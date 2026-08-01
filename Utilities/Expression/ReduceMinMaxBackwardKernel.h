@@ -33,4 +33,13 @@ void launchReduceMinMaxBackwardScatter(const void* grad_output,
                                        DataType grad_input_dtype,
                                        cudaStream_t stream);
 
+void launchSegmentedReduceMinMaxBackwardScatter(const void* grad_output,
+                                                const uint64_t* winner_indices,
+                                                void* grad_input,
+                                                uint64_t num_segments,
+                                                uint64_t grad_input_numel,
+                                                DataType grad_output_dtype,
+                                                DataType grad_input_dtype,
+                                                cudaStream_t stream);
+
 }  // namespace ThorImplementation

@@ -27,6 +27,7 @@ struct PhysicalExecutionStage;
 class CudaKernelExpression;
 class Expression;
 class Outputs;
+class RaggedExpression;
 
 enum class ExprOp : uint16_t {
     INPUT = 3,
@@ -139,6 +140,9 @@ enum class ExprOp : uint16_t {
     SEGMENTED_REDUCE_MAX,
     RAGGED_VALUEWISE_EXTENT,
     SEGMENTED_REDUCE_MEAN,
+    SEGMENTED_BROADCAST,
+    SEGMENTED_REDUCE_MIN_BACKWARD,
+    SEGMENTED_REDUCE_MAX_BACKWARD,
 };
 
 enum class RotaryScalingKind : uint8_t {
@@ -303,10 +307,11 @@ struct ExprNode {
     uint64_t scan_axis = UINT64_MAX;  // UINT64_MAX means final axis.
     bool scan_reverse = false;
 
-    // RAGGED_VALUEWISE_EXTENT metadata. rhs is the canonical offsets tensor.
+    // Ragged runtime-extent metadata. RAGGED_VALUEWISE_EXTENT uses rhs as the canonical offsets tensor; explicit segmented stages carry the same extent for autodiff.
     uint64_t ragged_runtime_batch_size = 0;
     uint64_t ragged_runtime_max_active_values = 0;
     uint64_t ragged_runtime_elements_per_value = 1;
+    bool segmented_broadcast_normalize_by_length = false;
 
     // For INPUT / RUNTIME_SCALAR nodes only: actual dtype of the bound runtime value.
     std::optional<DataType> input_tensor_dtype = std::nullopt;
@@ -970,12 +975,26 @@ class Expression {
     [[nodiscard]] static bool isTernaryOp(ExprOp op);
 
    private:
+    friend class RaggedExpression;
+
     std::shared_ptr<PhysicalExpression> expr;
     uint32_t nodeIndex = UINT32_MAX;
 
     [[nodiscard]] Expression(std::shared_ptr<PhysicalExpression> expr, uint32_t nodeIndex) : expr(std::move(expr)), nodeIndex(nodeIndex) {}
 
     [[nodiscard]] static Expression binaryOp(const Expression& lhsExpr, const Expression& rhsExpr, ExprOp op);
+    [[nodiscard]] static Expression segmentedScanWithRaggedMetadata(const Expression& input,
+                                                                    const Expression& offsets,
+                                                                    ScanOp op,
+                                                                    bool inclusive,
+                                                                    bool reverse,
+                                                                    uint64_t ragged_batch_size,
+                                                                    uint64_t ragged_max_active_values);
+    [[nodiscard]] static Expression segmentedReduceWithRaggedMetadata(const Expression& input,
+                                                                      const Expression& offsets,
+                                                                      ExprOp op,
+                                                                      uint64_t ragged_batch_size,
+                                                                      uint64_t ragged_max_active_values);
     [[nodiscard]] static Expression ternaryOp(const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, ExprOp op);
     [[nodiscard]] static Expression quaternaryOp(
         const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, const Expression& fourthExpr, ExprOp op);

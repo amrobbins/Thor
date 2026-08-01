@@ -67,6 +67,11 @@ static bool isSegmentedReduceOp(ExprOp op) {
            op == ExprOp::SEGMENTED_REDUCE_MAX || op == ExprOp::SEGMENTED_REDUCE_MEAN;
 }
 
+static bool isSegmentedBroadcastOp(ExprOp op) { return op == ExprOp::SEGMENTED_BROADCAST; }
+static bool isSegmentedReduceMinMaxBackwardOp(ExprOp op) {
+    return op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD || op == ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD;
+}
+
 static bool isCastOp(ExprOp op) { return op == ExprOp::CAST; }
 
 static bool isPassthroughViewOp(ExprOp op) {
@@ -119,6 +124,34 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
                 return requested_compute_dtype;
             default:
                 throw std::runtime_error("Unsupported segmented-reduction dtype in toSupportedComputeDType.");
+        }
+    }
+
+    if (isSegmentedReduceMinMaxBackwardOp(op)) {
+        switch (requested_compute_dtype) {
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+            case DataType::FP16:
+            case DataType::BF16:
+            case DataType::FP32:
+            case DataType::FP64:
+                return requested_compute_dtype;
+            default:
+                throw std::runtime_error("Unsupported segmented reduce-min/max backward dtype in toSupportedComputeDType.");
+        }
+    }
+
+    if (isSegmentedBroadcastOp(op)) {
+        switch (requested_compute_dtype) {
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+            case DataType::FP16:
+            case DataType::BF16:
+            case DataType::FP32:
+            case DataType::FP64:
+                return requested_compute_dtype;
+            default:
+                throw std::runtime_error("Unsupported segmented-broadcast dtype in toSupportedComputeDType.");
         }
     }
 
@@ -399,6 +432,33 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
         return resolved_output_dtypes[node.lhs];
     }
 
+    if (isSegmentedBroadcastOp(node.op)) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("segmented-broadcast node has parent index out of range in resolveNodeLogicalInputDType.");
+        }
+        const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
+            throw std::runtime_error("segmented-broadcast offsets must have UINT32 or UINT64 dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(offsets_dtype));
+        }
+        return resolved_output_dtypes[node.lhs];
+    }
+
+    if (isSegmentedReduceMinMaxBackwardOp(node.op)) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size() ||
+            node.aux >= resolved_output_dtypes.size()) {
+            throw std::runtime_error(
+                "segmented reduce-min/max backward node has parent index out of range in resolveNodeLogicalInputDType.");
+        }
+        const DataType offsets_dtype = resolved_output_dtypes[node.aux];
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
+            throw std::runtime_error(
+                "segmented reduce-min/max backward offsets must have UINT32 or UINT64 dtype, received: " +
+                TensorDescriptor::getElementTypeName(offsets_dtype));
+        }
+        return promoteTensorValueDTypes(resolved_output_dtypes[node.lhs], resolved_output_dtypes[node.rhs]);
+    }
+
     if (node.op == ExprOp::SCAN_MIN_BACKWARD || node.op == ExprOp::SCAN_MAX_BACKWARD ||
         node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
         const bool segmented = node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD;
@@ -627,6 +687,41 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         return input_dtype;
     }
 
+    if (isSegmentedBroadcastOp(node.op)) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("segmented-broadcast node has parent index out of range in resolveNodeOutputDType.");
+        }
+        const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
+            throw std::runtime_error("segmented-broadcast offsets must have UINT32 or UINT64 dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(offsets_dtype));
+        }
+        const DataType input_dtype = resolved_output_dtypes[node.lhs];
+        if (node.output_dtype.has_value() && node.output_dtype.value() != input_dtype) {
+            throw std::runtime_error("Expression segmented broadcast currently requires output dtype to match input dtype.");
+        }
+        return input_dtype;
+    }
+
+
+    if (isSegmentedReduceMinMaxBackwardOp(node.op)) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size() ||
+            node.aux >= resolved_output_dtypes.size()) {
+            throw std::runtime_error(
+                "segmented reduce-min/max backward node has input index out of range in resolveNodeOutputDType.");
+        }
+        const DataType offsets_dtype = resolved_output_dtypes[node.aux];
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
+            throw std::runtime_error(
+                "segmented reduce-min/max backward offsets must have UINT32 or UINT64 dtype, received: " +
+                TensorDescriptor::getElementTypeName(offsets_dtype));
+        }
+        const DataType grad_dtype = resolved_output_dtypes[node.rhs];
+        if (node.output_dtype.has_value() && node.output_dtype.value() != grad_dtype) {
+            throw std::runtime_error("segmented reduce-min/max backward output dtype must match grad-output dtype.");
+        }
+        return grad_dtype;
+    }
 
     if (node.op == ExprOp::SCAN_MIN_BACKWARD || node.op == ExprOp::SCAN_MAX_BACKWARD ||
         node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
@@ -842,6 +937,15 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
             // Segment offsets are structural metadata; reduction compute dtype
             // propagates only through values.
             propagate_to_parent(node.lhs);
+        } else if (isSegmentedBroadcastOp(node.op)) {
+            // Segment offsets are structural metadata. Numeric dtype requirements
+            // flow only through the per-segment values.
+            propagate_to_parent(node.lhs);
+        } else if (isSegmentedReduceMinMaxBackwardOp(node.op)) {
+            // Row-partition offsets are structural metadata. Gradient compute
+            // requirements flow only through values and the per-row upstream gradient.
+            propagate_to_parent(node.lhs);
+            propagate_to_parent(node.rhs);
         } else if (node.op == ExprOp::SCAN_MIN_BACKWARD || node.op == ExprOp::SCAN_MAX_BACKWARD ||
                    node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
             // Segmented-scan offsets are index metadata. Propagate the requested

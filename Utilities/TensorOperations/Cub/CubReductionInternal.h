@@ -135,6 +135,21 @@ void launchOffsetSegmentedReduction(CubReductionOp op,
                                     uint64_t num_segments,
                                     Stream& stream);
 
+size_t queryOffsetSegmentedArgReductionBytes(CubArgReductionOp op,
+                                             const Tensor& input,
+                                             Tensor& index_output,
+                                             const Tensor& segment_offsets,
+                                             uint64_t num_segments,
+                                             const Stream& stream);
+void launchOffsetSegmentedArgReduction(CubArgReductionOp op,
+                                       const Tensor& temp_storage,
+                                       size_t temp_storage_bytes,
+                                       const Tensor& input,
+                                       Tensor& index_output,
+                                       const Tensor& segment_offsets,
+                                       uint64_t num_segments,
+                                       Stream& stream);
+
 size_t queryArgMinReductionBytes(const Tensor& input,
                                  Tensor* value_output,
                                  Tensor* index_output,

@@ -227,11 +227,11 @@ TEST(ApiSubgraphClone, TrainingReportBoundaryIncludesAuxiliaryMetricInputs) {
     EXPECT_EQ(clonedMetrics.front().metricName, "peak_mean");
     EXPECT_EQ(clonedMetrics.front().aggregation, MetricAggregation::RATIO);
     EXPECT_THROW(
-        destination.getRequiredNetworkInputNamesForOutputs(
+        (void)destination.getRequiredNetworkInputNamesForOutputs(
             {METRIC_AGGREGATION_NUMERATOR_NAME}, /*inferenceOnly=*/false),
         std::runtime_error);
     EXPECT_THROW(
-        destination.getRequiredNetworkInputNamesForOutputs(
+        (void)destination.getRequiredNetworkInputNamesForOutputs(
             {METRIC_AGGREGATION_DENOMINATOR_NAME}, /*inferenceOnly=*/false),
         std::runtime_error);
 }

@@ -156,19 +156,22 @@ Expression RaggedExpression::reduce_sum() const { return segment_sum(); }
 Expression RaggedExpression::segment_sum() const {
     validateInitialized("segment_sum");
     validateScalarValues("segment_sum");
-    return values.segmentedReduceSum(offsets);
+    return Expression::segmentedReduceWithRaggedMetadata(
+        values, offsets, ExprOp::SEGMENTED_REDUCE_SUM, descriptor.getBatchSize(), descriptor.getMaxTotalValues());
 }
 
 Expression RaggedExpression::segment_min() const {
     validateInitialized("segment_min");
     validateScalarValues("segment_min");
-    return values.segmentedReduceMin(offsets);
+    return Expression::segmentedReduceWithRaggedMetadata(
+        values, offsets, ExprOp::SEGMENTED_REDUCE_MIN, descriptor.getBatchSize(), descriptor.getMaxTotalValues());
 }
 
 Expression RaggedExpression::segment_max() const {
     validateInitialized("segment_max");
     validateScalarValues("segment_max");
-    return values.segmentedReduceMax(offsets);
+    return Expression::segmentedReduceWithRaggedMetadata(
+        values, offsets, ExprOp::SEGMENTED_REDUCE_MAX, descriptor.getBatchSize(), descriptor.getMaxTotalValues());
 }
 
 Expression RaggedExpression::segment_mean() const {
@@ -187,7 +190,8 @@ Expression RaggedExpression::segment_mean() const {
             throw std::invalid_argument("RaggedExpression::segment_mean requires floating-point ragged values.");
     }
 
-    return values.segmentedReduceMean(offsets);
+    return Expression::segmentedReduceWithRaggedMetadata(
+        values, offsets, ExprOp::SEGMENTED_REDUCE_MEAN, descriptor.getBatchSize(), descriptor.getMaxTotalValues());
 }
 
 RaggedExpression RaggedExpression::segment_softmax() const {
@@ -265,16 +269,22 @@ RaggedExpression RaggedExpression::binaryValuewise(const RaggedExpression& other
 Expression RaggedExpression::segmentTotalBroadcast(ScanOp op, const char* op_name) const {
     validateInitialized(op_name);
     validateScalarValues(op_name);
+    const uint64_t batch_size = descriptor.getBatchSize();
+    const uint64_t max_active_values = descriptor.getMaxTotalValues();
     switch (op) {
         case ScanOp::Sum: {
-            const Expression prefix = values.segmentedScan(offsets, ScanOp::Sum, true, false);
-            const Expression suffix = values.segmentedScan(offsets, ScanOp::Sum, true, true);
+            const Expression prefix = Expression::segmentedScanWithRaggedMetadata(
+                values, offsets, ScanOp::Sum, true, false, batch_size, max_active_values);
+            const Expression suffix = Expression::segmentedScanWithRaggedMetadata(
+                values, offsets, ScanOp::Sum, true, true, batch_size, max_active_values);
             return prefix + suffix - values;
         }
         case ScanOp::Min:
         case ScanOp::Max: {
-            const Expression prefix = values.segmentedScan(offsets, op, true, false);
-            return prefix.segmentedScan(offsets, op, true, true);
+            const Expression prefix = Expression::segmentedScanWithRaggedMetadata(
+                values, offsets, op, true, false, batch_size, max_active_values);
+            return Expression::segmentedScanWithRaggedMetadata(
+                prefix, offsets, op, true, true, batch_size, max_active_values);
         }
         default:
             throw std::invalid_argument(raggedOpErrorPrefix(op_name) + "cannot broadcast this segment scan op.");

@@ -291,6 +291,7 @@ struct StageNodeKey {
     uint64_t ragged_runtime_batch_size = 0;
     uint64_t ragged_runtime_max_active_values = 0;
     uint64_t ragged_runtime_elements_per_value = 1;
+    bool segmented_broadcast_normalize_by_length = false;
 
     bool operator==(const StageNodeKey& other) const = default;
 };
@@ -364,10 +365,11 @@ struct StageNodeKeyHash {
         for (uint64_t stride : k.view_strides)
             hashCombine(h, std::hash<uint64_t>{}(stride));
         hashCombine(h, std::hash<uint64_t>{}(k.view_element_offset));
-        if (k.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+        if (k.op == ExprOp::RAGGED_VALUEWISE_EXTENT || k.op == ExprOp::SEGMENTED_BROADCAST) {
             hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_batch_size));
             hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_max_active_values));
             hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_elements_per_value));
+            hashCombine(h, std::hash<bool>{}(k.segmented_broadcast_normalize_by_length));
         }
         return h;
     }
@@ -434,10 +436,11 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.rope_allow_in_place_materialization = n.rope_allow_in_place_materialization;
     key.attention_use_bias = n.attention_use_bias;
     key.attention_dropout_probability_bits = scalarBits(n.attention_dropout_probability);
-    if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+    if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT || n.op == ExprOp::SEGMENTED_BROADCAST) {
         key.ragged_runtime_batch_size = n.ragged_runtime_batch_size;
         key.ragged_runtime_max_active_values = n.ragged_runtime_max_active_values;
         key.ragged_runtime_elements_per_value = n.ragged_runtime_elements_per_value;
+        key.segmented_broadcast_normalize_by_length = n.segmented_broadcast_normalize_by_length;
     }
 
     switch (n.op) {
@@ -624,7 +627,10 @@ static bool isConvolutionBackwardOp(ExprOp op) {
            op == ExprOp::CONV3D_BACKWARD_FILTER;
 }
 static bool isConvolutionOp(ExprOp op) { return isConvolutionForwardOp(op) || isConvolutionBackwardOp(op); }
-static bool isReduceMinMaxBackwardOp(ExprOp op) { return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD; }
+static bool isReduceMinMaxBackwardOp(ExprOp op) {
+    return op == ExprOp::REDUCE_MIN_BACKWARD || op == ExprOp::REDUCE_MAX_BACKWARD ||
+           op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD || op == ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD;
+}
 static bool isScanMinMaxBackwardOp(ExprOp op) {
     return op == ExprOp::SCAN_MIN_BACKWARD || op == ExprOp::SCAN_MAX_BACKWARD ||
            op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD;
@@ -634,6 +640,7 @@ static bool isSegmentedReduceOp(ExprOp op) {
     return op == ExprOp::SEGMENTED_REDUCE_SUM || op == ExprOp::SEGMENTED_REDUCE_MIN ||
            op == ExprOp::SEGMENTED_REDUCE_MAX || op == ExprOp::SEGMENTED_REDUCE_MEAN;
 }
+static bool isSegmentedBroadcastOp(ExprOp op) { return op == ExprOp::SEGMENTED_BROADCAST; }
 static bool isRmsNormOp(ExprOp op) { return op == ExprOp::RMSNORM; }
 static bool isEmbeddingLookupOp(ExprOp op) { return op == ExprOp::EMBEDDING_LOOKUP; }
 static bool isAttentionOp(ExprOp op) { return op == ExprOp::ATTENTION; }
@@ -650,43 +657,125 @@ static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
-    return isReductionOp(op) || isSoftmaxOp(op) || isScanOp(op) || isSegmentedReduceOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
+    return isReductionOp(op) || isSoftmaxOp(op) || isScanOp(op) || isSegmentedReduceOp(op) || isSegmentedBroadcastOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
            isAttentionBackwardOp(op) || isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isScanMinMaxBackwardOp(op) || isEmbeddingLookupOp(op) ||
            op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
 }
 
+static bool isRaggedPartitionAwareStageOp(ExprOp op) {
+    return op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(op) ||
+           op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD ||
+           op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD || op == ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD;
+}
+
+static uint32_t raggedPartitionOffsetsNode(const ExprNode& node) {
+    if (node.op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(node.op)) {
+        return node.rhs;
+    }
+    if (node.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD ||
+        node.op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD) {
+        return node.aux;
+    }
+    return UINT32_MAX;
+}
+
+static std::optional<uint32_t> directInputSlot(const PhysicalExpression& expr, uint32_t node_idx) {
+    if (node_idx == UINT32_MAX || node_idx >= expr.nodes.size()) {
+        return std::nullopt;
+    }
+    const ExprNode& node = expr.nodes[node_idx];
+    if (node.op != ExprOp::INPUT) {
+        return std::nullopt;
+    }
+    return node.input_slot;
+}
+
 static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr) {
     std::vector<bool> depends_on_ragged_extent(expr.nodes.size(), false);
+    std::vector<std::optional<uint32_t>> ragged_offsets_input_slot(expr.nodes.size(), std::nullopt);
+    std::vector<bool> ambiguous_ragged_partition(expr.nodes.size(), false);
+
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
         const ExprNode& node = expr.nodes[node_idx];
         if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
             depends_on_ragged_extent[node_idx] = true;
+            ragged_offsets_input_slot[node_idx] = directInputSlot(expr, node.rhs);
+            ambiguous_ragged_partition[node_idx] = !ragged_offsets_input_slot[node_idx].has_value();
             continue;
         }
 
-        auto parent_depends = [&](uint32_t parent_idx) {
+        bool depends = false;
+        std::optional<uint32_t> dependency_offsets_slot;
+        bool ambiguous_partition = false;
+        auto merge_parent = [&](uint32_t parent_idx) {
             if (parent_idx == UINT32_MAX) {
-                return false;
+                return;
             }
             if (parent_idx >= depends_on_ragged_extent.size()) {
                 throw std::runtime_error("ragged runtime extent consumer references an out-of-range parent node.");
             }
-            return static_cast<bool>(depends_on_ragged_extent[parent_idx]);
+            if (!depends_on_ragged_extent[parent_idx]) {
+                return;
+            }
+
+            depends = true;
+            if (ambiguous_ragged_partition[parent_idx] || !ragged_offsets_input_slot[parent_idx].has_value()) {
+                ambiguous_partition = true;
+                return;
+            }
+            const uint32_t parent_offsets_slot = ragged_offsets_input_slot[parent_idx].value();
+            if (!dependency_offsets_slot.has_value()) {
+                dependency_offsets_slot = parent_offsets_slot;
+            } else if (dependency_offsets_slot.value() != parent_offsets_slot) {
+                ambiguous_partition = true;
+            }
         };
-        bool depends = parent_depends(node.lhs) || parent_depends(node.rhs) || parent_depends(node.aux) ||
-                       parent_depends(node.alpha_node) || parent_depends(node.beta_node) ||
-                       parent_depends(node.matmul_epilogue_aux) || parent_depends(node.attention_seq_len_q_node) ||
-                       parent_depends(node.attention_seq_len_kv_node) || parent_depends(node.attention_ragged_offset_q_node) ||
-                       parent_depends(node.attention_ragged_offset_kv_node) || parent_depends(node.attention_page_table_k_node) ||
-                       parent_depends(node.attention_page_table_v_node) || parent_depends(node.attention_dropout_seed_node) ||
-                       parent_depends(node.attention_dropout_offset_node);
+
+        merge_parent(node.lhs);
+        merge_parent(node.rhs);
+        merge_parent(node.aux);
+        merge_parent(node.alpha_node);
+        merge_parent(node.beta_node);
+        merge_parent(node.matmul_epilogue_aux);
+        merge_parent(node.attention_seq_len_q_node);
+        merge_parent(node.attention_seq_len_kv_node);
+        merge_parent(node.attention_ragged_offset_q_node);
+        merge_parent(node.attention_ragged_offset_kv_node);
+        merge_parent(node.attention_page_table_k_node);
+        merge_parent(node.attention_page_table_v_node);
+        merge_parent(node.attention_dropout_seed_node);
+        merge_parent(node.attention_dropout_offset_node);
         if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
             for (uint32_t input_node : node.cuda_kernel_input_nodes) {
-                depends = depends || parent_depends(input_node);
+                merge_parent(input_node);
             }
         }
+
         depends_on_ragged_extent[node_idx] = depends;
+        ragged_offsets_input_slot[node_idx] = dependency_offsets_slot;
+        ambiguous_ragged_partition[node_idx] = ambiguous_partition;
         if (!depends) {
+            continue;
+        }
+
+        if (isRaggedPartitionAwareStageOp(node.op)) {
+            if (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
+                node.ragged_runtime_elements_per_value == 0) {
+                throw std::runtime_error(
+                    "a segmented operation consuming ragged valuewise output is missing ragged runtime-extent metadata.");
+            }
+            const std::optional<uint32_t> stage_offsets_slot = directInputSlot(expr, raggedPartitionOffsetsNode(node));
+            if (ambiguous_partition || !dependency_offsets_slot.has_value() || !stage_offsets_slot.has_value() ||
+                dependency_offsets_slot.value() != stage_offsets_slot.value()) {
+                throw std::runtime_error(
+                    "a ragged segmented operation received values carrying a different or non-canonical row partition.");
+            }
+            if (isSegmentedReduceOp(node.op)) {
+                // A segmented reduction consumes the ragged extent and returns one dense value per row.
+                depends_on_ragged_extent[node_idx] = false;
+                ragged_offsets_input_slot[node_idx] = std::nullopt;
+                ambiguous_ragged_partition[node_idx] = false;
+            }
             continue;
         }
 
@@ -1004,6 +1093,10 @@ static const char* fusedOpTag(ExprOp op) {
             return "RMIN_BW";
         case ExprOp::REDUCE_MAX_BACKWARD:
             return "RMAX_BW";
+        case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+            return "SEG_RMIN_BW";
+        case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
+            return "SEG_RMAX_BW";
         case ExprOp::SCAN_MIN_BACKWARD:
             return "SCAN_MIN_BW";
         case ExprOp::SCAN_MAX_BACKWARD:
@@ -1030,6 +1123,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "SEG_REDUCE_MAX";
         case ExprOp::SEGMENTED_REDUCE_MEAN:
             return "SEG_REDUCE_MEAN";
+        case ExprOp::SEGMENTED_BROADCAST:
+            return "SEG_BROADCAST";
         case ExprOp::RMSNORM:
             return "RMSNORM";
         case ExprOp::EMBEDDING_LOOKUP:
@@ -1195,8 +1290,13 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ")";
         } else if (isReduceMinMaxBackwardOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",axes=" + uintVecSignature(node.reduction_axes) +
-                ",squeeze=" + uintVecSignature(node.squeeze_axes) + ")";
+            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs;
+            if (node.op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD) {
+                s += ",offsets=" + fusedRegionSignatureRec(expr, node.aux);
+            } else {
+                s += ",axes=" + uintVecSignature(node.reduction_axes) + ",squeeze=" + uintVecSignature(node.squeeze_axes);
+            }
+            s += ")";
         } else if (isScanMinMaxBackwardOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",grad=" + rhs;
@@ -1390,6 +1490,12 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                std::to_string(node.ragged_runtime_batch_size) + ",maxActive=" +
                std::to_string(node.ragged_runtime_max_active_values) + ",elementsPerValue=" +
                std::to_string(node.ragged_runtime_elements_per_value) + ")";
+    }
+
+    if (node.op == ExprOp::SEGMENTED_BROADCAST) {
+        return std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ",maxActive=" +
+               std::to_string(node.ragged_runtime_max_active_values) + ",normalize=" +
+               std::to_string(node.segmented_broadcast_normalize_by_length ? 1 : 0) + ")";
     }
 
     if (isCommutativeStageOp(node.op) && rhs < lhs) {
@@ -1778,6 +1884,59 @@ shared_ptr<CompiledSegmentedReduction> EquationCompiler::compileSegmentedReducti
     }
 
     return make_shared<CompiledSegmentedReduction>(node.op, input_dtype, node.output_dtype.value(), offsets_node.input_tensor_dtype.value());
+}
+
+shared_ptr<CompiledSegmentedBroadcast> EquationCompiler::compileSegmentedBroadcast(const PhysicalExpression& expr) {
+    if (expr.numInputs() != 2) {
+        throw std::runtime_error("Segmented-broadcast stage must have exactly two inputs.");
+    }
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("Segmented-broadcast stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isSegmentedBroadcastOp(node.op)) {
+        throw std::runtime_error("Segmented-broadcast stage output node is not SEGMENTED_BROADCAST.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+        throw std::runtime_error("Segmented-broadcast node is missing per-segment values or offsets input.");
+    }
+    if (node.ragged_runtime_max_active_values == 0) {
+        throw std::runtime_error("Segmented-broadcast node is missing packed output-capacity metadata.");
+    }
+
+    const ExprNode& input_node = expr.nodes[node.lhs];
+    const ExprNode& offsets_node = expr.nodes[node.rhs];
+    if (input_node.op != ExprOp::INPUT || offsets_node.op != ExprOp::INPUT) {
+        throw std::runtime_error("Segmented-broadcast stage inputs must be local INPUT nodes.");
+    }
+    if (!input_node.input_tensor_dtype.has_value() || !offsets_node.input_tensor_dtype.has_value() || !node.output_dtype.has_value()) {
+        throw std::runtime_error("Segmented-broadcast stage is missing resolved dtypes.");
+    }
+    if (!isCanonicalRowPartitionOffsetDataType(offsets_node.input_tensor_dtype.value())) {
+        throw std::runtime_error("Segmented-broadcast offsets dtype must be UINT32 or UINT64.");
+    }
+    if (input_node.input_tensor_dtype.value() != node.output_dtype.value()) {
+        throw std::runtime_error("Segmented-broadcast input and output dtypes must match.");
+    }
+
+    switch (node.output_dtype.value()) {
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
+        case DataType::FP64:
+            break;
+        default:
+            throw std::runtime_error("Segmented-broadcast requires a floating expression dtype.");
+    }
+
+    return make_shared<CompiledSegmentedBroadcast>(input_node.input_tensor_dtype.value(),
+                                                   node.output_dtype.value(),
+                                                   offsets_node.input_tensor_dtype.value(),
+                                                   node.ragged_runtime_max_active_values,
+                                                   node.segmented_broadcast_normalize_by_length);
 }
 
 shared_ptr<CompiledScan> EquationCompiler::compileScan(const PhysicalExpression& expr) {
@@ -2815,43 +2974,61 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
 }
 
 shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBackward(const PhysicalExpression& expr) {
-    if (expr.numInputs() != 2) {
-        throw std::runtime_error("ReduceMinMaxBackward stage must have exactly two inputs.");
-    }
-
     if (expr.output_node >= expr.nodes.size()) {
         throw std::runtime_error("ReduceMinMaxBackward stage output_node is out of range.");
     }
 
     const ExprNode& node = expr.nodes[expr.output_node];
-    if (node.op != ExprOp::REDUCE_MIN_BACKWARD && node.op != ExprOp::REDUCE_MAX_BACKWARD) {
+    if (!isReduceMinMaxBackwardOp(node.op)) {
         throw std::runtime_error("ReduceMinMaxBackward stage output node is not a supported min/max backward op.");
     }
 
-    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX) {
-        throw std::runtime_error("ReduceMinMaxBackward node is missing an input.");
+    const bool segmented =
+        node.op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD;
+    const uint32_t expected_inputs = segmented ? 3 : 2;
+    if (expr.numInputs() != expected_inputs) {
+        throw std::runtime_error("ReduceMinMaxBackward stage has an unexpected number of inputs.");
     }
-    if (node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
-        throw std::runtime_error("ReduceMinMaxBackward input node is out of range.");
-    }
-
-    const ExprNode& input_node = expr.nodes[node.lhs];
-    const ExprNode& grad_node = expr.nodes[node.rhs];
-    if (input_node.op != ExprOp::INPUT || grad_node.op != ExprOp::INPUT) {
-        throw std::runtime_error("ReduceMinMaxBackward stage inputs must be local INPUT nodes.");
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || (segmented && node.aux == UINT32_MAX)) {
+        throw std::runtime_error("ReduceMinMaxBackward node is missing input, grad, or offsets.");
     }
 
-    if (!input_node.input_tensor_dtype.has_value()) {
-        throw std::runtime_error("ReduceMinMaxBackward input node missing resolved input_tensor_dtype.");
+    auto validate_local_input = [&](uint32_t idx, const char* role) -> const ExprNode& {
+        if (idx >= expr.nodes.size()) {
+            throw std::runtime_error(std::string("ReduceMinMaxBackward ") + role + " node is out of range.");
+        }
+        const ExprNode& input = expr.nodes[idx];
+        if (input.op != ExprOp::INPUT || !input.input_tensor_dtype.has_value()) {
+            throw std::runtime_error(std::string("ReduceMinMaxBackward ") + role + " must be a resolved local INPUT node.");
+        }
+        return input;
+    };
+
+    const ExprNode& input_node = validate_local_input(node.lhs, "input");
+    const ExprNode& grad_node = validate_local_input(node.rhs, "grad");
+    std::optional<DataType> offset_dtype = std::nullopt;
+    if (segmented) {
+        const ExprNode& offsets_node = validate_local_input(node.aux, "offsets");
+        offset_dtype = offsets_node.input_tensor_dtype.value();
+        if (!isCanonicalRowPartitionOffsetDataType(offset_dtype.value())) {
+            throw std::runtime_error("Segmented reduce-min/max backward offsets must have UINT32 or UINT64 dtype.");
+        }
+        if (!CubSegmentedArgReduction::isOffsetDataTypeSupported(offset_dtype.value())) {
+            throw std::runtime_error("Segmented reduce-min/max backward offsets dtype is not supported by the CUB backend.");
+        }
+        if (!node.reduction_axes.empty() || !node.squeeze_axes.empty()) {
+            throw std::runtime_error("Segmented reduce-min/max backward must not carry dense reduction axes.");
+        }
     }
-    if (!grad_node.input_tensor_dtype.has_value()) {
-        throw std::runtime_error("ReduceMinMaxBackward grad input node missing resolved input_tensor_dtype.");
-    }
+
     if (!node.output_dtype.has_value()) {
         throw std::runtime_error("ReduceMinMaxBackward node missing resolved output_dtype.");
     }
 
     const DataType input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
+    if (segmented && !CubSegmentedArgReduction::isInputDataTypeSupported(input_dtype)) {
+        throw std::runtime_error("Segmented reduce-min/max backward input dtype is not supported by the CUB arg-reduction backend.");
+    }
 
     return make_shared<CompiledReduceMinMaxBackward>(node.op,
                                                      node.reduction_axes,
@@ -2859,9 +3036,9 @@ shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBa
                                                      input_dtype,
                                                      grad_node.input_tensor_dtype.value(),
                                                      node.output_dtype.value(),
-                                                     node.compute_dtype);
+                                                     node.compute_dtype,
+                                                     offset_dtype);
 }
-
 
 shared_ptr<CompiledScanMinMaxBackward> EquationCompiler::compileScanMinMaxBackward(const PhysicalExpression& expr) {
     if (expr.output_node >= expr.nodes.size()) {
@@ -3612,6 +3789,78 @@ static PhysicalExecutionStage buildSegmentedReductionStage(const PhysicalExpress
 
     return PhysicalExecutionStage{
         .kind = PhysicalExecutionStage::Kind::SegmentedReduction,
+        .expr = std::move(stage_expr),
+        .input_value_ids = {values_value_id, offsets_value_id},
+        .outputs = {CompiledStageOutput{.name = output_name, .local_node_idx = local_node_idx, .value_id = output_value_id}},
+    };
+}
+
+static PhysicalExecutionStage buildSegmentedBroadcastStage(const PhysicalExpression& expr,
+                                                            uint32_t node_idx,
+                                                            uint32_t output_value_id,
+                                                            const std::string& output_name,
+                                                            const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes.at(node_idx);
+    if (!isSegmentedBroadcastOp(node.op)) {
+        throw std::runtime_error("buildSegmentedBroadcastStage called on non-segmented-broadcast node.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+        throw std::runtime_error("Segmented-broadcast node missing per-segment values or offsets input.");
+    }
+
+    auto resolve_stage_parent = [&](uint32_t parent_idx, const char* what) -> std::pair<uint32_t, DataType> {
+        const ExprNode& parent = expr.nodes[parent_idx];
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            if (!parent.output_dtype.has_value()) {
+                throw std::runtime_error(std::string("Segmented-broadcast ") + what + " parent node is missing output dtype.");
+            }
+            return {out_it->second, parent.output_dtype.value()};
+        }
+        if (parent.op == ExprOp::INPUT) {
+            if (!parent.input_tensor_dtype.has_value()) {
+                throw std::runtime_error(std::string("Segmented-broadcast ") + what + " input node is missing input dtype.");
+            }
+            return {parent.input_slot, parent.input_tensor_dtype.value()};
+        }
+        throw std::runtime_error(std::string("Missing value id for segmented-broadcast ") + what + ".");
+    };
+
+    const auto [values_value_id, values_dtype] = resolve_stage_parent(node.lhs, "values");
+    const auto [offsets_value_id, offsets_dtype] = resolve_stage_parent(node.rhs, "offsets");
+
+    PhysicalExpression stage_expr;
+    stage_expr.inputs.push_back(NamedInput{"__arg0", 0});
+    ExprNode values_node;
+    values_node.op = ExprOp::INPUT;
+    values_node.input_slot = 0;
+    values_node.input_tensor_dtype = values_dtype;
+    values_node.output_dtype = values_dtype;
+    values_node.compute_dtype = values_dtype;
+    values_node.backward_output_dtype = values_dtype;
+    values_node.backward_compute_dtype = values_dtype;
+    stage_expr.nodes.push_back(std::move(values_node));
+
+    stage_expr.inputs.push_back(NamedInput{"__arg1", 1});
+    ExprNode offsets_node;
+    offsets_node.op = ExprOp::INPUT;
+    offsets_node.input_slot = 1;
+    offsets_node.input_tensor_dtype = offsets_dtype;
+    offsets_node.output_dtype = offsets_dtype;
+    offsets_node.compute_dtype = offsets_dtype;
+    offsets_node.backward_output_dtype = offsets_dtype;
+    offsets_node.backward_compute_dtype = offsets_dtype;
+    stage_expr.nodes.push_back(std::move(offsets_node));
+
+    ExprNode broadcast = node;
+    broadcast.lhs = 0;
+    broadcast.rhs = 1;
+    const uint32_t local_node_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+    stage_expr.nodes.push_back(std::move(broadcast));
+    stage_expr.output_node = local_node_idx;
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::SegmentedBroadcast,
         .expr = std::move(stage_expr),
         .input_value_ids = {values_value_id, offsets_value_id},
         .outputs = {CompiledStageOutput{.name = output_name, .local_node_idx = local_node_idx, .value_id = output_value_id}},
@@ -5189,16 +5438,21 @@ static PhysicalExecutionStage buildReduceMinMaxBackwardStage(const PhysicalExpre
     if (!isReduceMinMaxBackwardOp(node.op)) {
         throw std::runtime_error("buildReduceMinMaxBackwardStage called on unsupported node.");
     }
-    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX) {
-        throw std::runtime_error("ReduceMinMaxBackward node missing lhs or rhs input.");
+    const bool segmented =
+        node.op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD;
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || (segmented && node.aux == UINT32_MAX)) {
+        throw std::runtime_error("ReduceMinMaxBackward node missing input, grad, or offsets input.");
     }
 
     PhysicalExpression stage_expr;
     stage_expr.inputs.push_back(NamedInput{"__arg0", 0});
     stage_expr.inputs.push_back(NamedInput{"__arg1", 1});
+    if (segmented) {
+        stage_expr.inputs.push_back(NamedInput{"__arg2", 2});
+    }
 
     std::vector<uint32_t> input_value_ids;
-    input_value_ids.reserve(2);
+    input_value_ids.reserve(segmented ? 3 : 2);
 
     auto bind_parent_to_local_input = [&](uint32_t parent_idx, uint32_t local_slot) {
         if (parent_idx >= expr.nodes.size()) {
@@ -5239,17 +5493,22 @@ static PhysicalExecutionStage buildReduceMinMaxBackwardStage(const PhysicalExpre
 
     bind_parent_to_local_input(node.lhs, 0);
     bind_parent_to_local_input(node.rhs, 1);
+    if (segmented) {
+        bind_parent_to_local_input(node.aux, 2);
+    }
 
     ExprNode route = node;
     route.lhs = 0;
     route.rhs = 1;
+    route.aux = segmented ? 2 : UINT32_MAX;
     stage_expr.nodes.push_back(std::move(route));
-    stage_expr.output_node = 2;
+    const uint32_t output_node = segmented ? 3 : 2;
+    stage_expr.output_node = output_node;
 
     std::vector<CompiledStageOutput> stage_outputs;
     stage_outputs.push_back(CompiledStageOutput{
         .name = output_name,
-        .local_node_idx = 2,
+        .local_node_idx = output_node,
         .value_id = output_value_id,
     });
 
@@ -5260,7 +5519,6 @@ static PhysicalExecutionStage buildReduceMinMaxBackwardStage(const PhysicalExpre
         .outputs = std::move(stage_outputs),
     };
 }
-
 
 static PhysicalExecutionStage buildScanMinMaxBackwardStage(const PhysicalExpression& expr,
                                                            uint32_t node_idx,
@@ -6111,7 +6369,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux");
             }
-            if (root.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
+            if (root.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD ||
+                root.op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD) {
                 ensureBoundaryParentEmitted(root.aux, "offsets");
             }
             if (root.op == ExprOp::ATTENTION && root.attention_use_bias) {
@@ -6201,6 +6460,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 planned.stages.push_back(buildScanMinMaxBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isSegmentedReduceOp(root.op)) {
                 planned.stages.push_back(buildSegmentedReductionStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isSegmentedBroadcastOp(root.op)) {
+                planned.stages.push_back(buildSegmentedBroadcastStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isScanOp(root.op)) {
                 planned.stages.push_back(buildScanStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isSoftmaxOp(root.op)) {
@@ -6489,7 +6750,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux");
             }
-            if (root.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
+            if (root.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD ||
+                root.op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD) {
                 ensureBoundaryParentEmitted(root.aux, "offsets");
             }
             if (root.op == ExprOp::ATTENTION && root.attention_use_bias) {
@@ -6588,6 +6850,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isSegmentedReduceOp(root.op)) {
                 planned.stages.push_back(
                     buildSegmentedReductionStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isSegmentedBroadcastOp(root.op)) {
+                planned.stages.push_back(
+                    buildSegmentedBroadcastStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isScanOp(root.op)) {
                 planned.stages.push_back(
                     buildScanStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -6789,6 +7054,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::SegmentedReduction: {
                 std::shared_ptr<CompiledSegmentedReduction> segmented_reduction = compileSegmentedReduction(stage.expr);
                 compiled->stages.emplace_back(segmented_reduction, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::SegmentedBroadcast: {
+                std::shared_ptr<CompiledSegmentedBroadcast> segmented_broadcast = compileSegmentedBroadcast(stage.expr);
+                compiled->stages.emplace_back(segmented_broadcast, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::Scan: {

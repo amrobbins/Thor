@@ -39,6 +39,7 @@ struct CompiledExecutionStage {
         Reduction,
         ArgMinMax,
         SegmentedReduction,
+        SegmentedBroadcast,
         Scan,
         Softmax,
         RmsNorm,
@@ -64,6 +65,8 @@ struct CompiledExecutionStage {
                 return "ArgMinMax";
             case Kind::SegmentedReduction:
                 return "SegmentedReduction";
+            case Kind::SegmentedBroadcast:
+                return "SegmentedBroadcast";
             case Kind::Scan:
                 return "Scan";
             case Kind::Softmax:
@@ -103,6 +106,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledReduction> reduction = nullptr;
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<CompiledSegmentedReduction> segmented_reduction = nullptr;
+    const std::shared_ptr<CompiledSegmentedBroadcast> segmented_broadcast = nullptr;
     const std::shared_ptr<CompiledScan> scan = nullptr;
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
     const std::shared_ptr<CompiledRmsNorm> rms_norm = nullptr;
@@ -155,6 +159,12 @@ struct CompiledExecutionStage {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing segmented-reduction stage.");
                 }
                 return segmented_reduction->output_dtype;
+
+            case Kind::SegmentedBroadcast:
+                if (!segmented_broadcast) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing segmented-broadcast stage.");
+                }
+                return segmented_broadcast->output_dtype;
 
             case Kind::Scan: {
                 if (!scan) {
@@ -303,6 +313,16 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::SegmentedReduction),
           segmented_reduction(segmented_reduction),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledSegmentedBroadcast>& segmented_broadcast,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::SegmentedBroadcast),
+          segmented_broadcast(segmented_broadcast),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
@@ -754,6 +774,14 @@ class FusedEquation {
         const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,
         Tensor& input,
         Tensor& grad_output,
+        const std::optional<Tensor>& preallocatedOutput,
+        const Stream& stream) const;
+
+    [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
+        const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,
+        Tensor& input,
+        Tensor& grad_output,
+        const std::optional<Tensor>& offsets,
         const std::optional<Tensor>& preallocatedOutput,
         const Stream& stream) const;
 

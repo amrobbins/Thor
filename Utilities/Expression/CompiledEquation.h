@@ -148,6 +148,27 @@ struct CompiledSegmentedReduction {
         : op(op), input_dtype(input_dtype), output_dtype(output_dtype), offset_dtype(offset_dtype) {}
 };
 
+struct CompiledSegmentedBroadcast {
+    DataType input_dtype = DataType::FP32;
+    DataType output_dtype = DataType::FP32;
+    DataType offset_dtype = DataType::UINT32;
+    uint64_t max_output_values = 0;
+    bool normalize_by_segment_length = false;
+
+    bool operator==(const CompiledSegmentedBroadcast& other) const = default;
+
+    CompiledSegmentedBroadcast(DataType input_dtype,
+                               DataType output_dtype,
+                               DataType offset_dtype,
+                               uint64_t max_output_values,
+                               bool normalize_by_segment_length)
+        : input_dtype(input_dtype),
+          output_dtype(output_dtype),
+          offset_dtype(offset_dtype),
+          max_output_values(max_output_values),
+          normalize_by_segment_length(normalize_by_segment_length) {}
+};
+
 struct CompiledScan {
     const ScanOp op;
     const ScanMode mode;
@@ -265,6 +286,8 @@ struct CompiledReduceMinMaxBackward {
     const DataType grad_output_dtype;
     const DataType output_dtype;
     const DataType compute_dtype;
+    const bool segmented_by_offsets;
+    const std::optional<DataType> offset_dtype;
 
     bool operator==(const CompiledReduceMinMaxBackward& other) const = default;
 
@@ -274,14 +297,17 @@ struct CompiledReduceMinMaxBackward {
                                  DataType input_dtype,
                                  DataType grad_output_dtype,
                                  DataType output_dtype,
-                                 std::optional<DataType> compute_dtype)
+                                 std::optional<DataType> compute_dtype,
+                                 std::optional<DataType> offset_dtype = std::nullopt)
         : op(op),
           reduction_axes(std::move(reduction_axes)),
           squeeze_axes(std::move(squeeze_axes)),
           input_dtype(input_dtype),
           grad_output_dtype(grad_output_dtype),
           output_dtype(output_dtype),
-          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : DataType::FP32) {
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : DataType::FP32),
+          segmented_by_offsets(offset_dtype.has_value()),
+          offset_dtype(offset_dtype) {
         std::sort(this->reduction_axes.begin(), this->reduction_axes.end());
         this->reduction_axes.erase(std::unique(this->reduction_axes.begin(), this->reduction_axes.end()), this->reduction_axes.end());
 

@@ -1321,6 +1321,8 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 break;
             case ExprOp::REDUCE_MIN_BACKWARD:
             case ExprOp::REDUCE_MAX_BACKWARD:
+            case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+            case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
             case ExprOp::SCAN_MIN_BACKWARD:
             case ExprOp::SCAN_MAX_BACKWARD:
             case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
@@ -3771,6 +3773,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::SEGMENTED_REDUCE_MIN:
             case ExprOp::SEGMENTED_REDUCE_MAX:
             case ExprOp::SEGMENTED_REDUCE_MEAN:
+            case ExprOp::SEGMENTED_BROADCAST:
             case ExprOp::EMBEDDING_LOOKUP:
             case ExprOp::SOFTMAX:
             case ExprOp::ATTENTION:
@@ -3789,6 +3792,8 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::RMSNORM:
             case ExprOp::REDUCE_MIN_BACKWARD:
             case ExprOp::REDUCE_MAX_BACKWARD:
+            case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+            case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
             case ExprOp::SCAN_MIN_BACKWARD:
             case ExprOp::SCAN_MAX_BACKWARD:
             case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
@@ -3984,10 +3989,9 @@ static uint64_t computeReduceMinMaxBackwardStageFlops(const CompiledReduceMinMax
         throw std::runtime_error("ReduceMinMaxBackward stage missing input dims while computing FLOPs.");
     }
 
-    // Reduce-min/max backward compares every original input element with the retained extremum and then
-    // conditionally routes the upstream gradient. Count those two per-input-element operations directly;
-    // upstream-gradient shaping is no longer represented as a separate helper stage in the optimized
-    // backward graph.
+    // Min/max backward first finds one deterministic winner per logical reduction and then routes the
+    // upstream gradient to that winner. Treat the arg-reduction comparison plus gradient routing as
+    // approximately two operations per packed input element for the existing FLOP accounting model.
     return checkedMulU64(numelFromDims(stage_input_dims[0]), 2, "computeReduceMinMaxBackwardStageFlops");
 }
 
@@ -4022,6 +4026,17 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
                     throw std::runtime_error("Segmented mean stage requires a non-empty rank-1 offsets shape while computing FLOPs.");
                 }
                 flops = checkedAddU64(flops, stage_input_dims[1][0] - 1, "computeSegmentedMeanStageFlops");
+            }
+            return flops;
+        }
+
+        case CompiledExecutionStage::Kind::SegmentedBroadcast: {
+            if (!stage.segmented_broadcast) {
+                throw std::runtime_error("SegmentedBroadcast stage missing payload while computing FLOPs.");
+            }
+            uint64_t flops = stage.segmented_broadcast->max_output_values;
+            if (stage.segmented_broadcast->normalize_by_segment_length) {
+                flops = checkedAddU64(flops, stage.segmented_broadcast->max_output_values, "computeSegmentedBroadcastStageFlops");
             }
             return flops;
         }
@@ -4144,6 +4159,19 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                 throw std::runtime_error("resolveOutputDimsForStageOutput segmented-reduction currently requires rank-1 values and non-empty rank-1 offsets.");
             }
             return std::vector<uint64_t>{stage_input_dims[1][0] - 1};
+        }
+
+        case CompiledExecutionStage::Kind::SegmentedBroadcast: {
+            if (!stage.segmented_broadcast) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput segmented-broadcast stage missing payload.");
+            }
+            if (stage_input_dims.size() != 2 || stage_input_dims[0].size() != 1 || stage_input_dims[1].size() != 1) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput segmented-broadcast requires rank-1 values and offsets.");
+            }
+            if (stage_input_dims[1][0] != stage_input_dims[0][0] + 1) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput segmented-broadcast offsets must have batch_size + 1 elements.");
+            }
+            return std::vector<uint64_t>{stage.segmented_broadcast->max_output_values};
         }
 
         case CompiledExecutionStage::Kind::Scan: {
@@ -5426,6 +5454,18 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                 throw std::runtime_error("Segmented-reduction stage currently requires rank-1 values and non-empty rank-1 offsets.");
             }
             value_dims[stage.outputs[0].value_id] = std::vector<uint64_t>{stage_input_dims[1][0] - 1};
+        } else if (stage.kind == CompiledExecutionStage::Kind::SegmentedBroadcast) {
+            if (!stage.segmented_broadcast) {
+                throw std::runtime_error("Missing compiled segmented-broadcast stage.");
+            }
+            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Segmented-broadcast stage expected per-segment values, offsets, and one output.");
+            }
+            if (stage_input_dims[0].size() != 1 || stage_input_dims[1].size() != 1 ||
+                stage_input_dims[1][0] != stage_input_dims[0][0] + 1) {
+                throw std::runtime_error("Segmented-broadcast stage requires rank-1 values and [batch_size + 1] offsets.");
+            }
+            value_dims[stage.outputs[0].value_id] = std::vector<uint64_t>{stage.segmented_broadcast->max_output_values};
         } else if (stage.kind == CompiledExecutionStage::Kind::Scan) {
             if (!stage.scan) {
                 throw std::runtime_error("Missing compiled scan stage.");
@@ -5458,8 +5498,9 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                 throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");
             }
 
-            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
-                throw std::runtime_error("Reduce-min/max-backward stage expected exactly two inputs and one output.");
+            const size_t expected_inputs = stage.reduce_minmax_backward->segmented_by_offsets ? 3 : 2;
+            if (stage.input_value_ids.size() != expected_inputs || stage.outputs.size() != 1) {
+                throw std::runtime_error("Reduce-min/max-backward stage expected input/grad[/offsets] and one output.");
             }
 
             value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
@@ -7434,13 +7475,23 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
     const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage, Tensor& input, Tensor& grad_output, const Stream& stream) const {
-    return stampReduceMinMaxBackward(compiledStage, input, grad_output, std::nullopt, stream);
+    return stampReduceMinMaxBackward(compiledStage, input, grad_output, std::nullopt, std::nullopt, stream);
 }
 
 std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
     const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,
     Tensor& input,
     Tensor& grad_output,
+    const std::optional<Tensor>& preallocatedOutput,
+    const Stream& stream) const {
+    return stampReduceMinMaxBackward(compiledStage, input, grad_output, std::nullopt, preallocatedOutput, stream);
+}
+
+std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBackward(
+    const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,
+    Tensor& input,
+    Tensor& grad_output,
+    const std::optional<Tensor>& offsets,
     const std::optional<Tensor>& preallocatedOutput,
     const Stream& stream) const {
     if (!compiledStage) {
@@ -7452,6 +7503,51 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
     }
     if (grad_output.getDataType() != compiledStage->grad_output_dtype) {
         throw std::runtime_error("Grad-output dtype does not match compiled reduce-min/max-backward grad-output dtype.");
+    }
+
+    Tensor output;
+    if (preallocatedOutput.has_value()) {
+        output = preallocatedOutput.value();
+        if (output.getPlacement() != input.getPlacement()) {
+            throw std::runtime_error("Preallocated reduce-min/max-backward output tensor placement does not match the input placement.");
+        }
+        if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
+            throw std::runtime_error("Preallocated reduce-min/max-backward output tensor dtype does not match the compiled output dtype.");
+        }
+        if (output.getDimensions() != input.getDimensions()) {
+            throw std::runtime_error("Preallocated reduce-min/max-backward output tensor dimensions do not match the input dimensions.");
+        }
+    } else {
+        output = Tensor(input.getPlacement(), TensorDescriptor(compiledStage->output_dtype, input.getDimensions()));
+    }
+
+    if (compiledStage->segmented_by_offsets) {
+        if (!offsets.has_value() || !compiledStage->offset_dtype.has_value()) {
+            throw std::runtime_error("Segmented reduce-min/max backward requires row-partition offsets.");
+        }
+        if (input.getDimensions().size() != 1 || grad_output.getDimensions().size() != 1 ||
+            offsets->getDimensions().size() != 1) {
+            throw std::runtime_error("Segmented reduce-min/max backward requires rank-1 input, grad, and offsets tensors.");
+        }
+        if (offsets->getDataType() != compiledStage->offset_dtype.value()) {
+            throw std::runtime_error("Runtime segmented reduce-min/max-backward offsets dtype does not match compiled dtype.");
+        }
+        if (offsets->getDimensions()[0] != grad_output.getDimensions()[0] + 1) {
+            throw std::runtime_error("Segmented reduce-min/max backward requires one upstream gradient per offsets segment.");
+        }
+        if (offsets->getPlacement() != input.getPlacement()) {
+            throw std::runtime_error("Segmented reduce-min/max-backward offsets placement must match packed input placement.");
+        }
+
+        Tensor indices(input.getPlacement(), TensorDescriptor(DataType::UINT64, grad_output.getDimensions()));
+        const CubArgReductionOp arg_op =
+            compiledStage->op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD ? CubArgReductionOp::ArgMin : CubArgReductionOp::ArgMax;
+        return make_shared<StampedReduceMinMaxBackward>(
+            arg_op, input, grad_output, output, indices, offsets.value(), stream);
+    }
+
+    if (offsets.has_value()) {
+        throw std::runtime_error("Dense reduce-min/max backward does not accept row-partition offsets.");
     }
 
     const std::vector<uint64_t> expected_grad_dims = StampedEquation::computeReductionOutputDims(
@@ -7477,32 +7573,11 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
 
     const std::vector<uint64_t> unsqueezed_output_dims =
         StampedEquation::computeReductionOutputDims(input.getDimensions(), built->key.reduction_axes, {});
-
-    TensorDescriptor indicesDescriptor(DataType::UINT32, unsqueezed_output_dims);
-    Tensor indices(input.getPlacement(), indicesDescriptor);
-
-    Tensor output;
-    if (preallocatedOutput.has_value()) {
-        output = preallocatedOutput.value();
-
-        if (output.getPlacement() != input.getPlacement()) {
-            throw std::runtime_error("Preallocated reduce-min/max-backward output tensor placement does not match the input placement.");
-        }
-        if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
-            throw std::runtime_error("Preallocated reduce-min/max-backward output tensor dtype does not match the compiled output dtype.");
-        }
-        if (output.getDimensions() != input.getDimensions()) {
-            throw std::runtime_error("Preallocated reduce-min/max-backward output tensor dimensions do not match the input dimensions.");
-        }
-    } else {
-        TensorDescriptor outputDescriptor(compiledStage->output_dtype, input.getDimensions());
-        output = Tensor(input.getPlacement(), outputDescriptor);
-    }
+    Tensor indices(input.getPlacement(), TensorDescriptor(DataType::UINT32, unsqueezed_output_dims));
 
     return make_shared<StampedReduceMinMaxBackward>(
         std::move(built), input, grad_output, output, indices, stream);
 }
-
 
 std::shared_ptr<StampedScanMinMaxBackward> FusedEquation::stampScanMinMaxBackward(
     const std::shared_ptr<CompiledScanMinMaxBackward>& compiledStage,
@@ -8122,6 +8197,46 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
                 stampedStages.emplace_back(stampedSegmentedReduction, std::move(dependency_stage_indices), stage_flops);
+                break;
+            }
+            case CompiledExecutionStage::Kind::SegmentedBroadcast: {
+                if (!stage.segmented_broadcast) {
+                    throw std::runtime_error("Segmented-broadcast stage missing compiled payload.");
+                }
+                if (stageInputs.size() != 2 || stage.outputs.size() != 1) {
+                    throw std::runtime_error("Segmented-broadcast stage expects per-segment values, offsets, and one output.");
+                }
+
+                Tensor perSegmentValues = runtimeInputTensor(stageInputs[0]);
+                Tensor offsetsTensor = runtimeInputTensor(stageInputs[1]);
+                const CompiledStageOutput& stageOutput = stage.outputs[0];
+
+                std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
+                auto requested_it = effectiveRequestedOutputShapes.find(stageOutput.name);
+                if (requested_it != effectiveRequestedOutputShapes.end() && !requested_it->second.empty()) {
+                    verifyRequestedOutputLayout(requested_it->second, output_dims);
+                    output_dims = requested_it->second;
+                }
+
+                auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
+                Tensor outputTensor;
+                if (preallocated_it != preallocated_final_outputs_by_name.end()) {
+                    outputTensor = preallocated_it->second;
+                } else {
+                    TensorDescriptor outputDescriptor(stage.segmented_broadcast->output_dtype, output_dims);
+                    outputTensor = Tensor(perSegmentValues.getPlacement(), outputDescriptor);
+                }
+
+                std::shared_ptr<StampedSegmentedBroadcast> stampedSegmentedBroadcast =
+                    std::make_shared<StampedSegmentedBroadcast>(stage.segmented_broadcast,
+                                                               perSegmentValues,
+                                                               offsetsTensor,
+                                                               outputTensor,
+                                                               stream);
+
+                values[stageOutput.value_id] = outputTensor;
+                producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
+                stampedStages.emplace_back(stampedSegmentedBroadcast, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
             case CompiledExecutionStage::Kind::Scan: {
@@ -8827,11 +8942,17 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (!stage.reduce_minmax_backward) {
                     throw std::runtime_error("Reduce-min/max-backward stage missing compiled payload.");
                 }
-                if (stageInputs.size() != 2) {
-                    throw std::runtime_error("Reduce-min/max-backward stage expects exactly two inputs.");
+                const size_t expected_inputs = stage.reduce_minmax_backward->segmented_by_offsets ? 3 : 2;
+                if (stageInputs.size() != expected_inputs) {
+                    throw std::runtime_error(
+                        "Reduce-min/max-backward stage expects input, grad, and optional offsets inputs.");
                 }
                 Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
                 Tensor gradOutputTensor = runtimeInputTensor(stageInputs[1]);
+                std::optional<Tensor> offsetsTensor = std::nullopt;
+                if (stage.reduce_minmax_backward->segmented_by_offsets) {
+                    offsetsTensor = runtimeInputTensor(stageInputs[2]);
+                }
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("Reduce-min/max-backward stage expects exactly one output.");
                 }
@@ -8846,7 +8967,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     outputTensor = Tensor(inputTensor.getPlacement(), outputDescriptor);
                 }
                 std::shared_ptr<StampedReduceMinMaxBackward> stampedReduceMinMaxBackward =
-                    stampReduceMinMaxBackward(stage.reduce_minmax_backward, inputTensor, gradOutputTensor, outputTensor, stream);
+                    stampReduceMinMaxBackward(
+                        stage.reduce_minmax_backward, inputTensor, gradOutputTensor, offsetsTensor, outputTensor, stream);
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
                 stampedStages.emplace_back(stampedReduceMinMaxBackward, std::move(dependency_stage_indices), stage_flops);
@@ -9255,6 +9377,18 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
                 throw std::runtime_error("Segmented-reduction stage currently requires rank-1 values and non-empty rank-1 offsets.");
             }
             value_dims[stage.outputs[0].value_id] = std::vector<uint64_t>{stage_input_dims[1][0] - 1};
+        } else if (stage.kind == CompiledExecutionStage::Kind::SegmentedBroadcast) {
+            if (!stage.segmented_broadcast) {
+                throw std::runtime_error("Missing compiled segmented-broadcast stage.");
+            }
+            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
+                throw std::runtime_error("Segmented-broadcast stage expected per-segment values, offsets, and one output.");
+            }
+            if (stage_input_dims[0].size() != 1 || stage_input_dims[1].size() != 1 ||
+                stage_input_dims[1][0] != stage_input_dims[0][0] + 1) {
+                throw std::runtime_error("Segmented-broadcast stage requires rank-1 values and [batch_size + 1] offsets.");
+            }
+            value_dims[stage.outputs[0].value_id] = std::vector<uint64_t>{stage.segmented_broadcast->max_output_values};
         } else if (stage.kind == CompiledExecutionStage::Kind::Scan) {
             if (!stage.scan) {
                 throw std::runtime_error("Missing compiled scan stage.");
@@ -9286,8 +9420,9 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");
             }
-            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
-                throw std::runtime_error("Reduce-min/max-backward stage expected exactly two inputs and one output.");
+            const size_t expected_inputs = stage.reduce_minmax_backward->segmented_by_offsets ? 3 : 2;
+            if (stage.input_value_ids.size() != expected_inputs || stage.outputs.size() != 1) {
+                throw std::runtime_error("Reduce-min/max-backward stage expected input/grad[/offsets] and one output.");
             }
             value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
         } else if (stage.kind == CompiledExecutionStage::Kind::ScanMinMaxBackward) {

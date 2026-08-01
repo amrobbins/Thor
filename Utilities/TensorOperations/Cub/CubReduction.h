@@ -91,6 +91,7 @@ struct CubReductionGeometry {
 
 class StampedCubReduction;
 class StampedCubArgReduction;
+class StampedCubSegmentedArgReduction;
 class StampedCubSegmentedReduction;
 
 /**
@@ -243,6 +244,74 @@ class StampedCubSegmentedReduction {
     const uint64_t num_items;
     const uint64_t num_segments;
     const size_t temp_storage_bytes;
+    Tensor temp_storage;
+    Stream stream;
+};
+
+/**
+ * Describes an offset-segmented argmin or argmax over rank-1 packed values.
+ *
+ * The output contains one global packed-value index per segment. Empty segments produce UINT64_MAX/UINT32_MAX.
+ * Candidate values are compared in FP32, NaNs propagate, and the lowest packed index wins ties, matching CubArgReduction.
+ */
+class CubSegmentedArgReduction {
+   public:
+    explicit CubSegmentedArgReduction(CubArgReductionOp op, DataType index_output_dtype = DataType::UINT64);
+
+    [[nodiscard]] CubArgReductionOp getOperation() const { return op; }
+    [[nodiscard]] DataType getIndexOutputDataType() const { return index_output_dtype; }
+    [[nodiscard]] static bool isInputDataTypeSupported(DataType dtype);
+    [[nodiscard]] static bool isOffsetDataTypeSupported(DataType dtype);
+
+    [[nodiscard]] std::shared_ptr<StampedCubSegmentedArgReduction> stamp(
+        const Tensor& input, const Tensor& segment_offsets, const Stream& stream) const;
+    [[nodiscard]] std::shared_ptr<StampedCubSegmentedArgReduction> stamp(
+        const Tensor& input,
+        const Tensor& preallocated_index_output,
+        const Tensor& segment_offsets,
+        const Stream& stream) const;
+
+   private:
+    [[nodiscard]] std::shared_ptr<StampedCubSegmentedArgReduction> stampValidated(
+        const Tensor& input,
+        const Tensor& index_output,
+        const Tensor& segment_offsets,
+        uint64_t num_segments,
+        const Stream& stream) const;
+
+    CubArgReductionOp op;
+    DataType index_output_dtype;
+};
+
+class StampedCubSegmentedArgReduction {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    [[nodiscard]] uint32_t gpuNum() const { return input.getPlacement().getDeviceNum(); }
+    [[nodiscard]] Tensor getIndexOutputTensor() const { return index_output; }
+    [[nodiscard]] DataType getOffsetDataType() const { return segment_offsets.getDataType(); }
+    [[nodiscard]] uint64_t getNumSegments() const { return num_segments; }
+    [[nodiscard]] size_t getWorkspaceSizeInBytes() const { return temp_storage_bytes; }
+
+   private:
+    friend class CubSegmentedArgReduction;
+
+    StampedCubSegmentedArgReduction(CubArgReductionOp op,
+                                    const Tensor& input,
+                                    const Tensor& index_output,
+                                    const Tensor& segment_offsets,
+                                    uint64_t num_segments,
+                                    size_t temp_storage_bytes,
+                                    const Tensor& temp_storage,
+                                    const Stream& stream);
+
+    CubArgReductionOp op;
+    const Tensor input;
+    mutable Tensor index_output;
+    const Tensor segment_offsets;
+    uint64_t num_segments;
+    size_t temp_storage_bytes;
     Tensor temp_storage;
     Stream stream;
 };

@@ -198,7 +198,7 @@ def test_segmented_minmax_scan_backward_uses_arg_scan_and_flat_scatter_add(op: S
 
 
 @pytest.mark.cuda
-def test_segmented_scan_rejects_unsupported_uint64_offsets_forward():
+def test_segmented_scan_supports_uint64_offsets_forward():
     x = ex.input("x")
     offsets = ex.input("offsets")
     out = x.segmented_scan(offsets, op=ScanOp.max, inclusive=False)
@@ -206,18 +206,23 @@ def test_segmented_scan_rejects_unsupported_uint64_offsets_forward():
 
     values_np = np.array([8, 6, 7, 5, 3, 2, 9], dtype=np.uint32)
     offsets_np = np.array([0, 2, 5, 7], dtype=np.uint64)
+    expected = _segmented_scan_reference(values_np, offsets_np, ScanOp.max, False)
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
         "x": _host_to_gpu(values_np, thor.DataType.uint32, stream),
         "offsets": _host_to_gpu(offsets_np, thor.DataType.uint64, stream),
     }
-    with pytest.raises(RuntimeError, match="segmented_scan offsets dtype is not supported"):
-        eq._debug_stage_kinds(inputs_gpu)
+    assert eq._debug_stage_kinds(inputs_gpu) == ["Scan"]
+
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output(), thor.DataType.uint32, stream)
+    np.testing.assert_array_equal(got, expected)
 
 
 @pytest.mark.cuda
-def test_segmented_sum_scan_backward_rejects_unsupported_uint64_offsets():
+def test_segmented_sum_scan_backward_supports_uint64_offsets():
     x = ex.input("x")
     offsets = ex.input("offsets")
     upstream_name = "__grad_output"
@@ -231,11 +236,21 @@ def test_segmented_sum_scan_backward_rejects_unsupported_uint64_offsets():
     offsets_np = np.array([0, 3, 3, 7], dtype=np.uint64)
     grad_np = np.array([0.5, -1.0, 0.25, 2.0, 1.25, -0.5, 1.5], dtype=np.float32)
 
+    expected = np.empty_like(grad_np)
+    for segment in range(len(offsets_np) - 1):
+        begin = int(offsets_np[segment])
+        end = int(offsets_np[segment + 1])
+        expected[begin:end] = np.cumsum(grad_np[begin:end][::-1])[::-1]
+
     stream = Stream(gpu_num=0)
     inputs_gpu = {
         "x": _host_to_gpu(x_np, thor.DataType.fp32, stream),
         "offsets": _host_to_gpu(offsets_np, thor.DataType.uint64, stream),
         upstream_name: _host_to_gpu(grad_np, thor.DataType.fp32, stream),
     }
-    with pytest.raises(RuntimeError, match="segmented_scan offsets dtype is not supported"):
-        bwd_eq._debug_stage_kinds(inputs_gpu)
+    assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["Scan"]
+
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host(stamped.output("x_grad"), thor.DataType.fp32, stream)
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)

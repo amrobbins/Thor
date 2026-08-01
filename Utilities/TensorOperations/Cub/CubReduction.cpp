@@ -288,6 +288,24 @@ void requireExpectedSegmentedOutput(const Tensor& input,
     }
 }
 
+void requireExpectedSegmentedArgOutput(const Tensor& input,
+                                       const Tensor& output,
+                                       const Tensor& segment_offsets,
+                                       DataType output_dtype,
+                                       uint64_t num_segments) {
+    requireDenseContiguousGpuTensor(output, "index output");
+    requireSameGpuPlacement(input, output, "input", "index output");
+    if (output.getDataType() != output_dtype) {
+        throw std::invalid_argument("CUB segmented arg-reduction output dtype does not match the configured index dtype.");
+    }
+    if (output.getTotalNumElements() != num_segments || output.getDimensions() != std::vector<uint64_t>{num_segments}) {
+        throw std::invalid_argument("CUB segmented arg-reduction output must have shape [num_segments].");
+    }
+    if (tensorStorageOverlaps(input, output) || tensorStorageOverlaps(segment_offsets, output)) {
+        throw std::invalid_argument("CUB segmented arg-reduction output storage must not overlap input or offsets storage.");
+    }
+}
+
 void requireSupportedArgOperation(CubArgReductionOp op) {
     switch (op) {
         case CubArgReductionOp::ArgMin:
@@ -711,7 +729,7 @@ bool CubSegmentedReduction::isOffsetDataTypeSupported(DataType dtype) {
     if (dtype == DataType::UINT32) {
         return true;
     }
-#if THOR_CUB_ENABLE_64BIT_TYPES
+#if THOR_CUB_ENABLE_64BIT_SEGMENT_OFFSETS
     if (dtype == DataType::UINT64) {
         return true;
     }
@@ -826,6 +844,117 @@ void StampedCubSegmentedReduction::runOn(Stream& run_stream) const {
                                                          num_items,
                                                          num_segments,
                                                          run_stream);
+}
+
+CubSegmentedArgReduction::CubSegmentedArgReduction(CubArgReductionOp op, DataType index_output_dtype)
+    : op(op), index_output_dtype(index_output_dtype) {
+    requireSupportedArgOperation(op);
+    requireSupportedArgIndexDType(index_output_dtype);
+}
+
+bool CubSegmentedArgReduction::isInputDataTypeSupported(DataType dtype) {
+    return isSupportedFloatingStorageDType(dtype);
+}
+
+bool CubSegmentedArgReduction::isOffsetDataTypeSupported(DataType dtype) {
+    if (dtype == DataType::UINT32) {
+        return true;
+    }
+#if THOR_CUB_ENABLE_64BIT_SEGMENT_OFFSETS
+    if (dtype == DataType::UINT64) {
+        return true;
+    }
+#endif
+    return false;
+}
+
+std::shared_ptr<StampedCubSegmentedArgReduction> CubSegmentedArgReduction::stamp(
+    const Tensor& input, const Tensor& segment_offsets, const Stream& stream) const {
+    requireDenseContiguousGpuTensor(input, "input");
+    if (input.getDimensions().size() != 1) {
+        throw std::invalid_argument("CUB segmented arg reduction requires a rank-1 values tensor.");
+    }
+    requireSupportedFloatingStorageDType(input.getDataType(), "segmented arg input");
+    requireSegmentOffsets(input, segment_offsets, stream);
+    validateSegmentOffsetContentsAtStamp(input, segment_offsets, stream);
+    const uint64_t num_segments = segment_offsets.getDimensions()[0] - 1;
+    Tensor output(input.getPlacement(), TensorDescriptor(index_output_dtype, {num_segments}));
+    return stampValidated(input, output, segment_offsets, num_segments, stream);
+}
+
+std::shared_ptr<StampedCubSegmentedArgReduction> CubSegmentedArgReduction::stamp(
+    const Tensor& input,
+    const Tensor& preallocated_index_output,
+    const Tensor& segment_offsets,
+    const Stream& stream) const {
+    requireDenseContiguousGpuTensor(input, "input");
+    if (input.getDimensions().size() != 1) {
+        throw std::invalid_argument("CUB segmented arg reduction requires a rank-1 values tensor.");
+    }
+    requireSupportedFloatingStorageDType(input.getDataType(), "segmented arg input");
+    requireSegmentOffsets(input, segment_offsets, stream);
+    validateSegmentOffsetContentsAtStamp(input, segment_offsets, stream);
+    const uint64_t num_segments = segment_offsets.getDimensions()[0] - 1;
+    requireExpectedSegmentedArgOutput(input, preallocated_index_output, segment_offsets, index_output_dtype, num_segments);
+    return stampValidated(input, preallocated_index_output, segment_offsets, num_segments, stream);
+}
+
+std::shared_ptr<StampedCubSegmentedArgReduction> CubSegmentedArgReduction::stampValidated(
+    const Tensor& input,
+    const Tensor& index_output,
+    const Tensor& segment_offsets,
+    uint64_t num_segments,
+    const Stream& stream) const {
+    const uint64_t num_items = input.getTotalNumElements();
+    if (index_output_dtype == DataType::UINT32 && num_items > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        throw std::invalid_argument("CUB segmented arg-reduction packed index domain does not fit in UINT32.");
+    }
+    if (num_segments > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        throw std::invalid_argument("CUB segmented arg-reduction segment count exceeds int64 limits.");
+    }
+
+    ScopedGpu scoped_gpu(stream.getGpuNum());
+    Tensor mutable_output = index_output;
+    const size_t temp_storage_bytes = CubReductionInternal::queryOffsetSegmentedArgReductionBytes(
+        op, input, mutable_output, segment_offsets, num_segments, stream);
+    Tensor temp_storage(input.getPlacement(),
+                        TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(temp_storage_bytes)}));
+    return std::shared_ptr<StampedCubSegmentedArgReduction>(new StampedCubSegmentedArgReduction(op,
+                                                                                                input,
+                                                                                                index_output,
+                                                                                                segment_offsets,
+                                                                                                num_segments,
+                                                                                                temp_storage_bytes,
+                                                                                                temp_storage,
+                                                                                                stream));
+}
+
+StampedCubSegmentedArgReduction::StampedCubSegmentedArgReduction(CubArgReductionOp op,
+                                                                 const Tensor& input,
+                                                                 const Tensor& index_output,
+                                                                 const Tensor& segment_offsets,
+                                                                 uint64_t num_segments,
+                                                                 size_t temp_storage_bytes,
+                                                                 const Tensor& temp_storage,
+                                                                 const Stream& stream)
+    : op(op),
+      input(input),
+      index_output(index_output),
+      segment_offsets(segment_offsets),
+      num_segments(num_segments),
+      temp_storage_bytes(temp_storage_bytes),
+      temp_storage(temp_storage),
+      stream(stream) {
+    requireTempStorage(this->temp_storage, input.getPlacement(), temp_storage_bytes);
+}
+
+void StampedCubSegmentedArgReduction::run() { runOn(stream); }
+
+void StampedCubSegmentedArgReduction::runOn(Stream& run_stream) const {
+    requireCompatibleStream(input, run_stream);
+    ScopedGpu scoped_gpu(run_stream.getGpuNum());
+    CubReductionInternal::launchOffsetSegmentedArgReduction(
+        op, temp_storage, temp_storage_bytes, input, index_output, segment_offsets, num_segments, run_stream);
 }
 
 CubArgReduction::CubArgReduction(CubArgReductionOp op,

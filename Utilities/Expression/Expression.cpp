@@ -374,6 +374,12 @@ std::string exprOpExternalName(ExprOp op) {
             return "segmented_reduce_max";
         case ExprOp::SEGMENTED_REDUCE_MEAN:
             return "segmented_reduce_mean";
+        case ExprOp::SEGMENTED_BROADCAST:
+            return "segmented_broadcast";
+        case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+            return "segmented_reduce_min_backward";
+        case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
+            return "segmented_reduce_max_backward";
         case ExprOp::RAGGED_VALUEWISE_EXTENT:
             return "ragged_valuewise_extent";
         default:
@@ -509,6 +515,9 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"segmented_reduce_min", ExprOp::SEGMENTED_REDUCE_MIN},
         {"segmented_reduce_max", ExprOp::SEGMENTED_REDUCE_MAX},
         {"segmented_reduce_mean", ExprOp::SEGMENTED_REDUCE_MEAN},
+        {"segmented_broadcast", ExprOp::SEGMENTED_BROADCAST},
+        {"segmented_reduce_min_backward", ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD},
+        {"segmented_reduce_max_backward", ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD},
         {"ragged_valuewise_extent", ExprOp::RAGGED_VALUEWISE_EXTENT},
     };
 
@@ -694,6 +703,7 @@ json exprNodeToJson(const ExprNode& node) {
     j["ragged_runtime_batch_size"] = node.ragged_runtime_batch_size;
     j["ragged_runtime_max_active_values"] = node.ragged_runtime_max_active_values;
     j["ragged_runtime_elements_per_value"] = node.ragged_runtime_elements_per_value;
+    j["segmented_broadcast_normalize_by_length"] = node.segmented_broadcast_normalize_by_length;
     setOptionalDTypeJson(j, "input_tensor_dtype", node.input_tensor_dtype);
     setOptionalDTypeJson(j, "output_dtype", node.output_dtype);
     setOptionalDTypeJson(j, "compute_dtype", node.compute_dtype);
@@ -808,6 +818,7 @@ ExprNode exprNodeFromJson(const json& j) {
     node.ragged_runtime_batch_size = j.value("ragged_runtime_batch_size", uint64_t{0});
     node.ragged_runtime_max_active_values = j.value("ragged_runtime_max_active_values", uint64_t{0});
     node.ragged_runtime_elements_per_value = j.value("ragged_runtime_elements_per_value", uint64_t{1});
+    node.segmented_broadcast_normalize_by_length = j.value("segmented_broadcast_normalize_by_length", false);
     parseOptionalDTypeField(j, "input_tensor_dtype", node.input_tensor_dtype);
     parseOptionalDTypeField(j, "output_dtype", node.output_dtype);
     parseOptionalDTypeField(j, "compute_dtype", node.compute_dtype);
@@ -1052,6 +1063,12 @@ std::string opName(ExprOp op) {
             return "SEGMENTED_REDUCE_MAX";
         case ExprOp::SEGMENTED_REDUCE_MEAN:
             return "SEGMENTED_REDUCE_MEAN";
+        case ExprOp::SEGMENTED_BROADCAST:
+            return "SEGMENTED_BROADCAST";
+        case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+            return "SEG_REDUCE_MIN_BW";
+        case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
+            return "SEG_REDUCE_MAX_BW";
         case ExprOp::RAGGED_VALUEWISE_EXTENT:
             return "RAGGED_VALUEWISE_EXTENT";
         case ExprOp::RMSNORM:
@@ -1281,6 +1298,15 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             break;
         }
 
+        case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+        case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD: {
+            std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
+            std::string c = canonicalizeNode(expr, n.aux, memo, memoReady);
+            out = opName(n.op) + "(" + a + "," + b + "," + c + ")";
+            break;
+        }
+
         case ExprOp::SCAN_MIN_BACKWARD:
         case ExprOp::SCAN_MAX_BACKWARD:
         case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
@@ -1319,6 +1345,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::RMSNORM:
         case ExprOp::EMBEDDING_LOOKUP:
         case ExprOp::RAGGED_VALUEWISE_EXTENT:
+        case ExprOp::SEGMENTED_BROADCAST:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
@@ -1351,6 +1378,9 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 out += ";batch=" + std::to_string(n.ragged_runtime_batch_size);
                 out += ";maxActive=" + std::to_string(n.ragged_runtime_max_active_values);
                 out += ";elementsPerValue=" + std::to_string(n.ragged_runtime_elements_per_value);
+            } else if (n.op == ExprOp::SEGMENTED_BROADCAST) {
+                out += ";maxActive=" + std::to_string(n.ragged_runtime_max_active_values);
+                out += ";normalize=" + std::to_string(n.segmented_broadcast_normalize_by_length ? 1 : 0);
             } else if (n.op == ExprOp::CONV2D || n.op == ExprOp::CONV2D_BACKWARD_DATA || n.op == ExprOp::CONV2D_BACKWARD_FILTER ||
                        n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
                 if (n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
@@ -2200,6 +2230,7 @@ bool Expression::isBinaryOp(const ExprOp op) {
         case ExprOp::SEGMENTED_REDUCE_MAX:
         case ExprOp::SEGMENTED_REDUCE_MEAN:
         case ExprOp::RAGGED_VALUEWISE_EXTENT:
+        case ExprOp::SEGMENTED_BROADCAST:
         case ExprOp::CONV2D:
         case ExprOp::CONV2D_BACKWARD_DATA:
         case ExprOp::CONV2D_BACKWARD_FILTER:
@@ -2226,6 +2257,8 @@ bool Expression::isTernaryOp(const ExprOp op) {
         case ExprOp::ATTENTION_BACKWARD_BIAS:
         case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
         case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD:
+        case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+        case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
         case ExprOp::WHERE:
             return true;
         default:
@@ -3503,25 +3536,69 @@ Expression Expression::segmentedScan(const Expression& input, const Expression& 
     return out;
 }
 
+Expression Expression::segmentedScanWithRaggedMetadata(const Expression& input,
+                                                       const Expression& offsets,
+                                                       ScanOp op,
+                                                       bool inclusive,
+                                                       bool reverse,
+                                                       uint64_t ragged_batch_size,
+                                                       uint64_t ragged_max_active_values) {
+    if ((ragged_batch_size == 0) != (ragged_max_active_values == 0)) {
+        throw std::invalid_argument("Segmented scan ragged metadata requires both batch size and max active values, or neither.");
+    }
+
+    Expression out = segmentedScan(input, offsets, op, inclusive, reverse);
+    if (ragged_batch_size != 0) {
+        ExprNode& node = out.expr->nodes.at(out.nodeIndex);
+        node.ragged_runtime_batch_size = ragged_batch_size;
+        node.ragged_runtime_max_active_values = ragged_max_active_values;
+        node.ragged_runtime_elements_per_value = 1;
+    }
+    return out;
+}
+
+Expression Expression::segmentedReduceWithRaggedMetadata(const Expression& input,
+                                                         const Expression& offsets,
+                                                         ExprOp op,
+                                                         uint64_t ragged_batch_size,
+                                                         uint64_t ragged_max_active_values) {
+    if (op != ExprOp::SEGMENTED_REDUCE_SUM && op != ExprOp::SEGMENTED_REDUCE_MIN &&
+        op != ExprOp::SEGMENTED_REDUCE_MAX && op != ExprOp::SEGMENTED_REDUCE_MEAN) {
+        throw std::invalid_argument("segmentedReduceWithRaggedMetadata requires a segmented reduction op.");
+    }
+    if ((ragged_batch_size == 0) != (ragged_max_active_values == 0)) {
+        throw std::invalid_argument("Segmented reduction ragged metadata requires both batch size and max active values, or neither.");
+    }
+
+    Expression out = binaryOp(input, offsets, op);
+    if (ragged_batch_size != 0) {
+        ExprNode& node = out.expr->nodes.at(out.nodeIndex);
+        node.ragged_runtime_batch_size = ragged_batch_size;
+        node.ragged_runtime_max_active_values = ragged_max_active_values;
+        node.ragged_runtime_elements_per_value = 1;
+    }
+    return out;
+}
+
 Expression Expression::segmentedReduceSum(const Expression& offsets) const { return segmentedReduceSum(*this, offsets); }
 Expression Expression::segmentedReduceMin(const Expression& offsets) const { return segmentedReduceMin(*this, offsets); }
 Expression Expression::segmentedReduceMax(const Expression& offsets) const { return segmentedReduceMax(*this, offsets); }
 Expression Expression::segmentedReduceMean(const Expression& offsets) const { return segmentedReduceMean(*this, offsets); }
 
 Expression Expression::segmentedReduceSum(const Expression& input, const Expression& offsets) {
-    return binaryOp(input, offsets, ExprOp::SEGMENTED_REDUCE_SUM);
+    return segmentedReduceWithRaggedMetadata(input, offsets, ExprOp::SEGMENTED_REDUCE_SUM, 0, 0);
 }
 
 Expression Expression::segmentedReduceMin(const Expression& input, const Expression& offsets) {
-    return binaryOp(input, offsets, ExprOp::SEGMENTED_REDUCE_MIN);
+    return segmentedReduceWithRaggedMetadata(input, offsets, ExprOp::SEGMENTED_REDUCE_MIN, 0, 0);
 }
 
 Expression Expression::segmentedReduceMax(const Expression& input, const Expression& offsets) {
-    return binaryOp(input, offsets, ExprOp::SEGMENTED_REDUCE_MAX);
+    return segmentedReduceWithRaggedMetadata(input, offsets, ExprOp::SEGMENTED_REDUCE_MAX, 0, 0);
 }
 
 Expression Expression::segmentedReduceMean(const Expression& input, const Expression& offsets) {
-    return binaryOp(input, offsets, ExprOp::SEGMENTED_REDUCE_MEAN);
+    return segmentedReduceWithRaggedMetadata(input, offsets, ExprOp::SEGMENTED_REDUCE_MEAN, 0, 0);
 }
 
 Expression Expression::withRaggedRuntimeExtent(const Expression& offsets,

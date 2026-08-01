@@ -595,7 +595,7 @@ bool isCubSegmentOffsetDTypeSupported(DataType dtype) {
     switch (dtype) {
         case DataType::UINT32:
             return true;
-#if THOR_CUB_ENABLE_64BIT_TYPES
+#if THOR_CUB_ENABLE_64BIT_SEGMENT_OFFSETS
         case DataType::UINT64:
             return true;
 #endif

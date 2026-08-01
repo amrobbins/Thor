@@ -1376,6 +1376,15 @@ void launchSegmentedArgScan(const CubDeviceSegmentedArgScanPlan& plan,
     auto input_begin = thrust::make_transform_iterator(
         thrust::counting_iterator<uint32_t>(0),
         CubSegmentedArgScanInputOp<T>{input.getMemPtr<T>(), static_cast<uint32_t>(checkedCubNumItems(plan.num_items)), 0U, false, plan.direction});
+
+    // Offset-segmented scans may cover only a prefix of the fixed-capacity
+    // tensor (offsets[num_segments] < num_items). CUB leaves pair_output
+    // entries outside the supplied segments untouched, but the extraction
+    // kernel visits the whole fixed-capacity output. Initialize those unused
+    // pairs so their indices are the canonical invalid sentinel rather than
+    // allocator-dependent garbage that could later be consumed by a scatter.
+    CUDA_CHECK(cudaMemsetAsync(pair_output, 0xFF, pair_bytes, stream.getStream()));
+
     if (plan.direction == CubScanDirection::Forward) {
         launchSegmentedArgScanIterator<T>(cub_temp,
                                           cub_temp_bytes,

@@ -467,7 +467,13 @@ TEST(CubDevicePrimitives, DTypeSupportPolicyMatchesFeatureDefines) {
     EXPECT_FALSE(isCubSegmentedExclusiveSumDTypeSupported(DataType::FP8_E5M2));
 
     EXPECT_TRUE(isCubSegmentOffsetDTypeSupported(DataType::UINT32));
+#if THOR_CUB_ENABLE_64BIT_SEGMENT_OFFSETS
+    EXPECT_TRUE(isCubSegmentOffsetDTypeSupported(DataType::UINT64));
+#else
+    EXPECT_FALSE(isCubSegmentOffsetDTypeSupported(DataType::UINT64));
+#endif
     EXPECT_FALSE(isCubSegmentOffsetDTypeSupported(DataType::INT32));
+    EXPECT_FALSE(isCubSegmentOffsetDTypeSupported(DataType::INT64));
     EXPECT_FALSE(isCubSegmentOffsetDTypeSupported(DataType::FP32));
 
 #if THOR_CUB_ENABLE_64BIT_TYPES
@@ -493,8 +499,6 @@ TEST(CubDevicePrimitives, DTypeSupportPolicyMatchesFeatureDefines) {
     EXPECT_TRUE(isCubSegmentedExclusiveSumDTypeSupported(DataType::UINT64));
     EXPECT_FALSE(isCubSegmentedExclusiveSumDTypeSupported(DataType::INT64));
     EXPECT_TRUE(isCubSegmentedExclusiveSumDTypeSupported(DataType::FP64));
-    EXPECT_TRUE(isCubSegmentOffsetDTypeSupported(DataType::UINT64));
-    EXPECT_FALSE(isCubSegmentOffsetDTypeSupported(DataType::INT64));
 #else
     EXPECT_FALSE(isCubRadixSortKeyDTypeSupported(DataType::UINT64));
     EXPECT_FALSE(isCubRadixSortKeyDTypeSupported(DataType::INT64));
@@ -516,8 +520,6 @@ TEST(CubDevicePrimitives, DTypeSupportPolicyMatchesFeatureDefines) {
     EXPECT_FALSE(isCubSegmentedExclusiveSumDTypeSupported(DataType::UINT64));
     EXPECT_FALSE(isCubSegmentedExclusiveSumDTypeSupported(DataType::INT64));
     EXPECT_FALSE(isCubSegmentedExclusiveSumDTypeSupported(DataType::FP64));
-    EXPECT_FALSE(isCubSegmentOffsetDTypeSupported(DataType::UINT64));
-    EXPECT_FALSE(isCubSegmentOffsetDTypeSupported(DataType::INT64));
 #endif
 
 #if THOR_CUB_ENABLE_FP8_TYPES
@@ -1079,8 +1081,8 @@ TEST(CubDevicePrimitives, SegmentedSortRejectsUnsupportedOffsetDTypes) {
         std::invalid_argument);
 }
 
-#if THOR_CUB_ENABLE_64BIT_TYPES
-TEST(CubDevicePrimitives, SegmentedSortSupportsUint64OffsetsWhen64BitEnabled) {
+#if THOR_CUB_ENABLE_64BIT_SEGMENT_OFFSETS
+TEST(CubDevicePrimitives, SegmentedSortSupportsUint64OffsetsWhenEnabled) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -1097,7 +1099,7 @@ TEST(CubDevicePrimitives, SegmentedSortSupportsUint64OffsetsWhen64BitEnabled) {
     EXPECT_EQ(copyGpuVector<uint32_t>(keys_out, stream), (std::vector<uint32_t>{1U, 3U, 2U, 4U}));
 }
 #else
-TEST(CubDevicePrimitives, SegmentedSortRejectsUint64OffsetsWhen64BitDisabled) {
+TEST(CubDevicePrimitives, SegmentedSortRejectsUint64OffsetsWhenDisabled) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -1109,10 +1111,6 @@ TEST(CubDevicePrimitives, SegmentedSortRejectsUint64OffsetsWhen64BitDisabled) {
         (void)prepareCubDeviceSegmentedRadixSortKeys(keys_in, keys_out, offsets, 2, 1, CubSortOrder::Ascending),
         std::invalid_argument);
 }
-#endif
-
-#if THOR_CUB_ENABLE_64BIT_TYPES
-#else
 #endif
 
 TEST(CubDevicePrimitives, DeviceFindLowerAndUpperBoundUseAscendingRange) {
@@ -1465,6 +1463,38 @@ TEST(CubDevicePrimitives, SegmentedArgScanUsesContiguousOffsets) {
     EXPECT_EQ(copyGpuVector<uint32_t>(max_out, stream), (std::vector<uint32_t>{0U, 0U, 2U, 2U, 2U, 5U, 6U}));
 }
 
+TEST(CubDevicePrimitives, SegmentedArgScanMarksUnusedCapacityInvalidEvenWithDirtyWorkspace) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuVector<uint32_t>({8U, 6U, 7U, 5U, 3U, 99U, 100U, 101U}, stream);
+    Tensor offsets = makeGpuVector<uint32_t>({0U, 2U, 2U, 5U}, stream);
+    Tensor forward_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {8}));
+    Tensor reverse_out(gpuPlacement, TensorDescriptor(DataType::UINT32, {8}));
+
+    const CubDeviceSegmentedArgScanPlan forward_plan = prepareCubDeviceSegmentedArgScan(
+        input, forward_out, offsets, 8, 3, CubArgScanOp::ArgMax, CubScanMode::Inclusive, CubScanDirection::Forward);
+    const CubDeviceSegmentedArgScanPlan reverse_plan = prepareCubDeviceSegmentedArgScan(
+        input, reverse_out, offsets, 8, 3, CubArgScanOp::ArgMax, CubScanMode::Inclusive, CubScanDirection::Reverse);
+    Tensor temp = allocateCubTemporaryStorage(cubMaxTemporaryStoragePlan(
+        {cubTemporaryStoragePlan(gpuPlacement, forward_plan.temp_storage_bytes),
+         cubTemporaryStoragePlan(gpuPlacement, reverse_plan.temp_storage_bytes)}));
+
+    // Deliberately poison the reusable workspace with zeroes. Before the
+    // inactive-pair initialization fix, unused pair indices were then read as
+    // valid index 0 and could contaminate a later scatter-add.
+    temp.memsetAsync(stream, 0);
+    cubDeviceSegmentedArgScan(forward_plan, temp, input, forward_out, offsets, stream);
+    temp.memsetAsync(stream, 0);
+    cubDeviceSegmentedArgScan(reverse_plan, temp, input, reverse_out, offsets, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<uint32_t>(forward_out, stream),
+              (std::vector<uint32_t>{0U, 0U, 2U, 2U, 2U, UINT32_MAX, UINT32_MAX, UINT32_MAX}));
+    EXPECT_EQ(copyGpuVector<uint32_t>(reverse_out, stream),
+              (std::vector<uint32_t>{0U, 1U, 2U, 3U, 4U, UINT32_MAX, UINT32_MAX, UINT32_MAX}));
+}
+
 TEST(CubDevicePrimitives, SegmentedScanSupportsGenericOpsWithContiguousOffsets) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -1495,6 +1525,25 @@ TEST(CubDevicePrimitives, SegmentedScanSupportsGenericOpsWithContiguousOffsets) 
     EXPECT_EQ(copyGpuVector<uint32_t>(max_out, stream), (std::vector<uint32_t>{8U, 8U, 7U, 7U, 7U, 2U, 9U}));
     EXPECT_EQ(copyGpuVector<uint32_t>(product_out, stream), (std::vector<uint32_t>{1U, 8U, 1U, 7U, 35U, 1U, 2U}));
 }
+
+#if THOR_CUB_ENABLE_64BIT_SEGMENT_OFFSETS
+TEST(CubDevicePrimitives, SegmentedScanSupportsUint64OffsetsIndependentOf64BitValueTypes) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuVector<float>({1.0F, 2.0F, 3.0F, 4.0F, 5.0F}, stream);
+    Tensor offsets = makeGpuVector<uint64_t>({0ULL, 2ULL, 2ULL, 5ULL}, stream);
+    Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {5}));
+
+    const CubDeviceSegmentedScanPlan plan =
+        prepareCubDeviceSegmentedScan(input, output, offsets, 5, 3, CubScanOp::Sum, CubScanMode::Inclusive);
+    Tensor temp = allocateCubTemporaryStorage(cubTemporaryStoragePlan(gpuPlacement, plan.temp_storage_bytes));
+    cubDeviceSegmentedScan(plan, temp, input, output, offsets, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<float>(output, stream), (std::vector<float>{1.0F, 3.0F, 3.0F, 7.0F, 12.0F}));
+}
+#endif
 
 TEST(CubDevicePrimitives, SegmentedScanSupportsRaggedReverseDirection) {
     REQUIRE_CUDA_DEVICE();

@@ -81,7 +81,7 @@ decltype(auto) dispatchOffsetDType(DataType dtype, Fn&& fn) {
     switch (dtype) {
         case DataType::UINT32:
             return fn.template operator()<uint32_t>();
-#if THOR_CUB_ENABLE_64BIT_TYPES
+#if THOR_CUB_ENABLE_64BIT_SEGMENT_OFFSETS
         case DataType::UINT64:
             return fn.template operator()<uint64_t>();
 #endif

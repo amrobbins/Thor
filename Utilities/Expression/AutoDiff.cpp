@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <optional>
 #include <limits>
 #include <stdexcept>
@@ -411,6 +412,7 @@ static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
         case ExprOp::SEGMENTED_REDUCE_MIN:
         case ExprOp::SEGMENTED_REDUCE_MAX:
         case ExprOp::SEGMENTED_REDUCE_MEAN:
+        case ExprOp::SEGMENTED_BROADCAST:
         case ExprOp::REDUCE_MIN:
         case ExprOp::REDUCE_MAX:
         case ExprOp::SOFTMAX:
@@ -428,6 +430,8 @@ static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
         case ExprOp::CONV3D_BACKWARD_FILTER:
         case ExprOp::REDUCE_MIN_BACKWARD:
         case ExprOp::REDUCE_MAX_BACKWARD:
+        case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+        case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
             return true;
         default:
             return false;
@@ -506,6 +510,16 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::RAGGED_VALUEWISE_EXTENT:
                 // Offsets are structural launch metadata and are never differentiable.
                 reaches[i] = reaches.at(node.lhs);
+                break;
+            case ExprOp::SEGMENTED_BROADCAST:
+                // Offsets are structural metadata; only per-segment values differentiate.
+                reaches[i] = reaches.at(node.lhs);
+                break;
+            case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+            case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
+                // Offsets are structural metadata. Second derivatives are rejected
+                // later, but reverse relevance must still ignore the partition.
+                reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs);
                 break;
             case ExprOp::TAKE_ALONG_AXIS:
                 reaches[i] = reaches.at(node.lhs);
@@ -719,6 +733,11 @@ class BackwardGraphBuilder {
             case ExprOp::SCAN:
             case ExprOp::SEGMENTED_SCAN:
                 return tryInferKnownGradientDims(n.lhs);
+            case ExprOp::SEGMENTED_BROADCAST:
+                if (n.ragged_runtime_max_active_values == 0) {
+                    return std::nullopt;
+                }
+                return std::vector<uint64_t>{n.ragged_runtime_max_active_values};
             case ExprOp::ADD:
             case ExprOp::SUB: {
                 const auto lhs_dims = tryInferKnownGradientDims(n.lhs);
@@ -1628,6 +1647,32 @@ class BackwardGraphBuilder {
         return push(std::move(node));
     }
 
+    uint32_t segmentedReduceMinMaxBackward(ExprOp op,
+                                           uint32_t lhs,
+                                           uint32_t grad,
+                                           uint32_t offsets,
+                                           uint64_t batch_size,
+                                           uint64_t max_active_values,
+                                           std::optional<DataType> output_dtype = std::nullopt,
+                                           std::optional<DataType> compute_dtype = std::nullopt) {
+        if (op != ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD && op != ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD) {
+            throw std::runtime_error(
+                "segmentedReduceMinMaxBackward requires SEGMENTED_REDUCE_MIN_BACKWARD or SEGMENTED_REDUCE_MAX_BACKWARD.");
+        }
+
+        ExprNode node{};
+        node.op = op;
+        node.lhs = lhs;
+        node.rhs = grad;
+        node.aux = offsets;
+        node.ragged_runtime_batch_size = batch_size;
+        node.ragged_runtime_max_active_values = max_active_values;
+        node.ragged_runtime_elements_per_value = 1;
+        node.output_dtype = output_dtype;
+        node.compute_dtype = compute_dtype;
+        return push(std::move(node));
+    }
+
     uint32_t scan(uint32_t lhs,
                   ScanOp op,
                   ScanMode mode,
@@ -1652,7 +1697,13 @@ class BackwardGraphBuilder {
                            ScanOp op,
                            ScanMode mode,
                            bool reverse,
-                           std::optional<DataType> output_dtype = std::nullopt) {
+                           std::optional<DataType> output_dtype = std::nullopt,
+                           uint64_t ragged_batch_size = 0,
+                           uint64_t ragged_max_active_values = 0,
+                           uint64_t ragged_elements_per_value = 1) {
+        if ((ragged_batch_size == 0) != (ragged_max_active_values == 0)) {
+            throw std::runtime_error("AutoDiff segmented scan ragged metadata requires both batch size and max active values, or neither.");
+        }
         ExprNode node{};
         node.op = ExprOp::SEGMENTED_SCAN;
         node.lhs = lhs;
@@ -1661,6 +1712,49 @@ class BackwardGraphBuilder {
         node.scan_mode = mode;
         node.scan_axis = UINT64_MAX;
         node.scan_reverse = reverse;
+        node.ragged_runtime_batch_size = ragged_batch_size;
+        node.ragged_runtime_max_active_values = ragged_max_active_values;
+        node.ragged_runtime_elements_per_value = ragged_elements_per_value;
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
+        }
+        return push(std::move(node));
+    }
+
+    uint32_t raggedValuewiseExtent(uint32_t lhs,
+                                   uint32_t offsets,
+                                   uint64_t batch_size,
+                                   uint64_t max_active_values,
+                                   uint64_t elements_per_value = 1,
+                                   std::optional<DataType> output_dtype = std::nullopt) {
+        ExprNode node{};
+        node.op = ExprOp::RAGGED_VALUEWISE_EXTENT;
+        node.lhs = lhs;
+        node.rhs = offsets;
+        node.ragged_runtime_batch_size = batch_size;
+        node.ragged_runtime_max_active_values = max_active_values;
+        node.ragged_runtime_elements_per_value = elements_per_value;
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
+        }
+        return push(std::move(node));
+    }
+
+    uint32_t segmentedBroadcast(uint32_t per_segment_values,
+                                uint32_t offsets,
+                                uint64_t max_active_values,
+                                bool normalize_by_segment_length,
+                                std::optional<DataType> output_dtype = std::nullopt) {
+        if (max_active_values == 0) {
+            throw std::runtime_error("AutoDiff segmented broadcast requires non-zero packed capacity.");
+        }
+        ExprNode node{};
+        node.op = ExprOp::SEGMENTED_BROADCAST;
+        node.lhs = per_segment_values;
+        node.rhs = offsets;
+        node.ragged_runtime_max_active_values = max_active_values;
+        node.ragged_runtime_elements_per_value = 1;
+        node.segmented_broadcast_normalize_by_length = normalize_by_segment_length;
         if (output_dtype.has_value()) {
             node.output_dtype = output_dtype.value();
         }
@@ -1675,10 +1769,17 @@ class BackwardGraphBuilder {
                                 ScanMode mode,
                                 uint64_t axis,
                                 bool reverse,
-                                std::optional<DataType> output_dtype = std::nullopt) {
+                                std::optional<DataType> output_dtype = std::nullopt,
+                                uint64_t ragged_batch_size = 0,
+                                uint64_t ragged_max_active_values = 0,
+                                uint64_t ragged_elements_per_value = 1) {
         if (op != ExprOp::SCAN_MIN_BACKWARD && op != ExprOp::SCAN_MAX_BACKWARD &&
             op != ExprOp::SEGMENTED_SCAN_MIN_BACKWARD && op != ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
             throw std::runtime_error("scanMinMaxBackward requires a scan min/max backward op.");
+        }
+        if ((ragged_batch_size == 0) != (ragged_max_active_values == 0)) {
+            throw std::runtime_error(
+                "AutoDiff segmented scan min/max backward ragged metadata requires both batch size and max active values, or neither.");
         }
         ExprNode node{};
         node.op = op;
@@ -1688,6 +1789,11 @@ class BackwardGraphBuilder {
         node.scan_mode = mode;
         node.scan_axis = axis;
         node.scan_reverse = reverse;
+        if (op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD) {
+            node.ragged_runtime_batch_size = ragged_batch_size;
+            node.ragged_runtime_max_active_values = ragged_max_active_values;
+            node.ragged_runtime_elements_per_value = ragged_elements_per_value;
+        }
         if (output_dtype.has_value()) {
             node.output_dtype = output_dtype.value();
         }
@@ -2771,6 +2877,17 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 node_dims[i] = std::vector<uint64_t>{offsets_dims[0] - 1};
                 break;
             }
+            case ExprOp::SEGMENTED_BROADCAST: {
+                if (node.ragged_runtime_max_active_values == 0) {
+                    throw std::runtime_error("inferForwardNodeDims segmented broadcast is missing packed capacity metadata.");
+                }
+                node_dims[i] = std::vector<uint64_t>{node.ragged_runtime_max_active_values};
+                break;
+            }
+            case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+            case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
+                node_dims[i] = node_dims[node.lhs];
+                break;
             case ExprOp::MATMUL:
                 node_dims[i] = inferMatmulOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
@@ -3101,18 +3218,43 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
     const std::vector<std::string> normalized_wrt = normalizeWrtNames(forward_expr, wrt_names);
     std::unordered_set<std::string> ragged_metadata_input_names;
+    std::unordered_set<uint32_t> visited_metadata_nodes;
+    std::function<void(uint32_t)> collect_metadata_inputs = [&](uint32_t node_idx) {
+        if (node_idx >= forward_expr.nodes.size()) {
+            throw std::runtime_error("Ragged expression operation has an invalid row-partition metadata node during autodiff.");
+        }
+        if (!visited_metadata_nodes.insert(node_idx).second) {
+            return;
+        }
+
+        const ExprNode& metadata_node = forward_expr.nodes[node_idx];
+        if (metadata_node.op == ExprOp::INPUT) {
+            if (metadata_node.input_slot >= forward_expr.inputs.size()) {
+                throw std::runtime_error("Ragged row-partition metadata input slot is out of range during autodiff.");
+            }
+            ragged_metadata_input_names.insert(forward_expr.inputs[metadata_node.input_slot].name);
+            return;
+        }
+
+        for (uint32_t parent : {metadata_node.lhs, metadata_node.rhs, metadata_node.aux}) {
+            if (parent != UINT32_MAX) {
+                collect_metadata_inputs(parent);
+            }
+        }
+    };
+
     for (const ExprNode& node : forward_expr.nodes) {
-        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
-            continue;
+        const bool uses_row_partition_metadata =
+            node.op == ExprOp::RAGGED_VALUEWISE_EXTENT || node.op == ExprOp::SEGMENTED_SCAN ||
+            node.op == ExprOp::SEGMENTED_REDUCE_SUM || node.op == ExprOp::SEGMENTED_REDUCE_MIN ||
+            node.op == ExprOp::SEGMENTED_REDUCE_MAX || node.op == ExprOp::SEGMENTED_REDUCE_MEAN ||
+            node.op == ExprOp::SEGMENTED_BROADCAST;
+        if (uses_row_partition_metadata) {
+            collect_metadata_inputs(node.rhs);
         }
-        if (node.rhs >= forward_expr.nodes.size()) {
-            throw std::runtime_error("Ragged valuewise extent has an invalid offsets node during autodiff.");
+        if (node.op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD || node.op == ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD) {
+            collect_metadata_inputs(node.aux);
         }
-        const ExprNode& offsets_node = forward_expr.nodes[node.rhs];
-        if (offsets_node.op != ExprOp::INPUT || offsets_node.input_slot >= forward_expr.inputs.size()) {
-            throw std::runtime_error("Ragged valuewise extent offsets must remain a direct metadata input during autodiff.");
-        }
-        ragged_metadata_input_names.insert(forward_expr.inputs[offsets_node.input_slot].name);
     }
     for (const std::string& name : normalized_wrt) {
         if (ragged_metadata_input_names.contains(name)) {
@@ -3305,8 +3447,19 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
             case ExprOp::RAGGED_VALUEWISE_EXTENT:
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    throw std::runtime_error(
-                        "Ragged valuewise autodiff is not implemented yet; offsets are metadata and cannot receive gradients.");
+                    if (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
+                        node.ragged_runtime_elements_per_value == 0) {
+                        throw std::runtime_error("Ragged valuewise autodiff encountered incomplete runtime-extent metadata.");
+                    }
+                    const uint32_t offsets = builder.cloneForward(node.rhs);
+                    const uint32_t ragged_grad = builder.raggedValuewiseExtent(
+                        grad,
+                        offsets,
+                        node.ragged_runtime_batch_size,
+                        node.ragged_runtime_max_active_values,
+                        node.ragged_runtime_elements_per_value,
+                        preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                    addContributionToChild(node.lhs, ragged_grad, node_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
                 }
                 break;
 
@@ -4482,10 +4635,124 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 throw std::runtime_error("Thor expressions autodiff does not support second derivatives for attention backward yet.");
 
             case ExprOp::SEGMENTED_REDUCE_SUM:
+            case ExprOp::SEGMENTED_REDUCE_MEAN: {
+                if (!node_reaches_requested_inputs.at(node.lhs)) {
+                    break;
+                }
+
+                uint64_t batch_size = node.ragged_runtime_batch_size;
+                uint64_t max_active_values = node.ragged_runtime_max_active_values;
+                if ((batch_size == 0 || max_active_values == 0) && has_forward_dims) {
+                    const std::vector<uint64_t>& values_dims = forward_node_dims.at(node.lhs);
+                    const std::vector<uint64_t>& offsets_dims = forward_node_dims.at(node.rhs);
+                    if (values_dims.size() != 1 || offsets_dims.size() != 1 || offsets_dims[0] == 0) {
+                        throw std::runtime_error("Segmented ragged reduction backward requires rank-1 values and offsets.");
+                    }
+                    batch_size = offsets_dims[0] - 1;
+                    max_active_values = values_dims[0];
+                }
+
+                if (batch_size == 0 || max_active_values == 0) {
+                    if (allow_shape_deferred_placeholders) {
+                        builder.addContribution(node.lhs, grad);
+                        break;
+                    }
+                    throw std::runtime_error(
+                        "Segmented ragged reduction backward requires ragged extent metadata or forward input dimensions.");
+                }
+
+                const uint32_t offsets = builder.cloneForward(node.rhs);
+                const auto grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
+                uint32_t segment_grad = grad;
+                if (has_forward_dims) {
+                    segment_grad = shapeGradLikeNodeOutput(
+                        grad, static_cast<uint32_t>(node_idx), forward_node_dims.at(static_cast<uint32_t>(node_idx)));
+                } else {
+                    double constant_value = 0.0;
+                    if (builder.tryGetConstantLikeValue(grad, constant_value)) {
+                        segment_grad = builder.fill(constant_value, {batch_size}, grad_dtype);
+                    }
+                }
+                if (grad_dtype.has_value()) {
+                    segment_grad = builder.cast(segment_grad, grad_dtype.value());
+                }
+                const uint32_t broadcast = builder.segmentedBroadcast(segment_grad,
+                                                                      offsets,
+                                                                      max_active_values,
+                                                                      node.op == ExprOp::SEGMENTED_REDUCE_MEAN,
+                                                                      grad_dtype);
+                const uint32_t ragged_grad = builder.raggedValuewiseExtent(
+                    broadcast, offsets, batch_size, max_active_values, 1, grad_dtype);
+                addContributionToChild(node.lhs, ragged_grad, {max_active_values}, grad_dtype);
+                break;
+            }
+
             case ExprOp::SEGMENTED_REDUCE_MIN:
-            case ExprOp::SEGMENTED_REDUCE_MAX:
-            case ExprOp::SEGMENTED_REDUCE_MEAN:
-                throw std::runtime_error("Thor expressions autodiff for segmented ragged reductions is deferred to the ragged autodiff chunk.");
+            case ExprOp::SEGMENTED_REDUCE_MAX: {
+                if (!node_reaches_requested_inputs.at(node.lhs)) {
+                    break;
+                }
+
+                uint64_t batch_size = node.ragged_runtime_batch_size;
+                uint64_t max_active_values = node.ragged_runtime_max_active_values;
+                if ((batch_size == 0 || max_active_values == 0) && has_forward_dims) {
+                    const std::vector<uint64_t>& values_dims = forward_node_dims.at(node.lhs);
+                    const std::vector<uint64_t>& offsets_dims = forward_node_dims.at(node.rhs);
+                    if (values_dims.size() != 1 || offsets_dims.size() != 1 || offsets_dims[0] == 0) {
+                        throw std::runtime_error("Segmented ragged min/max backward requires rank-1 values and offsets.");
+                    }
+                    batch_size = offsets_dims[0] - 1;
+                    max_active_values = values_dims[0];
+                }
+
+                if (batch_size == 0 || max_active_values == 0) {
+                    if (allow_shape_deferred_placeholders) {
+                        builder.addContribution(node.lhs, grad);
+                        break;
+                    }
+                    throw std::runtime_error(
+                        "Segmented ragged min/max backward requires ragged extent metadata or forward input dimensions.");
+                }
+
+                const uint32_t offsets = builder.cloneForward(node.rhs);
+                const auto grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
+                uint32_t segment_grad = grad;
+                if (has_forward_dims) {
+                    segment_grad = shapeGradLikeNodeOutput(
+                        grad, static_cast<uint32_t>(node_idx), forward_node_dims.at(static_cast<uint32_t>(node_idx)));
+                } else {
+                    double constant_value = 0.0;
+                    if (builder.tryGetConstantLikeValue(grad, constant_value)) {
+                        segment_grad = builder.fill(constant_value, {batch_size}, grad_dtype);
+                    }
+                }
+                if (grad_dtype.has_value()) {
+                    segment_grad = builder.cast(segment_grad, grad_dtype.value());
+                }
+
+                const uint32_t routed = builder.segmentedReduceMinMaxBackward(
+                    node.op == ExprOp::SEGMENTED_REDUCE_MIN ? ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD
+                                                            : ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD,
+                    builder.cloneForward(node.lhs),
+                    segment_grad,
+                    offsets,
+                    batch_size,
+                    max_active_values,
+                    grad_dtype,
+                    node.compute_dtype);
+                const uint32_t ragged_grad =
+                    builder.raggedValuewiseExtent(routed, offsets, batch_size, max_active_values, 1, grad_dtype);
+                addContributionToChild(node.lhs, ragged_grad, {max_active_values}, grad_dtype);
+                break;
+            }
+
+            case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+            case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
+                throw std::runtime_error(
+                    "Thor expressions autodiff does not support second derivatives through segmented min/max backward yet.");
+
+            case ExprOp::SEGMENTED_BROADCAST:
+                throw std::runtime_error("Thor expressions autodiff does not support second derivatives through segmented broadcast yet.");
 
             case ExprOp::SCAN:
             case ExprOp::SEGMENTED_SCAN: {
@@ -4494,41 +4761,64 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 }
                 const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
                 const uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                const auto lhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
+                uint32_t segmented_offsets = UINT32_MAX;
+                if (node.op == ExprOp::SEGMENTED_SCAN) {
+                    segmented_offsets = builder.cloneForward(node.rhs);
+                }
+
                 uint32_t dx;
                 if (node.scan_op == ScanOp::Sum) {
                     if (node.op == ExprOp::SEGMENTED_SCAN) {
-                        const uint32_t offsets = builder.cloneForward(node.rhs);
                         dx = builder.segmentedScan(grad_like_output,
-                                                   offsets,
+                                                   segmented_offsets,
                                                    ScanOp::Sum,
                                                    node.scan_mode,
                                                    !node.scan_reverse,
-                                                   preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                                                   lhs_grad_dtype,
+                                                   node.ragged_runtime_batch_size,
+                                                   node.ragged_runtime_max_active_values,
+                                                   node.ragged_runtime_elements_per_value);
                     } else {
                         dx = builder.scan(grad_like_output,
                                           ScanOp::Sum,
                                           node.scan_mode,
                                           node.scan_axis,
                                           !node.scan_reverse,
-                                          preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                                          lhs_grad_dtype);
                     }
                 } else if (node.scan_op == ScanOp::Min || node.scan_op == ScanOp::Max) {
                     const ExprOp backward_op = node.op == ExprOp::SEGMENTED_SCAN
                         ? (node.scan_op == ScanOp::Min ? ExprOp::SEGMENTED_SCAN_MIN_BACKWARD : ExprOp::SEGMENTED_SCAN_MAX_BACKWARD)
                         : (node.scan_op == ScanOp::Min ? ExprOp::SCAN_MIN_BACKWARD : ExprOp::SCAN_MAX_BACKWARD);
-                    const uint32_t offsets = node.op == ExprOp::SEGMENTED_SCAN ? builder.cloneForward(node.rhs) : UINT32_MAX;
                     const uint32_t grad_for_scatter = builder.cast(grad_like_output, DataType::FP32);
                     dx = builder.scanMinMaxBackward(backward_op,
                                                     builder.cloneForward(node.lhs),
                                                     grad_for_scatter,
-                                                    offsets,
+                                                    segmented_offsets,
                                                     node.scan_mode,
                                                     node.scan_axis,
                                                     node.scan_reverse,
-                                                    DataType::FP32);
+                                                    DataType::FP32,
+                                                    node.op == ExprOp::SEGMENTED_SCAN ? node.ragged_runtime_batch_size : 0,
+                                                    node.op == ExprOp::SEGMENTED_SCAN ? node.ragged_runtime_max_active_values : 0,
+                                                    node.op == ExprOp::SEGMENTED_SCAN ? node.ragged_runtime_elements_per_value : 1);
                 } else {
                     throw std::runtime_error("Thor expressions autodiff currently supports backward only for sum/min/max scan.");
                 }
+
+                if (node.op == ExprOp::SEGMENTED_SCAN && node.ragged_runtime_batch_size != 0) {
+                    if (node.ragged_runtime_max_active_values == 0 || node.ragged_runtime_elements_per_value == 0) {
+                        throw std::runtime_error("Segmented scan autodiff encountered incomplete ragged runtime-extent metadata.");
+                    }
+                    dx = builder.raggedValuewiseExtent(dx,
+                                                       segmented_offsets,
+                                                       node.ragged_runtime_batch_size,
+                                                       node.ragged_runtime_max_active_values,
+                                                       node.ragged_runtime_elements_per_value,
+                                                       lhs_grad_dtype);
+                }
+
                 addContributionToChild(node.lhs, dx, lhs_dims);
                 break;
             }

@@ -29,17 +29,20 @@ local flattened indices: NaNs propagate, and the lowest logical index wins equal
 
 ## Offset-segmented path
 
-`CubSegmentedReduction` owns ragged sum, mean, min, and max. `RaggedExpression::segment_mean()` emits the direct
-segmented-mean stage, so FP32 accumulation, division by row length, empty-row handling, and output conversion happen in
-one CUB operation without materializing row lengths or segmented sums. Segment offsets are validated while stamping,
-and empty segments use the explicit identities defined by `CubReduction::getFp32EmptyReductionValue()`.
+`CubSegmentedReduction` owns ragged sum, mean, min, and max. `CubSegmentedArgReduction` owns offset-segmented
+argmin/argmax and returns one global packed winner index per row; empty rows return the maximum index sentinel, NaNs
+propagate, and the lowest packed index wins ties. `RaggedExpression::segment_mean()` emits the direct segmented-mean
+stage, so FP32 accumulation, division by row length, empty-row handling, and output conversion happen in one CUB
+operation without materializing row lengths or segmented sums. Segment offsets are validated while stamping, and empty
+segments use the explicit identities defined by `CubReduction::getFp32EmptyReductionValue()`.
 
 ## Expression integration
 
 `BuiltReduction` caches the normalized axes, result kind, operation, and geometry. A plan produces either a value or
 indices; the backend is not selectable. `StampedReduction`, `StampedArgMinMax`, and
-`StampedReduceMinMaxBackward` bind those plans to concrete tensors. Min/max backward retains Thor's scatter kernel
-after CUB computes the winning local indices.
+`StampedReduceMinMaxBackward` bind those plans to concrete tensors. Dense min/max backward scatters through CUB's
+winning local indices; ragged segmented min/max backward uses `CubSegmentedArgReduction` to produce one global packed
+winner per row and scatters only that row's upstream gradient, without materializing row IDs.
 
 The test `ExpressionReductionArchitecture.ActiveSourcesDoNotUseCudnnReductionApis` prevents the retired cuDNN
 reduction descriptors, workspace queries, and execution API from being reintroduced anywhere in active Thor sources.

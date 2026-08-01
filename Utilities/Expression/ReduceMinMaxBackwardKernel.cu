@@ -231,6 +231,77 @@ void dispatchReduceMinMaxBackwardScatterOutput(const void* grad_output,
     }
 }
 
+
+template <typename GradT, typename OutT>
+__global__ void segmentedReduceMinMaxBackwardScatterKernel(const GradT* grad_output,
+                                                           const uint64_t* winner_indices,
+                                                           OutT* grad_input,
+                                                           uint64_t num_segments,
+                                                           uint64_t grad_input_numel) {
+    const uint64_t segment = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (segment >= num_segments) {
+        return;
+    }
+
+    const uint64_t winner = winner_indices[segment];
+    if (winner == ~uint64_t{0} || winner >= grad_input_numel) {
+        return;
+    }
+
+    const float grad_value = reduceBwToFloat<GradT>(grad_output[segment]);
+    grad_input[winner] = reduceBwFromFloat<OutT>(grad_value);
+}
+
+template <typename GradT, typename OutT>
+void launchTypedSegmentedReduceMinMaxBackwardScatter(const void* grad_output,
+                                                     const uint64_t* winner_indices,
+                                                     void* grad_input,
+                                                     uint64_t num_segments,
+                                                     uint64_t grad_input_numel,
+                                                     cudaStream_t stream) {
+    if (num_segments == 0) {
+        return;
+    }
+    constexpr uint32_t threads_per_block = 256;
+    const uint32_t blocks = static_cast<uint32_t>((num_segments + threads_per_block - 1) / threads_per_block);
+    segmentedReduceMinMaxBackwardScatterKernel<GradT, OutT><<<blocks, threads_per_block, 0, stream>>>(
+        static_cast<const GradT*>(grad_output), winner_indices, static_cast<OutT*>(grad_input), num_segments, grad_input_numel);
+}
+
+template <typename GradT>
+void dispatchSegmentedReduceMinMaxBackwardScatterOutput(const void* grad_output,
+                                                        const uint64_t* winner_indices,
+                                                        void* grad_input,
+                                                        uint64_t num_segments,
+                                                        uint64_t grad_input_numel,
+                                                        DataType grad_input_dtype,
+                                                        cudaStream_t stream) {
+    switch (grad_input_dtype) {
+        case DataType::FP32:
+            launchTypedSegmentedReduceMinMaxBackwardScatter<GradT, float>(
+                grad_output, winner_indices, grad_input, num_segments, grad_input_numel, stream);
+            break;
+        case DataType::FP16:
+            launchTypedSegmentedReduceMinMaxBackwardScatter<GradT, __half>(
+                grad_output, winner_indices, grad_input, num_segments, grad_input_numel, stream);
+            break;
+        case DataType::BF16:
+            launchTypedSegmentedReduceMinMaxBackwardScatter<GradT, __nv_bfloat16>(
+                grad_output, winner_indices, grad_input, num_segments, grad_input_numel, stream);
+            break;
+        case DataType::FP8_E4M3:
+            launchTypedSegmentedReduceMinMaxBackwardScatter<GradT, __nv_fp8_e4m3>(
+                grad_output, winner_indices, grad_input, num_segments, grad_input_numel, stream);
+            break;
+        case DataType::FP8_E5M2:
+            launchTypedSegmentedReduceMinMaxBackwardScatter<GradT, __nv_fp8_e5m2>(
+                grad_output, winner_indices, grad_input, num_segments, grad_input_numel, stream);
+            break;
+        default:
+            throw std::runtime_error("launchSegmentedReduceMinMaxBackwardScatter received unsupported grad-input dtype.");
+    }
+}
+
 }  // namespace
 
 ReduceMinMaxBackwardScatterPlan prepareReduceMinMaxBackwardScatter(
@@ -376,6 +447,44 @@ void launchReduceMinMaxBackwardScatter(const void* grad_output,
             break;
         default:
             throw std::runtime_error("launchReduceMinMaxBackwardScatter received unsupported grad-output dtype.");
+    }
+}
+
+
+void launchSegmentedReduceMinMaxBackwardScatter(const void* grad_output,
+                                                const uint64_t* winner_indices,
+                                                void* grad_input,
+                                                uint64_t num_segments,
+                                                uint64_t grad_input_numel,
+                                                DataType grad_output_dtype,
+                                                DataType grad_input_dtype,
+                                                cudaStream_t stream) {
+    if (grad_output == nullptr || winner_indices == nullptr || grad_input == nullptr) {
+        throw std::runtime_error("Segmented reduce-min/max backward scatter received a null tensor pointer.");
+    }
+    switch (grad_output_dtype) {
+        case DataType::FP32:
+            dispatchSegmentedReduceMinMaxBackwardScatterOutput<float>(
+                grad_output, winner_indices, grad_input, num_segments, grad_input_numel, grad_input_dtype, stream);
+            break;
+        case DataType::FP16:
+            dispatchSegmentedReduceMinMaxBackwardScatterOutput<__half>(
+                grad_output, winner_indices, grad_input, num_segments, grad_input_numel, grad_input_dtype, stream);
+            break;
+        case DataType::BF16:
+            dispatchSegmentedReduceMinMaxBackwardScatterOutput<__nv_bfloat16>(
+                grad_output, winner_indices, grad_input, num_segments, grad_input_numel, grad_input_dtype, stream);
+            break;
+        case DataType::FP8_E4M3:
+            dispatchSegmentedReduceMinMaxBackwardScatterOutput<__nv_fp8_e4m3>(
+                grad_output, winner_indices, grad_input, num_segments, grad_input_numel, grad_input_dtype, stream);
+            break;
+        case DataType::FP8_E5M2:
+            dispatchSegmentedReduceMinMaxBackwardScatterOutput<__nv_fp8_e5m2>(
+                grad_output, winner_indices, grad_input, num_segments, grad_input_numel, grad_input_dtype, stream);
+            break;
+        default:
+            throw std::runtime_error("launchSegmentedReduceMinMaxBackwardScatter received unsupported grad-output dtype.");
     }
 }
 

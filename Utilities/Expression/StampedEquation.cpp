@@ -6,6 +6,7 @@
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/MatmulScalarKernel.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
+#include "Utilities/Expression/SegmentedBroadcastKernel.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/TensorOperations/Copy/StridedCopy.h"
 
@@ -1150,6 +1151,39 @@ void StampedSegmentedReduction::runOn(Stream& run_stream) const {
     cub_segmented_reduction->runOn(run_stream);
 }
 
+StampedSegmentedBroadcast::StampedSegmentedBroadcast(std::shared_ptr<CompiledSegmentedBroadcast> compiled,
+                                                     const Tensor& per_segment_values,
+                                                     const Tensor& segment_offsets,
+                                                     const Tensor& output,
+                                                     const Stream& stream)
+    : compiled_segmented_broadcast(std::move(compiled)),
+      per_segment_values(per_segment_values),
+      segment_offsets(segment_offsets),
+      output(output),
+      stream(stream) {
+    if (!compiled_segmented_broadcast) {
+        throw std::runtime_error("StampedSegmentedBroadcast requires a compiled descriptor.");
+    }
+    if (per_segment_values.getDataType() != compiled_segmented_broadcast->input_dtype ||
+        output.getDataType() != compiled_segmented_broadcast->output_dtype ||
+        segment_offsets.getDataType() != compiled_segmented_broadcast->offset_dtype) {
+        throw std::runtime_error("StampedSegmentedBroadcast tensor dtypes do not match the compiled descriptor.");
+    }
+    if (output.getDimensions() != std::vector<uint64_t>{compiled_segmented_broadcast->max_output_values}) {
+        throw std::runtime_error("StampedSegmentedBroadcast output shape does not match the compiled packed capacity.");
+    }
+}
+
+void StampedSegmentedBroadcast::run() { runOn(stream); }
+
+void StampedSegmentedBroadcast::runOn(Stream& run_stream) const {
+    launchSegmentedBroadcast(per_segment_values,
+                             segment_offsets,
+                             output,
+                             compiled_segmented_broadcast->normalize_by_segment_length,
+                             run_stream);
+}
+
 StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled,
                          const Tensor& input,
                          const Tensor& output,
@@ -1965,12 +1999,68 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(std::shared_ptr<BuiltRe
                                                        stream);
 }
 
+StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(CubArgReductionOp segmented_op,
+                                                         const Tensor& input,
+                                                         const Tensor& grad_output,
+                                                         const Tensor& output,
+                                                         const Tensor& indices,
+                                                         const Tensor& segment_offsets,
+                                                         const Stream& stream)
+    : built_reduction(nullptr),
+      input(input),
+      grad_output(grad_output),
+      output(output),
+      indices(indices),
+      segment_offsets(segment_offsets),
+      stream(stream) {
+    if (indices.getDataType() != DataType::UINT64) {
+        throw std::runtime_error("Segmented reduce-min/max backward requires UINT64 global winner indices.");
+    }
+    if (input.getPlacement() != grad_output.getPlacement() || input.getPlacement() != output.getPlacement() ||
+        input.getPlacement() != indices.getPlacement() || input.getPlacement() != segment_offsets.getPlacement()) {
+        throw std::runtime_error("Segmented reduce-min/max backward tensors must share one GPU placement.");
+    }
+    if (input.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU ||
+        input.getPlacement().getDeviceNum() != stream.getGpuNum()) {
+        throw std::runtime_error("Segmented reduce-min/max backward must be stamped on the input tensor's GPU.");
+    }
+    if (grad_output.getDataType() != output.getDataType()) {
+        throw std::runtime_error("Segmented reduce-min/max backward output dtype must match upstream gradient dtype.");
+    }
+    if (input.getDimensions().size() != 1 || grad_output.getDimensions().size() != 1 ||
+        segment_offsets.getDimensions().size() != 1) {
+        throw std::runtime_error("Segmented reduce-min/max backward requires rank-1 input, grad, and offsets tensors.");
+    }
+    if (segment_offsets.getDimensions()[0] != grad_output.getDimensions()[0] + 1) {
+        throw std::runtime_error("Segmented reduce-min/max backward requires one upstream gradient per offsets segment.");
+    }
+    if (output.getDimensions() != input.getDimensions()) {
+        throw std::runtime_error("Segmented reduce-min/max backward output dimensions must match packed input dimensions.");
+    }
+    cub_segmented_arg_reduction =
+        CubSegmentedArgReduction(segmented_op, DataType::UINT64).stamp(input, indices, segment_offsets, stream);
+}
+
 void StampedReduceMinMaxBackward::run() { runOn(stream); }
 
 void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
+    if (cub_segmented_arg_reduction != nullptr) {
+        THOR_THROW_IF_FALSE(segment_offsets.has_value());
+        cub_segmented_arg_reduction->runOn(run_stream);
+        output.memsetAsync(run_stream, 0);
+        launchSegmentedReduceMinMaxBackwardScatter(grad_output.getMemPtr(),
+                                                   static_cast<const uint64_t*>(indices.getMemPtr()),
+                                                   (void*)output.getMemPtr(),
+                                                   grad_output.getTotalNumElements(),
+                                                   output.getTotalNumElements(),
+                                                   grad_output.getDataType(),
+                                                   output.getDataType(),
+                                                   run_stream.getStream());
+        return;
+    }
+
     THOR_THROW_IF_FALSE(cub_arg_reduction != nullptr);
     cub_arg_reduction->runOn(run_stream);
-
     output.memsetAsync(run_stream, 0);
 
     launchReduceMinMaxBackwardScatter(grad_output.getMemPtr(),

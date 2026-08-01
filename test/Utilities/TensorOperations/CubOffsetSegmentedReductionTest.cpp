@@ -69,7 +69,7 @@ TEST(CubSegmentedReduction, ConvertsLowPrecisionInputAndAccumulatesInFp32) {
     }
 }
 
-#if THOR_CUB_ENABLE_64BIT_TYPES
+#if THOR_CUB_ENABLE_64BIT_SEGMENT_OFFSETS
 TEST(CubSegmentedReduction, SupportsUint64SegmentOffsets) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -84,6 +84,32 @@ TEST(CubSegmentedReduction, SupportsUint64SegmentOffsets) {
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {1.0f, 9.0f});
 }
 #endif
+
+TEST(CubSegmentedArgReduction, GlobalWinnerIndicesMatchDenseTieAndNanPolicyForBothOffsetDTypes) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    Tensor input = makeGpuTensor({2.0f, -1.0f, -1.0f, nan, 5.0f, nan, 4.0f, 4.0f, 99.0f}, {9}, stream);
+    const std::vector<uint64_t> offsets_values{0, 3, 3, 6, 8};
+
+    for (DataType offsets_dtype : {DataType::UINT32, DataType::UINT64}) {
+        SCOPED_TRACE(static_cast<int>(offsets_dtype));
+        Tensor offsets = makeGpuUnsignedTensor(offsets_values, {5}, stream, offsets_dtype);
+
+        auto argmin = CubSegmentedArgReduction(CubArgReductionOp::ArgMin).stamp(input, offsets, stream);
+        argmin->run();
+        stream.synchronize();
+        EXPECT_EQ(copyGpuTensorAsUnsigned(argmin->getIndexOutputTensor(), stream),
+                  (std::vector<uint64_t>{1ULL, std::numeric_limits<uint64_t>::max(), 3ULL, 6ULL}));
+
+        auto argmax = CubSegmentedArgReduction(CubArgReductionOp::ArgMax).stamp(input, offsets, stream);
+        argmax->run();
+        stream.synchronize();
+        EXPECT_EQ(copyGpuTensorAsUnsigned(argmax->getIndexOutputTensor(), stream),
+                  (std::vector<uint64_t>{0ULL, std::numeric_limits<uint64_t>::max(), 3ULL, 6ULL}));
+    }
+}
 
 TEST(CubSegmentedReduction, ReusesOutputWorkspaceAndDynamicOffsetsAcrossExecutions) {
     REQUIRE_CUDA_DEVICE();
