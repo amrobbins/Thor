@@ -127,11 +127,11 @@ class FakeDataset final : public NamedDataset {
                                                    const BatchPolicy& batching,
                                                    const DatasetAccessPolicy& accessPolicy,
                                                    uint64_t maxInFlightBatches,
-                                                   const std::set<DatasetFieldId>& requiredFieldIds) const override {
+                                                   const DatasetFieldMaterializationRequirements& fieldRequirements) const override {
         (void)splits;
         (void)accessPolicy;
         (void)maxInFlightBatches;
-        (void)requiredFieldIds;
+        (void)fieldRequirements;
         return std::make_shared<FakeBatchSession>(batching.getBatchSize());
     }
 
@@ -284,10 +284,10 @@ class ExactMetricDataset final : public NamedDataset {
                                                    const BatchPolicy& batching,
                                                    const DatasetAccessPolicy& accessPolicy,
                                                    uint64_t maxInFlightBatches,
-                                                   const std::set<DatasetFieldId>& requiredFieldIds) const override {
+                                                   const DatasetFieldMaterializationRequirements& fieldRequirements) const override {
         (void)accessPolicy;
         (void)maxInFlightBatches;
-        (void)requiredFieldIds;
+        (void)fieldRequirements;
         return std::make_shared<ExactMetricBatchSession>(
             batching.getBatchSize(),
             values,

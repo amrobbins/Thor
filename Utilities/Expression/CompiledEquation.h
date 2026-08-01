@@ -79,13 +79,12 @@ struct CompiledEquation {
     uint32_t tiled_logical_transpose_vectorized_output_count = 0;
 
     int deviceNum = 0;
-    std::vector<std::string> input_names;
     std::vector<NamedInput::Kind> input_kinds;
     std::vector<DataType> input_dtypes;
     std::vector<DataType> output_dtypes;
 
-    uint64_t numInputs() { return input_names.size(); }
-    uint64_t numInputs() const { return input_names.size(); }
+    uint64_t numInputs() { return input_kinds.size(); }
+    uint64_t numInputs() const { return input_kinds.size(); }
     uint64_t numOutputs() const { return output_dtypes.size(); }
 
     CompiledEquation() = default;

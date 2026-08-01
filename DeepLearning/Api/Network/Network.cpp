@@ -1171,6 +1171,29 @@ void Network::registerRaggedNetworkInput(const std::string& name,
 
 bool Network::hasRaggedNetworkInput(const std::string& name) const { return raggedNetworkInputs.count(name) != 0; }
 
+std::string Network::logicalExternalInputName(const std::string& physicalInputName) const {
+    for (const auto& [logicalName, record] : raggedNetworkInputs) {
+        if (physicalInputName == record.valuesInputName || physicalInputName == record.offsetsInputName) {
+            return logicalName;
+        }
+    }
+    return physicalInputName;
+}
+
+std::vector<RaggedNetworkInputReference> Network::getExternalRaggedNetworkInputs() const {
+    std::vector<RaggedNetworkInputReference> inputs;
+    inputs.reserve(raggedNetworkInputs.size());
+    for (const auto& [name, record] : raggedNetworkInputs) {
+        (void)name;
+        inputs.push_back(RaggedNetworkInputReference{
+            .name = record.name,
+            .valuesInputName = record.valuesInputName,
+            .offsetsInputName = record.offsetsInputName,
+            .raggedTensor = record.raggedTensor});
+    }
+    return inputs;
+}
+
 json Network::architectureJson() const {
     json modelJson;
     modelJson["layers"] = json::array();
@@ -1337,6 +1360,18 @@ std::vector<std::shared_ptr<NetworkInput>> Network::getExternalNetworkInputs() c
     return inputs;
 }
 
+std::vector<std::string> Network::getExternalNetworkInputNames() const {
+    std::vector<std::string> names;
+    std::set<std::string> emittedNames;
+    for (const std::shared_ptr<NetworkInput>& input : getExternalNetworkInputs()) {
+        const std::string logicalName = logicalExternalInputName(input->getName());
+        if (emittedNames.insert(logicalName).second) {
+            names.push_back(logicalName);
+        }
+    }
+    return names;
+}
+
 std::vector<std::string> Network::getInferenceNetworkInputNames() {
     // Build the same inference-only graph view used by place(..., inferenceOnly=true).
     // For saved training artifacts this prunes loss roots and label-only inputs, so
@@ -1348,6 +1383,7 @@ std::vector<std::string> Network::getInferenceNetworkInputNames() {
     }
 
     std::vector<std::string> names;
+    std::set<std::string> emittedNames;
     const uint32_t numLayers = getNumLayers();
     names.reserve(numLayers);
     for (uint32_t i = 0; i < numLayers; ++i) {
@@ -1367,7 +1403,10 @@ std::vector<std::string> Network::getInferenceNetworkInputNames() {
         if (loadingIt == apiTensorToApiLoadingLayers.end() || loadingIt->second.empty()) {
             continue;
         }
-        names.push_back(input->getName());
+        const std::string logicalName = logicalExternalInputName(input->getName());
+        if (emittedNames.insert(logicalName).second) {
+            names.push_back(logicalName);
+        }
     }
     return names;
 }
@@ -1413,7 +1452,7 @@ std::vector<std::string> Network::getRequiredNetworkInputNamesForOutputs(
         std::shared_ptr<Layer> driver = driverIt->second;
         std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(driver);
         if (input != nullptr) {
-            requiredInputNames.insert(input->getName());
+            requiredInputNames.insert(logicalExternalInputName(input->getName()));
             return;
         }
         if (std::dynamic_pointer_cast<NetworkOutput>(driver) != nullptr) {
@@ -1450,12 +1489,17 @@ std::vector<std::string> Network::getRequiredNetworkInputNamesForOutputs(
 
     std::vector<std::string> names;
     names.reserve(requiredInputNames.size());
+    std::set<std::string> emittedNames;
     for (uint32_t i = 0; i < numLayers; ++i) {
         std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(getLayer(i));
-        if (input == nullptr || requiredInputNames.count(input->getName()) == 0) {
+        if (input == nullptr) {
             continue;
         }
-        names.push_back(input->getName());
+        const std::string logicalName = logicalExternalInputName(input->getName());
+        if (requiredInputNames.count(logicalName) == 0 || !emittedNames.insert(logicalName).second) {
+            continue;
+        }
+        names.push_back(logicalName);
     }
     return names;
 }
@@ -1562,7 +1606,7 @@ std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
             continue;
         }
         if (tensorFeedsOnlyTrainingLabelConsumers(input->getFeatureOutput().value())) {
-            names.push_back(input->getName());
+            names.push_back(logicalExternalInputName(input->getName()));
         }
     }
     std::sort(names.begin(), names.end());
@@ -1595,7 +1639,7 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
             std::shared_ptr<Layer> driver = driverIt->second;
             std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(driver);
             if (input != nullptr) {
-                std::string name = input->getName();
+                const std::string name = logicalExternalInputName(input->getName());
                 visiting.erase(current);
                 return name;
             }
@@ -1887,7 +1931,7 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
             std::shared_ptr<Layer> driver = driverIt->second;
             std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(driver);
             if (input != nullptr) {
-                std::string name = input->getName();
+                const std::string name = logicalExternalInputName(input->getName());
                 visiting.erase(current);
                 return name;
             }

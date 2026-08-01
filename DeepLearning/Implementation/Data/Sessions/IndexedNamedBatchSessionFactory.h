@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Data/DatasetSchema.h"
+#include "DeepLearning/Api/Data/DatasetFieldMaterializationRequirement.h"
 
 #include <cstdint>
 #include <memory>
@@ -20,6 +21,6 @@ namespace ThorImplementation {
     const Thor::DatasetSplitManifest &splits,
     const Thor::BatchPolicy &batching,
     uint64_t maxInFlightBatches,
-    const std::set<Thor::DatasetFieldId> &requiredFieldIds);
+    const Thor::DatasetFieldMaterializationRequirements &fieldRequirements);
 
 }  // namespace ThorImplementation

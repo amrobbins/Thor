@@ -135,10 +135,8 @@ std::string composedPhaseNetworkName(const TrainingStep& step) {
 }
 
 std::vector<TrainingInputBinding> activeInputBindingsForStep(const TrainingStep& step, const Network& activeNetwork) {
-    std::set<std::string> activeInputNames;
-    for (const std::shared_ptr<NetworkInput>& input : activeNetwork.getExternalNetworkInputs()) {
-        activeInputNames.insert(input->getName());
-    }
+    const std::vector<std::string> logicalInputNames = activeNetwork.getExternalNetworkInputNames();
+    const std::set<std::string> activeInputNames(logicalInputNames.begin(), logicalInputNames.end());
 
     std::vector<TrainingInputBinding> activeBindings;
     for (const TrainingInputBinding& binding : step.getInputBindings()) {
@@ -223,7 +221,7 @@ Trainer Trainer::Builder::build() const {
         CompiledDatasetInputBindings compiled = bindings.compile(
             *network_, *trainingData_->getDataset(), effectiveTrainingBatchSize(*trainingData_));
         trainer.datasetInputBindings = std::move(compiled.trainingInputBindings);
-        trainer.requiredDatasetFieldIds = std::move(compiled.requiredFieldIds);
+        trainer.requiredDatasetFieldRequirements = std::move(compiled.fieldRequirements);
     }
     trainer.optimizer = optimizer_;
     trainer.trainingProgram = trainingProgram_;
@@ -793,14 +791,14 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.network = network;
     fitTrainingData->requireNonEmptyPartition(ExampleType::TRAIN, "Trainer::fit");
     const uint64_t sessionMaxInFlightBatches = runtimeConfig.maxInFlightBatches;
-    const std::set<DatasetFieldId> requiredDatasetFieldIds =
-        resolvedDatasetInputs.requiredFieldIds;
+    const DatasetFieldMaterializationRequirements requiredDatasetFieldRequirements =
+        resolvedDatasetInputs.fieldRequirements;
     request.batchSessionFactory =
         [fitTrainingData,
          sessionMaxInFlightBatches,
-         requiredDatasetFieldIds]() {
+         requiredDatasetFieldRequirements]() {
             return fitTrainingData->openSession(
-                sessionMaxInFlightBatches, requiredDatasetFieldIds);
+                sessionMaxInFlightBatches, requiredDatasetFieldRequirements);
         };
     request.batchSession = request.batchSessionFactory();
     request.defaultValidationPopulation = fitTrainingData->getSplits().getDefaultValidationName();
@@ -813,7 +811,7 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
         namedValidation.batchSession = fitTrainingData->openValidationSession(
             validationName,
             sessionMaxInFlightBatches,
-            requiredDatasetFieldIds);
+            requiredDatasetFieldRequirements);
         request.additionalValidationSessions.push_back(std::move(namedValidation));
     }
     request.optimizer = optimizer;
@@ -1165,14 +1163,14 @@ TrainingRunResult Trainer::evaluateTrainingRun(std::string runName,
     TrainingRunRequest request;
     request.network = network;
     const uint64_t sessionMaxInFlightBatches = runtimeConfig.maxInFlightBatches;
-    const std::set<DatasetFieldId> requiredDatasetFieldIds =
-        resolvedDatasetInputs.requiredFieldIds;
+    const DatasetFieldMaterializationRequirements requiredDatasetFieldRequirements =
+        resolvedDatasetInputs.fieldRequirements;
     request.batchSessionFactory =
         [evaluationData = std::move(evaluationData),
          sessionMaxInFlightBatches,
-         requiredDatasetFieldIds]() {
+         requiredDatasetFieldRequirements]() {
             return evaluationData->openSession(
-                sessionMaxInFlightBatches, requiredDatasetFieldIds);
+                sessionMaxInFlightBatches, requiredDatasetFieldRequirements);
         };
     request.batchSession = request.batchSessionFactory();
     request.optimizer = optimizer;

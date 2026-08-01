@@ -1,10 +1,12 @@
 #pragma once
 
+#include "DeepLearning/Api/Data/DatasetFieldMaterializationRequirement.h"
 #include "DeepLearning/Api/Data/DatasetSchema.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Training/TrainingInputBinding.h"
 
 #include <cstdint>
-#include <set>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,22 +18,28 @@ class NetworkInput;
 
 struct CompiledDatasetInputBindings {
     std::vector<TrainingInputBinding> trainingInputBindings;
-    std::set<DatasetFieldId> requiredFieldIds;
+    DatasetFieldMaterializationRequirements fieldRequirements;
+
+    bool operator==(const CompiledDatasetInputBindings&) const = default;
 };
 
 /**
  * Explicit, conversion-free bindings between immutable dataset fields and
- * external NetworkInput ports.
+ * logical external network inputs.
  *
- * A binding records typed endpoint identity only. It never renames, casts,
- * reshapes, or otherwise changes the dataset field. A different model-side
- * name is supported only through an explicit bind() call.
+ * Ordinary NetworkInput ports bind directly. A RaggedNetworkInput binds as one
+ * logical endpoint even though the API graph contains physical .values and
+ * .offsets NetworkInputs underneath it. Physical ragged components are not
+ * independently bindable dataset inputs.
  */
 class DatasetInputBindings {
    public:
     DatasetInputBindings() = default;
 
     DatasetInputBindings &bind(const NetworkInput &networkInput, const DatasetField &field);
+    DatasetInputBindings &bind(const Network &network,
+                               const RaggedTensor &raggedNetworkInput,
+                               const DatasetField &field);
 
     [[nodiscard]] static DatasetInputBindings byExactName(const Network &network,
                                                           const NamedDataset &dataset);
@@ -41,14 +49,13 @@ class DatasetInputBindings {
                                                        uint64_t batchSize) const;
 
     /**
-     * Resolve a Network's external inputs directly against a dataset schema.
-     * Dataset fields that are not consumed by the Network are intentionally
-     * ignored; every consumed external input must resolve to one dataset field.
+     * Resolve a Network's logical external inputs directly against a dataset
+     * schema. Dataset fields that are not consumed by the Network are ignored;
+     * every consumed logical input must resolve to one dataset field.
      *
-     * Inputs use exact-name binding unless an explicit TrainingInputBinding
-     * remaps the NetworkInput name to a dataset field name.  This form is used
-     * for composed TrainingPhase graphs, whose NetworkInput layer identities do
-     * not exist until the currently enabled phases are joined.
+     * Explicit TrainingInputBinding remaps logical input names. For ragged
+     * inputs this is the RaggedNetworkInput name, never the physical .values or
+     * .offsets implementation names.
      */
     [[nodiscard]] static CompiledDatasetInputBindings compileByName(
         const Network &network,
@@ -60,12 +67,17 @@ class DatasetInputBindings {
     [[nodiscard]] bool empty() const { return entries.empty(); }
 
    private:
+    enum class EntryKind { DENSE, RAGGED };
+
     struct Entry {
+        EntryKind kind = EntryKind::DENSE;
         uint64_t networkInputLayerId = 0;
+        uint64_t raggedTensorId = 0;
         std::string networkInputName;
         ThorImplementation::DataType networkInputDataType = ThorImplementation::DataType::FP32;
         std::vector<uint64_t> networkInputDimensions;
         bool dimensionsIncludeBatch = false;
+        std::optional<ThorImplementation::RaggedTensorDescriptor> raggedDescriptor;
         DatasetField field;
     };
 

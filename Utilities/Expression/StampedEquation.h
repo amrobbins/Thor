@@ -349,10 +349,22 @@ struct BuiltConvolution {
 class StampedEquation {
    public:
     StampedEquation(std::shared_ptr<CompiledEquation> compiledEquation,
+                    std::vector<std::string> inputNames,
                     const std::vector<RuntimeInputValue>& inputs,
                     const std::vector<Tensor>& outputs,
                     const Stream& stream)
-        : compiledEquation(std::move(compiledEquation)), inputs(inputs), outputs(outputs), stream(stream) {}
+        : compiledEquation(std::move(compiledEquation)),
+          inputNames(std::move(inputNames)),
+          inputs(inputs),
+          outputs(outputs),
+          stream(stream) {
+        if (this->compiledEquation == nullptr) {
+            throw std::invalid_argument("StampedEquation requires a compiled equation.");
+        }
+        if (this->inputNames.size() != this->compiledEquation->numInputs()) {
+            throw std::invalid_argument("StampedEquation input-name count does not match compiled equation input count.");
+        }
+    }
 
     void run();
     void run(const std::unordered_map<std::string, float>& runtime_scalars);
@@ -431,6 +443,9 @@ class StampedEquation {
 
    private:
     std::shared_ptr<CompiledEquation> compiledEquation;
+    // CompiledEquation objects are globally cached by structural expression shape.
+    // Semantic binding names belong to this stamp, not to the cached kernel.
+    std::vector<std::string> inputNames;
     std::vector<RuntimeInputValue> inputs;
     std::vector<Tensor> outputs;
     Stream stream;

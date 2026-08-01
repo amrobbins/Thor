@@ -5,10 +5,10 @@
 #include "DeepLearning/Api/Data/DatasetSplitManifest.h"
 #include "DeepLearning/Api/Data/DatasetAccessPolicy.h"
 #include "DeepLearning/Api/Data/NamedDataset.h"
+#include "DeepLearning/Api/Data/DatasetFieldMaterializationRequirement.h"
 
 #include <cstdint>
 #include <memory>
-#include <set>
 #include <string>
 
 namespace Thor {
@@ -28,14 +28,14 @@ class TrainingData {
     [[nodiscard]] std::shared_ptr<BatchSession> openSession(uint64_t maxInFlightBatches = 32) const;
     [[nodiscard]] std::shared_ptr<BatchSession> openSession(
         uint64_t maxInFlightBatches,
-        const std::set<DatasetFieldId>& requiredFieldIds) const;
+        const DatasetFieldMaterializationRequirements& fieldRequirements) const;
     [[nodiscard]] std::shared_ptr<BatchSession> openValidationSession(
         const std::string& validationPopulation,
         uint64_t maxInFlightBatches = 32) const;
     [[nodiscard]] std::shared_ptr<BatchSession> openValidationSession(
         const std::string& validationPopulation,
         uint64_t maxInFlightBatches,
-        const std::set<DatasetFieldId>& requiredFieldIds) const;
+        const DatasetFieldMaterializationRequirements& fieldRequirements) const;
 
     [[nodiscard]] const std::shared_ptr<const NamedDataset> &getDataset() const { return dataset; }
     [[nodiscard]] const DatasetSplitManifest &getSplits() const { return splits; }

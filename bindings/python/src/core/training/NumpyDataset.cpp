@@ -56,13 +56,15 @@ class NumpyBatchSession final : public BatchSession {
                       DatasetSplitManifest splits,
                       BatchPolicy batching,
                       uint64_t queueDepth,
-                      std::set<DatasetFieldId> requiredFieldIds);
+                      DatasetFieldMaterializationRequirements fieldRequirements);
     ~NumpyBatchSession() override;
 
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override;
     uint64_t getNumExamples(ExampleType exampleType) override;
     uint64_t getNextBatchNum(ExampleType exampleType) override;
-    const std::set<DatasetFieldId> &getRequiredDatasetFieldIds() const override { return requiredFieldIds; }
+    const DatasetFieldMaterializationRequirements& getDatasetFieldMaterializationRequirements() const override {
+        return fieldRequirements;
+    }
     void cancel() override;
 
    private:
@@ -79,7 +81,7 @@ class NumpyBatchSession final : public BatchSession {
 
     std::shared_ptr<const NumpyDataset> dataset;
     DatasetSplitManifest splits;
-    std::set<DatasetFieldId> requiredFieldIds;
+    DatasetFieldMaterializationRequirements fieldRequirements;
     uint64_t queueDepth;
     bool randomizeTrain;
     std::atomic<bool> cancelled{false};
@@ -114,7 +116,7 @@ class NumpyDataset final : public NamedDataset {
                                                    const BatchPolicy &batching,
                                                    const DatasetAccessPolicy &accessPolicy,
                                                    uint64_t maxInFlightBatches,
-                                                   const std::set<DatasetFieldId> &requiredFieldIds) const override;
+                                                   const DatasetFieldMaterializationRequirements &fieldRequirements) const override;
 
     DatasetId id;
     uint64_t numExamples = 0;
@@ -275,24 +277,24 @@ std::shared_ptr<BatchSession> NumpyDataset::openBatchSession(
     const BatchPolicy &batching,
     const DatasetAccessPolicy &,
     uint64_t maxInFlightBatches,
-    const std::set<DatasetFieldId> &requiredFieldIds) const {
+    const DatasetFieldMaterializationRequirements &fieldRequirements) const {
     std::shared_ptr<const NumpyDataset> self =
         std::dynamic_pointer_cast<const NumpyDataset>(shared_from_this());
     if (self == nullptr) {
         throw std::runtime_error("NumpyDataset must be owned by std::shared_ptr before opening a session.");
     }
     return std::make_shared<NumpyBatchSession>(
-        std::move(self), splits, batching, maxInFlightBatches, requiredFieldIds);
+        std::move(self), splits, batching, maxInFlightBatches, fieldRequirements);
 }
 
 NumpyBatchSession::NumpyBatchSession(std::shared_ptr<const NumpyDataset> dataset,
                                      DatasetSplitManifest splits,
                                      BatchPolicy batching,
                                      uint64_t queueDepth,
-                                     std::set<DatasetFieldId> requiredFieldIds)
+                                     DatasetFieldMaterializationRequirements fieldRequirements)
     : dataset(std::move(dataset)),
       splits(std::move(splits)),
-      requiredFieldIds(std::move(requiredFieldIds)),
+      fieldRequirements(std::move(fieldRequirements)),
       queueDepth(queueDepth),
       randomizeTrain(batching.getRandomizeTrain()) {
     if (this->dataset == nullptr) {
@@ -303,12 +305,16 @@ NumpyBatchSession::NumpyBatchSession(std::shared_ptr<const NumpyDataset> dataset
     }
     this->splits.validateAgainst(*this->dataset);
     this->batchSize = batching.getBatchSize();
-    if (this->requiredFieldIds.empty()) {
+    if (this->fieldRequirements.empty()) {
         for (const DatasetField &field : this->dataset->getSchema().getFields()) {
-            this->requiredFieldIds.insert(field.id);
+            this->fieldRequirements.emplace(
+                field.id, DatasetFieldMaterializationRequirement::dense(field.id));
         }
     }
-    for (DatasetFieldId fieldId : this->requiredFieldIds) {
+    for (const auto& [fieldId, requirement] : this->fieldRequirements) {
+        if (fieldId != requirement.fieldId || requirement.isRagged()) {
+            throw std::runtime_error("NumpyDataset does not support ragged field materialization.");
+        }
         (void)this->dataset->getSchema().getField(fieldId);
     }
     initializeSplit(train, this->splits.getTrain(), randomizeTrain, batching.getRandomSeed());
@@ -337,7 +343,8 @@ void NumpyBatchSession::initializeSplit(SplitState &split,
         }
     }
     ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
-    for (DatasetFieldId fieldId : requiredFieldIds) {
+    for (const auto& [fieldId, requirement] : fieldRequirements) {
+        (void)requirement;
         const DatasetField &field = dataset->getSchema().getField(fieldId);
         std::vector<uint64_t> batchShape{batchSize};
         batchShape.insert(batchShape.end(), field.dimensions.begin(), field.dimensions.end());
@@ -426,7 +433,8 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
         }
         const uint64_t exampleIndex = split.indices->at(logicalIndex);
         finalValidExampleIndex = exampleIndex;
-        for (DatasetFieldId fieldId : requiredFieldIds) {
+        for (const auto& [fieldId, requirement] : fieldRequirements) {
+            (void)requirement;
             const NumpyFieldStorage &source = dataset->storage(fieldId);
             // This is a raw byte copy into a tensor whose logical dtype is described by the dataset field.
             // Use the untyped pointer accessor so Tensor does not interpret uint8_t as the field dtype.
@@ -437,7 +445,8 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
         }
     }
     for (uint64_t row = validExampleCount; row < batchSize; ++row) {
-        for (DatasetFieldId fieldId : requiredFieldIds) {
+        for (const auto& [fieldId, requirement] : fieldRequirements) {
+            (void)requirement;
             const NumpyFieldStorage &source = dataset->storage(fieldId);
             uint8_t *destination =
                 static_cast<uint8_t *>(tensors.at(fieldId).getMemPtr<void>());
@@ -481,7 +490,7 @@ void NumpyBatchSession::recycleBatch(ExampleType exampleType, Batch &&batch) {
         return;
     }
     SplitState &split = mutableSplit(exampleType);
-    if (batch.size() != requiredFieldIds.size()) {
+    if (batch.size() != fieldRequirements.size()) {
         throw std::runtime_error("NumpyBatchSession returned batch has unexpected tensor count.");
     }
     for (auto &[fieldId, queue] : split.queues) {

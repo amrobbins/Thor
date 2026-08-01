@@ -64,6 +64,60 @@ __global__ void offsetsToLengthsKernel(const OffsetT* offsets, LengthT* lengths,
     lengths[row] = static_cast<LengthT>(offsets[row + 1] - offsets[row]);
 }
 
+template <typename OffsetT>
+__global__ void offsetsToInt32LengthsCheckedKernel(const OffsetT* offsets,
+                                                    int32_t* lengths,
+                                                    uint32_t* validation_error_bits,
+                                                    uint64_t batch_size,
+                                                    uint64_t max_total_values,
+                                                    uint64_t max_allowed_length) {
+    const uint64_t row = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (row == 0 && static_cast<uint64_t>(offsets[0]) != 0) {
+        atomicOr(validation_error_bits, static_cast<uint32_t>(ROW_PARTITION_OFFSETS_MUST_START_AT_ZERO));
+    }
+    if (row >= batch_size) {
+        return;
+    }
+
+    const uint64_t begin = static_cast<uint64_t>(offsets[row]);
+    const uint64_t end = static_cast<uint64_t>(offsets[row + 1]);
+    if (end < begin) {
+        atomicOr(validation_error_bits, static_cast<uint32_t>(ROW_PARTITION_OFFSETS_MUST_BE_MONOTONIC));
+        lengths[row] = 0;
+        return;
+    }
+    if (begin > max_total_values || end > max_total_values) {
+        atomicOr(validation_error_bits, static_cast<uint32_t>(ROW_PARTITION_OFFSETS_EXCEED_CAPACITY));
+        lengths[row] = 0;
+        return;
+    }
+
+    const uint64_t row_length = end - begin;
+    constexpr uint64_t kMaxInt32Value = 0x7fffffffULL;
+    bool valid = true;
+    if (row_length > max_allowed_length) {
+        atomicOr(validation_error_bits, static_cast<uint32_t>(ROW_PARTITION_ROW_LENGTH_EXCEEDS_MAX));
+        valid = false;
+    }
+    if (row_length > kMaxInt32Value) {
+        atomicOr(validation_error_bits, static_cast<uint32_t>(ROW_PARTITION_ROW_LENGTH_EXCEEDS_INT32));
+        valid = false;
+    }
+    lengths[row] = valid ? static_cast<int32_t>(row_length) : 0;
+}
+
+__global__ void zeroInt32LengthsOnValidationErrorKernel(int32_t* lengths,
+                                                        const uint32_t* validation_error_bits,
+                                                        uint64_t batch_size) {
+    if (*validation_error_bits == 0U) {
+        return;
+    }
+    const uint64_t row = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (row < batch_size) {
+        lengths[row] = 0;
+    }
+}
+
 template <typename OffsetT, typename RowIdT>
 __global__ void offsetsToRowIdsKernel(const OffsetT* offsets, RowIdT* row_ids, uint64_t batch_size, uint64_t max_total_values) {
     const uint64_t row = blockIdx.x;
@@ -143,6 +197,31 @@ void validateOffsetsAndLengths(const Tensor& offsets, const Tensor& lengths, uin
     requireRowPartitionOffsetDType(lengths.getDataType(), "row partition lengths");
     if (offsets.getDataType() != lengths.getDataType()) {
         throw std::invalid_argument("row partition offsets and lengths must have the same dtype.");
+    }
+}
+
+void validateOffsetsAndInt32LengthsChecked(const Tensor& offsets,
+                                           const Tensor& lengths,
+                                           const Tensor& validation_error_bits,
+                                           uint64_t batch_size,
+                                           uint64_t max_total_values) {
+    requireRowPartitionVectorGpuTensor(offsets, "row partition offsets");
+    requireRowPartitionVectorGpuTensor(lengths, "row partition INT32 lengths");
+    requireRowPartitionVectorGpuTensor(validation_error_bits, "row partition validation_error_bits");
+    requireSameGpuPlacement(offsets, lengths, "row partition offsets", "row partition INT32 lengths");
+    requireSameGpuPlacement(offsets, validation_error_bits, "row partition offsets", "row partition validation_error_bits");
+    requireStorageForNumItems(offsets, "row partition offsets", checkedOffsetsElements(batch_size));
+    requireStorageForNumItems(lengths, "row partition INT32 lengths", batch_size);
+    requireStorageForNumItems(validation_error_bits, "row partition validation_error_bits", 1);
+    requireRowPartitionOffsetDType(offsets.getDataType(), "row partition offsets");
+    if (!canonicalRowPartitionOffsetCanRepresent(offsets.getDataType(), max_total_values)) {
+        throw std::invalid_argument("row partition offsets dtype cannot represent max_total_values.");
+    }
+    if (lengths.getDataType() != DataType::INT32) {
+        throw std::invalid_argument("row partition checked lengths output dtype must be INT32.");
+    }
+    if (validation_error_bits.getDataType() != DataType::UINT32) {
+        throw std::invalid_argument("row partition validation_error_bits dtype must be UINT32.");
     }
 }
 
@@ -242,6 +321,40 @@ struct OffsetsToLengthsFn {
         }
         offsetsToLengthsKernel<T, T><<<static_cast<uint32_t>(blocks64), threads, 0, stream.getStream()>>>(
             offsets.getMemPtr<T>(), lengths.getMemPtr<T>(), batch_size);
+        CUDA_CHECK(cudaGetLastError());
+    }
+};
+
+struct OffsetsToInt32LengthsCheckedFn {
+    const Tensor& offsets;
+    Tensor& lengths;
+    Tensor& validation_error_bits;
+    uint64_t batch_size;
+    uint64_t max_total_values;
+    uint64_t max_allowed_length;
+    Stream& stream;
+
+    template <typename OffsetT>
+    void operator()() const {
+        if (batch_size == 0) {
+            return;
+        }
+        constexpr uint32_t threads = 256;
+        const uint64_t blocks64 = (batch_size + threads - 1U) / threads;
+        if (blocks64 > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+            throw std::invalid_argument("row partition checked offsetsToInt32Lengths grid exceeds CUDA 1D grid limit.");
+        }
+        offsetsToInt32LengthsCheckedKernel<OffsetT><<<static_cast<uint32_t>(blocks64), threads, 0, stream.getStream()>>>(
+            offsets.getMemPtr<OffsetT>(),
+            lengths.getMemPtr<int32_t>(),
+            validation_error_bits.getMemPtr<uint32_t>(),
+            batch_size,
+            max_total_values,
+            max_allowed_length);
+        CUDA_CHECK(cudaGetLastError());
+
+        zeroInt32LengthsOnValidationErrorKernel<<<static_cast<uint32_t>(blocks64), threads, 0, stream.getStream()>>>(
+            lengths.getMemPtr<int32_t>(), validation_error_bits.getMemPtr<uint32_t>(), batch_size);
         CUDA_CHECK(cudaGetLastError());
     }
 };
@@ -353,6 +466,25 @@ void rowPartitionLengthsToOffsets(const Tensor& temp_storage,
 void rowPartitionOffsetsToLengths(const Tensor& offsets, Tensor& lengths, uint64_t batch_size, Stream& stream) {
     validateOffsetsAndLengths(offsets, lengths, batch_size);
     dispatchOffsetDType(offsets.getDataType(), OffsetsToLengthsFn{offsets, lengths, batch_size, stream});
+}
+
+void rowPartitionOffsetsToInt32LengthsChecked(const Tensor& offsets,
+                                               Tensor& lengths,
+                                               Tensor& validation_error_bits,
+                                               uint64_t batch_size,
+                                               uint64_t max_total_values,
+                                               uint64_t max_allowed_length,
+                                               Stream& stream) {
+    validateOffsetsAndInt32LengthsChecked(offsets, lengths, validation_error_bits, batch_size, max_total_values);
+    validation_error_bits.fill(0.0, stream);
+    dispatchOffsetDType(offsets.getDataType(),
+                        OffsetsToInt32LengthsCheckedFn{offsets,
+                                                       lengths,
+                                                       validation_error_bits,
+                                                       batch_size,
+                                                       max_total_values,
+                                                       max_allowed_length,
+                                                       stream});
 }
 
 void rowPartitionOffsetsToRowIds(const Tensor& offsets,

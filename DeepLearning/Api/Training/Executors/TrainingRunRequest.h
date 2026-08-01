@@ -32,7 +32,10 @@ struct TrainingRuntimeConfig {
     double statsIntervalSeconds = 10.0;
     bool statsStderrAlso = false;
     LineStatsColorMode statsColorMode = LineStatsColorMode::AUTO;
-    std::set<std::string> scalarTensorsToReport = {"loss", "accuracy"};
+    // Aggregate loss is the only implicit scalar. Metrics such as accuracy are
+    // first-class named graph metrics (or explicit scalar requests), not magic
+    // output names that every training graph is required to expose.
+    std::set<std::string> scalarTensorsToReport = {"loss"};
 };
 
 // The callback reserves a FIFO device-startup ticket and must not wait for the

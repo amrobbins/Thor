@@ -10,12 +10,12 @@
 
 namespace ThorImplementation {
 
-// cuDNN CTC v1 policy for Thor:
+// cuDNN CTC backend policy for Thor:
 //   * cuDNN only; no native/CPU fallback.
 //   * v9 descriptor setup with the CUDA-graph-friendly v8 workspace/compute APIs.
 //   * deterministic algorithm only until Thor has an explicit nondeterminism policy knob.
 //   * fp32 only because cuDNN returns NOT_SUPPORTED for non-FLOAT CTC compute/data types.
-//   * labels, label lengths, and input lengths are device-resident int32 arrays.
+//   * packed labels, derived label lengths, and input lengths are device-resident int32 arrays.
 //
 // Thor stores the dense activation tensor as physical [batchSize, maxTimeSteps, numClasses].
 // The cuDNN tensor descriptor presents that same contiguous memory as logical [maxTimeSteps, batchSize, numClasses]
@@ -38,14 +38,6 @@ struct CudnnCtcLossConfig {
     CtcLossOobGradientMode oobGradientMode = CtcLossOobGradientMode::ZERO;
 };
 
-
-void launchCompactPaddedCtcLabels(const int* paddedLabels,
-                                  const int* labelLengths,
-                                  int* packedLabels,
-                                  uint32_t batchSize,
-                                  uint32_t maxLabelLength,
-                                  Stream stream);
-
 void launchScaleCtcLossOutputs(float* costs,
                                float* gradients,
                                const int* inputLengths,
@@ -57,6 +49,20 @@ void launchScaleCtcLossOutputs(float* costs,
                                float lossScale,
                                float gradientScale,
                                Stream stream);
+
+// cuDNN currently returns zero cost for labelLength == 0. CTC semantics instead
+// admit exactly one alignment for an empty target: blank at every valid time step.
+// Repair those rows in-place after the cuDNN call, including gradients with respect
+// to the pre-softmax activations. All pointers are device-resident.
+void launchCorrectCtcEmptyTargetRows(const float* activations,
+                                     const int* labelLengths,
+                                     const int* inputLengths,
+                                     float* costs,
+                                     float* gradients,
+                                     uint32_t batchSize,
+                                     uint32_t maxTimeSteps,
+                                     uint32_t numClasses,
+                                     Stream stream);
 
 class CudnnCtcLossPlan {
    public:

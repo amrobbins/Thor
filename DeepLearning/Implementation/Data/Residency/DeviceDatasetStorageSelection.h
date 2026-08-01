@@ -9,7 +9,6 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <set>
 
 namespace Thor {
 
@@ -55,11 +54,11 @@ struct DeviceDatasetStorageSelection {
 [[nodiscard]] DeviceDatasetSessionDescription describeDeviceDatasetSession(
     const DatasetSplitManifest& splits,
     const BatchPolicy& batching,
-    const std::set<DatasetFieldId>& requiredFieldIds = {});
+    const DatasetFieldMaterializationRequirements& fieldRequirements = {});
 
 [[nodiscard]] DeviceDatasetSessionDescription describeDeviceDatasetSession(
     const TrainingData& trainingData,
-    const std::set<DatasetFieldId>& requiredFieldIds = {});
+    const DatasetFieldMaterializationRequirements& fieldRequirements = {});
 
 [[nodiscard]] uint64_t estimateDeviceResidentNamedDatasetRequiredBytes(
     const DatasetMaterializationDescription& dataset,

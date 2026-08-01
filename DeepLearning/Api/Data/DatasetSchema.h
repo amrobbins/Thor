@@ -12,7 +12,7 @@ namespace Thor {
 
 using DatasetFieldId = uint64_t;
 
-enum class DatasetFieldKind { DENSE, WINDOWED, WINDOW_MASK };
+enum class DatasetFieldKind { DENSE, WINDOWED, WINDOW_MASK, RAGGED };
 
 struct DatasetField {
     DatasetFieldId id = 0;

@@ -625,17 +625,17 @@ DatasetMaterializationDescription describeDatasetMaterialization(
 DeviceDatasetSessionDescription describeDeviceDatasetSession(
     const DatasetSplitManifest& splits,
     const BatchPolicy& batching,
-    const std::set<DatasetFieldId>& requiredFieldIds) {
-    return DeviceDatasetSessionDescription(splits, batching, requiredFieldIds);
+    const DatasetFieldMaterializationRequirements& fieldRequirements) {
+    return DeviceDatasetSessionDescription(splits, batching, fieldRequirements);
 }
 
 DeviceDatasetSessionDescription describeDeviceDatasetSession(
     const TrainingData& trainingData,
-    const std::set<DatasetFieldId>& requiredFieldIds) {
+    const DatasetFieldMaterializationRequirements& fieldRequirements) {
     return describeDeviceDatasetSession(
         trainingData.getSplits(),
         trainingData.getBatching(),
-        requiredFieldIds);
+        fieldRequirements);
 }
 
 DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
@@ -672,6 +672,13 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
     }
 
     report.attempted = true;
+    for (const auto& [fieldId, requirement] : sourceSession->getDatasetFieldMaterializationRequirements()) {
+        (void)fieldId;
+        if (requirement.isRagged()) {
+            report.reason = "ragged_dataset_residency_not_implemented";
+            return fallbackSelection(sourceSession, std::move(report), requested);
+        }
+    }
 
     std::optional<DatasetMaterializationDescription> datasetDescription;
     try {
@@ -685,7 +692,7 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
         describeDeviceDatasetSession(
             sessionSplits,
             trainingData.getBatching(),
-            sourceSession->getRequiredDatasetFieldIds());
+            sourceSession->getDatasetFieldMaterializationRequirements());
 
     report.examples = datasetDescription->numExamples;
     if (requested == DeviceDatasetStorage::STRICT_WINDOWED_ONLY &&

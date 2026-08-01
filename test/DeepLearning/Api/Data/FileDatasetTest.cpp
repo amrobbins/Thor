@@ -122,3 +122,65 @@ TEST(FileDatasetTest, RejectsManifestWithoutDatasetIdWithMigrationMessage) {
 
     std::filesystem::remove_all(datasetPath);
 }
+
+TEST(FileDatasetTest, OpensRaggedV2DatasetAndPublishesLogicalRaggedSchema) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_v2");
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        {},
+        std::vector<DatasetLayout::RaggedTensorShape>{
+            DatasetLayout::RaggedTensorShape("labels", {}, ThorImplementation::DataType::INT32)});
+    std::vector<int32_t> values{1, 2, 3};
+    std::vector<uint32_t> offsets{0, 2, 3};
+
+    DatasetWriter writer(datasetPath, layout, 4);
+    writer.writeIndexedExamples(
+        {},
+        {{"labels", DatasetWriter::RaggedTensorBatchView{.dataType = ThorImplementation::DataType::INT32,
+                                                         .dimensions = {3},
+                                                         .data = values.data(),
+                                                         .numBytes = values.size() * sizeof(int32_t),
+                                                         .offsetsDataType = ThorImplementation::DataType::UINT32,
+                                                         .offsets = offsets.data(),
+                                                         .count = 2}}});
+    writer.close();
+
+    std::shared_ptr<Thor::FileDataset> dataset = Thor::FileDataset::open(datasetPath);
+    ASSERT_NE(dataset, nullptr);
+    ASSERT_EQ(dataset->getSchema().getFields().size(), 1);
+    const Thor::DatasetField &field = dataset->getField("labels");
+    EXPECT_EQ(field.kind, Thor::DatasetFieldKind::RAGGED);
+    EXPECT_EQ(field.dataType, ThorImplementation::DataType::INT32);
+    EXPECT_TRUE(field.dimensions.empty());
+    EXPECT_EQ(dataset->getNumExamples(), 2);
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(FileDatasetTest, RejectsRaggedManifestWhoseValuesSidecarIsMissing) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_missing_sidecar");
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        {},
+        std::vector<DatasetLayout::RaggedTensorShape>{
+            DatasetLayout::RaggedTensorShape("labels", {}, ThorImplementation::DataType::INT32)});
+    std::vector<uint32_t> offsets{0, 0};
+
+    DatasetWriter writer(datasetPath, layout, 4);
+    writer.writeIndexedExamples(
+        {},
+        {{"labels", DatasetWriter::RaggedTensorBatchView{.dataType = ThorImplementation::DataType::INT32,
+                                                         .dimensions = {0},
+                                                         .data = nullptr,
+                                                         .numBytes = 0,
+                                                         .offsetsDataType = ThorImplementation::DataType::UINT32,
+                                                         .offsets = offsets.data(),
+                                                         .count = 1}}});
+    writer.close();
+
+    const nlohmann::json manifest = readManifest(datasetPath / DatasetWriter::MANIFEST_FILENAME);
+    const std::filesystem::path sidecar =
+        datasetPath / manifest.at("ragged_tensors").at("labels").at("storage").at("file").get<std::string>();
+    std::filesystem::remove(sidecar);
+    EXPECT_THROW((void)Thor::FileDataset::open(datasetPath), std::runtime_error);
+
+    std::filesystem::remove_all(datasetPath);
+}

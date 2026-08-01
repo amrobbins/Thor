@@ -11,6 +11,8 @@
 #include <utility>
 #include "DeepLearning/Implementation/ThorError.h"
 
+using ThorImplementation::RaggedTensor;
+using ThorImplementation::RaggedTensorDescriptor;
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorDescriptor;
 using ThorImplementation::TensorPlacement;
@@ -100,6 +102,36 @@ uint32_t checkedQueueDepth(uint64_t depth, const char *context) {
     return static_cast<uint32_t>(depth);
 }
 
+uint64_t checkedAddUint64(uint64_t left, uint64_t right, const std::string &context) {
+    if (right > std::numeric_limits<uint64_t>::max() - left) {
+        throw std::runtime_error(context + " overflows uint64_t.");
+    }
+    return left + right;
+}
+
+uint64_t checkedMulUint64(uint64_t left, uint64_t right, const std::string &context) {
+    if (left != 0 && right > std::numeric_limits<uint64_t>::max() / left) {
+        throw std::runtime_error(context + " overflows uint64_t.");
+    }
+    return left * right;
+}
+
+void writeRaggedOffset(void *offsets, ThorImplementation::DataType dataType, uint64_t index, uint64_t value) {
+    THOR_THROW_IF_FALSE(offsets != nullptr);
+    if (dataType == ThorImplementation::DataType::UINT32) {
+        if (value > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+            throw std::runtime_error("IndexedBatchAssembler ragged UINT32 offset is outside uint32_t range.");
+        }
+        static_cast<uint32_t *>(offsets)[index] = static_cast<uint32_t>(value);
+        return;
+    }
+    if (dataType == ThorImplementation::DataType::UINT64) {
+        static_cast<uint64_t *>(offsets)[index] = value;
+        return;
+    }
+    throw std::runtime_error("IndexedBatchAssembler ragged offsets dtype must be UINT32 or UINT64.");
+}
+
 using SteadyClock = std::chrono::steady_clock;
 
 bool diagnosticsTimingEnabled() {
@@ -182,11 +214,13 @@ IndexedBatchAssembler::IndexedBatchAssembler(
     uint64_t batchQueueDepth,
     bool randomized,
     std::optional<uint64_t> seed,
-    bool wrapTail)
+    bool wrapTail,
+    std::map<std::string, RaggedTensorDescriptor> raggedTensorDescriptors)
     : reader(std::move(reader)),
       layout(std::move(layout)),
       indices(std::move(indices)),
       splitName(std::move(splitName)),
+      raggedTensorDescriptors(std::move(raggedTensorDescriptors)),
       batchSize(batchSize),
       batchQueueDepth(batchQueueDepth),
       shardReadQueueDepth(0),
@@ -216,6 +250,7 @@ IndexedBatchAssembler::IndexedBatchAssembler(
     THOR_THROW_IF_FALSE(recordSizeBytes == this->layout.recordSizeBytes());
     THOR_THROW_IF_FALSE(this->reader->getTensorCount() == this->layout.tensors().size());
     THOR_THROW_IF_FALSE(this->reader->getWindowedTensorCount() == this->layout.windowedTensors().size());
+    THOR_THROW_IF_FALSE(this->reader->getRaggedTensorCount() == this->layout.raggedTensors().size());
 
     shardReadQueueDepth = computeShardReadQueueDepth(recordSizeBytes, batchSize);
     loadWorkerThreadCount = computeLoadWorkerThreadCount(batchSize);
@@ -264,6 +299,33 @@ IndexedBatchAssembler::IndexedBatchAssembler(
         }
     }
 
+    layoutRaggedTensorOrdinals.reserve(this->layout.raggedTensors().size());
+    for (const DatasetLayout::RaggedTensorSpec &spec : this->layout.raggedTensors()) {
+        const uint64_t readerOrdinal = this->reader->getLayoutRaggedTensorOrdinal(spec.name);
+        layoutRaggedTensorOrdinals.push_back(readerOrdinal);
+        const auto descriptorIt = this->raggedTensorDescriptors.find(spec.name);
+        if (descriptorIt == this->raggedTensorDescriptors.end()) {
+            continue;
+        }
+        const RaggedTensorDescriptor &descriptor = descriptorIt->second;
+        if (descriptor.getValuesDataType() != spec.dataType ||
+            descriptor.getTrailingDimensions() != spec.valueDimensions ||
+            descriptor.getBatchSize() != batchSize) {
+            throw std::runtime_error(
+                "IndexedBatchAssembler ragged materialization descriptor does not match dataset field '" +
+                spec.name + "'.");
+        }
+    }
+    for (const auto &[name, descriptor] : this->raggedTensorDescriptors) {
+        (void)descriptor;
+        if (std::none_of(this->layout.raggedTensors().begin(),
+                         this->layout.raggedTensors().end(),
+                         [&name](const DatasetLayout::RaggedTensorSpec &spec) { return spec.name == name; })) {
+            throw std::runtime_error(
+                "IndexedBatchAssembler received a ragged materialization descriptor for unknown field '" + name + "'.");
+        }
+    }
+
     open();
 }
 
@@ -273,6 +335,8 @@ void IndexedBatchAssembler::open() {
     try {
         THOR_THROW_IF_FALSE(loadWorkerThreads.empty());
         THOR_THROW_IF_FALSE(batchTensorQueues.empty());
+        THOR_THROW_IF_FALSE(raggedValuesQueues.empty());
+        THOR_THROW_IF_FALSE(raggedOffsetsQueues.empty());
 
         loadWorkQueue.resize(checkedQueueDepth(loadWorkQueueDepth, "IndexedBatchAssembler load work"));
         loadWorkQueue.open();
@@ -286,6 +350,17 @@ void IndexedBatchAssembler::open() {
             queue->resize(batchQueueDepth, entry.second, cpuPlacement);
             queue->open();
             batchTensorQueues.emplace(entry.first, std::move(queue));
+        }
+        for (const auto &[name, descriptor] : raggedTensorDescriptors) {
+            auto valuesQueue = std::make_unique<AsyncTensorQueue>();
+            valuesQueue->resize(batchQueueDepth, descriptor.getValuesDescriptor(), cpuPlacement);
+            valuesQueue->open();
+            raggedValuesQueues.emplace(name, std::move(valuesQueue));
+
+            auto offsetsQueue = std::make_unique<AsyncTensorQueue>();
+            offsetsQueue->resize(batchQueueDepth, descriptor.getOffsetsDescriptor(), cpuPlacement);
+            offsetsQueue->open();
+            raggedOffsetsQueues.emplace(name, std::move(offsetsQueue));
         }
 
         readyBatchQueue.resize(checkedQueueDepth(batchQueueDepth, "IndexedBatchAssembler ready batch"));
@@ -309,6 +384,16 @@ void IndexedBatchAssembler::close() {
             entry.second->close();
         }
     }
+    for (auto &entry : raggedValuesQueues) {
+        if (entry.second) {
+            entry.second->close();
+        }
+    }
+    for (auto &entry : raggedOffsetsQueues) {
+        if (entry.second) {
+            entry.second->close();
+        }
+    }
     readyBatchQueue.close();
 
     for (std::thread &thread : loadWorkerThreads) {
@@ -321,6 +406,8 @@ void IndexedBatchAssembler::close() {
     }
 
     batchTensorQueues.clear();
+    raggedValuesQueues.clear();
+    raggedOffsetsQueues.clear();
     loadWorkerThreads.clear();
     {
         std::lock_guard<std::mutex> guard(pendingBatchesMutex);
@@ -339,6 +426,16 @@ void IndexedBatchAssembler::recordWorkerException(std::exception_ptr exception) 
     loadWorkQueue.close();
     completedBatchQueue.close();
     for (auto &entry : batchTensorQueues) {
+        if (entry.second) {
+            entry.second->close();
+        }
+    }
+    for (auto &entry : raggedValuesQueues) {
+        if (entry.second) {
+            entry.second->close();
+        }
+    }
+    for (auto &entry : raggedOffsetsQueues) {
         if (entry.second) {
             entry.second->close();
         }
@@ -756,6 +853,7 @@ void IndexedBatchAssembler::loadWorkerThreadMain(uint64_t workerIndex) {
         THOR_THROW_IF_FALSE(work.batchState->tensorBasePointers.size() == reader->getTensorCount());
         THOR_THROW_IF_FALSE(work.batchState->windowedTensorBasePointers.size() == reader->getWindowedTensorCount());
         THOR_THROW_IF_FALSE(work.batchState->windowedMaskBasePointers.size() == reader->getWindowedTensorCount());
+        THOR_THROW_IF_FALSE(work.batchState->raggedReferenceBasePointers.size() == reader->getRaggedTensorCount());
 
         const SteadyClock::time_point submitStart = diagnosticNow();
         for (uint64_t slot = work.slotBegin; slot < work.slotEnd; ++slot) {
@@ -763,7 +861,8 @@ void IndexedBatchAssembler::loadWorkerThreadMain(uint64_t workerIndex) {
                                      slot,
                                      work.batchState->tensorBasePointers,
                                      work.batchState->windowedTensorBasePointers,
-                                     work.batchState->windowedMaskBasePointers);
+                                     work.batchState->windowedMaskBasePointers,
+                                     work.batchState->raggedReferenceBasePointers);
         }
         statsLoadWorkerReadSubmitNanoseconds.fetch_add(diagnosticElapsedNanoseconds(submitStart), std::memory_order_relaxed);
 
@@ -771,6 +870,7 @@ void IndexedBatchAssembler::loadWorkerThreadMain(uint64_t workerIndex) {
         session->drain();
         statsLoadWorkerReadDrainNanoseconds.fetch_add(diagnosticElapsedNanoseconds(drainStart), std::memory_order_relaxed);
         flushReaderSessionStats();
+        materializeRaggedBatch(*session, *work.batchState);
         const SteadyClock::time_point completePushStart = diagnosticNow();
         const bool completed = markLoadChunkComplete(work);
         statsLoadWorkerCompletedBatchPushWaitNanoseconds.fetch_add(diagnosticElapsedNanoseconds(completePushStart),
@@ -780,6 +880,106 @@ void IndexedBatchAssembler::loadWorkerThreadMain(uint64_t workerIndex) {
         if (!completed) {
             return;
         }
+    }
+}
+
+void IndexedBatchAssembler::materializeRaggedBatch(IndexedDatasetReader::Session &session,
+                                                   IndexedBatchState &batchState) const {
+    if (raggedTensorDescriptors.empty()) {
+        return;
+    }
+    THOR_THROW_IF_FALSE(batchState.raggedReferences.size() == reader->getRaggedTensorCount());
+    THOR_THROW_IF_FALSE(batchState.raggedTensors.size() == raggedTensorDescriptors.size());
+
+    const uint64_t logicalRows = wrapTail ? batchSize : batchState.validExampleCount;
+    THOR_THROW_IF_FALSE(logicalRows <= batchSize);
+
+    for (uint64_t layoutOrdinal = 0; layoutOrdinal < layout.raggedTensors().size(); ++layoutOrdinal) {
+        const DatasetLayout::RaggedTensorSpec &spec = layout.raggedTensors().at(static_cast<size_t>(layoutOrdinal));
+        const auto descriptorIt = raggedTensorDescriptors.find(spec.name);
+        if (descriptorIt == raggedTensorDescriptors.end()) {
+            continue;
+        }
+        const uint64_t readerOrdinal = layoutRaggedTensorOrdinals.at(static_cast<size_t>(layoutOrdinal));
+        const RaggedTensorDescriptor &descriptor = descriptorIt->second;
+        const auto raggedIt = batchState.raggedTensors.find(spec.name);
+        THOR_THROW_IF_FALSE(raggedIt != batchState.raggedTensors.end());
+        RaggedTensor ragged = raggedIt->second;
+        Tensor values = ragged.getValues();
+        Tensor offsets = ragged.getOffsets();
+        THOR_THROW_IF_FALSE(values.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+        THOR_THROW_IF_FALSE(offsets.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+
+        const auto &references = batchState.raggedReferences.at(static_cast<size_t>(readerOrdinal));
+        THOR_THROW_IF_FALSE(references.size() == batchSize);
+        const uint64_t storedValueCount = spec.storedValueCount();
+        const uint64_t maxTotalValues = descriptor.getMaxTotalValues();
+        uint64_t activeValueCount = 0;
+        writeRaggedOffset(offsets.getMemPtr(), descriptor.getOffsetsDataType(), 0, 0);
+
+        for (uint64_t row = 0; row < logicalRows; ++row) {
+            const IndexedRaggedTensorReference &reference = references.at(static_cast<size_t>(row));
+            if (reference.startValue > storedValueCount ||
+                reference.valueCount > storedValueCount - reference.startValue) {
+                throw std::runtime_error(
+                    "IndexedBatchAssembler ragged field '" + spec.name + "' row " + std::to_string(row) +
+                    " references values outside the sidecar.");
+            }
+            const uint64_t nextActiveValueCount = checkedAddUint64(
+                activeValueCount, reference.valueCount, "IndexedBatchAssembler ragged active value count");
+            if (nextActiveValueCount > maxTotalValues) {
+                throw std::runtime_error(
+                    "IndexedBatchAssembler ragged field '" + spec.name + "' requires " +
+                    std::to_string(nextActiveValueCount) + " active values at row " + std::to_string(row) +
+                    ", exceeding maxTotalValues=" + std::to_string(maxTotalValues) + ".");
+            }
+            activeValueCount = nextActiveValueCount;
+            writeRaggedOffset(offsets.getMemPtr(), descriptor.getOffsetsDataType(), row + 1, activeValueCount);
+        }
+        for (uint64_t row = logicalRows; row < batchSize; ++row) {
+            writeRaggedOffset(offsets.getMemPtr(), descriptor.getOffsetsDataType(), row + 1, activeValueCount);
+        }
+
+        uint8_t *const valuesBase = static_cast<uint8_t *>(values.getMemPtr());
+        const uint64_t valueNumBytes = spec.valueNumBytes();
+        uint64_t destinationValue = 0;
+        uint64_t row = 0;
+        while (row < logicalRows) {
+            const IndexedRaggedTensorReference &first = references.at(static_cast<size_t>(row));
+            if (first.valueCount == 0) {
+                ++row;
+                continue;
+            }
+            uint64_t sourceStart = first.startValue;
+            uint64_t runValues = first.valueCount;
+            const uint64_t destinationStart = destinationValue;
+            destinationValue = checkedAddUint64(destinationValue, first.valueCount,
+                                                "IndexedBatchAssembler ragged destination value count");
+            uint64_t nextRow = row + 1;
+            while (nextRow < logicalRows) {
+                const IndexedRaggedTensorReference &next = references.at(static_cast<size_t>(nextRow));
+                if (next.valueCount == 0) {
+                    ++nextRow;
+                    continue;
+                }
+                const uint64_t expectedSourceStart = checkedAddUint64(
+                    sourceStart, runValues, "IndexedBatchAssembler ragged contiguous source range");
+                if (next.startValue != expectedSourceStart) {
+                    break;
+                }
+                runValues = checkedAddUint64(
+                    runValues, next.valueCount, "IndexedBatchAssembler ragged contiguous read size");
+                destinationValue = checkedAddUint64(
+                    destinationValue, next.valueCount, "IndexedBatchAssembler ragged destination value count");
+                ++nextRow;
+            }
+            const uint64_t destinationByteOffset = checkedMulUint64(
+                destinationStart, valueNumBytes, "IndexedBatchAssembler ragged destination byte offset");
+            session.loadRaggedValuesInto(
+                readerOrdinal, sourceStart, runValues, valuesBase + destinationByteOffset);
+            row = nextRow;
+        }
+        THOR_THROW_IF_FALSE(destinationValue == activeValueCount);
     }
 }
 
@@ -831,6 +1031,16 @@ bool IndexedBatchAssembler::canStartNextBatchWithoutBlocking() {
             return false;
         }
     }
+    for (const auto &entry : raggedValuesQueues) {
+        if (entry.second->isFull()) {
+            return false;
+        }
+    }
+    for (const auto &entry : raggedOffsetsQueues) {
+        if (entry.second->isFull()) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -852,6 +1062,13 @@ bool IndexedBatchAssembler::startNextBatch() {
     batchState->tensorBasePointers.assign(reader->getTensorCount(), nullptr);
     batchState->windowedTensorBasePointers.assign(reader->getWindowedTensorCount(), nullptr);
     batchState->windowedMaskBasePointers.assign(reader->getWindowedTensorCount(), nullptr);
+    batchState->raggedReferences.resize(reader->getRaggedTensorCount());
+    batchState->raggedReferenceBasePointers.assign(reader->getRaggedTensorCount(), nullptr);
+    for (uint64_t ordinal = 0; ordinal < reader->getRaggedTensorCount(); ++ordinal) {
+        auto &references = batchState->raggedReferences.at(static_cast<size_t>(ordinal));
+        references.resize(static_cast<size_t>(batchSize));
+        batchState->raggedReferenceBasePointers.at(static_cast<size_t>(ordinal)) = references.data();
+    }
     batchState->globalExampleIndices.reserve(batchSize);
     batchState->pendingSince = SteadyClock::now();
     nextBatchToSchedule = (nextBatchToSchedule + 1) % batchesPerEpoch;
@@ -893,6 +1110,23 @@ bool IndexedBatchAssembler::startNextBatch() {
             batchState->windowedMaskBasePointers.at(readerOrdinal) = static_cast<uint8_t *>(maskTensor.getMemPtr());
             batchState->tensors.emplace(spec.maskName.value(), maskTensor);
         }
+    }
+    for (const auto &[name, descriptor] : raggedTensorDescriptors) {
+        Tensor values;
+        if (!raggedValuesQueues.at(name)->getBufferToLoad(values)) {
+            statsStartBatchTensorAcquireNanoseconds.fetch_add(
+                diagnosticElapsedNanoseconds(acquireStart), std::memory_order_relaxed);
+            return false;
+        }
+        Tensor offsets;
+        if (!raggedOffsetsQueues.at(name)->getBufferToLoad(offsets)) {
+            statsStartBatchTensorAcquireNanoseconds.fetch_add(
+                diagnosticElapsedNanoseconds(acquireStart), std::memory_order_relaxed);
+            return false;
+        }
+        THOR_THROW_IF_FALSE(values.getDescriptor() == descriptor.getValuesDescriptor());
+        THOR_THROW_IF_FALSE(offsets.getDescriptor() == descriptor.getOffsetsDescriptor());
+        batchState->raggedTensors.emplace(name, RaggedTensor(values, offsets));
     }
     for (uint8_t *basePointer : batchState->tensorBasePointers) {
         if (basePointer == nullptr) {
@@ -1089,6 +1323,18 @@ bool IndexedBatchAssembler::publishCompletedBatches() {
                 return publishedAny;
             }
         }
+        for (const auto &[name, ragged] : batchState->raggedTensors) {
+            const bool valuesQueueOpen = raggedValuesQueues.at(name)->bufferLoaded(ragged.getValues());
+            if (!valuesQueueOpen) {
+                finishPublishTiming();
+                return publishedAny;
+            }
+            const bool offsetsQueueOpen = raggedOffsetsQueues.at(name)->bufferLoaded(ragged.getOffsets());
+            if (!offsetsQueueOpen) {
+                finishPublishTiming();
+                return publishedAny;
+            }
+        }
         if (!readyBatchQueue.push(IndexedReadyBatch{
                 .batchNum = batchState->batchNum,
                 .validExampleCount = batchState->validExampleCount})) {
@@ -1105,6 +1351,7 @@ bool IndexedBatchAssembler::publishCompletedBatches() {
 }
 
 void IndexedBatchAssembler::acquireBatch(std::map<std::string, Tensor> &tensors,
+                                         std::map<std::string, RaggedTensor> &raggedTensors,
                                          IndexedReadyBatch &readyBatch) {
     if (batchesPerEpoch == 0) {
         throw std::runtime_error("IndexedBatchAssembler cannot get a batch from an empty split.");
@@ -1113,6 +1360,7 @@ void IndexedBatchAssembler::acquireBatch(std::map<std::string, Tensor> &tensors,
     std::lock_guard<std::mutex> deliveryGuard(batchDeliveryMutex);
     throwIfWorkerFailed();
     tensors.clear();
+    raggedTensors.clear();
 
     const int readyBeforePop = readyBatchQueue.occupancy();
     const bool hadReadyBatch = readyBeforePop > 0;
@@ -1142,6 +1390,23 @@ void IndexedBatchAssembler::acquireBatch(std::map<std::string, Tensor> &tensors,
             THOR_THROW_IF_FALSE(tensorQueueOpen);
         }
         tensors.emplace(entry.first, tensor);
+    }
+    for (const auto &[name, descriptor] : raggedTensorDescriptors) {
+        Tensor values;
+        const bool valuesQueueOpen = raggedValuesQueues.at(name)->getBufferToUnload(values);
+        if (!valuesQueueOpen) {
+            throwIfWorkerFailed();
+            THOR_THROW_IF_FALSE(valuesQueueOpen);
+        }
+        Tensor offsets;
+        const bool offsetsQueueOpen = raggedOffsetsQueues.at(name)->getBufferToUnload(offsets);
+        if (!offsetsQueueOpen) {
+            throwIfWorkerFailed();
+            THOR_THROW_IF_FALSE(offsetsQueueOpen);
+        }
+        THOR_THROW_IF_FALSE(values.getDescriptor() == descriptor.getValuesDescriptor());
+        THOR_THROW_IF_FALSE(offsets.getDescriptor() == descriptor.getOffsetsDescriptor());
+        raggedTensors.emplace(name, RaggedTensor(values, offsets));
     }
     statsGetBatchTensorUnloadWaitNanoseconds.fetch_add(diagnosticElapsedNanoseconds(tensorUnloadStart), std::memory_order_relaxed);
     THOR_THROW_IF_FALSE(readyBatch.batchNum == nextBatchToDeliver);
@@ -1182,10 +1447,37 @@ void IndexedBatchAssembler::validateReturnedTensorMapExact(const std::map<std::s
     }
 }
 
-void IndexedBatchAssembler::returnBuffers(const std::map<std::string, Tensor> &tensors) {
+void IndexedBatchAssembler::validateReturnedRaggedTensorMapExact(
+    const std::map<std::string, RaggedTensor> &raggedTensors) const {
+    if (raggedTensors.size() != raggedTensorDescriptors.size()) {
+        throw std::runtime_error(
+            "IndexedBatchAssembler returned ragged tensor count does not match output ragged tensor count.");
+    }
+    for (const auto &[name, descriptor] : raggedTensorDescriptors) {
+        const auto it = raggedTensors.find(name);
+        if (it == raggedTensors.end()) {
+            throw std::runtime_error("IndexedBatchAssembler missing returned ragged tensor: " + name);
+        }
+        THOR_THROW_IF_FALSE(it->second.isInitialized());
+        if (it->second.getDescriptor() != descriptor) {
+            throw std::runtime_error("IndexedBatchAssembler returned ragged tensor has wrong descriptor for: " + name);
+        }
+    }
+    for (const auto &[name, ragged] : raggedTensors) {
+        (void)ragged;
+        if (raggedTensorDescriptors.find(name) == raggedTensorDescriptors.end()) {
+            throw std::runtime_error("IndexedBatchAssembler returned unexpected ragged tensor: " + name);
+        }
+    }
+}
+
+void IndexedBatchAssembler::returnBuffers(
+    const std::map<std::string, Tensor> &tensors,
+    const std::map<std::string, RaggedTensor> &raggedTensors) {
     std::lock_guard<std::mutex> returnGuard(returnBuffersMutex);
     throwIfWorkerFailed();
     validateReturnedTensorMapExact(tensors);
+    validateReturnedRaggedTensorMapExact(raggedTensors);
     statsReturnBufferCalls.fetch_add(1, std::memory_order_relaxed);
     const SteadyClock::time_point returnStart = diagnosticNow();
     for (const auto &entry : batchTensorQueues) {
@@ -1193,6 +1485,18 @@ void IndexedBatchAssembler::returnBuffers(const std::map<std::string, Tensor> &t
         if (!queueOpen) {
             throwIfWorkerFailed();
             THOR_THROW_IF_FALSE(queueOpen);
+        }
+    }
+    for (const auto &[name, ragged] : raggedTensors) {
+        const bool valuesQueueOpen = raggedValuesQueues.at(name)->bufferUnloaded(ragged.getValues());
+        if (!valuesQueueOpen) {
+            throwIfWorkerFailed();
+            THOR_THROW_IF_FALSE(valuesQueueOpen);
+        }
+        const bool offsetsQueueOpen = raggedOffsetsQueues.at(name)->bufferUnloaded(ragged.getOffsets());
+        if (!offsetsQueueOpen) {
+            throwIfWorkerFailed();
+            THOR_THROW_IF_FALSE(offsetsQueueOpen);
         }
     }
     statsReturnBufferWaitNanoseconds.fetch_add(diagnosticElapsedNanoseconds(returnStart), std::memory_order_relaxed);

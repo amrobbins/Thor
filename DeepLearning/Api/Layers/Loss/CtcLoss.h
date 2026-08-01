@@ -4,6 +4,7 @@
 
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Layers/Loss/CtcLoss.h"
 #include "Utilities/TensorOperations/Loss/CtcLoss.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
@@ -15,13 +16,14 @@ namespace Thor {
 
 // Public cuDNN-backed CTC loss.
 //
-// v1 API contract:
+// Canonical API contract:
 //   * logits/activations tensor has API dimensions [T, C] and FP32 dtype.
 //     Thor's physical batch dimension makes the implementation tensor [B, T, C].
-//   * labels tensor has API dimensions [maxLabelLength] and INT32 dtype. It is
-//     a padded per-sample target row; the implementation layer compacts it to
-//     cuDNN's packed labels list on device using label_lengths.
-//   * label_lengths and input_lengths have API dimensions [1] and INT32 dtype.
+//   * labels are a rank-1 RaggedTensor whose packed values are INT32 and whose
+//     canonical UINT32/UINT64 offsets describe one target sequence per batch row.
+//   * input_lengths has API dimensions [1] and INT32 dtype.
+//   * label lengths are derived from labels.offsets on device. There is no
+//     padded-label or separately supplied label-length compatibility path.
 //   * blank label is cuDNN's fixed blank convention: class 0.
 //   * cuDNN deterministic CTC only; no native/CPU fallback.
 class CtcLoss : public Loss {
@@ -33,28 +35,44 @@ class CtcLoss : public Loss {
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<CtcLoss>(*this); }
     std::string getLayerType() const override { return "CtcLoss"; }
+    std::string getLayerVersion() const override { return "2.0.0"; }
 
-    Tensor getLabelLengths() const { return labelLengthsTensor; }
+    RaggedTensor getRaggedLabels() const {
+        THOR_THROW_IF_FALSE(labelsRaggedTensor.isInitialized());
+        return labelsRaggedTensor;
+    }
     Tensor getInputLengths() const { return inputLengthsTensor; }
-    uint32_t getMaxLabelLength() const { return maxLabelLength; }
     ThorImplementation::CtcLossOobGradientMode getOobGradientMode() const { return oobGradientMode; }
 
     std::vector<Tensor> getLossInputTensors() const override {
-        return {predictionsTensor, labelsTensor, labelLengthsTensor, inputLengthsTensor};
+        THOR_THROW_IF_FALSE(labelsRaggedTensor.isInitialized());
+        return {predictionsTensor, labelsRaggedTensor.getValues(), labelsRaggedTensor.getOffsets(), inputLengthsTensor};
     }
 
     int getConnectionType(Tensor connectingTensor) const override {
         if (connectingTensor == predictionsTensor)
             return static_cast<int>(ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD);
-        if (connectingTensor == labelsTensor)
+        if (labelsRaggedTensor.isInitialized() && connectingTensor == labelsRaggedTensor.getValues())
             return static_cast<int>(ThorImplementation::Loss::ConnectionType::LABELS);
-        if (connectingTensor == labelLengthsTensor)
-            return ThorImplementation::CtcLoss::LABEL_LENGTHS_CONNECTION_TYPE;
+        if (labelsRaggedTensor.isInitialized() && connectingTensor == labelsRaggedTensor.getOffsets())
+            return ThorImplementation::CtcLoss::LABEL_OFFSETS_CONNECTION_TYPE;
         if (connectingTensor == inputLengthsTensor)
             return ThorImplementation::CtcLoss::INPUT_LENGTHS_CONNECTION_TYPE;
         if (connectingTensor == getRawLoss())
             return 0;
         throw std::runtime_error("Tensor is not connected to this CtcLoss.");
+    }
+
+    [[nodiscard]] std::optional<std::string> getInputPortName(const Tensor& inputTensor) const override {
+        if (predictionsTensor.isInitialized() && inputTensor == predictionsTensor)
+            return "predictions";
+        if (labelsRaggedTensor.isInitialized() && inputTensor == labelsRaggedTensor.getValues())
+            return "labels.values";
+        if (labelsRaggedTensor.isInitialized() && inputTensor == labelsRaggedTensor.getOffsets())
+            return "labels.offsets";
+        if (inputLengthsTensor.isInitialized() && inputTensor == inputLengthsTensor)
+            return "input_lengths";
+        return std::nullopt;
     }
 
     nlohmann::json architectureJson() const override;
@@ -74,15 +92,14 @@ class CtcLoss : public Loss {
         (void)drivingApiLayer;
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor ||
-                            connectingApiTensor == labelLengthsTensor || connectingApiTensor == inputLengthsTensor);
-        return std::make_shared<ThorImplementation::CtcLoss>(maxLabelLength, oobGradientMode, lossWeight);
+        THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsRaggedTensor.getValues() ||
+                            connectingApiTensor == labelsRaggedTensor.getOffsets() || connectingApiTensor == inputLengthsTensor);
+        return std::make_shared<ThorImplementation::CtcLoss>(oobGradientMode, lossWeight);
     }
 
     bool rawLossAddedToNetwork = false;
-    Tensor labelLengthsTensor;
+    RaggedTensor labelsRaggedTensor;
     Tensor inputLengthsTensor;
-    uint32_t maxLabelLength = 0;
     ThorImplementation::CtcLossOobGradientMode oobGradientMode = ThorImplementation::CtcLossOobGradientMode::ZERO;
 };
 
@@ -113,22 +130,15 @@ class CtcLoss::Builder {
         return *this;
     }
 
-    CtcLoss::Builder& labels(Tensor labels) {
+    CtcLoss::Builder& labels(RaggedTensor labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
-        THOR_THROW_IF_FALSE(labels.getDataType() == DataType::INT32);
-        const std::vector<uint64_t>& dims = labels.getDimensions();
-        THOR_THROW_IF_FALSE(dims.size() == 1);
-        THOR_THROW_IF_FALSE(dims[0] > 0);
-        THOR_THROW_IF_FALSE(dims[0] < 256);
+        THOR_THROW_IF_FALSE(labels.isInitialized());
+        THOR_THROW_IF_FALSE(labels.getValuesDataType() == DataType::INT32);
+        THOR_THROW_IF_FALSE(labels.getTrailingDimensions().empty());
+        THOR_THROW_IF_FALSE(labels.getBatchSize() > 0);
+        THOR_THROW_IF_FALSE(labels.getMaxTotalValues() > 0);
+        THOR_THROW_IF_FALSE(ThorImplementation::RowPartitionDescriptor::isValidOffsetsDataType(labels.getOffsetsDataType()));
         this->_labels = labels;
-        return *this;
-    }
-
-    CtcLoss::Builder& labelLengths(Tensor labelLengths) {
-        THOR_THROW_IF_FALSE(!this->_labelLengths.has_value());
-        THOR_THROW_IF_FALSE(ThorImplementation::isCudnnCtcLengthDataType(labelLengths.getDataType()));
-        THOR_THROW_IF_FALSE(labelLengths.getDimensions() == std::vector<uint64_t>{1});
-        this->_labelLengths = labelLengths;
         return *this;
     }
 
@@ -201,21 +211,20 @@ class CtcLoss::Builder {
         THOR_THROW_IF_FALSE(_network.has_value());
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_labelLengths.has_value());
         THOR_THROW_IF_FALSE(_inputLengths.has_value());
-        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        THOR_THROW_IF_FALSE(_predictions.value() != _labelLengths.value());
+
+        const Tensor labelValues = _labels->getValues();
+        const Tensor labelOffsets = _labels->getOffsets();
+        THOR_THROW_IF_FALSE(_predictions.value() != labelValues);
+        THOR_THROW_IF_FALSE(_predictions.value() != labelOffsets);
         THOR_THROW_IF_FALSE(_predictions.value() != _inputLengths.value());
-        THOR_THROW_IF_FALSE(_labels.value() != _labelLengths.value());
-        THOR_THROW_IF_FALSE(_labels.value() != _inputLengths.value());
-        THOR_THROW_IF_FALSE(_labelLengths.value() != _inputLengths.value());
+        THOR_THROW_IF_FALSE(labelValues != labelOffsets);
+        THOR_THROW_IF_FALSE(labelValues != _inputLengths.value());
+        THOR_THROW_IF_FALSE(labelOffsets != _inputLengths.value());
 
         const std::vector<uint64_t>& predictionDims = _predictions.value().getDimensions();
-        const std::vector<uint64_t>& labelDims = _labels.value().getDimensions();
         THOR_THROW_IF_FALSE(predictionDims.size() == 2);
-        THOR_THROW_IF_FALSE(labelDims.size() == 1);
-        THOR_THROW_IF_FALSE(labelDims[0] > 0 && labelDims[0] < 256);
-        THOR_THROW_IF_FALSE(predictionDims[0] >= labelDims[0]);
+        THOR_THROW_IF_FALSE(predictionDims[0] > 0);
 
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
@@ -228,10 +237,11 @@ class CtcLoss::Builder {
 
         ctcLoss.rawLossAddedToNetwork = _rawLossAddedToNetwork.value_or(false);
         ctcLoss.predictionsTensor = _predictions.value();
-        ctcLoss.labelsTensor = _labels.value();
-        ctcLoss.labelLengthsTensor = _labelLengths.value();
+        ctcLoss.labelsRaggedTensor = _labels.value();
+        // Loss's base graph bookkeeping is Tensor-valued, so use the packed
+        // values edge there. The CTC API itself exposes labels as RaggedTensor.
+        ctcLoss.labelsTensor = labelValues;
         ctcLoss.inputLengthsTensor = _inputLengths.value();
-        ctcLoss.maxLabelLength = static_cast<uint32_t>(labelDims[0]);
         ctcLoss.lossDataType = _lossDataType.value();
         ctcLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         ctcLoss.lossShape = _lossShape.value();
@@ -252,8 +262,7 @@ class CtcLoss::Builder {
    private:
     std::optional<Network*> _network;
     std::optional<Tensor> _predictions;
-    std::optional<Tensor> _labels;
-    std::optional<Tensor> _labelLengths;
+    std::optional<RaggedTensor> _labels;
     std::optional<Tensor> _inputLengths;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;

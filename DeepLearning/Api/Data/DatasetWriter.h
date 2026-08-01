@@ -30,6 +30,26 @@ class DatasetWriter {
         uint64_t numBytes;
     };
 
+    struct RaggedTensorView {
+        ThorImplementation::DataType dataType;
+        /** Shape [row_values, *value_shape]. Scalar values use [row_values]. */
+        std::vector<uint64_t> dimensions;
+        const void *data;
+        uint64_t numBytes;
+    };
+
+    struct RaggedTensorBatchView {
+        ThorImplementation::DataType dataType;
+        /** Shape [total_values, *value_shape]. Scalar values use [total_values]. */
+        std::vector<uint64_t> dimensions;
+        const void *data;
+        uint64_t numBytes;
+        ThorImplementation::DataType offsetsDataType;
+        /** Host-resident canonical offsets with count + 1 entries. */
+        const void *offsets;
+        uint64_t count;
+    };
+
     struct WindowedTensorReferenceView {
         ThorImplementation::DataType keyDataType;
         ThorImplementation::DataType indexDataType;
@@ -83,14 +103,29 @@ class DatasetWriter {
 
     void writeIndexedExample(const std::map<std::string, TensorView> &tensors);
     void writeIndexedExample(const std::map<std::string, TensorView> &tensors,
+                             const std::map<std::string, RaggedTensorView> &raggedTensors);
+    void writeIndexedExample(const std::map<std::string, TensorView> &tensors,
                              const std::map<std::string, WindowedTensorReferenceView> &windowedTensorReferences);
+    void writeIndexedExample(const std::map<std::string, TensorView> &tensors,
+                             const std::map<std::string, WindowedTensorReferenceView> &windowedTensorReferences,
+                             const std::map<std::string, RaggedTensorView> &raggedTensors);
     void writeIndexedExamples(const std::map<std::string, TensorBatchView> &tensors);
     void writeIndexedExamples(const std::map<std::string, TensorBatchView> &tensors,
+                              const std::map<std::string, RaggedTensorBatchView> &raggedTensors);
+    void writeIndexedExamples(const std::map<std::string, TensorBatchView> &tensors,
                               const std::map<std::string, WindowedTensorReferenceBatchView> &windowedTensorReferences);
+    void writeIndexedExamples(const std::map<std::string, TensorBatchView> &tensors,
+                              const std::map<std::string, WindowedTensorReferenceBatchView> &windowedTensorReferences,
+                              const std::map<std::string, RaggedTensorBatchView> &raggedTensors);
     void writeAffineExamples(
         uint64_t count,
         const std::map<std::string, TensorBatchView> &tensors,
         const std::map<std::string, AffineWindowedTensorReferenceView> &windowedTensorReferences);
+    void writeAffineExamples(
+        uint64_t count,
+        const std::map<std::string, TensorBatchView> &tensors,
+        const std::map<std::string, AffineWindowedTensorReferenceView> &windowedTensorReferences,
+        const std::map<std::string, RaggedTensorBatchView> &raggedTensors);
     void writeWindowSource(std::string_view sourceName, const WindowedTensorSourceView &source);
     void close();
 
@@ -134,6 +169,19 @@ class DatasetWriter {
         std::vector<DatasetLayout::WindowedTensorSourceSequence> sequences;
     };
 
+    struct RaggedTensorManifestEntry {
+        std::string filename;
+        uint64_t numBytes = 0;
+        uint64_t numValues = 0;
+    };
+
+    struct RaggedTensorReference {
+        uint64_t startValue = 0;
+        uint64_t valueCount = 0;
+    };
+
+    std::map<std::string, RaggedTensorManifestEntry> raggedValues;
+
     std::map<std::string, WindowedTensorSourceManifestEntry> windowSources;
     struct AffineWindowedTensorReferenceManifestEntry {
         std::string keyHex;
@@ -163,6 +211,19 @@ class DatasetWriter {
     uint64_t validateTensorAndWindowedTensorReferenceBatchMapsExact(
         const std::map<std::string, TensorBatchView> &tensors,
         const std::map<std::string, WindowedTensorReferenceBatchView> &windowedTensorReferences) const;
+    void validateRaggedTensorMapExact(const std::map<std::string, RaggedTensorView> &raggedTensors) const;
+    uint64_t validateRaggedTensorBatchMapExact(
+        const std::map<std::string, RaggedTensorBatchView> &raggedTensors) const;
+    std::map<std::string, RaggedTensorReference> appendRaggedValues(
+        const std::map<std::string, RaggedTensorView> &raggedTensors);
+    std::map<std::string, std::vector<RaggedTensorReference>> appendRaggedValues(
+        const std::map<std::string, RaggedTensorBatchView> &raggedTensors,
+        uint64_t count);
+    void packRaggedReferences(std::vector<uint8_t> &record,
+                              const std::map<std::string, RaggedTensorReference> &references) const;
+    void packRaggedReferences(std::vector<uint8_t> &records,
+                              const std::map<std::string, std::vector<RaggedTensorReference>> &references,
+                              uint64_t count) const;
     std::vector<uint8_t> packRecord(const std::map<std::string, TensorView> &tensors) const;
     std::vector<uint8_t> packRecord(const std::map<std::string, TensorView> &tensors,
                                     const std::map<std::string, WindowedTensorReferenceView> &windowedTensorReferences) const;

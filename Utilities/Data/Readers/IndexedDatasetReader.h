@@ -2,12 +2,24 @@
 
 #include "DeepLearning/Api/Data/DatasetLayout.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
+
+struct IndexedRaggedTensorReference {
+    uint64_t startValue = 0;
+    uint64_t valueCount = 0;
+};
+
+static_assert(std::is_trivially_copyable_v<IndexedRaggedTensorReference>);
+static_assert(sizeof(IndexedRaggedTensorReference) == 2 * sizeof(uint64_t));
+static_assert(offsetof(IndexedRaggedTensorReference, startValue) == 0);
+static_assert(offsetof(IndexedRaggedTensorReference, valueCount) == sizeof(uint64_t));
 
 struct IndexedDatasetReaderSessionStats {
     uint64_t readCallsSubmitted = 0;
@@ -72,6 +84,16 @@ class IndexedDatasetReader : public std::enable_shared_from_this<IndexedDatasetR
                              const std::vector<uint8_t *> &tensorBasePointers,
                              const std::vector<uint8_t *> &windowedTensorBasePointers,
                              const std::vector<uint8_t *> &windowedMaskBasePointers);
+        void loadExampleInto(uint64_t globalExampleIndex,
+                             uint64_t batchSlot,
+                             const std::vector<uint8_t *> &tensorBasePointers,
+                             const std::vector<uint8_t *> &windowedTensorBasePointers,
+                             const std::vector<uint8_t *> &windowedMaskBasePointers,
+                             const std::vector<IndexedRaggedTensorReference *> &raggedReferenceBasePointers);
+        void loadRaggedValuesInto(uint64_t raggedTensorOrdinal,
+                                  uint64_t startValue,
+                                  uint64_t valueCount,
+                                  void *destination);
         void drain();
         IndexedDatasetReaderSessionStats takeStats();
 
@@ -101,8 +123,10 @@ class IndexedDatasetReader : public std::enable_shared_from_this<IndexedDatasetR
     [[nodiscard]] uint64_t getRecordSizeBytes() const;
     [[nodiscard]] uint64_t getTensorCount() const;
     [[nodiscard]] uint64_t getWindowedTensorCount() const;
+    [[nodiscard]] uint64_t getRaggedTensorCount() const;
     [[nodiscard]] uint64_t getLayoutTensorOrdinal(std::string_view tensorName) const;
     [[nodiscard]] uint64_t getLayoutWindowedTensorOrdinal(std::string_view tensorName) const;
+    [[nodiscard]] uint64_t getLayoutRaggedTensorOrdinal(std::string_view tensorName) const;
     void validateGlobalIndex(uint64_t index, const char *context) const;
 
    private:

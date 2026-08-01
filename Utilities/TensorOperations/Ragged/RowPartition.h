@@ -17,6 +17,7 @@ enum RowPartitionValidationErrorBits : uint32_t {
     ROW_PARTITION_OFFSETS_MUST_BE_MONOTONIC = 1U << 1U,
     ROW_PARTITION_OFFSETS_EXCEED_CAPACITY = 1U << 2U,
     ROW_PARTITION_ROW_LENGTH_EXCEEDS_MAX = 1U << 3U,
+    ROW_PARTITION_ROW_LENGTH_EXCEEDS_INT32 = 1U << 4U,
 };
 
 struct RowPartitionLengthsToOffsetsPlan {
@@ -50,6 +51,21 @@ void rowPartitionLengthsToOffsets(const Tensor& temp_storage,
                                   Stream& stream);
 
 void rowPartitionOffsetsToLengths(const Tensor& offsets, Tensor& lengths, uint64_t batch_size, Stream& stream);
+
+// Converts canonical UINT32/UINT64 offsets to INT32 per-row lengths for
+// backends such as cuDNN CTC. Validation is entirely device-side: malformed
+// partitions, offsets beyond max_total_values, rows beyond max_allowed_length,
+// and rows that cannot be represented by INT32 are reported through
+// validation_error_bits. If any validation bit is set, the entire lengths
+// output is zeroed before subsequent work on `stream` can consume it. No host
+// readback or synchronization is performed.
+void rowPartitionOffsetsToInt32LengthsChecked(const Tensor& offsets,
+                                               Tensor& lengths,
+                                               Tensor& validation_error_bits,
+                                               uint64_t batch_size,
+                                               uint64_t max_total_values,
+                                               uint64_t max_allowed_length,
+                                               Stream& stream);
 
 void rowPartitionOffsetsToRowIds(const Tensor& offsets,
                                  Tensor& row_ids,

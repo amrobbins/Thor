@@ -210,13 +210,22 @@ DeviceResidentWindowedNamedBatchSession::DeviceResidentWindowedNamedBatchSession
             "DeviceResidentWindowedNamedBatchSession split manifest does not match source dataset.");
     }
 
-    requiredFieldIds = this->sessionDescription.getRequiredFieldIds();
-    if (requiredFieldIds.empty()) {
+    fieldRequirements = this->sessionDescription.getFieldRequirements();
+    if (fieldRequirements.empty()) {
         for (const Thor::DatasetField &field : this->datasetDescription.schema.getFields()) {
-            requiredFieldIds.insert(field.id);
+            if (field.kind == Thor::DatasetFieldKind::RAGGED) {
+                throw std::runtime_error(
+                    "DeviceResidentWindowedNamedBatchSession does not yet support ragged dataset fields.");
+            }
+            fieldRequirements.emplace(
+                field.id, Thor::DatasetFieldMaterializationRequirement::dense(field.id));
         }
     }
-    for (Thor::DatasetFieldId fieldId : requiredFieldIds) {
+    for (const auto& [fieldId, requirement] : fieldRequirements) {
+        if (fieldId != requirement.fieldId || requirement.isRagged()) {
+            throw std::runtime_error(
+                "DeviceResidentWindowedNamedBatchSession does not yet support ragged field materialization requirements.");
+        }
         (void)this->datasetDescription.schema.getField(fieldId);
     }
 

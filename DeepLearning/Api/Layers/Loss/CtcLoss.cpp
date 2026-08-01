@@ -9,8 +9,7 @@ void CtcLoss::buildSupportLayersAndAddToNetwork() {
     CtcLoss::Builder rawBuilder;
     rawBuilder.network(*network)
         .predictions(predictionsTensor)
-        .labels(labelsTensor)
-        .labelLengths(labelLengthsTensor)
+        .labels(labelsRaggedTensor)
         .inputLengths(inputLengthsTensor)
         .lossDataType(lossDataType)
         .rawLossAddedToNetwork()
@@ -38,18 +37,16 @@ json CtcLoss::architectureJson() const {
     j["loss_data_type"] = lossDataType;
     ThorImplementation::addLossWeightToJson(j, lossWeight);
     j["predictions_tensor"] = predictionsTensor.architectureJson();
-    j["labels_tensor"] = labelsTensor.architectureJson();
-    j["label_lengths_tensor"] = labelLengthsTensor.architectureJson();
+    j["labels_ragged_tensor"] = labelsRaggedTensor.architectureJson();
     j["input_lengths_tensor"] = inputLengthsTensor.architectureJson();
     j["loss_shaper_input_tensor"] = lossShaperInput.architectureJson();
     j["loss_tensor"] = lossTensor.architectureJson();
-    j["max_label_length"] = maxLabelLength;
     j["oob_gradient_mode"] = oobGradientMode == ThorImplementation::CtcLossOobGradientMode::ZERO ? "zero" : "skip";
     return j;
 }
 
 void CtcLoss::deserialize(const json& j, Network* network) {
-    if (j.at("version").get<string>() != "1.0.0")
+    if (j.at("version").get<string>() != "2.0.0")
         throw runtime_error("Unsupported version in CtcLoss::deserialize: " + j.at("version").get<string>());
     if (j.at("layer_type").get<string>() != "ctc_loss")
         throw runtime_error("Layer type mismatch in CtcLoss::deserialize: " + j.at("layer_type").get<string>());
@@ -57,23 +54,36 @@ void CtcLoss::deserialize(const json& j, Network* network) {
     THOR_THROW_IF_FALSE(j.at("loss_shape").get<LossShape>() == LossShape::RAW);
 
     const uint64_t predictionsId = j.at("predictions_tensor").at("id").get<uint64_t>();
-    const uint64_t labelsId = j.at("labels_tensor").at("id").get<uint64_t>();
-    const uint64_t labelLengthsId = j.at("label_lengths_tensor").at("id").get<uint64_t>();
+    const json& labelsJson = j.at("labels_ragged_tensor");
+    if (labelsJson.at("version").get<string>() != "1.0.0")
+        throw runtime_error("Unsupported RaggedTensor version in CtcLoss::deserialize: " + labelsJson.at("version").get<string>());
+    if (labelsJson.at("ragged_rank").get<uint32_t>() != 1)
+        throw runtime_error("CtcLoss requires ragged_rank 1 labels.");
+    const uint64_t labelValuesId = labelsJson.at("values").at("id").get<uint64_t>();
+    const uint64_t labelOffsetsId = labelsJson.at("offsets").at("id").get<uint64_t>();
     const uint64_t inputLengthsId = j.at("input_lengths_tensor").at("id").get<uint64_t>();
 
     CtcLoss ctcLoss;
     ctcLoss.rawLossAddedToNetwork = true;
     ctcLoss.predictionsTensor = network->getApiTensorByOriginalId(predictionsId);
-    ctcLoss.labelsTensor = network->getApiTensorByOriginalId(labelsId);
-    ctcLoss.labelLengthsTensor = network->getApiTensorByOriginalId(labelLengthsId);
+    ctcLoss.labelsRaggedTensor =
+        RaggedTensor(network->getApiTensorByOriginalId(labelValuesId), network->getApiTensorByOriginalId(labelOffsetsId));
+    THOR_THROW_IF_FALSE(ctcLoss.labelsRaggedTensor.getBatchSize() == labelsJson.at("batch_size").get<uint64_t>());
+    THOR_THROW_IF_FALSE(ctcLoss.labelsRaggedTensor.getMaxTotalValues() == labelsJson.at("max_total_values").get<uint64_t>());
+    THOR_THROW_IF_FALSE(ctcLoss.predictionsTensor.getDataType() == DataType::FP32);
+    THOR_THROW_IF_FALSE(ctcLoss.predictionsTensor.getDimensions().size() == 2);
+    THOR_THROW_IF_FALSE(ctcLoss.labelsRaggedTensor.getValuesDataType() == DataType::INT32);
+    THOR_THROW_IF_FALSE(ctcLoss.labelsRaggedTensor.getTrailingDimensions().empty());
+    ctcLoss.labelsTensor = ctcLoss.labelsRaggedTensor.getValues();
     ctcLoss.inputLengthsTensor = network->getApiTensorByOriginalId(inputLengthsId);
+    THOR_THROW_IF_FALSE(ThorImplementation::isCudnnCtcLengthDataType(ctcLoss.inputLengthsTensor.getDataType()));
+    THOR_THROW_IF_FALSE(ctcLoss.inputLengthsTensor.getDimensions() == vector<uint64_t>{1});
     ctcLoss.lossDataType = j.at("loss_data_type").get<DataType>();
     ctcLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     ctcLoss.lossShape = LossShape::RAW;
     ctcLoss.lossTensor = Tensor::deserialize(j.at("loss_shaper_input_tensor"));
     ctcLoss.lossShaperInput = ctcLoss.lossTensor;
-    ctcLoss.maxLabelLength = j.value("max_label_length", static_cast<uint32_t>(ctcLoss.labelsTensor.getDimensions().at(0)));
-    const string oobMode = j.value("oob_gradient_mode", string("zero"));
+    const string oobMode = j.at("oob_gradient_mode").get<string>();
     if (oobMode == "zero")
         ctcLoss.oobGradientMode = ThorImplementation::CtcLossOobGradientMode::ZERO;
     else if (oobMode == "skip")

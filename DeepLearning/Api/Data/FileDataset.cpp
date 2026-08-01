@@ -23,11 +23,15 @@ constexpr const char *DATASET_MANIFEST_FILENAME = "manifest.json";
 
 DatasetSchema schemaFromLayout(const DatasetLayout &layout) {
     std::vector<DatasetField> fields;
-    fields.reserve(layout.tensors().size() + 2 * layout.windowedTensors().size());
+    fields.reserve(layout.tensors().size() + layout.raggedTensors().size() + 2 * layout.windowedTensors().size());
     DatasetFieldId nextId = 0;
     for (const DatasetLayout::TensorSpec &spec : layout.tensors()) {
         fields.push_back(DatasetField{.id = nextId++, .name = spec.name, .dataType = spec.dataType,
                                       .dimensions = spec.dimensions, .kind = DatasetFieldKind::DENSE});
+    }
+    for (const DatasetLayout::RaggedTensorSpec &spec : layout.raggedTensors()) {
+        fields.push_back(DatasetField{.id = nextId++, .name = spec.name, .dataType = spec.dataType,
+                                      .dimensions = spec.valueDimensions, .kind = DatasetFieldKind::RAGGED});
     }
     for (const DatasetLayout::WindowedTensorSpec &spec : layout.windowedTensors()) {
         fields.push_back(DatasetField{.id = nextId++, .name = spec.name, .dataType = spec.dataType,
@@ -122,14 +126,14 @@ std::shared_ptr<BatchSession> FileDataset::openBatchSession(
     const BatchPolicy &batching,
     const DatasetAccessPolicy &,
     uint64_t maxInFlightBatches,
-    const std::set<DatasetFieldId> &requiredFieldIds) const {
+    const DatasetFieldMaterializationRequirements &fieldRequirements) const {
     std::shared_ptr<const FileDataset> self =
         std::dynamic_pointer_cast<const FileDataset>(shared_from_this());
     if (self == nullptr) {
         throw std::runtime_error("FileDataset must be owned by std::shared_ptr before opening a session.");
     }
     return ThorImplementation::openIndexedNamedBatchSession(
-        std::move(self), splits, batching, maxInFlightBatches, requiredFieldIds);
+        std::move(self), splits, batching, maxInFlightBatches, fieldRequirements);
 }
 
 std::unique_ptr<DatasetMaterializationDescription>

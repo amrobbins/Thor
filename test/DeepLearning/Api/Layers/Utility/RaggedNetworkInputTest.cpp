@@ -98,3 +98,28 @@ TEST(RaggedNetworkInputApi, RejectsInvalidOffsetDType) {
                       .build()),
                  std::logic_error);
 }
+
+TEST(RaggedNetworkInputApi, NetworkInputDiscoveryReportsOnlyLogicalRaggedBoundary) {
+    Network network("ragged_network_input_discovery");
+
+    RaggedTensor labels = RaggedNetworkInput::Builder()
+                              .network(network)
+                              .name("labels")
+                              .valuesDataType(DataType::INT32)
+                              .offsetsDataType(DataType::UINT64)
+                              .batchSize(2)
+                              .maxTotalValues(5)
+                              .build();
+
+    NetworkOutput::Builder().network(network).name("label_values").inputTensor(labels.getValues()).dataType(DataType::INT32).build();
+    NetworkOutput::Builder().network(network).name("label_offsets").inputTensor(labels.getOffsets()).dataType(DataType::UINT64).build();
+
+    EXPECT_EQ(network.getExternalNetworkInputNames(), (std::vector<std::string>{"labels"}));
+    EXPECT_EQ(network.getInferenceNetworkInputNames(), (std::vector<std::string>{"labels"}));
+    EXPECT_EQ(network.getRequiredNetworkInputNamesForOutputs({"label_values"}, /*inferenceOnly=*/true),
+              (std::vector<std::string>{"labels"}));
+    EXPECT_EQ(network.getRequiredNetworkInputNamesForOutputs({"label_offsets"}, /*inferenceOnly=*/true),
+              (std::vector<std::string>{"labels"}));
+    EXPECT_EQ(network.getRequiredNetworkInputNamesForOutputs({"label_values", "label_offsets"}, /*inferenceOnly=*/true),
+              (std::vector<std::string>{"labels"}));
+}

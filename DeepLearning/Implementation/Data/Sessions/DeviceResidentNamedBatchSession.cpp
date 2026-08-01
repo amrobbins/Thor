@@ -97,7 +97,12 @@ DeviceResidentNamedBatchSession::DeviceResidentNamedBatchSession(
 
     this->batchSize = this->batching.getBatchSize();
     for (const Thor::DatasetField &field : this->dataset->getSchema().getFields()) {
-        requiredFieldIds.insert(field.id);
+        if (field.kind == Thor::DatasetFieldKind::RAGGED) {
+            throw std::runtime_error(
+                "DeviceResidentNamedBatchSession does not yet support ragged dataset fields.");
+        }
+        fieldRequirements.emplace(
+            field.id, Thor::DatasetFieldMaterializationRequirement::dense(field.id));
     }
     for (const BatchTensorSpec &spec : batchTensorSpecsFor(this->dataset->getLayout())) {
         if (!this->dataset->hasTensor(spec.name)) {
@@ -135,13 +140,23 @@ DeviceResidentNamedBatchSession::DeviceResidentNamedBatchSession(
           session.getBatching(),
           batchQueueDepth,
           std::move(datasetName)) {
-    requiredFieldIds = session.getRequiredFieldIds();
-    if (requiredFieldIds.empty()) {
+    fieldRequirements = session.getFieldRequirements();
+    if (fieldRequirements.empty()) {
+        fieldRequirements.clear();
         for (const Thor::DatasetField &field : this->dataset->getSchema().getFields()) {
-            requiredFieldIds.insert(field.id);
+            if (field.kind == Thor::DatasetFieldKind::RAGGED) {
+                throw std::runtime_error(
+                    "DeviceResidentNamedBatchSession does not yet support ragged dataset fields.");
+            }
+            fieldRequirements.emplace(
+                field.id, Thor::DatasetFieldMaterializationRequirement::dense(field.id));
         }
     }
-    for (Thor::DatasetFieldId fieldId : requiredFieldIds) {
+    for (const auto& [fieldId, requirement] : fieldRequirements) {
+        if (fieldId != requirement.fieldId || requirement.isRagged()) {
+            throw std::runtime_error(
+                "DeviceResidentNamedBatchSession does not yet support ragged field materialization requirements.");
+        }
         (void)this->dataset->getSchema().getField(fieldId);
     }
 }

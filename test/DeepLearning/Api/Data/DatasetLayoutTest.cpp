@@ -320,7 +320,7 @@ TEST(DatasetLayoutTest, AffineWindowReferencesRequireNoPerExampleRecordBytes) {
               DatasetLayout::WindowedTensorReferenceMode::AFFINE);
 }
 
-TEST(DatasetLayoutTest, RejectsRetiredWindowDatasetVersions) {
+TEST(DatasetLayoutTest, RejectsInvalidV2UnsupportedVersionsAndOldV1Shape) {
     nlohmann::json manifest = DatasetLayout::fromTensorShapes(
         {},
         {DatasetLayout::WindowedTensorSourceShape("tokens", {}, DataType::UINT8, DataType::UINT64)},
@@ -340,4 +340,83 @@ TEST(DatasetLayoutTest, RejectsRetiredWindowDatasetVersions) {
     EXPECT_THROW(DatasetLayout::fromJson(manifest), std::runtime_error);
     manifest["format"] = "thor.dataset.v3";
     EXPECT_THROW(DatasetLayout::fromJson(manifest), std::runtime_error);
+}
+
+TEST(DatasetLayoutTest, RaggedTensorShapesReserveFixedReferencesAndUseV2Manifest) {
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        vector<DatasetLayout::TensorShape>{DatasetLayout::TensorShape("dense", {2}, DataType::FP32)},
+        vector<DatasetLayout::RaggedTensorShape>{
+            DatasetLayout::RaggedTensorShape("labels", {}, DataType::INT32),
+            DatasetLayout::RaggedTensorShape("features", {3}, DataType::BF16)});
+
+    ASSERT_EQ(layout.raggedTensors().size(), 2);
+    EXPECT_TRUE(layout.hasRaggedTensors());
+    EXPECT_EQ(layout.tensor("dense").offsetBytes, 0);
+    EXPECT_EQ(layout.raggedTensor("labels").referenceOffsetBytes, 8);
+    EXPECT_EQ(layout.raggedTensor("labels").referenceNumBytes, 16);
+    EXPECT_EQ(layout.raggedTensor("labels").valueNumBytes(), 4);
+    EXPECT_EQ(layout.raggedTensor("features").referenceOffsetBytes, 24);
+    EXPECT_EQ(layout.raggedTensor("features").valueNumBytes(), 6);
+    EXPECT_EQ(layout.recordSizeBytes(), 40);
+
+    nlohmann::json j = layout.toJson();
+    EXPECT_EQ(j.at("format").get<string>(), DatasetLayout::RAGGED_FORMAT);
+    EXPECT_EQ(j.at("ragged_tensors").at("labels").at("value_shape").get<vector<uint64_t>>(), vector<uint64_t>{});
+    EXPECT_EQ(j.at("ragged_tensors").at("features").at("value_shape").get<vector<uint64_t>>(), vector<uint64_t>({3}));
+    EXPECT_FALSE(j.at("ragged_tensors").at("labels").contains("storage"));
+
+    DatasetLayout parsed = DatasetLayout::fromJson(j);
+    EXPECT_NO_THROW(layout.validateRequestedLayoutExact(parsed));
+    EXPECT_NO_THROW(parsed.validateRequestedLayoutExact(layout));
+}
+
+TEST(DatasetLayoutTest, RaggedStorageRoundTripValidatesValueAlignmentAndV1CannotContainRaggedMetadata) {
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        {}, vector<DatasetLayout::RaggedTensorShape>{DatasetLayout::RaggedTensorShape("labels", {}, DataType::INT32)});
+    nlohmann::json j = layout.toJson();
+    j["ragged_tensors"]["labels"]["storage"] =
+        nlohmann::json{{"file", "ragged_values/labels.bin"}, {"num_bytes", 12}, {"num_values", 3}};
+
+    DatasetLayout parsed = DatasetLayout::fromJson(j);
+    ASSERT_TRUE(parsed.raggedTensor("labels").valuesFilename.has_value());
+    EXPECT_EQ(parsed.raggedTensor("labels").valuesFilename.value(), "ragged_values/labels.bin");
+    EXPECT_EQ(parsed.raggedTensor("labels").storedValueCount(), 3);
+    EXPECT_NO_THROW(layout.validateRequestedLayoutExact(parsed));
+
+    nlohmann::json misaligned = j;
+    misaligned["ragged_tensors"]["labels"]["storage"]["num_bytes"] = 10;
+    EXPECT_THROW(DatasetLayout::fromJson(misaligned), std::runtime_error);
+
+    nlohmann::json wrongCount = j;
+    wrongCount["ragged_tensors"]["labels"]["storage"]["num_values"] = 4;
+    EXPECT_THROW(DatasetLayout::fromJson(wrongCount), std::runtime_error);
+
+    nlohmann::json v1 = j;
+    v1["format"] = DatasetLayout::FORMAT;
+    EXPECT_THROW(DatasetLayout::fromJson(v1), std::runtime_error);
+
+    nlohmann::json v2WithoutRagged = j;
+    v2WithoutRagged.erase("ragged_tensors");
+    EXPECT_THROW(DatasetLayout::fromJson(v2WithoutRagged), std::runtime_error);
+}
+
+TEST(DatasetLayoutTest, RaggedTensorValidationRejectsDuplicateNamesAndBadReferenceWidths) {
+    EXPECT_THROW(
+        DatasetLayout::fromTensorShapes(
+            vector<DatasetLayout::TensorShape>{DatasetLayout::TensorShape("labels", {1}, DataType::FP32)},
+            vector<DatasetLayout::RaggedTensorShape>{DatasetLayout::RaggedTensorShape("labels", {}, DataType::INT32)}),
+        std::runtime_error);
+
+    EXPECT_THROW(
+        DatasetLayout(
+            8,
+            {},
+            {},
+            {},
+            {DatasetLayout::RaggedTensorSpec{.name = "labels",
+                                             .dataType = DataType::INT32,
+                                             .valueDimensions = {},
+                                             .referenceOffsetBytes = 0,
+                                             .referenceNumBytes = 8}}),
+        std::runtime_error);
 }

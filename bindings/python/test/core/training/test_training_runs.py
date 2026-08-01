@@ -2435,7 +2435,7 @@ def make_network(name):
         daily_forecast,
         daily_labels.get_feature_output(),
         thor.DataType.fp32,
-        False,
+        thor.losses.LossShape.batch,
         loss_weight=10.0,
         example_weights=daily_weights.get_feature_output(),
     )
@@ -2516,7 +2516,7 @@ def make_network(name):
         aggregate_forecast,
         aggregate_labels.get_feature_output(),
         thor.DataType.fp32,
-        False,
+        thor.losses.LossShape.batch,
         loss_weight=1.0,
         example_weights=aggregate_weights.get_feature_output(),
     )

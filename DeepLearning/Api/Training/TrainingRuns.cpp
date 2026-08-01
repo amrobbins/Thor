@@ -3982,7 +3982,7 @@ Batch inferenceBatchForInputBindings(const std::vector<std::string>& inputNames,
 bool compiledDatasetInputBindingsEqual(const CompiledDatasetInputBindings& lhs,
                                        const CompiledDatasetInputBindings& rhs) {
     return lhs.trainingInputBindings == rhs.trainingInputBindings &&
-           lhs.requiredFieldIds == rhs.requiredFieldIds;
+           lhs.fieldRequirements == rhs.fieldRequirements;
 }
 
 
@@ -4079,7 +4079,7 @@ void TrainingRuns::evaluateEnsembles(std::vector<TrainingRunResult>& results,
                 sourceMember.spec->trainer->resolveDatasetInputsForData(sourceData, /*inferenceOnly=*/true);
             std::shared_ptr<BatchSession> sourceSession = sourceData.openSession(
                 sourceMember.spec->trainer->getRuntimeConfig().maxInFlightBatches,
-                sourceBindings.requiredFieldIds);
+                sourceBindings.fieldRequirements);
             TrainingRunsComposedEvaluatorArtifacts& sourceArtifacts = composedArtifactsForBatchSize(
                 sourceSession->getBatchSize());
             ComposedEnsembleEvaluationMetrics sourceMetrics = evaluateComposedEnsembleReportsOnSession(
@@ -4155,7 +4155,7 @@ std::vector<MemberGraphEvaluationMetrics> evaluateMemberGraphReportsOnData(
         if (!artifacts.losses.empty() || !artifacts.metrics.empty()) {
             std::shared_ptr<BatchSession> session = data.openSession(
                 member.spec->trainer->getRuntimeConfig().maxInFlightBatches,
-                memberBindings[memberIndex].requiredFieldIds);
+                memberBindings[memberIndex].fieldRequirements);
             ComposedEnsembleEvaluationMetrics metrics = evaluateComposedEnsembleReportsOnSession(
                 artifacts, *session, exampleType, memberBindings[memberIndex].trainingInputBindings);
             result.loss = metrics.overallLoss;
@@ -4296,7 +4296,7 @@ void TrainingRuns::evaluateEnsemblesOnTestData(
 
         std::shared_ptr<BatchSession> composedSession = testData->openSession(
             members.front().spec->trainer->getRuntimeConfig().maxInFlightBatches,
-            composedBindings.requiredFieldIds);
+            composedBindings.fieldRequirements);
         ComposedEnsembleEvaluationMetrics metrics = evaluateComposedEnsembleReportsOnSession(
             composedArtifacts, *composedSession, ExampleType::TEST, composedBindings.trainingInputBindings);
         applyComposedEvaluationMetricsToEnsemble(ensembleIt->second, metrics, /*testPhase=*/true);

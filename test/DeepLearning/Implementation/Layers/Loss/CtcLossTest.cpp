@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <vector>
 
@@ -61,7 +62,6 @@ double cpuCtcLossForSample(const vector<float>& probabilities,
     const uint64_t L = static_cast<uint64_t>(labelLengths[batch]);
     EXPECT_GT(T, 0u);
     EXPECT_LE(T, maxTimeSteps);
-    EXPECT_GT(L, 0u);
 
     uint64_t labelOffset = 0;
     for (uint64_t i = 0; i < batch; ++i)
@@ -201,8 +201,8 @@ vector<double> finiteDifferenceCtcLogitGradient(const vector<float>& activations
 
 struct CtcNumericalCase {
     vector<float> activations;
-    vector<int> paddedLabels;
-    vector<int> packedLabels;
+    vector<int> packedLabelStorage;
+    vector<uint64_t> labelOffsets;
     vector<int> labelLengths;
     vector<int> inputLengths;
 };
@@ -221,15 +221,14 @@ CtcNumericalCase makeRepeatedAndVariableLengthCase() {
             0.10f, 0.15f, 0.60f,
             0.95f, -0.75f, 0.05f,
         },
-        // The trailing 99 is intentionally outside the class range. It must be ignored because
-        // labelLengths[1] == 1 and the implementation compacts only the valid prefix.
+        // Capacity is four, but offsets[B] == 3. The trailing out-of-range label
+        // is intentionally unused and must never be consumed by cuDNN.
         {1, 1, 2, 99},
-        {1, 1, 2},
+        {0, 2, 3},
         {2, 1},
         {4, 3},
     };
 }
-
 
 struct CtcLayerNetwork {
     TensorPlacement cpuPlacement{TensorPlacement::MemDevices::CPU};
@@ -237,12 +236,12 @@ struct CtcLayerNetwork {
 
     Tensor probabilitiesCpu;
     Tensor labelsCpu;
-    Tensor labelLengthsCpu;
+    Tensor labelOffsetsCpu;
     Tensor inputLengthsCpu;
 
     shared_ptr<NetworkInput> probabilitiesInput;
     shared_ptr<NetworkInput> labelsInput;
-    shared_ptr<NetworkInput> labelLengthsInput;
+    shared_ptr<NetworkInput> labelOffsetsInput;
     shared_ptr<NetworkInput> inputLengthsInput;
     shared_ptr<CtcLoss> ctcLoss;
     shared_ptr<NetworkOutput> lossOutput;
@@ -251,60 +250,79 @@ struct CtcLayerNetwork {
 
 CtcLayerNetwork makeTinyCtcNetwork(bool inferenceOnly,
                                     DataType probabilitiesType = DataType::FP32,
-                                    DataType lengthType = DataType::INT32,
+                                    DataType offsetsType = DataType::UINT32,
+                                    DataType inputLengthType = DataType::INT32,
                                     optional<float> lossWeight = nullopt) {
     CtcLayerNetwork network;
     constexpr uint64_t T = 4;
     constexpr uint64_t B = 2;
     constexpr uint64_t C = 3;
+    constexpr uint64_t maxTotalLabelValues = 4;
 
     network.probabilitiesCpu = Tensor(network.cpuPlacement, TensorDescriptor(probabilitiesType, {B, T, C}));
-    network.labelsCpu = Tensor(network.cpuPlacement, TensorDescriptor(DataType::INT32, {B, 2}));
-    network.labelLengthsCpu = Tensor(network.cpuPlacement, TensorDescriptor(lengthType, {B, 1}));
-    network.inputLengthsCpu = Tensor(network.cpuPlacement, TensorDescriptor(DataType::INT32, {B, 1}));
+    network.labelsCpu = Tensor(network.cpuPlacement, TensorDescriptor(DataType::INT32, {maxTotalLabelValues}));
+    network.labelOffsetsCpu = Tensor(network.cpuPlacement, TensorDescriptor(offsetsType, {B + 1}));
+    network.inputLengthsCpu = Tensor(network.cpuPlacement, TensorDescriptor(inputLengthType, {B, 1}));
 
     network.probabilitiesInput = make_shared<NetworkInput>(network.gpuPlacement, probabilitiesType, vector<unsigned long>{B, T, C});
-    network.labelsInput = make_shared<NetworkInput>(network.gpuPlacement, DataType::INT32, vector<unsigned long>{B, 2});
-    network.labelLengthsInput = make_shared<NetworkInput>(network.gpuPlacement, lengthType, vector<unsigned long>{B, 1});
-    network.inputLengthsInput = make_shared<NetworkInput>(network.gpuPlacement, DataType::INT32, vector<unsigned long>{B, 1});
-    network.ctcLoss = make_shared<CtcLoss>(2, CtcLossOobGradientMode::ZERO, lossWeight);
+    network.labelsInput = make_shared<NetworkInput>(network.gpuPlacement, DataType::INT32, vector<unsigned long>{maxTotalLabelValues});
+    network.labelOffsetsInput = make_shared<NetworkInput>(network.gpuPlacement, offsetsType, vector<unsigned long>{B + 1});
+    network.inputLengthsInput = make_shared<NetworkInput>(network.gpuPlacement, inputLengthType, vector<unsigned long>{B, 1});
+    network.ctcLoss = make_shared<CtcLoss>(CtcLossOobGradientMode::ZERO, lossWeight);
     network.ctcLoss->setConstructForInferenceOnly(inferenceOnly);
     network.lossOutput = make_shared<NetworkOutput>(network.cpuPlacement);
 
     network.layers = {network.probabilitiesInput,
                       network.labelsInput,
-                      network.labelLengthsInput,
+                      network.labelOffsetsInput,
                       network.inputLengthsInput,
                       network.ctcLoss,
                       network.lossOutput};
 
     LayerTestHelper::connectTwoLayers(network.probabilitiesInput, network.ctcLoss, 0, static_cast<int>(Loss::ConnectionType::FORWARD_BACKWARD));
     LayerTestHelper::connectTwoLayers(network.labelsInput, network.ctcLoss, 0, static_cast<int>(Loss::ConnectionType::LABELS));
-    LayerTestHelper::connectTwoLayers(network.labelLengthsInput, network.ctcLoss, 0, CtcLoss::LABEL_LENGTHS_CONNECTION_TYPE);
+    LayerTestHelper::connectTwoLayers(network.labelOffsetsInput, network.ctcLoss, 0, CtcLoss::LABEL_OFFSETS_CONNECTION_TYPE);
     LayerTestHelper::connectTwoLayers(network.inputLengthsInput, network.ctcLoss, 0, CtcLoss::INPUT_LENGTHS_CONNECTION_TYPE);
     LayerTestHelper::connectTwoLayers(network.ctcLoss, network.lossOutput);
 
     return network;
 }
 
+void copyOffsetsToCpu(Tensor& offsetsCpu, const vector<uint64_t>& offsets) {
+    ASSERT_EQ(offsetsCpu.getTotalNumElements(), offsets.size());
+    if (offsetsCpu.getDataType() == DataType::UINT32) {
+        uint32_t* dst = offsetsCpu.getMemPtr<uint32_t>();
+        for (size_t i = 0; i < offsets.size(); ++i) {
+            ASSERT_LE(offsets[i], static_cast<uint64_t>(numeric_limits<uint32_t>::max()));
+            dst[i] = static_cast<uint32_t>(offsets[i]);
+        }
+    } else {
+        ASSERT_EQ(offsetsCpu.getDataType(), DataType::UINT64);
+        std::copy(offsets.begin(), offsets.end(), offsetsCpu.getMemPtr<uint64_t>());
+    }
+}
+
 void populateTinyCtcNetwork(CtcLayerNetwork& network,
                             const vector<float>& activations,
-                            const vector<int>& paddedLabels,
-                            const vector<int>& labelLengths,
+                            const vector<int>& packedLabelStorage,
+                            const vector<uint64_t>& labelOffsets,
                             const vector<int>& inputLengths) {
+    ASSERT_EQ(activations.size(), network.probabilitiesCpu.getTotalNumElements());
+    ASSERT_EQ(packedLabelStorage.size(), network.labelsCpu.getTotalNumElements());
+    ASSERT_EQ(inputLengths.size(), network.inputLengthsCpu.getTotalNumElements());
     std::copy(activations.begin(), activations.end(), network.probabilitiesCpu.getMemPtr<float>());
-    std::copy(paddedLabels.begin(), paddedLabels.end(), network.labelsCpu.getMemPtr<int>());
-    std::copy(labelLengths.begin(), labelLengths.end(), network.labelLengthsCpu.getMemPtr<int>());
+    std::copy(packedLabelStorage.begin(), packedLabelStorage.end(), network.labelsCpu.getMemPtr<int>());
+    copyOffsetsToCpu(network.labelOffsetsCpu, labelOffsets);
     std::copy(inputLengths.begin(), inputLengths.end(), network.inputLengthsCpu.getMemPtr<int>());
 }
 
-void runTinyCtcNetwork(CtcLayerNetwork& network, vector<float>* gradient = nullptr) {
+void runTinyCtcNetwork(CtcLayerNetwork& network, vector<float>* gradient = nullptr, uint32_t validExampleCount = 0) {
     LayerTestHelper::initializeNetwork(network.layers);
 
-    network.probabilitiesInput->forward(network.probabilitiesCpu, false);
-    network.labelsInput->forward(network.labelsCpu, false);
-    network.labelLengthsInput->forward(network.labelLengthsCpu, false);
-    network.inputLengthsInput->forward(network.inputLengthsCpu, false);
+    network.probabilitiesInput->forward(network.probabilitiesCpu, false, validExampleCount);
+    network.labelsInput->forward(network.labelsCpu, false, validExampleCount);
+    network.labelOffsetsInput->forward(network.labelOffsetsCpu, false, validExampleCount);
+    network.inputLengthsInput->forward(network.inputLengthsCpu, false, validExampleCount);
 
     Stream syncStream = network.probabilitiesInput->getStream();
     syncStream.waitEvent(network.lossOutput->getOutputReadyEvent());
@@ -319,6 +337,29 @@ void runTinyCtcNetwork(CtcLayerNetwork& network, vector<float>* gradient = nullp
         gradient->assign(gradientMem, gradientMem + gradientCpu.getTotalNumElements());
     }
 }
+
+vector<int> generatedLabelLengths(CtcLayerNetwork& network) {
+    if (!network.ctcLoss->getGeneratedLabelLengthsForTesting().has_value())
+        throw runtime_error("CTC generated label lengths are not initialized.");
+    Tensor gpu = network.ctcLoss->getGeneratedLabelLengthsForTesting().value();
+    Tensor cpu = gpu.clone(network.cpuPlacement);
+    Stream stream = network.probabilitiesInput->getStream();
+    cpu.copyFromAsync(gpu, stream);
+    stream.synchronize();
+    return vector<int>(cpu.getMemPtr<int>(), cpu.getMemPtr<int>() + cpu.getTotalNumElements());
+}
+
+uint32_t labelOffsetsValidationBits(CtcLayerNetwork& network) {
+    if (!network.ctcLoss->getLabelOffsetsValidationErrorBitsForTesting().has_value())
+        throw runtime_error("CTC label-offset validation storage is not initialized.");
+    Tensor gpu = network.ctcLoss->getLabelOffsetsValidationErrorBitsForTesting().value();
+    Tensor cpu = gpu.clone(network.cpuPlacement);
+    Stream stream = network.probabilitiesInput->getStream();
+    cpu.copyFromAsync(gpu, stream);
+    stream.synchronize();
+    return cpu.getMemPtr<uint32_t>()[0];
+}
+
 }  // namespace
 
 TEST(CtcLossImplementationLayer, CreatesPerSampleLossAndPredictionGradientDescriptors) {
@@ -329,6 +370,8 @@ TEST(CtcLossImplementationLayer, CreatesPerSampleLossAndPredictionGradientDescri
     EXPECT_EQ(network.ctcLoss->getLossOutput().value().getDescriptor(), TensorDescriptor(DataType::FP32, {2, 1}));
     ASSERT_TRUE(network.ctcLoss->getErrorOutput().has_value());
     EXPECT_EQ(network.ctcLoss->getErrorOutput().value().getDescriptor(), TensorDescriptor(DataType::FP32, {2, 4, 3}));
+    ASSERT_TRUE(network.ctcLoss->getGeneratedLabelLengthsForTesting().has_value());
+    EXPECT_EQ(network.ctcLoss->getGeneratedLabelLengthsForTesting()->getDescriptor(), TensorDescriptor(DataType::INT32, {2}));
 
     LayerTestHelper::tearDownNetwork(network.layers);
 }
@@ -350,68 +393,113 @@ TEST(CtcLossImplementationLayer, RejectsNonFp32Probabilities) {
     LayerTestHelper::tearDownNetwork(network.layers);
 }
 
-TEST(CtcLossImplementationLayer, RejectsNonInt32Lengths) {
-    CtcLayerNetwork network = makeTinyCtcNetwork(true, DataType::FP32, DataType::UINT32);
+TEST(CtcLossImplementationLayer, RejectsNonCanonicalOffsetDtype) {
+    CtcLayerNetwork network = makeTinyCtcNetwork(true, DataType::FP32, DataType::INT32);
     EXPECT_THROW(LayerTestHelper::initializeNetwork(network.layers), std::logic_error);
     LayerTestHelper::tearDownNetwork(network.layers);
 }
 
-TEST(CtcLossImplementationLayer, InferenceForwardMatchesCpuReferenceForSmallBatchWithSoftmaxNormalization) {
+TEST(CtcLossImplementationLayer, RejectsNonInt32InputLengths) {
+    CtcLayerNetwork network = makeTinyCtcNetwork(true, DataType::FP32, DataType::UINT32, DataType::UINT32);
+    EXPECT_THROW(LayerTestHelper::initializeNetwork(network.layers), std::logic_error);
+    LayerTestHelper::tearDownNetwork(network.layers);
+}
+
+TEST(CtcLossImplementationLayer, ForwardConsumesPackedLabelsDirectlyAndDerivesLengthsForBothOffsetDtypes) {
     constexpr uint64_t T = 4;
     constexpr uint64_t B = 2;
     constexpr uint64_t C = 3;
     constexpr int blankLabel = 0;
 
-    CtcLayerNetwork network = makeTinyCtcNetwork(true);
-
     const vector<float> activations = {
-        // b=0, t=0..3
         0.60f, 0.30f, 0.10f,
         0.20f, 0.70f, 0.10f,
         0.25f, 0.65f, 0.10f,
         0.70f, 0.20f, 0.10f,
-        // b=1, t=0..3
         0.50f, 0.20f, 0.30f,
         0.20f, 0.20f, 0.60f,
         0.30f, 0.40f, 0.30f,
         0.60f, 0.30f, 0.10f,
     };
-    const vector<int> paddedLabels = {1, 0, 2, 1};
-    const vector<int> packedLabels = {1, 2, 1};
+    const vector<int> packedLabelStorage = {1, 2, 1, 99};
+    const vector<uint64_t> offsets = {0, 1, 3};
     const vector<int> labelLengths = {1, 2};
     const vector<int> inputLengths = {4, 4};
-
-    std::copy(activations.begin(), activations.end(), network.probabilitiesCpu.getMemPtr<float>());
-    std::copy(paddedLabels.begin(), paddedLabels.end(), network.labelsCpu.getMemPtr<int>());
-    std::copy(labelLengths.begin(), labelLengths.end(), network.labelLengthsCpu.getMemPtr<int>());
-    std::copy(inputLengths.begin(), inputLengths.end(), network.inputLengthsCpu.getMemPtr<int>());
-
+    const vector<int> packedLabels = {1, 2, 1};
     const vector<float> normalizedProbabilities = softmaxNormalizedActivations(activations, T, B, C);
     const vector<double> expected = cpuCtcLoss(normalizedProbabilities, T, B, C, packedLabels, labelLengths, inputLengths, blankLabel);
 
-    LayerTestHelper::initializeNetwork(network.layers);
+    for (DataType offsetsType : {DataType::UINT32, DataType::UINT64}) {
+        CtcLayerNetwork network = makeTinyCtcNetwork(true, DataType::FP32, offsetsType);
+        populateTinyCtcNetwork(network, activations, packedLabelStorage, offsets, inputLengths);
+        runTinyCtcNetwork(network);
 
-    network.probabilitiesInput->forward(network.probabilitiesCpu, false);
-    network.labelsInput->forward(network.labelsCpu, false);
-    network.labelLengthsInput->forward(network.labelLengthsCpu, false);
-    network.inputLengthsInput->forward(network.inputLengthsCpu, false);
+        EXPECT_EQ(generatedLabelLengths(network), labelLengths);
+        EXPECT_EQ(labelOffsetsValidationBits(network), 0u);
 
-    Stream syncStream = network.probabilitiesInput->getStream();
-    syncStream.waitEvent(network.lossOutput->getOutputReadyEvent());
-    syncStream.synchronize();
-
-    Tensor actualLossCpu = network.lossOutput->getFeatureOutput().value();
-    const float* actual = actualLossCpu.getMemPtr<float>();
-    for (uint64_t i = 0; i < B; ++i) {
-        ASSERT_TRUE(std::isfinite(actual[i]));
-        EXPECT_NEAR(actual[i], expected[i], 1.0e-4);
+        Tensor actualLossCpu = network.lossOutput->getFeatureOutput().value();
+        const float* actual = actualLossCpu.getMemPtr<float>();
+        for (uint64_t i = 0; i < B; ++i) {
+            ASSERT_TRUE(std::isfinite(actual[i]));
+            EXPECT_NEAR(actual[i], expected[i], 1.0e-4);
+        }
+        LayerTestHelper::tearDownNetwork(network.layers);
     }
-
-    LayerTestHelper::tearDownNetwork(network.layers);
 }
 
+TEST(CtcLossImplementationLayer, ForwardSupportsActiveEmptyTargetRows) {
+    constexpr uint64_t T = 4;
+    constexpr uint64_t B = 2;
+    constexpr uint64_t C = 3;
+    constexpr int blankLabel = 0;
 
-TEST(CtcLossImplementationLayer, ForwardMatchesCpuReferenceForRepeatedLabelsVariableLengthsAndIgnoredPadding) {
+    const vector<float> activations = {
+        0.60f, 0.30f, 0.10f,
+        0.20f, 0.70f, 0.10f,
+        0.25f, 0.65f, 0.10f,
+        0.70f, 0.20f, 0.10f,
+        0.50f, 0.20f, 0.30f,
+        0.20f, 0.20f, 0.60f,
+        0.30f, 0.40f, 0.30f,
+        0.60f, 0.30f, 0.10f,
+    };
+    const vector<int> packedLabelStorage = {1, 99, 98, 97};
+    const vector<uint64_t> offsets = {0, 0, 1};
+    const vector<int> labelLengths = {0, 1};
+    const vector<int> inputLengths = {4, 4};
+    const vector<int> packedLabels = {1};
+
+    const vector<float> normalizedProbabilities = softmaxNormalizedActivations(activations, T, B, C);
+    const vector<double> expected = cpuCtcLoss(normalizedProbabilities, T, B, C, packedLabels, labelLengths, inputLengths, blankLabel);
+    const vector<double> expectedGradient =
+        finiteDifferenceCtcLogitGradient(activations, T, B, C, packedLabels, labelLengths, inputLengths, blankLabel, 1.0e-3);
+
+    for (DataType offsetsType : {DataType::UINT32, DataType::UINT64}) {
+        CtcLayerNetwork network = makeTinyCtcNetwork(false, DataType::FP32, offsetsType);
+        populateTinyCtcNetwork(network, activations, packedLabelStorage, offsets, inputLengths);
+
+        vector<float> actualGradient;
+        runTinyCtcNetwork(network, &actualGradient);
+
+        EXPECT_EQ(generatedLabelLengths(network), labelLengths);
+        EXPECT_EQ(labelOffsetsValidationBits(network), 0u);
+        Tensor actualLossCpu = network.lossOutput->getFeatureOutput().value();
+        const float* actual = actualLossCpu.getMemPtr<float>();
+        for (uint64_t i = 0; i < B; ++i) {
+            ASSERT_TRUE(std::isfinite(actual[i]));
+            EXPECT_NEAR(actual[i], expected[i], 1.0e-4f);
+        }
+        ASSERT_EQ(actualGradient.size(), expectedGradient.size());
+        for (uint64_t i = 0; i < actualGradient.size(); ++i) {
+            ASSERT_TRUE(std::isfinite(actualGradient[i]));
+            EXPECT_NEAR(actualGradient[i], expectedGradient[i], 3.0e-3f) << "gradient index " << i;
+        }
+
+        LayerTestHelper::tearDownNetwork(network.layers);
+    }
+}
+
+TEST(CtcLossImplementationLayer, ForwardMatchesCpuReferenceForRepeatedLabelsAndVariableLengths) {
     constexpr uint64_t T = 4;
     constexpr uint64_t B = 2;
     constexpr uint64_t C = 3;
@@ -419,16 +507,11 @@ TEST(CtcLossImplementationLayer, ForwardMatchesCpuReferenceForRepeatedLabelsVari
 
     CtcLayerNetwork network = makeTinyCtcNetwork(true);
     const CtcNumericalCase testCase = makeRepeatedAndVariableLengthCase();
-    populateTinyCtcNetwork(network, testCase.activations, testCase.paddedLabels, testCase.labelLengths, testCase.inputLengths);
+    populateTinyCtcNetwork(network, testCase.activations, testCase.packedLabelStorage, testCase.labelOffsets, testCase.inputLengths);
 
-    const vector<double> expected = cpuCtcLossForActivations(testCase.activations,
-                                                            T,
-                                                            B,
-                                                            C,
-                                                            testCase.packedLabels,
-                                                            testCase.labelLengths,
-                                                            testCase.inputLengths,
-                                                            blankLabel);
+    const vector<int> packedLabels(testCase.packedLabelStorage.begin(), testCase.packedLabelStorage.begin() + testCase.labelOffsets.back());
+    const vector<double> expected = cpuCtcLossForActivations(
+        testCase.activations, T, B, C, packedLabels, testCase.labelLengths, testCase.inputLengths, blankLabel);
 
     runTinyCtcNetwork(network);
 
@@ -450,16 +533,17 @@ TEST(CtcLossImplementationLayer, BackwardMatchesFiniteDifferenceCpuReferenceForS
 
     CtcLayerNetwork network = makeTinyCtcNetwork(false);
     const CtcNumericalCase testCase = makeRepeatedAndVariableLengthCase();
-    populateTinyCtcNetwork(network, testCase.activations, testCase.paddedLabels, testCase.labelLengths, testCase.inputLengths);
+    populateTinyCtcNetwork(network, testCase.activations, testCase.packedLabelStorage, testCase.labelOffsets, testCase.inputLengths);
 
     vector<float> actualGradient;
     runTinyCtcNetwork(network, &actualGradient);
 
+    const vector<int> packedLabels(testCase.packedLabelStorage.begin(), testCase.packedLabelStorage.begin() + testCase.labelOffsets.back());
     const vector<double> referenceGradient = finiteDifferenceCtcLogitGradient(testCase.activations,
                                                                              T,
                                                                              B,
                                                                              C,
-                                                                             testCase.packedLabels,
+                                                                             packedLabels,
                                                                              testCase.labelLengths,
                                                                              testCase.inputLengths,
                                                                              blankLabel,
@@ -484,27 +568,21 @@ TEST(CtcLossImplementationLayer, LossWeightScalesForwardAndBackwardNumerically) 
     constexpr int blankLabel = 0;
     constexpr float lossWeight = 0.25f;
 
-    CtcLayerNetwork network = makeTinyCtcNetwork(false, DataType::FP32, DataType::INT32, lossWeight);
-
+    CtcLayerNetwork network = makeTinyCtcNetwork(false, DataType::FP32, DataType::UINT32, DataType::INT32, lossWeight);
     const CtcNumericalCase testCase = makeRepeatedAndVariableLengthCase();
-    populateTinyCtcNetwork(network, testCase.activations, testCase.paddedLabels, testCase.labelLengths, testCase.inputLengths);
+    populateTinyCtcNetwork(network, testCase.activations, testCase.packedLabelStorage, testCase.labelOffsets, testCase.inputLengths);
 
     vector<float> actualGradient;
     runTinyCtcNetwork(network, &actualGradient);
 
-    const vector<double> expectedLoss = cpuCtcLossForActivations(testCase.activations,
-                                                                T,
-                                                                B,
-                                                                C,
-                                                                testCase.packedLabels,
-                                                                testCase.labelLengths,
-                                                                testCase.inputLengths,
-                                                                blankLabel);
+    const vector<int> packedLabels(testCase.packedLabelStorage.begin(), testCase.packedLabelStorage.begin() + testCase.labelOffsets.back());
+    const vector<double> expectedLoss = cpuCtcLossForActivations(
+        testCase.activations, T, B, C, packedLabels, testCase.labelLengths, testCase.inputLengths, blankLabel);
     const vector<double> referenceGradient = finiteDifferenceCtcLogitGradient(testCase.activations,
                                                                              T,
                                                                              B,
                                                                              C,
-                                                                             testCase.packedLabels,
+                                                                             packedLabels,
                                                                              testCase.labelLengths,
                                                                              testCase.inputLengths,
                                                                              blankLabel,
@@ -529,7 +607,7 @@ TEST(CtcLossImplementationLayer, LossWeightScalesForwardAndBackwardNumerically) 
     LayerTestHelper::tearDownNetwork(network.layers);
 }
 
-TEST(CtcLossImplementationLayer, PartialBatchMatchesSingleValidSequenceAndZerosTail) {
+TEST(CtcLossImplementationLayer, PartialBatchUsesEmptyRaggedTailAndZerosLossAndGradientTail) {
     constexpr uint64_t T = 4;
     constexpr uint64_t B = 2;
     constexpr uint64_t C = 3;
@@ -544,37 +622,30 @@ TEST(CtcLossImplementationLayer, PartialBatchMatchesSingleValidSequenceAndZerosT
     };
     vector<float> activations = oneSequence;
     activations.insert(activations.end(), oneSequence.begin(), oneSequence.end());
-    const vector<int> paddedLabels = {1, 0, 1, 0};
-    const vector<int> packedLabels = {1, 1};
-    const vector<int> labelLengths = {1, 1};
+    const vector<int> packedLabelStorage = {1, 99, 98, 97};
+    const vector<uint64_t> offsets = {0, 1, 1};
     const vector<int> inputLengths = {4, 4};
-    populateTinyCtcNetwork(network, activations, paddedLabels, labelLengths, inputLengths);
+    populateTinyCtcNetwork(network, activations, packedLabelStorage, offsets, inputLengths);
 
-    const vector<double> expectedLoss = cpuCtcLossForActivations(
-        activations, T, B, C, packedLabels, labelLengths, inputLengths, blankLabel);
+    const vector<int> onePackedLabel = {1};
+    const vector<int> oneLabelLength = {1};
+    const vector<int> oneInputLength = {4};
+    const vector<float> oneProbabilities = softmaxNormalizedActivations(oneSequence, T, 1, C);
+    const vector<double> expectedLoss = cpuCtcLoss(oneProbabilities, T, 1, C, onePackedLabel, oneLabelLength, oneInputLength, blankLabel);
     const vector<double> expectedGradient = finiteDifferenceCtcLogitGradient(
-        activations, T, B, C, packedLabels, labelLengths, inputLengths, blankLabel, 1.0e-3);
+        oneSequence, T, 1, C, onePackedLabel, oneLabelLength, oneInputLength, blankLabel, 1.0e-3);
 
-    LayerTestHelper::initializeNetwork(network.layers);
-    network.probabilitiesInput->forward(network.probabilitiesCpu, false, 1);
-    network.labelsInput->forward(network.labelsCpu, false, 1);
-    network.labelLengthsInput->forward(network.labelLengthsCpu, false, 1);
-    network.inputLengthsInput->forward(network.inputLengthsCpu, false, 1);
+    vector<float> actualGradient;
+    runTinyCtcNetwork(network, &actualGradient, 1);
 
-    Stream syncStream = network.probabilitiesInput->getStream();
-    syncStream.waitEvent(network.lossOutput->getOutputReadyEvent());
-    syncStream.synchronize();
+    EXPECT_EQ(generatedLabelLengths(network), (vector<int>{1, 0}));
+    EXPECT_EQ(labelOffsetsValidationBits(network), 0u);
 
     Tensor actualLossCpu = network.lossOutput->getFeatureOutput().value();
     const float* actualLoss = actualLossCpu.getMemPtr<float>();
     EXPECT_NEAR(actualLoss[0], expectedLoss[0], 1.0e-4);
     EXPECT_EQ(actualLoss[1], 0.0f);
 
-    ASSERT_TRUE(network.ctcLoss->getErrorOutput().has_value());
-    Tensor gradientCpu = network.ctcLoss->getErrorOutput().value().clone(network.cpuPlacement);
-    gradientCpu.copyFromAsync(network.ctcLoss->getErrorOutput().value(), syncStream);
-    syncStream.synchronize();
-    const float* actualGradient = gradientCpu.getMemPtr<float>();
     const double gradientScale = static_cast<double>(Loss::getLossScalingFactor());
     const uint64_t elementsPerSequence = T * C;
     for (uint64_t i = 0; i < elementsPerSequence; ++i) {

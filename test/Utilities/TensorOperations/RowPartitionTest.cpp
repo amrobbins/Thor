@@ -89,6 +89,22 @@ void expectOffsetsToLengthsDType() {
     EXPECT_EQ(copyGpuVector<T>(lengths, stream), (std::vector<T>{T{3}, T{0}, T{4}, T{1}}));
 }
 
+template <typename OffsetT>
+void expectOffsetsToInt32LengthsCheckedDType() {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor offsets = makeGpuVector<OffsetT>({OffsetT{0}, OffsetT{3}, OffsetT{3}, OffsetT{7}, OffsetT{8}}, stream);
+    Tensor lengths = makeGpuVector<int32_t>({-7, -7, -7, -7}, stream);
+    Tensor errorBits = makeGpuVector<uint32_t>({99U}, stream);
+
+    rowPartitionOffsetsToInt32LengthsChecked(offsets, lengths, errorBits, 4, 8, 4, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<int32_t>(lengths, stream), (std::vector<int32_t>{3, 0, 4, 1}));
+    EXPECT_EQ(copyGpuVector<uint32_t>(errorBits, stream), (std::vector<uint32_t>{0U}));
+}
+
 template <typename T>
 void expectLengthsToOffsetsDType() {
     REQUIRE_CUDA_DEVICE();
@@ -190,6 +206,62 @@ TEST(RowPartition, RuntimeExtentRejectsInvalidStaticCapacityAndElementsPerValue)
 TEST(RowPartition, OffsetsToLengthsUint32) { expectOffsetsToLengthsDType<uint32_t>(); }
 
 TEST(RowPartition, OffsetsToLengthsUint64) { expectOffsetsToLengthsDType<uint64_t>(); }
+
+TEST(RowPartition, OffsetsToInt32LengthsCheckedUint32) { expectOffsetsToInt32LengthsCheckedDType<uint32_t>(); }
+
+TEST(RowPartition, OffsetsToInt32LengthsCheckedUint64) { expectOffsetsToInt32LengthsCheckedDType<uint64_t>(); }
+
+TEST(RowPartition, OffsetsToInt32LengthsCheckedReportsMalformedPartitionAndZerosAllLengths) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor offsets = makeGpuVector<uint32_t>({1U, 3U, 2U, 9U}, stream);
+    Tensor lengths = makeGpuVector<int32_t>({91, 92, 93}, stream);
+    Tensor errorBits = makeGpuVector<uint32_t>({0xffffffffU}, stream);
+
+    rowPartitionOffsetsToInt32LengthsChecked(offsets, lengths, errorBits, 3, 8, 8, stream);
+    stream.synchronize();
+
+    const uint32_t expected = static_cast<uint32_t>(ROW_PARTITION_OFFSETS_MUST_START_AT_ZERO) |
+                              static_cast<uint32_t>(ROW_PARTITION_OFFSETS_MUST_BE_MONOTONIC) |
+                              static_cast<uint32_t>(ROW_PARTITION_OFFSETS_EXCEED_CAPACITY);
+    EXPECT_EQ(copyGpuVector<uint32_t>(errorBits, stream), (std::vector<uint32_t>{expected}));
+    EXPECT_EQ(copyGpuVector<int32_t>(lengths, stream), (std::vector<int32_t>{0, 0, 0}));
+}
+
+TEST(RowPartition, OffsetsToInt32LengthsCheckedReportsBackendMaximumAndZerosAllLengths) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor offsets = makeGpuVector<uint64_t>({0ULL, 3ULL, 5ULL}, stream);
+    Tensor lengths = makeGpuVector<int32_t>({81, 82}, stream);
+    Tensor errorBits = makeGpuVector<uint32_t>({0U}, stream);
+
+    rowPartitionOffsetsToInt32LengthsChecked(offsets, lengths, errorBits, 2, 5, 2, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<uint32_t>(errorBits, stream),
+              (std::vector<uint32_t>{static_cast<uint32_t>(ROW_PARTITION_ROW_LENGTH_EXCEEDS_MAX)}));
+    EXPECT_EQ(copyGpuVector<int32_t>(lengths, stream), (std::vector<int32_t>{0, 0}));
+}
+
+TEST(RowPartition, OffsetsToInt32LengthsCheckedReportsInt32OverflowWithoutLargeAllocation) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    const uint64_t tooLargeForInt32 = static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) + 1ULL;
+    Tensor offsets = makeGpuVector<uint64_t>({0ULL, tooLargeForInt32}, stream);
+    Tensor lengths = makeGpuVector<int32_t>({73}, stream);
+    Tensor errorBits = makeGpuVector<uint32_t>({0U}, stream);
+
+    rowPartitionOffsetsToInt32LengthsChecked(
+        offsets, lengths, errorBits, 1, tooLargeForInt32, std::numeric_limits<uint64_t>::max(), stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<uint32_t>(errorBits, stream),
+              (std::vector<uint32_t>{static_cast<uint32_t>(ROW_PARTITION_ROW_LENGTH_EXCEEDS_INT32)}));
+    EXPECT_EQ(copyGpuVector<int32_t>(lengths, stream), (std::vector<int32_t>{0}));
+}
 
 TEST(RowPartition, LengthsToOffsetsUint32) { expectLengthsToOffsetsDType<uint32_t>(); }
 

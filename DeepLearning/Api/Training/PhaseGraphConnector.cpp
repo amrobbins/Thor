@@ -1,10 +1,12 @@
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 
 #include <algorithm>
 #include <functional>
+#include <optional>
 #include <queue>
 #include <set>
 #include <stdexcept>
@@ -87,8 +89,59 @@ void validateProducerConsumerDescriptors(const string& tensorName,
     }
 }
 
-Tensor ensureExternalInput(ComposedPhaseGraph& graph, const NetworkInput& sourceInput) {
+optional<RaggedNetworkInputReference> raggedInputForPhysicalName(const Network& network, const string& physicalInputName) {
+    for (const RaggedNetworkInputReference& ragged : network.getExternalRaggedNetworkInputs()) {
+        if (physicalInputName == ragged.valuesInputName || physicalInputName == ragged.offsetsInputName) {
+            return ragged;
+        }
+    }
+    return nullopt;
+}
+
+Tensor ensureExternalInput(ComposedPhaseGraph& graph, const Network& sourceNetwork, const NetworkInput& sourceInput) {
     const string& inputName = sourceInput.getName();
+
+    const optional<RaggedNetworkInputReference> sourceRagged =
+        raggedInputForPhysicalName(sourceNetwork, inputName);
+    if (sourceRagged.has_value()) {
+        RaggedTensor destinationRagged;
+        bool foundExisting = false;
+        for (const RaggedNetworkInputReference& existing : graph.network->getExternalRaggedNetworkInputs()) {
+            if (existing.name != sourceRagged->name) {
+                continue;
+            }
+            if (existing.raggedTensor.getDescriptor() != sourceRagged->raggedTensor.getDescriptor()) {
+                throw runtime_error("Phase graph logical ragged external input '" + sourceRagged->name +
+                                    "' has incompatible descriptors across active phases.");
+            }
+            destinationRagged = existing.raggedTensor;
+            foundExisting = true;
+            break;
+        }
+
+        if (!foundExisting) {
+            const ThorImplementation::RaggedTensorDescriptor descriptor =
+                sourceRagged->raggedTensor.getDescriptor();
+            destinationRagged = RaggedNetworkInput::Builder()
+                                    .network(*graph.network)
+                                    .name(sourceRagged->name)
+                                    .valuesDataType(descriptor.getValuesDataType())
+                                    .offsetsDataType(descriptor.getOffsetsDataType())
+                                    .trailingDimensions(descriptor.getTrailingDimensions())
+                                    .maxTotalValues(descriptor.getMaxTotalValues())
+                                    .batchSize(descriptor.getBatchSize())
+                                    .build();
+        }
+
+        graph.externalInputTensorsByName[sourceRagged->valuesInputName] = destinationRagged.getValues();
+        graph.externalInputTensorsByName[sourceRagged->offsetsInputName] = destinationRagged.getOffsets();
+        if (inputName == sourceRagged->valuesInputName) {
+            return destinationRagged.getValues();
+        }
+        THOR_THROW_IF_FALSE(inputName == sourceRagged->offsetsInputName);
+        return destinationRagged.getOffsets();
+    }
+
     auto existingIt = graph.externalInputTensorsByName.find(inputName);
     if (existingIt != graph.externalInputTensorsByName.end()) {
         const Tensor& existing = existingIt->second;
@@ -282,7 +335,7 @@ ComposedPhaseGraph buildComposedPhaseGraphByName(const vector<PhaseGraphNetworkS
                     throw runtime_error("Phase graph non-external input '" + inputName + "' in phase '" + phase.spec.phaseName +
                                         "' is not satisfied by another active phase output.");
                 }
-                destinationTensor = ensureExternalInput(graph, *input);
+                destinationTensor = ensureExternalInput(graph, *phase.spec.network, *input);
             }
             remap.map(input->getFeatureOutput().value(), destinationTensor);
         }

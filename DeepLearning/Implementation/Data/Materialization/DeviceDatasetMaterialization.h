@@ -8,7 +8,6 @@
 
 #include <cstdint>
 #include <filesystem>
-#include <set>
 #include <utility>
 
 namespace Thor {
@@ -54,19 +53,19 @@ class DeviceDatasetSessionDescription {
    public:
     DeviceDatasetSessionDescription(DatasetSplitManifest splits,
                                     BatchPolicy batching,
-                                    std::set<DatasetFieldId> requiredFieldIds = {})
+                                    DatasetFieldMaterializationRequirements fieldRequirements = {})
         : splits(std::move(splits)),
           batching(std::move(batching)),
-          requiredFieldIds(std::move(requiredFieldIds)) {}
+          fieldRequirements(std::move(fieldRequirements)) {}
 
     [[nodiscard]] const DatasetSplitManifest &getSplits() const { return splits; }
     [[nodiscard]] const BatchPolicy &getBatching() const { return batching; }
-    [[nodiscard]] const std::set<DatasetFieldId>& getRequiredFieldIds() const { return requiredFieldIds; }
+    [[nodiscard]] const DatasetFieldMaterializationRequirements& getFieldRequirements() const { return fieldRequirements; }
 
    private:
     DatasetSplitManifest splits;
     BatchPolicy batching;
-    std::set<DatasetFieldId> requiredFieldIds;
+    DatasetFieldMaterializationRequirements fieldRequirements;
 };
 
 }  // namespace Thor

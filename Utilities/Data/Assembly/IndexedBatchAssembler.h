@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Api/Data/DatasetSplitManifest.h"
 #include "Utilities/Data/Readers/IndexedDatasetReader.h"
@@ -185,6 +186,9 @@ struct IndexedBatchState {
     std::atomic<uint64_t> completedLoadChunks{0};
     bool loadComplete = false;
     std::map<std::string, ThorImplementation::Tensor> tensors;
+    std::map<std::string, ThorImplementation::RaggedTensor> raggedTensors;
+    std::vector<std::vector<IndexedRaggedTensorReference>> raggedReferences;
+    std::vector<IndexedRaggedTensorReference *> raggedReferenceBasePointers;
     std::vector<uint8_t *> tensorBasePointers;
     std::vector<uint8_t *> windowedTensorBasePointers;
     std::vector<uint8_t *> windowedMaskBasePointers;
@@ -210,7 +214,8 @@ class IndexedBatchAssembler {
                           uint64_t batchQueueDepth,
                           bool randomized = false,
                           std::optional<uint64_t> seed = std::nullopt,
-                          bool wrapTail = false);
+                          bool wrapTail = false,
+                          std::map<std::string, ThorImplementation::RaggedTensorDescriptor> raggedTensorDescriptors = {});
     ~IndexedBatchAssembler();
 
     IndexedBatchAssembler(const IndexedBatchAssembler &) = delete;
@@ -235,8 +240,10 @@ class IndexedBatchAssembler {
 #endif
 
     void acquireBatch(std::map<std::string, ThorImplementation::Tensor> &tensors,
+                      std::map<std::string, ThorImplementation::RaggedTensor> &raggedTensors,
                       IndexedReadyBatch &readyBatch);
-    void returnBuffers(const std::map<std::string, ThorImplementation::Tensor> &tensors);
+    void returnBuffers(const std::map<std::string, ThorImplementation::Tensor> &tensors,
+                       const std::map<std::string, ThorImplementation::RaggedTensor> &raggedTensors);
 
    private:
     std::shared_ptr<IndexedDatasetReader> reader;
@@ -245,8 +252,12 @@ class IndexedBatchAssembler {
     std::string splitName;
     std::map<std::string, ThorImplementation::TensorDescriptor> batchTensorDescriptors;
     std::map<std::string, std::unique_ptr<AsyncTensorQueue>> batchTensorQueues;
+    std::map<std::string, ThorImplementation::RaggedTensorDescriptor> raggedTensorDescriptors;
+    std::map<std::string, std::unique_ptr<AsyncTensorQueue>> raggedValuesQueues;
+    std::map<std::string, std::unique_ptr<AsyncTensorQueue>> raggedOffsetsQueues;
     std::vector<uint64_t> layoutTensorOrdinals;
     std::vector<uint64_t> layoutWindowedTensorOrdinals;
+    std::vector<uint64_t> layoutRaggedTensorOrdinals;
 
     uint64_t batchSize;
     uint64_t batchQueueDepth;
@@ -375,7 +386,10 @@ class IndexedBatchAssembler {
     void fillPendingBatchAgeStats(IndexedBatchAssemblerStats &stats) const;
     uint64_t nextLogicalSplitPosition();
     void validateGlobalIndex(uint64_t index, const char *context) const;
+    void materializeRaggedBatch(IndexedDatasetReader::Session &session, IndexedBatchState &batchState) const;
     void validateReturnedTensorMapExact(const std::map<std::string, ThorImplementation::Tensor> &tensors) const;
+    void validateReturnedRaggedTensorMapExact(
+        const std::map<std::string, ThorImplementation::RaggedTensor> &raggedTensors) const;
     void recordWorkerException(std::exception_ptr exception);
     void throwIfWorkerFailed() const;
     void setResolvedIoBackend(const std::string &backendName);

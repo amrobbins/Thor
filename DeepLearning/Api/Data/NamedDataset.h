@@ -2,10 +2,10 @@
 
 #include "DeepLearning/Api/Data/DatasetId.h"
 #include "DeepLearning/Api/Data/DatasetSchema.h"
+#include "DeepLearning/Api/Data/DatasetFieldMaterializationRequirement.h"
 
 #include <cstdint>
 #include <memory>
-#include <set>
 #include <string_view>
 
 struct MaterializedNamedDatasetSnapshot;
@@ -45,7 +45,7 @@ class NamedDataset : public std::enable_shared_from_this<NamedDataset> {
         const BatchPolicy &batching,
         const DatasetAccessPolicy &accessPolicy,
         uint64_t maxInFlightBatches,
-        const std::set<DatasetFieldId> &requiredFieldIds) const = 0;
+        const DatasetFieldMaterializationRequirements &fieldRequirements) const = 0;
 
    private:
     [[nodiscard]] virtual std::unique_ptr<DatasetMaterializationDescription>

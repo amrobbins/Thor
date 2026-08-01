@@ -35,7 +35,7 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
                              Thor::DatasetSplitManifest splits,
                              Thor::BatchPolicy batching,
                              uint64_t batchQueueDepth = 32,
-                             std::set<Thor::DatasetFieldId> requiredFieldIds = {});
+                             Thor::DatasetFieldMaterializationRequirements fieldRequirements = {});
 
     ~IndexedNamedBatchSession() override;
 
@@ -52,8 +52,9 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
     [[nodiscard]] const DatasetLayout &getLayout() const;
     [[nodiscard]] const std::shared_ptr<const Thor::FileDataset> &getDataset() const { return dataset; }
     [[nodiscard]] const Thor::DatasetSplitManifest &getSplitManifest() const { return splitManifest; }
-    [[nodiscard]] const std::set<Thor::DatasetFieldId>& getRequiredDatasetFieldIds() const override {
-        return requiredFieldIds;
+    [[nodiscard]] const Thor::DatasetFieldMaterializationRequirements&
+    getDatasetFieldMaterializationRequirements() const override {
+        return fieldRequirements;
     }
     [[nodiscard]] uint64_t getNumDatasetExamples() const;
     [[nodiscard]] uint64_t getBatchQueueDepth() const;
@@ -81,7 +82,7 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
     void setBatchTailModeForRuntimeImpl(ThorImplementation::BatchTailMode mode) override;
     std::shared_ptr<const Thor::FileDataset> dataset;
     Thor::DatasetSplitManifest splitManifest;
-    std::set<Thor::DatasetFieldId> requiredFieldIds;
+    Thor::DatasetFieldMaterializationRequirements fieldRequirements;
 
     std::unique_ptr<IndexedBatchAssembler> trainAssembler;
     std::unique_ptr<IndexedBatchAssembler> validateAssembler;
@@ -96,6 +97,7 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
     struct PendingReturnedBuffers {
         ExampleType exampleType = ExampleType::TRAIN;
         std::shared_ptr<std::map<std::string, ThorImplementation::Tensor>> tensors;
+        std::shared_ptr<std::map<std::string, ThorImplementation::RaggedTensor>> raggedTensors;
         std::vector<Event> consumedEvents;
     };
 
@@ -120,6 +122,7 @@ class IndexedNamedBatchSession : public Thor::BatchSession {
     void enqueueReturnedBuffers(
         ExampleType exampleType,
         std::shared_ptr<std::map<std::string, ThorImplementation::Tensor>> tensors,
+        std::shared_ptr<std::map<std::string, ThorImplementation::RaggedTensor>> raggedTensors,
         std::vector<Event> consumedEvents) noexcept;
     void recyclerMain() noexcept;
     void stopRecycler() noexcept;

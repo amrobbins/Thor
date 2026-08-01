@@ -65,8 +65,9 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
     [[nodiscard]] std::optional<ThorImplementation::TensorPlacement> getBatchTensorPlacement(
         const std::string &tensorName) const override;
     [[nodiscard]] std::vector<Event> getSynchronizeEvents() const override;
-    [[nodiscard]] const std::set<Thor::DatasetFieldId>& getRequiredDatasetFieldIds() const override {
-        return requiredFieldIds;
+    [[nodiscard]] const Thor::DatasetFieldMaterializationRequirements&
+    getDatasetFieldMaterializationRequirements() const override {
+        return fieldRequirements;
     }
     void cancel() override;
 
@@ -114,7 +115,7 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
     Thor::DeviceDatasetLease dataset;
     Thor::DatasetSplitManifest splits;
     Thor::BatchPolicy batching;
-    std::set<Thor::DatasetFieldId> requiredFieldIds;
+    Thor::DatasetFieldMaterializationRequirements fieldRequirements;
     uint64_t batchQueueDepth = 0;
     std::map<ExampleType, std::unique_ptr<SplitRuntime>> splitRuntimes;
     std::atomic<bool> cancelled{false};

@@ -24,6 +24,12 @@ std::string makeShardFilename(uint64_t shardIndex) {
     return out.str();
 }
 
+std::string makeRaggedValuesFilename(uint64_t ordinal) {
+    std::ostringstream out;
+    out << "ragged_values/ragged_values_" << std::setw(6) << std::setfill('0') << ordinal << ".bin";
+    return out.str();
+}
+
 void ensureEmptyOrCreateDirectory(const std::filesystem::path &path) {
     if (std::filesystem::exists(path)) {
         if (!std::filesystem::is_directory(path)) {
@@ -108,6 +114,49 @@ void checkedIndexBounds(int64_t startIndex, uint64_t numSteps, const std::string
     }
 }
 
+uint64_t readRaggedOffset(const void *offsets, ThorImplementation::DataType dataType, uint64_t index) {
+    if (offsets == nullptr) {
+        throw std::runtime_error("DatasetWriter ragged offsets pointer is null.");
+    }
+    if (dataType == ThorImplementation::DataType::UINT32) {
+        uint32_t value = 0;
+        std::memcpy(&value, static_cast<const uint8_t *>(offsets) + index * sizeof(uint32_t), sizeof(value));
+        return value;
+    }
+    if (dataType == ThorImplementation::DataType::UINT64) {
+        uint64_t value = 0;
+        std::memcpy(&value, static_cast<const uint8_t *>(offsets) + index * sizeof(uint64_t), sizeof(value));
+        return value;
+    }
+    throw std::runtime_error("DatasetWriter ragged offsets dtype must be UINT32 or UINT64.");
+}
+
+void appendFileBytes(const std::filesystem::path &path, const void *data, uint64_t numBytes, const std::string &context) {
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream out(path, std::ios::binary | std::ios::app);
+    if (!out.is_open()) {
+        throw std::runtime_error(context + " failed to open sidecar: " + path.string());
+    }
+    if (numBytes == 0) {
+        return;
+    }
+    if (data == nullptr) {
+        throw std::runtime_error(context + " received null data for non-empty sidecar append.");
+    }
+    const uint8_t *cursor = static_cast<const uint8_t *>(data);
+    uint64_t remaining = numBytes;
+    const uint64_t maxChunk = static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max());
+    while (remaining != 0) {
+        const uint64_t chunk = std::min<uint64_t>(remaining, maxChunk);
+        out.write(reinterpret_cast<const char *>(cursor), static_cast<std::streamsize>(chunk));
+        if (!out.good()) {
+            throw std::runtime_error(context + " failed while writing sidecar: " + path.string());
+        }
+        cursor += chunk;
+        remaining -= chunk;
+    }
+}
+
 }  // namespace
 
 class DatasetWriter::Runtime {
@@ -155,6 +204,12 @@ DatasetWriter::DatasetWriter(std::filesystem::path datasetPath,
         entry.filename = makeWindowSourceFilename(ordinal++);
         windowSources.emplace(spec.name, std::move(entry));
     }
+    ordinal = 0;
+    for (const DatasetLayout::RaggedTensorSpec &spec : this->layout.raggedTensors()) {
+        RaggedTensorManifestEntry entry;
+        entry.filename = makeRaggedValuesFilename(ordinal++);
+        raggedValues.emplace(spec.name, std::move(entry));
+    }
 }
 
 DatasetWriter::~DatasetWriter() {
@@ -171,6 +226,10 @@ void DatasetWriter::writeIndexedExample(const std::map<std::string, TensorView> 
         throw std::runtime_error(
             "DatasetWriter writeIndexedExample for a layout with windowed tensors requires windowed tensor references.");
     }
+    if (layout.hasRaggedTensors()) {
+        throw std::runtime_error(
+            "DatasetWriter writeIndexedExample for a layout with ragged tensors requires ragged tensor values.");
+    }
     validateWritable();
     validateTensorMapExact(tensors);
     std::vector<uint8_t> record = packRecord(tensors);
@@ -179,7 +238,30 @@ void DatasetWriter::writeIndexedExample(const std::map<std::string, TensorView> 
 
 void DatasetWriter::writeIndexedExample(
     const std::map<std::string, TensorView> &tensors,
+    const std::map<std::string, RaggedTensorView> &raggedTensors) {
+    if (layout.hasWindowedTensors()) {
+        throw std::runtime_error(
+            "DatasetWriter writeIndexedExample for a layout with windowed tensors requires windowed tensor references.");
+    }
+    validateWritable();
+    validateTensorMapExact(tensors);
+    validateRaggedTensorMapExact(raggedTensors);
+    if (expectedNumExamples.has_value() && numExamples() >= expectedNumExamples.value()) {
+        throw std::runtime_error("DatasetWriter write would exceed expected_num_examples.");
+    }
+    auto raggedReferences = appendRaggedValues(raggedTensors);
+    std::vector<uint8_t> record = packRecord(tensors);
+    packRaggedReferences(record, raggedReferences);
+    writePackedIndexedRecords(record.data(), 1);
+}
+
+void DatasetWriter::writeIndexedExample(
+    const std::map<std::string, TensorView> &tensors,
     const std::map<std::string, WindowedTensorReferenceView> &windowedTensorReferences) {
+    if (layout.hasRaggedTensors()) {
+        throw std::runtime_error(
+            "DatasetWriter writeIndexedExample for a layout with ragged tensors requires ragged tensor values.");
+    }
     if (layout.hasAffineWindowedTensors()) {
         throw std::runtime_error("DatasetWriter affine window layouts require writeAffineExamples.");
     }
@@ -190,10 +272,34 @@ void DatasetWriter::writeIndexedExample(
     writePackedIndexedRecords(record.data(), 1);
 }
 
+void DatasetWriter::writeIndexedExample(
+    const std::map<std::string, TensorView> &tensors,
+    const std::map<std::string, WindowedTensorReferenceView> &windowedTensorReferences,
+    const std::map<std::string, RaggedTensorView> &raggedTensors) {
+    if (layout.hasAffineWindowedTensors()) {
+        throw std::runtime_error("DatasetWriter affine window layouts require writeAffineExamples.");
+    }
+    validateWritable();
+    validateTensorMapExact(tensors);
+    validateWindowedTensorReferenceMapExact(windowedTensorReferences);
+    validateRaggedTensorMapExact(raggedTensors);
+    if (expectedNumExamples.has_value() && numExamples() >= expectedNumExamples.value()) {
+        throw std::runtime_error("DatasetWriter write would exceed expected_num_examples.");
+    }
+    auto raggedReferences = appendRaggedValues(raggedTensors);
+    std::vector<uint8_t> record = packRecord(tensors, windowedTensorReferences);
+    packRaggedReferences(record, raggedReferences);
+    writePackedIndexedRecords(record.data(), 1);
+}
+
 void DatasetWriter::writeIndexedExamples(const std::map<std::string, TensorBatchView> &tensors) {
     if (layout.hasWindowedTensors()) {
         throw std::runtime_error(
             "DatasetWriter writeIndexedExamples for a layout with windowed tensors requires windowed tensor references.");
+    }
+    if (layout.hasRaggedTensors()) {
+        throw std::runtime_error(
+            "DatasetWriter writeIndexedExamples for a layout with ragged tensors requires ragged tensor values.");
     }
     validateWritable();
     const uint64_t count = validateTensorBatchMapExact(tensors);
@@ -203,7 +309,35 @@ void DatasetWriter::writeIndexedExamples(const std::map<std::string, TensorBatch
 
 void DatasetWriter::writeIndexedExamples(
     const std::map<std::string, TensorBatchView> &tensors,
+    const std::map<std::string, RaggedTensorBatchView> &raggedTensors) {
+    if (layout.hasWindowedTensors()) {
+        throw std::runtime_error(
+            "DatasetWriter writeIndexedExamples for a layout with windowed tensors requires windowed tensor references.");
+    }
+    validateWritable();
+    const uint64_t denseCount = validateTensorBatchMapExact(tensors);
+    const uint64_t raggedCount = validateRaggedTensorBatchMapExact(raggedTensors);
+    const uint64_t count = denseCount != 0 ? denseCount : raggedCount;
+    if (count == 0 || (denseCount != 0 && raggedCount != 0 && denseCount != raggedCount)) {
+        throw std::runtime_error("DatasetWriter dense and ragged tensor batches must have the same non-zero example count.");
+    }
+    if (expectedNumExamples.has_value() &&
+        (numExamples() > expectedNumExamples.value() || count > expectedNumExamples.value() - numExamples())) {
+        throw std::runtime_error("DatasetWriter write would exceed expected_num_examples.");
+    }
+    auto raggedReferences = appendRaggedValues(raggedTensors, count);
+    std::vector<uint8_t> records = packRecords(tensors, count);
+    packRaggedReferences(records, raggedReferences, count);
+    writePackedIndexedRecords(records.data(), count);
+}
+
+void DatasetWriter::writeIndexedExamples(
+    const std::map<std::string, TensorBatchView> &tensors,
     const std::map<std::string, WindowedTensorReferenceBatchView> &windowedTensorReferences) {
+    if (layout.hasRaggedTensors()) {
+        throw std::runtime_error(
+            "DatasetWriter writeIndexedExamples for a layout with ragged tensors requires ragged tensor values.");
+    }
     if (layout.hasAffineWindowedTensors()) {
         throw std::runtime_error("DatasetWriter affine window layouts require writeAffineExamples.");
     }
@@ -213,10 +347,44 @@ void DatasetWriter::writeIndexedExamples(
     writePackedIndexedRecords(records.data(), count);
 }
 
+void DatasetWriter::writeIndexedExamples(
+    const std::map<std::string, TensorBatchView> &tensors,
+    const std::map<std::string, WindowedTensorReferenceBatchView> &windowedTensorReferences,
+    const std::map<std::string, RaggedTensorBatchView> &raggedTensors) {
+    if (layout.hasAffineWindowedTensors()) {
+        throw std::runtime_error("DatasetWriter affine window layouts require writeAffineExamples.");
+    }
+    validateWritable();
+    const uint64_t baseCount = validateTensorAndWindowedTensorReferenceBatchMapsExact(tensors, windowedTensorReferences);
+    const uint64_t raggedCount = validateRaggedTensorBatchMapExact(raggedTensors);
+    if (baseCount == 0 || raggedCount != baseCount) {
+        throw std::runtime_error("DatasetWriter tensor, windowed, and ragged batches must have the same non-zero example count.");
+    }
+    if (expectedNumExamples.has_value() &&
+        (numExamples() > expectedNumExamples.value() || baseCount > expectedNumExamples.value() - numExamples())) {
+        throw std::runtime_error("DatasetWriter write would exceed expected_num_examples.");
+    }
+    auto raggedReferences = appendRaggedValues(raggedTensors, baseCount);
+    std::vector<uint8_t> records = packRecords(tensors, windowedTensorReferences, baseCount);
+    packRaggedReferences(records, raggedReferences, baseCount);
+    writePackedIndexedRecords(records.data(), baseCount);
+}
+
 void DatasetWriter::writeAffineExamples(
     uint64_t count,
     const std::map<std::string, TensorBatchView> &tensors,
     const std::map<std::string, AffineWindowedTensorReferenceView> &windowedTensorReferences) {
+    if (layout.hasRaggedTensors()) {
+        throw std::runtime_error("DatasetWriter writeAffineExamples for a ragged layout requires ragged tensor values.");
+    }
+    writeAffineExamples(count, tensors, windowedTensorReferences, {});
+}
+
+void DatasetWriter::writeAffineExamples(
+    uint64_t count,
+    const std::map<std::string, TensorBatchView> &tensors,
+    const std::map<std::string, AffineWindowedTensorReferenceView> &windowedTensorReferences,
+    const std::map<std::string, RaggedTensorBatchView> &raggedTensors) {
     validateWritable();
     if (!layout.hasAffineWindowedTensors() || layout.hasIndexedWindowedTensors()) {
         throw std::runtime_error("DatasetWriter writeAffineExamples requires an affine window-reference layout.");
@@ -244,6 +412,10 @@ void DatasetWriter::writeAffineExamples(
         (void)layout.tensor(entry.first);
     }
     validateAffineWindowedTensorReferenceMapExact(windowedTensorReferences, count);
+    const uint64_t raggedCount = validateRaggedTensorBatchMapExact(raggedTensors);
+    if (layout.hasRaggedTensors() && raggedCount != count) {
+        throw std::runtime_error("DatasetWriter affine ragged tensor batches must match count.");
+    }
 
     const uint64_t rowStart = totalExamples;
     if (expectedNumExamples.has_value() &&
@@ -252,7 +424,14 @@ void DatasetWriter::writeAffineExamples(
     }
 
     if (layout.recordSizeBytes() != 0) {
+        std::map<std::string, std::vector<RaggedTensorReference>> raggedReferences;
+        if (layout.hasRaggedTensors()) {
+            raggedReferences = appendRaggedValues(raggedTensors, count);
+        }
         std::vector<uint8_t> records = packRecords(tensors, count);
+        if (!raggedReferences.empty()) {
+            packRaggedReferences(records, raggedReferences, count);
+        }
         writePackedIndexedRecords(records.data(), count);
     } else {
         totalExamples = checkedAdd(totalExamples, count, "DatasetWriter affine example count");
@@ -691,6 +870,201 @@ uint64_t DatasetWriter::validateTensorAndWindowedTensorReferenceBatchMapsExact(
     }
     return count;
 }
+void DatasetWriter::validateRaggedTensorMapExact(
+    const std::map<std::string, RaggedTensorView> &raggedTensors) const {
+    if (raggedTensors.size() != layout.raggedTensors().size()) {
+        throw std::runtime_error("DatasetWriter ragged tensor count " + std::to_string(raggedTensors.size()) +
+                                 " does not match layout ragged tensor count " +
+                                 std::to_string(layout.raggedTensors().size()) + ".");
+    }
+    for (const DatasetLayout::RaggedTensorSpec &spec : layout.raggedTensors()) {
+        const auto it = raggedTensors.find(spec.name);
+        if (it == raggedTensors.end()) {
+            throw std::runtime_error("DatasetWriter missing ragged tensor: " + spec.name);
+        }
+        const RaggedTensorView &view = it->second;
+        if (view.dataType != spec.dataType) {
+            throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name + "' has wrong dtype.");
+        }
+        if (view.dimensions.size() != spec.valueDimensions.size() + 1) {
+            throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name + "' shape " +
+                                     shapeToString(view.dimensions) + " must be [row_values, *value_shape].");
+        }
+        std::vector<uint64_t> valueShape(view.dimensions.begin() + 1, view.dimensions.end());
+        if (valueShape != spec.valueDimensions) {
+            throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name + "' value shape does not match layout.");
+        }
+        const uint64_t rowValues = view.dimensions.front();
+        const uint64_t expectedBytes = checkedMul(rowValues, spec.valueNumBytes(), "DatasetWriter ragged row bytes");
+        if (view.numBytes != expectedBytes) {
+            throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name + "' byte count does not match row length.");
+        }
+        if (expectedBytes != 0 && view.data == nullptr) {
+            throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name + "' has null data for a non-empty row.");
+        }
+    }
+    for (const auto &entry : raggedTensors) {
+        (void)layout.raggedTensor(entry.first);
+    }
+}
+
+uint64_t DatasetWriter::validateRaggedTensorBatchMapExact(
+    const std::map<std::string, RaggedTensorBatchView> &raggedTensors) const {
+    if (raggedTensors.size() != layout.raggedTensors().size()) {
+        throw std::runtime_error("DatasetWriter ragged tensor batch count " + std::to_string(raggedTensors.size()) +
+                                 " does not match layout ragged tensor count " +
+                                 std::to_string(layout.raggedTensors().size()) + ".");
+    }
+    bool haveCount = false;
+    uint64_t count = 0;
+    for (const DatasetLayout::RaggedTensorSpec &spec : layout.raggedTensors()) {
+        const auto it = raggedTensors.find(spec.name);
+        if (it == raggedTensors.end()) {
+            throw std::runtime_error("DatasetWriter missing ragged tensor batch: " + spec.name);
+        }
+        const RaggedTensorBatchView &view = it->second;
+        if (view.count == 0) {
+            throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name + "' must contain at least one example.");
+        }
+        if (!haveCount) {
+            count = view.count;
+            haveCount = true;
+        } else if (count != view.count) {
+            throw std::runtime_error("DatasetWriter ragged tensor batches must have the same example count.");
+        }
+        if (view.dataType != spec.dataType) {
+            throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name + "' has wrong dtype.");
+        }
+        if (view.offsetsDataType != ThorImplementation::DataType::UINT32 &&
+            view.offsetsDataType != ThorImplementation::DataType::UINT64) {
+            throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name +
+                                     "' offsets dtype must be UINT32 or UINT64.");
+        }
+        if (view.offsets == nullptr) {
+            throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name + "' has null offsets.");
+        }
+        if (view.dimensions.size() != spec.valueDimensions.size() + 1) {
+            throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name + "' shape " +
+                                     shapeToString(view.dimensions) + " must be [total_values, *value_shape].");
+        }
+        std::vector<uint64_t> valueShape(view.dimensions.begin() + 1, view.dimensions.end());
+        if (valueShape != spec.valueDimensions) {
+            throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name + "' value shape does not match layout.");
+        }
+        const uint64_t totalValues = view.dimensions.front();
+        const uint64_t expectedBytes = checkedMul(totalValues, spec.valueNumBytes(), "DatasetWriter ragged batch bytes");
+        if (view.numBytes != expectedBytes) {
+            throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name + "' byte count does not match total values.");
+        }
+        if (expectedBytes != 0 && view.data == nullptr) {
+            throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name + "' has null data for non-empty values.");
+        }
+        uint64_t previous = readRaggedOffset(view.offsets, view.offsetsDataType, 0);
+        if (previous != 0) {
+            throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name + "' offsets[0] must be zero.");
+        }
+        for (uint64_t row = 0; row < view.count; ++row) {
+            const uint64_t next = readRaggedOffset(view.offsets, view.offsetsDataType, row + 1);
+            if (next < previous) {
+                throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name + "' offsets must be monotonic.");
+            }
+            previous = next;
+        }
+        if (previous != totalValues) {
+            throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name +
+                                     "' final offset does not match total_values.");
+        }
+    }
+    for (const auto &entry : raggedTensors) {
+        (void)layout.raggedTensor(entry.first);
+    }
+    return haveCount ? count : 0;
+}
+
+std::map<std::string, DatasetWriter::RaggedTensorReference> DatasetWriter::appendRaggedValues(
+    const std::map<std::string, RaggedTensorView> &raggedTensors) {
+    std::map<std::string, RaggedTensorReference> references;
+    for (const DatasetLayout::RaggedTensorSpec &spec : layout.raggedTensors()) {
+        const RaggedTensorView &view = raggedTensors.at(spec.name);
+        RaggedTensorManifestEntry &entry = raggedValues.at(spec.name);
+        const uint64_t valueCount = view.dimensions.front();
+        const uint64_t baseValue = entry.numValues;
+        const uint64_t newNumValues = checkedAdd(baseValue, valueCount, "DatasetWriter ragged value count");
+        const uint64_t newNumBytes = checkedAdd(entry.numBytes, view.numBytes, "DatasetWriter ragged sidecar byte count");
+        const RaggedTensorReference reference{.startValue = baseValue, .valueCount = valueCount};
+        appendFileBytes(datasetPath / entry.filename, view.data, view.numBytes,
+                        "DatasetWriter ragged tensor '" + spec.name + "'");
+        entry.numValues = newNumValues;
+        entry.numBytes = newNumBytes;
+        references.emplace(spec.name, reference);
+    }
+    return references;
+}
+
+std::map<std::string, std::vector<DatasetWriter::RaggedTensorReference>> DatasetWriter::appendRaggedValues(
+    const std::map<std::string, RaggedTensorBatchView> &raggedTensors,
+    uint64_t count) {
+    std::map<std::string, std::vector<RaggedTensorReference>> references;
+    for (const DatasetLayout::RaggedTensorSpec &spec : layout.raggedTensors()) {
+        const RaggedTensorBatchView &view = raggedTensors.at(spec.name);
+        if (view.count != count) {
+            throw std::runtime_error("DatasetWriter ragged batch count changed after validation.");
+        }
+        RaggedTensorManifestEntry &entry = raggedValues.at(spec.name);
+        const uint64_t totalValues = view.dimensions.front();
+        const uint64_t baseValue = entry.numValues;
+        const uint64_t newNumValues = checkedAdd(baseValue, totalValues, "DatasetWriter ragged value count");
+        const uint64_t newNumBytes = checkedAdd(entry.numBytes, view.numBytes, "DatasetWriter ragged sidecar byte count");
+        std::vector<RaggedTensorReference> fieldReferences;
+        fieldReferences.reserve(static_cast<size_t>(count));
+        for (uint64_t row = 0; row < count; ++row) {
+            const uint64_t begin = readRaggedOffset(view.offsets, view.offsetsDataType, row);
+            const uint64_t end = readRaggedOffset(view.offsets, view.offsetsDataType, row + 1);
+            fieldReferences.push_back(RaggedTensorReference{
+                .startValue = checkedAdd(baseValue, begin, "DatasetWriter ragged reference start"),
+                .valueCount = end - begin});
+        }
+        appendFileBytes(datasetPath / entry.filename, view.data, view.numBytes,
+                        "DatasetWriter ragged tensor batch '" + spec.name + "'");
+        entry.numValues = newNumValues;
+        entry.numBytes = newNumBytes;
+        references.emplace(spec.name, std::move(fieldReferences));
+    }
+    return references;
+}
+
+void DatasetWriter::packRaggedReferences(
+    std::vector<uint8_t> &record,
+    const std::map<std::string, RaggedTensorReference> &references) const {
+    if (record.size() != layout.recordSizeBytes()) {
+        throw std::runtime_error("DatasetWriter ragged reference record has wrong byte size.");
+    }
+    for (const DatasetLayout::RaggedTensorSpec &spec : layout.raggedTensors()) {
+        const RaggedTensorReference &reference = references.at(spec.name);
+        uint8_t *destination = record.data() + spec.referenceOffsetBytes;
+        std::memcpy(destination, &reference.startValue, sizeof(reference.startValue));
+        std::memcpy(destination + sizeof(reference.startValue), &reference.valueCount, sizeof(reference.valueCount));
+    }
+}
+
+void DatasetWriter::packRaggedReferences(
+    std::vector<uint8_t> &records,
+    const std::map<std::string, std::vector<RaggedTensorReference>> &references,
+    uint64_t count) const {
+    if (records.size() != checkedMul(count, layout.recordSizeBytes(), "DatasetWriter ragged reference records")) {
+        throw std::runtime_error("DatasetWriter ragged reference batch has wrong byte size.");
+    }
+    for (uint64_t row = 0; row < count; ++row) {
+        uint8_t *record = records.data() + checkedMul(row, layout.recordSizeBytes(), "DatasetWriter ragged record offset");
+        for (const DatasetLayout::RaggedTensorSpec &spec : layout.raggedTensors()) {
+            const RaggedTensorReference &reference = references.at(spec.name).at(static_cast<size_t>(row));
+            uint8_t *destination = record + spec.referenceOffsetBytes;
+            std::memcpy(destination, &reference.startValue, sizeof(reference.startValue));
+            std::memcpy(destination + sizeof(reference.startValue), &reference.valueCount, sizeof(reference.valueCount));
+        }
+    }
+}
+
 std::vector<uint8_t> DatasetWriter::packRecord(const std::map<std::string, TensorView> &tensors) const {
     std::vector<uint8_t> record(layout.recordSizeBytes(), 0);
     for (const DatasetLayout::TensorSpec &spec : layout.tensors()) {
@@ -815,6 +1189,38 @@ void DatasetWriter::writeManifest() const {
     }
     root["preallocated"] = preallocate;
     root["shards"] = json::array();
+
+    if (!raggedValues.empty()) {
+        if (!root.contains("ragged_tensors") || !root.at("ragged_tensors").is_object()) {
+            throw std::runtime_error("DatasetWriter internal error: missing ragged_tensors in layout manifest.");
+        }
+        for (const auto &entry : raggedValues) {
+            const DatasetLayout::RaggedTensorSpec &spec = layout.raggedTensor(entry.first);
+            const uint64_t expectedBytes = checkedMul(entry.second.numValues, spec.valueNumBytes(),
+                                                      "DatasetWriter ragged manifest byte count");
+            if (expectedBytes != entry.second.numBytes) {
+                throw std::runtime_error("DatasetWriter internal ragged sidecar byte/value count mismatch for '" +
+                                         entry.first + "'.");
+            }
+            const std::filesystem::path valuesPath = datasetPath / entry.second.filename;
+            std::filesystem::create_directories(valuesPath.parent_path());
+            if (!std::filesystem::exists(valuesPath)) {
+                std::ofstream emptyValues(valuesPath, std::ios::binary | std::ios::app);
+                if (!emptyValues.is_open()) {
+                    throw std::runtime_error("DatasetWriter failed to create empty ragged values sidecar: " +
+                                             valuesPath.string());
+                }
+            }
+            if (std::filesystem::file_size(valuesPath) != entry.second.numBytes) {
+                throw std::runtime_error("DatasetWriter ragged values sidecar size does not match bytes written: " +
+                                         valuesPath.string());
+            }
+            root["ragged_tensors"].at(entry.first)["storage"] =
+                json{{"file", entry.second.filename},
+                     {"num_bytes", entry.second.numBytes},
+                     {"num_values", entry.second.numValues}};
+        }
+    }
 
     if (!windowSources.empty()) {
         if (!root.contains("window_sources") || !root.at("window_sources").is_object()) {

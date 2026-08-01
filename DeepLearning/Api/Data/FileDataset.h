@@ -36,7 +36,7 @@ class FileDataset final : public NamedDataset {
         const BatchPolicy &batching,
         const DatasetAccessPolicy &accessPolicy,
         uint64_t maxInFlightBatches,
-        const std::set<DatasetFieldId> &requiredFieldIds) const override;
+        const DatasetFieldMaterializationRequirements &fieldRequirements) const override;
 
     [[nodiscard]] std::unique_ptr<DatasetMaterializationDescription>
     describeMaterializationForRuntime() const override;

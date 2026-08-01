@@ -1516,7 +1516,6 @@ static std::string fusedRegionSignature(const PhysicalExpression& expr, uint32_t
 shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey& key,
                                                          const vector<char>& cubin,
                                                          const string& kernel_name,
-                                                         const vector<string>& input_names,
                                                          const std::vector<NamedInput::Kind>& input_kinds,
                                                          const std::vector<DataType>& input_dtypes,
                                                          const std::vector<DataType>& output_dtypes,
@@ -1532,7 +1531,6 @@ shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey&
     out->module = module;
     out->kernel = fn;
     out->kernel_name = kernel_name;
-    out->input_names = input_names;
     out->input_kinds = input_kinds;
     out->input_dtypes = input_dtypes;
     out->output_dtypes = output_dtypes;
@@ -1689,12 +1687,9 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     if (hit)
         return hit;
 
-    vector<string> input_names;
     std::vector<NamedInput::Kind> input_kinds;
-    input_names.reserve(stage.expr.inputs.size());
     input_kinds.reserve(stage.expr.inputs.size());
     for (const NamedInput& input : stage.expr.inputs) {
-        input_names.push_back(input.name);
         input_kinds.push_back(input.kind);
     }
     const std::vector<DataType> input_dtypes = collectCompiledInputDTypes(stage.expr);
@@ -1715,7 +1710,6 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
         compiled->key = key;
         compiled->kernel_name = "fused_kernel";
         compiled->deviceNum = sig.device_num;
-        compiled->input_names = std::move(input_names);
         compiled->input_kinds = std::move(input_kinds);
         compiled->input_dtypes = input_dtypes;
         compiled->output_dtypes = output_dtypes;
@@ -1732,7 +1726,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
 
     vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
     vector<char> cubin = linkToCubin(ltoir, sig);
-    auto compiled = loadCubin(key, cubin, kernel_name, input_names, input_kinds, input_dtypes, output_dtypes, sig.device_num);
+    auto compiled = loadCubin(key, cubin, kernel_name, input_kinds, input_dtypes, output_dtypes, sig.device_num);
     if (stageHasTransposedMaterializedOutput(stage.outputs)) {
         compiled->launch_kind = CompiledEquation::LaunchKind::FusedTiledTranspose;
         compiled->elements_per_thread = 1;
@@ -7157,12 +7151,9 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
         return hit.value();
     }
 
-    std::vector<std::string> input_names;
     std::vector<NamedInput::Kind> input_kinds;
-    input_names.reserve(stage.expr.inputs.size());
     input_kinds.reserve(stage.expr.inputs.size());
     for (const NamedInput& input : stage.expr.inputs) {
-        input_names.push_back(input.name);
         input_kinds.push_back(input.kind);
     }
     const std::vector<DataType> input_dtypes = collectCompiledInputDTypes(stage.expr);
@@ -7185,7 +7176,6 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
     shared_ptr<CompiledEquation> compiled = loadCubin(EquationCacheKey(canonicalize(stage.expr), sig),
                                                       cubin,
                                                       kernel_name,
-                                                      input_names,
                                                       input_kinds,
                                                       input_dtypes,
                                                       output_dtypes,

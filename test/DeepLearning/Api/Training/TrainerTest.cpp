@@ -79,11 +79,11 @@ class FakeDataset final : public NamedDataset {
                                                    const BatchPolicy& batching,
                                                    const DatasetAccessPolicy& accessPolicy,
                                                    uint64_t maxInFlightBatches,
-                                                   const std::set<DatasetFieldId>& requiredFieldIds) const override {
+                                                   const DatasetFieldMaterializationRequirements& fieldRequirements) const override {
         (void)splits;
         (void)accessPolicy;
         (void)maxInFlightBatches;
-        (void)requiredFieldIds;
+        (void)fieldRequirements;
         return std::make_shared<FakeBatchSession>(batching.getBatchSize());
     }
 
@@ -580,6 +580,8 @@ TEST(Trainer, CompilesStrictDatasetInputBindingsBeforeOpeningSession) {
     ASSERT_NE(session, nullptr);
     EXPECT_EQ(session->getRequiredDatasetFieldIds(),
               trainer.getRequiredDatasetFieldIds());
+    EXPECT_EQ(session->getDatasetFieldMaterializationRequirements(),
+              trainer.getRequiredDatasetFieldRequirements());
     std::filesystem::remove_all(path);
 }
 

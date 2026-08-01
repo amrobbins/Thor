@@ -96,7 +96,12 @@ class Trainer {
     [[nodiscard]] const TrainingRuntimeConfig& getRuntimeConfig() const { return runtimeConfig; }
     [[nodiscard]] std::shared_ptr<const TrainingData> getTrainingData() const { return trainingData; }
     [[nodiscard]] const std::vector<TrainingInputBinding>& getDatasetInputBindings() const { return datasetInputBindings; }
-    [[nodiscard]] const std::set<DatasetFieldId>& getRequiredDatasetFieldIds() const { return requiredDatasetFieldIds; }
+    [[nodiscard]] std::set<DatasetFieldId> getRequiredDatasetFieldIds() const {
+        return datasetFieldIds(requiredDatasetFieldRequirements);
+    }
+    [[nodiscard]] const DatasetFieldMaterializationRequirements& getRequiredDatasetFieldRequirements() const {
+        return requiredDatasetFieldRequirements;
+    }
     // Returns the standalone model network. Phase-backed Trainers return null
     // because their model is the enabled composition of TrainingPhase networks.
     [[nodiscard]] std::shared_ptr<Network> getNetwork() const { return network; }
@@ -157,7 +162,7 @@ class Trainer {
     std::shared_ptr<Network> network = nullptr;
     std::shared_ptr<const TrainingData> trainingData = nullptr;
     std::vector<TrainingInputBinding> datasetInputBindings{};
-    std::set<DatasetFieldId> requiredDatasetFieldIds{};
+    DatasetFieldMaterializationRequirements requiredDatasetFieldRequirements{};
     std::shared_ptr<Optimizer> optimizer = nullptr;
     std::shared_ptr<TrainingProgram> trainingProgram = nullptr;
     TrainingRuntimeConfig runtimeConfig{};

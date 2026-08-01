@@ -16,7 +16,6 @@ void bind_smooth_l1_loss(nb::module_ &losses);
 void bind_huber_loss(nb::module_ &losses);
 void bind_soft_target_cross_entropy(nb::module_ &losses);
 void bind_kl_div_loss(nb::module_ &losses);
-void bind_ctc_loss(nb::module_ &losses);
 void bind_quantile_loss(nb::module_ &losses);
 void bind_expectile_loss(nb::module_ &losses);
 void bind_asymmetric_power_loss(nb::module_ &losses);
@@ -76,7 +75,6 @@ over the batch while preserving every non-batch loss dimension.
     bind_huber_loss(losses);
     bind_soft_target_cross_entropy(losses);
     bind_kl_div_loss(losses);
-    bind_ctc_loss(losses);
     bind_quantile_loss(losses);
     bind_expectile_loss(losses);
     bind_asymmetric_power_loss(losses);

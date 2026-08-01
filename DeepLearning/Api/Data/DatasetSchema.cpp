@@ -14,7 +14,7 @@ DatasetSchema::DatasetSchema(std::vector<DatasetField> fields) : fields(std::mov
         if (field.name.empty()) {
             throw std::runtime_error("DatasetSchema field names must not be empty.");
         }
-        if (field.dimensions.empty()) {
+        if (field.dimensions.empty() && field.kind != DatasetFieldKind::RAGGED) {
             throw std::runtime_error("DatasetSchema field dimensions must not be empty: " + field.name);
         }
         for (uint64_t dimension : field.dimensions) {

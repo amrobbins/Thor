@@ -41,7 +41,6 @@ class EquationCompiler {
     static std::shared_ptr<CompiledEquation> loadCubin(const EquationCacheKey& key,
                                                        const std::vector<char>& cubin,
                                                        const std::string& kernel_name,
-                                                       const std::vector<std::string>& input_names,
                                                        const std::vector<NamedInput::Kind>& input_kinds,
                                                        const std::vector<DataType>& input_dtypes,
                                                        const std::vector<DataType>& output_dtypes,

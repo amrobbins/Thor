@@ -51,6 +51,8 @@ using std::vector;
 using Thor::BatchLease;
 using Thor::BatchSession;
 using ThorImplementation::DataType;
+using ThorImplementation::RaggedTensor;
+using ThorImplementation::RaggedTensorDescriptor;
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorPlacement;
 
@@ -60,7 +62,7 @@ static_assert(std::is_constructible_v<
               Thor::DatasetSplitManifest,
               Thor::BatchPolicy,
               uint64_t,
-              std::set<Thor::DatasetFieldId>>);
+              Thor::DatasetFieldMaterializationRequirements>);
 static_assert(!std::is_constructible_v<
               IndexedNamedBatchSession,
               std::filesystem::path,
@@ -154,6 +156,71 @@ void writeCanonicalDataset(const std::filesystem::path &datasetPath, const Datas
     writeIndexedExample(writer, 60.0f);
     writeIndexedExample(writer, 80.0f);
     writer.close();
+}
+
+DatasetLayout raggedSessionLayout() {
+    return DatasetLayout::fromTensorShapes(
+        {},
+        vector<DatasetLayout::RaggedTensorShape>{
+            DatasetLayout::RaggedTensorShape("labels", {}, DataType::INT32)});
+}
+
+void writeRaggedSessionDataset(const std::filesystem::path &datasetPath, uint64_t examplesPerShard = 2) {
+    DatasetLayout layout = raggedSessionLayout();
+    DatasetWriter writer(datasetPath, layout, examplesPerShard);
+    vector<int32_t> values{10, 11, 30, 31, 32, 40, 50, 51};
+    vector<uint32_t> offsets{0, 2, 2, 5, 6, 8};
+    writer.writeIndexedExamples(
+        {},
+        {{"labels",
+          DatasetWriter::RaggedTensorBatchView{.dataType = DataType::INT32,
+                                                .dimensions = {values.size()},
+                                                .data = values.data(),
+                                                .numBytes = values.size() * sizeof(int32_t),
+                                                .offsetsDataType = DataType::UINT32,
+                                                .offsets = offsets.data(),
+                                                .count = 5}}});
+    writer.close();
+}
+
+Thor::DatasetFieldMaterializationRequirements raggedRequirements(
+    const Thor::FileDataset &dataset,
+    uint64_t batchSize,
+    uint64_t maxTotalValues,
+    DataType offsetsDataType) {
+    const Thor::DatasetField &field = dataset.getField("labels");
+    Thor::DatasetFieldMaterializationRequirements requirements;
+    requirements.emplace(
+        field.id,
+        Thor::DatasetFieldMaterializationRequirement::ragged(
+            field.id,
+            RaggedTensorDescriptor(DataType::INT32, {}, batchSize, maxTotalValues, offsetsDataType)));
+    return requirements;
+}
+
+vector<uint64_t> raggedOffsetsAsUint64(const RaggedTensor &ragged) {
+    Tensor offsets = ragged.getOffsets();
+    vector<uint64_t> result(ragged.getBatchSize() + 1, 0);
+    if (ragged.getOffsetsDataType() == DataType::UINT32) {
+        const uint32_t *source = static_cast<const uint32_t *>(offsets.getMemPtr());
+        for (uint64_t i = 0; i < result.size(); ++i) {
+            result.at(static_cast<size_t>(i)) = source[i];
+        }
+        return result;
+    }
+    THOR_THROW_IF_FALSE(ragged.getOffsetsDataType() == DataType::UINT64);
+    const uint64_t *source = static_cast<const uint64_t *>(offsets.getMemPtr());
+    for (uint64_t i = 0; i < result.size(); ++i) {
+        result.at(static_cast<size_t>(i)) = source[i];
+    }
+    return result;
+}
+
+vector<int32_t> activeRaggedInt32Values(const RaggedTensor &ragged) {
+    const vector<uint64_t> offsets = raggedOffsetsAsUint64(ragged);
+    const uint64_t active = offsets.back();
+    const int32_t *source = static_cast<const int32_t *>(ragged.getValues().getMemPtr());
+    return vector<int32_t>(source, source + active);
 }
 
 
@@ -351,9 +418,9 @@ class MetadataOnlyBatchSession final : public BatchSession {
     MetadataOnlyBatchSession(
         Thor::DatasetSplitManifest splits,
         Thor::BatchPolicy batching,
-        std::set<Thor::DatasetFieldId> requiredFieldIds)
+        Thor::DatasetFieldMaterializationRequirements fieldRequirements)
         : splits(std::move(splits)),
-          requiredFieldIds(std::move(requiredFieldIds)) {
+          fieldRequirements(std::move(fieldRequirements)) {
         batchSize = batching.getBatchSize();
     }
 
@@ -377,8 +444,8 @@ class MetadataOnlyBatchSession final : public BatchSession {
 
     uint64_t getNextBatchNum(ExampleType) override { return 0; }
 
-    const std::set<Thor::DatasetFieldId> &getRequiredDatasetFieldIds() const override {
-        return requiredFieldIds;
+    const Thor::DatasetFieldMaterializationRequirements& getDatasetFieldMaterializationRequirements() const override {
+        return fieldRequirements;
     }
 
    private:
@@ -390,7 +457,7 @@ class MetadataOnlyBatchSession final : public BatchSession {
     void recycleBatch(ExampleType, Batch &&) override {}
 
     Thor::DatasetSplitManifest splits;
-    std::set<Thor::DatasetFieldId> requiredFieldIds;
+    Thor::DatasetFieldMaterializationRequirements fieldRequirements;
 };
 
 class DenseMemoryDatasetForTest final : public Thor::NamedDataset {
@@ -430,11 +497,11 @@ class DenseMemoryDatasetForTest final : public Thor::NamedDataset {
         const Thor::BatchPolicy &batching,
         const Thor::DatasetAccessPolicy &,
         uint64_t,
-        const std::set<Thor::DatasetFieldId> &requiredFieldIds) const override {
+        const Thor::DatasetFieldMaterializationRequirements &fieldRequirements) const override {
         return std::make_shared<MetadataOnlyBatchSession>(
             splits,
             batching,
-            requiredFieldIds);
+            fieldRequirements);
     }
 
     std::unique_ptr<Thor::DatasetMaterializationDescription>
@@ -528,7 +595,7 @@ Thor::DeviceDatasetSessionDescription deviceSessionDescription(
             session.getBatchSize(),
             session.getRandomizeTrain(),
             session.getRandomSeed()),
-        session.getRequiredDatasetFieldIds());
+        session.getDatasetFieldMaterializationRequirements());
 }
 
 std::shared_ptr<Thor::TrainingData> trainingDataFor(
@@ -1341,6 +1408,156 @@ TEST(IndexedDatasetReaderTest, AsyncReadvDrainsAndReusesIovecSlotsWhenQueueDepth
     EXPECT_EQ(stats.readBytesCompleted, 5 * layout.recordSizeBytes());
     ASSERT_EQ(stats.resolvedIoBackends.size(), 1);
     EXPECT_EQ(stats.resolvedIoBackends.front(), "pread_buffered_readv");
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(IndexedDatasetReaderTest, ReadsRaggedReferencesAndPackedSidecarValues) {
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+    const std::filesystem::path datasetPath = makeTempDatasetPath("reader_ragged_references");
+    DatasetLayout layout = raggedSessionLayout();
+    writeRaggedSessionDataset(datasetPath, 2);
+
+    std::shared_ptr<IndexedDatasetReader> reader = IndexedDatasetReader::openDataset(datasetPath, layout);
+    ASSERT_EQ(reader->getRaggedTensorCount(), 1u);
+    EXPECT_EQ(reader->getLayoutRaggedTensorOrdinal("labels"), 0u);
+
+    vector<IndexedRaggedTensorReference> references(2);
+    vector<IndexedRaggedTensorReference *> referenceDestinations(reader->getRaggedTensorCount(), nullptr);
+    referenceDestinations.at(reader->getLayoutRaggedTensorOrdinal("labels")) = references.data();
+
+    std::unique_ptr<IndexedDatasetReader::Session> session = reader->createSession(2);
+    session->loadExampleInto(2, 0, {}, {}, {}, referenceDestinations);
+    session->loadExampleInto(1, 1, {}, {}, {}, referenceDestinations);
+    session->drain();
+
+    EXPECT_EQ(references.at(0).startValue, 2u);
+    EXPECT_EQ(references.at(0).valueCount, 3u);
+    EXPECT_EQ(references.at(1).startValue, 2u);
+    EXPECT_EQ(references.at(1).valueCount, 0u);
+
+    vector<int32_t> packed(3, -1);
+    session->loadRaggedValuesInto(0, references.at(0).startValue, references.at(0).valueCount, packed.data());
+    EXPECT_EQ(packed, (vector<int32_t>{30, 31, 32}));
+    EXPECT_THROW(session->loadRaggedValuesInto(0, 7, 2, packed.data()), std::runtime_error);
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(IndexedNamedBatchSessionTest, MaterializesLogicalRaggedBatchesForBothCanonicalOffsetDTypes) {
+    for (DataType offsetsDataType : {DataType::UINT32, DataType::UINT64}) {
+        const std::filesystem::path datasetPath = makeTempDatasetPath(
+            offsetsDataType == DataType::UINT32 ? "ragged_uint32" : "ragged_uint64");
+        writeRaggedSessionDataset(datasetPath, 2);
+        std::shared_ptr<Thor::FileDataset> dataset = Thor::FileDataset::open(datasetPath);
+        Thor::DatasetSplitManifest splits(*dataset, vector<uint64_t>{2, 1, 4}, vector<uint64_t>{0}, vector<uint64_t>{3});
+        Thor::DatasetFieldMaterializationRequirements requirements =
+            raggedRequirements(*dataset, 3, 6, offsetsDataType);
+
+        TestIndexedNamedBatchSession session(
+            dataset, std::move(splits), Thor::BatchPolicy(3, false), 2, requirements);
+        uint64_t batchNum = 99;
+        BatchLease lease = session.leaseBatch(ExampleType::TRAIN, batchNum);
+        ASSERT_EQ(batchNum, 0u);
+        const Batch &batch = lease.get();
+        ASSERT_EQ(batch.size(), 1u);
+        EXPECT_TRUE(batch.isRaggedTensor("labels"));
+        EXPECT_FALSE(batch.contains("labels.values"));
+        EXPECT_FALSE(batch.contains("labels.offsets"));
+        EXPECT_FALSE(batch.getValidExampleCount().has_value());
+
+        const RaggedTensor &labels = batch.getRaggedTensor("labels");
+        EXPECT_EQ(labels.getDescriptor(), requirements.begin()->second.raggedTensorDescriptor.value());
+        EXPECT_EQ(raggedOffsetsAsUint64(labels), (vector<uint64_t>{0, 3, 3, 5}));
+        EXPECT_EQ(activeRaggedInt32Values(labels), (vector<int32_t>{30, 31, 32, 50, 51}));
+        lease.reset();
+
+        std::filesystem::remove_all(datasetPath);
+    }
+}
+
+TEST(IndexedNamedBatchSessionTest, ExactRaggedTailUsesEmptyPhysicalTailRowsAndRecyclesBuffers) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_exact_tail");
+    writeRaggedSessionDataset(datasetPath, 2);
+    std::shared_ptr<Thor::FileDataset> dataset = Thor::FileDataset::open(datasetPath);
+    Thor::DatasetSplitManifest splits(*dataset, vector<uint64_t>{0, 1, 2}, vector<uint64_t>{3}, vector<uint64_t>{4});
+    Thor::DatasetFieldMaterializationRequirements requirements =
+        raggedRequirements(*dataset, 2, 6, DataType::UINT64);
+
+    TestIndexedNamedBatchSession session(
+        dataset, std::move(splits), Thor::BatchPolicy(2, false), 1, requirements);
+    uint64_t batchNum = 99;
+    BatchLease first = session.leaseBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0u);
+    EXPECT_EQ(raggedOffsetsAsUint64(first.get().getRaggedTensor("labels")), (vector<uint64_t>{0, 2, 2}));
+    EXPECT_EQ(activeRaggedInt32Values(first.get().getRaggedTensor("labels")), (vector<int32_t>{10, 11}));
+    first.reset();
+
+    BatchLease tail = session.leaseBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 1u);
+    ASSERT_TRUE(tail.get().getValidExampleCount().has_value());
+    EXPECT_EQ(tail.get().getValidExampleCount().value(), 1u);
+    EXPECT_EQ(raggedOffsetsAsUint64(tail.get().getRaggedTensor("labels")), (vector<uint64_t>{0, 3, 3}));
+    EXPECT_EQ(activeRaggedInt32Values(tail.get().getRaggedTensor("labels")), (vector<int32_t>{30, 31, 32}));
+    tail.reset();
+
+    BatchLease nextEpoch = session.leaseBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0u);
+    EXPECT_EQ(raggedOffsetsAsUint64(nextEpoch.get().getRaggedTensor("labels")), (vector<uint64_t>{0, 2, 2}));
+    nextEpoch.reset();
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(IndexedNamedBatchSessionTest, WrappedRaggedTailPacksWrappedExamplesAsRealRows) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_wrapped_tail");
+    writeRaggedSessionDataset(datasetPath, 2);
+    std::shared_ptr<Thor::FileDataset> dataset = Thor::FileDataset::open(datasetPath);
+    Thor::DatasetSplitManifest splits(*dataset, vector<uint64_t>{0, 1, 2}, vector<uint64_t>{3}, vector<uint64_t>{4});
+    Thor::DatasetFieldMaterializationRequirements requirements =
+        raggedRequirements(*dataset, 2, 6, DataType::UINT32);
+
+    TestIndexedNamedBatchSession session(
+        dataset, std::move(splits), Thor::BatchPolicy(2, false), 1, requirements);
+    ThorImplementation::BatchSessionRuntimeAccess::setTailMode(
+        session, ThorImplementation::BatchTailMode::WRAP);
+
+    uint64_t batchNum = 99;
+    BatchLease first = session.leaseBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 0u);
+    first.reset();
+
+    BatchLease tail = session.leaseBatch(ExampleType::TRAIN, batchNum);
+    EXPECT_EQ(batchNum, 1u);
+    EXPECT_FALSE(tail.get().getValidExampleCount().has_value());
+    EXPECT_EQ(raggedOffsetsAsUint64(tail.get().getRaggedTensor("labels")), (vector<uint64_t>{0, 3, 5}));
+    EXPECT_EQ(activeRaggedInt32Values(tail.get().getRaggedTensor("labels")),
+              (vector<int32_t>{30, 31, 32, 10, 11}));
+    tail.reset();
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(IndexedNamedBatchSessionTest, RaggedCapacityOverflowFailsBeforePublishingABatch) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_capacity_overflow");
+    writeRaggedSessionDataset(datasetPath, 2);
+    std::shared_ptr<Thor::FileDataset> dataset = Thor::FileDataset::open(datasetPath);
+    Thor::DatasetSplitManifest splits(*dataset, vector<uint64_t>{2, 4}, vector<uint64_t>{0}, vector<uint64_t>{1, 3});
+    Thor::DatasetFieldMaterializationRequirements requirements =
+        raggedRequirements(*dataset, 2, 4, DataType::UINT32);
+
+    TestIndexedNamedBatchSession session(
+        dataset, std::move(splits), Thor::BatchPolicy(2, false), 1, requirements);
+    uint64_t batchNum = 99;
+    try {
+        BatchLease lease = session.leaseBatch(ExampleType::TRAIN, batchNum);
+        (void)lease;
+        FAIL() << "Expected ragged capacity overflow.";
+    } catch (const std::runtime_error &error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("labels"), std::string::npos);
+        EXPECT_NE(message.find("maxTotalValues=4"), std::string::npos);
+    }
 
     std::filesystem::remove_all(datasetPath);
 }

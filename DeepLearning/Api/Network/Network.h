@@ -65,7 +65,7 @@ struct NetworkLossReference {
     std::string predictionOutputName{};
     std::string targetInputName{};
     std::optional<std::string> weightInputName{};
-    // Canonically sorted external NetworkInput boundary of the exposed loss
+    // Canonically sorted logical external input boundary of the exposed loss
     // report in the training graph. This includes labels, weights, thresholds,
     // masks, and any other auxiliary inputs required by custom loss wiring.
     std::vector<std::string> requiredInputNames{};
@@ -85,7 +85,7 @@ struct NetworkMetricReference {
     // More complex input-derived sources may have no single semantic remap point;
     // requiredInputNames still records their external dependency boundary.
     std::optional<std::string> inputSourceName{};
-    // Canonically sorted external NetworkInput boundary of the exposed metric
+    // Canonically sorted logical external input boundary of the exposed metric
     // report in the training graph. This is the authoritative dependency contract
     // used by composed evaluators; the fields above identify semantic remap points.
     std::vector<std::string> requiredInputNames{};
@@ -119,6 +119,15 @@ class PlacedNetwork;
 class NetworkInput;
 
 class Executor;
+
+struct RaggedNetworkInputReference {
+    std::string name;
+    std::string valuesInputName;
+    std::string offsetsInputName;
+    RaggedTensor raggedTensor;
+
+    bool operator==(const RaggedNetworkInputReference&) const = default;
+};
 
 class Network {
    public:
@@ -217,7 +226,12 @@ class Network {
         const std::vector<std::string>& outputNames,
         bool inferenceOnly);
     [[nodiscard]] std::vector<std::string> getTrainingOnlyNetworkInputNames();
+    // Physical graph inputs. Ragged logical inputs appear here as their .values/.offsets
+    // NetworkInput pair; graph-internal code that needs the external API boundary should
+    // use getExternalNetworkInputNames() instead.
     [[nodiscard]] std::vector<std::shared_ptr<NetworkInput>> getExternalNetworkInputs() const;
+    // Logical external boundary names. A RaggedNetworkInput contributes exactly one name.
+    [[nodiscard]] std::vector<std::string> getExternalNetworkInputNames() const;
     [[nodiscard]] std::vector<NetworkLossReference> getReportableLosses();
     [[nodiscard]] std::vector<NetworkMetricReference> getReportableMetrics();
 
@@ -245,6 +259,7 @@ class Network {
                                     const std::string& valuesInputName,
                                     const std::string& offsetsInputName);
     [[nodiscard]] bool hasRaggedNetworkInput(const std::string& name) const;
+    [[nodiscard]] std::vector<RaggedNetworkInputReference> getExternalRaggedNetworkInputs() const;
 
    protected:
     virtual StatusCode connect(bool inferenceOnly);
@@ -345,6 +360,8 @@ class Network {
     void addToNetwork(Layer *layer);
     void addToNetwork(Initializer *initializer);
     void addToNetwork(Optimizer *optimizer);
+
+    [[nodiscard]] std::string logicalExternalInputName(const std::string& physicalInputName) const;
 
     void setGraphValidationIssue(StatusCode status, std::string summary, std::string detail);
     [[nodiscard]] std::string graphValidationFailureMessage(StatusCode status) const;

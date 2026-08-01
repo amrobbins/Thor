@@ -4,6 +4,49 @@
 #include <utility>
 
 namespace Thor {
+namespace {
+
+DatasetFieldMaterializationRequirements allFieldRequirementsOrThrow(const DatasetSchema& schema) {
+    DatasetFieldMaterializationRequirements requirements;
+    for (const DatasetField& field : schema.getFields()) {
+        if (field.kind == DatasetFieldKind::RAGGED) {
+            throw std::runtime_error(
+                "TrainingData cannot open all fields when the dataset contains ragged field '" + field.name +
+                "'. Ragged batch materialization requires a consuming RaggedNetworkInput descriptor.");
+        }
+        requirements.emplace(field.id, DatasetFieldMaterializationRequirement::dense(field.id));
+    }
+    return requirements;
+}
+
+void validateFieldRequirements(const DatasetSchema& schema,
+                               const DatasetFieldMaterializationRequirements& requirements,
+                               uint64_t batchSize) {
+    for (const auto& [fieldId, requirement] : requirements) {
+        if (fieldId != requirement.fieldId) {
+            throw std::runtime_error("Dataset field materialization requirement key/id mismatch.");
+        }
+        const DatasetField& field = schema.getField(fieldId);
+        if (field.kind == DatasetFieldKind::RAGGED) {
+            if (!requirement.raggedTensorDescriptor.has_value()) {
+                throw std::runtime_error("Ragged dataset field '" + field.name +
+                                         "' requires a RaggedTensor materialization descriptor.");
+            }
+            const auto& descriptor = requirement.raggedTensorDescriptor.value();
+            if (descriptor.getValuesDataType() != field.dataType ||
+                descriptor.getTrailingDimensions() != field.dimensions ||
+                descriptor.getBatchSize() != batchSize) {
+                throw std::runtime_error("Ragged dataset field materialization contract does not match field '" +
+                                         field.name + "'.");
+            }
+        } else if (requirement.raggedTensorDescriptor.has_value()) {
+            throw std::runtime_error("Non-ragged dataset field '" + field.name +
+                                     "' cannot carry a RaggedTensor materialization descriptor.");
+        }
+    }
+}
+
+}  // namespace
 
 TrainingData::TrainingData(std::shared_ptr<const NamedDataset> dataset,
                            DatasetSplitManifest splits,
@@ -49,24 +92,21 @@ void TrainingData::requireNonEmptyPartition(ExampleType exampleType, const std::
 }
 
 std::shared_ptr<BatchSession> TrainingData::openSession(uint64_t maxInFlightBatches) const {
-    std::set<DatasetFieldId> allFields;
-    for (const DatasetField& field : dataset->getSchema().getFields()) {
-        allFields.insert(field.id);
-    }
-    return openSession(maxInFlightBatches, allFields);
+    return openSession(maxInFlightBatches, allFieldRequirementsOrThrow(dataset->getSchema()));
 }
 
 std::shared_ptr<BatchSession> TrainingData::openSession(
     uint64_t maxInFlightBatches,
-    const std::set<DatasetFieldId>& requiredFieldIds) const {
+    const DatasetFieldMaterializationRequirements& fieldRequirements) const {
     if (maxInFlightBatches == 0) {
         throw std::runtime_error("TrainingData max_in_flight_batches must be >= 1.");
     }
-    for (DatasetFieldId fieldId : requiredFieldIds) {
-        (void)dataset->getSchema().getField(fieldId);
-    }
+    DatasetFieldMaterializationRequirements effectiveRequirements = fieldRequirements.empty()
+        ? allFieldRequirementsOrThrow(dataset->getSchema())
+        : fieldRequirements;
+    validateFieldRequirements(dataset->getSchema(), effectiveRequirements, batching.getBatchSize());
     std::shared_ptr<BatchSession> session = dataset->openBatchSession(
-        splits, batching, accessPolicy, maxInFlightBatches, requiredFieldIds);
+        splits, batching, accessPolicy, maxInFlightBatches, effectiveRequirements);
     if (session == nullptr) {
         throw std::runtime_error("NamedDataset backend returned a null BatchSession.");
     }
@@ -77,27 +117,25 @@ std::shared_ptr<BatchSession> TrainingData::openSession(
 std::shared_ptr<BatchSession> TrainingData::openValidationSession(
     const std::string& validationPopulation,
     uint64_t maxInFlightBatches) const {
-    std::set<DatasetFieldId> allFields;
-    for (const DatasetField& field : dataset->getSchema().getFields()) {
-        allFields.insert(field.id);
-    }
-    return openValidationSession(validationPopulation, maxInFlightBatches, allFields);
+    return openValidationSession(
+        validationPopulation, maxInFlightBatches, allFieldRequirementsOrThrow(dataset->getSchema()));
 }
 
 std::shared_ptr<BatchSession> TrainingData::openValidationSession(
     const std::string& validationPopulation,
     uint64_t maxInFlightBatches,
-    const std::set<DatasetFieldId>& requiredFieldIds) const {
+    const DatasetFieldMaterializationRequirements& fieldRequirements) const {
     if (maxInFlightBatches == 0) {
         throw std::runtime_error("TrainingData max_in_flight_batches must be >= 1.");
     }
     (void)splits.getValidation(validationPopulation);
-    for (DatasetFieldId fieldId : requiredFieldIds) {
-        (void)dataset->getSchema().getField(fieldId);
-    }
+    DatasetFieldMaterializationRequirements effectiveRequirements = fieldRequirements.empty()
+        ? allFieldRequirementsOrThrow(dataset->getSchema())
+        : fieldRequirements;
+    validateFieldRequirements(dataset->getSchema(), effectiveRequirements, batching.getBatchSize());
     DatasetSplitManifest selectedSplits = splits.withDefaultValidation(validationPopulation);
     std::shared_ptr<BatchSession> session = dataset->openBatchSession(
-        selectedSplits, batching, accessPolicy, maxInFlightBatches, requiredFieldIds);
+        selectedSplits, batching, accessPolicy, maxInFlightBatches, effectiveRequirements);
     if (session == nullptr) {
         throw std::runtime_error("NamedDataset backend returned a null BatchSession.");
     }

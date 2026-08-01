@@ -23,16 +23,35 @@ const char *splitNameForStats(ExampleType exampleType) {
     return "unknown";
 }
 
+void splitHostBatchBuffersOrThrow(
+    const Batch &batch,
+    std::map<std::string, ThorImplementation::Tensor> &tensors,
+    std::map<std::string, ThorImplementation::RaggedTensor> &raggedTensors,
+    const std::string &context) {
+    tensors.clear();
+    raggedTensors.clear();
+    for (const auto &[name, value] : batch.values()) {
+        if (std::holds_alternative<ThorImplementation::Tensor>(value)) {
+            tensors.emplace(name, std::get<ThorImplementation::Tensor>(value));
+        } else if (std::holds_alternative<ThorImplementation::RaggedTensor>(value)) {
+            raggedTensors.emplace(name, std::get<ThorImplementation::RaggedTensor>(value));
+        } else {
+            throw std::runtime_error(context + " contains device-resident batch input '" + name +
+                                     "', but indexed file sessions own host buffers only.");
+        }
+    }
+}
+
 }  // namespace
 
 IndexedNamedBatchSession::IndexedNamedBatchSession(std::shared_ptr<const Thor::FileDataset> dataset,
                                                    Thor::DatasetSplitManifest splits,
                                                    Thor::BatchPolicy batching,
                                                    uint64_t batchQueueDepth,
-                                                   std::set<Thor::DatasetFieldId> requiredFieldIds)
+                                                   Thor::DatasetFieldMaterializationRequirements fieldRequirements)
     : dataset(std::move(dataset)),
       splitManifest(std::move(splits)),
-      requiredFieldIds(std::move(requiredFieldIds)),
+      fieldRequirements(std::move(fieldRequirements)),
       batchQueueDepth(batchQueueDepth),
       randomizeTrain(batching.getRandomizeTrain()),
       seed(batching.getRandomSeed()) {
@@ -44,15 +63,43 @@ IndexedNamedBatchSession::IndexedNamedBatchSession(std::shared_ptr<const Thor::F
     }
 
     splitManifest.validateAgainst(*this->dataset);
-    if (this->requiredFieldIds.empty()) {
+    if (this->fieldRequirements.empty()) {
         for (const Thor::DatasetField& field : this->dataset->getSchema().getFields()) {
-            this->requiredFieldIds.insert(field.id);
+            if (field.kind == Thor::DatasetFieldKind::RAGGED) {
+                throw std::runtime_error(
+                    "IndexedNamedBatchSession requires an explicit materialization descriptor for ragged field '" +
+                    field.name + "'.");
+            }
+            this->fieldRequirements.emplace(
+                field.id, Thor::DatasetFieldMaterializationRequirement::dense(field.id));
         }
     }
-    for (Thor::DatasetFieldId fieldId : this->requiredFieldIds) {
-        (void)this->dataset->getSchema().getField(fieldId);
-    }
     this->batchSize = batching.getBatchSize();
+    for (const auto& [fieldId, requirement] : this->fieldRequirements) {
+        if (fieldId != requirement.fieldId) {
+            throw std::runtime_error("IndexedNamedBatchSession field requirement key/id mismatch.");
+        }
+        const Thor::DatasetField& field = this->dataset->getSchema().getField(fieldId);
+        if (field.kind == Thor::DatasetFieldKind::RAGGED) {
+            if (!requirement.raggedTensorDescriptor.has_value()) {
+                throw std::runtime_error(
+                    "IndexedNamedBatchSession ragged field '" + field.name +
+                    "' requires a materialization descriptor.");
+            }
+            const auto& descriptor = requirement.raggedTensorDescriptor.value();
+            if (descriptor.getValuesDataType() != field.dataType ||
+                descriptor.getTrailingDimensions() != field.dimensions ||
+                descriptor.getBatchSize() != this->batchSize) {
+                throw std::runtime_error(
+                    "IndexedNamedBatchSession ragged materialization contract does not match field '" +
+                    field.name + "'.");
+            }
+        } else if (requirement.raggedTensorDescriptor.has_value()) {
+            throw std::runtime_error(
+                "IndexedNamedBatchSession non-ragged field '" + field.name +
+                "' cannot carry a RaggedTensor materialization descriptor.");
+        }
+    }
     numDatasetExamples = this->dataset->getNumExamples();
 
 
@@ -95,6 +142,16 @@ std::unique_ptr<IndexedBatchAssembler> IndexedNamedBatchSession::createAssembler
         ThorImplementation::FileDatasetRuntimeAccess::reader(*dataset);
     const DatasetLayout &layout =
         ThorImplementation::FileDatasetRuntimeAccess::layout(*dataset);
+    std::map<std::string, ThorImplementation::RaggedTensorDescriptor> raggedTensorDescriptors;
+    for (const auto &[fieldId, requirement] : fieldRequirements) {
+        (void)fieldId;
+        if (!requirement.raggedTensorDescriptor.has_value()) {
+            continue;
+        }
+        const Thor::DatasetField &field = dataset->getSchema().getField(requirement.fieldId);
+        THOR_THROW_IF_FALSE(field.kind == Thor::DatasetFieldKind::RAGGED);
+        raggedTensorDescriptors.emplace(field.name, requirement.raggedTensorDescriptor.value());
+    }
     return std::make_unique<IndexedBatchAssembler>(
         reader,
         layout,
@@ -104,7 +161,8 @@ std::unique_ptr<IndexedBatchAssembler> IndexedNamedBatchSession::createAssembler
         batchQueueDepth,
         randomized,
         splitSeed,
-        wrapTail);
+        wrapTail,
+        std::move(raggedTensorDescriptors));
 }
 
 
@@ -167,12 +225,18 @@ Batch IndexedNamedBatchSession::acquireBatch(ExampleType exampleType, uint64_t &
     }
 
     std::map<std::string, ThorImplementation::Tensor> tensors;
+    std::map<std::string, ThorImplementation::RaggedTensor> raggedTensors;
     IndexedReadyBatch readyBatch;
-    assembler->acquireBatch(tensors, readyBatch);
+    assembler->acquireBatch(tensors, raggedTensors, readyBatch);
     batchNum = readyBatch.batchNum;
     auto sourceTensors = std::make_shared<std::map<std::string, ThorImplementation::Tensor>>(
         std::move(tensors));
+    auto sourceRaggedTensors =
+        std::make_shared<std::map<std::string, ThorImplementation::RaggedTensor>>(std::move(raggedTensors));
     Batch batch = batchFromTensorMap(*sourceTensors);
+    for (const auto &[name, ragged] : *sourceRaggedTensors) {
+        batch.insert(name, ragged);
+    }
     if (readyBatch.validExampleCount < getBatchSize()) {
         batch.setValidExampleCount(readyBatch.validExampleCount);
     }
@@ -182,17 +246,22 @@ Batch IndexedNamedBatchSession::acquireBatch(ExampleType exampleType, uint64_t &
         (void)tensor;
         fieldNames.insert(name);
     }
+    for (const auto &[name, ragged] : *sourceRaggedTensors) {
+        (void)ragged;
+        fieldNames.insert(name);
+    }
 
     std::shared_ptr<IndexedNamedBatchSession> sharedSelf =
         std::dynamic_pointer_cast<IndexedNamedBatchSession>(shared_from_this());
     THOR_THROW_IF_FALSE(sharedSelf != nullptr);
     std::weak_ptr<IndexedNamedBatchSession> weakSelf = sharedSelf;
     Thor::BatchSourceOwner sourceOwner(
-        [weakSelf, exampleType, sourceTensors](std::vector<Event> consumedEvents) mutable {
+        [weakSelf, exampleType, sourceTensors, sourceRaggedTensors](std::vector<Event> consumedEvents) mutable {
             if (std::shared_ptr<IndexedNamedBatchSession> session = weakSelf.lock()) {
                 session->enqueueReturnedBuffers(
                     exampleType,
                     std::move(sourceTensors),
+                    std::move(sourceRaggedTensors),
                     std::move(consumedEvents));
                 return;
             }
@@ -214,12 +283,9 @@ void IndexedNamedBatchSession::recycleBatch(ExampleType exampleType, Batch &&bat
     if (batch.ownsSourceResourceLifecycle()) {
         // The source owner, rather than BatchLease destruction, returns the
         // assembler buffers after every NetworkInput upload has consumed them.
-        // Batch copies retain source references but do not own this lifecycle,
-        // so malformed copies continue through the exact legacy validation path.
+        // Batch copies retain source references but do not own this lifecycle.
+        // Require the complete source-reference contract before releasing them.
         THOR_THROW_IF_FALSE(batch.allFieldsHaveSourceReferences());
-        (void)denseTensorMapFromBatchOrThrow(
-            batch,
-            "IndexedNamedBatchSession returned source-tracked batch");
         batch.clear();
         return;
     }
@@ -233,9 +299,11 @@ void IndexedNamedBatchSession::recycleBatch(ExampleType exampleType, Batch &&bat
         throw std::runtime_error("IndexedNamedBatchSession cannot return buffers to an empty split.");
     }
 
-    std::map<std::string, ThorImplementation::Tensor> tensors =
-        denseTensorMapFromBatchOrThrow(batch, "IndexedNamedBatchSession returned batch");
-    assembler->returnBuffers(tensors);
+    std::map<std::string, ThorImplementation::Tensor> tensors;
+    std::map<std::string, ThorImplementation::RaggedTensor> raggedTensors;
+    splitHostBatchBuffersOrThrow(
+        batch, tensors, raggedTensors, "IndexedNamedBatchSession returned batch");
+    assembler->returnBuffers(tensors, raggedTensors);
 }
 
 uint64_t IndexedNamedBatchSession::getNumBatchesPerEpoch(ExampleType exampleType) {
@@ -301,8 +369,9 @@ bool IndexedNamedBatchSession::hasExplicitTestSplit() const { return splitManife
 void IndexedNamedBatchSession::enqueueReturnedBuffers(
     ExampleType exampleType,
     std::shared_ptr<std::map<std::string, ThorImplementation::Tensor>> tensors,
+    std::shared_ptr<std::map<std::string, ThorImplementation::RaggedTensor>> raggedTensors,
     std::vector<Event> consumedEvents) noexcept {
-    if (tensors == nullptr) {
+    if (tensors == nullptr || raggedTensors == nullptr) {
         return;
     }
 
@@ -318,7 +387,7 @@ void IndexedNamedBatchSession::enqueueReturnedBuffers(
         try {
             IndexedBatchAssembler *assembler = assemblerFor(exampleType);
             if (assembler != nullptr) {
-                assembler->returnBuffers(*tensors);
+                assembler->returnBuffers(*tensors, *raggedTensors);
             }
         } catch (...) {
             if (recyclerFailure == nullptr) {
@@ -334,6 +403,7 @@ void IndexedNamedBatchSession::enqueueReturnedBuffers(
             pendingReturnedBuffers.push_back(PendingReturnedBuffers{
                 exampleType,
                 tensors,
+                raggedTensors,
                 consumedEvents});
             recyclerNotEmpty.notify_one();
             return;
@@ -373,7 +443,7 @@ void IndexedNamedBatchSession::recyclerMain() noexcept {
             if (!cancelled.load(std::memory_order_acquire)) {
                 IndexedBatchAssembler *assembler = assemblerFor(pending.exampleType);
                 if (assembler != nullptr) {
-                    assembler->returnBuffers(*pending.tensors);
+                    assembler->returnBuffers(*pending.tensors, *pending.raggedTensors);
                 }
             }
         } catch (...) {
@@ -424,9 +494,9 @@ std::shared_ptr<Thor::BatchSession> openIndexedNamedBatchSession(
     const Thor::DatasetSplitManifest &splits,
     const Thor::BatchPolicy &batching,
     uint64_t maxInFlightBatches,
-    const std::set<Thor::DatasetFieldId> &requiredFieldIds) {
+    const Thor::DatasetFieldMaterializationRequirements &fieldRequirements) {
     return std::make_shared<IndexedNamedBatchSession>(
-        std::move(dataset), splits, batching, maxInFlightBatches, requiredFieldIds);
+        std::move(dataset), splits, batching, maxInFlightBatches, fieldRequirements);
 }
 
 }  // namespace ThorImplementation

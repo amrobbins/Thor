@@ -581,7 +581,7 @@ def test_affine_windowed_dataset_uses_compact_segments_and_zero_record_shards(tm
     assert thor.data.FileDataset.open(dataset_path).num_examples == 3
 
 
-def test_windowed_dataset_rejects_retired_layout_versions_and_old_v1_shape(tmp_path):
+def test_windowed_dataset_rejects_invalid_v2_unsupported_versions_and_old_v1_shape(tmp_path):
     dataset_path = tmp_path / "retired_window_layout"
     layout = thor.data.DatasetLayout(
         tensors={},
@@ -609,12 +609,17 @@ def test_windowed_dataset_rejects_retired_layout_versions_and_old_v1_shape(tmp_p
 
     manifest_path = dataset_path / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    for retired_format in ("thor.dataset.v2", "thor.dataset.v3"):
-        retired = dict(manifest)
-        retired["format"] = retired_format
-        manifest_path.write_text(json.dumps(retired))
-        with pytest.raises(RuntimeError, match="unsupported manifest format"):
-            thor.data.FileDataset.open(dataset_path)
+    invalid_v2 = dict(manifest)
+    invalid_v2["format"] = "thor.dataset.v2"
+    manifest_path.write_text(json.dumps(invalid_v2))
+    with pytest.raises(RuntimeError, match="V2 manifests must contain at least one ragged tensor"):
+        thor.data.FileDataset.open(dataset_path)
+
+    unsupported = dict(manifest)
+    unsupported["format"] = "thor.dataset.v3"
+    manifest_path.write_text(json.dumps(unsupported))
+    with pytest.raises(RuntimeError, match="unsupported manifest format"):
+        thor.data.FileDataset.open(dataset_path)
 
     old_v1 = json.loads(json.dumps(manifest))
     del old_v1["windowed_tensors"]["examples"]["reference_mode"]

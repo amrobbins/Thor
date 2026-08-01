@@ -1,9 +1,11 @@
 #include "DeepLearning/Implementation/Layers/Loss/CtcLoss.h"
+#include "Utilities/TensorOperations/Ragged/RowPartition.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
 
+#include <algorithm>
 #include <limits>
 #include <utility>
 
@@ -24,20 +26,10 @@ bool isBatchLengthVector(const Tensor& tensor, uint64_t batchSize) {
     return (dims.size() == 1 && dims[0] == batchSize) || (dims.size() == 2 && dims[0] == batchSize && dims[1] == 1);
 }
 
-bool isPaddedLabelsMatrix(const Tensor& tensor, uint64_t batchSize, uint64_t maxLabelLength) {
-    const vector<uint64_t> dims = tensor.getDescriptor().getDimensions();
-    return dims.size() == 2 && dims[0] == batchSize && dims[1] == maxLabelLength;
-}
-
 }  // namespace
 
-CtcLoss::CtcLoss(uint32_t maxLabelLength, CtcLossOobGradientMode oobGradientMode, optional<float> lossWeight)
-    : Loss(DataType::FP32),
-      maxLabelLength(maxLabelLength),
-      oobGradientMode(oobGradientMode),
-      lossWeight(normalizeLossWeight(lossWeight)) {
-    THOR_THROW_IF_FALSE(maxLabelLength > 0);
-}
+CtcLoss::CtcLoss(CtcLossOobGradientMode oobGradientMode, optional<float> lossWeight)
+    : Loss(DataType::FP32), oobGradientMode(oobGradientMode), lossWeight(normalizeLossWeight(lossWeight)) {}
 
 vector<uint64_t> CtcLoss::rawLossDimensionsForProbabilities(const vector<uint64_t>& probabilityDimensions) {
     THOR_THROW_IF_FALSE(probabilityDimensions.size() == 3);
@@ -70,34 +62,34 @@ optional<Tensor> CtcLoss::connectToPreviousLayer(Layer* previousLayer,
         return connectToPredictionsInputLayer(previousLayer, featureInput, stream, backPropagateError);
     } else if (connectionType == static_cast<int>(ConnectionType::LABELS)) {
         return connectToLabelsInputLayer(previousLayer, featureInput, stream);
-    } else if (connectionType == LABEL_LENGTHS_CONNECTION_TYPE) {
-        return connectToLabelLengthsInputLayer(previousLayer, featureInput, stream);
+    } else if (connectionType == LABEL_OFFSETS_CONNECTION_TYPE) {
+        return connectToLabelOffsetsInputLayer(previousLayer, featureInput, stream);
     } else if (connectionType == INPUT_LENGTHS_CONNECTION_TYPE) {
         return connectToInputLengthsInputLayer(previousLayer, featureInput, stream);
     }
     THOR_UNREACHABLE();
 }
 
-optional<Tensor> CtcLoss::connectToLabelLengthsInputLayer(Layer* labelLengthsLayer,
-                                                          optional<Tensor> labelLengths,
-                                                          Stream labelLengthsStream) {
-    (void)labelLengthsLayer;
-    THOR_THROW_IF_FALSE(!this->labelLengthsInput.has_value());
-    THOR_THROW_IF_FALSE(labelLengths.has_value());
+optional<Tensor> CtcLoss::connectToLabelOffsetsInputLayer(Layer* labelOffsetsLayer,
+                                                          optional<Tensor> labelOffsets,
+                                                          Stream labelOffsetsStream) {
+    (void)labelOffsetsLayer;
+    THOR_THROW_IF_FALSE(!this->labelOffsetsInput.has_value());
+    THOR_THROW_IF_FALSE(labelOffsets.has_value());
 
     if (featureInput.has_value()) {
         THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-        THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == labelLengths.value().getPlacement());
+        THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == labelOffsets.value().getPlacement());
     }
     if (labelsInput.has_value()) {
-        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement() == labelLengths.value().getPlacement());
+        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement() == labelOffsets.value().getPlacement());
     }
     if (inputLengthsInput.has_value()) {
-        THOR_THROW_IF_FALSE(inputLengthsInput.value().getPlacement() == labelLengths.value().getPlacement());
+        THOR_THROW_IF_FALSE(inputLengthsInput.value().getPlacement() == labelOffsets.value().getPlacement());
     }
 
-    this->labelLengthsInput = labelLengths;
-    this->labelLengthsStream = labelLengthsStream;
+    this->labelOffsetsInput = labelOffsets;
+    this->labelOffsetsStream = labelOffsetsStream;
     return nullopt;
 }
 
@@ -115,8 +107,8 @@ optional<Tensor> CtcLoss::connectToInputLengthsInputLayer(Layer* inputLengthsLay
     if (labelsInput.has_value()) {
         THOR_THROW_IF_FALSE(labelsInput.value().getPlacement() == inputLengths.value().getPlacement());
     }
-    if (labelLengthsInput.has_value()) {
-        THOR_THROW_IF_FALSE(labelLengthsInput.value().getPlacement() == inputLengths.value().getPlacement());
+    if (labelOffsetsInput.has_value()) {
+        THOR_THROW_IF_FALSE(labelOffsetsInput.value().getPlacement() == inputLengths.value().getPlacement());
     }
 
     this->inputLengthsInput = inputLengths;
@@ -126,7 +118,7 @@ optional<Tensor> CtcLoss::connectToInputLengthsInputLayer(Layer* inputLengthsLay
 
 void CtcLoss::initialize() {
     Loss::initialize();
-    labelLengthsReceived = false;
+    labelOffsetsReceived = false;
     inputLengthsReceived = false;
 }
 
@@ -134,10 +126,13 @@ void CtcLoss::cleanup() {
     ctcPlan.reset();
     workspace.reset();
     inferenceGradientScratch.reset();
-    packedLabels.reset();
+    generatedLabelLengths.reset();
+    labelOffsetsValidationErrorBits.reset();
     maxTimeSteps = 0;
     ctcBatchSize = 0;
     numClasses = 0;
+    maxTotalLabelValues = 0;
+    backendMaxLabelLength = 0;
     Layer::cleanup();
 }
 
@@ -145,7 +140,7 @@ void CtcLoss::validateConnectedDescriptors() {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
     THOR_THROW_IF_FALSE(labelsInput.has_value());
-    THOR_THROW_IF_FALSE(labelLengthsInput.has_value());
+    THOR_THROW_IF_FALSE(labelOffsetsInput.has_value());
     THOR_THROW_IF_FALSE(inputLengthsInput.has_value());
 
     THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
@@ -165,18 +160,23 @@ void CtcLoss::validateConnectedDescriptors() {
     numClasses = checkedUint32(probabilityDimensions[2], "numClasses");
 
     THOR_THROW_IF_FALSE(labelsInput.value().isInitialized());
-    THOR_THROW_IF_FALSE(labelLengthsInput.value().isInitialized());
+    THOR_THROW_IF_FALSE(labelOffsetsInput.value().isInitialized());
     THOR_THROW_IF_FALSE(inputLengthsInput.value().isInitialized());
     THOR_THROW_IF_FALSE(labelsInput.value().getPlacement() == featureInput.value().getPlacement());
-    THOR_THROW_IF_FALSE(labelLengthsInput.value().getPlacement() == featureInput.value().getPlacement());
+    THOR_THROW_IF_FALSE(labelOffsetsInput.value().getPlacement() == featureInput.value().getPlacement());
     THOR_THROW_IF_FALSE(inputLengthsInput.value().getPlacement() == featureInput.value().getPlacement());
 
     THOR_THROW_IF_FALSE(labelsInput.value().getDescriptor().getDataType() == DataType::INT32);
-    THOR_THROW_IF_FALSE(isCudnnCtcLengthDataType(labelLengthsInput.value().getDescriptor().getDataType()));
+    THOR_THROW_IF_FALSE(isRowPartitionOffsetDTypeSupported(labelOffsetsInput.value().getDescriptor().getDataType()));
     THOR_THROW_IF_FALSE(isCudnnCtcLengthDataType(inputLengthsInput.value().getDescriptor().getDataType()));
-    THOR_THROW_IF_FALSE(isPaddedLabelsMatrix(labelsInput.value(), ctcBatchSize, maxLabelLength));
-    THOR_THROW_IF_FALSE(isBatchLengthVector(labelLengthsInput.value(), ctcBatchSize));
+
+    const vector<uint64_t> labelsDimensions = labelsInput.value().getDescriptor().getDimensions();
+    const vector<uint64_t> offsetsDimensions = labelOffsetsInput.value().getDescriptor().getDimensions();
+    THOR_THROW_IF_FALSE(labelsDimensions.size() == 1);
+    THOR_THROW_IF_FALSE(labelsDimensions[0] > 0);
+    THOR_THROW_IF_FALSE(offsetsDimensions == vector<uint64_t>{static_cast<uint64_t>(ctcBatchSize) + 1});
     THOR_THROW_IF_FALSE(isBatchLengthVector(inputLengthsInput.value(), ctcBatchSize));
+    maxTotalLabelValues = labelsDimensions[0];
 
     THOR_THROW_IF_FALSE(errorOutput.has_value() || isInferenceOnly());
     if (errorOutput.has_value()) {
@@ -194,7 +194,9 @@ void CtcLoss::compileImpl() {
     config.maxTimeSteps = maxTimeSteps;
     config.batchSize = ctcBatchSize;
     config.numClasses = numClasses;
-    config.maxLabelLength = maxLabelLength;
+    backendMaxLabelLength = std::min<uint32_t>(maxTimeSteps, 255U);
+    THOR_THROW_IF_FALSE(backendMaxLabelLength > 0);
+    config.maxLabelLength = backendMaxLabelLength;
     config.dataType = DataType::FP32;
     config.algorithm = CtcLossAlgorithm::DETERMINISTIC;
     config.normalization = CtcLossNormalization::SOFTMAX;
@@ -207,7 +209,8 @@ void CtcLoss::compileImpl() {
         workspace.reset();
     }
 
-    packedLabels = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::INT32, {static_cast<uint64_t>(ctcBatchSize) * maxLabelLength}));
+    generatedLabelLengths = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::INT32, {ctcBatchSize}));
+    labelOffsetsValidationErrorBits = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::UINT32, {1}));
 
     if (isInferenceOnly()) {
         inferenceGradientScratch = featureInput.value().clone(DataType::FP32);
@@ -221,32 +224,48 @@ void CtcLoss::runCudnn(Stream stream) {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
     THOR_THROW_IF_FALSE(labelsInput.has_value());
-    THOR_THROW_IF_FALSE(labelLengthsInput.has_value());
+    THOR_THROW_IF_FALSE(labelOffsetsInput.has_value());
     THOR_THROW_IF_FALSE(inputLengthsInput.has_value());
+    THOR_THROW_IF_FALSE(generatedLabelLengths.has_value());
+    THOR_THROW_IF_FALSE(labelOffsetsValidationErrorBits.has_value());
 
     Tensor& gradientTensor = errorOutput.has_value() ? errorOutput.value() : inferenceGradientScratch.value();
     THOR_THROW_IF_FALSE(gradientTensor.isInitialized());
 
-    THOR_THROW_IF_FALSE(packedLabels.has_value());
-    launchCompactPaddedCtcLabels(labelsInput.value().getMemPtr<int>(),
-                                 labelLengthsInput.value().getMemPtr<int>(),
-                                 packedLabels.value().getMemPtr<int>(),
-                                 ctcBatchSize,
-                                 maxLabelLength,
-                                 stream);
+    rowPartitionOffsetsToInt32LengthsChecked(labelOffsetsInput.value(),
+                                             generatedLabelLengths.value(),
+                                             labelOffsetsValidationErrorBits.value(),
+                                             ctcBatchSize,
+                                             maxTotalLabelValues,
+                                             backendMaxLabelLength,
+                                             stream);
 
     const size_t workspaceSizeBytes = ctcPlan->getWorkspaceSizeInBytes();
     void* workspacePtr = workspace.has_value() ? workspace.value().getMemPtr() : nullptr;
 
     ctcPlan->run(featureInput.value().getMemPtr(),
-                 packedLabels.value().getMemPtr<int>(),
-                 labelLengthsInput.value().getMemPtr<int>(),
+                 labelsInput.value().getMemPtr<int>(),
+                 generatedLabelLengths.value().getMemPtr<int>(),
                  inputLengthsInput.value().getMemPtr<int>(),
                  featureOutput.value().getMemPtr(),
                  gradientTensor.getMemPtr(),
                  workspacePtr,
                  workspaceSizeBytes,
                  stream);
+
+    // cuDNN currently reports zero cost for active rows whose target length is
+    // zero. CTC itself has well-defined empty-target semantics: the only valid
+    // alignment is blank at every valid time step. Repair those rows on-device
+    // before Thor applies loss/gradient scaling.
+    launchCorrectCtcEmptyTargetRows(featureInput.value().getMemPtr<float>(),
+                                    generatedLabelLengths.value().getMemPtr<int>(),
+                                    inputLengthsInput.value().getMemPtr<int>(),
+                                    featureOutput.value().getMemPtr<float>(),
+                                    gradientTensor.getMemPtr<float>(),
+                                    ctcBatchSize,
+                                    maxTimeSteps,
+                                    numClasses,
+                                    stream);
 
     const float materializedLossWeight = materializeLossWeight(lossWeight);
     const float gradientScale = static_cast<float>(lossScalingFactor) * materializedLossWeight;
@@ -272,13 +291,13 @@ void CtcLoss::infer(optional<Tensor> probabilities, optional<Tensor> loss, Strea
 
     ScopedGpu scopedGpu(probabilities.value().getPlacement().getDeviceNum());
     stream.waitEvent(labelsStream.putEvent());
-    stream.waitEvent(labelLengthsStream.putEvent());
+    stream.waitEvent(labelOffsetsStream.putEvent());
     stream.waitEvent(inputLengthsStream.putEvent());
 
     runCudnn(stream);
 
     labelsStream.waitEvent(stream.putEvent());
-    labelLengthsStream.waitEvent(stream.putEvent());
+    labelOffsetsStream.waitEvent(stream.putEvent());
     inputLengthsStream.waitEvent(stream.putEvent());
 }
 
@@ -294,10 +313,10 @@ void CtcLoss::backProp(optional<Tensor> labels, optional<Tensor> probabilities, 
 void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_t validExampleCount) {
     THOR_THROW_IF_FALSE(running);
     THOR_THROW_IF_FALSE(labelsStream.isInitialized());
-    THOR_THROW_IF_FALSE(labelLengthsStream.isInitialized());
+    THOR_THROW_IF_FALSE(labelOffsetsStream.isInitialized());
     THOR_THROW_IF_FALSE(inputLengthsStream.isInitialized());
     THOR_THROW_IF_FALSE(labelsInput.has_value());
-    THOR_THROW_IF_FALSE(labelLengthsInput.has_value());
+    THOR_THROW_IF_FALSE(labelOffsetsInput.has_value());
     THOR_THROW_IF_FALSE(inputLengthsInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
     THOR_THROW_IF_FALSE(featureInput.has_value());
@@ -316,9 +335,9 @@ void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_
             forwardLabels(inputTensor.value(), validationPass);
             return;
         }
-        if (inputTensor.value() == labelLengthsInput.value()) {
-            THOR_THROW_IF_FALSE(labelLengthsReceived == false);
-            labelLengthsReceived = true;
+        if (inputTensor.value() == labelOffsetsInput.value()) {
+            THOR_THROW_IF_FALSE(labelOffsetsReceived == false);
+            labelOffsetsReceived = true;
             advanceDataIfReady(validationPass);
             return;
         }
@@ -334,11 +353,11 @@ void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_
     THOR_THROW_IF_FALSE(!inputTensor.has_value());
     THOR_THROW_IF_FALSE(featureInputReceived);
     THOR_THROW_IF_FALSE(labelsReceived);
-    THOR_THROW_IF_FALSE(labelLengthsReceived);
+    THOR_THROW_IF_FALSE(labelOffsetsReceived);
     THOR_THROW_IF_FALSE(inputLengthsReceived);
     featureInputReceived = false;
     labelsReceived = false;
-    labelLengthsReceived = false;
+    labelOffsetsReceived = false;
     inputLengthsReceived = false;
     finishBatchCardinality();
 
@@ -356,9 +375,9 @@ void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_
 }
 
 void CtcLoss::advanceDataIfReady(bool validationPass) {
-    if (featureInputReceived && labelsReceived && labelLengthsReceived && inputLengthsReceived) {
+    if (featureInputReceived && labelsReceived && labelOffsetsReceived && inputLengthsReceived) {
         stream.waitEvent(labelsStream.putEvent());
-        stream.waitEvent(labelLengthsStream.putEvent());
+        stream.waitEvent(labelOffsetsStream.putEvent());
         stream.waitEvent(inputLengthsStream.putEvent());
         forward(nullopt, validationPass);
     }
@@ -367,16 +386,18 @@ void CtcLoss::advanceDataIfReady(bool validationPass) {
 void CtcLoss::ensureNoDeviceCrossing() {
     Loss::ensureNoDeviceCrossing();
     if (featureInput.has_value()) {
-        if (labelLengthsInput.has_value())
-            THOR_THROW_IF_FALSE(labelLengthsInput.value().getPlacement() == featureInput.value().getPlacement());
+        if (labelOffsetsInput.has_value())
+            THOR_THROW_IF_FALSE(labelOffsetsInput.value().getPlacement() == featureInput.value().getPlacement());
         if (inputLengthsInput.has_value())
             THOR_THROW_IF_FALSE(inputLengthsInput.value().getPlacement() == featureInput.value().getPlacement());
+        if (generatedLabelLengths.has_value())
+            THOR_THROW_IF_FALSE(generatedLabelLengths.value().getPlacement() == featureInput.value().getPlacement());
+        if (labelOffsetsValidationErrorBits.has_value())
+            THOR_THROW_IF_FALSE(labelOffsetsValidationErrorBits.value().getPlacement() == featureInput.value().getPlacement());
         if (workspace.has_value())
             THOR_THROW_IF_FALSE(workspace.value().getPlacement() == featureInput.value().getPlacement());
         if (inferenceGradientScratch.has_value())
             THOR_THROW_IF_FALSE(inferenceGradientScratch.value().getPlacement() == featureInput.value().getPlacement());
-        if (packedLabels.has_value())
-            THOR_THROW_IF_FALSE(packedLabels.value().getPlacement() == featureInput.value().getPlacement());
     }
 }
 
@@ -387,7 +408,7 @@ vector<Event> CtcLoss::getSynchronizeEvents() {
     set<uint64_t> synchronizedStreamIds;
     appendSynchronizeEvent(events, synchronizedStreamIds, stream);
     appendSynchronizeEvent(events, synchronizedStreamIds, labelsStream);
-    appendSynchronizeEvent(events, synchronizedStreamIds, labelLengthsStream);
+    appendSynchronizeEvent(events, synchronizedStreamIds, labelOffsetsStream);
     appendSynchronizeEvent(events, synchronizedStreamIds, inputLengthsStream);
     return events;
 }

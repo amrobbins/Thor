@@ -1004,12 +1004,12 @@ void StampedEquation::runOn(Stream& run_stream, const std::unordered_map<std::st
     std::vector<RuntimeInputValue> overridden_inputs = inputs;
     std::unordered_set<std::string> consumed_names;
 
-    for (size_t i = 0; i < compiledEquation->input_names.size(); ++i) {
+    for (size_t i = 0; i < inputNames.size(); ++i) {
         if (compiledEquation->input_kinds[i] != NamedInput::Kind::RuntimeScalarFp32) {
             continue;
         }
 
-        const std::string& name = compiledEquation->input_names[i];
+        const std::string& name = inputNames[i];
         auto it = runtime_scalars.find(name);
         if (it == runtime_scalars.end()) {
             throw std::runtime_error("Missing value for runtime scalar: " + name +
@@ -3780,9 +3780,9 @@ std::unordered_set<std::string> StampedEquation::runtimeScalarNames() const {
         return names;
     }
 
-    for (size_t i = 0; i < compiledEquation->input_names.size(); ++i) {
+    for (size_t i = 0; i < inputNames.size(); ++i) {
         if (compiledEquation->input_kinds[i] == NamedInput::Kind::RuntimeScalarFp32) {
-            names.insert(compiledEquation->input_names[i]);
+            names.insert(inputNames[i]);
         }
     }
     return names;

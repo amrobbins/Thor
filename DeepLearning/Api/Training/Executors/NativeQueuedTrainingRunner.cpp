@@ -1307,10 +1307,8 @@ std::vector<TrainingInputBinding> mergeDatasetInputBindings(
 std::vector<TrainingInputBinding> inputBindingsForNetwork(
     const std::vector<TrainingInputBinding>& bindings,
     const Network& network) {
-    std::set<std::string> externalInputNames;
-    for (const std::shared_ptr<NetworkInput>& input : network.getExternalNetworkInputs()) {
-        externalInputNames.insert(input->getName());
-    }
+    const std::vector<std::string> logicalInputNames = network.getExternalNetworkInputNames();
+    const std::set<std::string> externalInputNames(logicalInputNames.begin(), logicalInputNames.end());
 
     std::vector<TrainingInputBinding> filtered;
     filtered.reserve(bindings.size());

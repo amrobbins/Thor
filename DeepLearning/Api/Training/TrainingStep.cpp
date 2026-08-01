@@ -101,8 +101,8 @@ void TrainingStep::validate() const {
     }
     std::set<std::string> phaseExternalInputNames;
     for (const std::shared_ptr<TrainingPhase>& phase : phases) {
-        for (const std::shared_ptr<NetworkInput>& input : phase->getNetwork()->getExternalNetworkInputs()) {
-            phaseExternalInputNames.insert(input->getName());
+        for (const std::string& inputName : phase->getNetwork()->getExternalNetworkInputNames()) {
+            phaseExternalInputNames.insert(inputName);
         }
     }
 

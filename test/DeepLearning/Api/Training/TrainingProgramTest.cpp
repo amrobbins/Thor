@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
@@ -413,6 +414,51 @@ TEST(TrainingProgramApi, TrainingStepPhaseGraphValidationSkipsDisabledPhasesAndD
                               false);
     EXPECT_TRUE(disabledStep.getActivePhaseNames().empty());
     EXPECT_TRUE(disabledStep.getActiveObjectiveRoots().empty());
+}
+
+
+TEST(TrainingProgramApi, TrainingStepAndPhaseCompositionPreserveLogicalRaggedInputs) {
+    auto network = std::make_shared<Network>("ragged_phase_network");
+    RaggedTensor labels = RaggedNetworkInput::Builder()
+                              .network(*network)
+                              .name("labels")
+                              .valuesDataType(DataType::INT32)
+                              .offsetsDataType(DataType::UINT64)
+                              .batchSize(2)
+                              .maxTotalValues(5)
+                              .build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("label_values")
+        .inputTensor(labels.getValues())
+        .dataType(DataType::INT32)
+        .build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("label_offsets")
+        .inputTensor(labels.getOffsets())
+        .dataType(DataType::UINT64)
+        .build();
+
+    auto phase = std::make_shared<TrainingPhase>("ragged_phase", network, true);
+    TrainingStep step("ragged_step",
+                      std::vector<std::shared_ptr<TrainingPhase>>{phase},
+                      nullptr,
+                      std::vector<ParameterReference>{},
+                      1,
+                      TrainingStep::GradientClearPolicy::CLEAR_BEFORE_STEP,
+                      std::vector<TrainingInputBinding>{TrainingInputBinding("labels", "labels")});
+
+    ComposedPhaseGraph graph = composeActivePhases(step);
+    ASSERT_TRUE(graph.network->hasRaggedNetworkInput("labels"));
+    EXPECT_EQ(graph.network->getExternalNetworkInputNames(), (std::vector<std::string>{"labels"}));
+    ASSERT_EQ(graph.network->getExternalRaggedNetworkInputs().size(), 1u);
+    EXPECT_EQ(graph.network->getExternalRaggedNetworkInputs().front().raggedTensor.getDescriptor(),
+              labels.getDescriptor());
+    EXPECT_EQ(graph.externalInputTensorsByName.at("labels.values"),
+              graph.network->getExternalRaggedNetworkInputs().front().raggedTensor.getValues());
+    EXPECT_EQ(graph.externalInputTensorsByName.at("labels.offsets"),
+              graph.network->getExternalRaggedNetworkInputs().front().raggedTensor.getOffsets());
 }
 
 TEST(TrainingProgramApi, PhaseGraphDependencyErrorsAreSpecificAndSearchable) {

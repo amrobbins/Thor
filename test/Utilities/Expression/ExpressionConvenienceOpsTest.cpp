@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -2123,6 +2124,35 @@ std::vector<float> toFloatValues(const std::vector<double>& values) {
 
 }  // namespace
 
+
+TEST(ExpressionConvenienceOps, GlobalFusedKernelCacheKeepsRuntimeScalarNamesStampLocal) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor x = makeGpuTensor({3}, {1.0f, 2.0f, 3.0f}, stream);
+
+    auto build = [](const std::string& inputName, const std::string& scalarName) {
+        Expression input = Expression::input(inputName);
+        Expression scale = Expression::runtimeScalar(scalarName, DataType::FP32, DataType::FP32);
+        Expression output = input * scale + Expression::constantScalar(0.31415927);
+        return Expression::outputs({{"y", output}});
+    };
+
+    FusedEquation first = FusedEquation::compile(build("cache_binding_x_first", "cache_binding_scale_first").physicalOutputs(), 0);
+    StampedExecutionPlan firstPlan = first.stamp({{"cache_binding_x_first", x}}, stream);
+    EXPECT_EQ(firstPlan.runtimeScalarNames(), (std::unordered_set<std::string>{"cache_binding_scale_first"}));
+    firstPlan.run({{"cache_binding_scale_first", 2.0f}});
+    expectNear(copyToCpuValues(firstPlan.output("y"), stream), {2.31415927f, 4.31415927f, 6.31415927f});
+
+    // This graph is structurally identical to the first one, so its fused CUDA kernel
+    // should be served by the global structural cache. Semantic input names must still
+    // come from this stamp rather than from whichever graph populated the cache first.
+    FusedEquation second = FusedEquation::compile(build("cache_binding_x_second", "cache_binding_scale_second").physicalOutputs(), 0);
+    StampedExecutionPlan secondPlan = second.stamp({{"cache_binding_x_second", x}}, stream);
+    EXPECT_EQ(secondPlan.runtimeScalarNames(), (std::unordered_set<std::string>{"cache_binding_scale_second"}));
+    EXPECT_NO_THROW(secondPlan.run({{"cache_binding_scale_second", 3.0f}}));
+    expectNear(copyToCpuValues(secondPlan.output("y"), stream), {3.31415927f, 6.31415927f, 9.31415927f});
+}
 
 TEST(ExpressionConvenienceOps, FusedKernelConsumesNonDenseStridedInputView) {
     REQUIRE_CUDA_DEVICE();

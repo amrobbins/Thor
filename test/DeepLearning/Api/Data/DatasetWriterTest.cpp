@@ -668,3 +668,141 @@ TEST(DatasetWriterTest, RejectsAffineReferenceFormulaOverflowAtEitherEndpoint) {
     writer.close();
     std::filesystem::remove_all(datasetPath);
 }
+
+TEST(DatasetWriterTest, WritesPackedRaggedSidecarAndPerRecordReferences) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_sidecar");
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        vector<DatasetLayout::TensorShape>{DatasetLayout::TensorShape("weight", {1}, DataType::FP32)},
+        vector<DatasetLayout::RaggedTensorShape>{DatasetLayout::RaggedTensorShape("labels", {}, DataType::INT32)});
+
+    vector<float> weights{1.0f, 2.0f, 3.0f};
+    vector<int32_t> labels{10, 11, 20, 21, 22};
+    vector<uint64_t> offsets{0, 2, 2, 5};
+
+    DatasetWriter writer(datasetPath, layout, 8);
+    writer.writeIndexedExamples(
+        {{"weight", DatasetWriter::TensorBatchView{.dataType = DataType::FP32,
+                                                    .dimensions = {3, 1},
+                                                    .data = weights.data(),
+                                                    .numBytes = weights.size() * sizeof(float)}}},
+        {{"labels", DatasetWriter::RaggedTensorBatchView{.dataType = DataType::INT32,
+                                                         .dimensions = {5},
+                                                         .data = labels.data(),
+                                                         .numBytes = labels.size() * sizeof(int32_t),
+                                                         .offsetsDataType = DataType::UINT64,
+                                                         .offsets = offsets.data(),
+                                                         .count = 3}}});
+
+    float finalWeight = 4.0f;
+    vector<int32_t> finalLabels{30, 31};
+    writer.writeIndexedExample(
+        {{"weight", DatasetWriter::TensorView{.dataType = DataType::FP32,
+                                               .dimensions = {1},
+                                               .data = &finalWeight,
+                                               .numBytes = sizeof(finalWeight)}}},
+        {{"labels", DatasetWriter::RaggedTensorView{.dataType = DataType::INT32,
+                                                    .dimensions = {2},
+                                                    .data = finalLabels.data(),
+                                                    .numBytes = finalLabels.size() * sizeof(int32_t)}}});
+    writer.close();
+
+    const nlohmann::json manifest = readJson(datasetPath / DatasetWriter::MANIFEST_FILENAME);
+    EXPECT_EQ(manifest.at("format").get<string>(), DatasetLayout::RAGGED_FORMAT);
+    ASSERT_TRUE(manifest.contains("ragged_tensors"));
+    const nlohmann::json &storage = manifest.at("ragged_tensors").at("labels").at("storage");
+    EXPECT_EQ(storage.at("num_values").get<uint64_t>(), 7);
+    EXPECT_EQ(storage.at("num_bytes").get<uint64_t>(), 7 * sizeof(int32_t));
+    const std::filesystem::path valuesPath = datasetPath / storage.at("file").get<string>();
+    ASSERT_EQ(std::filesystem::file_size(valuesPath), 7 * sizeof(int32_t));
+
+    vector<int32_t> storedLabels(7);
+    {
+        std::ifstream in(valuesPath, std::ios::binary);
+        in.read(reinterpret_cast<char *>(storedLabels.data()), static_cast<std::streamsize>(storedLabels.size() * sizeof(int32_t)));
+        ASSERT_TRUE(in.good() || in.eof());
+    }
+    EXPECT_EQ(storedLabels, vector<int32_t>({10, 11, 20, 21, 22, 30, 31}));
+
+    DatasetShard shard;
+    shard.openShard((datasetPath / manifest.at("shards").at(0).at("file").get<string>()).string());
+    const DatasetLayout parsed = DatasetLayout::fromJson(manifest);
+    const DatasetLayout::RaggedTensorSpec &spec = parsed.raggedTensor("labels");
+    vector<std::pair<uint64_t, uint64_t>> expectedReferences{{0, 2}, {2, 0}, {2, 3}, {5, 2}};
+    for (uint64_t row = 0; row < expectedReferences.size(); ++row) {
+        vector<uint8_t> record(parsed.recordSizeBytes());
+        string label;
+        string filename;
+        shard.loadExample(record.data(), label, filename, ExampleType::TRAIN, row);
+        uint64_t startValue = 0;
+        uint64_t valueCount = 0;
+        std::memcpy(&startValue, record.data() + spec.referenceOffsetBytes, sizeof(startValue));
+        std::memcpy(&valueCount, record.data() + spec.referenceOffsetBytes + sizeof(startValue), sizeof(valueCount));
+        EXPECT_EQ(startValue, expectedReferences.at(row).first);
+        EXPECT_EQ(valueCount, expectedReferences.at(row).second);
+    }
+
+    EXPECT_NO_THROW(layout.validateRequestedLayoutExact(parsed));
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DatasetWriterTest, RaggedBatchSupportsUint32OffsetsAndAllEmptyRows) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_empty_rows");
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        {}, vector<DatasetLayout::RaggedTensorShape>{DatasetLayout::RaggedTensorShape("tokens", {2}, DataType::FP32)});
+    vector<uint32_t> offsets{0, 0, 0, 0};
+
+    DatasetWriter writer(datasetPath, layout, 8);
+    writer.writeIndexedExamples(
+        {},
+        {{"tokens", DatasetWriter::RaggedTensorBatchView{.dataType = DataType::FP32,
+                                                         .dimensions = {0, 2},
+                                                         .data = nullptr,
+                                                         .numBytes = 0,
+                                                         .offsetsDataType = DataType::UINT32,
+                                                         .offsets = offsets.data(),
+                                                         .count = 3}}});
+    writer.close();
+
+    const nlohmann::json manifest = readJson(datasetPath / DatasetWriter::MANIFEST_FILENAME);
+    EXPECT_EQ(manifest.at("num_examples").get<uint64_t>(), 3);
+    const nlohmann::json &storage = manifest.at("ragged_tensors").at("tokens").at("storage");
+    EXPECT_EQ(storage.at("num_values").get<uint64_t>(), 0);
+    EXPECT_EQ(storage.at("num_bytes").get<uint64_t>(), 0);
+    EXPECT_TRUE(std::filesystem::exists(datasetPath / storage.at("file").get<string>()));
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DatasetWriterTest, RejectsMalformedRaggedBatchBeforeWritingSidecar) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_bad_offsets");
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        {}, vector<DatasetLayout::RaggedTensorShape>{DatasetLayout::RaggedTensorShape("labels", {}, DataType::INT32)});
+    vector<int32_t> values{1, 2, 3};
+    vector<uint64_t> badStart{1, 2, 3};
+    vector<uint64_t> decreasing{0, 3, 2};
+    vector<uint64_t> badFinal{0, 1, 2};
+
+    DatasetWriter writer(datasetPath, layout, 8);
+    auto makeView = [&](const vector<uint64_t> &offsets) {
+        return DatasetWriter::RaggedTensorBatchView{.dataType = DataType::INT32,
+                                                    .dimensions = {3},
+                                                    .data = values.data(),
+                                                    .numBytes = values.size() * sizeof(int32_t),
+                                                    .offsetsDataType = DataType::UINT64,
+                                                    .offsets = offsets.data(),
+                                                    .count = 2};
+    };
+    EXPECT_THROW(writer.writeIndexedExamples({}, {{"labels", makeView(badStart)}}), std::runtime_error);
+    EXPECT_THROW(writer.writeIndexedExamples({}, {{"labels", makeView(decreasing)}}), std::runtime_error);
+    EXPECT_THROW(writer.writeIndexedExamples({}, {{"labels", makeView(badFinal)}}), std::runtime_error);
+    EXPECT_EQ(writer.numExamples(), 0);
+    writer.close();
+
+    const nlohmann::json manifest = readJson(datasetPath / DatasetWriter::MANIFEST_FILENAME);
+    const nlohmann::json &storage = manifest.at("ragged_tensors").at("labels").at("storage");
+    EXPECT_EQ(storage.at("num_values").get<uint64_t>(), 0);
+    EXPECT_EQ(storage.at("num_bytes").get<uint64_t>(), 0);
+    EXPECT_EQ(std::filesystem::file_size(datasetPath / storage.at("file").get<string>()), 0);
+
+    std::filesystem::remove_all(datasetPath);
+}

@@ -55,8 +55,9 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
     [[nodiscard]] Thor::BatchFieldSourceDescription getBatchFieldSourceDescription(
         const std::string &fieldName) const override;
     [[nodiscard]] std::vector<Event> getSynchronizeEvents() const override;
-    [[nodiscard]] const std::set<Thor::DatasetFieldId>& getRequiredDatasetFieldIds() const override {
-        return requiredFieldIds;
+    [[nodiscard]] const Thor::DatasetFieldMaterializationRequirements&
+    getDatasetFieldMaterializationRequirements() const override {
+        return fieldRequirements;
     }
     void cancel() override;
 
@@ -98,7 +99,7 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
 
     Thor::DatasetMaterializationDescription datasetDescription;
     Thor::DeviceDatasetSessionDescription sessionDescription;
-    std::set<Thor::DatasetFieldId> requiredFieldIds;
+    Thor::DatasetFieldMaterializationRequirements fieldRequirements;
     std::set<std::string> directFieldNames;
     std::set<std::string> residentFieldNames;
     std::shared_ptr<IndexedDatasetReader> reader;

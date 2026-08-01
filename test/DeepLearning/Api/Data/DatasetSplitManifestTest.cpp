@@ -37,7 +37,7 @@ class TestNamedDataset final : public Thor::NamedDataset {
         const Thor::BatchPolicy &,
         const Thor::DatasetAccessPolicy &,
         uint64_t,
-        const std::set<Thor::DatasetFieldId> &) const override {
+        const Thor::DatasetFieldMaterializationRequirements &) const override {
         return nullptr;
     }
 

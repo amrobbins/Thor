@@ -315,6 +315,7 @@ class IndexedDatasetReader::Impl {
     enum class RecordReadSpanKind {
         Tensor,
         WindowedReference,
+        RaggedReference,
     };
 
     struct RecordReadSpan {
@@ -334,6 +335,11 @@ class IndexedDatasetReader::Impl {
         DatasetLayout::WindowedTensorSpec spec;
         uint64_t sourceOrdinal = 0;
         uint64_t referenceBufferOffsetBytes = 0;
+    };
+
+    struct RaggedTensorReadSpec {
+        DatasetLayout::RaggedTensorSpec spec;
+        std::filesystem::path valuesPath;
     };
 
     struct AffineWindowReference {
@@ -356,9 +362,11 @@ class IndexedDatasetReader::Impl {
     std::vector<DatasetLayout::TensorSpec> directTensorSpecs;
     std::vector<WindowedSourceReadSpec> windowedSourceReadSpecs;
     std::vector<WindowedTensorReadSpec> windowedReadSpecs;
+    std::vector<RaggedTensorReadSpec> raggedReadSpecs;
     std::vector<AffineWindowReferenceSegment> affineWindowReferenceSegments;
     std::map<std::string, uint64_t> tensorOrdinalByName;
     std::map<std::string, uint64_t> windowedTensorOrdinalByName;
+    std::map<std::string, uint64_t> raggedTensorOrdinalByName;
     uint64_t totalWindowedReferenceBytes = 0;
     uint64_t numExamples = 0;
 
@@ -391,6 +399,29 @@ class IndexedDatasetReader::Impl {
         auto out = std::unique_ptr<Impl>(new Impl());
         out->datasetPath = datasetPath;
         out->layout = DatasetLayout::fromJson(manifest);
+        uint64_t raggedOrdinal = 0;
+        for (const DatasetLayout::RaggedTensorSpec &spec : out->layout.raggedTensors()) {
+            if (!spec.valuesFilename.has_value()) {
+                throw std::runtime_error("IndexedDatasetReader ragged tensor '" + spec.name + "' has no storage.");
+            }
+            const std::filesystem::path valuesPath = datasetPath / spec.valuesFilename.value();
+            if (!std::filesystem::exists(valuesPath) || !std::filesystem::is_regular_file(valuesPath)) {
+                throw std::runtime_error("IndexedDatasetReader ragged values sidecar is missing: " + valuesPath.string());
+            }
+            if (std::filesystem::file_size(valuesPath) != spec.valuesNumBytes) {
+                throw std::runtime_error("IndexedDatasetReader ragged values sidecar size does not match manifest: " +
+                                         valuesPath.string());
+            }
+            const auto [insertIt, inserted] = out->raggedTensorOrdinalByName.emplace(spec.name, raggedOrdinal);
+            (void)insertIt;
+            THOR_THROW_IF_FALSE(inserted);
+            out->raggedReadSpecs.push_back(RaggedTensorReadSpec{.spec = spec, .valuesPath = valuesPath});
+            out->recordReadSpans.push_back(RecordReadSpan{.kind = RecordReadSpanKind::RaggedReference,
+                                                          .sourceOffsetBytes = spec.referenceOffsetBytes,
+                                                          .numBytes = spec.referenceNumBytes,
+                                                          .ordinal = raggedOrdinal});
+            raggedOrdinal += 1;
+        }
         if (requestedLayout != nullptr) {
             out->layout.validateRequestedLayoutExact(*requestedLayout);
         }
@@ -572,18 +603,24 @@ class IndexedDatasetReader::Impl {
             return static_cast<int>(left.kind) < static_cast<int>(right.kind);
         });
 
-        uint64_t expectedRecordOffsetBytes = 0;
+        std::vector<std::pair<uint64_t, uint64_t>> recordCoverage;
+        recordCoverage.reserve(out->recordReadSpans.size());
         for (const RecordReadSpan &span : out->recordReadSpans) {
-            if (span.sourceOffsetBytes != expectedRecordOffsetBytes) {
-                throw std::runtime_error("IndexedDatasetReader readv layout requires dense contiguous tensor/reference records "
+            recordCoverage.emplace_back(span.sourceOffsetBytes, span.numBytes);
+        }
+        std::sort(recordCoverage.begin(), recordCoverage.end());
+        uint64_t expectedRecordOffsetBytes = 0;
+        for (const auto &[sourceOffsetBytes, numBytes] : recordCoverage) {
+            if (sourceOffsetBytes != expectedRecordOffsetBytes) {
+                throw std::runtime_error("IndexedDatasetReader layout requires dense contiguous tensor/reference records "
                                          "in source-offset order.");
             }
             expectedRecordOffsetBytes = checkedAdd(expectedRecordOffsetBytes,
-                                                   span.numBytes,
+                                                   numBytes,
                                                    "IndexedDatasetReader direct-read record layout");
         }
         if (expectedRecordOffsetBytes != out->layout.recordSizeBytes()) {
-            throw std::runtime_error("IndexedDatasetReader readv tensor/reference specs do not cover record_size_bytes.");
+            throw std::runtime_error("IndexedDatasetReader tensor/reference specs do not cover record_size_bytes.");
         }
 
         return out;
@@ -700,6 +737,7 @@ class IndexedDatasetReader::Session::Impl {
     std::shared_ptr<IndexedDatasetReader> owner;
     std::map<uint64_t, IoContext> ioContextsByShardIndex;
     std::map<uint64_t, SourceFileContext> sourceContextsBySourceOrdinal;
+    std::map<uint64_t, SourceFileContext> raggedSourceContextsByOrdinal;
     IndexedDatasetReaderSessionStats stats;
     std::set<std::string> resolvedIoBackends;
     const uint64_t queueDepth;
@@ -746,6 +784,25 @@ class IndexedDatasetReader::Session::Impl {
                                      "': " + std::strerror(errno));
         }
         auto [insertIt, inserted] = sourceContextsBySourceOrdinal.emplace(sourceOrdinal, SourceFileContext(filename, fd));
+        THOR_THROW_IF_FALSE(inserted);
+        return insertIt->second;
+    }
+
+    SourceFileContext &raggedSourceContextFor(uint64_t raggedOrdinal) {
+        auto it = raggedSourceContextsByOrdinal.find(raggedOrdinal);
+        if (it != raggedSourceContextsByOrdinal.end()) {
+            return it->second;
+        }
+        THOR_THROW_IF_FALSE(owner != nullptr);
+        const auto &source = owner->impl->raggedReadSpecs.at(static_cast<size_t>(raggedOrdinal));
+        const std::string filename = source.valuesPath.string();
+        int fd = ::open(filename.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            throw std::runtime_error("IndexedDatasetReader failed to open ragged values sidecar '" + filename +
+                                     "': " + std::strerror(errno));
+        }
+        auto [insertIt, inserted] =
+            raggedSourceContextsByOrdinal.emplace(raggedOrdinal, SourceFileContext(filename, fd));
         THOR_THROW_IF_FALSE(inserted);
         return insertIt->second;
     }
@@ -928,12 +985,15 @@ class IndexedDatasetReader::Session::Impl {
                     const std::vector<uint8_t *> &tensorBasePointers,
                     const std::vector<uint8_t *> &windowedTensorBasePointers,
                     const std::vector<uint8_t *> &windowedMaskBasePointers,
+                    const std::vector<IndexedRaggedTensorReference *> &raggedReferenceBasePointers,
                     bool materializeWindowedTensors) {
         THOR_THROW_IF_FALSE(owner != nullptr);
         const IndexedDatasetReader::Impl &reader = *owner->impl;
         const uint64_t tensorCount = static_cast<uint64_t>(reader.directTensorSpecs.size());
         const uint64_t windowedCount = static_cast<uint64_t>(reader.windowedReadSpecs.size());
+        const uint64_t raggedCount = static_cast<uint64_t>(reader.raggedReadSpecs.size());
         THOR_THROW_IF_FALSE(tensorBasePointers.size() == tensorCount);
+        THOR_THROW_IF_FALSE(raggedReferenceBasePointers.size() == raggedCount);
         if (materializeWindowedTensors) {
             THOR_THROW_IF_FALSE(windowedTensorBasePointers.size() == windowedCount);
             THOR_THROW_IF_FALSE(windowedMaskBasePointers.size() == windowedCount);
@@ -984,12 +1044,25 @@ class IndexedDatasetReader::Session::Impl {
                                                               "IndexedDatasetReader destination tensor slot");
                 readIovecs[spanOrdinal].iov_base = basePointer + destinationOffset;
                 readIovecs[spanOrdinal].iov_len = static_cast<size_t>(spec.numBytes);
-            } else {
+            } else if (span.kind == IndexedDatasetReader::Impl::RecordReadSpanKind::WindowedReference) {
                 const IndexedDatasetReader::Impl::WindowedTensorReadSpec &spec =
                     reader.windowedReadSpecs.at(static_cast<size_t>(span.ordinal));
                 THOR_THROW_IF_FALSE(span.numBytes == spec.spec.referenceNumBytes);
                 readIovecs[spanOrdinal].iov_base = referenceBuffer.data() + spec.referenceBufferOffsetBytes;
                 readIovecs[spanOrdinal].iov_len = static_cast<size_t>(spec.spec.referenceNumBytes);
+            } else {
+                const IndexedDatasetReader::Impl::RaggedTensorReadSpec &spec =
+                    reader.raggedReadSpecs.at(static_cast<size_t>(span.ordinal));
+                THOR_THROW_IF_FALSE(span.numBytes == spec.spec.referenceNumBytes);
+                THOR_THROW_IF_FALSE(span.numBytes == sizeof(IndexedRaggedTensorReference));
+                IndexedRaggedTensorReference *const basePointer =
+                    raggedReferenceBasePointers.at(static_cast<size_t>(span.ordinal));
+                if (basePointer == nullptr) {
+                    throw std::runtime_error(
+                        "IndexedDatasetReader::Session received a null ragged reference destination pointer.");
+                }
+                readIovecs[spanOrdinal].iov_base = basePointer + batchSlot;
+                readIovecs[spanOrdinal].iov_len = sizeof(IndexedRaggedTensorReference);
             }
         }
         stats.iovecFillNanoseconds += diagnosticElapsedNanoseconds(fillStart);
@@ -1101,6 +1174,10 @@ uint64_t IndexedDatasetReader::getWindowedTensorCount() const {
     return static_cast<uint64_t>(impl->windowedReadSpecs.size());
 }
 
+uint64_t IndexedDatasetReader::getRaggedTensorCount() const {
+    return static_cast<uint64_t>(impl->raggedReadSpecs.size());
+}
+
 uint64_t IndexedDatasetReader::getLayoutTensorOrdinal(std::string_view tensorName) const {
     const auto it = impl->tensorOrdinalByName.find(std::string(tensorName));
     if (it == impl->tensorOrdinalByName.end()) {
@@ -1113,6 +1190,14 @@ uint64_t IndexedDatasetReader::getLayoutWindowedTensorOrdinal(std::string_view t
     const auto it = impl->windowedTensorOrdinalByName.find(std::string(tensorName));
     if (it == impl->windowedTensorOrdinalByName.end()) {
         throw std::runtime_error("IndexedDatasetReader windowed tensor not found in layout: " + std::string(tensorName));
+    }
+    return it->second;
+}
+
+uint64_t IndexedDatasetReader::getLayoutRaggedTensorOrdinal(std::string_view tensorName) const {
+    const auto it = impl->raggedTensorOrdinalByName.find(std::string(tensorName));
+    if (it == impl->raggedTensorOrdinalByName.end()) {
+        throw std::runtime_error("IndexedDatasetReader ragged tensor not found in layout: " + std::string(tensorName));
     }
     return it->second;
 }
@@ -1148,6 +1233,10 @@ void IndexedDatasetReader::Session::loadDirectExampleInto(uint64_t globalExample
     THOR_THROW_IF_FALSE(impl != nullptr);
     THOR_THROW_IF_FALSE(impl->owner != nullptr);
     const IndexedDatasetReader::Impl &reader = *impl->owner->impl;
+    if (!reader.raggedReadSpecs.empty()) {
+        throw std::runtime_error(
+            "IndexedDatasetReader::Session direct loads do not materialize ragged fields; use the indexed batch assembler.");
+    }
     if (tensorBasePointers.size() != reader.directTensorSpecs.size()) {
         throw std::runtime_error("IndexedDatasetReader::Session direct destination tensor count does not match layout tensor count.");
     }
@@ -1176,15 +1265,31 @@ void IndexedDatasetReader::Session::loadDirectExampleInto(uint64_t globalExample
     if (request.numBytes != reader.layout.recordSizeBytes()) {
         throw std::runtime_error("IndexedDatasetReader shard read request size does not match layout record size.");
     }
-    impl->readRecord(context, request.fileOffsetBytes, globalExampleIndex, batchSlot, tensorBasePointers, {}, {}, false);
+    impl->readRecord(context, request.fileOffsetBytes, globalExampleIndex, batchSlot, tensorBasePointers, {}, {}, {}, false);
     impl->stats.loadExampleNanoseconds += diagnosticElapsedNanoseconds(loadExampleStart);
 }
 
 void IndexedDatasetReader::Session::loadExampleInto(uint64_t globalExampleIndex,
-                                                              uint64_t batchSlot,
-                                                              const std::vector<uint8_t *> &tensorBasePointers,
-                                                              const std::vector<uint8_t *> &windowedTensorBasePointers,
-                                                              const std::vector<uint8_t *> &windowedMaskBasePointers) {
+                                                      uint64_t batchSlot,
+                                                      const std::vector<uint8_t *> &tensorBasePointers,
+                                                      const std::vector<uint8_t *> &windowedTensorBasePointers,
+                                                      const std::vector<uint8_t *> &windowedMaskBasePointers) {
+    THOR_THROW_IF_FALSE(impl != nullptr);
+    THOR_THROW_IF_FALSE(impl->owner != nullptr);
+    if (!impl->owner->impl->raggedReadSpecs.empty()) {
+        throw std::runtime_error(
+            "IndexedDatasetReader::Session ragged layouts require ragged reference destination pointers.");
+    }
+    loadExampleInto(
+        globalExampleIndex, batchSlot, tensorBasePointers, windowedTensorBasePointers, windowedMaskBasePointers, {});
+}
+
+void IndexedDatasetReader::Session::loadExampleInto(uint64_t globalExampleIndex,
+                                                      uint64_t batchSlot,
+                                                      const std::vector<uint8_t *> &tensorBasePointers,
+                                                      const std::vector<uint8_t *> &windowedTensorBasePointers,
+                                                      const std::vector<uint8_t *> &windowedMaskBasePointers,
+                                                      const std::vector<IndexedRaggedTensorReference *> &raggedReferenceBasePointers) {
     THOR_THROW_IF_FALSE(impl != nullptr);
     THOR_THROW_IF_FALSE(impl->owner != nullptr);
     const IndexedDatasetReader::Impl &reader = *impl->owner->impl;
@@ -1198,6 +1303,10 @@ void IndexedDatasetReader::Session::loadExampleInto(uint64_t globalExampleIndex,
     if (windowedMaskBasePointers.size() != reader.windowedReadSpecs.size()) {
         throw std::runtime_error(
             "IndexedDatasetReader::Session windowed mask destination tensor count does not match layout windowed tensor count.");
+    }
+    if (raggedReferenceBasePointers.size() != reader.raggedReadSpecs.size()) {
+        throw std::runtime_error(
+            "IndexedDatasetReader::Session ragged reference destination count does not match layout ragged tensor count.");
     }
 
     const SteadyClock::time_point loadExampleStart = diagnosticNow();
@@ -1237,8 +1346,45 @@ void IndexedDatasetReader::Session::loadExampleInto(uint64_t globalExampleIndex,
                      tensorBasePointers,
                      windowedTensorBasePointers,
                      windowedMaskBasePointers,
+                     raggedReferenceBasePointers,
                      true);
     impl->stats.loadExampleNanoseconds += diagnosticElapsedNanoseconds(loadExampleStart);
+}
+
+void IndexedDatasetReader::Session::loadRaggedValuesInto(uint64_t raggedTensorOrdinal,
+                                                               uint64_t startValue,
+                                                               uint64_t valueCount,
+                                                               void *destination) {
+    THOR_THROW_IF_FALSE(impl != nullptr);
+    THOR_THROW_IF_FALSE(impl->owner != nullptr);
+    const IndexedDatasetReader::Impl &reader = *impl->owner->impl;
+    if (raggedTensorOrdinal >= reader.raggedReadSpecs.size()) {
+        throw std::runtime_error("IndexedDatasetReader ragged tensor ordinal is outside the layout.");
+    }
+    const IndexedDatasetReader::Impl::RaggedTensorReadSpec &readSpec =
+        reader.raggedReadSpecs.at(static_cast<size_t>(raggedTensorOrdinal));
+    const uint64_t storedValues = readSpec.spec.storedValueCount();
+    if (startValue > storedValues || valueCount > storedValues - startValue) {
+        throw std::runtime_error("IndexedDatasetReader ragged tensor '" + readSpec.spec.name +
+                                 "' reference is outside its values sidecar.");
+    }
+    if (valueCount == 0) {
+        return;
+    }
+    if (destination == nullptr) {
+        throw std::runtime_error("IndexedDatasetReader ragged values destination is null for '" +
+                                 readSpec.spec.name + "'.");
+    }
+    const uint64_t bytesPerValue = readSpec.spec.valueNumBytes();
+    const uint64_t offsetBytes = checkedMul(startValue, bytesPerValue, "IndexedDatasetReader ragged values offset");
+    const uint64_t numBytes = checkedMul(valueCount, bytesPerValue, "IndexedDatasetReader ragged values byte count");
+    IndexedDatasetReader::Session::Impl::SourceFileContext &sourceContext =
+        impl->raggedSourceContextFor(raggedTensorOrdinal);
+    preadExact(sourceContext.fd,
+               destination,
+               numBytes,
+               offsetBytes,
+               "IndexedDatasetReader ragged values read for '" + readSpec.spec.name + "'");
 }
 
 void IndexedDatasetReader::Session::drain() {

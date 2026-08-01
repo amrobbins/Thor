@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Data/BatchFieldSource.h"
 #include "DeepLearning/Api/Data/BatchSourceResource.h"
 #include "DeepLearning/Api/Data/DatasetSchema.h"
+#include "DeepLearning/Api/Data/DatasetFieldMaterializationRequirement.h"
 #include "DeepLearning/Api/Data/ExampleType.h"
 #include "Utilities/Common/Event.h"
 
@@ -104,9 +105,13 @@ class BatchSession : public std::enable_shared_from_this<BatchSession> {
     [[nodiscard]] virtual std::string getDatasetName() const { return datasetName; }
 
     [[nodiscard]] virtual std::vector<Event> getSynchronizeEvents() const { return {}; }
-    [[nodiscard]] virtual const std::set<DatasetFieldId>& getRequiredDatasetFieldIds() const {
-        static const std::set<DatasetFieldId> none;
+    [[nodiscard]] virtual const DatasetFieldMaterializationRequirements&
+    getDatasetFieldMaterializationRequirements() const {
+        static const DatasetFieldMaterializationRequirements none;
         return none;
+    }
+    [[nodiscard]] std::set<DatasetFieldId> getRequiredDatasetFieldIds() const {
+        return datasetFieldIds(getDatasetFieldMaterializationRequirements());
     }
 
     /**

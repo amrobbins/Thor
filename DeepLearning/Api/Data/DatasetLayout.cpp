@@ -198,6 +198,24 @@ void validateSourceStorage(const DatasetLayout::WindowedTensorSourceSpec &spec) 
     }
 }
 
+void validateRaggedStorage(const DatasetLayout::RaggedTensorSpec &spec) {
+    const uint64_t valueBytes = spec.valueNumBytes();
+    if (!spec.valuesFilename.has_value()) {
+        if (spec.valuesNumBytes != 0) {
+            throw std::runtime_error("DatasetLayout ragged tensor '" + spec.name +
+                                     "' has values_num_bytes without a storage file.");
+        }
+        return;
+    }
+    if (spec.valuesFilename->empty()) {
+        throw std::runtime_error("DatasetLayout ragged tensor '" + spec.name + "' storage file must be non-empty.");
+    }
+    if ((spec.valuesNumBytes % valueBytes) != 0) {
+        throw std::runtime_error("DatasetLayout ragged tensor '" + spec.name +
+                                 "' storage byte count is not aligned to one logical value.");
+    }
+}
+
 }  // namespace
 
 bool DatasetLayout::TensorSpec::operator==(const TensorSpec &rhs) const {
@@ -207,6 +225,34 @@ bool DatasetLayout::TensorSpec::operator==(const TensorSpec &rhs) const {
 
 DatasetLayout::TensorShape::TensorShape(std::string name, std::vector<uint64_t> dimensions, DataType dataType)
     : name(std::move(name)), dimensions(std::move(dimensions)), dataType(dataType) {}
+
+uint64_t DatasetLayout::RaggedTensorSpec::valueNumBytes() const {
+    return expectedOptionalShapeNumBytes(valueDimensions, dataType, name);
+}
+
+uint64_t DatasetLayout::RaggedTensorSpec::storedValueCount() const {
+    const uint64_t bytesPerValue = valueNumBytes();
+    if ((valuesNumBytes % bytesPerValue) != 0) {
+        throw std::runtime_error("DatasetLayout ragged tensor '" + name + "' storage is not value aligned.");
+    }
+    return valuesNumBytes / bytesPerValue;
+}
+
+bool DatasetLayout::RaggedTensorSpec::operator==(const RaggedTensorSpec &rhs) const {
+    return name == rhs.name && dataType == rhs.dataType && valueDimensions == rhs.valueDimensions &&
+           referenceOffsetBytes == rhs.referenceOffsetBytes && referenceNumBytes == rhs.referenceNumBytes &&
+           valuesFilename == rhs.valuesFilename && valuesNumBytes == rhs.valuesNumBytes;
+}
+
+bool DatasetLayout::RaggedTensorSpec::contractEquals(const RaggedTensorSpec &rhs) const {
+    return name == rhs.name && dataType == rhs.dataType && valueDimensions == rhs.valueDimensions &&
+           referenceOffsetBytes == rhs.referenceOffsetBytes && referenceNumBytes == rhs.referenceNumBytes;
+}
+
+DatasetLayout::RaggedTensorShape::RaggedTensorShape(std::string name,
+                                                    std::vector<uint64_t> valueDimensions,
+                                                    DataType dataType)
+    : name(std::move(name)), valueDimensions(std::move(valueDimensions)), dataType(dataType) {}
 
 bool DatasetLayout::WindowedTensorSourceSequence::operator==(const WindowedTensorSourceSequence &rhs) const {
     return keyHex == rhs.keyHex && startIndex == rhs.startIndex && endIndexExclusive == rhs.endIndexExclusive &&
@@ -298,8 +344,16 @@ DatasetLayout::DatasetLayout(uint64_t recordSizeBytes,
                              std::vector<TensorSpec> tensors,
                              std::vector<WindowedTensorSourceSpec> windowedTensorSources,
                              std::vector<WindowedTensorSpec> windowedTensors)
+    : DatasetLayout(recordSizeBytes, std::move(tensors), std::move(windowedTensorSources), std::move(windowedTensors), {}) {}
+
+DatasetLayout::DatasetLayout(uint64_t recordSizeBytes,
+                             std::vector<TensorSpec> tensors,
+                             std::vector<WindowedTensorSourceSpec> windowedTensorSources,
+                             std::vector<WindowedTensorSpec> windowedTensors,
+                             std::vector<RaggedTensorSpec> raggedTensors)
     : layoutRecordSizeBytes(recordSizeBytes), layoutTensors(std::move(tensors)),
-      layoutWindowedTensorSources(std::move(windowedTensorSources)), layoutWindowedTensors(std::move(windowedTensors)) {
+      layoutWindowedTensorSources(std::move(windowedTensorSources)), layoutWindowedTensors(std::move(windowedTensors)),
+      layoutRaggedTensors(std::move(raggedTensors)) {
     validate();
 }
 
@@ -312,6 +366,19 @@ const DatasetLayout::TensorSpec &DatasetLayout::tensor(std::string_view name) co
 }
 
 const std::vector<DatasetLayout::TensorSpec> &DatasetLayout::tensors() const { return layoutTensors; }
+
+bool DatasetLayout::hasRaggedTensors() const { return !layoutRaggedTensors.empty(); }
+
+const DatasetLayout::RaggedTensorSpec &DatasetLayout::raggedTensor(std::string_view name) const {
+    const auto it = std::find_if(layoutRaggedTensors.begin(), layoutRaggedTensors.end(),
+                                 [&](const RaggedTensorSpec &spec) { return spec.name == name; });
+    if (it == layoutRaggedTensors.end()) {
+        throw std::runtime_error("DatasetLayout ragged tensor not found: " + std::string(name));
+    }
+    return *it;
+}
+
+const std::vector<DatasetLayout::RaggedTensorSpec> &DatasetLayout::raggedTensors() const { return layoutRaggedTensors; }
 
 bool DatasetLayout::hasWindowedTensors() const { return !layoutWindowedTensors.empty(); }
 
@@ -350,8 +417,8 @@ const DatasetLayout::WindowedTensorSpec &DatasetLayout::windowedTensor(std::stri
 const std::vector<DatasetLayout::WindowedTensorSpec> &DatasetLayout::windowedTensors() const { return layoutWindowedTensors; }
 
 void DatasetLayout::validate() const {
-    if (layoutTensors.empty() && layoutWindowedTensors.empty()) {
-        throw std::runtime_error("DatasetLayout must contain at least one tensor or windowed tensor.");
+    if (layoutTensors.empty() && layoutWindowedTensors.empty() && layoutRaggedTensors.empty()) {
+        throw std::runtime_error("DatasetLayout must contain at least one tensor, windowed tensor, or ragged tensor.");
     }
 
     std::set<std::string> sourceNames;
@@ -427,6 +494,25 @@ void DatasetLayout::validate() const {
         }
     }
 
+    for (const RaggedTensorSpec &spec : layoutRaggedTensors) {
+        if (spec.name.empty()) throw std::runtime_error("DatasetLayout ragged tensor names must be non-empty.");
+        if (!names.insert(spec.name).second) throw std::runtime_error("DatasetLayout duplicate tensor name: " + spec.name);
+        (void)spec.valueNumBytes();
+        if (spec.referenceNumBytes != 2 * sizeof(uint64_t)) {
+            throw std::runtime_error("DatasetLayout ragged tensor '" + spec.name +
+                                     "' reference_num_bytes must be 16 for UINT64 {start_value, value_count}.");
+        }
+        const uint64_t referenceEnd = checkedAdd(spec.referenceOffsetBytes, spec.referenceNumBytes,
+                                                 "ragged tensor reference for '" + spec.name + "'");
+        if (referenceEnd > layoutRecordSizeBytes) {
+            throw std::runtime_error("DatasetLayout ragged tensor reference '" + spec.name +
+                                     "' extends past record_size_bytes.");
+        }
+        occupiedRanges.emplace_back(spec.referenceOffsetBytes, referenceEnd);
+        occupiedNames.push_back("ragged tensor reference '" + spec.name + "'");
+        validateRaggedStorage(spec);
+    }
+
     if (hasAffineWindowedTensors() && hasIndexedWindowedTensors()) {
         throw std::runtime_error("DatasetLayout does not support mixing indexed and affine window references in one layout.");
     }
@@ -482,6 +568,9 @@ void DatasetLayout::validateRequestedLayoutExact(const DatasetLayout &requested)
     if (layoutWindowedTensors.size() != requested.layoutWindowedTensors.size()) {
         throw std::runtime_error("DatasetLayout requested windowed tensor count does not match manifest windowed tensor count.");
     }
+    if (layoutRaggedTensors.size() != requested.layoutRaggedTensors.size()) {
+        throw std::runtime_error("DatasetLayout requested ragged tensor count does not match manifest ragged tensor count.");
+    }
     for (const TensorSpec &manifestSpec : layoutTensors) {
         if (manifestSpec != requested.tensor(manifestSpec.name)) {
             throw std::runtime_error("DatasetLayout requested tensor '" + manifestSpec.name + "' does not match manifest.");
@@ -497,12 +586,17 @@ void DatasetLayout::validateRequestedLayoutExact(const DatasetLayout &requested)
             throw std::runtime_error("DatasetLayout requested windowed tensor '" + manifestSpec.name + "' does not match manifest.");
         }
     }
+    for (const RaggedTensorSpec &manifestSpec : layoutRaggedTensors) {
+        if (!manifestSpec.contractEquals(requested.raggedTensor(manifestSpec.name))) {
+            throw std::runtime_error("DatasetLayout requested ragged tensor '" + manifestSpec.name + "' does not match manifest.");
+        }
+    }
 }
 
 json DatasetLayout::toJson() const {
     validate();
     json root;
-    root["format"] = FORMAT;
+    root["format"] = layoutRaggedTensors.empty() ? FORMAT : RAGGED_FORMAT;
     root["record_size_bytes"] = layoutRecordSizeBytes;
     root["tensors"] = json::object();
 
@@ -515,6 +609,26 @@ json DatasetLayout::toJson() const {
     for (const TensorSpec *spec : sortedTensors) {
         root["tensors"][spec->name] = json{{"shape", spec->dimensions}, {"data_type", dataTypeToString(spec->dataType)},
                                                    {"offset_bytes", spec->offsetBytes}, {"num_bytes", spec->numBytes}};
+    }
+
+    if (!layoutRaggedTensors.empty()) {
+        root["ragged_tensors"] = json::object();
+        std::vector<const RaggedTensorSpec *> sortedRagged;
+        for (const RaggedTensorSpec &spec : layoutRaggedTensors) sortedRagged.push_back(&spec);
+        std::sort(sortedRagged.begin(), sortedRagged.end(), [](const RaggedTensorSpec *a, const RaggedTensorSpec *b) {
+            if (a->referenceOffsetBytes != b->referenceOffsetBytes) return a->referenceOffsetBytes < b->referenceOffsetBytes;
+            return a->name < b->name;
+        });
+        for (const RaggedTensorSpec *spec : sortedRagged) {
+            json specJson{{"value_shape", spec->valueDimensions}, {"data_type", dataTypeToString(spec->dataType)},
+                          {"reference_offset_bytes", spec->referenceOffsetBytes},
+                          {"reference_num_bytes", spec->referenceNumBytes}};
+            if (spec->valuesFilename.has_value()) {
+                specJson["storage"] = json{{"file", *spec->valuesFilename}, {"num_bytes", spec->valuesNumBytes},
+                                           {"num_values", spec->storedValueCount()}};
+            }
+            root["ragged_tensors"][spec->name] = std::move(specJson);
+        }
     }
 
     if (!layoutWindowedTensorSources.empty()) {
@@ -569,7 +683,16 @@ DatasetLayout DatasetLayout::fromJson(const json &j) {
         throw std::runtime_error("DatasetLayout manifest is missing required string field 'format'.");
     }
     const std::string format = j.at("format").get<std::string>();
-    if (format != FORMAT) throw std::runtime_error("DatasetLayout unsupported manifest format: " + format);
+    if (format != FORMAT && format != RAGGED_FORMAT) {
+        throw std::runtime_error("DatasetLayout unsupported manifest format: " + format);
+    }
+    if (format == FORMAT && j.contains("ragged_tensors")) {
+        throw std::runtime_error("DatasetLayout V1 manifests cannot contain ragged tensors; rewrite using the V2 writer.");
+    }
+    if (format == RAGGED_FORMAT &&
+        (!j.contains("ragged_tensors") || !j.at("ragged_tensors").is_object() || j.at("ragged_tensors").empty())) {
+        throw std::runtime_error("DatasetLayout V2 manifests must contain at least one ragged tensor.");
+    }
     const uint64_t recordSizeBytes = j.at("record_size_bytes").get<uint64_t>();
     const json &tensorJson = j.at("tensors");
     if (!tensorJson.is_object()) throw std::runtime_error("DatasetLayout manifest tensors field must be an object.");
@@ -581,6 +704,34 @@ DatasetLayout DatasetLayout::fromJson(const json &j) {
                                      .dimensions = specJson.at("shape").get<std::vector<uint64_t>>(),
                                      .offsetBytes = specJson.at("offset_bytes").get<uint64_t>(),
                                      .numBytes = specJson.at("num_bytes").get<uint64_t>()});
+    }
+
+    std::vector<RaggedTensorSpec> ragged;
+    if (j.contains("ragged_tensors")) {
+        if (format != RAGGED_FORMAT) {
+            throw std::runtime_error("DatasetLayout ragged tensors require manifest format thor.dataset.v2.");
+        }
+        const json &raggedJson = j.at("ragged_tensors");
+        if (!raggedJson.is_object()) throw std::runtime_error("DatasetLayout manifest ragged_tensors field must be an object.");
+        for (const auto &item : raggedJson.items()) {
+            const json &specJson = item.value();
+            RaggedTensorSpec spec{.name = item.key(),
+                                  .dataType = dataTypeFromString(specJson.at("data_type").get<std::string>()),
+                                  .valueDimensions = specJson.at("value_shape").get<std::vector<uint64_t>>(),
+                                  .referenceOffsetBytes = specJson.at("reference_offset_bytes").get<uint64_t>(),
+                                  .referenceNumBytes = specJson.at("reference_num_bytes").get<uint64_t>()};
+            if (specJson.contains("storage")) {
+                const json &storage = specJson.at("storage");
+                spec.valuesFilename = storage.at("file").get<std::string>();
+                spec.valuesNumBytes = storage.at("num_bytes").get<uint64_t>();
+                const uint64_t declaredValues = storage.at("num_values").get<uint64_t>();
+                if (declaredValues != spec.storedValueCount()) {
+                    throw std::runtime_error("DatasetLayout ragged tensor '" + spec.name +
+                                             "' storage num_values does not match num_bytes.");
+                }
+            }
+            ragged.push_back(std::move(spec));
+        }
     }
 
     std::vector<WindowedTensorSourceSpec> sources;
@@ -641,7 +792,7 @@ DatasetLayout DatasetLayout::fromJson(const json &j) {
             if (!specJson.contains("reference_mode") || !specJson.at("reference_mode").is_string()) {
                 throw std::runtime_error("DatasetLayout windowed tensor '" + name +
                                          "' is missing required string field 'reference_mode'. "
-                                         "Retired windowed dataset manifests are unsupported; rewrite the dataset using the current V1 writer.");
+                                         "Retired windowed dataset manifests are unsupported; rewrite the dataset using the current DatasetWriter.");
             }
             windowed.push_back(WindowedTensorSpec{
                 .name = name, .sourceName = sourceName, .dataType = sourceIt->second->dataType,
@@ -664,7 +815,11 @@ DatasetLayout DatasetLayout::fromJson(const json &j) {
         if (a.referenceOffsetBytes != b.referenceOffsetBytes) return a.referenceOffsetBytes < b.referenceOffsetBytes;
         return a.name < b.name;
     });
-    return DatasetLayout(recordSizeBytes, std::move(tensors), std::move(sources), std::move(windowed));
+    std::sort(ragged.begin(), ragged.end(), [](const RaggedTensorSpec &a, const RaggedTensorSpec &b) {
+        if (a.referenceOffsetBytes != b.referenceOffsetBytes) return a.referenceOffsetBytes < b.referenceOffsetBytes;
+        return a.name < b.name;
+    });
+    return DatasetLayout(recordSizeBytes, std::move(tensors), std::move(sources), std::move(windowed), std::move(ragged));
 }
 
 void DatasetLayout::writeManifest(const std::filesystem::path &path) const {
@@ -684,12 +839,24 @@ DatasetLayout DatasetLayout::readManifest(const std::filesystem::path &path) {
 }
 
 DatasetLayout DatasetLayout::fromTensorShapes(const std::vector<TensorShape> &tensors) {
-    return fromTensorShapes(tensors, {}, {});
+    return fromTensorShapes(tensors, {}, {}, {});
+}
+
+DatasetLayout DatasetLayout::fromTensorShapes(const std::vector<TensorShape> &tensors,
+                                              const std::vector<RaggedTensorShape> &raggedTensors) {
+    return fromTensorShapes(tensors, {}, {}, raggedTensors);
 }
 
 DatasetLayout DatasetLayout::fromTensorShapes(const std::vector<TensorShape> &tensors,
                                               const std::vector<WindowedTensorSourceShape> &windowedTensorSources,
                                               const std::vector<WindowedTensorShape> &windowedTensors) {
+    return fromTensorShapes(tensors, windowedTensorSources, windowedTensors, {});
+}
+
+DatasetLayout DatasetLayout::fromTensorShapes(const std::vector<TensorShape> &tensors,
+                                              const std::vector<WindowedTensorSourceShape> &windowedTensorSources,
+                                              const std::vector<WindowedTensorShape> &windowedTensors,
+                                              const std::vector<RaggedTensorShape> &raggedTensors) {
     uint64_t offsetBytes = 0;
     std::vector<TensorSpec> tensorSpecs;
     tensorSpecs.reserve(tensors.size());
@@ -736,5 +903,19 @@ DatasetLayout DatasetLayout::fromTensorShapes(const std::vector<TensorShape> &te
         }
         windowedSpecs.push_back(std::move(spec));
     }
-    return DatasetLayout(offsetBytes, std::move(tensorSpecs), std::move(sourceSpecs), std::move(windowedSpecs));
+    std::vector<RaggedTensorSpec> raggedSpecs;
+    raggedSpecs.reserve(raggedTensors.size());
+    for (const RaggedTensorShape &entry : raggedTensors) {
+        RaggedTensorSpec spec{.name = entry.name,
+                              .dataType = entry.dataType,
+                              .valueDimensions = entry.valueDimensions,
+                              .referenceOffsetBytes = offsetBytes,
+                              .referenceNumBytes = 2 * sizeof(uint64_t)};
+        (void)spec.valueNumBytes();
+        offsetBytes = checkedAdd(offsetBytes, spec.referenceNumBytes,
+                                 "record size for ragged tensor reference '" + entry.name + "'");
+        raggedSpecs.push_back(std::move(spec));
+    }
+    return DatasetLayout(offsetBytes, std::move(tensorSpecs), std::move(sourceSpecs), std::move(windowedSpecs),
+                         std::move(raggedSpecs));
 }

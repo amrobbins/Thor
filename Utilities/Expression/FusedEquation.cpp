@@ -6317,6 +6317,7 @@ std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputsFor
 }
 
 std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_ptr<CompiledEquation>& compiledEquation,
+                                                              const std::vector<std::string>& inputNames,
                                                               std::vector<RuntimeInputValue>& inputs,
                                                               std::vector<Tensor>& outputs,
                                                               const Stream& stream) const {
@@ -6330,6 +6331,9 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
 
     if (inputs.size() != compiledEquation->numInputs()) {
         throw std::runtime_error("Wrong number of inputs passed to FusedEquation::stampEquation.");
+    }
+    if (inputNames.size() != inputs.size()) {
+        throw std::runtime_error("Wrong number of input names passed to FusedEquation::stampEquation.");
     }
 
     if (outputs.empty()) {
@@ -6396,7 +6400,7 @@ std::shared_ptr<StampedEquation> FusedEquation::stampEquation(const std::shared_
         }
     }
 
-    return make_shared<StampedEquation>(compiledEquation, inputs, outputs, stream);
+    return make_shared<StampedEquation>(compiledEquation, inputNames, inputs, outputs, stream);
 }
 
 std::shared_ptr<StampedReduction> FusedEquation::stampReduction(const std::shared_ptr<CompiledReduction>& compiledReduction,
@@ -8003,7 +8007,13 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
                 }
 
-                std::shared_ptr<StampedEquation> stampedKernel = stampEquation(compiledEq, stageInputs, stageOutputs, stream);
+                std::vector<std::string> stageInputNames;
+                stageInputNames.reserve(stage.expr.inputs.size());
+                for (const NamedInput& input : stage.expr.inputs) {
+                    stageInputNames.push_back(input.name);
+                }
+                std::shared_ptr<StampedEquation> stampedKernel =
+                    stampEquation(compiledEq, stageInputNames, stageInputs, stageOutputs, stream);
                 stampedStages.emplace_back(stampedKernel, std::move(dependency_stage_indices), stage_flops);
                 break;
             }

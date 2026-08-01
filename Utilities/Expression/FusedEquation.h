@@ -652,6 +652,7 @@ class FusedEquation {
                   128)) {}
 
     [[nodiscard]] std::shared_ptr<StampedEquation> stampEquation(const std::shared_ptr<CompiledEquation>& compiledEquation,
+                                                                 const std::vector<std::string>& inputNames,
                                                                  std::vector<RuntimeInputValue>& inputs,
                                                                  std::vector<Tensor>& outputs,
                                                                  const Stream& stream) const;
