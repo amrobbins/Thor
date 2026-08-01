@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <vector>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -101,10 +102,12 @@ class TensorFanout : public MultiConnectionLayer {
         TensorPlacement placement = featureInputs[0].value().getPlacement();
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
-        CUDA_CHECK(cudaMalloc(&errorInputArray_d, numPresentTensors(errorInputs) * sizeof(void *)));
+        const uint32_t presentErrorInputCount = numPresentTensors(errorInputs);
+        CUDA_CHECK(cudaMalloc(&errorInputArray_d, presentErrorInputCount * sizeof(void *)));
 
-        if (numPresentTensors(errorInputs) > 0) {
-            void **errorInputArray = new void *[numPresentTensors(errorInputs)];
+        if (presentErrorInputCount > 0) {
+            THOR_THROW_IF_FALSE(!streams.empty());
+            std::vector<void *> errorInputArray(presentErrorInputCount);
             uint32_t j = 0;
             for (unsigned int i = 0; i < errorInputs.size(); ++i) {
                 if (errorInputs[i].has_value()) {
@@ -113,8 +116,12 @@ class TensorFanout : public MultiConnectionLayer {
                     ++j;
                 }
             }
-            CUDA_CHECK(cudaMemcpy(errorInputArray_d, errorInputArray, numPresentTensors(errorInputs) * sizeof(void *), cudaMemcpyHostToDevice));
-            delete[] errorInputArray;
+            CUDA_CHECK(cudaMemcpyAsync(errorInputArray_d,
+                                       errorInputArray.data(),
+                                       presentErrorInputCount * sizeof(void *),
+                                       cudaMemcpyHostToDevice,
+                                       streams[0].getStream()));
+            streams[0].synchronize();
         }
 
         if (fusedCustomLossGradientRegisteredWithDrivingLayer &&
@@ -203,7 +210,8 @@ class TensorFanout : public MultiConnectionLayer {
             THOR_THROW_IF_FALSE(featureInputs[0].has_value());
             ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
 
-            void **errorInputArray = new void *[presentErrorInputCount];
+            THOR_THROW_IF_FALSE(!streams.empty());
+            std::vector<void *> errorInputArray(presentErrorInputCount);
             uint32_t j = 0;
             for (unsigned int i = 0; i < errorInputs.size(); ++i) {
                 if (errorInputs[i].has_value()) {
@@ -211,8 +219,12 @@ class TensorFanout : public MultiConnectionLayer {
                     ++j;
                 }
             }
-            CUDA_CHECK(cudaMemcpy(errorInputArray_d, errorInputArray, presentErrorInputCount * sizeof(void *), cudaMemcpyHostToDevice));
-            delete[] errorInputArray;
+            CUDA_CHECK(cudaMemcpyAsync(errorInputArray_d,
+                                       errorInputArray.data(),
+                                       presentErrorInputCount * sizeof(void *),
+                                       cudaMemcpyHostToDevice,
+                                       streams[0].getStream()));
+            streams[0].synchronize();
         }
     }
 

@@ -87,6 +87,11 @@ class Extract : public Layer {
         }
         padBefore_d.copyFromAsync(padBefore, stream);
         padAfter_d.copyFromAsync(padAfter, stream);
+
+        // These tensors are persistent kernel metadata, while their pinned host
+        // sources are local to compileImpl(). Complete every upload before those
+        // host tensors are released or a non-blocking execution stream can run.
+        stream.synchronize();
     }
 
     void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override {

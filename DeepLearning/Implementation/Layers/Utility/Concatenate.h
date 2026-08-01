@@ -148,31 +148,43 @@ class Concatenate : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(nextLayers.size() == 1);
         THOR_THROW_IF_FALSE(featureInputs[0].has_value());
         THOR_THROW_IF_FALSE(featureInputs[0].value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(!streams.empty());
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
-        int numSplitTensors = featureInputs.size();
+        const int numSplitTensors = static_cast<int>(featureInputs.size());
 
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorFeatureInputMemoriesArray_d), numSplitTensors * sizeof(void *)));
-        void **splitTensorFeatureInputMemoriesArray = new void *[numSplitTensors];
+        // Keep compile-time metadata uploads on the same non-blocking stream as
+        // the Split/Concatenate kernels. cudaMemcpy from pageable memory may
+        // return after staging but before the device DMA is complete, while a
+        // cudaStreamNonBlocking execution stream does not wait for the legacy
+        // default stream. The host vectors remain alive until one final stream
+        // synchronization confirms that every metadata upload is device-visible.
+        std::vector<void *> splitTensorFeatureInputMemoriesArray(numSplitTensors);
+        std::vector<void *> splitTensorErrorOutputMemoriesArray;
+        std::vector<long> axisElementsPerSplitTensor(numSplitTensors);
+
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorFeatureInputMemoriesArray_d),
+                              numSplitTensors * sizeof(void *)));
         for (int i = 0; i < numSplitTensors; ++i) {
             THOR_THROW_IF_FALSE(featureInputs[i].has_value());
             splitTensorFeatureInputMemoriesArray[i] = featureInputs[i].value().getMemPtr();
         }
-        CUDA_CHECK(cudaMemcpy(splitTensorFeatureInputMemoriesArray_d,
-                              splitTensorFeatureInputMemoriesArray,
-                              numSplitTensors * sizeof(void *),
-                              cudaMemcpyHostToDevice));
-        delete[] splitTensorFeatureInputMemoriesArray;
+        CUDA_CHECK(cudaMemcpyAsync(splitTensorFeatureInputMemoriesArray_d,
+                                   splitTensorFeatureInputMemoriesArray.data(),
+                                   numSplitTensors * sizeof(void *),
+                                   cudaMemcpyHostToDevice,
+                                   streams[0].getStream()));
 
         if (errorInputs[0].has_value()) {
             // Backpropagation through Concatenate may be intentionally sparse: some
             // inputs can be real trainable graph edges while others are external data
-            // inputs that do not accept errors.  The split kernel still walks the
+            // inputs that do not accept errors. The split kernel still walks the
             // original concatenated layout, so its destination pointer table must have
-            // one entry per original feature input.  Missing upstream error outputs are
+            // one entry per original feature input. Missing upstream error outputs are
             // routed into throwaway tensors and then not propagated further.
             discardedErrorOutputs.resize(numSplitTensors);
-            CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorOutputMemoriesArray_d), numSplitTensors * sizeof(void *)));
-            void **splitTensorErrorOutputMemoriesArray = new void *[numSplitTensors];
+            splitTensorErrorOutputMemoriesArray.resize(numSplitTensors);
+            CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorOutputMemoriesArray_d),
+                                  numSplitTensors * sizeof(void *)));
             for (int i = 0; i < numSplitTensors; ++i) {
                 if (errorOutputs[i].has_value()) {
                     splitTensorErrorOutputMemoriesArray[i] = errorOutputs[i].value().getMemPtr();
@@ -182,48 +194,58 @@ class Concatenate : public MultiConnectionLayer {
                     splitTensorErrorOutputMemoriesArray[i] = discardedErrorOutputs[i].value().getMemPtr();
                 }
             }
-            CUDA_CHECK(cudaMemcpy(splitTensorErrorOutputMemoriesArray_d,
-                                  splitTensorErrorOutputMemoriesArray,
-                                  numSplitTensors * sizeof(void *),
-                                  cudaMemcpyHostToDevice));
-            delete[] splitTensorErrorOutputMemoriesArray;
+            CUDA_CHECK(cudaMemcpyAsync(splitTensorErrorOutputMemoriesArray_d,
+                                       splitTensorErrorOutputMemoriesArray.data(),
+                                       numSplitTensors * sizeof(void *),
+                                       cudaMemcpyHostToDevice,
+                                       streams[0].getStream()));
         }
 
-        long *axisElementsPerSplitTensor = new long[numSplitTensors];
-        for (int i = 0; i < numSplitTensors; ++i)
-            axisElementsPerSplitTensor[i] = featureInputs[i].value().getDescriptor().getDimensions()[axis];
+        for (int i = 0; i < numSplitTensors; ++i) {
+            axisElementsPerSplitTensor[i] =
+                static_cast<long>(featureInputs[i].value().getDescriptor().getDimensions()[axis]);
+        }
         CUDA_CHECK(cudaMalloc(&axisElementsPerSplitTensor_d, numSplitTensors * sizeof(long)));
-        CUDA_CHECK(
-            cudaMemcpy(axisElementsPerSplitTensor_d, axisElementsPerSplitTensor, numSplitTensors * sizeof(long), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpyAsync(axisElementsPerSplitTensor_d,
+                                   axisElementsPerSplitTensor.data(),
+                                   numSplitTensors * sizeof(long),
+                                   cudaMemcpyHostToDevice,
+                                   streams[0].getStream()));
 
-        unsigned int numDimensions = featureInputs[0].value().getDescriptor().getDimensions().size();
-        long *stridePerSplitTensorDimension = new long[numDimensions * numSplitTensors];
+        const unsigned int numDimensions = featureInputs[0].value().getDescriptor().getDimensions().size();
+        std::vector<long> stridePerSplitTensorDimension(numDimensions * numSplitTensors);
         for (unsigned int t = 0; t < featureInputs.size(); ++t) {
             stridePerSplitTensorDimension[t * numDimensions + (numDimensions - 1)] = 1;
-            for (int d = numDimensions - 2; d >= 0; --d)
-                stridePerSplitTensorDimension[t * numDimensions + d] = stridePerSplitTensorDimension[t * numDimensions + (d + 1)] *
-                                                                       featureInputs[t].value().getDescriptor().getDimensions()[d + 1];
+            for (int d = static_cast<int>(numDimensions) - 2; d >= 0; --d) {
+                stridePerSplitTensorDimension[t * numDimensions + d] =
+                    stridePerSplitTensorDimension[t * numDimensions + (d + 1)] *
+                    static_cast<long>(featureInputs[t].value().getDescriptor().getDimensions()[d + 1]);
+            }
         }
-        CUDA_CHECK(cudaMalloc(&stridePerSplitTensorDimension_d, numDimensions * numSplitTensors * sizeof(long)));
-        CUDA_CHECK(cudaMemcpy(stridePerSplitTensorDimension_d,
-                              stridePerSplitTensorDimension,
-                              numDimensions * numSplitTensors * sizeof(long),
-                              cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMalloc(&stridePerSplitTensorDimension_d,
+                              numDimensions * numSplitTensors * sizeof(long)));
+        CUDA_CHECK(cudaMemcpyAsync(stridePerSplitTensorDimension_d,
+                                   stridePerSplitTensorDimension.data(),
+                                   numDimensions * numSplitTensors * sizeof(long),
+                                   cudaMemcpyHostToDevice,
+                                   streams[0].getStream()));
 
-        delete[] stridePerSplitTensorDimension;
-        delete[] axisElementsPerSplitTensor;
+        const std::vector<uint64_t> outputDimensions = featureOutputs[0].value().getDescriptor().getDimensions();
+        std::vector<long> stridePerPackedTensorDimension(outputDimensions.size());
+        stridePerPackedTensorDimension.back() = 1;
+        for (int i = static_cast<int>(outputDimensions.size()) - 2; i >= 0; --i) {
+            stridePerPackedTensorDimension[i] =
+                static_cast<long>(outputDimensions[i + 1]) * stridePerPackedTensorDimension[i + 1];
+        }
+        CUDA_CHECK(cudaMalloc(&stridePerPackedTensorDimension_d,
+                              outputDimensions.size() * sizeof(long)));
+        CUDA_CHECK(cudaMemcpyAsync(stridePerPackedTensorDimension_d,
+                                   stridePerPackedTensorDimension.data(),
+                                   outputDimensions.size() * sizeof(long),
+                                   cudaMemcpyHostToDevice,
+                                   streams[0].getStream()));
 
-        std::vector<uint64_t> outputDimensions = featureOutputs[0].value().getDescriptor().getDimensions();
-        long *stridePerPackedTensorDimension = new long[outputDimensions.size()];
-        stridePerPackedTensorDimension[outputDimensions.size() - 1] = 1;
-        for (int i = (int)outputDimensions.size() - 2; i >= 0; --i)
-            stridePerPackedTensorDimension[i] = outputDimensions[i + 1] * stridePerPackedTensorDimension[i + 1];
-        CUDA_CHECK(cudaMalloc(&stridePerPackedTensorDimension_d, outputDimensions.size() * sizeof(unsigned long)));
-        CUDA_CHECK(cudaMemcpy(stridePerPackedTensorDimension_d,
-                              stridePerPackedTensorDimension,
-                              outputDimensions.size() * sizeof(unsigned long),
-                              cudaMemcpyHostToDevice));
-        delete[] stridePerPackedTensorDimension;
+        streams[0].synchronize();
 
         for (unsigned int i = 0; i < featureInputs.size(); ++i)
             allFeatureInputTensorIds.insert(featureInputs[i].value().getTensorId());

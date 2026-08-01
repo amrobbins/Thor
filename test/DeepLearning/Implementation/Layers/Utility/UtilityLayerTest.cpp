@@ -1213,6 +1213,29 @@ TEST(Concatenate, Concatenates) {
     }
 }
 
+TEST(Split, CreatesOneStreamPerOutput) {
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    Tensor wholeGpu(gpuPlacement, TensorDescriptor(DataType::FP16, {6, 4}));
+
+    shared_ptr<NetworkInput> inputLayer = make_shared<NetworkInput>(wholeGpu);
+    shared_ptr<Split> splitLayer = make_shared<Split>(0, vector<unsigned long>{1, 2, 3});
+    inputLayer->connectToNextLayer(splitLayer.get());
+
+    vector<shared_ptr<NoOpLayer>> outputLayers;
+    for (int output = 0; output < 3; ++output) {
+        outputLayers.push_back(make_shared<NoOpLayer>());
+        splitLayer->connectToNextLayer(outputLayers.back().get());
+    }
+
+    const vector<Stream> splitStreams = splitLayer->getStreams();
+    ASSERT_EQ(splitStreams.size(), 3U);
+    for (size_t output = 0; output < splitStreams.size(); ++output) {
+        for (size_t priorOutput = 0; priorOutput < output; ++priorOutput) {
+            ASSERT_NE(splitStreams[output].getId(), splitStreams[priorOutput].getId());
+        }
+    }
+}
+
 TEST(Split, Splits) {
     const char *seedEnvironment = std::getenv("THOR_SPLIT_TEST_SEED");
     const unsigned int seed =
@@ -1229,7 +1252,6 @@ TEST(Split, Splits) {
     for (int test = 0; test < runCount; ++test) {
         vector<Tensor> partsCpu;
         vector<Tensor> partsGpu;
-        vector<Tensor> splitOutputsGpu;
 
         Tensor wholeCpu;
         Tensor wholeGpu;
@@ -1310,7 +1332,7 @@ TEST(Split, Splits) {
             axisElements.push_back(static_cast<unsigned long>(axisElementsPerDestArray[output]));
         }
 
-        shared_ptr<Layer> splitLayer = make_shared<Split>(axis, axisElements);
+        shared_ptr<Split> splitLayer = make_shared<Split>(axis, axisElements);
 
         layers.back()->connectToNextLayer(splitLayer.get());
         layers.push_back(splitLayer);
@@ -1318,17 +1340,12 @@ TEST(Split, Splits) {
         vector<shared_ptr<Layer>> outputLayers;
         outputLayers.reserve(numSplitTensors);
         partsGpu.reserve(numSplitTensors);
-        splitOutputsGpu.reserve(numSplitTensors);
 
         for (int output = 0; output < numSplitTensors; ++output) {
             shared_ptr<Layer> noOpLayer = make_shared<NoOpLayer>();
 
             layers.push_back(noOpLayer);
             splitLayer->connectToNextLayer(noOpLayer.get());
-
-            // This is the tensor produced directly by Split and consumed
-            // by NoOpLayer.
-            splitOutputsGpu.push_back(noOpLayer->getFeatureInput().value());
 
             shared_ptr<Layer> networkOutputLayer = make_shared<NetworkOutput>(gpuPlacement);
 
@@ -1390,95 +1407,36 @@ TEST(Split, Splits) {
 
             const float expected = static_cast<float>(wholeMem[sourceFlatIndex]);
 
-            const float observedBeforeDeviceSynchronize = static_cast<float>(partsMem[destFlatIndex]);
+            const float observed = static_cast<float>(partsMem[destFlatIndex]);
 
-            if (expected == observedBeforeDeviceSynchronize)
+            if (expected == observed)
                 continue;
-
-            // Wait for every CUDA stream and inspect each pipeline stage:
-            //
-            // NetworkInput output -> Split output -> NoOp/NetworkOutput.
-            //
-            // This distinguishes bad input handoff, bad Split output, and
-            // bad downstream output propagation.
-            Stream::deviceSynchronize(gpuPlacement.getDeviceNum());
-
-            Stream diagnosticStream(gpuPlacement.getDeviceNum());
-
-            Tensor networkInputFeatureGpu = layers[0]->getFeatureOutput().value();
-
-            Tensor networkInputFeatureCpu(cpuPlacement, networkInputFeatureGpu.getDescriptor());
-
-            networkInputFeatureCpu.copyFromAsync(networkInputFeatureGpu, diagnosticStream);
-
-            vector<Tensor> synchronizedSplitOutputsCpu;
-            synchronizedSplitOutputsCpu.reserve(splitOutputsGpu.size());
-
-            for (const Tensor &splitOutputGpu : splitOutputsGpu) {
-                synchronizedSplitOutputsCpu.emplace_back(cpuPlacement, splitOutputGpu.getDescriptor());
-
-                synchronizedSplitOutputsCpu.back().copyFromAsync(splitOutputGpu, diagnosticStream);
-            }
-
-            vector<Tensor> synchronizedPartsCpu;
-            synchronizedPartsCpu.reserve(partsGpu.size());
-
-            for (const Tensor &partGpu : partsGpu) {
-                synchronizedPartsCpu.emplace_back(cpuPlacement, partGpu.getDescriptor());
-
-                synchronizedPartsCpu.back().copyFromAsync(partGpu, diagnosticStream);
-            }
-
-            diagnosticStream.synchronize();
-
-            const float networkInputValue = static_cast<float>(static_cast<half *>(networkInputFeatureCpu.getMemPtr())[sourceFlatIndex]);
-
-            const float splitOutputValue =
-                static_cast<float>(static_cast<half *>(synchronizedSplitOutputsCpu[destination].getMemPtr())[destFlatIndex]);
-
-            const float observedAfterDeviceSynchronize =
-                static_cast<float>(static_cast<half *>(synchronizedPartsCpu[destination].getMemPtr())[destFlatIndex]);
 
             std::ostringstream dimensionsText;
             dimensionsText << "[";
-
             for (size_t dimension = 0; dimension < wholeDimensions.size(); ++dimension) {
                 if (dimension != 0)
                     dimensionsText << ",";
-
                 dimensionsText << wholeDimensions[dimension];
             }
-
             dimensionsText << "]";
 
             std::ostringstream axisElementsText;
             axisElementsText << "[";
-
             for (int output = 0; output < numSplitTensors; ++output) {
                 if (output != 0)
                     axisElementsText << ",";
-
                 axisElementsText << axisElementsPerDestArray[output];
             }
-
             axisElementsText << "]";
 
-            const bool changedAfterDeviceSynchronize = observedAfterDeviceSynchronize != observedBeforeDeviceSynchronize;
-
-            std::ostringstream failureMessage;
-            failureMessage << "Split mismatch. Reproduce with "
-                           << "THOR_SPLIT_TEST_SEED=" << seed << " THOR_SPLIT_TEST_RUNS=" << runCount << ". randomized_case=" << test
-                           << " rank=" << numDimensions << " dimensions=" << dimensionsText.str() << " axis=" << axis
-                           << " axis_elements=" << axisElementsText.str() << " source_flat_index=" << sourceFlatIndex
-                           << " destination=" << destination << " destination_flat_index=" << destFlatIndex << " expected=" << expected
-                           << " network_input_after_device_synchronize=" << networkInputValue
-                           << " split_output_after_device_synchronize=" << splitOutputValue
-                           << " noop_output_before_device_synchronize=" << observedBeforeDeviceSynchronize
-                           << " noop_output_after_device_synchronize=" << observedAfterDeviceSynchronize
-                           << " changed_after_device_synchronize=" << changedAfterDeviceSynchronize;
-
             LayerTestHelper::tearDownNetwork(layers);
-            FAIL() << failureMessage.str();
+            FAIL() << "Split mismatch. Reproduce with THOR_SPLIT_TEST_SEED=" << seed
+                   << " THOR_SPLIT_TEST_RUNS=" << runCount << ". randomized_case=" << test
+                   << " rank=" << numDimensions << " dimensions=" << dimensionsText.str() << " axis=" << axis
+                   << " axis_elements=" << axisElementsText.str() << " source_flat_index=" << sourceFlatIndex
+                   << " destination=" << destination << " destination_flat_index=" << destFlatIndex
+                   << " expected=" << expected << " observed=" << observed;
         }
 
         LayerTestHelper::tearDownNetwork(layers);
