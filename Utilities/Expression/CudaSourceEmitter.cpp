@@ -226,6 +226,9 @@ static void collectRequiredNodes(const PhysicalExpression& expr, uint32_t node_i
     }
 
     collectRequiredNodes(expr, node.lhs, required);
+    if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
+        collectRequiredNodes(expr, node.rope_effective_sequence_length_node, required);
+    }
     if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         collectRequiredNodes(expr, node.rhs, required);
     }
@@ -247,6 +250,9 @@ static void collectRequiredNodesExcludingIndexAwareChildren(const PhysicalExpres
     }
 
     collectRequiredNodesExcludingIndexAwareChildren(expr, node.lhs, required);
+    if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
+        collectRequiredNodesExcludingIndexAwareChildren(expr, node.rope_effective_sequence_length_node, required);
+    }
     if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         collectRequiredNodesExcludingIndexAwareChildren(expr, node.rhs, required);
     }
@@ -1008,7 +1014,8 @@ static bool nodeDependsOnRaggedExtent(const PhysicalExpression& expr,
     };
     bool depends = parent_depends(node.lhs) || parent_depends(node.rhs) || parent_depends(node.aux) ||
                    parent_depends(node.alpha_node) || parent_depends(node.beta_node) ||
-                   parent_depends(node.matmul_epilogue_aux) || parent_depends(node.attention_seq_len_q_node) ||
+                   parent_depends(node.matmul_epilogue_aux) || parent_depends(node.rope_effective_sequence_length_node) ||
+                   parent_depends(node.attention_seq_len_q_node) ||
                    parent_depends(node.attention_seq_len_kv_node) || parent_depends(node.attention_ragged_offset_q_node) ||
                    parent_depends(node.attention_ragged_offset_kv_node) || parent_depends(node.attention_page_table_k_node) ||
                    parent_depends(node.attention_page_table_v_node) || parent_depends(node.attention_dropout_seed_node) ||
@@ -1055,7 +1062,9 @@ static void validateRaggedExtentStageIsolation(const PhysicalExecutionStage& sta
         auto references_offsets = [&](uint32_t parent_idx) { return is_offsets_input_node(parent_idx); };
         bool offsets_are_value_data = references_offsets(node.lhs) || references_offsets(node.rhs) || references_offsets(node.aux) ||
                                       references_offsets(node.alpha_node) || references_offsets(node.beta_node) ||
-                                      references_offsets(node.matmul_epilogue_aux) || references_offsets(node.attention_seq_len_q_node) ||
+                                      references_offsets(node.matmul_epilogue_aux) ||
+                                      references_offsets(node.rope_effective_sequence_length_node) ||
+                                      references_offsets(node.attention_seq_len_q_node) ||
                                       references_offsets(node.attention_seq_len_kv_node) || references_offsets(node.attention_ragged_offset_q_node) ||
                                       references_offsets(node.attention_ragged_offset_kv_node) || references_offsets(node.attention_page_table_k_node) ||
                                       references_offsets(node.attention_page_table_v_node) || references_offsets(node.attention_dropout_seed_node) ||
@@ -1759,7 +1768,8 @@ static std::string emitBinaryComputeExpr(ExprOp op, const std::string& a, const 
             return castScalarExpr("(" + a_f + " + " + b_f + ")", DataType::FP32, compute_dtype);
 
         case ExprOp::SUB:
-            if (compute_dtype == DataType::FP32 || compute_dtype == DataType::FP16 || compute_dtype == DataType::BF16) {
+            if (compute_dtype == DataType::FP32 || compute_dtype == DataType::FP16 || compute_dtype == DataType::BF16 ||
+                compute_dtype == DataType::UINT32 || compute_dtype == DataType::UINT64) {
                 return "(" + a + " - " + b + ")";
             }
             return castScalarExpr("(" + a_f + " - " + b_f + ")", DataType::FP32, compute_dtype);
@@ -3229,6 +3239,10 @@ static void emitScalarNode(std::ostringstream& ss,
         const std::string seq_coord = ropeAxisCoordVar(n.rope_sequence_axis);
         const std::string head_dim_extent = ropeAxisDimVar(n.rope_head_dim_axis);
         const std::string seq_extent = ropeAxisDimVar(n.rope_sequence_axis);
+        const std::string effective_seq_len_expr =
+            n.rope_effective_sequence_length_node == UINT32_MAX
+                ? std::string("static_cast<float>(") + seq_extent + ")"
+                : emitResolvedScalarValueExpr(expr, n.rope_effective_sequence_length_node, DataType::FP32);
         const std::string rotary_dim_expr = n.rope_rotary_dim == 0 ? head_dim_extent : emitUnsignedLiteral(n.rope_rotary_dim, true);
         const std::string suffix = "_rope_peer_" + std::to_string(node_idx);
 
@@ -3268,7 +3282,7 @@ static void emitScalarNode(std::ostringstream& ss,
         ss << indent << "    float rope_base = " << emitScalarFpLiteral(n.rope_base) << ";\n";
         ss << indent << "    float rope_freq = 0.0f;\n";
         if (n.rope_scaling_kind == RotaryScalingKind::DynamicNTK) {
-            ss << indent << "    const float rope_seq_len = fmaxf(static_cast<float>(" << seq_extent << ") + "
+            ss << indent << "    const float rope_seq_len = fmaxf(" << effective_seq_len_expr << " + "
                << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
             ss << indent << "    const float rope_original_max = "
                << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";
@@ -3306,7 +3320,7 @@ static void emitScalarNode(std::ostringstream& ss,
             if (n.rope_long_rope_short_factors.empty() || n.rope_long_rope_long_factors.empty()) {
                 throw runtime_error("LongRoPE code generation requires non-empty short/long factor lists.");
             }
-            ss << indent << "    const float rope_seq_len = fmaxf(static_cast<float>(" << seq_extent << ") + "
+            ss << indent << "    const float rope_seq_len = fmaxf(" << effective_seq_len_expr << " + "
                << emitScalarFpLiteral(static_cast<double>(std::max<int64_t>(0, n.rope_position_offset))) << ", 1.0f);\n";
             ss << indent << "    const float rope_original_max = "
                << emitScalarFpLiteral(static_cast<double>(n.rope_original_max_position_embeddings)) << ";\n";

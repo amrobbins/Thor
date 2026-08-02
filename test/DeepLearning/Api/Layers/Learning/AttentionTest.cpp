@@ -98,6 +98,15 @@ void writeCpuUint32Tensor(Impl::Tensor& tensor, const vector<uint32_t>& values) 
         ptr[i] = values[i];
 }
 
+void writeCpuUint64Tensor(Impl::Tensor& tensor, const vector<uint64_t>& values) {
+    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
+    ASSERT_EQ(tensor.getDataType(), DataType::UINT64);
+    ASSERT_EQ(tensorNumel(tensor), values.size());
+    auto* ptr = static_cast<uint64_t*>(tensor.getMemPtr());
+    for (uint64_t i = 0; i < values.size(); ++i)
+        ptr[i] = values[i];
+}
+
 vector<float> readCpuTensor(const Impl::Tensor& tensor) {
     EXPECT_EQ(tensor.getPlacement(), cpuPlacement);
 
@@ -583,9 +592,15 @@ void applyRopeInPlace(vector<float>& bhsd, const AttentionReferenceCase& c, uint
                     ropePosition /= static_cast<float>(opts.scaling_factor);
                 }
                 float ropeBase = static_cast<float>(opts.base);
+                const uint32_t logicalBatchMaxSequenceLength =
+                    c.sequenceLengths.empty()
+                        ? c.sequenceLength
+                        : static_cast<uint32_t>(*std::max_element(c.sequenceLengths.begin(), c.sequenceLengths.end()));
+                const float ropeSeqLen = std::max(
+                    static_cast<float>(logicalBatchMaxSequenceLength) +
+                        static_cast<float>(std::max<int64_t>(0, opts.position_offset)),
+                    1.0f);
                 if (opts.scaling_kind == Impl::RotaryScalingKind::DynamicNTK) {
-                    const float ropeSeqLen = std::max(
-                        static_cast<float>(c.sequenceLength) + static_cast<float>(std::max<int64_t>(0, opts.position_offset)), 1.0f);
                     const float ropeOriginalMax = static_cast<float>(opts.original_max_position_embeddings);
                     if (ropeSeqLen > ropeOriginalMax && rotaryDim > 2) {
                         const float ratio = static_cast<float>(opts.scaling_factor) * ropeSeqLen / ropeOriginalMax -
@@ -604,8 +619,15 @@ void applyRopeInPlace(vector<float>& bhsd, const AttentionReferenceCase& c, uint
                     const uint64_t pairIndex = opts.interleaved ? (d >> 1U) : (d < halfDim ? d : d - halfDim);
                     const uint64_t peerDelta = opts.interleaved ? 1U : halfDim;
                     const uint32_t peerD = static_cast<uint32_t>(firstLane ? d + peerDelta : d - peerDelta);
-                    const float theta =
-                        ropePosition * powf(ropeBase, -2.0f * static_cast<float>(pairIndex) / static_cast<float>(rotaryDim));
+                    float ropeFreq =
+                        powf(ropeBase, -2.0f * static_cast<float>(pairIndex) / static_cast<float>(rotaryDim));
+                    if (opts.scaling_kind == Impl::RotaryScalingKind::LongRope) {
+                        const bool useLongFactors = ropeSeqLen > static_cast<float>(opts.original_max_position_embeddings);
+                        const float factor = static_cast<float>(useLongFactors ? opts.long_rope_long_factors.at(pairIndex)
+                                                                             : opts.long_rope_short_factors.at(pairIndex));
+                        ropeFreq /= factor;
+                    }
+                    const float theta = ropePosition * ropeFreq;
                     float sTheta = sinf(theta);
                     const float cTheta = cosf(theta);
                     if (opts.inverse)
@@ -1620,6 +1642,131 @@ TEST(AttentionApi, DisabledTrainingDropoutUsesDeterministicForwardAndMatchingBac
     }
 }
 
+TEST(AttentionApi, DynamicNtkRejectsSequenceLengthMetadataBeyondFp32ExactIntegerRange) {
+    constexpr uint64_t maxExactFp32Integer = uint64_t{1} << 24;
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = 8;
+    rope.scaling_kind = Impl::RotaryScalingKind::DynamicNTK;
+    rope.scaling_factor = 2.0;
+    rope.original_max_position_embeddings = 4096;
+    rope.output_dtype = DataType::BF16;
+    rope.compute_dtype = DataType::FP32;
+
+    Api::Network boundaryNetwork("attention_api_dynamic_ntk_fp32_exact_boundary");
+    Api::NetworkInput boundaryInput = Api::NetworkInput::Builder()
+                                          .network(boundaryNetwork)
+                                          .name("tokens")
+                                          .dimensions({64, 8})
+                                          .dataType(DataType::BF16)
+                                          .build();
+    rope.position_offset = static_cast<int64_t>(maxExactFp32Integer - 64);
+    EXPECT_NO_THROW((Api::Attention::Builder()
+                         .network(boundaryNetwork)
+                         .featureInput(boundaryInput.getFeatureOutput().value())
+                         .numHeads(1)
+                         .headDim(8)
+                         .ropeOptions(rope)
+                         .build()));
+
+    Api::Network overflowNetwork("attention_api_dynamic_ntk_fp32_exact_overflow");
+    Api::NetworkInput overflowInput = Api::NetworkInput::Builder()
+                                          .network(overflowNetwork)
+                                          .name("tokens")
+                                          .dimensions({64, 8})
+                                          .dataType(DataType::BF16)
+                                          .build();
+    rope.position_offset = static_cast<int64_t>(maxExactFp32Integer - 63);
+    EXPECT_THROW((Api::Attention::Builder()
+                      .network(overflowNetwork)
+                      .featureInput(overflowInput.getFeatureOutput().value())
+                      .numHeads(1)
+                      .headDim(8)
+                      .ropeOptions(rope)
+                      .build()),
+                 std::invalid_argument);
+}
+
+TEST(AttentionApi, RaggedDynamicNtkRejectsCapacityBeyondFp32ExactIntegerRange) {
+    constexpr uint64_t maxExactFp32Integer = uint64_t{1} << 24;
+
+    Api::Network network("attention_api_ragged_dynamic_ntk_fp32_capacity_guard");
+    Api::RaggedTensor tokens = Api::RaggedNetworkInput::Builder()
+                                   .network(network)
+                                   .name("tokens")
+                                   .valuesDataType(DataType::BF16)
+                                   .trailingDimensions({8})
+                                   .batchSize(2)
+                                   .maxTotalValues(maxExactFp32Integer + 1)
+                                   .build();
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = 8;
+    rope.scaling_kind = Impl::RotaryScalingKind::DynamicNTK;
+    rope.scaling_factor = 2.0;
+    rope.original_max_position_embeddings = 4096;
+    rope.output_dtype = DataType::BF16;
+    rope.compute_dtype = DataType::FP32;
+
+    EXPECT_THROW((Api::Attention::Builder()
+                      .network(network)
+                      .featureInput(tokens)
+                      .numHeads(1)
+                      .headDim(8)
+                      .ropeOptions(rope)
+                      .build()),
+                 std::invalid_argument);
+}
+
+TEST(AttentionApi, LongRopeRejectsOriginalMaxBeyondFp32ExactIntegerRangeAndDeserializeRevalidates) {
+    constexpr uint64_t maxExactFp32Integer = uint64_t{1} << 24;
+
+    Api::Network network("attention_api_long_rope_fp32_original_max_guard");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({8, 8}).dataType(DataType::BF16).build();
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = 8;
+    rope.scaling_kind = Impl::RotaryScalingKind::LongRope;
+    rope.scaling_factor = 2.0;
+    rope.original_max_position_embeddings = maxExactFp32Integer;
+    rope.long_rope_short_factors = {1.0, 1.0, 1.0, 1.0};
+    rope.long_rope_long_factors = {2.0, 2.0, 2.0, 2.0};
+    rope.output_dtype = DataType::BF16;
+    rope.compute_dtype = DataType::FP32;
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .numHeads(1)
+                                   .headDim(8)
+                                   .ropeOptions(rope)
+                                   .build();
+
+    Impl::RotaryPositionEmbeddingOptions invalidRope = rope;
+    invalidRope.original_max_position_embeddings = maxExactFp32Integer + 1;
+    Api::Network invalidNetwork("attention_api_long_rope_fp32_original_max_reject");
+    Api::NetworkInput invalidInput = Api::NetworkInput::Builder()
+                                         .network(invalidNetwork)
+                                         .name("tokens")
+                                         .dimensions({8, 8})
+                                         .dataType(DataType::BF16)
+                                         .build();
+    EXPECT_THROW((Api::Attention::Builder()
+                      .network(invalidNetwork)
+                      .featureInput(invalidInput.getFeatureOutput().value())
+                      .numHeads(1)
+                      .headDim(8)
+                      .ropeOptions(invalidRope)
+                      .build()),
+                 std::invalid_argument);
+
+    nlohmann::json invalidArchive = attention.architectureJson();
+    invalidArchive["rope_options"]["original_max_position_embeddings"] = maxExactFp32Integer + 1;
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    EXPECT_THROW(Api::Attention::deserialize(archiveReader, invalidArchive, &network), std::runtime_error);
+}
+
 TEST(AttentionApi, BuildsComposedGqaAttentionWithExplicitDimsBiasAndRope) {
     Api::Network network("attention_api_builds_composed_gqa_attention_with_explicit_dims_bias_and_rope");
     Api::NetworkInput input =
@@ -2244,6 +2391,111 @@ TEST(AttentionApi, ForwardWithCanonicalRaggedTensorMatchesPackedReference) {
                    1.2e-1f);
 }
 
+
+TEST(AttentionApi, RaggedDynamicNtkUsesLongestLogicalRowNotPackedCapacity) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 8;
+    c.numHeads = 2;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 32;
+    c.outputFeatures = 32;
+    c.hasBias = false;
+    c.useRope = true;
+    c.ropeOptions.rotary_dim = 16;
+    c.ropeOptions.base = 37.0;
+    c.ropeOptions.scaling_kind = Impl::RotaryScalingKind::DynamicNTK;
+    c.ropeOptions.scaling_factor = 8.0;
+    c.ropeOptions.original_max_position_embeddings = 4;
+    c.ropeOptions.output_dtype = DataType::FP16;
+    c.ropeOptions.compute_dtype = DataType::FP32;
+    c.maskKind = Impl::AttentionMaskKind::None;
+    c.attentionScale = 0.25f;
+    c.sequenceLengths = {4, 3};
+    c.dataType = DataType::FP16;
+
+    const AttentionReferenceInputs denseInputs = makeRopeLayoutSentinelInputs(c);
+    AttentionReferenceInputs packedInputs = denseInputs;
+    packedInputs.featureInput =
+        packBsfRaggedStorage(denseInputs.featureInput, c.sequenceLengths, c.batchSize, c.sequenceLength, c.inputFeatures);
+    const vector<float> expectedDense = attentionLayerReference(denseInputs, c);
+    const vector<float> expectedPacked =
+        packBsfRaggedStorage(expectedDense, c.sequenceLengths, c.batchSize, c.sequenceLength, c.outputFeatures);
+
+    Api::Network network("attention_api_ragged_dynamic_ntk_uses_longest_logical_row");
+    // Capacity is 16 tokens while the active rows contain only 4 and 3 tokens. The old implementation
+    // incorrectly used 16 for Dynamic-NTK and therefore crossed original_max_position_embeddings=4.
+    // The deliberately small base/high scaling factor makes that wrong basis numerically obvious.
+    const uint64_t maxTotalValues = static_cast<uint64_t>(c.batchSize) * c.sequenceLength;
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .valuesDataType(c.dataType)
+                                  .offsetsDataType(DataType::UINT64)
+                                  .trailingDimensions({c.inputFeatures})
+                                  .maxTotalValues(maxTotalValues)
+                                  .batchSize(c.batchSize)
+                                  .build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input)
+                                   .numHeads(c.numHeads)
+                                   .numKeyValueHeads(c.numKeyValueHeads)
+                                   .headDim(c.headDim)
+                                   .valueDim(c.valueDim)
+                                   .outputFeatures(c.outputFeatures)
+                                   .hasBias(c.hasBias)
+                                   .ropeOptions(c.ropeOptions)
+                                   .weightsDataType(c.dataType)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(c.dataType)
+                                   .attentionScale(c.attentionScale)
+                                   .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(attention.getRaggedFeatureOutput()->getValues())
+                                    .dataType(c.dataType)
+                                    .build();
+
+    std::shared_ptr<Api::NetworkInput> valuesApiInput;
+    for (const auto& candidate : network.getExternalNetworkInputs()) {
+        if (candidate != nullptr && candidate->getName() == "tokens.values") {
+            valuesApiInput = candidate;
+            break;
+        }
+    }
+    ASSERT_NE(valuesApiInput, nullptr);
+
+    PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, *valuesApiInput, output, attention, c.batchSize, true);
+    auto physicalRaggedOffsetsInput = fixture.stampedNetwork->getNamedInput("tokens.offsets");
+    ASSERT_NE(physicalRaggedOffsetsInput, nullptr);
+
+    Stream stream = fixture.physicalAttention->getStreams()[0];
+    setAttentionParameters(fixture.physicalAttention, denseInputs, c, stream);
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(c.dataType, {maxTotalValues, c.inputFeatures}));
+    writeCpuTensor(featureInHost, packedInputs.featureInput);
+    const vector<uint32_t> offsets32 = canonicalRaggedRowOffsets(c.sequenceLengths);
+    const vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    Impl::Tensor raggedOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT64, {c.batchSize + 1}));
+    writeCpuUint64Tensor(raggedOffsetsHost, offsets);
+
+    const vector<float> actual = runForwardWithRaggedMetadata(*fixture.physicalInput,
+                                                             *physicalRaggedOffsetsInput,
+                                                             *fixture.physicalOutput,
+                                                             featureInHost,
+                                                             raggedOffsetsHost,
+                                                             c.batchSize);
+    expectAllClose(packedBsfRaggedValidValues(actual, c.sequenceLengths, c.outputFeatures),
+                   packedBsfRaggedValidValues(expectedPacked, c.sequenceLengths, c.outputFeatures),
+                   1.2e-1f,
+                   1.2e-1f);
+}
+
 TEST(AttentionApi, ForwardWithSequenceLengthsMatchesPaddingMaskReference) {
     AttentionReferenceCase c;
     c.batchSize = 2;
@@ -2283,6 +2535,89 @@ TEST(AttentionApi, ForwardWithSequenceLengthsMatchesPaddingMaskReference) {
                                    .valueDim(c.valueDim)
                                    .outputFeatures(c.outputFeatures)
                                    .hasBias(c.hasBias)
+                                   .weightsDataType(c.dataType)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(c.dataType)
+                                   .attentionScale(c.attentionScale)
+                                   .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(attention.getOutput("feature_output"))
+                                    .dataType(c.dataType)
+                                    .build();
+
+    PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, input, output, attention, c.batchSize, true);
+    auto physicalSequenceLengthsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(sequenceLengths.getId()));
+    ASSERT_NE(physicalSequenceLengthsInput, nullptr);
+
+    Stream stream = fixture.physicalAttention->getStreams()[0];
+    setAttentionParameters(fixture.physicalAttention, inputs, c, stream);
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(c.dataType, {c.batchSize, c.sequenceLength, c.inputFeatures}));
+    writeCpuTensor(featureInHost, inputs.featureInput);
+    Impl::Tensor sequenceLengthsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {c.batchSize, 1}));
+    writeCpuInt32Tensor(sequenceLengthsHost, c.sequenceLengths);
+
+    const vector<float> expected = attentionLayerReference(inputs, c);
+    const vector<float> actual = runForwardWithMetadata(
+        *fixture.physicalInput, *physicalSequenceLengthsInput, *fixture.physicalOutput, featureInHost, sequenceLengthsHost, c.batchSize);
+    expectAllClose(actual, expected, 1.2e-1f, 1.2e-1f);
+}
+
+
+TEST(AttentionApi, DenseVariableLengthLongRopeUsesActiveMaximumNotPaddedSequenceExtent) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 8;
+    c.numHeads = 2;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 32;
+    c.outputFeatures = 32;
+    c.hasBias = false;
+    c.useRope = true;
+    c.ropeOptions.rotary_dim = 8;
+    c.ropeOptions.base = 37.0;
+    c.ropeOptions.scaling_kind = Impl::RotaryScalingKind::LongRope;
+    c.ropeOptions.scaling_factor = 2.0;
+    c.ropeOptions.original_max_position_embeddings = 4;
+    c.ropeOptions.attention_factor = 1.0;
+    c.ropeOptions.long_rope_short_factors = {1.0, 1.0, 1.0, 1.0};
+    c.ropeOptions.long_rope_long_factors = {4.0, 4.0, 4.0, 4.0};
+    c.ropeOptions.output_dtype = DataType::FP16;
+    c.ropeOptions.compute_dtype = DataType::FP32;
+    c.maskKind = Impl::AttentionMaskKind::None;
+    c.attentionScale = 0.25f;
+    c.sequenceLengths = {4, 3};
+    c.dataType = DataType::FP16;
+
+    const AttentionReferenceInputs inputs = makeRopeLayoutSentinelInputs(c);
+
+    Api::Network network("attention_api_dense_variable_length_longrope_uses_active_maximum");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({c.sequenceLength, c.inputFeatures})
+                                  .dataType(c.dataType)
+                                  .build();
+    Api::NetworkInput sequenceLengths =
+        Api::NetworkInput::Builder().network(network).name("sequence_lengths").dimensions({1}).dataType(DataType::INT32).build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
+                                   .numHeads(c.numHeads)
+                                   .numKeyValueHeads(c.numKeyValueHeads)
+                                   .headDim(c.headDim)
+                                   .valueDim(c.valueDim)
+                                   .outputFeatures(c.outputFeatures)
+                                   .hasBias(c.hasBias)
+                                   .ropeOptions(c.ropeOptions)
                                    .weightsDataType(c.dataType)
                                    .computeDataType(DataType::FP32)
                                    .outputDataType(c.dataType)

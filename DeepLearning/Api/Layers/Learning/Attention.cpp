@@ -60,6 +60,38 @@ uint64_t checkedMul(uint64_t a, uint64_t b, const char* what) {
     return a * b;
 }
 
+constexpr uint64_t kMaxExactlyRepresentableFp32Integer = uint64_t{1} << 24;
+
+bool ropeScalingUsesSequenceLength(ThorImplementation::RotaryScalingKind scalingKind) {
+    return scalingKind == ThorImplementation::RotaryScalingKind::DynamicNTK ||
+           scalingKind == ThorImplementation::RotaryScalingKind::LongRope;
+}
+
+std::optional<std::string> ropeFp32SequenceLengthValidationError(
+    bool useRope, const ThorImplementation::RotaryPositionEmbeddingOptions& options, uint64_t maximumPossibleSequenceLength) {
+    if (!useRope || !ropeScalingUsesSequenceLength(options.scaling_kind)) {
+        return std::nullopt;
+    }
+
+    if (options.original_max_position_embeddings > kMaxExactlyRepresentableFp32Integer) {
+        return "Attention Dynamic-NTK/LongRoPE currently requires original_max_position_embeddings <= 16777216 "
+               "because RoPE sequence-length scaling uses FP32 metadata.";
+    }
+
+    const uint64_t positivePositionOffset =
+        options.position_offset > 0 ? static_cast<uint64_t>(options.position_offset) : uint64_t{0};
+    if (positivePositionOffset > kMaxExactlyRepresentableFp32Integer ||
+        maximumPossibleSequenceLength > kMaxExactlyRepresentableFp32Integer - positivePositionOffset) {
+        return "Attention Dynamic-NTK/LongRoPE currently requires maximum possible sequence length plus positive "
+               "position_offset <= 16777216 because RoPE sequence-length scaling uses FP32 metadata. "
+               "maximum_possible_sequence_length=" +
+               std::to_string(maximumPossibleSequenceLength) + ", positive_position_offset=" +
+               std::to_string(positivePositionOffset) + ".";
+    }
+
+    return std::nullopt;
+}
+
 void requireRank2FeatureInput(const Thor::Tensor& tensor, const char* inputName = "feature input") {
     if (!tensor.isInitialized()) {
         throw std::invalid_argument(std::string("Attention ") + inputName + " tensor is not initialized.");
@@ -845,8 +877,40 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                     opts.output_dtype = outputDType;
                 }
 
-                q = q.rotaryPositionEmbedding(opts);
-                k = k.rotaryPositionEmbedding(opts);
+                const bool scalingNeedsLogicalSequenceLength =
+                    opts.scaling_kind == ThorImplementation::RotaryScalingKind::DynamicNTK ||
+                    opts.scaling_kind == ThorImplementation::RotaryScalingKind::LongRope;
+                std::optional<Expression> effectiveSequenceLength;
+                if (scalingNeedsLogicalSequenceLength && useRagged) {
+                    // Packed ragged storage uses maxTotalValues as its physical sequence-axis capacity. Dynamic-NTK
+                    // and LongRoPE instead require the longest logical sequence in the batch. Derive max(diff(offsets))
+                    // entirely on-device; the row partition remains structural, non-differentiable metadata.
+                    Expression offsets = Expression::input(
+                        kAttentionQueryRowPartitionInputName, queryRowPartitionDType, queryRowPartitionDType);
+                    Expression starts = offsets.stridedView({batch}, {1}, 0);
+                    Expression ends = offsets.stridedView({batch}, {1}, 1);
+                    // Subtract while offsets are still exact UINT32/UINT64 metadata. Only the resulting row lengths are
+                    // converted to FP32, which is the numeric domain used by the RoPE scaling formulas themselves.
+                    effectiveSequenceLength = (ends - starts).cast(DataType::FP32).reduce_max({0}, {});
+                } else if (scalingNeedsLogicalSequenceLength && useSequenceLengths) {
+                    // Dense variable-length attention must likewise use active logical lengths rather than padded S.
+                    // Q/K share one RoPE frequency basis, so cross-attention uses the larger active maximum.
+                    Expression qLengths = Expression::input(
+                        kAttentionQuerySequenceLengthsInputName, DataType::INT32, DataType::INT32);
+                    Expression kvLengths = Expression::input(
+                        kAttentionKeyValueSequenceLengthsInputName, DataType::INT32, DataType::INT32);
+                    effectiveSequenceLength = qLengths.cast(DataType::FP32)
+                                                  .reduce_max({0}, {})
+                                                  .max(kvLengths.cast(DataType::FP32).reduce_max({0}, {}));
+                }
+
+                if (effectiveSequenceLength.has_value()) {
+                    q = q.rotaryPositionEmbeddingWithEffectiveSequenceLength(effectiveSequenceLength.value(), opts);
+                    k = k.rotaryPositionEmbeddingWithEffectiveSequenceLength(effectiveSequenceLength.value(), opts);
+                } else {
+                    q = q.rotaryPositionEmbedding(opts);
+                    k = k.rotaryPositionEmbedding(opts);
+                }
             }
 
             AttentionOptions options;
@@ -1262,6 +1326,17 @@ void Attention::Builder::verifyConfig() const {
         throw std::invalid_argument(
             "Attention ragged cross-attention with RoPE requires query and key/value to share the same row partition. "
             "Independent ragged partitions need explicit positional semantics, which Attention does not infer.");
+    }
+    const uint64_t maximumPossibleRopeSequenceLength =
+        useRagged
+            ? _raggedFeatureInput->getMaxTotalValues()
+            : std::max(_featureInput->getDimensions().at(0),
+                       _contextInput.has_value() ? _contextInput->getDimensions().at(0) : _featureInput->getDimensions().at(0));
+    if (const std::optional<std::string> error = ropeFp32SequenceLengthValidationError(
+            _useRope.value_or(false), _ropeOptions.value_or(ThorImplementation::RotaryPositionEmbeddingOptions{}),
+            maximumPossibleRopeSequenceLength);
+        error.has_value()) {
+        throw std::invalid_argument(error.value());
     }
     if (_numHeads.value() == 0) {
         throw std::invalid_argument("Attention numHeads must be non-zero.");
@@ -1854,6 +1929,14 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     const DataType weightsDataType = j.at("weights_data_type").get<DataType>();
     const DataType computeDataType = j.at("compute_data_type").get<DataType>();
     const DataType outputDataType = j.at("output_data_type").get<DataType>();
+    const uint64_t maximumPossibleRopeSequenceLength =
+        raggedFeatureInput.has_value() ? raggedFeatureInput->getMaxTotalValues()
+                                       : std::max(querySequenceLength, keyValueSequenceLength);
+    if (const std::optional<std::string> error =
+            ropeFp32SequenceLengthValidationError(useRope, ropeOptions, maximumPossibleRopeSequenceLength);
+        error.has_value()) {
+        throw std::runtime_error(error.value());
+    }
     if (epilogue.has_value()) {
         auto validateSerializedExpressionInputDTypes = [&](const std::string& inputName) {
             const AttentionEpilogueInputDataTypes inputDataTypes =

@@ -1093,6 +1093,19 @@ static std::vector<uint64_t> thorAttentionDims(AttentionTensorLayout layout,
 
 static uint64_t numelFromDims(const std::vector<uint64_t>& dims);
 
+static void validateRopeEffectiveSequenceLengthDims(const ExprNode& node,
+                                                    const std::vector<std::vector<uint64_t>>& node_dims) {
+    if (node.rope_effective_sequence_length_node == UINT32_MAX) {
+        return;
+    }
+    if (node.rope_effective_sequence_length_node >= node_dims.size()) {
+        throw std::runtime_error("RoPE effective sequence length node index is out of range.");
+    }
+    if (numelFromDims(node_dims[node.rope_effective_sequence_length_node]) != 1) {
+        throw std::runtime_error("RoPE effective sequence length metadata must contain exactly one value.");
+    }
+}
+
 static std::vector<uint64_t> inferRaggedValuewiseExtentDims(const ExprNode& node,
                                                                const std::vector<uint64_t>& values_dims,
                                                                const std::vector<uint64_t>& offsets_dims) {
@@ -1243,6 +1256,7 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 break;
             case ExprOp::ROPE: {
                 node_dims[i] = node_dims[node.lhs];
+                validateRopeEffectiveSequenceLengthDims(node, node_dims);
                 const std::vector<uint64_t>& dims = node_dims[i];
                 if (dims.empty()) {
                     throw std::runtime_error("RoPE requires a tensor input.");
@@ -2945,6 +2959,9 @@ static void collectReferencedLocalInputSlots(const PhysicalExpression& expr, uin
     }
 
     collectReferencedLocalInputSlots(expr, node.lhs, slots);
+    if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
+        collectReferencedLocalInputSlots(expr, node.rope_effective_sequence_length_node, slots);
+    }
 
     if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         collectReferencedLocalInputSlots(expr, node.rhs, slots);
@@ -2979,6 +2996,9 @@ static void collectBroadcastOffsetLocalInputSlots(const PhysicalExpression& expr
     }
 
     collectBroadcastOffsetLocalInputSlots(expr, node.lhs, slots);
+    if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
+        collectBroadcastOffsetLocalInputSlots(expr, node.rope_effective_sequence_length_node, slots);
+    }
 
     if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         collectBroadcastOffsetLocalInputSlots(expr, node.rhs, slots);
@@ -3003,6 +3023,9 @@ static void collectReachableLocalNodes(const PhysicalExpression& expr, uint32_t 
     }
 
     collectReachableLocalNodes(expr, node.lhs, nodes);
+    if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
+        collectReachableLocalNodes(expr, node.rope_effective_sequence_length_node, nodes);
+    }
 
     if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         collectReachableLocalNodes(expr, node.rhs, nodes);
@@ -3255,6 +3278,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
                 break;
             case ExprOp::ROPE: {
                 node_dims[i] = node_dims[node.lhs];
+                validateRopeEffectiveSequenceLengthDims(node, node_dims);
                 const std::vector<uint64_t>& dims = node_dims[i];
                 if (dims.empty()) {
                     throw std::runtime_error("RoPE requires a tensor input.");
@@ -3658,6 +3682,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
                 break;
             case ExprOp::ROPE: {
                 node_dims[i] = node_dims[node.lhs];
+                validateRopeEffectiveSequenceLengthDims(node, node_dims);
                 const std::vector<uint64_t>& dims = node_dims[i];
                 if (dims.empty()) {
                     throw std::runtime_error("RoPE requires a tensor input.");
@@ -4832,7 +4857,6 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::SQRT:
         case ExprOp::TANH:
         case ExprOp::NORMCDF:
-        case ExprOp::ROPE:
         case ExprOp::LOGICAL_NOT:
         case ExprOp::CAST:
         case ExprOp::REDUCE_SUM:
@@ -4845,6 +4869,15 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::REDUCE_NORM1:
         case ExprOp::REDUCE_NORM2:
             return collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
+        case ExprOp::ROPE: {
+            auto result = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
+            if (node.rope_effective_sequence_length_node != UINT32_MAX) {
+                auto metadata =
+                    collectEffectiveInputDimsForNode(expr, node_dims, node.rope_effective_sequence_length_node);
+                mergeEffectiveInputDimsMaps(result, metadata);
+            }
+            return result;
+        }
         case ExprOp::TAKE_ALONG_AXIS: {
             auto lhs_map = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
             auto rhs_map = collectEffectiveInputDimsForNode(expr, node_dims, node.rhs);

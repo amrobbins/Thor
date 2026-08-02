@@ -394,6 +394,9 @@ Supported features for FP16/BF16:
   ``num_key_value_heads``.
 * RoPE with ``none``, ``linear``, ``dynamic_ntk``, ``yarn``, ``longrope``, and
   ``llama3`` scaling parameterizations.
+  Dynamic-NTK and LongRoPE currently require the maximum possible sequence length plus
+  positive position offset, and ``rope_original_max_position_embeddings`` itself, to be
+  at most 16,777,216 so their FP32 sequence-length metadata remains exact.
 * Masks: ``none``, ``causal_top_left``, ``causal_bottom_right``,
   ``sliding_window_top_left``, and ``sliding_window_bottom_right``.
 * ALiBi only with causal/sliding diagonal masks and ``diagonal_right_bound == 0``;

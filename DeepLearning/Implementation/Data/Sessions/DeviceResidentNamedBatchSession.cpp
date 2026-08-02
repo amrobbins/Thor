@@ -8,6 +8,8 @@
 #include <utility>
 
 using ThorImplementation::DataType;
+using ThorImplementation::RaggedTensor;
+using ThorImplementation::RaggedTensorDescriptor;
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorDescriptor;
 using ThorImplementation::TensorPlacement;
@@ -99,7 +101,7 @@ DeviceResidentNamedBatchSession::DeviceResidentNamedBatchSession(
     for (const Thor::DatasetField &field : this->dataset->getSchema().getFields()) {
         if (field.kind == Thor::DatasetFieldKind::RAGGED) {
             throw std::runtime_error(
-                "DeviceResidentNamedBatchSession does not yet support ragged dataset fields.");
+                "DeviceResidentNamedBatchSession requires explicit materialization descriptors for ragged dataset fields.");
         }
         fieldRequirements.emplace(
             field.id, Thor::DatasetFieldMaterializationRequirement::dense(field.id));
@@ -134,31 +136,95 @@ DeviceResidentNamedBatchSession::DeviceResidentNamedBatchSession(
     Thor::DeviceDatasetSessionDescription session,
     uint64_t batchQueueDepth,
     std::string datasetName)
-    : DeviceResidentNamedBatchSession(
-          std::move(dataset),
-          session.getSplits(),
-          session.getBatching(),
-          batchQueueDepth,
-          std::move(datasetName)) {
-    fieldRequirements = session.getFieldRequirements();
+    : Thor::BatchSession(std::move(datasetName)),
+      dataset(std::move(dataset)),
+      splits(session.getSplits()),
+      batching(session.getBatching()),
+      fieldRequirements(session.getFieldRequirements()),
+      batchQueueDepth(batchQueueDepth) {
+    if (!this->dataset) {
+        throw std::runtime_error("DeviceResidentNamedBatchSession requires a dataset.");
+    }
+    if (batchQueueDepth == 0) {
+        throw std::runtime_error(
+            "DeviceResidentNamedBatchSession batch_queue_depth must be >= 1.");
+    }
+    if (this->splits.getDatasetId() != this->dataset->getDatasetId()) {
+        throw std::runtime_error(
+            "DeviceResidentNamedBatchSession split manifest belongs to a different dataset.");
+    }
+    if (this->splits.getNumExamples() != this->dataset->getNumExamples()) {
+        throw std::runtime_error(
+            "DeviceResidentNamedBatchSession split manifest row count does not match resident dataset.");
+    }
+
+    this->batchSize = this->batching.getBatchSize();
     if (fieldRequirements.empty()) {
-        fieldRequirements.clear();
         for (const Thor::DatasetField &field : this->dataset->getSchema().getFields()) {
             if (field.kind == Thor::DatasetFieldKind::RAGGED) {
                 throw std::runtime_error(
-                    "DeviceResidentNamedBatchSession does not yet support ragged dataset fields.");
+                    "DeviceResidentNamedBatchSession requires an explicit materialization descriptor for ragged field '" +
+                    field.name + "'.");
             }
             fieldRequirements.emplace(
                 field.id, Thor::DatasetFieldMaterializationRequirement::dense(field.id));
         }
     }
-    for (const auto& [fieldId, requirement] : fieldRequirements) {
-        if (fieldId != requirement.fieldId || requirement.isRagged()) {
+    for (const auto &[fieldId, requirement] : fieldRequirements) {
+        if (fieldId != requirement.fieldId) {
             throw std::runtime_error(
-                "DeviceResidentNamedBatchSession does not yet support ragged field materialization requirements.");
+                "DeviceResidentNamedBatchSession field requirement key/id mismatch.");
         }
-        (void)this->dataset->getSchema().getField(fieldId);
+        const Thor::DatasetField &field = this->dataset->getSchema().getField(fieldId);
+        if (field.kind == Thor::DatasetFieldKind::RAGGED) {
+            if (!requirement.raggedTensorDescriptor.has_value()) {
+                throw std::runtime_error(
+                    "DeviceResidentNamedBatchSession ragged field '" + field.name +
+                    "' requires a materialization descriptor.");
+            }
+            const RaggedTensorDescriptor &descriptor =
+                requirement.raggedTensorDescriptor.value();
+            if (descriptor.getValuesDataType() != field.dataType ||
+                descriptor.getTrailingDimensions() != field.dimensions ||
+                descriptor.getBatchSize() != this->batchSize) {
+                throw std::runtime_error(
+                    "DeviceResidentNamedBatchSession ragged materialization contract does not match field '" +
+                    field.name + "'.");
+            }
+            if (!this->dataset->hasSnapshotRaggedField(field.name)) {
+                throw std::runtime_error(
+                    "DeviceResidentNamedBatchSession resident dataset is missing ragged field '" +
+                    field.name + "'.");
+            }
+        } else if (requirement.raggedTensorDescriptor.has_value()) {
+            throw std::runtime_error(
+                "DeviceResidentNamedBatchSession non-ragged field '" + field.name +
+                "' cannot carry a RaggedTensor materialization descriptor.");
+        }
     }
+    for (const BatchTensorSpec &spec : batchTensorSpecsFor(this->dataset->getLayout())) {
+        if (!this->dataset->hasTensor(spec.name)) {
+            throw std::runtime_error(
+                "DeviceResidentNamedBatchSession resident dataset is missing tensor '" +
+                spec.name + "'.");
+        }
+    }
+
+    initializeSplit(
+        ExampleType::TRAIN,
+        this->splits.getSharedTrain(),
+        this->batching.getRandomizeTrain(),
+        this->batching.getRandomSeed());
+    initializeSplit(
+        ExampleType::VALIDATE,
+        this->splits.getSharedValidate(),
+        false,
+        std::nullopt);
+    initializeSplit(
+        ExampleType::TEST,
+        this->splits.getSharedTest(),
+        false,
+        std::nullopt);
 }
 
 DeviceResidentNamedBatchSession::~DeviceResidentNamedBatchSession() {
@@ -222,7 +288,7 @@ void DeviceResidentNamedBatchSession::initializeSplit(
             }
         }
         for (uint64_t i = 0; i < batchQueueDepth; ++i) {
-            runtime->availableBatches.push_back(allocateBatchTensorSet());
+            runtime->availableBatches.push_back(allocateBatchStorage());
         }
     }
 
@@ -231,11 +297,11 @@ void DeviceResidentNamedBatchSession::initializeSplit(
     (void)it;
 }
 
-std::map<std::string, Tensor>
-DeviceResidentNamedBatchSession::allocateBatchTensorSet() const {
-    std::map<std::string, Tensor> tensors;
+DeviceResidentNamedBatchSession::SplitRuntime::BatchStorage
+DeviceResidentNamedBatchSession::allocateBatchStorage() const {
+    SplitRuntime::BatchStorage storage;
     for (const BatchTensorSpec &spec : batchTensorSpecsFor(dataset->getLayout())) {
-        tensors.emplace(
+        storage.tensors.emplace(
             spec.name,
             Tensor(
                 dataset->getPlacement(),
@@ -243,7 +309,17 @@ DeviceResidentNamedBatchSession::allocateBatchTensorSet() const {
                     spec.dataType,
                     batchDimensionsFor(spec.exampleDimensions, batchSize))));
     }
-    return tensors;
+    for (const auto &[fieldId, requirement] : fieldRequirements) {
+        if (!requirement.raggedTensorDescriptor.has_value()) continue;
+        const Thor::DatasetField &field = dataset->getSchema().getField(fieldId);
+        const RaggedTensorDescriptor &descriptor = requirement.raggedTensorDescriptor.value();
+        storage.raggedTensors.emplace(
+            field.name,
+            RaggedTensor(
+                Tensor(dataset->getPlacement(), descriptor.getValuesDescriptor()),
+                Tensor(dataset->getPlacement(), descriptor.getOffsetsDescriptor())));
+    }
+    return storage;
 }
 
 DeviceResidentNamedBatchSession::SplitRuntime &
@@ -318,9 +394,9 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
         throw std::runtime_error("DeviceResidentNamedBatchSession has been cancelled.");
     }
 
-    std::map<std::string, Tensor> tensors;
+    SplitRuntime::BatchStorage storage;
     if (!runtime.availableBatches.empty()) {
-        tensors = std::move(runtime.availableBatches.front());
+        storage = std::move(runtime.availableBatches.front());
         runtime.availableBatches.pop_front();
     } else {
         THOR_THROW_IF_FALSE(!runtime.pendingBatches.empty());
@@ -331,11 +407,11 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
             event.synchronize();
         }
         lock.lock();
-        tensors = std::move(pending.tensors);
+        storage = std::move(pending.storage);
     }
 
     if (cancelled.load(std::memory_order_acquire)) {
-        runtime.availableBatches.push_front(std::move(tensors));
+        runtime.availableBatches.push_front(std::move(storage));
         throw std::runtime_error("DeviceResidentNamedBatchSession has been cancelled.");
     }
 
@@ -350,12 +426,23 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
     runtime.nextBatchNum =
         (runtime.nextBatchNum + 1) % runtime.batchesPerEpoch;
     fillRowIndexTensor(runtime, validExampleCount);
+
+    for (const auto &[fieldId, requirement] : fieldRequirements) {
+        if (!requirement.raggedTensorDescriptor.has_value()) continue;
+        const Thor::DatasetField &field = dataset->getSchema().getField(fieldId);
+        dataset->validateSnapshotRaggedBatchCapacity(
+            field.name,
+            runtime.rowIndicesHost,
+            validExampleCount,
+            requirement.raggedTensorDescriptor->getMaxTotalValues());
+    }
+
     runtime.rowIndicesDevice.copyFromAsync(
         runtime.rowIndicesHost,
         runtime.gatherStream);
 
     for (const BatchTensorSpec &spec : batchTensorSpecsFor(dataset->getLayout())) {
-        Tensor &destination = tensors.at(spec.name);
+        Tensor &destination = storage.tensors.at(spec.name);
         const Tensor &source = dataset->tensor(spec.name);
         launchDeviceResidentNamedGatherKernel(
             source,
@@ -363,18 +450,36 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
             runtime.rowIndicesDevice,
             runtime.gatherStream);
     }
+    for (auto &[fieldName, ragged] : storage.raggedTensors) {
+        dataset->enqueueSnapshotRaggedFieldMaterialization(
+            fieldName,
+            runtime.rowIndicesDevice,
+            validExampleCount,
+            ragged,
+            runtime.gatherStream);
+    }
     runtime.gatherStream.synchronize();
     runtime.batchesGathered += 1;
 
-    auto sourceTensors =
-        std::make_shared<std::map<std::string, Tensor>>(std::move(tensors));
-    Batch batch = batchFromTensorMap(*sourceTensors);
+    auto sourceStorage =
+        std::make_shared<SplitRuntime::BatchStorage>(std::move(storage));
+    Batch batch;
+    for (const auto &[name, tensor] : sourceStorage->tensors) {
+        batch.insert(name, tensor);
+    }
+    for (const auto &[name, ragged] : sourceStorage->raggedTensors) {
+        batch.insert(name, ragged);
+    }
     if (validExampleCount < batchSize) {
         batch.setValidExampleCount(validExampleCount);
     }
     std::set<std::string> fieldNames;
-    for (const auto &[name, tensor] : *sourceTensors) {
+    for (const auto &[name, tensor] : sourceStorage->tensors) {
         (void)tensor;
+        fieldNames.insert(name);
+    }
+    for (const auto &[name, ragged] : sourceStorage->raggedTensors) {
+        (void)ragged;
         fieldNames.insert(name);
     }
 
@@ -383,11 +488,11 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
     THOR_THROW_IF_FALSE(sharedSelf != nullptr);
     std::weak_ptr<DeviceResidentNamedBatchSession> weakSelf = sharedSelf;
     Thor::BatchSourceOwner sourceOwner(
-        [weakSelf, exampleType, sourceTensors](std::vector<Event> consumedEvents) mutable {
+        [weakSelf, exampleType, sourceStorage](std::vector<Event> consumedEvents) mutable {
             if (std::shared_ptr<DeviceResidentNamedBatchSession> session = weakSelf.lock()) {
                 session->releaseBatchTensorSet(
                     exampleType,
-                    std::move(sourceTensors),
+                    std::move(sourceStorage),
                     std::move(consumedEvents));
                 return;
             }
@@ -399,25 +504,28 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
             }
         });
     addBatchSourceResource(batch, std::move(fieldNames), std::move(sourceOwner));
+    validateReturnedBatch(batch);
     return batch;
 }
 
-void DeviceResidentNamedBatchSession::validateReturnedBatch(
-    const std::map<std::string, Tensor> &tensors) const {
-    const std::vector<BatchTensorSpec> specs =
-        batchTensorSpecsFor(dataset->getLayout());
-    if (tensors.size() != specs.size()) {
+void DeviceResidentNamedBatchSession::validateReturnedBatch(const Batch &batch) const {
+    const std::vector<BatchTensorSpec> specs = batchTensorSpecsFor(dataset->getLayout());
+    uint64_t expectedFields = specs.size();
+    for (const auto &[fieldId, requirement] : fieldRequirements) {
+        (void)fieldId;
+        if (requirement.raggedTensorDescriptor.has_value()) expectedFields += 1;
+    }
+    if (batch.size() != expectedFields) {
         throw std::runtime_error(
-            "DeviceResidentNamedBatchSession returned batch has wrong tensor count.");
+            "DeviceResidentNamedBatchSession returned batch has wrong field count.");
     }
     for (const BatchTensorSpec &spec : specs) {
-        const auto found = tensors.find(spec.name);
-        if (found == tensors.end()) {
+        if (!batch.contains(spec.name) || !batch.isTensor(spec.name)) {
             throw std::runtime_error(
                 "DeviceResidentNamedBatchSession returned batch is missing tensor '" +
                 spec.name + "'.");
         }
-        const Tensor &tensor = found->second;
+        const Tensor &tensor = batch.getTensor(spec.name);
         if (!tensor.isInitialized()) {
             throw std::runtime_error(
                 "DeviceResidentNamedBatchSession returned batch contains uninitialized tensor '" +
@@ -437,13 +545,29 @@ void DeviceResidentNamedBatchSession::validateReturnedBatch(
                 spec.name + "' has the wrong descriptor.");
         }
     }
+    for (const auto &[fieldId, requirement] : fieldRequirements) {
+        if (!requirement.raggedTensorDescriptor.has_value()) continue;
+        const Thor::DatasetField &field = dataset->getSchema().getField(fieldId);
+        if (!batch.contains(field.name) || !batch.isRaggedTensor(field.name)) {
+            throw std::runtime_error(
+                "DeviceResidentNamedBatchSession returned batch is missing ragged tensor '" +
+                field.name + "'.");
+        }
+        const RaggedTensor &ragged = batch.getRaggedTensor(field.name);
+        if (!ragged.isInitialized() || ragged.getPlacement() != dataset->getPlacement() ||
+            ragged.getDescriptor() != requirement.raggedTensorDescriptor.value()) {
+            throw std::runtime_error(
+                "DeviceResidentNamedBatchSession returned ragged tensor '" +
+                field.name + "' has the wrong placement or descriptor.");
+        }
+    }
 }
 
 void DeviceResidentNamedBatchSession::releaseBatchTensorSet(
     ExampleType exampleType,
-    std::shared_ptr<std::map<std::string, Tensor>> tensors,
+    std::shared_ptr<SplitRuntime::BatchStorage> storage,
     std::vector<Event> consumedEvents) noexcept {
-    if (tensors == nullptr) {
+    if (storage == nullptr) {
         return;
     }
     auto found = splitRuntimes.find(exampleType);
@@ -471,11 +595,11 @@ void DeviceResidentNamedBatchSession::releaseBatchTensorSet(
     try {
         std::lock_guard<std::mutex> guard(runtime.mutex);
         if (consumedEvents.empty()) {
-            runtime.availableBatches.push_back(*tensors);
+            runtime.availableBatches.push_back(*storage);
         } else {
             runtime.pendingBatches.push_back(
                 SplitRuntime::PendingBatch{
-                    *tensors,
+                    *storage,
                     consumedEvents});
         }
         runtime.batchesReturned += 1;
@@ -512,10 +636,7 @@ void DeviceResidentNamedBatchSession::recycleBatch(
     Batch &&batch) {
     if (batch.ownsSourceResourceLifecycle()) {
         THOR_THROW_IF_FALSE(batch.allFieldsHaveSourceReferences());
-        std::map<std::string, Tensor> tensors = denseTensorMapFromBatchOrThrow(
-            batch,
-            "DeviceResidentNamedBatchSession returned source-tracked batch");
-        validateReturnedBatch(tensors);
+        validateReturnedBatch(batch);
         // Clearing seals an owner that a manual caller did not release after
         // submission. Batch copies do not own this lifecycle and therefore
         // continue through the ordinary exact validation/recycle path below.
@@ -527,13 +648,19 @@ void DeviceResidentNamedBatchSession::recycleBatch(
         return;
     }
     SplitRuntime &runtime = runtimeFor(exampleType);
-    std::map<std::string, Tensor> tensors = denseTensorMapFromBatchOrThrow(
-        batch,
-        "DeviceResidentNamedBatchSession returned batch");
-    validateReturnedBatch(tensors);
+    validateReturnedBatch(batch);
+    SplitRuntime::BatchStorage storage;
+    for (const BatchTensorSpec &spec : batchTensorSpecsFor(dataset->getLayout())) {
+        storage.tensors.emplace(spec.name, batch.getTensor(spec.name));
+    }
+    for (const auto &[fieldId, requirement] : fieldRequirements) {
+        if (!requirement.raggedTensorDescriptor.has_value()) continue;
+        const std::string &name = dataset->getSchema().getField(fieldId).name;
+        storage.raggedTensors.emplace(name, batch.getRaggedTensor(name));
+    }
     {
         std::lock_guard<std::mutex> guard(runtime.mutex);
-        runtime.availableBatches.push_back(std::move(tensors));
+        runtime.availableBatches.push_back(std::move(storage));
         runtime.batchesReturned += 1;
     }
     runtime.notEmpty.notify_one();
@@ -559,7 +686,7 @@ uint64_t DeviceResidentNamedBatchSession::getNextBatchNum(
 std::optional<TensorPlacement>
 DeviceResidentNamedBatchSession::getBatchTensorPlacement(
     const std::string &tensorName) const {
-    if (dataset->hasTensor(tensorName)) {
+    if (dataset->hasTensor(tensorName) || dataset->hasSnapshotRaggedField(tensorName)) {
         return dataset->getPlacement();
     }
     return std::nullopt;

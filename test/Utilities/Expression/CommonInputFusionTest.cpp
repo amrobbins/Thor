@@ -260,6 +260,13 @@ TEST(EquationCompiler, ExplicitCastAfterReductionControlsLowPrecisionStorage) {
     EXPECT_EQ(cast_output.output_dtype.value(), DataType::FP16);
 }
 
+TEST(ExpressionDTypeResolution, CanonicalUnsignedMetadataSubtractionPreservesIntegerDType) {
+    EXPECT_EQ(toSupportedInputDType(ExprOp::SUB, DataType::UINT32), DataType::UINT32);
+    EXPECT_EQ(toSupportedInputDType(ExprOp::SUB, DataType::UINT64), DataType::UINT64);
+    EXPECT_EQ(toSupportedComputeDType(ExprOp::SUB, DataType::UINT32), DataType::UINT32);
+    EXPECT_EQ(toSupportedComputeDType(ExprOp::SUB, DataType::UINT64), DataType::UINT64);
+}
+
 TEST(ExpressionDTypeResolution, DenseValueAndArgReductionsPreserveInputStorageDtypes) {
     EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_SUM, DataType::BF16), DataType::BF16);
     EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_MAX, DataType::BF16), DataType::BF16);

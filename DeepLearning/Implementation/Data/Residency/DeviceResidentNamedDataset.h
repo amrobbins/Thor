@@ -21,9 +21,10 @@ class Stream;
 /**
  * Canonical device-resident storage for one immutable named dataset.
  *
- * Dense-only datasets may store canonical tensors in dataset row order. For a
- * file dataset with windowed or ragged fields, the compact representation
- * stores the physical indexed records plus the required source sidecars and
+ * Canonical snapshots may store dense tensors and packed ragged fields in
+ * dataset row order. For a file dataset with windowed or ragged fields, the
+ * compact representation stores the physical indexed records plus the required
+ * source sidecars and
  * metadata. Direct/window outputs are deferred references; ragged outputs are
  * gathered into reusable batch-capacity buffers for the selected rows.
  */
@@ -61,6 +62,7 @@ class DeviceResidentNamedDataset {
     [[nodiscard]] bool hasCompactDirectField(const std::string &name) const;
     [[nodiscard]] bool hasCompactWindowField(const std::string &name) const;
     [[nodiscard]] bool hasCompactRaggedField(const std::string &name) const;
+    [[nodiscard]] bool hasSnapshotRaggedField(const std::string &name) const;
     [[nodiscard]] const ThorImplementation::Tensor &field(Thor::DatasetFieldId id) const;
     [[nodiscard]] const ThorImplementation::Tensor &tensor(const std::string &name) const;
 
@@ -71,6 +73,19 @@ class DeviceResidentNamedDataset {
         uint64_t maxTotalValues) const;
 
     void enqueueCompactRaggedFieldMaterialization(
+        const std::string &fieldName,
+        const ThorImplementation::Tensor &rowIndicesDevice,
+        uint64_t logicalRows,
+        ThorImplementation::RaggedTensor &destination,
+        Stream &stream) const;
+
+    void validateSnapshotRaggedBatchCapacity(
+        const std::string &fieldName,
+        const ThorImplementation::Tensor &rowIndicesHost,
+        uint64_t logicalRows,
+        uint64_t maxTotalValues) const;
+
+    void enqueueSnapshotRaggedFieldMaterialization(
         const std::string &fieldName,
         const ThorImplementation::Tensor &rowIndicesDevice,
         uint64_t logicalRows,
@@ -92,6 +107,15 @@ class DeviceResidentNamedDataset {
         DatasetLayout::RaggedTensorSpec spec;
         ThorImplementation::Tensor values;
         std::vector<uint64_t> valueCounts;
+    };
+
+    struct SnapshotRaggedFieldStorage {
+        DatasetLayout::RaggedTensorSpec spec;
+        ThorImplementation::Tensor references;
+        ThorImplementation::Tensor values;
+        std::vector<uint64_t> valueCounts;
+        uint64_t storedValueCount = 0;
+        uint64_t valueBytes = 0;
     };
 
     struct CompactWindowSourceStorage {
@@ -133,6 +157,7 @@ class DeviceResidentNamedDataset {
     ThorImplementation::Tensor compactRecords;
     std::map<std::string, CompactDirectFieldStorage> compactDirectFields;
     std::map<std::string, CompactRaggedFieldStorage> compactRaggedFields;
+    std::map<std::string, SnapshotRaggedFieldStorage> snapshotRaggedFields;
     std::map<std::string, CompactWindowSourceStorage> compactSources;
     std::map<std::string, CompactWindowFieldStorage> compactWindowFields;
     std::map<std::string, CompactAffineFieldStorage> compactAffineFields;

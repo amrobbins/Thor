@@ -273,6 +273,7 @@ struct StageNodeKey {
     uint64_t rope_llama3_high_freq_factor_bits = 0;
     std::vector<uint64_t> rope_long_rope_short_factor_bits;
     std::vector<uint64_t> rope_long_rope_long_factor_bits;
+    uint32_t rope_effective_sequence_length_node = UINT32_MAX;
     bool rope_allow_in_place_materialization = false;
     bool attention_use_bias = false;
     uint64_t attention_dropout_probability_bits = 0;
@@ -338,6 +339,7 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<size_t>{}(k.rope_long_rope_long_factor_bits.size()));
         for (uint64_t factor_bits : k.rope_long_rope_long_factor_bits)
             hashCombine(h, std::hash<uint64_t>{}(factor_bits));
+        hashCombine(h, std::hash<uint32_t>{}(k.rope_effective_sequence_length_node));
         hashCombine(h, std::hash<bool>{}(k.rope_allow_in_place_materialization));
         hashCombine(h, std::hash<bool>{}(k.attention_use_bias));
         hashCombine(h, std::hash<uint64_t>{}(k.attention_dropout_probability_bits));
@@ -435,6 +437,7 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.rope_long_rope_long_factor_bits.reserve(n.rope_long_rope_long_factors.size());
     for (double factor : n.rope_long_rope_long_factors)
         key.rope_long_rope_long_factor_bits.push_back(scalarBits(factor));
+    key.rope_effective_sequence_length_node = n.rope_effective_sequence_length_node;
     key.rope_allow_in_place_materialization = n.rope_allow_in_place_materialization;
     key.attention_use_bias = n.attention_use_bias;
     key.attention_dropout_probability_bits = scalarBits(n.attention_dropout_probability);
@@ -517,6 +520,9 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
 
         if (Expression::isBinaryOp(n.op)) {
             n.rhs = remapNode(n.rhs);
+        }
+        if (n.op == ExprOp::ROPE && n.rope_effective_sequence_length_node != UINT32_MAX) {
+            n.rope_effective_sequence_length_node = remapNode(n.rope_effective_sequence_length_node);
         }
         if (Expression::isTernaryOp(n.op)) {
             n.rhs = remapNode(n.rhs);
@@ -741,6 +747,7 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
         merge_parent(node.alpha_node);
         merge_parent(node.beta_node);
         merge_parent(node.matmul_epilogue_aux);
+        merge_parent(node.rope_effective_sequence_length_node);
         merge_parent(node.attention_seq_len_q_node);
         merge_parent(node.attention_seq_len_kv_node);
         merge_parent(node.attention_ragged_offset_q_node);
@@ -858,6 +865,9 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
         }
 
         addExternalValue(node.lhs);
+        if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
+            addExternalValue(node.rope_effective_sequence_length_node);
+        }
 
         if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
             addExternalValue(node.rhs);
@@ -1465,6 +1475,9 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 ",llama3HighFreq=" + std::to_string(scalarBits(node.rope_llama3_high_freq_factor)) +
                 ",longRopeShort=" + doubleVecSignature(node.rope_long_rope_short_factors) +
                 ",longRopeLong=" + doubleVecSignature(node.rope_long_rope_long_factors) +
+                (node.rope_effective_sequence_length_node == UINT32_MAX
+                     ? std::string{}
+                     : ",effectiveSeqLen=" + fusedRegionSignatureRec(expr, node.rope_effective_sequence_length_node)) +
                 ",allowInPlace=" + std::to_string(node.rope_allow_in_place_materialization ? 1 : 0) + ")";
         } else {
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ")";
@@ -3170,6 +3183,16 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
             stack.push_back(lhs_idx);
         }
 
+        if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
+            const uint32_t effective_idx = node.rope_effective_sequence_length_node;
+            if (effective_idx >= expr.nodes.size()) {
+                throw std::runtime_error("Invalid RoPE effective sequence length node index in expression.");
+            }
+            if (!isStageBoundaryOp(expr.nodes[effective_idx].op) && !forced_boundary_nodes.count(effective_idx)) {
+                stack.push_back(effective_idx);
+            }
+        }
+
         if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
             uint32_t rhs_idx = node.rhs;
             if (rhs_idx >= expr.nodes.size()) {
@@ -3352,6 +3375,15 @@ static void collectBoundaryDependencies(const PhysicalExpression& expr,
         if (!region_nodes.count(lhs_idx) && isStageBoundaryOp(expr.nodes[lhs_idx].op)) {
             boundary_nodes.insert(lhs_idx);
         }
+        if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
+            const uint32_t effective_idx = node.rope_effective_sequence_length_node;
+            if (effective_idx >= expr.nodes.size()) {
+                throw std::runtime_error("Invalid RoPE effective sequence length node index in expression.");
+            }
+            if (!region_nodes.count(effective_idx) && isStageBoundaryOp(expr.nodes[effective_idx].op)) {
+                boundary_nodes.insert(effective_idx);
+            }
+        }
 
         if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
             uint32_t rhs_idx = node.rhs;
@@ -3460,6 +3492,10 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
 
             if (!Expression::isLeafOp(new_node.op)) {
                 new_node.lhs = remapParent(new_node.lhs, "lhs");
+            }
+            if (new_node.op == ExprOp::ROPE && new_node.rope_effective_sequence_length_node != UINT32_MAX) {
+                new_node.rope_effective_sequence_length_node =
+                    remapParent(new_node.rope_effective_sequence_length_node, "RoPE effective sequence length");
             }
 
             if (Expression::isBinaryOp(new_node.op) || Expression::isTernaryOp(new_node.op)) {
@@ -5750,6 +5786,7 @@ static std::vector<uint32_t> computeNodeUseCounts(const PhysicalExpression& expr
         bump(node.alpha_node);
         bump(node.beta_node);
         bump(node.matmul_epilogue_aux);
+        bump(node.rope_effective_sequence_length_node);
         bump(node.attention_seq_len_q_node);
         bump(node.attention_seq_len_kv_node);
         bump(node.attention_ragged_offset_q_node);
@@ -5777,7 +5814,7 @@ static std::optional<InPlaceRopeMaterializationCandidate> classifySplitProjectio
     if (rope.op != ExprOp::ROPE || rope.lhs == UINT32_MAX || rope.lhs >= expr.nodes.size()) {
         return std::nullopt;
     }
-    if (!rope.rope_allow_in_place_materialization) {
+    if (!rope.rope_allow_in_place_materialization || rope.rope_effective_sequence_length_node != UINT32_MAX) {
         return std::nullopt;
     }
     if (!rope.output_dtype.has_value()) {
@@ -6444,6 +6481,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                     ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset");
                 }
             }
+            if (root.op == ExprOp::ROPE && root.rope_effective_sequence_length_node != UINT32_MAX) {
+                ensureBoundaryParentEmitted(root.rope_effective_sequence_length_node, "RoPE effective sequence length");
+            }
             if (root.op == ExprOp::GEMM) {
                 ensureBoundaryParentEmitted(root.aux, "aux");
                 ensureScaleDependencyEmitted(root.alpha_node, "alpha");
@@ -6824,6 +6864,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                     ensureBoundaryParentEmitted(root.attention_dropout_seed_node, "dropout_seed");
                     ensureBoundaryParentEmitted(root.attention_dropout_offset_node, "dropout_offset");
                 }
+            }
+            if (root.op == ExprOp::ROPE && root.rope_effective_sequence_length_node != UINT32_MAX) {
+                ensureBoundaryParentEmitted(root.rope_effective_sequence_length_node, "RoPE effective sequence length");
             }
             if (root.op == ExprOp::GEMM) {
                 ensureBoundaryParentEmitted(root.aux, "aux");

@@ -7,6 +7,7 @@
 #include "DeepLearning/Implementation/Data/Residency/DeviceDatasetResidency.h"
 #include "Utilities/Common/Stream.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedDataset.h"
+#include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
 #include "Utilities/Random/FullPeriodRandom.h"
 
 #include <atomic>
@@ -88,13 +89,17 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
         std::shared_ptr<const Thor::ExampleIndexSet> sourceIndices;
         bool randomized = false;
         std::optional<uint64_t> seed;
-        struct PendingBatch {
+        struct BatchStorage {
             std::map<std::string, ThorImplementation::Tensor> tensors;
+            std::map<std::string, ThorImplementation::RaggedTensor> raggedTensors;
+        };
+        struct PendingBatch {
+            BatchStorage storage;
             std::vector<Event> consumedEvents;
         };
 
         uint64_t batchesPerEpoch = 0;
-        std::deque<std::map<std::string, ThorImplementation::Tensor>> availableBatches;
+        std::deque<BatchStorage> availableBatches;
         std::deque<PendingBatch> pendingBatches;
         ThorImplementation::Tensor rowIndicesHost;
         ThorImplementation::Tensor rowIndicesDevice;
@@ -126,11 +131,11 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
                          std::optional<uint64_t> seed);
     [[nodiscard]] SplitRuntime &runtimeFor(ExampleType exampleType);
     [[nodiscard]] const SplitRuntime &runtimeFor(ExampleType exampleType) const;
-    [[nodiscard]] std::map<std::string, ThorImplementation::Tensor> allocateBatchTensorSet() const;
-    void validateReturnedBatch(const std::map<std::string, ThorImplementation::Tensor> &tensors) const;
+    [[nodiscard]] SplitRuntime::BatchStorage allocateBatchStorage() const;
+    void validateReturnedBatch(const Batch &batch) const;
     void fillRowIndexTensor(SplitRuntime &runtime, uint32_t validExampleCount);
     void releaseBatchTensorSet(
         ExampleType exampleType,
-        std::shared_ptr<std::map<std::string, ThorImplementation::Tensor>> tensors,
+        std::shared_ptr<SplitRuntime::BatchStorage> storage,
         std::vector<Event> consumedEvents) noexcept;
 };

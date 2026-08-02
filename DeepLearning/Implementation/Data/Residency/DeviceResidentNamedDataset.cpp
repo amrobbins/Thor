@@ -102,6 +102,30 @@ uint64_t keyBitsFromHex(const std::string &hex, DataType keyDataType) {
     return bits;
 }
 
+
+uint64_t canonicalOffsetHost(const Tensor &offsets, uint64_t index) {
+    THOR_THROW_IF_FALSE(offsets.isInitialized());
+    THOR_THROW_IF_FALSE(
+        offsets.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(offsets.getDimensions().size() == 1);
+    THOR_THROW_IF_FALSE(index < offsets.getDimensions().front());
+    if (offsets.getDataType() == DataType::UINT32) {
+        return offsets.getMemPtr<uint32_t>()[index];
+    }
+    if (offsets.getDataType() == DataType::UINT64) {
+        return offsets.getMemPtr<uint64_t>()[index];
+    }
+    throw std::runtime_error(
+        "Materialized ragged snapshot offsets must use canonical UINT32 or UINT64 dtype.");
+}
+
+void writeLittleEndianUint64(uint8_t *destination, uint64_t value) {
+    THOR_THROW_IF_FALSE(destination != nullptr);
+    for (uint64_t i = 0; i < sizeof(uint64_t); ++i) {
+        destination[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xffu);
+    }
+}
+
 uint64_t readLittleEndianUnsignedHost(const uint8_t *bytes, uint64_t numBytes) {
     if (bytes == nullptr || numBytes == 0 || numBytes > sizeof(uint64_t)) {
         throw std::runtime_error("Compact resident scalar byte width is invalid.");
@@ -687,11 +711,104 @@ std::shared_ptr<DeviceResidentNamedDataset> DeviceResidentNamedDataset::fromSnap
 
     const auto start = std::chrono::steady_clock::now();
     Stream uploadStream(devicePlacement);
+    std::vector<Tensor> hostRaggedReferenceBuffers;
+    hostRaggedReferenceBuffers.reserve(snapshot.raggedFields.size());
     for (const auto &entry : snapshot.fields) {
         const Tensor &hostTensor = entry.second;
         Tensor deviceTensor(devicePlacement, hostTensor.getDescriptor());
         deviceTensor.copyFromAsync(hostTensor, uploadStream);
         dataset->fields.emplace(entry.first, std::move(deviceTensor));
+    }
+
+    for (const auto &[fieldId, source] : snapshot.raggedFields) {
+        const Thor::DatasetField &field = snapshot.schema.getField(fieldId);
+        if (field.kind != Thor::DatasetFieldKind::RAGGED) {
+            throw std::runtime_error(
+                "Materialized ragged snapshot field is not marked RAGGED: " + field.name);
+        }
+        const DatasetLayout::RaggedTensorSpec &spec = snapshot.layout.raggedTensor(field.name);
+        if (source.valuesDataType != field.dataType ||
+            source.trailingDimensions != field.dimensions ||
+            source.valueBytes != spec.valueNumBytes()) {
+            throw std::runtime_error(
+                "Materialized ragged snapshot contract mismatch for field '" + field.name + "'.");
+        }
+        if (!source.offsets.isInitialized() ||
+            source.offsets.getPlacement().getMemDevice() != TensorPlacement::MemDevices::CPU ||
+            source.offsets.getDimensions() != std::vector<uint64_t>{snapshot.numExamples + 1}) {
+            throw std::runtime_error(
+                "Materialized ragged snapshot has invalid offsets for field '" + field.name + "'.");
+        }
+        if (source.storedValueCount != 0) {
+            std::vector<uint64_t> expectedValueDimensions;
+            expectedValueDimensions.reserve(field.dimensions.size() + 1);
+            expectedValueDimensions.push_back(source.storedValueCount);
+            expectedValueDimensions.insert(
+                expectedValueDimensions.end(), field.dimensions.begin(), field.dimensions.end());
+            if (!source.values.isInitialized() ||
+                source.values.getPlacement().getMemDevice() != TensorPlacement::MemDevices::CPU ||
+                source.values.getDescriptor() != TensorDescriptor(field.dataType, expectedValueDimensions)) {
+                throw std::runtime_error(
+                    "Materialized ragged snapshot has invalid packed values for field '" + field.name + "'.");
+            }
+        } else if (source.values.isInitialized()) {
+            throw std::runtime_error(
+                "All-empty materialized ragged snapshot must not allocate packed values for field '" +
+                field.name + "'.");
+        }
+
+        constexpr uint64_t referenceBytes = 2 * sizeof(uint64_t);
+        const uint64_t referenceStorageBytes = checkedMul(
+            snapshot.numExamples,
+            referenceBytes,
+            "Materialized ragged snapshot reference storage");
+        Tensor hostReferences(
+            TensorPlacement(TensorPlacement::MemDevices::CPU),
+            TensorDescriptor(DataType::UINT8, {referenceStorageBytes}));
+        std::vector<uint64_t> valueCounts(snapshot.numExamples, 0);
+        uint8_t *referenceBytesPtr = hostReferences.getMemPtr<uint8_t>();
+        uint64_t previous = canonicalOffsetHost(source.offsets, 0);
+        if (previous != 0) {
+            throw std::runtime_error(
+                "Materialized ragged snapshot offsets must start at zero for field '" +
+                field.name + "'.");
+        }
+        for (uint64_t row = 0; row < snapshot.numExamples; ++row) {
+            const uint64_t next = canonicalOffsetHost(source.offsets, row + 1);
+            if (next < previous || next > source.storedValueCount) {
+                throw std::runtime_error(
+                    "Materialized ragged snapshot offsets are invalid for field '" +
+                    field.name + "'.");
+            }
+            valueCounts[row] = next - previous;
+            uint8_t *reference = referenceBytesPtr + row * referenceBytes;
+            writeLittleEndianUint64(reference, previous);
+            writeLittleEndianUint64(reference + sizeof(uint64_t), next - previous);
+            previous = next;
+        }
+        if (previous != source.storedValueCount) {
+            throw std::runtime_error(
+                "Materialized ragged snapshot final offset does not match packed values for field '" +
+                field.name + "'.");
+        }
+
+        Tensor deviceReferences(devicePlacement, hostReferences.getDescriptor());
+        deviceReferences.copyFromAsync(hostReferences, uploadStream);
+        hostRaggedReferenceBuffers.push_back(hostReferences);
+        Tensor deviceValues;
+        if (source.storedValueCount != 0) {
+            deviceValues = Tensor(devicePlacement, source.values.getDescriptor());
+            deviceValues.copyFromAsync(source.values, uploadStream);
+        }
+        dataset->snapshotRaggedFields.emplace(
+            field.name,
+            SnapshotRaggedFieldStorage{
+                .spec = spec,
+                .references = std::move(deviceReferences),
+                .values = std::move(deviceValues),
+                .valueCounts = std::move(valueCounts),
+                .storedValueCount = source.storedValueCount,
+                .valueBytes = source.valueBytes});
     }
 
     uploadStream.synchronize();
@@ -843,6 +960,12 @@ uint64_t DeviceResidentNamedDataset::totalBytes() const {
             bytes += entry.second.values.getArraySizeInBytes();
         }
     }
+    for (const auto &entry : snapshotRaggedFields) {
+        bytes += entry.second.references.getArraySizeInBytes();
+        if (entry.second.values.isInitialized()) {
+            bytes += entry.second.values.getArraySizeInBytes();
+        }
+    }
     for (const auto &entry : compactSources) {
         bytes += entry.second.bytes.getArraySizeInBytes();
         bytes += entry.second.sequences.getArraySizeInBytes();
@@ -882,7 +1005,15 @@ uint64_t DeviceResidentNamedDataset::compactMetadataBytes() const {
 }
 
 bool DeviceResidentNamedDataset::hasField(Thor::DatasetFieldId id) const {
-    return fields.find(id) != fields.end() || compactFieldIds.find(id) != compactFieldIds.end();
+    if (fields.find(id) != fields.end() || compactFieldIds.find(id) != compactFieldIds.end()) {
+        return true;
+    }
+    for (const Thor::DatasetField &field : schema.getFields()) {
+        if (field.id == id) {
+            return snapshotRaggedFields.find(field.name) != snapshotRaggedFields.end();
+        }
+    }
+    return false;
 }
 
 bool DeviceResidentNamedDataset::hasTensor(const std::string &name) const {
@@ -904,6 +1035,10 @@ bool DeviceResidentNamedDataset::hasCompactWindowField(const std::string &name) 
 
 bool DeviceResidentNamedDataset::hasCompactRaggedField(const std::string &name) const {
     return compactRaggedFields.find(name) != compactRaggedFields.end();
+}
+
+bool DeviceResidentNamedDataset::hasSnapshotRaggedField(const std::string &name) const {
+    return snapshotRaggedFields.find(name) != snapshotRaggedFields.end();
 }
 
 const Tensor &DeviceResidentNamedDataset::field(Thor::DatasetFieldId id) const {
@@ -987,6 +1122,78 @@ void DeviceResidentNamedDataset::enqueueCompactRaggedFieldMaterialization(
         spec.referenceOffsetBytes,
         spec.storedValueCount(),
         spec.valueNumBytes(),
+        logicalRows,
+        values,
+        offsets,
+        rowIndicesDevice,
+        stream);
+}
+
+void DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacity(
+    const std::string &fieldName,
+    const Tensor &rowIndicesHost,
+    uint64_t logicalRows,
+    uint64_t maxTotalValues) const {
+    const auto found = snapshotRaggedFields.find(fieldName);
+    if (found == snapshotRaggedFields.end()) {
+        throw std::runtime_error(
+            "DeviceResidentNamedDataset has no snapshot ragged field '" + fieldName + "'.");
+    }
+    THOR_THROW_IF_FALSE(rowIndicesHost.isInitialized());
+    THOR_THROW_IF_FALSE(
+        rowIndicesHost.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(rowIndicesHost.getDataType() == DataType::UINT64);
+    THOR_THROW_IF_FALSE(rowIndicesHost.getDimensions().size() == 1);
+    THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= rowIndicesHost.getDimensions().front());
+
+    const uint64_t *rowIndices = rowIndicesHost.getMemPtr<uint64_t>();
+    uint64_t active = 0;
+    for (uint64_t row = 0; row < logicalRows; ++row) {
+        const uint64_t sourceRow = rowIndices[row];
+        if (sourceRow >= found->second.valueCounts.size()) {
+            throw std::runtime_error(
+                "Device resident ragged field '" + fieldName +
+                "' selected invalid dataset row " + std::to_string(sourceRow) +
+                " at batch row " + std::to_string(row) + ".");
+        }
+        const uint64_t count = found->second.valueCounts[sourceRow];
+        if (count > maxTotalValues - active) {
+            throw std::runtime_error(
+                "Device resident ragged field '" + fieldName + "' requires " +
+                std::to_string(active + count) + " active values at row " +
+                std::to_string(row) + ", exceeding maxTotalValues=" +
+                std::to_string(maxTotalValues) + ".");
+        }
+        active += count;
+    }
+}
+
+void DeviceResidentNamedDataset::enqueueSnapshotRaggedFieldMaterialization(
+    const std::string &fieldName,
+    const Tensor &rowIndicesDevice,
+    uint64_t logicalRows,
+    ThorImplementation::RaggedTensor &destination,
+    Stream &stream) const {
+    const auto found = snapshotRaggedFields.find(fieldName);
+    if (found == snapshotRaggedFields.end()) {
+        throw std::runtime_error(
+            "DeviceResidentNamedDataset has no snapshot ragged field '" + fieldName + "'.");
+    }
+    const SnapshotRaggedFieldStorage &storage = found->second;
+    const ThorImplementation::RaggedTensorDescriptor descriptor = destination.getDescriptor();
+    THOR_THROW_IF_FALSE(descriptor.getValuesDataType() == storage.spec.dataType);
+    THOR_THROW_IF_FALSE(descriptor.getTrailingDimensions() == storage.spec.valueDimensions);
+    THOR_THROW_IF_FALSE(descriptor.getBatchSize() == rowIndicesDevice.getDimensions().front());
+    Tensor values = destination.getValues();
+    Tensor offsets = destination.getOffsets();
+    launchDeviceResidentRaggedMaterializationKernel(
+        storage.references,
+        storage.values,
+        numExamples,
+        2 * sizeof(uint64_t),
+        0,
+        storage.storedValueCount,
+        storage.valueBytes,
         logicalRows,
         values,
         offsets,

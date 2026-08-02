@@ -87,6 +87,23 @@ Tensor makeGpuUint32Tensor(const std::vector<uint64_t>& dims, const std::vector<
     return gpu;
 }
 
+Tensor makeGpuUint64Tensor(const std::vector<uint64_t>& dims, const std::vector<uint64_t>& values, Stream& stream) {
+    Tensor cpu(cpuPlacement, TensorDescriptor(DataType::UINT64, dims));
+    if (tensorNumel(cpu) != values.size()) {
+        throw std::runtime_error("makeGpuUint64Tensor value count mismatch.");
+    }
+
+    auto* ptr = static_cast<uint64_t*>(cpu.getMemPtr());
+    for (size_t i = 0; i < values.size(); ++i) {
+        ptr[i] = values[i];
+    }
+
+    Tensor gpu(gpuPlacement, TensorDescriptor(DataType::UINT64, dims));
+    gpu.copyFromAsync(cpu, stream);
+    stream.synchronize();
+    return gpu;
+}
+
 std::vector<float> copyToCpuValues(const Tensor& gpu, Stream& stream) {
     Tensor cpu = gpu.clone(cpuPlacement);
     cpu.copyFromAsync(gpu, stream);
@@ -2570,4 +2587,162 @@ TEST(NewtonSchulzOrthogonalization, TallMatrixRightPolynomialPathMatchesCpuRefer
 
     EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{rows, cols}));
     expectNear(copyToCpuValues(y, stream), toFloatValues(newtonSchulzCpuOriginalShape(inputValues, rows, cols, options)), 2.0e-4f);
+}
+
+TEST(ExpressionConvenienceOps, Uint64RowLengthDifferenceIsExactBeforeFloatingConversion) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    // Values above 2^24 deliberately distinguish exact UINT64 subtraction from the incorrect
+    // "cast offsets to FP32, then subtract" implementation.
+    Tensor starts = makeGpuUint64Tensor({2}, {16777216ULL, 16777220ULL}, stream);
+    Tensor ends = makeGpuUint64Tensor({2}, {16777219ULL, 16777225ULL}, stream);
+
+    Expression exactLengths = (Expression::input("ends") - Expression::input("starts")).cast(DataType::FP32);
+    Tensor result = runExpressionOutput(
+        Expression::outputs({{"lengths", exactLengths}}), {{"starts", starts}, {"ends", ends}}, "lengths", stream);
+
+    expectNear(copyToCpuValues(result, stream), {3.0f, 5.0f}, 0.0f);
+}
+
+TEST(ExpressionConvenienceOps, DynamicNtkRuntimeEffectiveSequenceLengthControlsForwardAndBackward) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    std::vector<float> xValues(24);
+    std::vector<float> dyValues(24);
+    for (uint64_t i = 0; i < xValues.size(); ++i) {
+        xValues[i] = 0.05f * static_cast<float>(i + 1);
+        dyValues[i] = 0.03f * static_cast<float>((i % 7) + 1);
+    }
+    Tensor x = makeGpuTensor({1, 6, 1, 4}, xValues, stream);
+    Tensor lengths = makeGpuUint32Tensor({2}, {4U, 2U}, stream);
+    Tensor dy = makeGpuTensor({1, 6, 1, 4}, dyValues, stream);
+
+    RotaryPositionEmbeddingOptions dynamicOptions;
+    dynamicOptions.sequence_axis = 1;
+    dynamicOptions.head_dim_axis = 3;
+    dynamicOptions.rotary_dim = 4;
+    dynamicOptions.scaling_kind = RotaryScalingKind::DynamicNTK;
+    dynamicOptions.scaling_factor = 2.0;
+    dynamicOptions.original_max_position_embeddings = 4;
+    dynamicOptions.output_dtype = DataType::FP32;
+    dynamicOptions.compute_dtype = DataType::FP32;
+
+    RotaryPositionEmbeddingOptions unscaledOptions = dynamicOptions;
+    unscaledOptions.scaling_kind = RotaryScalingKind::None;
+
+    Expression xExpr = Expression::input("x");
+    Expression maxLength = Expression::input("lengths").cast(DataType::FP32).reduce_max({0}, {});
+    Outputs runtimeOutputs = Expression::outputs(
+        {{"y", xExpr.rotaryPositionEmbeddingWithEffectiveSequenceLength(maxLength, dynamicOptions)}});
+    Outputs referenceOutputs = Expression::outputs(
+        {{"y", xExpr.rotaryPositionEmbedding(unscaledOptions)}});
+    Outputs physicalExtentOutputs = Expression::outputs(
+        {{"y", xExpr.rotaryPositionEmbedding(dynamicOptions)}});
+
+    const auto runtimeValues = copyToCpuValues(
+        runExpressionOutput(runtimeOutputs, {{"x", x}, {"lengths", lengths}}, "y", stream), stream);
+    const auto referenceValues = copyToCpuValues(
+        runExpressionOutput(referenceOutputs, {{"x", x}}, "y", stream), stream);
+    const auto physicalExtentValues = copyToCpuValues(
+        runExpressionOutput(physicalExtentOutputs, {{"x", x}}, "y", stream), stream);
+
+    // max(lengths)=4 does not activate Dynamic-NTK, even though physical S=6 would.
+    expectNear(runtimeValues, referenceValues, 2.0e-5f);
+    bool differsFromPhysicalExtent = false;
+    for (uint64_t i = 0; i < runtimeValues.size(); ++i) {
+        differsFromPhysicalExtent |= std::fabs(runtimeValues[i] - physicalExtentValues[i]) > 1.0e-4f;
+    }
+    EXPECT_TRUE(differsFromPhysicalExtent);
+
+    const auto runtimeGradients = runBackwardValues(
+        runtimeOutputs, {{"x", x}, {"lengths", lengths}, {"dy", dy}}, {"x"}, "dy", stream);
+    const auto referenceGradients = runBackwardValues(
+        referenceOutputs, {{"x", x}, {"dy", dy}}, {"x"}, "dy", stream);
+    expectNear(runtimeGradients.at("x_grad"), referenceGradients.at("x_grad"), 2.0e-5f);
+}
+
+TEST(ExpressionConvenienceOps, LongRopeRuntimeEffectiveSequenceLengthSelectsShortFactors) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    std::vector<float> xValues(24);
+    std::vector<float> dyValues(24);
+    for (uint64_t i = 0; i < xValues.size(); ++i) {
+        xValues[i] = 0.04f * static_cast<float>(i + 1);
+        dyValues[i] = 0.02f * static_cast<float>((i % 5) + 1);
+    }
+    Tensor x = makeGpuTensor({1, 6, 1, 4}, xValues, stream);
+    Tensor lengths = makeGpuUint32Tensor({2}, {4U, 2U}, stream);
+    Tensor dy = makeGpuTensor({1, 6, 1, 4}, dyValues, stream);
+
+    RotaryPositionEmbeddingOptions longOptions;
+    longOptions.sequence_axis = 1;
+    longOptions.head_dim_axis = 3;
+    longOptions.rotary_dim = 4;
+    longOptions.scaling_kind = RotaryScalingKind::LongRope;
+    longOptions.scaling_factor = 2.0;
+    longOptions.original_max_position_embeddings = 4;
+    longOptions.attention_factor = 1.0;
+    longOptions.long_rope_short_factors = {1.0, 1.0};
+    longOptions.long_rope_long_factors = {2.0, 2.0};
+    longOptions.output_dtype = DataType::FP32;
+    longOptions.compute_dtype = DataType::FP32;
+
+    RotaryPositionEmbeddingOptions shortReference = longOptions;
+    shortReference.scaling_kind = RotaryScalingKind::None;
+
+    Expression xExpr = Expression::input("x");
+    Expression maxLength = Expression::input("lengths").cast(DataType::FP32).reduce_max({0}, {});
+    Outputs runtimeOutputs = Expression::outputs(
+        {{"y", xExpr.rotaryPositionEmbeddingWithEffectiveSequenceLength(maxLength, longOptions)}});
+    Outputs shortReferenceOutputs = Expression::outputs(
+        {{"y", xExpr.rotaryPositionEmbedding(shortReference)}});
+    Outputs physicalExtentOutputs = Expression::outputs(
+        {{"y", xExpr.rotaryPositionEmbedding(longOptions)}});
+
+    const auto runtimeValues = copyToCpuValues(
+        runExpressionOutput(runtimeOutputs, {{"x", x}, {"lengths", lengths}}, "y", stream), stream);
+    const auto shortValues = copyToCpuValues(
+        runExpressionOutput(shortReferenceOutputs, {{"x", x}}, "y", stream), stream);
+    const auto physicalExtentValues = copyToCpuValues(
+        runExpressionOutput(physicalExtentOutputs, {{"x", x}}, "y", stream), stream);
+
+    // max(lengths)=4 must select short factors; physical S=6 would incorrectly select long factors.
+    expectNear(runtimeValues, shortValues, 2.0e-5f);
+    bool differsFromPhysicalExtent = false;
+    for (uint64_t i = 0; i < runtimeValues.size(); ++i) {
+        differsFromPhysicalExtent |= std::fabs(runtimeValues[i] - physicalExtentValues[i]) > 1.0e-4f;
+    }
+    EXPECT_TRUE(differsFromPhysicalExtent);
+
+    const auto runtimeGradients = runBackwardValues(
+        runtimeOutputs, {{"x", x}, {"lengths", lengths}, {"dy", dy}}, {"x"}, "dy", stream);
+    const auto referenceGradients = runBackwardValues(
+        shortReferenceOutputs, {{"x", x}, {"dy", dy}}, {"x"}, "dy", stream);
+    expectNear(runtimeGradients.at("x_grad"), referenceGradients.at("x_grad"), 2.0e-5f);
+}
+
+TEST(ExpressionConvenienceOps, RuntimeEffectiveSequenceLengthMustBeScalarMetadata) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor x = makeGpuTensor({1, 4, 1, 4}, std::vector<float>(16, 0.25f), stream);
+    Tensor lengths = makeGpuUint32Tensor({2}, {4U, 2U}, stream);
+
+    RotaryPositionEmbeddingOptions options;
+    options.sequence_axis = 1;
+    options.head_dim_axis = 3;
+    options.rotary_dim = 4;
+    options.scaling_kind = RotaryScalingKind::DynamicNTK;
+    options.scaling_factor = 2.0;
+    options.original_max_position_embeddings = 4;
+    options.output_dtype = DataType::FP32;
+    options.compute_dtype = DataType::FP32;
+
+    Outputs outputs = Expression::outputs(
+        {{"y", Expression::input("x").rotaryPositionEmbeddingWithEffectiveSequenceLength(Expression::input("lengths"), options)}});
+    FusedEquation equation = FusedEquation::compile(outputs.physicalOutputs(), 0);
+    EXPECT_THROW((void)equation.stamp({{"x", x}, {"lengths", lengths}}, stream), std::runtime_error);
 }

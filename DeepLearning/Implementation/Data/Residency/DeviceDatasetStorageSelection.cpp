@@ -16,6 +16,7 @@
 #include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
 #include "DeepLearning/Implementation/Data/Materialization/NamedDatasetMaterializer.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 
 #include <chrono>
 #include <exception>
@@ -79,6 +80,36 @@ uint64_t allBytesPerExample(const DatasetLayout &layout) {
         directBytesPerExample(layout),
         windowedBytesPerExample(layout),
         "Device dataset bytes per example");
+}
+
+uint64_t canonicalSnapshotResidentBytes(
+    const MaterializedNamedDatasetSnapshot &snapshot) {
+    uint64_t bytes = 0;
+    for (const auto &[fieldId, tensor] : snapshot.fields) {
+        (void)fieldId;
+        bytes = checkedAdd(
+            bytes,
+            tensor.getArraySizeInBytes(),
+            "Device dataset canonical snapshot tensor bytes");
+    }
+    for (const auto &[fieldId, ragged] : snapshot.raggedFields) {
+        (void)fieldId;
+        const uint64_t valuesBytes = ragged.values.isInitialized()
+                                         ? ragged.values.getArraySizeInBytes()
+                                         : 0;
+        bytes = checkedAdd(
+            bytes,
+            valuesBytes,
+            "Device dataset canonical ragged values bytes");
+        bytes = checkedAdd(
+            bytes,
+            checkedMul(
+                snapshot.numExamples,
+                2 * static_cast<uint64_t>(sizeof(uint64_t)),
+                "Device dataset canonical ragged references bytes"),
+            "Device dataset canonical ragged resident bytes");
+    }
+    return bytes;
 }
 
 uint64_t nonEmptySplitCount(const DatasetSplitManifest &splits) {
@@ -252,6 +283,47 @@ uint64_t compactRaggedBatchRingBytes(
     return checkedMul(slotCount, bytesPerSlot, "Device dataset ragged batch ring bytes");
 }
 
+uint64_t canonicalSnapshotRequiredBytes(
+    uint64_t residentBytes,
+    const DatasetMaterializationDescription &dataset,
+    const DeviceDatasetSessionDescription &session,
+    uint64_t batchQueueDepth) {
+    if (batchQueueDepth == 0) {
+        throw std::runtime_error(
+            "Device dataset batch_queue_depth must be >= 1.");
+    }
+    const uint64_t populatedSplits = nonEmptySplitCount(session.getSplits());
+    const uint64_t batchSize = session.getBatching().getBatchSize();
+    const uint64_t denseBytesPerBatch = checkedMul(
+        batchSize,
+        directBytesPerExample(dataset.layout),
+        "Device dataset canonical batch tensor bytes");
+    const uint64_t denseBatchRingBytes = checkedMul(
+        checkedMul(
+            populatedSplits,
+            batchQueueDepth,
+            "Device dataset canonical batch slot count"),
+        denseBytesPerBatch,
+        "Device dataset canonical batch-ring bytes");
+    const uint64_t rowIndexBytes = checkedMul(
+        populatedSplits,
+        checkedMul(
+            batchSize,
+            static_cast<uint64_t>(sizeof(uint64_t)),
+            "Device dataset canonical row-index bytes per split"),
+        "Device dataset canonical row-index bytes");
+    return checkedAdd(
+        checkedAdd(
+            checkedAdd(
+                residentBytes,
+                denseBatchRingBytes,
+                "Device dataset canonical required bytes"),
+            compactRaggedBatchRingBytes(session, batchQueueDepth),
+            "Device dataset canonical ragged required bytes"),
+        rowIndexBytes,
+        "Device dataset canonical required bytes");
+}
+
 uint64_t compactRequiredBytes(
     uint64_t residentBytes,
     const DeviceDatasetSessionDescription &session,
@@ -301,7 +373,7 @@ MaterializedNamedDatasetSnapshot materializeCanonicalSnapshot(
             "NamedDataset materialization returned the wrong schema.");
     }
     snapshot.layout.validateRequestedLayoutExact(description.layout);
-    if (snapshot.fields.size() != description.schema.size()) {
+    if (snapshot.fields.size() + snapshot.raggedFields.size() != description.schema.size()) {
         throw std::runtime_error(
             "NamedDataset materialization returned an unexpected field count.");
     }
@@ -310,6 +382,48 @@ MaterializedNamedDatasetSnapshot materializeCanonicalSnapshot(
             throw std::runtime_error(
                 "NamedDataset materialization omitted field '" + field.name + "'.");
         }
+        if (field.kind == DatasetFieldKind::RAGGED) {
+            if (!snapshot.hasRaggedField(field.id)) {
+                throw std::runtime_error(
+                    "NamedDataset materialization returned dense storage for ragged field '" +
+                    field.name + "'.");
+            }
+            const MaterializedRaggedFieldSnapshot &ragged = snapshot.raggedField(field.id);
+            if (ragged.valuesDataType != field.dataType ||
+                ragged.trailingDimensions != field.dimensions ||
+                ragged.valueBytes != description.layout.raggedTensor(field.name).valueNumBytes() ||
+                !ragged.offsets.isInitialized() ||
+                ragged.offsets.getDimensions() != std::vector<uint64_t>{description.numExamples + 1} ||
+                !ThorImplementation::RowPartitionDescriptor::isValidOffsetsDataType(
+                    ragged.offsets.getDataType())) {
+                throw std::runtime_error(
+                    "NamedDataset materialization returned the wrong ragged descriptor for field '" +
+                    field.name + "'.");
+            }
+            if (ragged.storedValueCount == 0) {
+                if (ragged.values.isInitialized()) {
+                    throw std::runtime_error(
+                        "NamedDataset materialization allocated values for all-empty ragged field '" +
+                        field.name + "'.");
+                }
+            } else {
+                std::vector<uint64_t> expectedValueDimensions;
+                expectedValueDimensions.reserve(field.dimensions.size() + 1);
+                expectedValueDimensions.push_back(ragged.storedValueCount);
+                expectedValueDimensions.insert(
+                    expectedValueDimensions.end(), field.dimensions.begin(), field.dimensions.end());
+                const ThorImplementation::TensorDescriptor expectedValuesDescriptor(
+                    field.dataType, expectedValueDimensions);
+                if (!ragged.values.isInitialized() ||
+                    ragged.values.getDescriptor() != expectedValuesDescriptor) {
+                    throw std::runtime_error(
+                        "NamedDataset materialization returned the wrong packed values descriptor for field '" +
+                        field.name + "'.");
+                }
+            }
+            continue;
+        }
+
         std::vector<uint64_t> expectedDimensions;
         expectedDimensions.reserve(field.dimensions.size() + 1);
         expectedDimensions.push_back(description.numExamples);
@@ -391,6 +505,7 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
     ThorImplementation::TensorPlacement devicePlacement,
     uint64_t batchQueueDepth,
     uint64_t requiredBytes,
+    std::shared_ptr<const MaterializedNamedDatasetSnapshot> canonicalSnapshot,
     std::optional<uint64_t> availableBytesOverride,
     DeviceDatasetStorageReport report) {
     DeviceDatasetResidencyCache &cache =
@@ -543,8 +658,9 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
         return fallbackSelection(sourceSession, std::move(report), requested);
     }
 
-    const uint64_t residentBytes =
-        estimateDeviceResidentNamedDatasetStorageBytes(dataset);
+    const uint64_t residentBytes = canonicalSnapshot != nullptr
+                                       ? canonicalSnapshotResidentBytes(*canonicalSnapshot)
+                                       : estimateDeviceResidentNamedDatasetStorageBytes(dataset);
     const std::set<DatasetFieldId> fullFields = allFieldIds(dataset.schema);
     try {
         DeviceDatasetResidencyRequest request(
@@ -556,7 +672,13 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
             requiredBytes,
             requested,
             availableBytesOverride,
-            [namedDataset, dataset, devicePlacement]() {
+            [namedDataset, dataset, devicePlacement, canonicalSnapshot]() {
+                if (canonicalSnapshot != nullptr) {
+                    return std::shared_ptr<const DeviceResidentNamedDataset>(
+                        DeviceResidentNamedDataset::fromSnapshot(
+                            *canonicalSnapshot,
+                            devicePlacement));
+                }
                 MaterializedNamedDatasetSnapshot snapshot =
                     materializeCanonicalSnapshot(namedDataset, dataset);
                 return std::shared_ptr<const DeviceResidentNamedDataset>(
@@ -608,6 +730,10 @@ uint64_t estimateDeviceResidentNamedDatasetStorageBytes(
     if (usesCompactFileResidency(dataset)) {
         return estimateDeviceResidentCompactDatasetStorageBytes(dataset);
     }
+    if (dataset.layout.hasRaggedTensors()) {
+        throw std::runtime_error(
+            "Canonical ragged device residency size requires a materialized dataset snapshot.");
+    }
     return checkedMul(
         dataset.numExamples,
         allBytesPerExample(dataset.layout),
@@ -623,6 +749,10 @@ uint64_t estimateDeviceResidentNamedDatasetRequiredBytes(
             dataset,
             session,
             batchQueueDepth);
+    }
+    if (dataset.layout.hasRaggedTensors()) {
+        throw std::runtime_error(
+            "Canonical ragged device residency size requires a materialized dataset snapshot.");
     }
     return estimateRequiredBytesForPerExampleBytes(
         dataset,
@@ -736,10 +866,6 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
     }
 
     if (!usesCompactFileResidency(*datasetDescription)) {
-        if (datasetDescription->layout.hasRaggedTensors()) {
-            report.reason = "ragged_dataset_residency_requires_file_dataset";
-            return fallbackSelection(sourceSession, std::move(report), requested);
-        }
         const NamedDatasetMaterializationSupport support =
             checkNamedDatasetSnapshotMaterializationSupport(*datasetDescription);
         if (!support.supported) {
@@ -750,24 +876,38 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
         }
     }
 
-    uint64_t requiredBytes = 0;
-    try {
-        requiredBytes = estimateDeviceResidentNamedDatasetRequiredBytes(
-            *datasetDescription,
-            sessionDescription,
-            batchQueueDepth);
-        report.requiredBytes = requiredBytes;
-    } catch (const std::exception& e) {
-        report.reason =
-            std::string("device_dataset_size_estimate_failed:") + e.what();
-        return fallbackSelection(sourceSession, std::move(report), requested);
-    }
-
     const std::shared_ptr<const NamedDataset>& namedDataset =
         trainingData.getDataset();
     if (namedDataset->getId() != datasetDescription->datasetId ||
         namedDataset->getNumExamples() != datasetDescription->numExamples) {
         report.reason = "training_data_dataset_identity_mismatch";
+        return fallbackSelection(sourceSession, std::move(report), requested);
+    }
+
+    uint64_t requiredBytes = 0;
+    std::shared_ptr<const MaterializedNamedDatasetSnapshot> canonicalSnapshot;
+    try {
+        if (!usesCompactFileResidency(*datasetDescription) &&
+            datasetDescription->layout.hasRaggedTensors()) {
+            canonicalSnapshot = std::make_shared<MaterializedNamedDatasetSnapshot>(
+                materializeCanonicalSnapshot(namedDataset, *datasetDescription));
+            const uint64_t residentBytes =
+                canonicalSnapshotResidentBytes(*canonicalSnapshot);
+            requiredBytes = canonicalSnapshotRequiredBytes(
+                residentBytes,
+                *datasetDescription,
+                sessionDescription,
+                batchQueueDepth);
+        } else {
+            requiredBytes = estimateDeviceResidentNamedDatasetRequiredBytes(
+                *datasetDescription,
+                sessionDescription,
+                batchQueueDepth);
+        }
+        report.requiredBytes = requiredBytes;
+    } catch (const std::exception& e) {
+        report.reason =
+            std::string("device_dataset_size_estimate_failed:") + e.what();
         return fallbackSelection(sourceSession, std::move(report), requested);
     }
 
@@ -785,6 +925,7 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
         devicePlacement,
         batchQueueDepth,
         requiredBytes,
+        std::move(canonicalSnapshot),
         availableBytesOverride,
         std::move(report));
 }

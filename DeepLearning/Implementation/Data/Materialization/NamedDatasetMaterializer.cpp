@@ -56,12 +56,24 @@ NamedDatasetMaterializationSupport checkNamedDatasetSnapshotMaterializationSuppo
     if (description.numExamples == 0) {
         return NamedDatasetMaterializationSupport{false, "empty_dataset"};
     }
-    if (description.layout.tensors().empty() && description.layout.windowedTensors().empty()) {
+    if (description.source == Thor::DatasetMaterializationSource::FILE_DATASET &&
+        description.layout.hasRaggedTensors()) {
+        return NamedDatasetMaterializationSupport{
+            false, "file_ragged_snapshot_requires_compact_materialization"};
+    }
+    if (description.layout.tensors().empty() &&
+        description.layout.windowedTensors().empty() &&
+        description.layout.raggedTensors().empty()) {
         return NamedDatasetMaterializationSupport{false, "empty_tensor_layout"};
     }
     for (const DatasetLayout::TensorSpec &spec : description.layout.tensors()) {
         if (spec.numBytes == 0) {
             return NamedDatasetMaterializationSupport{false, "zero_sized_tensor"};
+        }
+    }
+    for (const DatasetLayout::RaggedTensorSpec &spec : description.layout.raggedTensors()) {
+        if (spec.valueNumBytes() == 0) {
+            return NamedDatasetMaterializationSupport{false, "zero_sized_ragged_value"};
         }
     }
     for (const DatasetLayout::WindowedTensorSourceSpec &source : description.layout.windowedTensorSources()) {

@@ -293,6 +293,10 @@ struct ExprNode {
     double rope_llama3_high_freq_factor = 4.0;
     std::vector<double> rope_long_rope_short_factors;
     std::vector<double> rope_long_rope_long_factors;
+    // Optional one-element tensor metadata supplying the logical effective sequence length for
+    // sequence-length-dependent scaling (Dynamic-NTK/LongRoPE). UINT32_MAX means use the
+    // physical sequence-axis extent. This dependency is structural metadata and is not differentiable.
+    uint32_t rope_effective_sequence_length_node = UINT32_MAX;
     bool rope_allow_in_place_materialization = false;
 
     uint64_t rms_norm_normalized_feature_count = 0;
@@ -606,6 +610,8 @@ class Expression {
     [[nodiscard]] static Expression sqrt(const Expression& expr);
     [[nodiscard]] Expression normcdf() const;
     [[nodiscard]] Expression rotaryPositionEmbedding(RotaryPositionEmbeddingOptions options = {}) const;
+    [[nodiscard]] Expression rotaryPositionEmbeddingWithEffectiveSequenceLength(
+        const Expression& effective_sequence_length, RotaryPositionEmbeddingOptions options) const;
     [[nodiscard]] Expression rope(RotaryPositionEmbeddingOptions options = {}) const { return rotaryPositionEmbedding(std::move(options)); }
     [[nodiscard]] static Expression rotaryPositionEmbedding(const Expression& input, RotaryPositionEmbeddingOptions options = {}) {
         return input.rotaryPositionEmbedding(std::move(options));

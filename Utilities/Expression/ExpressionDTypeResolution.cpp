@@ -61,6 +61,12 @@ static bool isLogicalOp(ExprOp op) { return op == ExprOp::LOGICAL_AND || op == E
 
 static bool isWhereOp(ExprOp op) { return op == ExprOp::WHERE; }
 
+static bool isExactUnsignedPointwiseDType(DataType dtype) {
+    return dtype == DataType::UINT32 || dtype == DataType::UINT64;
+}
+
+static bool isExactUnsignedSubtractOp(ExprOp op) { return op == ExprOp::SUB; }
+
 static bool isScanOp(ExprOp op) { return op == ExprOp::SCAN || op == ExprOp::SEGMENTED_SCAN; }
 static bool isSegmentedReduceOp(ExprOp op) {
     return op == ExprOp::SEGMENTED_REDUCE_SUM || op == ExprOp::SEGMENTED_REDUCE_MIN ||
@@ -159,6 +165,10 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
         return DataType::TF32;
     }
 
+    if (isExactUnsignedSubtractOp(op) && isExactUnsignedPointwiseDType(requested_compute_dtype)) {
+        return requested_compute_dtype;
+    }
+
     if (!isSupportedFusionFloatingType(requested_compute_dtype)) {
         throw std::runtime_error("Unsupported dtype in toSupportedComputeDType.");
     }
@@ -227,6 +237,9 @@ DataType defaultComputeDType(DataType input_dtype, DataType output_dtype) {
 }
 
 DataType toSupportedInputDType(ExprOp op, DataType dtype) {
+    if (isExactUnsignedSubtractOp(op) && isExactUnsignedPointwiseDType(dtype)) {
+        return dtype;
+    }
     if (!isSupportedFusionFloatingType(dtype)) {
         throw std::runtime_error("Unsupported dtype in toSupportedInputDType.");
     }
@@ -1047,6 +1060,11 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
         DataType requested_compute_dtype;
         if (node.op == ExprOp::EMBEDDING_LOOKUP || node.op == ExprOp::CAST || isPassthroughViewOp(node.op)) {
             requested_compute_dtype = output_dtype;
+        } else if (isExactUnsignedSubtractOp(node.op) && isExactUnsignedPointwiseDType(logical_input_dtype) &&
+                   logical_input_dtype == output_dtype) {
+            // Canonical row-partition arithmetic must happen in the integer domain before any conversion to floating point.
+            // This preserves exact differences even when UINT64 offsets exceed FP32's exact-integer range.
+            requested_compute_dtype = logical_input_dtype;
         } else if (isComparisonOp(node.op)) {
             if (node.compute_dtype.has_value()) {
                 requested_compute_dtype = node.compute_dtype.value();

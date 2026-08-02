@@ -106,7 +106,9 @@ void launchTyped(
     const int blocks = static_cast<int>(std::min<uint64_t>(logicalRows, 65535));
     gatherRaggedValuesKernel<OffsetT><<<blocks, threadsPerBlock, 0, stream.getStream()>>>(
         recordStorage.getMemPtr<uint8_t>(),
-        packedValuesStorage.isInitialized() ? packedValuesStorage.getMemPtr<uint8_t>() : nullptr,
+        packedValuesStorage.isInitialized()
+            ? static_cast<const uint8_t *>(packedValuesStorage.getMemPtr<void>())
+            : nullptr,
         rowIndicesDevice.getMemPtr<uint64_t>(),
         destinationOffsets.getMemPtr<OffsetT>(),
         recordSizeBytes,
@@ -145,12 +147,8 @@ void launchDeviceResidentRaggedMaterializationKernel(
     THOR_THROW_IF_FALSE(destinationOffsets.getPlacement() == recordStorage.getPlacement());
     THOR_THROW_IF_FALSE(rowIndicesDevice.getPlacement() == recordStorage.getPlacement());
     THOR_THROW_IF_FALSE(recordStorage.getDataType() == DataType::UINT8);
-    THOR_THROW_IF_FALSE(!packedValuesStorage.isInitialized() ||
-                        packedValuesStorage.getDataType() == DataType::UINT8);
     THOR_THROW_IF_FALSE(rowIndicesDevice.getDataType() == DataType::UINT64);
     THOR_THROW_IF_FALSE(recordStorage.getDimensions().size() == 1);
-    THOR_THROW_IF_FALSE(!packedValuesStorage.isInitialized() ||
-                        packedValuesStorage.getDimensions().size() == 1);
     THOR_THROW_IF_FALSE(rowIndicesDevice.getDimensions().size() == 1);
     THOR_THROW_IF_FALSE(destinationOffsets.getDimensions().size() == 1);
     THOR_THROW_IF_FALSE(!destinationValues.getDimensions().empty());

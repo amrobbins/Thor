@@ -50,6 +50,7 @@
 #include "bindings/python/src/core/cast.h"
 #include "bindings/python/src/core/physical/NumpyDTypeMapping.h"
 #include "bindings/python/src/core/training/NumpyDataset.h"
+#include "bindings/python/src/core/training/PythonRaggedBatch.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -57,6 +58,8 @@ using namespace Thor;
 namespace pybind = Thor::PythonBindings;
 
 namespace {
+
+using Thor::PythonBindings::PythonRaggedBatch;
 
 using Int32Array = nb::ndarray<const int32_t, nb::numpy, nb::c_contig>;
 using UInt32Array = nb::ndarray<const uint32_t, nb::numpy, nb::c_contig>;
@@ -78,11 +81,6 @@ struct PythonTensorLayout {
 struct PythonRaggedTensorLayout {
     std::vector<uint64_t> valueShape;
     ThorImplementation::DataType dataType = ThorImplementation::DataType::FP32;
-};
-
-struct PythonRaggedBatch {
-    nb::object values;
-    nb::object offsets;
 };
 
 struct PythonWindowedTensorSourceLayout {

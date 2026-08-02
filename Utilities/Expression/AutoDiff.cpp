@@ -239,6 +239,11 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
         throw std::runtime_error("Unsupported op while cloning forward subtree for autodiff: " + std::to_string((int)src_node.op));
     }
 
+    if (src_node.op == ExprOp::ROPE && src_node.rope_effective_sequence_length_node != UINT32_MAX) {
+        new_node.rope_effective_sequence_length_node =
+            cloneForwardSubtree(src, src_node.rope_effective_sequence_length_node, dst, old_to_new);
+    }
+
     const uint32_t new_index = static_cast<uint32_t>(dst.nodes.size());
     dst.nodes.push_back(std::move(new_node));
     old_to_new[src_node_index] = new_index;
@@ -1525,6 +1530,7 @@ class BackwardGraphBuilder {
     uint32_t rotaryPositionEmbedding(uint32_t lhs,
                                     const ExprNode& forward_rope,
                                     bool inverse,
+                                    uint32_t effective_sequence_length_node = UINT32_MAX,
                                     std::optional<DataType> output_dtype = std::nullopt,
                                     std::optional<DataType> compute_dtype = std::nullopt) {
         ExprNode node{};
@@ -1547,6 +1553,7 @@ class BackwardGraphBuilder {
         node.rope_llama3_high_freq_factor = forward_rope.rope_llama3_high_freq_factor;
         node.rope_long_rope_short_factors = forward_rope.rope_long_rope_short_factors;
         node.rope_long_rope_long_factors = forward_rope.rope_long_rope_long_factors;
+        node.rope_effective_sequence_length_node = effective_sequence_length_node;
         node.rope_allow_in_place_materialization = false;
         if (output_dtype.has_value()) {
             node.output_dtype = output_dtype.value();
@@ -4054,10 +4061,15 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
             case ExprOp::ROPE: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const uint32_t effective_sequence_length =
+                        node.rope_effective_sequence_length_node == UINT32_MAX
+                            ? UINT32_MAX
+                            : builder.cloneForward(node.rope_effective_sequence_length_node);
                     const uint32_t lhs_grad = builder.rotaryPositionEmbedding(
                         grad,
                         node,
                         !node.rope_inverse,
+                        effective_sequence_length,
                         preferredGradValueDType(forward_expr.nodes.at(node.lhs)),
                         node.compute_dtype);
                     addContributionToChild(node.lhs, lhs_grad, node_dims);
