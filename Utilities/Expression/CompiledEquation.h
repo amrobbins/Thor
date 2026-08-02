@@ -140,11 +140,20 @@ struct CompiledSegmentedReduction {
     DataType input_dtype = DataType::FP32;
     DataType output_dtype = DataType::FP32;
     DataType offset_dtype = DataType::UINT32;
+    uint64_t elements_per_value = 1;
 
     bool operator==(const CompiledSegmentedReduction& other) const = default;
 
-    CompiledSegmentedReduction(ExprOp op, DataType input_dtype, DataType output_dtype, DataType offset_dtype)
-        : op(op), input_dtype(input_dtype), output_dtype(output_dtype), offset_dtype(offset_dtype) {}
+    CompiledSegmentedReduction(ExprOp op,
+                               DataType input_dtype,
+                               DataType output_dtype,
+                               DataType offset_dtype,
+                               uint64_t elements_per_value)
+        : op(op),
+          input_dtype(input_dtype),
+          output_dtype(output_dtype),
+          offset_dtype(offset_dtype),
+          elements_per_value(elements_per_value) {}
 };
 
 struct CompiledSegmentedBroadcast {
@@ -152,6 +161,7 @@ struct CompiledSegmentedBroadcast {
     DataType output_dtype = DataType::FP32;
     DataType offset_dtype = DataType::UINT32;
     uint64_t max_output_values = 0;
+    uint64_t elements_per_value = 1;
     bool normalize_by_segment_length = false;
 
     bool operator==(const CompiledSegmentedBroadcast& other) const = default;
@@ -160,11 +170,13 @@ struct CompiledSegmentedBroadcast {
                                DataType output_dtype,
                                DataType offset_dtype,
                                uint64_t max_output_values,
+                               uint64_t elements_per_value,
                                bool normalize_by_segment_length)
         : input_dtype(input_dtype),
           output_dtype(output_dtype),
           offset_dtype(offset_dtype),
           max_output_values(max_output_values),
+          elements_per_value(elements_per_value),
           normalize_by_segment_length(normalize_by_segment_length) {}
 };
 

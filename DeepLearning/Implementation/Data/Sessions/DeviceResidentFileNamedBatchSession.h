@@ -20,32 +20,34 @@
 #include <string>
 #include <vector>
 
-struct DeviceResidentWindowedSelectionSlot;
-struct DeviceResidentWindowedDirectSlot;
-struct DeviceResidentWindowedPendingSelection;
-struct DeviceResidentWindowedPendingDirect;
+struct DeviceResidentFileSelectionSlot;
+struct DeviceResidentFileDirectSlot;
+struct DeviceResidentFileRaggedSlot;
+struct DeviceResidentFilePendingSelection;
+struct DeviceResidentFilePendingDirect;
+struct DeviceResidentFilePendingRagged;
 
 /**
- * Compact file-backed device session. Windowed fields are always resident and
- * returned as DeviceBatchReferences. Direct fields are also references when
- * their compact record ranges were admitted; otherwise they remain CPU-backed
- * tensors, preserving the hybrid fallback path.
+ * Compact file-backed device session. Windowed fields are returned as
+ * DeviceBatchReferences, ragged fields are gathered into reusable GPU
+ * RaggedTensors, and direct fields are references when their compact record
+ * ranges were admitted or CPU-backed tensors in the hybrid fallback path.
  */
-class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
+class DeviceResidentFileNamedBatchSession : public Thor::BatchSession {
    public:
-    DeviceResidentWindowedNamedBatchSession(
+    DeviceResidentFileNamedBatchSession(
         Thor::DatasetMaterializationDescription datasetDescription,
         Thor::DeviceDatasetSessionDescription sessionDescription,
-        Thor::DeviceDatasetLease windowedDataset,
+        Thor::DeviceDatasetLease residentDataset,
         uint64_t batchQueueDepth = 2,
         uint64_t readerQueueDepth = 32,
         std::string datasetName = {});
-    ~DeviceResidentWindowedNamedBatchSession() override;
+    ~DeviceResidentFileNamedBatchSession() override;
 
-    DeviceResidentWindowedNamedBatchSession(const DeviceResidentWindowedNamedBatchSession &) = delete;
-    DeviceResidentWindowedNamedBatchSession &operator=(const DeviceResidentWindowedNamedBatchSession &) = delete;
-    DeviceResidentWindowedNamedBatchSession(DeviceResidentWindowedNamedBatchSession &&) = delete;
-    DeviceResidentWindowedNamedBatchSession &operator=(DeviceResidentWindowedNamedBatchSession &&) = delete;
+    DeviceResidentFileNamedBatchSession(const DeviceResidentFileNamedBatchSession &) = delete;
+    DeviceResidentFileNamedBatchSession &operator=(const DeviceResidentFileNamedBatchSession &) = delete;
+    DeviceResidentFileNamedBatchSession(DeviceResidentFileNamedBatchSession &&) = delete;
+    DeviceResidentFileNamedBatchSession &operator=(DeviceResidentFileNamedBatchSession &&) = delete;
 
     uint64_t getNumBatchesPerEpoch(ExampleType exampleType) override;
     uint64_t getNumExamples(ExampleType exampleType) override;
@@ -61,8 +63,8 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
     }
     void cancel() override;
 
-    [[nodiscard]] const std::shared_ptr<const DeviceResidentNamedDataset> &getWindowedDeviceDataset() const {
-        return windowedDataset.getShared();
+    [[nodiscard]] const std::shared_ptr<const DeviceResidentNamedDataset> &getDeviceDataset() const {
+        return residentDataset.getShared();
     }
     [[nodiscard]] uint64_t getBatchQueueDepth() const { return batchQueueDepth; }
     [[nodiscard]] bool isCancelled() const { return cancelled.load(std::memory_order_acquire); }
@@ -79,10 +81,12 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
         bool randomized = false;
         std::optional<uint64_t> seed;
         uint64_t batchesPerEpoch = 0;
-        std::deque<std::shared_ptr<DeviceResidentWindowedSelectionSlot>> availableSelections;
-        std::deque<std::shared_ptr<DeviceResidentWindowedDirectSlot>> availableDirectSlots;
-        std::deque<DeviceResidentWindowedPendingSelection> pendingSelections;
-        std::deque<DeviceResidentWindowedPendingDirect> pendingDirectSlots;
+        std::deque<std::shared_ptr<DeviceResidentFileSelectionSlot>> availableSelections;
+        std::deque<std::shared_ptr<DeviceResidentFileDirectSlot>> availableDirectSlots;
+        std::deque<std::shared_ptr<DeviceResidentFileRaggedSlot>> availableRaggedSlots;
+        std::deque<DeviceResidentFilePendingSelection> pendingSelections;
+        std::deque<DeviceResidentFilePendingDirect> pendingDirectSlots;
+        std::deque<DeviceResidentFilePendingRagged> pendingRaggedSlots;
         std::unique_ptr<FullPeriodRandom> randomizer;
         std::unique_ptr<IndexedDatasetReader::Session> readerSession;
         uint64_t nextBatchNum = 0;
@@ -91,6 +95,7 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
         std::mutex readerMutex;
         std::condition_variable notEmpty;
         Stream selectionUploadStream;
+        Stream raggedGatherStream;
 
         [[nodiscard]] uint64_t numExamples() const {
             return sourceIndices == nullptr ? 0 : static_cast<uint64_t>(sourceIndices->size());
@@ -101,9 +106,10 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
     Thor::DeviceDatasetSessionDescription sessionDescription;
     Thor::DatasetFieldMaterializationRequirements fieldRequirements;
     std::set<std::string> directFieldNames;
-    std::set<std::string> residentFieldNames;
+    std::set<std::string> residentReferenceFieldNames;
+    std::set<std::string> raggedFieldNames;
     std::shared_ptr<IndexedDatasetReader> reader;
-    Thor::DeviceDatasetLease windowedDataset;
+    Thor::DeviceDatasetLease residentDataset;
     uint64_t batchQueueDepth = 0;
     uint64_t readerQueueDepth = 0;
     std::map<ExampleType, std::unique_ptr<SplitRuntime>> splitRuntimes;
@@ -116,21 +122,27 @@ class DeviceResidentWindowedNamedBatchSession : public Thor::BatchSession {
     [[nodiscard]] SplitRuntime &runtimeFor(ExampleType exampleType);
     [[nodiscard]] const SplitRuntime &runtimeFor(ExampleType exampleType) const;
     [[nodiscard]] std::map<std::string, ThorImplementation::Tensor> allocateDirectTensorSet() const;
-    [[nodiscard]] std::shared_ptr<DeviceResidentWindowedSelectionSlot> allocateSelectionSlot(
+    [[nodiscard]] std::shared_ptr<DeviceResidentFileSelectionSlot> allocateSelectionSlot(
         uint64_t slotIndex) const;
-    [[nodiscard]] std::shared_ptr<DeviceResidentWindowedDirectSlot> allocateDirectSlot(
+    [[nodiscard]] std::shared_ptr<DeviceResidentFileDirectSlot> allocateDirectSlot(
+        uint64_t slotIndex) const;
+    [[nodiscard]] std::shared_ptr<DeviceResidentFileRaggedSlot> allocateRaggedSlot(
         uint64_t slotIndex) const;
     void fillRowIndexTensor(
         SplitRuntime &runtime,
-        DeviceResidentWindowedSelectionSlot &selectionSlot,
+        DeviceResidentFileSelectionSlot &selectionSlot,
         uint32_t validExampleCount);
     void validateReturnedBatch(const Batch &batch) const;
     void releaseSelectionSlot(
         ExampleType exampleType,
-        std::shared_ptr<DeviceResidentWindowedSelectionSlot> selectionSlot,
+        std::shared_ptr<DeviceResidentFileSelectionSlot> selectionSlot,
         std::vector<Event> consumedEvents) noexcept;
     void releaseDirectSlot(
         ExampleType exampleType,
-        std::shared_ptr<DeviceResidentWindowedDirectSlot> directSlot,
+        std::shared_ptr<DeviceResidentFileDirectSlot> directSlot,
+        std::vector<Event> consumedEvents) noexcept;
+    void releaseRaggedSlot(
+        ExampleType exampleType,
+        std::shared_ptr<DeviceResidentFileRaggedSlot> raggedSlot,
         std::vector<Event> consumedEvents) noexcept;
 };

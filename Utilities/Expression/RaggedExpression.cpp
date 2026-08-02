@@ -155,28 +155,36 @@ Expression RaggedExpression::reduce_sum() const { return segment_sum(); }
 
 Expression RaggedExpression::segment_sum() const {
     validateInitialized("segment_sum");
-    validateScalarValues("segment_sum");
-    return Expression::segmentedReduceWithRaggedMetadata(
-        values, offsets, ExprOp::SEGMENTED_REDUCE_SUM, descriptor.getBatchSize(), descriptor.getMaxTotalValues());
+    return Expression::segmentedReduceWithRaggedMetadata(values,
+                                                         offsets,
+                                                         ExprOp::SEGMENTED_REDUCE_SUM,
+                                                         descriptor.getBatchSize(),
+                                                         descriptor.getMaxTotalValues(),
+                                                         elementsPerValue(descriptor));
 }
 
 Expression RaggedExpression::segment_min() const {
     validateInitialized("segment_min");
-    validateScalarValues("segment_min");
-    return Expression::segmentedReduceWithRaggedMetadata(
-        values, offsets, ExprOp::SEGMENTED_REDUCE_MIN, descriptor.getBatchSize(), descriptor.getMaxTotalValues());
+    return Expression::segmentedReduceWithRaggedMetadata(values,
+                                                         offsets,
+                                                         ExprOp::SEGMENTED_REDUCE_MIN,
+                                                         descriptor.getBatchSize(),
+                                                         descriptor.getMaxTotalValues(),
+                                                         elementsPerValue(descriptor));
 }
 
 Expression RaggedExpression::segment_max() const {
     validateInitialized("segment_max");
-    validateScalarValues("segment_max");
-    return Expression::segmentedReduceWithRaggedMetadata(
-        values, offsets, ExprOp::SEGMENTED_REDUCE_MAX, descriptor.getBatchSize(), descriptor.getMaxTotalValues());
+    return Expression::segmentedReduceWithRaggedMetadata(values,
+                                                         offsets,
+                                                         ExprOp::SEGMENTED_REDUCE_MAX,
+                                                         descriptor.getBatchSize(),
+                                                         descriptor.getMaxTotalValues(),
+                                                         elementsPerValue(descriptor));
 }
 
 Expression RaggedExpression::segment_mean() const {
     validateInitialized("segment_mean");
-    validateScalarValues("segment_mean");
 
     switch (descriptor.getValuesDataType()) {
         case DataType::FP8_E4M3:
@@ -190,30 +198,50 @@ Expression RaggedExpression::segment_mean() const {
             throw std::invalid_argument("RaggedExpression::segment_mean requires floating-point ragged values.");
     }
 
-    return Expression::segmentedReduceWithRaggedMetadata(
-        values, offsets, ExprOp::SEGMENTED_REDUCE_MEAN, descriptor.getBatchSize(), descriptor.getMaxTotalValues());
+    return Expression::segmentedReduceWithRaggedMetadata(values,
+                                                         offsets,
+                                                         ExprOp::SEGMENTED_REDUCE_MEAN,
+                                                         descriptor.getBatchSize(),
+                                                         descriptor.getMaxTotalValues(),
+                                                         elementsPerValue(descriptor));
 }
 
 RaggedExpression RaggedExpression::segment_softmax() const {
     validateInitialized("segment_softmax");
-    validateScalarValues("segment_softmax");
-    const Expression max_values = segmentTotalBroadcast(ScanOp::Max, "segment_softmax");
-    const Expression shifted = values - max_values;
+    if (descriptor.getTrailingDimensions().empty()) {
+        const Expression max_values = segmentTotalBroadcast(ScanOp::Max, "segment_softmax");
+        const Expression shifted = values - max_values;
+        const Expression exp_values = shifted.exp();
+        const RaggedExpression exp_ragged = withValues(exp_values, descriptor);
+        const Expression denom = exp_ragged.segmentTotalBroadcast(ScanOp::Sum, "segment_softmax");
+        return withValues(exp_values / denom, descriptor);
+    }
+
+    const Expression row_max = segment_max();
+    const Expression shifted = values - segmentDenseBroadcast(row_max, false);
     const Expression exp_values = shifted.exp();
     const RaggedExpression exp_ragged = withValues(exp_values, descriptor);
-    const Expression denom = exp_ragged.segmentTotalBroadcast(ScanOp::Sum, "segment_softmax");
-    return withValues(exp_values / denom, descriptor);
+    const Expression row_sum = exp_ragged.segment_sum();
+    return withValues(exp_values / segmentDenseBroadcast(row_sum, false), descriptor);
 }
 
 RaggedExpression RaggedExpression::segment_log_softmax() const {
     validateInitialized("segment_log_softmax");
-    validateScalarValues("segment_log_softmax");
-    const Expression max_values = segmentTotalBroadcast(ScanOp::Max, "segment_log_softmax");
-    const Expression shifted = values - max_values;
+    if (descriptor.getTrailingDimensions().empty()) {
+        const Expression max_values = segmentTotalBroadcast(ScanOp::Max, "segment_log_softmax");
+        const Expression shifted = values - max_values;
+        const Expression exp_values = shifted.exp();
+        const RaggedExpression exp_ragged = withValues(exp_values, descriptor);
+        const Expression denom = exp_ragged.segmentTotalBroadcast(ScanOp::Sum, "segment_log_softmax");
+        return withValues(shifted - denom.ln(), descriptor);
+    }
+
+    const Expression row_max = segment_max();
+    const Expression shifted = values - segmentDenseBroadcast(row_max, false);
     const Expression exp_values = shifted.exp();
     const RaggedExpression exp_ragged = withValues(exp_values, descriptor);
-    const Expression denom = exp_ragged.segmentTotalBroadcast(ScanOp::Sum, "segment_log_softmax");
-    return withValues(shifted - denom.ln(), descriptor);
+    const Expression row_sum = exp_ragged.segment_sum();
+    return withValues(shifted - segmentDenseBroadcast(row_sum, false).ln(), descriptor);
 }
 
 RaggedExpression RaggedExpression::unaryValuewise(ExprOp op, const char* op_name) const {
@@ -268,7 +296,10 @@ RaggedExpression RaggedExpression::binaryValuewise(const RaggedExpression& other
 
 Expression RaggedExpression::segmentTotalBroadcast(ScanOp op, const char* op_name) const {
     validateInitialized(op_name);
-    validateScalarValues(op_name);
+    if (!descriptor.getTrailingDimensions().empty()) {
+        throw std::invalid_argument(raggedOpErrorPrefix(op_name) +
+                                    "scalar segmented-scan broadcast cannot be used with trailing value dimensions.");
+    }
     const uint64_t batch_size = descriptor.getBatchSize();
     const uint64_t max_active_values = descriptor.getMaxTotalValues();
     switch (op) {
@@ -291,17 +322,20 @@ Expression RaggedExpression::segmentTotalBroadcast(ScanOp op, const char* op_nam
     }
 }
 
+Expression RaggedExpression::segmentDenseBroadcast(const Expression& per_segment_values, bool normalize_by_segment_length) const {
+    validateInitialized("segmentDenseBroadcast");
+    Expression out = Expression::binaryOp(per_segment_values, offsets, ExprOp::SEGMENTED_BROADCAST);
+    ExprNode& node = out.expr->nodes.at(out.nodeIndex);
+    node.ragged_runtime_batch_size = descriptor.getBatchSize();
+    node.ragged_runtime_max_active_values = descriptor.getMaxTotalValues();
+    node.ragged_runtime_elements_per_value = elementsPerValue(descriptor);
+    node.segmented_broadcast_normalize_by_length = normalize_by_segment_length;
+    return out;
+}
+
 void RaggedExpression::validateInitialized(const char* caller) const {
     if (!initialized) {
         throw std::runtime_error(raggedOpErrorPrefix(caller) + "ragged expression is not initialized.");
-    }
-}
-
-void RaggedExpression::validateScalarValues(const char* caller) const {
-    validateInitialized(caller);
-    if (!descriptor.getTrailingDimensions().empty()) {
-        throw std::invalid_argument(raggedOpErrorPrefix(caller) +
-                                    "currently supports only scalar ragged values with values shape [max_total_values].");
     }
 }
 

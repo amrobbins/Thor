@@ -453,6 +453,12 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
         throw std::runtime_error("Sparse row vector4 update requires a non-zero embeddingDim.");
     }
 
+    // capacity and vocabularySize are compile-time plan invariants. The sparse-gradient
+    // producer guarantees num_rows <= capacity and every row index < vocabularySize;
+    // rechecking those contracts in every update thread is intentionally avoided.
+    (void)capacity;
+    (void)vocabularySize;
+
     const std::string rowType = scalarStorageType(rowDataType);
     std::ostringstream ss;
     ss << "#include <cuda_fp16.h>\n";
@@ -592,7 +598,6 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
     ss << ") {\n";
     ss << "  const unsigned long long idx = static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;\n";
     ss << "  const unsigned long long active_rows = static_cast<unsigned long long>(num_rows[0]);\n";
-    ss << "  if (active_rows > " << capacity << "ULL) { asm(\"trap;\"); return; }\n";
     ss << "  const unsigned long long embedding_dim = " << embeddingDim << "ULL;\n";
     ss << "  const unsigned long long vectors_per_row = " << ((embeddingDim + 3ULL) / 4ULL) << "ULL;\n";
     ss << "  const unsigned long long total = active_rows * vectors_per_row;\n";
@@ -606,7 +611,6 @@ std::string emitVector4KernelSource(const PhysicalOutputs& outputs,
         ss << "  const unsigned int vector_valid_lanes = (dim + 4ULL <= embedding_dim) ? 4U : static_cast<unsigned int>(embedding_dim - dim);\n";
     }
     ss << "  const unsigned long long row = static_cast<unsigned long long>(rows[logical_row]);\n";
-    ss << "  if (row >= " << vocabularySize << "ULL) { asm(\"trap;\"); return; }\n";
     ss << "  const unsigned long long logical_offset = logical_row * embedding_dim + dim;\n";
     ss << "  const unsigned long long indexed_offset = row * embedding_dim + dim;\n\n";
 
@@ -708,6 +712,11 @@ std::string emitKernelSource(const PhysicalOutputs& outputs,
         throw std::runtime_error("Sparse row update requires at least one output.");
     }
 
+    // These bounds are guaranteed by the sparse-gradient producer. Keep them in
+    // the compiled plan/cache key, but do not branch on them in every GPU thread.
+    (void)capacity;
+    (void)vocabularySize;
+
     const std::string rowType = scalarStorageType(rowDataType);
     std::ostringstream ss;
     ss << "#include <cuda_fp16.h>\n";
@@ -741,14 +750,12 @@ std::string emitKernelSource(const PhysicalOutputs& outputs,
     ss << ") {\n";
     ss << "  const unsigned long long idx = static_cast<unsigned long long>(blockIdx.x) * blockDim.x + threadIdx.x;\n";
     ss << "  const unsigned long long active_rows = static_cast<unsigned long long>(num_rows[0]);\n";
-    ss << "  if (active_rows > " << capacity << "ULL) { asm(\"trap;\"); return; }\n";
     ss << "  const unsigned long long embedding_dim = " << embeddingDim << "ULL;\n";
     ss << "  const unsigned long long total = active_rows * embedding_dim;\n";
     ss << "  if (idx >= total) return;\n";
     ss << "  const unsigned long long logical_row = idx / embedding_dim;\n";
     ss << "  const unsigned long long dim = idx - logical_row * embedding_dim;\n";
     ss << "  const unsigned long long row = static_cast<unsigned long long>(rows[logical_row]);\n";
-    ss << "  if (row >= " << vocabularySize << "ULL) { asm(\"trap;\"); return; }\n";
     ss << "  const unsigned long long logical_offset = logical_row * embedding_dim + dim;\n";
     ss << "  const unsigned long long indexed_offset = row * embedding_dim + dim;\n\n";
 

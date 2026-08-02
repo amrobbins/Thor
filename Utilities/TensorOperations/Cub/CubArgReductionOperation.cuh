@@ -82,9 +82,6 @@ inline __host__ __device__ void storeArgIndexAsRuntimeDType(void* output,
             static_cast<uint64_t*>(output)[output_index] = value;
             return;
         default:
-#if defined(__CUDA_ARCH__)
-            asm("trap;");
-#endif
             return;
     }
 }

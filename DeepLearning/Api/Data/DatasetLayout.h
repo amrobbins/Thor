@@ -16,7 +16,6 @@ class DatasetLayout {
     enum class WindowedTensorReferenceMode { INDEXED, AFFINE };
 
     static constexpr const char *FORMAT = "thor.dataset.v1";
-    static constexpr const char *RAGGED_FORMAT = "thor.dataset.v2";
 
     struct TensorSpec {
         std::string name;

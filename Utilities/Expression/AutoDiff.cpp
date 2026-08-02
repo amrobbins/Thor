@@ -734,10 +734,33 @@ class BackwardGraphBuilder {
             case ExprOp::SEGMENTED_SCAN:
                 return tryInferKnownGradientDims(n.lhs);
             case ExprOp::SEGMENTED_BROADCAST:
-                if (n.ragged_runtime_max_active_values == 0) {
+                if (n.ragged_runtime_max_active_values == 0 || n.ragged_runtime_elements_per_value == 0) {
                     return std::nullopt;
                 }
-                return std::vector<uint64_t>{n.ragged_runtime_max_active_values};
+                if (n.ragged_runtime_elements_per_value == 1) {
+                    return std::vector<uint64_t>{n.ragged_runtime_max_active_values};
+                }
+                return std::vector<uint64_t>{n.ragged_runtime_max_active_values, n.ragged_runtime_elements_per_value};
+            case ExprOp::SEGMENTED_REDUCE_SUM:
+            case ExprOp::SEGMENTED_REDUCE_MIN:
+            case ExprOp::SEGMENTED_REDUCE_MAX:
+            case ExprOp::SEGMENTED_REDUCE_MEAN:
+                if (n.ragged_runtime_batch_size == 0 || n.ragged_runtime_elements_per_value == 0) {
+                    return std::nullopt;
+                }
+                if (n.ragged_runtime_elements_per_value == 1) {
+                    return std::vector<uint64_t>{n.ragged_runtime_batch_size};
+                }
+                return std::vector<uint64_t>{n.ragged_runtime_batch_size, n.ragged_runtime_elements_per_value};
+            case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+            case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
+                if (n.ragged_runtime_max_active_values == 0 || n.ragged_runtime_elements_per_value == 0) {
+                    return std::nullopt;
+                }
+                if (n.ragged_runtime_elements_per_value == 1) {
+                    return std::vector<uint64_t>{n.ragged_runtime_max_active_values};
+                }
+                return std::vector<uint64_t>{n.ragged_runtime_max_active_values, n.ragged_runtime_elements_per_value};
             case ExprOp::ADD:
             case ExprOp::SUB: {
                 const auto lhs_dims = tryInferKnownGradientDims(n.lhs);
@@ -1647,12 +1670,41 @@ class BackwardGraphBuilder {
         return push(std::move(node));
     }
 
+    uint32_t segmentedReduce(uint32_t values,
+                             uint32_t offsets,
+                             ExprOp op,
+                             uint64_t batch_size,
+                             uint64_t max_active_values,
+                             uint64_t elements_per_value,
+                             std::optional<DataType> output_dtype = std::nullopt) {
+        if (op != ExprOp::SEGMENTED_REDUCE_SUM && op != ExprOp::SEGMENTED_REDUCE_MEAN &&
+            op != ExprOp::SEGMENTED_REDUCE_MIN && op != ExprOp::SEGMENTED_REDUCE_MAX) {
+            throw std::runtime_error("AutoDiff segmentedReduce requires a segmented reduction op.");
+        }
+        if (batch_size == 0 || max_active_values == 0 || elements_per_value == 0) {
+            throw std::runtime_error("AutoDiff segmentedReduce requires non-zero ragged extent metadata.");
+        }
+
+        ExprNode node{};
+        node.op = op;
+        node.lhs = values;
+        node.rhs = offsets;
+        node.ragged_runtime_batch_size = batch_size;
+        node.ragged_runtime_max_active_values = max_active_values;
+        node.ragged_runtime_elements_per_value = elements_per_value;
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
+        }
+        return push(std::move(node));
+    }
+
     uint32_t segmentedReduceMinMaxBackward(ExprOp op,
                                            uint32_t lhs,
                                            uint32_t grad,
                                            uint32_t offsets,
                                            uint64_t batch_size,
                                            uint64_t max_active_values,
+                                           uint64_t elements_per_value,
                                            std::optional<DataType> output_dtype = std::nullopt,
                                            std::optional<DataType> compute_dtype = std::nullopt) {
         if (op != ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD && op != ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD) {
@@ -1667,7 +1719,7 @@ class BackwardGraphBuilder {
         node.aux = offsets;
         node.ragged_runtime_batch_size = batch_size;
         node.ragged_runtime_max_active_values = max_active_values;
-        node.ragged_runtime_elements_per_value = 1;
+        node.ragged_runtime_elements_per_value = elements_per_value;
         node.output_dtype = output_dtype;
         node.compute_dtype = compute_dtype;
         return push(std::move(node));
@@ -1742,18 +1794,21 @@ class BackwardGraphBuilder {
 
     uint32_t segmentedBroadcast(uint32_t per_segment_values,
                                 uint32_t offsets,
+                                uint64_t batch_size,
                                 uint64_t max_active_values,
+                                uint64_t elements_per_value,
                                 bool normalize_by_segment_length,
                                 std::optional<DataType> output_dtype = std::nullopt) {
-        if (max_active_values == 0) {
-            throw std::runtime_error("AutoDiff segmented broadcast requires non-zero packed capacity.");
+        if (batch_size == 0 || max_active_values == 0 || elements_per_value == 0) {
+            throw std::runtime_error("AutoDiff segmented broadcast requires non-zero ragged extent metadata.");
         }
         ExprNode node{};
         node.op = ExprOp::SEGMENTED_BROADCAST;
         node.lhs = per_segment_values;
         node.rhs = offsets;
+        node.ragged_runtime_batch_size = batch_size;
         node.ragged_runtime_max_active_values = max_active_values;
-        node.ragged_runtime_elements_per_value = 1;
+        node.ragged_runtime_elements_per_value = elements_per_value;
         node.segmented_broadcast_normalize_by_length = normalize_by_segment_length;
         if (output_dtype.has_value()) {
             node.output_dtype = output_dtype.value();
@@ -2871,17 +2926,36 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::SEGMENTED_REDUCE_MEAN: {
                 const std::vector<uint64_t>& values_dims = node_dims[node.lhs];
                 const std::vector<uint64_t>& offsets_dims = node_dims[node.rhs];
-                if (values_dims.size() != 1 || offsets_dims.size() != 1 || offsets_dims[0] == 0) {
-                    throw std::runtime_error("inferForwardNodeDims segmented reduce currently requires rank-1 values and non-empty rank-1 offsets.");
+                if (values_dims.empty() || offsets_dims.size() != 1 || offsets_dims[0] == 0) {
+                    throw std::runtime_error("inferForwardNodeDims segmented reduce requires values [N,D...] and non-empty rank-1 offsets.");
                 }
-                node_dims[i] = std::vector<uint64_t>{offsets_dims[0] - 1};
+                if (values_dims[0] == 0 || node.ragged_runtime_elements_per_value == 0 ||
+                    dynamicDimsNumel(values_dims, "inferForwardNodeDims segmented reduce values") / values_dims[0] !=
+                        node.ragged_runtime_elements_per_value) {
+                    throw std::runtime_error("inferForwardNodeDims segmented reduce elements-per-value metadata mismatch.");
+                }
+                std::vector<uint64_t> output_dims = values_dims;
+                output_dims[0] = offsets_dims[0] - 1;
+                node_dims[i] = std::move(output_dims);
                 break;
             }
             case ExprOp::SEGMENTED_BROADCAST: {
-                if (node.ragged_runtime_max_active_values == 0) {
+                if (node.ragged_runtime_max_active_values == 0 || node.ragged_runtime_elements_per_value == 0) {
                     throw std::runtime_error("inferForwardNodeDims segmented broadcast is missing packed capacity metadata.");
                 }
-                node_dims[i] = std::vector<uint64_t>{node.ragged_runtime_max_active_values};
+                const std::vector<uint64_t>& per_segment_dims = node_dims[node.lhs];
+                const std::vector<uint64_t>& offsets_dims = node_dims[node.rhs];
+                if (per_segment_dims.empty() || offsets_dims.size() != 1 || offsets_dims[0] != per_segment_dims[0] + 1) {
+                    throw std::runtime_error("inferForwardNodeDims segmented broadcast requires values [B,D...] and offsets [B+1].");
+                }
+                if (per_segment_dims[0] == 0 ||
+                    dynamicDimsNumel(per_segment_dims, "inferForwardNodeDims segmented broadcast values") / per_segment_dims[0] !=
+                        node.ragged_runtime_elements_per_value) {
+                    throw std::runtime_error("inferForwardNodeDims segmented broadcast elements-per-value metadata mismatch.");
+                }
+                std::vector<uint64_t> output_dims = per_segment_dims;
+                output_dims[0] = node.ragged_runtime_max_active_values;
+                node_dims[i] = std::move(output_dims);
                 break;
             }
             case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
@@ -4642,17 +4716,30 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
                 uint64_t batch_size = node.ragged_runtime_batch_size;
                 uint64_t max_active_values = node.ragged_runtime_max_active_values;
-                if ((batch_size == 0 || max_active_values == 0) && has_forward_dims) {
-                    const std::vector<uint64_t>& values_dims = forward_node_dims.at(node.lhs);
+                uint64_t elements_per_value = node.ragged_runtime_elements_per_value;
+                std::vector<uint64_t> values_dims;
+                std::vector<uint64_t> segment_dims;
+                if (has_forward_dims) {
+                    values_dims = forward_node_dims.at(node.lhs);
+                    segment_dims = forward_node_dims.at(static_cast<uint32_t>(node_idx));
                     const std::vector<uint64_t>& offsets_dims = forward_node_dims.at(node.rhs);
-                    if (values_dims.size() != 1 || offsets_dims.size() != 1 || offsets_dims[0] == 0) {
-                        throw std::runtime_error("Segmented ragged reduction backward requires rank-1 values and offsets.");
+                    if (values_dims.empty() || segment_dims.empty() || offsets_dims.size() != 1 || offsets_dims[0] == 0 ||
+                        values_dims[0] == 0 || segment_dims[0] != offsets_dims[0] - 1) {
+                        throw std::runtime_error(
+                            "Segmented ragged reduction backward requires values [N,D...], output [B,D...], and offsets [B+1].");
                     }
                     batch_size = offsets_dims[0] - 1;
                     max_active_values = values_dims[0];
+                    const uint64_t inferred_elements =
+                        dynamicDimsNumel(values_dims, "segmented reduction backward values") / values_dims[0];
+                    if (elements_per_value == 0) {
+                        elements_per_value = inferred_elements;
+                    } else if (elements_per_value != inferred_elements) {
+                        throw std::runtime_error("Segmented ragged reduction backward elements-per-value metadata mismatch.");
+                    }
                 }
 
-                if (batch_size == 0 || max_active_values == 0) {
+                if (batch_size == 0 || max_active_values == 0 || elements_per_value == 0) {
                     if (allow_shape_deferred_placeholders) {
                         builder.addContribution(node.lhs, grad);
                         break;
@@ -4666,11 +4753,14 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 uint32_t segment_grad = grad;
                 if (has_forward_dims) {
                     segment_grad = shapeGradLikeNodeOutput(
-                        grad, static_cast<uint32_t>(node_idx), forward_node_dims.at(static_cast<uint32_t>(node_idx)));
+                        grad, static_cast<uint32_t>(node_idx), segment_dims);
                 } else {
                     double constant_value = 0.0;
                     if (builder.tryGetConstantLikeValue(grad, constant_value)) {
-                        segment_grad = builder.fill(constant_value, {batch_size}, grad_dtype);
+                        const std::vector<uint64_t> flat_segment_dims =
+                            elements_per_value == 1 ? std::vector<uint64_t>{batch_size}
+                                                    : std::vector<uint64_t>{batch_size, elements_per_value};
+                        segment_grad = builder.fill(constant_value, flat_segment_dims, grad_dtype);
                     }
                 }
                 if (grad_dtype.has_value()) {
@@ -4678,12 +4768,18 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 }
                 const uint32_t broadcast = builder.segmentedBroadcast(segment_grad,
                                                                       offsets,
+                                                                      batch_size,
                                                                       max_active_values,
+                                                                      elements_per_value,
                                                                       node.op == ExprOp::SEGMENTED_REDUCE_MEAN,
                                                                       grad_dtype);
                 const uint32_t ragged_grad = builder.raggedValuewiseExtent(
-                    broadcast, offsets, batch_size, max_active_values, 1, grad_dtype);
-                addContributionToChild(node.lhs, ragged_grad, {max_active_values}, grad_dtype);
+                    broadcast, offsets, batch_size, max_active_values, elements_per_value, grad_dtype);
+                const std::vector<uint64_t> child_dims = has_forward_dims
+                    ? values_dims
+                    : (elements_per_value == 1 ? std::vector<uint64_t>{max_active_values}
+                                               : std::vector<uint64_t>{max_active_values, elements_per_value});
+                addContributionToChild(node.lhs, ragged_grad, child_dims, grad_dtype);
                 break;
             }
 
@@ -4695,17 +4791,30 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
 
                 uint64_t batch_size = node.ragged_runtime_batch_size;
                 uint64_t max_active_values = node.ragged_runtime_max_active_values;
-                if ((batch_size == 0 || max_active_values == 0) && has_forward_dims) {
-                    const std::vector<uint64_t>& values_dims = forward_node_dims.at(node.lhs);
+                uint64_t elements_per_value = node.ragged_runtime_elements_per_value;
+                std::vector<uint64_t> values_dims;
+                std::vector<uint64_t> segment_dims;
+                if (has_forward_dims) {
+                    values_dims = forward_node_dims.at(node.lhs);
+                    segment_dims = forward_node_dims.at(static_cast<uint32_t>(node_idx));
                     const std::vector<uint64_t>& offsets_dims = forward_node_dims.at(node.rhs);
-                    if (values_dims.size() != 1 || offsets_dims.size() != 1 || offsets_dims[0] == 0) {
-                        throw std::runtime_error("Segmented ragged min/max backward requires rank-1 values and offsets.");
+                    if (values_dims.empty() || segment_dims.empty() || offsets_dims.size() != 1 || offsets_dims[0] == 0 ||
+                        values_dims[0] == 0 || segment_dims[0] != offsets_dims[0] - 1) {
+                        throw std::runtime_error(
+                            "Segmented ragged min/max backward requires values [N,D...], output [B,D...], and offsets [B+1].");
                     }
                     batch_size = offsets_dims[0] - 1;
                     max_active_values = values_dims[0];
+                    const uint64_t inferred_elements =
+                        dynamicDimsNumel(values_dims, "segmented min/max backward values") / values_dims[0];
+                    if (elements_per_value == 0) {
+                        elements_per_value = inferred_elements;
+                    } else if (elements_per_value != inferred_elements) {
+                        throw std::runtime_error("Segmented ragged min/max backward elements-per-value metadata mismatch.");
+                    }
                 }
 
-                if (batch_size == 0 || max_active_values == 0) {
+                if (batch_size == 0 || max_active_values == 0 || elements_per_value == 0) {
                     if (allow_shape_deferred_placeholders) {
                         builder.addContribution(node.lhs, grad);
                         break;
@@ -4719,11 +4828,14 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 uint32_t segment_grad = grad;
                 if (has_forward_dims) {
                     segment_grad = shapeGradLikeNodeOutput(
-                        grad, static_cast<uint32_t>(node_idx), forward_node_dims.at(static_cast<uint32_t>(node_idx)));
+                        grad, static_cast<uint32_t>(node_idx), segment_dims);
                 } else {
                     double constant_value = 0.0;
                     if (builder.tryGetConstantLikeValue(grad, constant_value)) {
-                        segment_grad = builder.fill(constant_value, {batch_size}, grad_dtype);
+                        const std::vector<uint64_t> flat_segment_dims =
+                            elements_per_value == 1 ? std::vector<uint64_t>{batch_size}
+                                                    : std::vector<uint64_t>{batch_size, elements_per_value};
+                        segment_grad = builder.fill(constant_value, flat_segment_dims, grad_dtype);
                     }
                 }
                 if (grad_dtype.has_value()) {
@@ -4738,11 +4850,16 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     offsets,
                     batch_size,
                     max_active_values,
+                    elements_per_value,
                     grad_dtype,
                     node.compute_dtype);
-                const uint32_t ragged_grad =
-                    builder.raggedValuewiseExtent(routed, offsets, batch_size, max_active_values, 1, grad_dtype);
-                addContributionToChild(node.lhs, ragged_grad, {max_active_values}, grad_dtype);
+                const uint32_t ragged_grad = builder.raggedValuewiseExtent(
+                    routed, offsets, batch_size, max_active_values, elements_per_value, grad_dtype);
+                const std::vector<uint64_t> child_dims = has_forward_dims
+                    ? values_dims
+                    : (elements_per_value == 1 ? std::vector<uint64_t>{max_active_values}
+                                               : std::vector<uint64_t>{max_active_values, elements_per_value});
+                addContributionToChild(node.lhs, ragged_grad, child_dims, grad_dtype);
                 break;
             }
 
@@ -4751,8 +4868,42 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                 throw std::runtime_error(
                     "Thor expressions autodiff does not support second derivatives through segmented min/max backward yet.");
 
-            case ExprOp::SEGMENTED_BROADCAST:
-                throw std::runtime_error("Thor expressions autodiff does not support second derivatives through segmented broadcast yet.");
+            case ExprOp::SEGMENTED_BROADCAST: {
+                if (!node_reaches_requested_inputs.at(node.lhs)) {
+                    break;
+                }
+                if (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
+                    node.ragged_runtime_elements_per_value == 0) {
+                    throw std::runtime_error("Segmented broadcast backward requires complete ragged extent metadata.");
+                }
+
+                const uint32_t offsets = builder.cloneForward(node.rhs);
+                const auto grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
+                const uint32_t grad_like_output =
+                    has_forward_dims ? shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx),
+                                                               forward_node_dims.at(static_cast<uint32_t>(node_idx)))
+                                     : grad;
+                const ExprOp reduction_op = node.segmented_broadcast_normalize_by_length
+                    ? ExprOp::SEGMENTED_REDUCE_MEAN
+                    : ExprOp::SEGMENTED_REDUCE_SUM;
+                uint32_t per_segment_grad = builder.segmentedReduce(grad_like_output,
+                                                                    offsets,
+                                                                    reduction_op,
+                                                                    node.ragged_runtime_batch_size,
+                                                                    node.ragged_runtime_max_active_values,
+                                                                    node.ragged_runtime_elements_per_value,
+                                                                    grad_dtype);
+                if (grad_dtype.has_value()) {
+                    per_segment_grad = builder.cast(per_segment_grad, grad_dtype.value());
+                }
+                const std::vector<uint64_t> lhs_dims = has_forward_dims
+                    ? forward_node_dims.at(node.lhs)
+                    : (node.ragged_runtime_elements_per_value == 1
+                           ? std::vector<uint64_t>{node.ragged_runtime_batch_size}
+                           : std::vector<uint64_t>{node.ragged_runtime_batch_size, node.ragged_runtime_elements_per_value});
+                addContributionToChild(node.lhs, per_segment_grad, lhs_dims, grad_dtype);
+                break;
+            }
 
             case ExprOp::SCAN:
             case ExprOp::SEGMENTED_SCAN: {

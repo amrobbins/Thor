@@ -3561,7 +3561,8 @@ Expression Expression::segmentedReduceWithRaggedMetadata(const Expression& input
                                                          const Expression& offsets,
                                                          ExprOp op,
                                                          uint64_t ragged_batch_size,
-                                                         uint64_t ragged_max_active_values) {
+                                                         uint64_t ragged_max_active_values,
+                                                         uint64_t ragged_elements_per_value) {
     if (op != ExprOp::SEGMENTED_REDUCE_SUM && op != ExprOp::SEGMENTED_REDUCE_MIN &&
         op != ExprOp::SEGMENTED_REDUCE_MAX && op != ExprOp::SEGMENTED_REDUCE_MEAN) {
         throw std::invalid_argument("segmentedReduceWithRaggedMetadata requires a segmented reduction op.");
@@ -3569,13 +3570,16 @@ Expression Expression::segmentedReduceWithRaggedMetadata(const Expression& input
     if ((ragged_batch_size == 0) != (ragged_max_active_values == 0)) {
         throw std::invalid_argument("Segmented reduction ragged metadata requires both batch size and max active values, or neither.");
     }
+    if (ragged_elements_per_value == 0) {
+        throw std::invalid_argument("Segmented reduction ragged elements-per-value metadata must be non-zero.");
+    }
 
     Expression out = binaryOp(input, offsets, op);
     if (ragged_batch_size != 0) {
         ExprNode& node = out.expr->nodes.at(out.nodeIndex);
         node.ragged_runtime_batch_size = ragged_batch_size;
         node.ragged_runtime_max_active_values = ragged_max_active_values;
-        node.ragged_runtime_elements_per_value = 1;
+        node.ragged_runtime_elements_per_value = ragged_elements_per_value;
     }
     return out;
 }

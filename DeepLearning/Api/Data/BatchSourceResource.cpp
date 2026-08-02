@@ -9,9 +9,17 @@ namespace Thor {
 
 class BatchSourceResourceState {
    public:
-    explicit BatchSourceResourceState(BatchSourceOwner::ReleaseCallback releaseCallback)
-        : releaseCallback(std::move(releaseCallback)) {
+    explicit BatchSourceResourceState(
+        BatchSourceOwner::ReleaseCallback releaseCallback,
+        Event producerReadyEvent = Event())
+        : releaseCallback(std::move(releaseCallback)),
+          producerReadyEvent(std::move(producerReadyEvent)) {
         THOR_THROW_IF_FALSE(static_cast<bool>(this->releaseCallback));
+    }
+
+    void waitUntilReady(const Stream& consumingStream) const {
+        THOR_THROW_IF_FALSE(consumingStream.isInitialized());
+        if (producerReadyEvent.isInitialized()) consumingStream.waitEvent(producerReadyEvent);
     }
 
     void recordConsumption(const Stream& consumingStream) {
@@ -43,17 +51,24 @@ class BatchSourceResourceState {
             }
             producerReleased = true;
             events = std::move(consumedEvents);
+            if (producerReadyEvent.isInitialized()) events.push_back(producerReadyEvent);
             callback = releaseCallback;
         }
         callback(std::move(events));
     }
 
    private:
-    std::mutex mutex;
+    mutable std::mutex mutex;
     BatchSourceOwner::ReleaseCallback releaseCallback;
+    Event producerReadyEvent;
     std::vector<Event> consumedEvents;
     bool producerReleased = false;
 };
+
+void BatchSourceReference::waitUntilReady(const Stream& consumingStream) const {
+    THOR_THROW_IF_FALSE(isInitialized());
+    state->waitUntilReady(consumingStream);
+}
 
 void BatchSourceReference::recordConsumption(const Stream& consumingStream) const {
     THOR_THROW_IF_FALSE(isInitialized());
@@ -62,6 +77,14 @@ void BatchSourceReference::recordConsumption(const Stream& consumingStream) cons
 
 BatchSourceOwner::BatchSourceOwner(ReleaseCallback releaseCallback)
     : state(std::make_shared<BatchSourceResourceState>(std::move(releaseCallback))) {}
+
+BatchSourceOwner::BatchSourceOwner(
+    ReleaseCallback releaseCallback,
+    Event producerReadyEvent)
+    : state(std::make_shared<BatchSourceResourceState>(
+          std::move(releaseCallback), std::move(producerReadyEvent))) {
+    THOR_THROW_IF_FALSE(state != nullptr);
+}
 
 BatchSourceOwner::~BatchSourceOwner() {
     try {

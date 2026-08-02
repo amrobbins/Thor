@@ -707,7 +707,7 @@ TEST(DatasetWriterTest, WritesPackedRaggedSidecarAndPerRecordReferences) {
     writer.close();
 
     const nlohmann::json manifest = readJson(datasetPath / DatasetWriter::MANIFEST_FILENAME);
-    EXPECT_EQ(manifest.at("format").get<string>(), DatasetLayout::RAGGED_FORMAT);
+    EXPECT_EQ(manifest.at("format").get<string>(), DatasetLayout::FORMAT);
     ASSERT_TRUE(manifest.contains("ragged_tensors"));
     const nlohmann::json &storage = manifest.at("ragged_tensors").at("labels").at("storage");
     EXPECT_EQ(storage.at("num_values").get<uint64_t>(), 7);

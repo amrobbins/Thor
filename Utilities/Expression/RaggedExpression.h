@@ -97,9 +97,9 @@ class RaggedExpression {
     [[nodiscard]] RaggedExpression unaryValuewise(ExprOp op, const char* op_name) const;
     [[nodiscard]] RaggedExpression binaryValuewise(const RaggedExpression& other, ExprOp op, const char* op_name) const;
     [[nodiscard]] Expression segmentTotalBroadcast(ScanOp op, const char* op_name) const;
+    [[nodiscard]] Expression segmentDenseBroadcast(const Expression& per_segment_values, bool normalize_by_segment_length) const;
 
     void validateInitialized(const char* caller) const;
-    void validateScalarValues(const char* caller) const;
     static void validateDescriptor(const RaggedTensorDescriptor& descriptor);
     static RaggedExpressionRuntimeExtent makeRuntimeExtent(const Expression& offsets, const RaggedTensorDescriptor& descriptor);
     static Expression markExecutionValues(const Expression& values,

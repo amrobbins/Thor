@@ -53,36 +53,29 @@ void validateDescriptorCommon(const DeviceUpdatableKernelNodeDeviceHandle* targe
     validateCountTensor(countTensor, stream.getGpuNum(), label);
 }
 
-__device__ __forceinline__ unsigned long long checkedMulU64(unsigned long long a, unsigned long long b) {
+__device__ __forceinline__ unsigned long long saturatingMulU64(unsigned long long a, unsigned long long b) {
     if (a != 0ULL && b > 0xffffffffffffffffULL / a) {
-        asm("trap;");
+        return 0xffffffffffffffffULL;
     }
     return a * b;
 }
 
-__device__ __forceinline__ unsigned int checkedGridDim(unsigned long long value, unsigned int minGrid, unsigned int maxGrid) {
-    if (minGrid == 0U || maxGrid == 0U || minGrid > maxGrid) {
-        asm("trap;");
-    }
+__device__ __forceinline__ unsigned long long ceilDivU64(unsigned long long value, unsigned long long divisor) {
+    return value / divisor + (value % divisor != 0ULL ? 1ULL : 0ULL);
+}
+
+__device__ __forceinline__ unsigned int clampedGridDim(unsigned long long value, unsigned int minGrid, unsigned int maxGrid) {
     unsigned long long clamped = value;
     if (clamped < static_cast<unsigned long long>(minGrid)) {
         clamped = static_cast<unsigned long long>(minGrid);
-    }
-    if (clamped > static_cast<unsigned long long>(maxGrid) || clamped > 0xffffffffULL) {
-        asm("trap;");
+    } else if (clamped > static_cast<unsigned long long>(maxGrid)) {
+        clamped = static_cast<unsigned long long>(maxGrid);
     }
     return static_cast<unsigned int>(clamped);
 }
 
 __device__ __forceinline__ cudaGraphDeviceNode_t loadTargetNode(const cudaGraphDeviceNode_t* targetNode) {
-    if (targetNode == nullptr) {
-        asm("trap;");
-    }
-    cudaGraphDeviceNode_t node = *targetNode;
-    if (node == nullptr) {
-        asm("trap;");
-    }
-    return node;
+    return *targetNode;
 }
 
 template <typename CountT>
@@ -95,19 +88,11 @@ __global__ void updateDeviceGrid1DFromScalarKernel(const cudaGraphDeviceNode_t* 
     if (threadIdx.x != 0 || blockIdx.x != 0) {
         return;
     }
-    if (itemCount == nullptr || targetBlockDimX == 0U || itemsPerCount == 0ULL) {
-        asm("trap;");
-    }
-
     const unsigned long long count = static_cast<unsigned long long>(itemCount[0]);
-    const unsigned long long items = checkedMulU64(count, itemsPerCount);
-    const unsigned long long grid64 = (items + static_cast<unsigned long long>(targetBlockDimX) - 1ULL) /
-                                      static_cast<unsigned long long>(targetBlockDimX);
-    const unsigned int gridX = checkedGridDim(grid64, minGridDimX, maxGridDimX);
-    cudaError_t status = cudaGraphKernelNodeSetGridDim(loadTargetNode(targetNode), dim3(gridX, 1U, 1U));
-    if (status != cudaSuccess) {
-        asm("trap;");
-    }
+    const unsigned long long items = saturatingMulU64(count, itemsPerCount);
+    const unsigned long long grid64 = ceilDivU64(items, static_cast<unsigned long long>(targetBlockDimX));
+    const unsigned int gridX = clampedGridDim(grid64, minGridDimX, maxGridDimX);
+    (void)cudaGraphKernelNodeSetGridDim(loadTargetNode(targetNode), dim3(gridX, 1U, 1U));
 }
 
 template <typename CountT>
@@ -116,22 +101,14 @@ __global__ void updateDeviceGrid2DFromScalarKernel(const cudaGraphDeviceNode_t* 
                                                   unsigned long long gridDimXPerRow,
                                                   unsigned int gridDimY,
                                                   unsigned int minGridDimX,
-                                                  unsigned int maxGridDimX,
-                                                  unsigned int maxGridDimY) {
+                                                  unsigned int maxGridDimX) {
     if (threadIdx.x != 0 || blockIdx.x != 0) {
         return;
     }
-    if (rowCount == nullptr || gridDimXPerRow == 0ULL || gridDimY == 0U || gridDimY > maxGridDimY) {
-        asm("trap;");
-    }
-
     const unsigned long long rows = static_cast<unsigned long long>(rowCount[0]);
-    const unsigned long long gridX64 = checkedMulU64(rows, gridDimXPerRow);
-    const unsigned int gridX = checkedGridDim(gridX64, minGridDimX, maxGridDimX);
-    cudaError_t status = cudaGraphKernelNodeSetGridDim(loadTargetNode(targetNode), dim3(gridX, gridDimY, 1U));
-    if (status != cudaSuccess) {
-        asm("trap;");
-    }
+    const unsigned long long gridX64 = saturatingMulU64(rows, gridDimXPerRow);
+    const unsigned int gridX = clampedGridDim(gridX64, minGridDimX, maxGridDimX);
+    (void)cudaGraphKernelNodeSetGridDim(loadTargetNode(targetNode), dim3(gridX, gridDimY, 1U));
 }
 
 template <typename CountT>
@@ -154,8 +131,7 @@ void launchUpdateDeviceGrid2DTyped(const DynamicGrid2DFromScalarDescriptor& desc
                                                                                 descriptor.gridDimXPerRow,
                                                                                 descriptor.gridDimY,
                                                                                 descriptor.minGridDimX,
-                                                                                descriptor.maxGridDimX,
-                                                                                descriptor.maxGridDimY);
+                                                                                descriptor.maxGridDimX);
     CUDA_CHECK(cudaGetLastError());
 }
 

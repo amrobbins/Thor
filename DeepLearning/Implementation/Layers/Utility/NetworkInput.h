@@ -310,10 +310,9 @@ class NetworkInput : public Layer {
                 // independently of downstream network completion.
                 THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == networkPlacement);
                 THOR_THROW_IF_FALSE(networkPlacement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+                if (sourceReference.has_value()) sourceReference->waitUntilReady(stream);
                 featureOutput.value().copyFromAsync(featureInput.value(), stream);
-                if (sourceReference.has_value()) {
-                    sourceReference->recordConsumption(stream);
-                }
+                if (sourceReference.has_value()) sourceReference->recordConsumption(stream);
             } else {
                 if (inputSlots.empty()) {
                     // Non-queued inference callers do not preallocate slots.
@@ -332,10 +331,9 @@ class NetworkInput : public Layer {
                 loadStream.waitEvent(slot.outputBufferWritableEvent);
 
                 // Copy into the slot-local prefetch buffer using the upload stream.
+                if (sourceReference.has_value()) sourceReference->waitUntilReady(loadStream);
                 slot.outputBuffer.value().copyFromAsync(featureInput.value(), loadStream);
-                if (sourceReference.has_value()) {
-                    sourceReference->recordConsumption(loadStream);
-                }
+                if (sourceReference.has_value()) sourceReference->recordConsumption(loadStream);
                 loadStream.putEvent(slot.outputBufferLoadedEvent);
                 stream.waitEvent(slot.outputBufferLoadedEvent);
 
@@ -421,10 +419,9 @@ class NetworkInput : public Layer {
         InputSlot& slot = inputSlots[activeInputSlot];
         THOR_THROW_IF_FALSE(!slot.outputBuffer.has_value());
         slot.deviceBatchReference = deviceBatchReference;
+        if (sourceReference.has_value()) sourceReference->waitUntilReady(stream);
         slot.deviceBatchReference.value().enqueueMaterialization(featureOutput.value(), stream);
-        if (sourceReference.has_value()) {
-            sourceReference->recordConsumption(stream);
-        }
+        if (sourceReference.has_value()) sourceReference->recordConsumption(stream);
 
         const uint64_t materializeMicros =
             emitDiagnostics ? layerSubmitDiagnosticElapsedMicros(materializeStart, layerSubmitDiagnosticNow()) : 0;

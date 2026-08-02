@@ -362,7 +362,7 @@ TEST(RaggedCtcEndToEnd, FileDatasetFeedsCanonicalRaggedCtcForwardBackwardAndExac
     session->cancel();
 }
 
-TEST(RaggedCtcEndToEnd, SerializedNetworkTrainsFromV2DatasetThroughLogicalBinding) {
+TEST(RaggedCtcEndToEnd, SerializedNetworkTrainsFromCurrentDatasetThroughLogicalBinding) {
     ScopedTempDirectory temp("thor-ragged-ctc-serialized");
     const std::filesystem::path datasetPath = temp.path() / "dataset";
     const std::filesystem::path modelPath = temp.path() / "model";

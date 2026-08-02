@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Data/DatasetWriter.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentDirectMaterializationKernel.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentRaggedMaterializationKernel.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentWindowMaterializationKernel.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/Stream.h"
@@ -201,13 +202,15 @@ json readDatasetManifest(const std::filesystem::path &datasetPath) {
 
 enum class RequestedCompactFieldKind {
     DIRECT,
-    WINDOW
+    WINDOW,
+    RAGGED
 };
 
 struct RequestedCompactField {
     RequestedCompactFieldKind kind = RequestedCompactFieldKind::DIRECT;
     const DatasetLayout::TensorSpec *directSpec = nullptr;
     const DatasetLayout::WindowedTensorSpec *windowSpec = nullptr;
+    const DatasetLayout::RaggedTensorSpec *raggedSpec = nullptr;
     bool mask = false;
 };
 
@@ -218,9 +221,9 @@ std::map<std::string, RequestedCompactField> resolveRequestedCompactFields(
         throw std::runtime_error(
             "Compact device residency currently requires a file dataset.");
     }
-    if (!description.layout.hasWindowedTensors()) {
+    if (!description.layout.hasWindowedTensors() && !description.layout.hasRaggedTensors()) {
         throw std::runtime_error(
-            "Compact device residency requires at least one windowed field.");
+            "Compact device residency requires at least one windowed or ragged field.");
     }
 
     std::map<std::string, RequestedCompactField> available;
@@ -230,6 +233,13 @@ std::map<std::string, RequestedCompactField> resolveRequestedCompactFields(
             RequestedCompactField{
                 .kind = RequestedCompactFieldKind::DIRECT,
                 .directSpec = &spec});
+    }
+    for (const DatasetLayout::RaggedTensorSpec &spec : description.layout.raggedTensors()) {
+        available.emplace(
+            spec.name,
+            RequestedCompactField{
+                .kind = RequestedCompactFieldKind::RAGGED,
+                .raggedSpec = &spec});
     }
     for (const DatasetLayout::WindowedTensorSpec &spec :
          description.layout.windowedTensors()) {
@@ -265,14 +275,15 @@ std::map<std::string, RequestedCompactField> resolveRequestedCompactFields(
     if (requested.empty()) {
         throw std::runtime_error("Compact device residency requested no fields.");
     }
-    bool hasWindowField = false;
+    bool hasVariableField = false;
     for (const auto &entry : requested) {
-        hasWindowField = hasWindowField ||
-                         entry.second.kind == RequestedCompactFieldKind::WINDOW;
+        hasVariableField = hasVariableField ||
+                           entry.second.kind == RequestedCompactFieldKind::WINDOW ||
+                           entry.second.kind == RequestedCompactFieldKind::RAGGED;
     }
-    if (!hasWindowField) {
+    if (!hasVariableField) {
         throw std::runtime_error(
-            "Compact device residency must expose at least one windowed field.");
+            "Compact device residency must expose at least one windowed or ragged field.");
     }
     return requested;
 }
@@ -293,11 +304,20 @@ uint64_t compactStorageBytes(
     const std::map<std::string, RequestedCompactField> &requested,
     const json &manifest) {
     bool needsRecords = false;
+    uint64_t bytes = 0;
     std::set<std::string> sourceNames;
     std::set<std::string> affineFieldNames;
     for (const auto &entry : requested) {
         if (entry.second.kind == RequestedCompactFieldKind::DIRECT) {
             needsRecords = true;
+            continue;
+        }
+        if (entry.second.kind == RequestedCompactFieldKind::RAGGED) {
+            needsRecords = true;
+            bytes = checkedAdd(
+                bytes,
+                entry.second.raggedSpec->valuesNumBytes,
+                "Compact resident ragged values storage");
             continue;
         }
         const DatasetLayout::WindowedTensorSpec &spec = *entry.second.windowSpec;
@@ -309,7 +329,6 @@ uint64_t compactStorageBytes(
         }
     }
 
-    uint64_t bytes = 0;
     if (needsRecords) {
         bytes = checkedAdd(
             bytes,
@@ -442,6 +461,80 @@ void validateIndexedReferences(
             validateWindowEnd(start, spec.windowLength(), spec.name);
         }
     }
+}
+
+Tensor readRaggedValuesBytes(
+    const Thor::DatasetMaterializationDescription &description,
+    const DatasetLayout::RaggedTensorSpec &spec) {
+    if (!spec.valuesFilename.has_value() || spec.valuesFilename->empty()) {
+        throw std::runtime_error(
+            "Compact resident ragged field '" + spec.name + "' has no values filename.");
+    }
+    const std::filesystem::path path =
+        description.datasetPath / spec.valuesFilename.value();
+    if (!std::filesystem::exists(path) ||
+        std::filesystem::file_size(path) != spec.valuesNumBytes) {
+        throw std::runtime_error(
+            "Compact resident ragged values size does not match its manifest for field '" +
+            spec.name + "'.");
+    }
+    if (spec.valuesNumBytes == 0) {
+        return Tensor();
+    }
+    Tensor bytes = cpuByteTensor(spec.valuesNumBytes);
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+        throw std::runtime_error(
+            "Failed to open compact resident ragged values for field '" + spec.name + "'.");
+    }
+    in.read(static_cast<char *>(bytes.getMemPtr()),
+            static_cast<std::streamsize>(spec.valuesNumBytes));
+    if (in.gcount() != static_cast<std::streamsize>(spec.valuesNumBytes)) {
+        throw std::runtime_error(
+            "Compact resident ragged values were shorter than the manifest for field '" +
+            spec.name + "'.");
+    }
+    return bytes;
+}
+
+std::map<std::string, std::vector<uint64_t>> readAndValidateRaggedValueCounts(
+    const Thor::DatasetMaterializationDescription &description,
+    const std::map<std::string, RequestedCompactField> &requested,
+    const Tensor &records) {
+    THOR_THROW_IF_FALSE(records.isInitialized());
+    std::map<std::string, std::vector<uint64_t>> countsByField;
+    const uint8_t *recordBytes = records.getMemPtr<uint8_t>();
+    const uint64_t recordSize = description.layout.recordSizeBytes();
+    for (const auto &entry : requested) {
+        if (entry.second.kind != RequestedCompactFieldKind::RAGGED) continue;
+        const DatasetLayout::RaggedTensorSpec &spec = *entry.second.raggedSpec;
+        const uint64_t storedValueCount = spec.storedValueCount();
+        if (spec.referenceNumBytes != 2 * sizeof(uint64_t) ||
+            recordSize < spec.referenceNumBytes ||
+            spec.referenceOffsetBytes > recordSize - spec.referenceNumBytes) {
+            throw std::runtime_error(
+                "Compact resident ragged reference layout is invalid for field '" +
+                spec.name + "'.");
+        }
+        std::vector<uint64_t> counts(description.numExamples);
+        for (uint64_t row = 0; row < description.numExamples; ++row) {
+            const uint8_t *reference =
+                recordBytes + row * recordSize + spec.referenceOffsetBytes;
+            uint64_t startValue = 0;
+            uint64_t valueCount = 0;
+            std::memcpy(&startValue, reference, sizeof(uint64_t));
+            std::memcpy(&valueCount, reference + sizeof(uint64_t), sizeof(uint64_t));
+            if (startValue > storedValueCount ||
+                valueCount > storedValueCount - startValue) {
+                throw std::runtime_error(
+                    "Compact resident ragged reference for field '" + spec.name +
+                    "' row " + std::to_string(row) + " is outside its values sidecar.");
+            }
+            counts[row] = valueCount;
+        }
+        countsByField.emplace(spec.name, std::move(counts));
+    }
+    return countsByField;
 }
 
 Tensor readSourceBytes(const Thor::DatasetMaterializationDescription &description,
@@ -639,6 +732,7 @@ DeviceResidentNamedDataset::fromCompactFileDataset(
     std::set<std::string> sourceNames;
     std::set<std::string> affineFieldNames;
     std::map<std::string, RequestedCompactField> requestedWindows;
+    std::map<std::string, RequestedCompactField> requestedRagged;
     for (const auto &entry : requested) {
         dataset->compactFieldIds.insert(description.schema.getField(entry.first).id);
         if (entry.second.kind == RequestedCompactFieldKind::DIRECT) {
@@ -646,6 +740,11 @@ DeviceResidentNamedDataset::fromCompactFileDataset(
             dataset->compactDirectFields.emplace(
                 entry.first,
                 CompactDirectFieldStorage{*entry.second.directSpec});
+            continue;
+        }
+        if (entry.second.kind == RequestedCompactFieldKind::RAGGED) {
+            needsRecords = true;
+            requestedRagged.emplace(entry.first, entry.second);
             continue;
         }
         const DatasetLayout::WindowedTensorSpec &spec = *entry.second.windowSpec;
@@ -668,11 +767,27 @@ DeviceResidentNamedDataset::fromCompactFileDataset(
     // the upload stream reaches the corresponding copy. Keep these compact host
     // tensors retained until the single synchronization below.
     std::vector<Tensor> uploadSources;
+    std::map<std::string, std::vector<uint64_t>> raggedValueCounts;
     if (needsRecords) {
         Tensor recordsHost = readCompactRecords(description, manifest);
         validateIndexedReferences(description, requestedWindows, recordsHost);
+        raggedValueCounts =
+            readAndValidateRaggedValueCounts(description, requestedRagged, recordsHost);
         dataset->compactRecords = uploadTensor(recordsHost, devicePlacement, uploadStream);
         uploadSources.push_back(std::move(recordsHost));
+    }
+
+    for (const auto &entry : requestedRagged) {
+        const DatasetLayout::RaggedTensorSpec &spec = *entry.second.raggedSpec;
+        Tensor valuesHost = readRaggedValuesBytes(description, spec);
+        CompactRaggedFieldStorage storage;
+        storage.spec = spec;
+        storage.valueCounts = raggedValueCounts.at(entry.first);
+        if (valuesHost.isInitialized()) {
+            storage.values = uploadTensor(valuesHost, devicePlacement, uploadStream);
+            uploadSources.push_back(std::move(valuesHost));
+        }
+        dataset->compactRaggedFields.emplace(entry.first, std::move(storage));
     }
 
     for (const std::string &sourceName : sourceNames) {
@@ -723,6 +838,11 @@ uint64_t DeviceResidentNamedDataset::totalBytes() const {
     if (compactRecords.isInitialized()) {
         bytes += compactRecords.getArraySizeInBytes();
     }
+    for (const auto &entry : compactRaggedFields) {
+        if (entry.second.values.isInitialized()) {
+            bytes += entry.second.values.getArraySizeInBytes();
+        }
+    }
     for (const auto &entry : compactSources) {
         bytes += entry.second.bytes.getArraySizeInBytes();
         bytes += entry.second.sequences.getArraySizeInBytes();
@@ -739,6 +859,11 @@ uint64_t DeviceResidentNamedDataset::compactRecordBytes() const {
 
 uint64_t DeviceResidentNamedDataset::compactSourceBytes() const {
     uint64_t bytes = 0;
+    for (const auto &entry : compactRaggedFields) {
+        if (entry.second.values.isInitialized()) {
+            bytes += entry.second.values.getArraySizeInBytes();
+        }
+    }
     for (const auto &entry : compactSources) {
         bytes += entry.second.bytes.getArraySizeInBytes();
     }
@@ -765,7 +890,8 @@ bool DeviceResidentNamedDataset::hasTensor(const std::string &name) const {
 }
 
 bool DeviceResidentNamedDataset::hasCompactField(const std::string &name) const {
-    return hasCompactDirectField(name) || hasCompactWindowField(name);
+    return hasCompactDirectField(name) || hasCompactWindowField(name) ||
+           hasCompactRaggedField(name);
 }
 
 bool DeviceResidentNamedDataset::hasCompactDirectField(const std::string &name) const {
@@ -774,6 +900,10 @@ bool DeviceResidentNamedDataset::hasCompactDirectField(const std::string &name) 
 
 bool DeviceResidentNamedDataset::hasCompactWindowField(const std::string &name) const {
     return compactWindowFields.find(name) != compactWindowFields.end();
+}
+
+bool DeviceResidentNamedDataset::hasCompactRaggedField(const std::string &name) const {
+    return compactRaggedFields.find(name) != compactRaggedFields.end();
 }
 
 const Tensor &DeviceResidentNamedDataset::field(Thor::DatasetFieldId id) const {
@@ -790,6 +920,78 @@ const Tensor &DeviceResidentNamedDataset::field(Thor::DatasetFieldId id) const {
 
 const Tensor &DeviceResidentNamedDataset::tensor(const std::string &name) const {
     return field(schema.getField(name).id);
+}
+
+void DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity(
+    const std::string &fieldName,
+    const Tensor &rowIndicesHost,
+    uint64_t logicalRows,
+    uint64_t maxTotalValues) const {
+    const auto found = compactRaggedFields.find(fieldName);
+    if (found == compactRaggedFields.end()) {
+        throw std::runtime_error(
+            "DeviceResidentNamedDataset has no compact ragged field '" + fieldName + "'.");
+    }
+    THOR_THROW_IF_FALSE(rowIndicesHost.isInitialized());
+    THOR_THROW_IF_FALSE(
+        rowIndicesHost.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(rowIndicesHost.getDataType() == DataType::UINT64);
+    THOR_THROW_IF_FALSE(rowIndicesHost.getDimensions().size() == 1);
+    THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= rowIndicesHost.getDimensions().front());
+
+    const uint64_t *rowIndices = rowIndicesHost.getMemPtr<uint64_t>();
+    uint64_t active = 0;
+    for (uint64_t row = 0; row < logicalRows; ++row) {
+        const uint64_t sourceRow = rowIndices[row];
+        if (sourceRow >= found->second.valueCounts.size()) {
+            throw std::runtime_error(
+                "Device resident ragged field '" + fieldName +
+                "' selected invalid dataset row " + std::to_string(sourceRow) +
+                " at batch row " + std::to_string(row) + ".");
+        }
+        const uint64_t count = found->second.valueCounts[sourceRow];
+        if (count > maxTotalValues - active) {
+            throw std::runtime_error(
+                "Device resident ragged field '" + fieldName + "' requires " +
+                std::to_string(active + count) + " active values at row " +
+                std::to_string(row) + ", exceeding maxTotalValues=" +
+                std::to_string(maxTotalValues) + ".");
+        }
+        active += count;
+    }
+}
+
+void DeviceResidentNamedDataset::enqueueCompactRaggedFieldMaterialization(
+    const std::string &fieldName,
+    const Tensor &rowIndicesDevice,
+    uint64_t logicalRows,
+    ThorImplementation::RaggedTensor &destination,
+    Stream &stream) const {
+    const auto found = compactRaggedFields.find(fieldName);
+    if (found == compactRaggedFields.end()) {
+        throw std::runtime_error(
+            "DeviceResidentNamedDataset has no compact ragged field '" + fieldName + "'.");
+    }
+    const DatasetLayout::RaggedTensorSpec &spec = found->second.spec;
+    const ThorImplementation::RaggedTensorDescriptor descriptor = destination.getDescriptor();
+    THOR_THROW_IF_FALSE(descriptor.getValuesDataType() == spec.dataType);
+    THOR_THROW_IF_FALSE(descriptor.getTrailingDimensions() == spec.valueDimensions);
+    THOR_THROW_IF_FALSE(descriptor.getBatchSize() == rowIndicesDevice.getDimensions().front());
+    Tensor values = destination.getValues();
+    Tensor offsets = destination.getOffsets();
+    launchDeviceResidentRaggedMaterializationKernel(
+        compactRecords,
+        found->second.values,
+        numExamples,
+        layout.recordSizeBytes(),
+        spec.referenceOffsetBytes,
+        spec.storedValueCount(),
+        spec.valueNumBytes(),
+        logicalRows,
+        values,
+        offsets,
+        rowIndicesDevice,
+        stream);
 }
 
 void DeviceResidentNamedDataset::enqueueCompactFieldMaterialization(

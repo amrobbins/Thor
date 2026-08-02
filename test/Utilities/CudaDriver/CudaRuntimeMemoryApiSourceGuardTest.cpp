@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -89,6 +90,48 @@ TEST(CudaRuntimeMemoryApiArchitecture, ActiveSourcesDoNotUseDefaultStreamMemcpyO
     EXPECT_TRUE(violations.empty())
         << "Thor uses cudaStreamNonBlocking execution streams; non-Async/default-stream CUDA memory APIs are unordered with them. "
            "Use the Async API with an explicit Thor stream.\n"
+        << [&]() {
+               std::ostringstream message;
+               for (const std::string& violation : violations) {
+                   message << violation << '\n';
+               }
+               return message.str();
+           }();
+}
+
+
+TEST(CudaKernelArchitecture, ActiveSourcesDoNotUseDeviceTrapsOrRuntimeAsserts) {
+    const std::vector<std::filesystem::path> sourceRoots = {
+        std::filesystem::path(SOURCE_DIR) / "Utilities",
+        std::filesystem::path(SOURCE_DIR) / "DeepLearning",
+        std::filesystem::path(SOURCE_DIR) / "bindings",
+    };
+    for (const std::filesystem::path& sourceRoot : sourceRoots) {
+        ASSERT_TRUE(std::filesystem::exists(sourceRoot));
+    }
+
+    // Kernel launch contracts belong at the host/API boundary. Device traps and
+    // runtime assertions poison the CUDA context on failure and add validation
+    // machinery to code that should execute under an already-validated contract.
+    // Split the trap token so this guard does not flag its own source text.
+    const std::string trapToken = std::string("tr") + "ap;";
+    const std::string assertFailToken = std::string("__assert") + "fail";
+    const std::regex runtimeAssertPattern(R"((^|[^A-Za-z0-9_])assert\s*\()",
+                                          std::regex_constants::ECMAScript);
+
+    std::vector<std::string> violations;
+    forEachActiveSourceFile(sourceRoots, [&](const std::filesystem::path& path) {
+        const std::string contents = readTextFile(path);
+        if (contents.find(trapToken) != std::string::npos) {
+            violations.push_back(std::filesystem::relative(path, SOURCE_DIR).generic_string() + ": device trap");
+        }
+        if (contents.find(assertFailToken) != std::string::npos || std::regex_search(contents, runtimeAssertPattern)) {
+            violations.push_back(std::filesystem::relative(path, SOURCE_DIR).generic_string() + ": runtime assert");
+        }
+    });
+
+    EXPECT_TRUE(violations.empty())
+        << "Thor production CUDA paths must rely on host-validated launch contracts, not device traps/assertions.\n"
         << [&]() {
                std::ostringstream message;
                for (const std::string& violation : violations) {

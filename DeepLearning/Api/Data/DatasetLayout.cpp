@@ -596,7 +596,7 @@ void DatasetLayout::validateRequestedLayoutExact(const DatasetLayout &requested)
 json DatasetLayout::toJson() const {
     validate();
     json root;
-    root["format"] = layoutRaggedTensors.empty() ? FORMAT : RAGGED_FORMAT;
+    root["format"] = FORMAT;
     root["record_size_bytes"] = layoutRecordSizeBytes;
     root["tensors"] = json::object();
 
@@ -683,15 +683,8 @@ DatasetLayout DatasetLayout::fromJson(const json &j) {
         throw std::runtime_error("DatasetLayout manifest is missing required string field 'format'.");
     }
     const std::string format = j.at("format").get<std::string>();
-    if (format != FORMAT && format != RAGGED_FORMAT) {
+    if (format != FORMAT) {
         throw std::runtime_error("DatasetLayout unsupported manifest format: " + format);
-    }
-    if (format == FORMAT && j.contains("ragged_tensors")) {
-        throw std::runtime_error("DatasetLayout V1 manifests cannot contain ragged tensors; rewrite using the V2 writer.");
-    }
-    if (format == RAGGED_FORMAT &&
-        (!j.contains("ragged_tensors") || !j.at("ragged_tensors").is_object() || j.at("ragged_tensors").empty())) {
-        throw std::runtime_error("DatasetLayout V2 manifests must contain at least one ragged tensor.");
     }
     const uint64_t recordSizeBytes = j.at("record_size_bytes").get<uint64_t>();
     const json &tensorJson = j.at("tensors");
@@ -708,9 +701,6 @@ DatasetLayout DatasetLayout::fromJson(const json &j) {
 
     std::vector<RaggedTensorSpec> ragged;
     if (j.contains("ragged_tensors")) {
-        if (format != RAGGED_FORMAT) {
-            throw std::runtime_error("DatasetLayout ragged tensors require manifest format thor.dataset.v2.");
-        }
         const json &raggedJson = j.at("ragged_tensors");
         if (!raggedJson.is_object()) throw std::runtime_error("DatasetLayout manifest ragged_tensors field must be an object.");
         for (const auto &item : raggedJson.items()) {

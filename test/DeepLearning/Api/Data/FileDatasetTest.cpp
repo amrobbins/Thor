@@ -123,8 +123,8 @@ TEST(FileDatasetTest, RejectsManifestWithoutDatasetIdWithMigrationMessage) {
     std::filesystem::remove_all(datasetPath);
 }
 
-TEST(FileDatasetTest, OpensRaggedV2DatasetAndPublishesLogicalRaggedSchema) {
-    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_v2");
+TEST(FileDatasetTest, OpensRaggedDatasetAndPublishesLogicalRaggedSchema) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged");
     DatasetLayout layout = DatasetLayout::fromTensorShapes(
         {},
         std::vector<DatasetLayout::RaggedTensorShape>{

@@ -541,6 +541,8 @@ class StampedSegmentedReduction {
 
    private:
     const std::shared_ptr<CompiledSegmentedReduction> compiled_segmented_reduction;
+    const Tensor input;
+    const Tensor segment_offsets;
     mutable Tensor output;
     std::shared_ptr<StampedCubSegmentedReduction> cub_segmented_reduction;
     Stream stream;
@@ -989,6 +991,8 @@ class StampedReduceMinMaxBackward {
     const std::optional<Tensor> segment_offsets;
     std::shared_ptr<StampedCubArgReduction> cub_arg_reduction;
     std::shared_ptr<StampedCubSegmentedArgReduction> cub_segmented_arg_reduction;
+    std::optional<CubArgReductionOp> segmented_op;
+    uint64_t segmented_elements_per_value = 1;
     ReduceMinMaxBackwardScatterPlan scatter_plan;
     Stream stream;
 };

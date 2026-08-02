@@ -1,8 +1,10 @@
 # Thor Reduction Architecture
 
 Thor's central GPU reduction implementation lives in `Utilities/TensorOperations/Cub`.
-Dense expression reductions and ragged offset-segmented reductions use these utilities directly; they do not stage
-inputs through compatibility tensors and do not call `cudnnReduceTensor`.
+Dense expression reductions and scalar ragged offset-segmented reductions use these utilities directly; they do not
+stage inputs through compatibility tensors and do not call `cudnnReduceTensor`. Vector-valued ragged reductions keep
+that same FP32 numeric contract but use the dedicated `(row, trailing-element)` expression kernel because row-major
+`[value, component]` storage interleaves components and therefore is not a contiguous CUB segment per component.
 
 ## Numeric contract
 
@@ -29,12 +31,15 @@ local flattened indices: NaNs propagate, and the lowest logical index wins equal
 
 ## Offset-segmented path
 
-`CubSegmentedReduction` owns ragged sum, mean, min, and max. `CubSegmentedArgReduction` owns offset-segmented
+`CubSegmentedReduction` owns the scalar fast path for ragged sum, mean, min, and max. Vector-valued ragged
+sum/mean/min/max use `SegmentedReductionKernel` while preserving the same FP32 accumulation and empty-row identities.
+`CubSegmentedArgReduction` owns offset-segmented
 argmin/argmax and returns one global packed winner index per row; empty rows return the maximum index sentinel, NaNs
 propagate, and the lowest packed index wins ties. `RaggedExpression::segment_mean()` emits the direct segmented-mean
-stage, so FP32 accumulation, division by row length, empty-row handling, and output conversion happen in one CUB
-operation without materializing row lengths or segmented sums. Segment offsets are validated while stamping, and empty
-segments use the explicit identities defined by `CubReduction::getFp32EmptyReductionValue()`.
+stage, so FP32 accumulation, division by row length, empty-row handling, and output conversion happen in one reduction
+stage without materializing row lengths or segmented sums. Scalar values use CUB and vector-valued rows use the dedicated
+expression kernel. Segment offsets are validated while stamping, and empty segments use the same explicit identities as
+`CubReduction::getFp32EmptyReductionValue()`.
 
 ## Expression integration
 

@@ -27,10 +27,6 @@ __global__ void correctCtcEmptyTargetRows(const float* activations,
         return;
 
     const int inputLength = inputLengths[batch];
-    if (inputLength < 0 || inputLength > static_cast<int>(maxTimeSteps)) {
-        asm("trap;");
-        return;
-    }
 
     float cost = 0.0f;
     const uint64_t batchBase = static_cast<uint64_t>(batch) * maxTimeSteps * numClasses;
@@ -75,9 +71,6 @@ __global__ void scaleCtcGradientTensor(float* gradients,
         const uint32_t t = static_cast<uint32_t>((index / numClasses) % maxTimeSteps);
         const uint32_t b = static_cast<uint32_t>(index / (static_cast<uint64_t>(maxTimeSteps) * numClasses));
         const int validLength = inputLengths[b];
-        if (validLength < 0 || validLength > static_cast<int>(maxTimeSteps)) {
-            asm("trap;");
-        }
         if (t < static_cast<uint32_t>(validLength)) {
             gradients[index] *= scale;
         } else {

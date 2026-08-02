@@ -6,12 +6,14 @@
 #include "DeepLearning/Implementation/Data/Materialization/DeviceDatasetMaterialization.h"
 #include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
 
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
+#include <vector>
 #include <utility>
 
 class Stream;
@@ -20,10 +22,10 @@ class Stream;
  * Canonical device-resident storage for one immutable named dataset.
  *
  * Dense-only datasets may store canonical tensors in dataset row order. For a
- * file dataset with windowed fields, the compact representation instead stores
- * the physical indexed records, source sequences, and affine-reference
- * metadata. Direct and window outputs are materialized only for the selected
- * batch rows.
+ * file dataset with windowed or ragged fields, the compact representation
+ * stores the physical indexed records plus the required source sidecars and
+ * metadata. Direct/window outputs are deferred references; ragged outputs are
+ * gathered into reusable batch-capacity buffers for the selected rows.
  */
 class DeviceResidentNamedDataset {
    public:
@@ -58,8 +60,22 @@ class DeviceResidentNamedDataset {
     [[nodiscard]] bool hasCompactField(const std::string &name) const;
     [[nodiscard]] bool hasCompactDirectField(const std::string &name) const;
     [[nodiscard]] bool hasCompactWindowField(const std::string &name) const;
+    [[nodiscard]] bool hasCompactRaggedField(const std::string &name) const;
     [[nodiscard]] const ThorImplementation::Tensor &field(Thor::DatasetFieldId id) const;
     [[nodiscard]] const ThorImplementation::Tensor &tensor(const std::string &name) const;
+
+    void validateCompactRaggedBatchCapacity(
+        const std::string &fieldName,
+        const ThorImplementation::Tensor &rowIndicesHost,
+        uint64_t logicalRows,
+        uint64_t maxTotalValues) const;
+
+    void enqueueCompactRaggedFieldMaterialization(
+        const std::string &fieldName,
+        const ThorImplementation::Tensor &rowIndicesDevice,
+        uint64_t logicalRows,
+        ThorImplementation::RaggedTensor &destination,
+        Stream &stream) const;
 
     void enqueueCompactFieldMaterialization(
         const std::string &fieldName,
@@ -70,6 +86,12 @@ class DeviceResidentNamedDataset {
    private:
     struct CompactDirectFieldStorage {
         DatasetLayout::TensorSpec spec;
+    };
+
+    struct CompactRaggedFieldStorage {
+        DatasetLayout::RaggedTensorSpec spec;
+        ThorImplementation::Tensor values;
+        std::vector<uint64_t> valueCounts;
     };
 
     struct CompactWindowSourceStorage {
@@ -110,6 +132,7 @@ class DeviceResidentNamedDataset {
     bool compactFileStorage = false;
     ThorImplementation::Tensor compactRecords;
     std::map<std::string, CompactDirectFieldStorage> compactDirectFields;
+    std::map<std::string, CompactRaggedFieldStorage> compactRaggedFields;
     std::map<std::string, CompactWindowSourceStorage> compactSources;
     std::map<std::string, CompactWindowFieldStorage> compactWindowFields;
     std::map<std::string, CompactAffineFieldStorage> compactAffineFields;

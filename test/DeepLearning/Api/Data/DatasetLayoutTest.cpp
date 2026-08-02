@@ -320,7 +320,7 @@ TEST(DatasetLayoutTest, AffineWindowReferencesRequireNoPerExampleRecordBytes) {
               DatasetLayout::WindowedTensorReferenceMode::AFFINE);
 }
 
-TEST(DatasetLayoutTest, RejectsInvalidV2UnsupportedVersionsAndOldV1Shape) {
+TEST(DatasetLayoutTest, RejectsUnsupportedManifestVersionsAndIncompleteCurrentManifest) {
     nlohmann::json manifest = DatasetLayout::fromTensorShapes(
         {},
         {DatasetLayout::WindowedTensorSourceShape("tokens", {}, DataType::UINT8, DataType::UINT64)},
@@ -332,9 +332,9 @@ TEST(DatasetLayoutTest, RejectsInvalidV2UnsupportedVersionsAndOldV1Shape) {
                                             std::nullopt,
                                             DatasetLayout::WindowedTensorReferenceMode::AFFINE)})
                                       .toJson();
-    nlohmann::json oldV1 = manifest;
-    oldV1.at("windowed_tensors").at("examples").erase("reference_mode");
-    EXPECT_THROW(DatasetLayout::fromJson(oldV1), std::runtime_error);
+    nlohmann::json missingReferenceMode = manifest;
+    missingReferenceMode.at("windowed_tensors").at("examples").erase("reference_mode");
+    EXPECT_THROW(DatasetLayout::fromJson(missingReferenceMode), std::runtime_error);
 
     manifest["format"] = "thor.dataset.v2";
     EXPECT_THROW(DatasetLayout::fromJson(manifest), std::runtime_error);
@@ -342,7 +342,7 @@ TEST(DatasetLayoutTest, RejectsInvalidV2UnsupportedVersionsAndOldV1Shape) {
     EXPECT_THROW(DatasetLayout::fromJson(manifest), std::runtime_error);
 }
 
-TEST(DatasetLayoutTest, RaggedTensorShapesReserveFixedReferencesAndUseV2Manifest) {
+TEST(DatasetLayoutTest, RaggedTensorShapesReserveFixedReferencesInCurrentManifest) {
     DatasetLayout layout = DatasetLayout::fromTensorShapes(
         vector<DatasetLayout::TensorShape>{DatasetLayout::TensorShape("dense", {2}, DataType::FP32)},
         vector<DatasetLayout::RaggedTensorShape>{
@@ -360,7 +360,7 @@ TEST(DatasetLayoutTest, RaggedTensorShapesReserveFixedReferencesAndUseV2Manifest
     EXPECT_EQ(layout.recordSizeBytes(), 40);
 
     nlohmann::json j = layout.toJson();
-    EXPECT_EQ(j.at("format").get<string>(), DatasetLayout::RAGGED_FORMAT);
+    EXPECT_EQ(j.at("format").get<string>(), DatasetLayout::FORMAT);
     EXPECT_EQ(j.at("ragged_tensors").at("labels").at("value_shape").get<vector<uint64_t>>(), vector<uint64_t>{});
     EXPECT_EQ(j.at("ragged_tensors").at("features").at("value_shape").get<vector<uint64_t>>(), vector<uint64_t>({3}));
     EXPECT_FALSE(j.at("ragged_tensors").at("labels").contains("storage"));
@@ -370,7 +370,7 @@ TEST(DatasetLayoutTest, RaggedTensorShapesReserveFixedReferencesAndUseV2Manifest
     EXPECT_NO_THROW(parsed.validateRequestedLayoutExact(layout));
 }
 
-TEST(DatasetLayoutTest, RaggedStorageRoundTripValidatesValueAlignmentAndV1CannotContainRaggedMetadata) {
+TEST(DatasetLayoutTest, RaggedStorageRoundTripValidatesValueAlignment) {
     DatasetLayout layout = DatasetLayout::fromTensorShapes(
         {}, vector<DatasetLayout::RaggedTensorShape>{DatasetLayout::RaggedTensorShape("labels", {}, DataType::INT32)});
     nlohmann::json j = layout.toJson();
@@ -390,14 +390,6 @@ TEST(DatasetLayoutTest, RaggedStorageRoundTripValidatesValueAlignmentAndV1Cannot
     nlohmann::json wrongCount = j;
     wrongCount["ragged_tensors"]["labels"]["storage"]["num_values"] = 4;
     EXPECT_THROW(DatasetLayout::fromJson(wrongCount), std::runtime_error);
-
-    nlohmann::json v1 = j;
-    v1["format"] = DatasetLayout::FORMAT;
-    EXPECT_THROW(DatasetLayout::fromJson(v1), std::runtime_error);
-
-    nlohmann::json v2WithoutRagged = j;
-    v2WithoutRagged.erase("ragged_tensors");
-    EXPECT_THROW(DatasetLayout::fromJson(v2WithoutRagged), std::runtime_error);
 }
 
 TEST(DatasetLayoutTest, RaggedTensorValidationRejectsDuplicateNamesAndBadReferenceWidths) {

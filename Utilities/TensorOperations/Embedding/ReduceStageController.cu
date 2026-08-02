@@ -70,33 +70,49 @@ static_assert(TWO_STAGE_FINALIZE_THREADS == 1024U);
 static_assert(TWO_STAGE_FINALIZE_WARPS == 32U);
 static_assert(TWO_STAGE_FINALIZE_WARP_COUNT_WORDS == 33U);
 
-#ifndef NDEBUG
-#define THOR_DEVICE_TRAP_IF(cond) \
-    do {                          \
-        if (cond) {               \
-            asm("trap;");         \
-        }                         \
-    } while (0)
-#else
-#define THOR_DEVICE_TRAP_IF(cond) \
-    do {                          \
-    } while (0)
-#endif
-
-__device__ __forceinline__ cudaGraphDeviceNode_t loadEmbeddingSparseGradientTargetNode(const cudaGraphDeviceNode_t* targetNode) {
-    THOR_DEVICE_TRAP_IF(targetNode == nullptr);
-    cudaGraphDeviceNode_t node = *targetNode;
-    THOR_DEVICE_TRAP_IF(node == nullptr);
-    return node;
+void validateReduceGridUpdateConfig(const DeviceUpdatableKernelNodeDeviceHandle* nodeHandle,
+                                    EmbeddingSparseGradientReduceGridUpdateConfig config,
+                                    Stream stream,
+                                    const char* label) {
+    if (nodeHandle == nullptr) {
+        return;
+    }
+    if (!nodeHandle->isInitialized()) {
+        throw std::invalid_argument(std::string("Embedding sparse-gradient ") + label + " node handle is not initialized.");
+    }
+    if (nodeHandle->getGpuNum() != stream.getGpuNum()) {
+        throw std::invalid_argument(std::string("Embedding sparse-gradient ") + label + " node handle GPU does not match the launch stream.");
+    }
+    if (config.reduceRowsPerGridX == 0U || config.reduceGridDimY == 0U || config.minReduceGridDimX == 0U ||
+        config.maxReduceGridDimX == 0U || config.minReduceGridDimX > config.maxReduceGridDimX ||
+        config.maxReduceGridDimY == 0U || config.reduceGridDimY > config.maxReduceGridDimY) {
+        throw std::invalid_argument(std::string("Embedding sparse-gradient ") + label + " grid update configuration is invalid.");
+    }
 }
 
-__device__ __forceinline__ uint32_t checkedEmbeddingSparseGradientGridDim(uint64_t value, uint32_t minGrid, uint32_t maxGrid) {
-    THOR_DEVICE_TRAP_IF(minGrid == 0U || maxGrid == 0U || minGrid > maxGrid);
+void validateOptionalNodeHandle(const DeviceUpdatableKernelNodeDeviceHandle* nodeHandle, Stream stream, const char* label) {
+    if (nodeHandle == nullptr) {
+        return;
+    }
+    if (!nodeHandle->isInitialized()) {
+        throw std::invalid_argument(std::string("Embedding sparse-gradient ") + label + " node handle is not initialized.");
+    }
+    if (nodeHandle->getGpuNum() != stream.getGpuNum()) {
+        throw std::invalid_argument(std::string("Embedding sparse-gradient ") + label + " node handle GPU does not match the launch stream.");
+    }
+}
+
+__device__ __forceinline__ cudaGraphDeviceNode_t loadEmbeddingSparseGradientTargetNode(const cudaGraphDeviceNode_t* targetNode) {
+    return *targetNode;
+}
+
+__device__ __forceinline__ uint32_t embeddingSparseGradientGridDim(uint64_t value, uint32_t minGrid, uint32_t maxGrid) {
     uint64_t clamped = value;
     if (clamped < static_cast<uint64_t>(minGrid)) {
         clamped = static_cast<uint64_t>(minGrid);
+    } else if (clamped > static_cast<uint64_t>(maxGrid)) {
+        clamped = static_cast<uint64_t>(maxGrid);
     }
-    THOR_DEVICE_TRAP_IF(clamped > static_cast<uint64_t>(maxGrid) || clamped > 0xffffffffULL);
     return static_cast<uint32_t>(clamped);
 }
 
@@ -104,18 +120,14 @@ __device__ __forceinline__ void setEmbeddingSparseGradientKernelNodeEnabled(cons
     if (node == nullptr) {
         return;
     }
-    cudaError_t status = cudaGraphKernelNodeSetEnabled(loadEmbeddingSparseGradientTargetNode(node), enabled);
-    if (status != cudaSuccess) {
-        asm("trap;");
-    }
+    (void)cudaGraphKernelNodeSetEnabled(loadEmbeddingSparseGradientTargetNode(node), enabled);
 }
 
 __device__ __forceinline__ void setEmbeddingSparseGradientKernelNodeGridDim(const cudaGraphDeviceNode_t* node, dim3 gridDim) {
-    THOR_DEVICE_TRAP_IF(node == nullptr);
-    cudaError_t status = cudaGraphKernelNodeSetGridDim(loadEmbeddingSparseGradientTargetNode(node), gridDim);
-    if (status != cudaSuccess) {
-        asm("trap;");
+    if (node == nullptr) {
+        return;
     }
+    (void)cudaGraphKernelNodeSetGridDim(loadEmbeddingSparseGradientTargetNode(node), gridDim);
 }
 
 __device__ __forceinline__ void updateEmbeddingSparseGradientBucketReduceGrid(const cudaGraphDeviceNode_t* reduceNode,
@@ -124,10 +136,9 @@ __device__ __forceinline__ void updateEmbeddingSparseGradientBucketReduceGrid(co
     if (reduceNode == nullptr) {
         return;
     }
-    THOR_DEVICE_TRAP_IF(config.reduceRowsPerGridX == 0U || config.reduceGridDimY == 0U || config.reduceGridDimY > config.maxReduceGridDimY);
     const uint64_t packedGridX =
         (rows + static_cast<uint64_t>(config.reduceRowsPerGridX) - 1ULL) / static_cast<uint64_t>(config.reduceRowsPerGridX);
-    const uint32_t gridX = checkedEmbeddingSparseGradientGridDim(packedGridX, config.minReduceGridDimX, config.maxReduceGridDimX);
+    const uint32_t gridX = embeddingSparseGradientGridDim(packedGridX, config.minReduceGridDimX, config.maxReduceGridDimX);
     setEmbeddingSparseGradientKernelNodeGridDim(reduceNode, dim3(gridX, config.reduceGridDimY, 1U));
 }
 
@@ -259,7 +270,6 @@ __global__ void finalizeAndBucketizeEmbeddingSparseGradientRowsKernel(
         sharedState->ultraPartialTotal = 0U;
 
         if (twoStageClassifyNode != nullptr || twoStageAccumulateNode != nullptr) {
-            THOR_DEVICE_TRAP_IF(twoStageClassifyNode == nullptr || twoStageAccumulateNode == nullptr);
             if (useTwoStage) {
                 const uint32_t stageBlocks = ceilDivU32(validRuns, TWO_STAGE_FINALIZE_RUNS_PER_BLOCK);
                 setEmbeddingSparseGradientKernelNodeGridDim(twoStageClassifyNode, dim3(stageBlocks, 1U, 1U));
@@ -272,7 +282,6 @@ __global__ void finalizeAndBucketizeEmbeddingSparseGradientRowsKernel(
                 outputNumRows[0] = static_cast<RowT>(validRuns);
             }
         } else {
-            THOR_DEVICE_TRAP_IF(useTwoStage);
             outputNumRows[0] = static_cast<RowT>(validRuns);
         }
     }
@@ -1047,6 +1056,16 @@ void launchFinalizeAndBucketizeEmbeddingSparseGradientRows(const void* outputRow
                                                            Stream stream) {
     initializeEmbeddingKernelsSharedAttributes();
 
+    validateReduceGridUpdateConfig(lowReduceNodeHandle, lowReduceGridConfig, stream, "low-reduction");
+    validateReduceGridUpdateConfig(highReduceNodeHandle, highReduceGridConfig, stream, "high-reduction");
+    validateReduceGridUpdateConfig(ultraHighPartialReduceNodeHandle, ultraHighPartialReduceGridConfig, stream, "ultra-partial-reduction");
+    validateReduceGridUpdateConfig(ultraHighReduceNodeHandle, ultraHighReduceGridConfig, stream, "ultra-reduction");
+    validateOptionalNodeHandle(twoStageClassifyNodeHandle, stream, "two-stage classify");
+    validateOptionalNodeHandle(twoStageAccumulateNodeHandle, stream, "two-stage accumulate");
+    if ((twoStageClassifyNodeHandle == nullptr) != (twoStageAccumulateNodeHandle == nullptr)) {
+        throw std::invalid_argument("Embedding sparse-gradient two-stage node handles must either both be present or both be absent.");
+    }
+
     const cudaGraphDeviceNode_t* lowReduceNodePtr = lowReduceNodeHandle != nullptr ? lowReduceNodeHandle->devicePtr() : nullptr;
     const cudaGraphDeviceNode_t* highReduceNodePtr = highReduceNodeHandle != nullptr ? highReduceNodeHandle->devicePtr() : nullptr;
     const cudaGraphDeviceNode_t* ultraHighPartialReduceNodePtr =
@@ -1201,6 +1220,11 @@ EmbeddingSparseGradientTwoStageFinalizeCapturedNodes captureTwoStageFinalizeAndB
     EmbeddingSparseGradientReduceGridUpdateConfig ultraHighPartialReduceGridConfig,
     EmbeddingSparseGradientReduceGridUpdateConfig ultraHighReduceGridConfig,
     Stream stream) {
+    validateReduceGridUpdateConfig(lowReduceNodeHandle, lowReduceGridConfig, stream, "low-reduction");
+    validateReduceGridUpdateConfig(highReduceNodeHandle, highReduceGridConfig, stream, "high-reduction");
+    validateReduceGridUpdateConfig(ultraHighPartialReduceNodeHandle, ultraHighPartialReduceGridConfig, stream, "ultra-partial-reduction");
+    validateReduceGridUpdateConfig(ultraHighReduceNodeHandle, ultraHighReduceGridConfig, stream, "ultra-reduction");
+
     const cudaGraphDeviceNode_t* lowReduceNodePtr = lowReduceNodeHandle != nullptr ? lowReduceNodeHandle->devicePtr() : nullptr;
     const cudaGraphDeviceNode_t* highReduceNodePtr = highReduceNodeHandle != nullptr ? highReduceNodeHandle->devicePtr() : nullptr;
     const cudaGraphDeviceNode_t* ultraHighPartialReduceNodePtr =

@@ -365,7 +365,9 @@ struct StageNodeKeyHash {
         for (uint64_t stride : k.view_strides)
             hashCombine(h, std::hash<uint64_t>{}(stride));
         hashCombine(h, std::hash<uint64_t>{}(k.view_element_offset));
-        if (k.op == ExprOp::RAGGED_VALUEWISE_EXTENT || k.op == ExprOp::SEGMENTED_BROADCAST) {
+        if (k.op == ExprOp::RAGGED_VALUEWISE_EXTENT || k.op == ExprOp::SEGMENTED_BROADCAST ||
+            k.op == ExprOp::SEGMENTED_REDUCE_SUM || k.op == ExprOp::SEGMENTED_REDUCE_MIN ||
+            k.op == ExprOp::SEGMENTED_REDUCE_MAX || k.op == ExprOp::SEGMENTED_REDUCE_MEAN) {
             hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_batch_size));
             hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_max_active_values));
             hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_elements_per_value));
@@ -436,7 +438,9 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.rope_allow_in_place_materialization = n.rope_allow_in_place_materialization;
     key.attention_use_bias = n.attention_use_bias;
     key.attention_dropout_probability_bits = scalarBits(n.attention_dropout_probability);
-    if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT || n.op == ExprOp::SEGMENTED_BROADCAST) {
+    if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT || n.op == ExprOp::SEGMENTED_BROADCAST ||
+        n.op == ExprOp::SEGMENTED_REDUCE_SUM || n.op == ExprOp::SEGMENTED_REDUCE_MIN ||
+        n.op == ExprOp::SEGMENTED_REDUCE_MAX || n.op == ExprOp::SEGMENTED_REDUCE_MEAN) {
         key.ragged_runtime_batch_size = n.ragged_runtime_batch_size;
         key.ragged_runtime_max_active_values = n.ragged_runtime_max_active_values;
         key.ragged_runtime_elements_per_value = n.ragged_runtime_elements_per_value;
@@ -1494,8 +1498,14 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
 
     if (node.op == ExprOp::SEGMENTED_BROADCAST) {
         return std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ",maxActive=" +
-               std::to_string(node.ragged_runtime_max_active_values) + ",normalize=" +
+               std::to_string(node.ragged_runtime_max_active_values) + ",elementsPerValue=" +
+               std::to_string(node.ragged_runtime_elements_per_value) + ",normalize=" +
                std::to_string(node.segmented_broadcast_normalize_by_length ? 1 : 0) + ")";
+    }
+
+    if (isSegmentedReduceOp(node.op)) {
+        return std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ",elementsPerValue=" +
+               std::to_string(node.ragged_runtime_elements_per_value) + ")";
     }
 
     if (isCommutativeStageOp(node.op) && rhs < lhs) {
@@ -1857,7 +1867,7 @@ shared_ptr<CompiledSegmentedReduction> EquationCompiler::compileSegmentedReducti
         throw std::runtime_error("Segmented-reduction node missing resolved output_dtype.");
     }
     if (!CubSegmentedReduction::isOffsetDataTypeSupported(offsets_node.input_tensor_dtype.value())) {
-        throw std::runtime_error("Expression segmented-reduction offsets dtype is not supported by the central CUB reducer.");
+        throw std::runtime_error("Expression segmented-reduction offsets dtype must be UINT32 or UINT64.");
     }
 
     const DataType input_dtype = input_node.input_tensor_dtype.value();
@@ -1865,7 +1875,7 @@ shared_ptr<CompiledSegmentedReduction> EquationCompiler::compileSegmentedReducti
         throw std::runtime_error("Expression segmented-reduction currently requires input/output dtypes to match.");
     }
     if (!CubSegmentedReduction::isInputDataTypeSupported(input_dtype)) {
-        throw std::runtime_error("Expression segmented-reduction input dtype is not supported by the central CUB reducer.");
+        throw std::runtime_error("Expression segmented-reduction input dtype is not supported.");
     }
     switch (node.op) {
         case ExprOp::SEGMENTED_REDUCE_SUM:
@@ -1877,7 +1887,15 @@ shared_ptr<CompiledSegmentedReduction> EquationCompiler::compileSegmentedReducti
             throw std::runtime_error("Unsupported segmented-reduction op.");
     }
 
-    return make_shared<CompiledSegmentedReduction>(node.op, input_dtype, node.output_dtype.value(), offsets_node.input_tensor_dtype.value());
+    if (node.ragged_runtime_elements_per_value == 0) {
+        throw std::runtime_error("Expression segmented-reduction elements-per-value metadata must be non-zero.");
+    }
+
+    return make_shared<CompiledSegmentedReduction>(node.op,
+                                                   input_dtype,
+                                                   node.output_dtype.value(),
+                                                   offsets_node.input_tensor_dtype.value(),
+                                                   node.ragged_runtime_elements_per_value);
 }
 
 shared_ptr<CompiledSegmentedBroadcast> EquationCompiler::compileSegmentedBroadcast(const PhysicalExpression& expr) {
@@ -1895,7 +1913,7 @@ shared_ptr<CompiledSegmentedBroadcast> EquationCompiler::compileSegmentedBroadca
     if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
         throw std::runtime_error("Segmented-broadcast node is missing per-segment values or offsets input.");
     }
-    if (node.ragged_runtime_max_active_values == 0) {
+    if (node.ragged_runtime_max_active_values == 0 || node.ragged_runtime_elements_per_value == 0) {
         throw std::runtime_error("Segmented-broadcast node is missing packed output-capacity metadata.");
     }
 
@@ -1930,6 +1948,7 @@ shared_ptr<CompiledSegmentedBroadcast> EquationCompiler::compileSegmentedBroadca
                                                    node.output_dtype.value(),
                                                    offsets_node.input_tensor_dtype.value(),
                                                    node.ragged_runtime_max_active_values,
+                                                   node.ragged_runtime_elements_per_value,
                                                    node.segmented_broadcast_normalize_by_length);
 }
 
@@ -3007,9 +3026,6 @@ shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBa
         if (!isCanonicalRowPartitionOffsetDataType(offset_dtype.value())) {
             throw std::runtime_error("Segmented reduce-min/max backward offsets must have UINT32 or UINT64 dtype.");
         }
-        if (!CubSegmentedArgReduction::isOffsetDataTypeSupported(offset_dtype.value())) {
-            throw std::runtime_error("Segmented reduce-min/max backward offsets dtype is not supported by the CUB backend.");
-        }
         if (!node.reduction_axes.empty() || !node.squeeze_axes.empty()) {
             throw std::runtime_error("Segmented reduce-min/max backward must not carry dense reduction axes.");
         }
@@ -3020,8 +3036,8 @@ shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBa
     }
 
     const DataType input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
-    if (segmented && !CubSegmentedArgReduction::isInputDataTypeSupported(input_dtype)) {
-        throw std::runtime_error("Segmented reduce-min/max backward input dtype is not supported by the CUB arg-reduction backend.");
+    if (segmented && node.ragged_runtime_elements_per_value == 0) {
+        throw std::runtime_error("Segmented reduce-min/max backward is missing elements-per-value metadata.");
     }
 
     return make_shared<CompiledReduceMinMaxBackward>(node.op,

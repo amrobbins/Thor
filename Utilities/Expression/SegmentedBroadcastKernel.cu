@@ -5,6 +5,7 @@
 #include <cuda_fp8.h>
 
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 
 #include "Utilities/Common/LowPrecisionFloat.h"
@@ -83,32 +84,25 @@ template <typename T, typename OffsetT>
 __global__ void segmentedBroadcastKernel(const T* per_segment_values,
                                          const OffsetT* offsets,
                                          T* output,
-                                         uint64_t batch_size,
-                                         uint64_t output_capacity,
+                                         uint64_t elements_per_value,
                                          bool normalize_by_segment_length) {
-    const uint64_t row = blockIdx.x;
-    if (row >= batch_size) {
-        return;
-    }
-
+    const uint64_t row = static_cast<uint64_t>(blockIdx.x);
     const uint64_t begin = static_cast<uint64_t>(offsets[row]);
     const uint64_t end = static_cast<uint64_t>(offsets[row + 1]);
-    if (begin > end || end > output_capacity) {
-        return;
-    }
-
     const uint64_t row_length = end - begin;
     if (row_length == 0) {
         return;
     }
 
-    T value = per_segment_values[row];
-    if (normalize_by_segment_length) {
-        value = normalizeByLength<T>(value, row_length);
-    }
-
-    for (uint64_t index = begin + threadIdx.x; index < end; index += blockDim.x) {
-        output[index] = value;
+    const uint64_t row_elements = row_length * elements_per_value;
+    for (uint64_t flat = threadIdx.x; flat < row_elements; flat += blockDim.x) {
+        const uint64_t value_offset = flat / elements_per_value;
+        const uint64_t component = flat - value_offset * elements_per_value;
+        T value = per_segment_values[row * elements_per_value + component];
+        if (normalize_by_segment_length) {
+            value = normalizeByLength<T>(value, row_length);
+        }
+        output[(begin + value_offset) * elements_per_value + component] = value;
     }
 }
 
@@ -116,9 +110,10 @@ template <typename T>
 void dispatchOffsets(const Tensor& per_segment_values,
                      const Tensor& segment_offsets,
                      Tensor& output,
+                     uint64_t elements_per_value,
                      bool normalize_by_segment_length,
                      Stream& stream) {
-    const uint64_t batch_size = per_segment_values.getTotalNumElements();
+    const uint64_t batch_size = per_segment_values.getDimensions()[0];
     if (batch_size == 0) {
         return;
     }
@@ -130,8 +125,7 @@ void dispatchOffsets(const Tensor& per_segment_values,
                 per_segment_values.getMemPtr<T>(),
                 segment_offsets.getMemPtr<uint32_t>(),
                 output.getMemPtr<T>(),
-                batch_size,
-                output.getTotalNumElements(),
+                elements_per_value,
                 normalize_by_segment_length);
             break;
         case DataType::UINT64:
@@ -139,8 +133,7 @@ void dispatchOffsets(const Tensor& per_segment_values,
                 per_segment_values.getMemPtr<T>(),
                 segment_offsets.getMemPtr<uint64_t>(),
                 output.getMemPtr<T>(),
-                batch_size,
-                output.getTotalNumElements(),
+                elements_per_value,
                 normalize_by_segment_length);
             break;
         default:
@@ -164,11 +157,13 @@ void launchSegmentedBroadcast(const Tensor& per_segment_values,
         per_segment_values.getPlacement().getDeviceNum() != stream.getGpuNum()) {
         throw std::runtime_error("Segmented broadcast requires tensors on the execution GPU.");
     }
-    if (per_segment_values.getDimensions().size() != 1 || segment_offsets.getDimensions().size() != 1 ||
-        output.getDimensions().size() != 1) {
-        throw std::runtime_error("Segmented broadcast currently supports rank-1 scalar ragged values only.");
+    if (per_segment_values.getDimensions().empty() || segment_offsets.getDimensions().size() != 1 || output.getDimensions().empty()) {
+        throw std::runtime_error("Segmented broadcast requires per-segment values [B,D...], offsets [B+1], and output [N,D...].");
     }
     const uint64_t batch_size = per_segment_values.getDimensions()[0];
+    if (batch_size == 0 || batch_size > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::runtime_error("Segmented broadcast batch size exceeds CUDA grid.x capacity.");
+    }
     if (segment_offsets.getDimensions()[0] != batch_size + 1) {
         throw std::runtime_error("Segmented broadcast offsets must have shape [batch_size + 1].");
     }
@@ -176,24 +171,36 @@ void launchSegmentedBroadcast(const Tensor& per_segment_values,
         throw std::runtime_error("Segmented broadcast input and output dtypes must match.");
     }
 
+    // Internal expression aliases may reshape the trailing dimensions while preserving
+    // the dense row-major per-value storage extent (for example [B, 4] <-> [B, 2, 2],
+    // or [B, 1] <-> [B]). The broadcast kernel is intentionally flat over those
+    // trailing elements, so elements-per-value is the execution invariant. Logical
+    // output shape preservation is validated by the compiler/stamping layer.
+    const uint64_t elements_per_value = per_segment_values.getTotalNumElements() / batch_size;
+    if (elements_per_value == 0 || output.getDimensions()[0] == 0 ||
+        output.getTotalNumElements() % output.getDimensions()[0] != 0 ||
+        output.getTotalNumElements() / output.getDimensions()[0] != elements_per_value) {
+        throw std::runtime_error("Segmented broadcast trailing dimensions produce an invalid elements-per-value extent.");
+    }
+
     switch (per_segment_values.getDataType()) {
         case DataType::FP8_E4M3:
-            dispatchOffsets<__nv_fp8_e4m3>(per_segment_values, segment_offsets, output, normalize_by_segment_length, stream);
+            dispatchOffsets<__nv_fp8_e4m3>(per_segment_values, segment_offsets, output, elements_per_value, normalize_by_segment_length, stream);
             break;
         case DataType::FP8_E5M2:
-            dispatchOffsets<__nv_fp8_e5m2>(per_segment_values, segment_offsets, output, normalize_by_segment_length, stream);
+            dispatchOffsets<__nv_fp8_e5m2>(per_segment_values, segment_offsets, output, elements_per_value, normalize_by_segment_length, stream);
             break;
         case DataType::FP16:
-            dispatchOffsets<__half>(per_segment_values, segment_offsets, output, normalize_by_segment_length, stream);
+            dispatchOffsets<__half>(per_segment_values, segment_offsets, output, elements_per_value, normalize_by_segment_length, stream);
             break;
         case DataType::BF16:
-            dispatchOffsets<__nv_bfloat16>(per_segment_values, segment_offsets, output, normalize_by_segment_length, stream);
+            dispatchOffsets<__nv_bfloat16>(per_segment_values, segment_offsets, output, elements_per_value, normalize_by_segment_length, stream);
             break;
         case DataType::FP32:
-            dispatchOffsets<float>(per_segment_values, segment_offsets, output, normalize_by_segment_length, stream);
+            dispatchOffsets<float>(per_segment_values, segment_offsets, output, elements_per_value, normalize_by_segment_length, stream);
             break;
         case DataType::FP64:
-            dispatchOffsets<double>(per_segment_values, segment_offsets, output, normalize_by_segment_length, stream);
+            dispatchOffsets<double>(per_segment_values, segment_offsets, output, elements_per_value, normalize_by_segment_length, stream);
             break;
         default:
             throw std::runtime_error("Segmented broadcast requires a floating-point expression dtype.");

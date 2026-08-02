@@ -82,7 +82,7 @@ TEST(PublicHeaderSurface, GeneratedHeaderListUsesOnlyTheExplicitApiRoot) {
     EXPECT_FALSE(exported.contains("./DeepLearning/Api/Loaders/Batch.h"));
     EXPECT_FALSE(exported.contains("./DeepLearning/Api/Loaders/IndexedNamedBatchSession.h"));
     EXPECT_FALSE(exported.contains("./DeepLearning/Api/Loaders/DeviceResidentNamedBatchSession.h"));
-    EXPECT_FALSE(exported.contains("./DeepLearning/Api/Loaders/DeviceResidentWindowedNamedBatchSession.h"));
+    EXPECT_FALSE(exported.contains("./DeepLearning/Api/Loaders/DeviceResidentFileNamedBatchSession.h"));
     EXPECT_FALSE(exported.contains("./DeepLearning/Api/Loaders/DeviceDatasetMaterialization.h"));
     EXPECT_FALSE(exported.contains("./DeepLearning/Api/Training/DeviceDatasetResidency.h"));
     EXPECT_FALSE(exported.contains("./DeepLearning/Api/Training/DeviceDatasetStorageSelection.h"));

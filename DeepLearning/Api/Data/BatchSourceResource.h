@@ -15,16 +15,21 @@ class BatchSourceResourceState;
  * Copyable reference attached to a logical batch field whose backing storage
  * belongs to a reusable BatchSession slot.
  *
- * A NetworkInput records one event after it has enqueued the final operation
- * that reads the source storage. The owning Batch later seals the resource
- * after all physical submissions have been enqueued. The session can then
- * recycle the slot as soon as every recorded event has completed.
+ * A source may also carry a producer-ready event when its storage is filled
+ * asynchronously. NetworkInput waits on that event before reading the source,
+ * then records one event after it has enqueued the final read. The owning Batch
+ * later seals the resource after all physical submissions have been enqueued.
+ * The session can recycle the slot as soon as producer and consumer events have
+ * completed.
  */
 class BatchSourceReference {
    public:
     BatchSourceReference() = default;
 
     [[nodiscard]] bool isInitialized() const { return state != nullptr; }
+
+    /** Wait for asynchronous producer work, if any, before reading the source. */
+    void waitUntilReady(const Stream& consumingStream) const;
 
     void recordConsumption(const Stream& consumingStream) const;
 
@@ -46,8 +51,8 @@ class BatchSourceReference {
  *
  * Destroying or explicitly releasing the owner seals the resource. New
  * NetworkInput consumers cannot be registered after sealing. The release
- * callback receives all source-consumed events synchronously and transfers
- * ownership back to the BatchSession's pending-reuse queue.
+ * callback receives the source-consumed events plus any producer-ready event
+ * and transfers ownership back to the BatchSession's pending-reuse queue.
  */
 class BatchSourceOwner {
    public:
@@ -55,6 +60,7 @@ class BatchSourceOwner {
 
     BatchSourceOwner() = default;
     explicit BatchSourceOwner(ReleaseCallback releaseCallback);
+    BatchSourceOwner(ReleaseCallback releaseCallback, Event producerReadyEvent);
     ~BatchSourceOwner();
 
     BatchSourceOwner(const BatchSourceOwner&) = delete;

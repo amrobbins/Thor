@@ -9,7 +9,7 @@
 #include "DeepLearning/Api/Data/FileDataset.h"
 #include "DeepLearning/Api/Data/TrainingData.h"
 #include "DeepLearning/Implementation/Data/Sessions/DeviceResidentNamedBatchSession.h"
-#include "DeepLearning/Implementation/Data/Sessions/DeviceResidentWindowedNamedBatchSession.h"
+#include "DeepLearning/Implementation/Data/Sessions/DeviceResidentFileNamedBatchSession.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceDatasetResidency.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedDataset.h"
@@ -147,62 +147,63 @@ uint64_t compactRequiredBytes(
     const DeviceDatasetSessionDescription &session,
     uint64_t batchQueueDepth);
 
-uint64_t estimateDeviceResidentWindowedDatasetStorageBytes(
-    const DatasetMaterializationDescription &dataset) {
+std::set<std::string> windowedTensorNames(const DatasetLayout &layout) {
     std::set<std::string> names;
-    for (const DatasetLayout::WindowedTensorSpec &spec : dataset.layout.windowedTensors()) {
+    for (const DatasetLayout::WindowedTensorSpec &spec : layout.windowedTensors()) {
         names.insert(spec.name);
-        if (spec.maskName.has_value()) {
-            names.insert(spec.maskName.value());
-        }
+        if (spec.maskName.has_value()) names.insert(spec.maskName.value());
     }
-    return DeviceResidentNamedDataset::estimateCompactFileDatasetBytes(
-        dataset,
-        names);
+    return names;
 }
 
-uint64_t estimateDeviceResidentWindowedDatasetRequiredBytes(
-    const DatasetMaterializationDescription &dataset,
-    const DeviceDatasetSessionDescription &session,
-    uint64_t batchQueueDepth) {
-    return compactRequiredBytes(
-        estimateDeviceResidentWindowedDatasetStorageBytes(dataset),
-        session,
-        batchQueueDepth);
-}
-
-bool usesCompactWindowedResidency(
-    const DatasetMaterializationDescription &dataset) {
-    return dataset.source == DatasetMaterializationSource::FILE_DATASET &&
-           dataset.layout.hasWindowedTensors();
-}
-
-std::set<std::string> windowedTensorNames(
-    const DatasetLayout &layout) {
+std::set<std::string> raggedTensorNames(const DatasetLayout &layout) {
     std::set<std::string> names;
-    for (const DatasetLayout::WindowedTensorSpec &spec :
-         layout.windowedTensors()) {
+    for (const DatasetLayout::RaggedTensorSpec &spec : layout.raggedTensors()) {
         names.insert(spec.name);
-        if (spec.maskName.has_value()) {
-            names.insert(spec.maskName.value());
-        }
     }
     return names;
 }
 
 std::set<std::string> directTensorNames(const DatasetLayout &layout) {
     std::set<std::string> names;
-    for (const DatasetLayout::TensorSpec &spec : layout.tensors()) {
-        names.insert(spec.name);
-    }
+    for (const DatasetLayout::TensorSpec &spec : layout.tensors()) names.insert(spec.name);
+    return names;
+}
+
+std::set<std::string> mandatoryCompactFieldNames(const DatasetLayout &layout) {
+    std::set<std::string> names = windowedTensorNames(layout);
+    const std::set<std::string> raggedNames = raggedTensorNames(layout);
+    names.insert(raggedNames.begin(), raggedNames.end());
     return names;
 }
 
 std::set<std::string> allCompactFieldNames(const DatasetLayout &layout) {
-    std::set<std::string> names = windowedTensorNames(layout);
+    std::set<std::string> names = mandatoryCompactFieldNames(layout);
     const std::set<std::string> directNames = directTensorNames(layout);
     names.insert(directNames.begin(), directNames.end());
     return names;
+}
+
+bool usesCompactFileResidency(const DatasetMaterializationDescription &dataset) {
+    return dataset.source == DatasetMaterializationSource::FILE_DATASET &&
+           (dataset.layout.hasWindowedTensors() || dataset.layout.hasRaggedTensors());
+}
+
+uint64_t estimateDeviceResidentCompactDatasetStorageBytes(
+    const DatasetMaterializationDescription &dataset) {
+    return DeviceResidentNamedDataset::estimateCompactFileDatasetBytes(
+        dataset,
+        mandatoryCompactFieldNames(dataset.layout));
+}
+
+uint64_t estimateDeviceResidentCompactDatasetRequiredBytes(
+    const DatasetMaterializationDescription &dataset,
+    const DeviceDatasetSessionDescription &session,
+    uint64_t batchQueueDepth) {
+    return compactRequiredBytes(
+        estimateDeviceResidentCompactDatasetStorageBytes(dataset),
+        session,
+        batchQueueDepth);
 }
 
 uint64_t compactSelectionRingBytes(
@@ -226,14 +227,42 @@ uint64_t compactSelectionRingBytes(
         "Device dataset selection-ring bytes");
 }
 
+uint64_t compactRaggedBatchRingBytes(
+    const DeviceDatasetSessionDescription &session,
+    uint64_t batchQueueDepth) {
+    const uint64_t slotCount = checkedMul(
+        nonEmptySplitCount(session.getSplits()),
+        batchQueueDepth,
+        "Device dataset ragged slot count");
+    uint64_t bytesPerSlot = 0;
+    for (const auto &[fieldId, requirement] : session.getFieldRequirements()) {
+        (void)fieldId;
+        if (!requirement.raggedTensorDescriptor.has_value()) continue;
+        const ThorImplementation::RaggedTensorDescriptor &descriptor =
+            requirement.raggedTensorDescriptor.value();
+        bytesPerSlot = checkedAdd(
+            bytesPerSlot,
+            descriptor.getValuesDescriptor().getArraySizeInBytes(),
+            "Device dataset ragged batch values bytes");
+        bytesPerSlot = checkedAdd(
+            bytesPerSlot,
+            descriptor.getOffsetsDescriptor().getArraySizeInBytes(),
+            "Device dataset ragged batch offsets bytes");
+    }
+    return checkedMul(slotCount, bytesPerSlot, "Device dataset ragged batch ring bytes");
+}
+
 uint64_t compactRequiredBytes(
     uint64_t residentBytes,
     const DeviceDatasetSessionDescription &session,
     uint64_t batchQueueDepth) {
     return checkedAdd(
-        residentBytes,
-        compactSelectionRingBytes(session, batchQueueDepth),
-        "Device dataset compact reference required bytes");
+        checkedAdd(
+            residentBytes,
+            compactSelectionRingBytes(session, batchQueueDepth),
+            "Device dataset compact reference required bytes"),
+        compactRaggedBatchRingBytes(session, batchQueueDepth),
+        "Device dataset compact ragged required bytes");
 }
 
 std::set<DatasetFieldId> allFieldIds(const DatasetSchema &schema) {
@@ -367,25 +396,23 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
     DeviceDatasetResidencyCache &cache =
         ThorImplementation::NamedDatasetRuntimeAccess::residencyCache(*namedDataset);
     const auto started = std::chrono::steady_clock::now();
-    const bool compactWindowedResidency = usesCompactWindowedResidency(dataset);
+    const bool compactFileResidency = usesCompactFileResidency(dataset);
     const bool strictWindowedOnly =
         requested == DeviceDatasetStorage::STRICT_WINDOWED_ONLY;
-    const std::set<std::string> windowNames =
-        compactWindowedResidency ? windowedTensorNames(dataset.layout)
-                                 : std::set<std::string>{};
+    const std::set<std::string> mandatoryNames =
+        compactFileResidency ? mandatoryCompactFieldNames(dataset.layout)
+                             : std::set<std::string>{};
 
-    // File-backed windowed datasets must never enter the expanded canonical
-    // full-dataset path. Other materializable datasets, including memory-backed
-    // datasets and file datasets without windows, retain canonical shared
-    // residency.
-    if (compactWindowedResidency) {
+    // File-backed windowed/ragged datasets stay in compact storage. Other
+    // materializable datasets retain canonical shared residency.
+    if (compactFileResidency) {
         const std::set<std::string> allNames = allCompactFieldNames(dataset.layout);
-        const uint64_t windowResidentBytes =
+        const uint64_t mandatoryResidentBytes =
             DeviceResidentNamedDataset::estimateCompactFileDatasetBytes(
                 dataset,
-                windowNames);
-        const uint64_t windowRequiredBytes = compactRequiredBytes(
-            windowResidentBytes,
+                mandatoryNames);
+        const uint64_t mandatoryRequiredBytes = compactRequiredBytes(
+            mandatoryResidentBytes,
             session,
             batchQueueDepth);
         const uint64_t fullResidentBytes =
@@ -430,7 +457,7 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
                     });
                 DeviceDatasetResidencyAcquisition acquisition = cache.acquire(request);
                 auto effectiveSession =
-                    std::make_shared<DeviceResidentWindowedNamedBatchSession>(
+                    std::make_shared<DeviceResidentFileNamedBatchSession>(
                         dataset,
                         session,
                         acquisition.lease,
@@ -468,9 +495,9 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
 
         // Prefer full compact residency when it fits. If the direct record
         // ranges add too much memory (notably for affine-only windows), retry
-        // with all windowed fields resident and direct fields CPU-backed.
+        // with all mandatory windowed/ragged fields resident and direct fields CPU-backed.
         CompactAttemptFailure fullFailure;
-        if (!strictWindowedOnly && allNames != windowNames) {
+        if (!strictWindowedOnly && allNames != mandatoryNames) {
             if (std::optional<DeviceDatasetStorageSelection> full =
                     attemptCompactResidency(
                         allNames,
@@ -483,30 +510,34 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
             }
         }
 
-        CompactAttemptFailure windowFailure;
-        const char *windowSuccessReason =
-            strictWindowedOnly || allNames != windowNames
-                ? "compact_windowed_residency"
-                : "compact_file_residency";
-        if (std::optional<DeviceDatasetStorageSelection> windowed =
+        CompactAttemptFailure mandatoryFailure;
+        const char *mandatorySuccessReason =
+            allNames == mandatoryNames
+                ? "compact_file_residency"
+                : (dataset.layout.hasWindowedTensors()
+                       ? "compact_windowed_residency"
+                       : "compact_ragged_residency");
+        if (std::optional<DeviceDatasetStorageSelection> compact =
                 attemptCompactResidency(
-                    windowNames,
-                    windowResidentBytes,
-                    windowRequiredBytes,
-                    windowSuccessReason,
-                    windowFailure);
-            windowed.has_value()) {
-            return std::move(windowed.value());
+                    mandatoryNames,
+                    mandatoryResidentBytes,
+                    mandatoryRequiredBytes,
+                    mandatorySuccessReason,
+                    mandatoryFailure);
+            compact.has_value()) {
+            return std::move(compact.value());
         }
 
-        report.reason = windowFailure.reason.empty()
+        report.reason = mandatoryFailure.reason.empty()
                             ? "device_dataset_materialization_failed"
-                            : windowFailure.reason;
+                            : mandatoryFailure.reason;
         if (report.reason == "insufficient_device_memory") {
-            report.reason = "insufficient_device_memory_for_windowed_dataset";
+            report.reason = dataset.layout.hasWindowedTensors()
+                                ? "insufficient_device_memory_for_windowed_dataset"
+                                : "insufficient_device_memory_for_ragged_dataset";
         }
-        report.requiredBytes = windowRequiredBytes;
-        report.availableBytesAfterPlacement = windowFailure.availableBytes;
+        report.requiredBytes = mandatoryRequiredBytes;
+        report.availableBytesAfterPlacement = mandatoryFailure.availableBytes;
         report.materializationSeconds = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - started).count();
         return fallbackSelection(sourceSession, std::move(report), requested);
@@ -574,8 +605,8 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
 
 uint64_t estimateDeviceResidentNamedDatasetStorageBytes(
     const DatasetMaterializationDescription &dataset) {
-    if (usesCompactWindowedResidency(dataset)) {
-        return estimateDeviceResidentWindowedDatasetStorageBytes(dataset);
+    if (usesCompactFileResidency(dataset)) {
+        return estimateDeviceResidentCompactDatasetStorageBytes(dataset);
     }
     return checkedMul(
         dataset.numExamples,
@@ -587,8 +618,8 @@ uint64_t estimateDeviceResidentNamedDatasetRequiredBytes(
     const DatasetMaterializationDescription &dataset,
     const DeviceDatasetSessionDescription &session,
     uint64_t batchQueueDepth) {
-    if (usesCompactWindowedResidency(dataset)) {
-        return estimateDeviceResidentWindowedDatasetRequiredBytes(
+    if (usesCompactFileResidency(dataset)) {
+        return estimateDeviceResidentCompactDatasetRequiredBytes(
             dataset,
             session,
             batchQueueDepth);
@@ -672,13 +703,6 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
     }
 
     report.attempted = true;
-    for (const auto& [fieldId, requirement] : sourceSession->getDatasetFieldMaterializationRequirements()) {
-        (void)fieldId;
-        if (requirement.isRagged()) {
-            report.reason = "ragged_dataset_residency_not_implemented";
-            return fallbackSelection(sourceSession, std::move(report), requested);
-        }
-    }
 
     std::optional<DatasetMaterializationDescription> datasetDescription;
     try {
@@ -696,7 +720,8 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
 
     report.examples = datasetDescription->numExamples;
     if (requested == DeviceDatasetStorage::STRICT_WINDOWED_ONLY &&
-        !usesCompactWindowedResidency(*datasetDescription)) {
+        !(datasetDescription->source == DatasetMaterializationSource::FILE_DATASET &&
+          datasetDescription->layout.hasWindowedTensors())) {
         report.reason =
             "strict_windowed_only_requires_file_backed_windowed_dataset";
         return fallbackSelection(sourceSession, std::move(report), requested);
@@ -710,13 +735,19 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
         return fallbackSelection(sourceSession, std::move(report), requested);
     }
 
-    const NamedDatasetMaterializationSupport support =
-        checkNamedDatasetSnapshotMaterializationSupport(*datasetDescription);
-    if (!support.supported) {
-        report.reason = support.reason.empty()
-                            ? "dataset_not_materializable"
-                            : support.reason;
-        return fallbackSelection(sourceSession, std::move(report), requested);
+    if (!usesCompactFileResidency(*datasetDescription)) {
+        if (datasetDescription->layout.hasRaggedTensors()) {
+            report.reason = "ragged_dataset_residency_requires_file_dataset";
+            return fallbackSelection(sourceSession, std::move(report), requested);
+        }
+        const NamedDatasetMaterializationSupport support =
+            checkNamedDatasetSnapshotMaterializationSupport(*datasetDescription);
+        if (!support.supported) {
+            report.reason = support.reason.empty()
+                                ? "dataset_not_materializable"
+                                : support.reason;
+            return fallbackSelection(sourceSession, std::move(report), requested);
+        }
     }
 
     uint64_t requiredBytes = 0;

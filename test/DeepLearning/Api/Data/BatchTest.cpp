@@ -3,7 +3,11 @@
 
 #include "gtest/gtest.h"
 
+#include <chrono>
+#include <condition_variable>
+#include <future>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <set>
 #include <stdexcept>
@@ -54,6 +58,32 @@ class RecycleTokenTestSession final : public Thor::BatchSession {
     Batch acquireBatch(ExampleType, uint64_t&) override { return {}; }
     void recycleBatch(ExampleType, Batch&&) override {}
 };
+
+struct BatchSourceReadyGate {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool released = false;
+};
+
+struct BatchSourceReadyGateArgs : public HostFunctionArgsBase {
+    explicit BatchSourceReadyGateArgs(std::shared_ptr<BatchSourceReadyGate> gate)
+        : gate(std::move(gate)) {}
+    std::shared_ptr<BatchSourceReadyGate> gate;
+};
+
+void waitForBatchSourceReadyGate(void *rawArgs) {
+    auto *args = static_cast<BatchSourceReadyGateArgs *>(rawArgs);
+    std::unique_lock<std::mutex> lock(args->gate->mutex);
+    args->gate->condition.wait(lock, [&] { return args->gate->released; });
+}
+
+void releaseBatchSourceReadyGate(const std::shared_ptr<BatchSourceReadyGate> &gate) {
+    {
+        std::lock_guard<std::mutex> lock(gate->mutex);
+        gate->released = true;
+    }
+    gate->condition.notify_all();
+}
 
 class DescriptorOnlyDeviceBatchMaterializer : public DeviceBatchMaterializer {
    public:
@@ -262,4 +292,59 @@ TEST(BatchSourceResource, ConsumptionEventsUseBlockingSynchronizationForHostRecy
     ASSERT_EQ(releasedEvents.size(), 1u);
     EXPECT_TRUE(releasedEvents.front().usesBlockingSync());
     releasedEvents.front().synchronize();
+}
+
+TEST(BatchSourceResource, ProducerReadyEventOrdersConsumersAndIsRetainedForRecycling) {
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+    Stream setupStream(0);
+    Tensor source(gpuPlacement, descriptor);
+    source.fill(3.0, setupStream);
+    setupStream.synchronize();
+
+    auto gate = std::make_shared<BatchSourceReadyGate>();
+    Stream producerStream(0);
+    producerStream.enqueueHostFunction(
+        &waitForBatchSourceReadyGate,
+        std::make_unique<BatchSourceReadyGateArgs>(gate));
+    source.fill(17.0, producerStream);
+    Event producerReady = producerStream.putEvent(
+        /*enableTiming=*/false,
+        /*expectingHostToWaitOnThisOne=*/true);
+
+    std::vector<Event> releasedEvents;
+    Thor::BatchSourceOwner owner(
+        [&](std::vector<Event> events) { releasedEvents = std::move(events); },
+        producerReady);
+    Thor::BatchSourceReference reference = owner.getReference();
+
+    Tensor destination(gpuPlacement, descriptor);
+    Stream consumerStream(0);
+    reference.waitUntilReady(consumerStream);
+    destination.copyFromAsync(source, consumerStream);
+    reference.recordConsumption(consumerStream);
+    Event consumerDone = consumerStream.putEvent(
+        /*enableTiming=*/false,
+        /*expectingHostToWaitOnThisOne=*/true);
+    owner.release();
+
+    auto waitForConsumer = std::async(std::launch::async, [consumerDone]() mutable {
+        consumerDone.synchronize();
+    });
+    EXPECT_EQ(
+        waitForConsumer.wait_for(std::chrono::milliseconds(50)),
+        std::future_status::timeout);
+
+    releaseBatchSourceReadyGate(gate);
+    waitForConsumer.get();
+    ASSERT_EQ(releasedEvents.size(), 2u);
+    for (Event &event : releasedEvents) event.synchronize();
+
+    Tensor host(cpuPlacement, descriptor);
+    Stream downloadStream(0);
+    host.copyFromAsync(destination, downloadStream);
+    downloadStream.synchronize();
+    const float *values = host.getMemPtr<float>();
+    for (uint64_t i = 0; i < 4; ++i) EXPECT_FLOAT_EQ(values[i], 17.0f);
 }

@@ -581,8 +581,8 @@ def test_affine_windowed_dataset_uses_compact_segments_and_zero_record_shards(tm
     assert thor.data.FileDataset.open(dataset_path).num_examples == 3
 
 
-def test_windowed_dataset_rejects_invalid_v2_unsupported_versions_and_old_v1_shape(tmp_path):
-    dataset_path = tmp_path / "retired_window_layout"
+def test_windowed_dataset_rejects_unsupported_versions_and_incomplete_current_manifest(tmp_path):
+    dataset_path = tmp_path / "invalid_window_layout"
     layout = thor.data.DatasetLayout(
         tensors={},
         window_sources={
@@ -609,21 +609,16 @@ def test_windowed_dataset_rejects_invalid_v2_unsupported_versions_and_old_v1_sha
 
     manifest_path = dataset_path / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    invalid_v2 = dict(manifest)
-    invalid_v2["format"] = "thor.dataset.v2"
-    manifest_path.write_text(json.dumps(invalid_v2))
-    with pytest.raises(RuntimeError, match="V2 manifests must contain at least one ragged tensor"):
-        thor.data.FileDataset.open(dataset_path)
+    for version in ("thor.dataset.v2", "thor.dataset.v3"):
+        unsupported = dict(manifest)
+        unsupported["format"] = version
+        manifest_path.write_text(json.dumps(unsupported))
+        with pytest.raises(RuntimeError, match="unsupported manifest format"):
+            thor.data.FileDataset.open(dataset_path)
 
-    unsupported = dict(manifest)
-    unsupported["format"] = "thor.dataset.v3"
-    manifest_path.write_text(json.dumps(unsupported))
-    with pytest.raises(RuntimeError, match="unsupported manifest format"):
-        thor.data.FileDataset.open(dataset_path)
-
-    old_v1 = json.loads(json.dumps(manifest))
-    del old_v1["windowed_tensors"]["examples"]["reference_mode"]
-    manifest_path.write_text(json.dumps(old_v1))
+    missing_reference_mode = json.loads(json.dumps(manifest))
+    del missing_reference_mode["windowed_tensors"]["examples"]["reference_mode"]
+    manifest_path.write_text(json.dumps(missing_reference_mode))
     with pytest.raises((RuntimeError, KeyError)):
         thor.data.FileDataset.open(dataset_path)
 

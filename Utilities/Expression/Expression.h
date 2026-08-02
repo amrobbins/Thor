@@ -994,7 +994,8 @@ class Expression {
                                                                       const Expression& offsets,
                                                                       ExprOp op,
                                                                       uint64_t ragged_batch_size,
-                                                                      uint64_t ragged_max_active_values);
+                                                                      uint64_t ragged_max_active_values,
+                                                                      uint64_t ragged_elements_per_value = 1);
     [[nodiscard]] static Expression ternaryOp(const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, ExprOp op);
     [[nodiscard]] static Expression quaternaryOp(
         const Expression& lhsExpr, const Expression& rhsExpr, const Expression& auxExpr, const Expression& fourthExpr, ExprOp op);

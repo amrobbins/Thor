@@ -26,9 +26,6 @@ struct RuntimeOffsetSegmentedReductionFp32 {
             case CubReductionOp::Max:
                 return PropagatingMaximumFp32{}(lhs, rhs);
             default:
-#if defined(__CUDA_ARCH__)
-                asm("trap;");
-#endif
                 return lhs;
         }
     }

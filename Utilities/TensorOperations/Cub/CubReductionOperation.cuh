@@ -142,9 +142,6 @@ inline __host__ __device__ void storeFp32AsRuntimeDType(void* output,
             return;
 #endif
         default:
-#if defined(__CUDA_ARCH__)
-            asm("trap;");
-#endif
             return;
     }
 }

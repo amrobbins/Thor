@@ -4025,7 +4025,10 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
                 if (stage_input_dims.size() != 2 || stage_input_dims[1].size() != 1 || stage_input_dims[1][0] == 0) {
                     throw std::runtime_error("Segmented mean stage requires a non-empty rank-1 offsets shape while computing FLOPs.");
                 }
-                flops = checkedAddU64(flops, stage_input_dims[1][0] - 1, "computeSegmentedMeanStageFlops");
+                const uint64_t mean_divisions = checkedMulU64(stage_input_dims[1][0] - 1,
+                                                               stage.segmented_reduction->elements_per_value,
+                                                               "computeSegmentedMeanStageFlops");
+                flops = checkedAddU64(flops, mean_divisions, "computeSegmentedMeanStageFlops");
             }
             return flops;
         }
@@ -4034,9 +4037,11 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
             if (!stage.segmented_broadcast) {
                 throw std::runtime_error("SegmentedBroadcast stage missing payload while computing FLOPs.");
             }
-            uint64_t flops = stage.segmented_broadcast->max_output_values;
+            uint64_t flops = checkedMulU64(stage.segmented_broadcast->max_output_values,
+                                           stage.segmented_broadcast->elements_per_value,
+                                           "computeSegmentedBroadcastStageFlops");
             if (stage.segmented_broadcast->normalize_by_segment_length) {
-                flops = checkedAddU64(flops, stage.segmented_broadcast->max_output_values, "computeSegmentedBroadcastStageFlops");
+                flops = checkedAddU64(flops, flops, "computeSegmentedBroadcastStageFlops");
             }
             return flops;
         }
@@ -4155,23 +4160,47 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
             if (stage_input_dims.size() != 2) {
                 throw std::runtime_error("resolveOutputDimsForStageOutput segmented-reduction stage expected values and offsets shapes.");
             }
-            if (stage_input_dims[0].size() != 1 || stage_input_dims[1].size() != 1 || stage_input_dims[1][0] == 0) {
-                throw std::runtime_error("resolveOutputDimsForStageOutput segmented-reduction currently requires rank-1 values and non-empty rank-1 offsets.");
+            if (stage_input_dims[0].empty() || stage_input_dims[1].size() != 1 || stage_input_dims[1][0] == 0) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput segmented-reduction requires values [N,D...] and non-empty rank-1 offsets.");
             }
-            return std::vector<uint64_t>{stage_input_dims[1][0] - 1};
+            std::vector<uint64_t> output_dims = stage_input_dims[0];
+            output_dims[0] = stage_input_dims[1][0] - 1;
+            if (numelFromDims(stage_input_dims[0]) !=
+                    checkedMulU64(stage_input_dims[0][0],
+                                  stage.segmented_reduction->elements_per_value,
+                                  "segmentedReductionInputNumel") ||
+                numelFromDims(output_dims) !=
+                    checkedMulU64(output_dims[0],
+                                  stage.segmented_reduction->elements_per_value,
+                                  "segmentedReductionOutputNumel")) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput segmented-reduction elements-per-value metadata mismatch.");
+            }
+            return output_dims;
         }
 
         case CompiledExecutionStage::Kind::SegmentedBroadcast: {
             if (!stage.segmented_broadcast) {
                 throw std::runtime_error("resolveOutputDimsForStageOutput segmented-broadcast stage missing payload.");
             }
-            if (stage_input_dims.size() != 2 || stage_input_dims[0].size() != 1 || stage_input_dims[1].size() != 1) {
-                throw std::runtime_error("resolveOutputDimsForStageOutput segmented-broadcast requires rank-1 values and offsets.");
+            if (stage_input_dims.size() != 2 || stage_input_dims[0].empty() || stage_input_dims[1].size() != 1) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput segmented-broadcast requires values [B,D...] and offsets [B+1].");
             }
             if (stage_input_dims[1][0] != stage_input_dims[0][0] + 1) {
                 throw std::runtime_error("resolveOutputDimsForStageOutput segmented-broadcast offsets must have batch_size + 1 elements.");
             }
-            return std::vector<uint64_t>{stage.segmented_broadcast->max_output_values};
+            std::vector<uint64_t> output_dims = stage_input_dims[0];
+            output_dims[0] = stage.segmented_broadcast->max_output_values;
+            if (numelFromDims(stage_input_dims[0]) !=
+                    checkedMulU64(stage_input_dims[0][0],
+                                  stage.segmented_broadcast->elements_per_value,
+                                  "segmentedBroadcastInputNumel") ||
+                numelFromDims(output_dims) !=
+                    checkedMulU64(output_dims[0],
+                                  stage.segmented_broadcast->elements_per_value,
+                                  "segmentedBroadcastOutputNumel")) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput segmented-broadcast elements-per-value metadata mismatch.");
+            }
+            return output_dims;
         }
 
         case CompiledExecutionStage::Kind::Scan: {
@@ -5450,10 +5479,22 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
             if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
                 throw std::runtime_error("Segmented-reduction stage expected values, offsets, and one output.");
             }
-            if (stage_input_dims[0].size() != 1 || stage_input_dims[1].size() != 1 || stage_input_dims[1][0] == 0) {
-                throw std::runtime_error("Segmented-reduction stage currently requires rank-1 values and non-empty rank-1 offsets.");
+            if (stage_input_dims[0].empty() || stage_input_dims[1].size() != 1 || stage_input_dims[1][0] == 0) {
+                throw std::runtime_error("Segmented-reduction stage requires values [N,D...] and non-empty rank-1 offsets.");
             }
-            value_dims[stage.outputs[0].value_id] = std::vector<uint64_t>{stage_input_dims[1][0] - 1};
+            std::vector<uint64_t> output_dims = stage_input_dims[0];
+            output_dims[0] = stage_input_dims[1][0] - 1;
+            if (numelFromDims(stage_input_dims[0]) !=
+                    checkedMulU64(stage_input_dims[0][0],
+                                  stage.segmented_reduction->elements_per_value,
+                                  "segmentedReductionInputNumel") ||
+                numelFromDims(output_dims) !=
+                    checkedMulU64(output_dims[0],
+                                  stage.segmented_reduction->elements_per_value,
+                                  "segmentedReductionOutputNumel")) {
+                throw std::runtime_error("Segmented-reduction elements-per-value metadata does not match values trailing dimensions.");
+            }
+            value_dims[stage.outputs[0].value_id] = std::move(output_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::SegmentedBroadcast) {
             if (!stage.segmented_broadcast) {
                 throw std::runtime_error("Missing compiled segmented-broadcast stage.");
@@ -5461,11 +5502,23 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
             if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
                 throw std::runtime_error("Segmented-broadcast stage expected per-segment values, offsets, and one output.");
             }
-            if (stage_input_dims[0].size() != 1 || stage_input_dims[1].size() != 1 ||
+            if (stage_input_dims[0].empty() || stage_input_dims[1].size() != 1 ||
                 stage_input_dims[1][0] != stage_input_dims[0][0] + 1) {
-                throw std::runtime_error("Segmented-broadcast stage requires rank-1 values and [batch_size + 1] offsets.");
+                throw std::runtime_error("Segmented-broadcast stage requires per-segment values [B,D...] and [B+1] offsets.");
             }
-            value_dims[stage.outputs[0].value_id] = std::vector<uint64_t>{stage.segmented_broadcast->max_output_values};
+            std::vector<uint64_t> output_dims = stage_input_dims[0];
+            output_dims[0] = stage.segmented_broadcast->max_output_values;
+            if (numelFromDims(stage_input_dims[0]) !=
+                    checkedMulU64(stage_input_dims[0][0],
+                                  stage.segmented_broadcast->elements_per_value,
+                                  "segmentedBroadcastInputNumel") ||
+                numelFromDims(output_dims) !=
+                    checkedMulU64(output_dims[0],
+                                  stage.segmented_broadcast->elements_per_value,
+                                  "segmentedBroadcastOutputNumel")) {
+                throw std::runtime_error("Segmented-broadcast elements-per-value metadata does not match values trailing dimensions.");
+            }
+            value_dims[stage.outputs[0].value_id] = std::move(output_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::Scan) {
             if (!stage.scan) {
                 throw std::runtime_error("Missing compiled scan stage.");
@@ -7529,21 +7582,39 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
         if (!offsets.has_value() || !compiledStage->offset_dtype.has_value()) {
             throw std::runtime_error("Segmented reduce-min/max backward requires row-partition offsets.");
         }
-        if (input.getDimensions().size() != 1 || grad_output.getDimensions().size() != 1 ||
-            offsets->getDimensions().size() != 1) {
-            throw std::runtime_error("Segmented reduce-min/max backward requires rank-1 input, grad, and offsets tensors.");
+        if (input.getDimensions().empty() || grad_output.getDimensions().empty() || offsets->getDimensions().size() != 1) {
+            throw std::runtime_error(
+                "Segmented reduce-min/max backward requires input [N,D...], grad [B,D...], and rank-1 offsets tensors.");
         }
         if (offsets->getDataType() != compiledStage->offset_dtype.value()) {
             throw std::runtime_error("Runtime segmented reduce-min/max-backward offsets dtype does not match compiled dtype.");
         }
-        if (offsets->getDimensions()[0] != grad_output.getDimensions()[0] + 1) {
-            throw std::runtime_error("Segmented reduce-min/max backward requires one upstream gradient per offsets segment.");
+        const uint64_t batch_size = offsets->getDimensions()[0] - 1;
+        if (batch_size == 0 || input.getDimensions()[0] == 0 || grad_output.getDimensions()[0] != batch_size) {
+            throw std::runtime_error("Segmented reduce-min/max backward received inconsistent batch dimensions.");
+        }
+        if (input.getTotalNumElements() % input.getDimensions()[0] != 0 ||
+            grad_output.getTotalNumElements() % batch_size != 0 ||
+            input.getTotalNumElements() / input.getDimensions()[0] != grad_output.getTotalNumElements() / batch_size) {
+            throw std::runtime_error("Segmented reduce-min/max backward input and upstream gradient trailing extents must match.");
         }
         if (offsets->getPlacement() != input.getPlacement()) {
             throw std::runtime_error("Segmented reduce-min/max-backward offsets placement must match packed input placement.");
         }
 
-        Tensor indices(input.getPlacement(), TensorDescriptor(DataType::UINT64, grad_output.getDimensions()));
+        const uint64_t elements_per_value = input.getTotalNumElements() / input.getDimensions()[0];
+        Tensor indices;
+        if (elements_per_value == 1) {
+            if (!CubSegmentedArgReduction::isInputDataTypeSupported(compiledStage->input_dtype)) {
+                throw std::runtime_error(
+                    "Scalar segmented reduce-min/max backward input dtype is not supported by the CUB arg-reduction backend.");
+            }
+            if (!CubSegmentedArgReduction::isOffsetDataTypeSupported(offsets->getDataType())) {
+                throw std::runtime_error(
+                    "Scalar segmented reduce-min/max backward offsets dtype is not supported by the CUB arg-reduction backend.");
+            }
+            indices = Tensor(input.getPlacement(), TensorDescriptor(DataType::UINT64, grad_output.getDimensions()));
+        }
         const CubArgReductionOp arg_op =
             compiledStage->op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD ? CubArgReductionOp::ArgMin : CubArgReductionOp::ArgMax;
         return make_shared<StampedReduceMinMaxBackward>(
@@ -9383,10 +9454,22 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
                 throw std::runtime_error("Segmented-reduction stage expected values, offsets, and one output.");
             }
-            if (stage_input_dims[0].size() != 1 || stage_input_dims[1].size() != 1 || stage_input_dims[1][0] == 0) {
-                throw std::runtime_error("Segmented-reduction stage currently requires rank-1 values and non-empty rank-1 offsets.");
+            if (stage_input_dims[0].empty() || stage_input_dims[1].size() != 1 || stage_input_dims[1][0] == 0) {
+                throw std::runtime_error("Segmented-reduction stage requires values [N,D...] and non-empty rank-1 offsets.");
             }
-            value_dims[stage.outputs[0].value_id] = std::vector<uint64_t>{stage_input_dims[1][0] - 1};
+            std::vector<uint64_t> output_dims = stage_input_dims[0];
+            output_dims[0] = stage_input_dims[1][0] - 1;
+            if (numelFromDims(stage_input_dims[0]) !=
+                    checkedMulU64(stage_input_dims[0][0],
+                                  stage.segmented_reduction->elements_per_value,
+                                  "segmentedReductionInputNumel") ||
+                numelFromDims(output_dims) !=
+                    checkedMulU64(output_dims[0],
+                                  stage.segmented_reduction->elements_per_value,
+                                  "segmentedReductionOutputNumel")) {
+                throw std::runtime_error("Segmented-reduction elements-per-value metadata does not match values trailing dimensions.");
+            }
+            value_dims[stage.outputs[0].value_id] = std::move(output_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::SegmentedBroadcast) {
             if (!stage.segmented_broadcast) {
                 throw std::runtime_error("Missing compiled segmented-broadcast stage.");
@@ -9394,11 +9477,23 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
                 throw std::runtime_error("Segmented-broadcast stage expected per-segment values, offsets, and one output.");
             }
-            if (stage_input_dims[0].size() != 1 || stage_input_dims[1].size() != 1 ||
+            if (stage_input_dims[0].empty() || stage_input_dims[1].size() != 1 ||
                 stage_input_dims[1][0] != stage_input_dims[0][0] + 1) {
-                throw std::runtime_error("Segmented-broadcast stage requires rank-1 values and [batch_size + 1] offsets.");
+                throw std::runtime_error("Segmented-broadcast stage requires per-segment values [B,D...] and [B+1] offsets.");
             }
-            value_dims[stage.outputs[0].value_id] = std::vector<uint64_t>{stage.segmented_broadcast->max_output_values};
+            std::vector<uint64_t> output_dims = stage_input_dims[0];
+            output_dims[0] = stage.segmented_broadcast->max_output_values;
+            if (numelFromDims(stage_input_dims[0]) !=
+                    checkedMulU64(stage_input_dims[0][0],
+                                  stage.segmented_broadcast->elements_per_value,
+                                  "segmentedBroadcastInputNumel") ||
+                numelFromDims(output_dims) !=
+                    checkedMulU64(output_dims[0],
+                                  stage.segmented_broadcast->elements_per_value,
+                                  "segmentedBroadcastOutputNumel")) {
+                throw std::runtime_error("Segmented-broadcast elements-per-value metadata does not match values trailing dimensions.");
+            }
+            value_dims[stage.outputs[0].value_id] = std::move(output_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::Scan) {
             if (!stage.scan) {
                 throw std::runtime_error("Missing compiled scan stage.");

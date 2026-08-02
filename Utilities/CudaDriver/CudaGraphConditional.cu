@@ -25,9 +25,6 @@ __global__ void setCudaGraphConditionalFromBoolKernel(cudaGraphConditionalHandle
     if (blockIdx.x != 0 || threadIdx.x != 0) {
         return;
     }
-    if (predicate == nullptr) {
-        asm("trap;");
-    }
     cudaGraphSetConditional(handle, predicate[0] ? 1U : 0U);
 }
 
