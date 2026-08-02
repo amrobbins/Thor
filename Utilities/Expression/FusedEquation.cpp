@@ -1047,6 +1047,21 @@ static AttentionTensorLogicalDims logicalAttentionDims(const std::vector<uint64_
     }
 }
 
+static AttentionTensorLogicalDims packedRaggedAttentionDims(const std::vector<uint64_t>& dims,
+                                                            uint64_t batch,
+                                                            AttentionTensorLayout layout,
+                                                            const char* tensor_name) {
+    if (layout != AttentionTensorLayout::BSHD) {
+        throw std::runtime_error(std::string("Canonical ragged attention tensor '") + tensor_name +
+                                 "' requires BSHD/token-major layout.");
+    }
+    if (dims.size() != 3 || batch == 0) {
+        throw std::runtime_error(std::string("Canonical ragged attention tensor '") + tensor_name +
+                                 "' must use packed [T,H,D] storage with a non-zero logical batch.");
+    }
+    return {batch, dims.at(1), dims.at(0), dims.at(2)};
+}
+
 static bool isAllowedAttentionBiasDims(const std::vector<uint64_t>& dims,
                                            uint64_t batch,
                                            uint64_t heads,
@@ -1333,9 +1348,30 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX) {
                     throw std::runtime_error("Attention shape inference for GEMM optimization found a malformed ATTENTION node.");
                 }
-                const AttentionTensorLogicalDims q_dims = logicalAttentionDims(node_dims[node.lhs], node.attention_q_layout, "q");
-                const AttentionTensorLogicalDims k_dims = logicalAttentionDims(node_dims[node.rhs], node.attention_k_layout, "k");
-                const AttentionTensorLogicalDims v_dims = logicalAttentionDims(node_dims[node.aux], node.attention_v_layout, "v");
+                const auto& q_raw_dims = node_dims[node.lhs];
+                const auto& k_raw_dims = node_dims[node.rhs];
+                const auto& v_raw_dims = node_dims[node.aux];
+                if (node.attention_use_ragged_offsets && q_raw_dims.size() == 3) {
+                    if (node.attention_q_layout != AttentionTensorLayout::BSHD ||
+                        node.attention_k_layout != AttentionTensorLayout::BSHD ||
+                        node.attention_v_layout != AttentionTensorLayout::BSHD ||
+                        node.attention_o_layout != AttentionTensorLayout::BSHD || k_raw_dims.size() != 3 ||
+                        v_raw_dims.size() != 3) {
+                        throw std::runtime_error(
+                            "Canonical ragged attention shape inference requires packed [T,H,D] BSHD q/k/v storage.");
+                    }
+                    if (k_raw_dims.at(0) != v_raw_dims.at(0) || k_raw_dims.at(1) != v_raw_dims.at(1) ||
+                        q_raw_dims.at(2) != k_raw_dims.at(2) || k_raw_dims.at(1) == 0 ||
+                        q_raw_dims.at(1) == 0 || q_raw_dims.at(1) % k_raw_dims.at(1) != 0) {
+                        throw std::runtime_error(
+                            "Canonical ragged attention shape inference found incompatible q/k/v packed dimensions.");
+                    }
+                    node_dims[i] = {q_raw_dims.at(0), q_raw_dims.at(1), v_raw_dims.at(2)};
+                    break;
+                }
+                const AttentionTensorLogicalDims q_dims = logicalAttentionDims(q_raw_dims, node.attention_q_layout, "q");
+                const AttentionTensorLogicalDims k_dims = logicalAttentionDims(k_raw_dims, node.attention_k_layout, "k");
+                const AttentionTensorLogicalDims v_dims = logicalAttentionDims(v_raw_dims, node.attention_v_layout, "v");
                 if (q_dims.batch != k_dims.batch || q_dims.batch != v_dims.batch) {
                     throw std::runtime_error("Attention shape inference for GEMM optimization requires matching q/k/v batch dimensions.");
                 }
@@ -2065,6 +2101,67 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
         throw std::runtime_error("Attention stage expected q/k/v input shapes.");
     }
 
+    if (compiled_stage.use_ragged_offsets && stage_input_dims.at(0).size() == 3) {
+        if (compiled_stage.q_layout != AttentionTensorLayout::BSHD || compiled_stage.k_layout != AttentionTensorLayout::BSHD ||
+            compiled_stage.v_layout != AttentionTensorLayout::BSHD || compiled_stage.o_layout != AttentionTensorLayout::BSHD) {
+            throw std::runtime_error("Canonical ragged attention requires token-major BSHD/packed-THD layouts.");
+        }
+        const auto& q = stage_input_dims.at(0);
+        const auto& k = stage_input_dims.at(1);
+        const auto& v = stage_input_dims.at(2);
+        if (q.size() != 3 || k.size() != 3 || v.size() != 3) {
+            throw std::runtime_error("Canonical ragged attention q/k/v values must use packed [T,H,D] storage.");
+        }
+        const uint64_t queryCapacity = q.at(0);
+        const uint64_t queryHeads = q.at(1);
+        const uint64_t qkDim = q.at(2);
+        const uint64_t kvCapacity = k.at(0);
+        const uint64_t kvHeads = k.at(1);
+        const uint64_t kDim = k.at(2);
+        if (v.at(0) != kvCapacity || v.at(1) != kvHeads) {
+            throw std::runtime_error("Canonical ragged attention K/V packed token capacities and head counts must match.");
+        }
+        const uint64_t valueDim = v.at(2);
+        if (queryCapacity == 0 || kvCapacity == 0 || queryHeads == 0 || kvHeads == 0 || qkDim == 0 || valueDim == 0) {
+            throw std::runtime_error("Canonical ragged attention packed q/k/v dimensions must be non-zero.");
+        }
+        if (queryHeads % kvHeads != 0) {
+            throw std::runtime_error("Attention query heads must be an integer multiple of key/value heads for MHA/MQA/GQA.");
+        }
+        if (qkDim != kDim) {
+            throw std::runtime_error("Attention q/k head dimensions must match.");
+        }
+
+        size_t nextOptional = 3;
+        if (compiled_stage.use_bias) {
+            ++nextOptional;
+        }
+        if (compiled_stage.use_padding_mask) {
+            nextOptional += 2;
+        }
+        if (stage_input_dims.size() <= nextOptional + 1) {
+            throw std::runtime_error("Canonical ragged attention expected query and key/value row partitions.");
+        }
+        const auto& qOffsets = stage_input_dims.at(nextOptional);
+        const auto& kvOffsets = stage_input_dims.at(nextOptional + 1);
+        if (qOffsets.size() != 1 || kvOffsets.size() != 1 || qOffsets.at(0) < 2 || qOffsets != kvOffsets) {
+            throw std::runtime_error("Canonical ragged attention row partitions must both have shape [B+1].");
+        }
+        const uint64_t batch = qOffsets.at(0) - 1;
+
+        if (compiled_stage.use_bias) {
+            const auto& biasDims = stage_input_dims.at(3);
+            if (!isAllowedAttentionBiasDims(biasDims, batch, queryHeads, queryCapacity, kvCapacity)) {
+                throw std::runtime_error("Attention additive bias must have shape " +
+                                         attentionBiasShapeDescription(batch, queryHeads, queryCapacity, kvCapacity) + ".");
+            }
+        }
+        if (compiled_stage.use_paged_kv_cache) {
+            throw std::runtime_error("Canonical ragged attention cannot use paged KV cache.");
+        }
+        return {queryCapacity, queryHeads, valueDim};
+    }
+
     const AttentionTensorLogicalDims q_dims = logicalAttentionDims(stage_input_dims.at(0), compiled_stage.q_layout, "q");
     const AttentionTensorLogicalDims k_dims = logicalAttentionDims(stage_input_dims.at(1), compiled_stage.k_layout, "k");
     const AttentionTensorLogicalDims v_dims = logicalAttentionDims(stage_input_dims.at(2), compiled_stage.v_layout, "v");
@@ -2128,11 +2225,6 @@ static std::vector<uint64_t> resolveAttentionOutputDimsFromInputs(const Compiled
         next_optional_idx += 2;
     }
     if (compiled_stage.use_ragged_offsets) {
-        if (qk_dim != v_dim) {
-            throw std::runtime_error(
-                "Attention ragged offsets require value head_dim to match query/key head_dim because Thor uses shared Q/O and K/V "
-                "element offsets.");
-        }
         if (stage_input_dims.size() <= next_optional_idx + 1) {
             throw std::runtime_error("Attention stage with ragged offsets expected q_ragged_offsets and kv_ragged_offsets input shapes.");
         }
@@ -3869,16 +3961,32 @@ static uint64_t computeAttentionStageFlops(const CompiledAttention& attention, c
     const auto& q_dims = stage_input_dims.at(0);
     const auto& k_dims = stage_input_dims.at(1);
 
-    const uint64_t batch = out_dims.at(0);
-    const uint64_t query_heads = out_dims.at(1);
-    const uint64_t query_len = out_dims.at(2);
-    const uint64_t value_dim = out_dims.at(3);
-    const uint64_t key_len = k_dims.at(2);
-    const uint64_t qk_dim = q_dims.at(3);
+    uint64_t scores = 0;
+    uint64_t qk_dim = 0;
+    uint64_t value_dim = 0;
+    if (attention.use_ragged_offsets && q_dims.size() == 3) {
+        // Packed ragged storage is [T,H,D].  Static FLOP accounting cannot know the per-row
+        // active lengths without reading the row partition values, so use the conservative
+        // capacity product Tq*Tk rather than pretending the packed T axis is a dense batch/sequence axis.
+        if (k_dims.size() != 3 || out_dims.size() != 3) {
+            throw std::runtime_error("Packed ragged attention FLOP accounting requires rank-3 q/k/output tensors.");
+        }
+        scores = checkedMulU64(out_dims.at(1), out_dims.at(0), "computeAttentionStageFlops");
+        scores = checkedMulU64(scores, k_dims.at(0), "computeAttentionStageFlops");
+        qk_dim = q_dims.at(2);
+        value_dim = out_dims.at(2);
+    } else {
+        const uint64_t batch = out_dims.at(0);
+        const uint64_t query_heads = out_dims.at(1);
+        const uint64_t query_len = out_dims.at(2);
+        value_dim = out_dims.at(3);
+        const uint64_t key_len = k_dims.at(2);
+        qk_dim = q_dims.at(3);
 
-    uint64_t scores = checkedMulU64(batch, query_heads, "computeAttentionStageFlops");
-    scores = checkedMulU64(scores, query_len, "computeAttentionStageFlops");
-    scores = checkedMulU64(scores, key_len, "computeAttentionStageFlops");
+        scores = checkedMulU64(batch, query_heads, "computeAttentionStageFlops");
+        scores = checkedMulU64(scores, query_len, "computeAttentionStageFlops");
+        scores = checkedMulU64(scores, key_len, "computeAttentionStageFlops");
+    }
 
     uint64_t qk_flops = checkedMulU64(scores, qk_dim, "computeAttentionStageFlops");
     qk_flops = checkedMulU64(qk_flops, 2, "computeAttentionStageFlops");
@@ -7064,6 +7172,20 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       bgrad_output);
 }
 
+static CudnnRaggedAttentionScratch makeRaggedAttentionScratch(const TensorPlacement& placement, uint64_t batchSize) {
+    if (batchSize == 0) {
+        throw std::runtime_error("Ragged attention scratch requires a non-zero batch size.");
+    }
+    return CudnnRaggedAttentionScratch{
+        .seqLenQ = Tensor(placement, TensorDescriptor(DataType::INT32, {batchSize})),
+        .seqLenKv = Tensor(placement, TensorDescriptor(DataType::INT32, {batchSize})),
+        .qElementOffsets = Tensor(placement, TensorDescriptor(DataType::INT32, {batchSize + 1})),
+        .kElementOffsets = Tensor(placement, TensorDescriptor(DataType::INT32, {batchSize + 1})),
+        .vElementOffsets = Tensor(placement, TensorDescriptor(DataType::INT32, {batchSize + 1})),
+        .oElementOffsets = Tensor(placement, TensorDescriptor(DataType::INT32, {batchSize + 1})),
+    };
+}
+
 std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::shared_ptr<CompiledAttention>& compiledStage,
                                                                 const Tensor& q,
                                                                 const Tensor& k,
@@ -7153,9 +7275,35 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
         stage_input_dims.push_back(amax_o->getDimensions());
     }
     const std::vector<uint64_t> output_dims = resolveAttentionOutputDimsFromInputs(*compiledStage, stage_input_dims);
-    const AttentionTensorLogicalDims qLogical = logicalAttentionDims(q.getDimensions(), compiledStage->q_layout, "q");
-    const AttentionTensorLogicalDims kLogical = logicalAttentionDims(k.getDimensions(), compiledStage->k_layout, "k");
-    const AttentionTensorLogicalDims vLogical = logicalAttentionDims(v.getDimensions(), compiledStage->v_layout, "v");
+    uint64_t raggedBatchSize = 0;
+    if (compiledStage->use_ragged_offsets) {
+        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
+            throw std::runtime_error("stampAttention requires q/kv ragged offset tensors for ragged attention.");
+        }
+        const auto& qOffsetDims = q_ragged_offsets->getDimensions();
+        const auto& kvOffsetDims = kv_ragged_offsets->getDimensions();
+        if (qOffsetDims.size() != 1 || qOffsetDims != kvOffsetDims || qOffsetDims.at(0) < 2) {
+            throw std::runtime_error("Attention ragged q/kv row partitions must both have shape [B+1].");
+        }
+        raggedBatchSize = qOffsetDims.at(0) - 1;
+    }
+    const bool packedRagged = compiledStage->use_ragged_offsets && q.getDimensions().size() == 3;
+    const AttentionTensorLogicalDims qLogical = packedRagged
+                                                     ? packedRaggedAttentionDims(
+                                                           q.getDimensions(), raggedBatchSize, compiledStage->q_layout, "q")
+                                                     : logicalAttentionDims(q.getDimensions(), compiledStage->q_layout, "q");
+    const AttentionTensorLogicalDims kLogical = packedRagged
+                                                     ? packedRaggedAttentionDims(
+                                                           k.getDimensions(), raggedBatchSize, compiledStage->k_layout, "k")
+                                                     : logicalAttentionDims(k.getDimensions(), compiledStage->k_layout, "k");
+    const AttentionTensorLogicalDims vLogical = packedRagged
+                                                     ? packedRaggedAttentionDims(
+                                                           v.getDimensions(), raggedBatchSize, compiledStage->v_layout, "v")
+                                                     : logicalAttentionDims(v.getDimensions(), compiledStage->v_layout, "v");
+    std::optional<CudnnRaggedAttentionScratch> raggedScratch = std::nullopt;
+    if (compiledStage->use_ragged_offsets) {
+        raggedScratch = makeRaggedAttentionScratch(q.getPlacement(), raggedBatchSize);
+    }
 
     Tensor output;
     if (preallocatedOutput.has_value()) {
@@ -7200,8 +7348,8 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
             if (tensor->getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Attention ragged ") + label + " placement must match q.");
             }
-            if (!isCudnnRaggedOffsetDataType(tensor->getDataType())) {
-                throw std::runtime_error(std::string("Attention ragged ") + label + " dtype must be INT32.");
+            if (!isCanonicalRowPartitionOffsetDataType(tensor->getDataType())) {
+                throw std::runtime_error(std::string("Attention ragged ") + label + " dtype must be UINT32 or UINT64.");
             }
             if (tensor->getDimensions() != std::vector<uint64_t>{qLogical.batch + 1}) {
                 throw std::runtime_error(std::string("Attention ragged ") + label + " shape must be [B + 1].");
@@ -7279,7 +7427,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
     }
 
     // Build and validate the cuDNN descriptor during stamping so shape/layout errors fail before execution.
-    (void)compiledStage->descriptorFor(q, k, v, output);
+    (void)compiledStage->descriptorFor(q, k, v, output, raggedBatchSize);
     if (compiledStage->use_bias && boundBias.has_value()) {
         if (!isAllowedAttentionBiasDims(boundBias->getDimensions(), qLogical.batch, qLogical.heads, qLogical.sequence_length, kLogical.sequence_length)) {
             throw std::runtime_error("Attention additive bias must have shape " +
@@ -7306,6 +7454,7 @@ std::shared_ptr<StampedAttention> FusedEquation::stampAttention(const std::share
                                          seq_len_kv,
                                          q_ragged_offsets,
                                          kv_ragged_offsets,
+                                         raggedScratch,
                                          page_table_k,
                                          page_table_v,
                                          dropout_seed,
@@ -7398,8 +7547,31 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
     }
     const std::vector<uint64_t> o_dims = resolveAttentionOutputDimsFromInputs(
         makeForwardAttentionView(*compiledStage, dO.getDataType(), ".stats_forward"), forward_input_dims);
-    const AttentionTensorLogicalDims qLogical = logicalAttentionDims(q.getDimensions(), compiledStage->q_layout, "q");
-    const AttentionTensorLogicalDims kLogical = logicalAttentionDims(k.getDimensions(), compiledStage->k_layout, "k");
+    uint64_t raggedBatchSize = 0;
+    if (compiledStage->use_ragged_offsets) {
+        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
+            throw std::runtime_error("stampAttentionBackward requires q/kv ragged offset tensors for ragged attention.");
+        }
+        const auto& qOffsetDims = q_ragged_offsets->getDimensions();
+        const auto& kvOffsetDims = kv_ragged_offsets->getDimensions();
+        if (qOffsetDims.size() != 1 || qOffsetDims != kvOffsetDims || qOffsetDims.at(0) < 2) {
+            throw std::runtime_error("Attention-backward ragged q/kv row partitions must both have shape [B+1].");
+        }
+        raggedBatchSize = qOffsetDims.at(0) - 1;
+    }
+    const bool packedRagged = compiledStage->use_ragged_offsets && q.getDimensions().size() == 3;
+    const AttentionTensorLogicalDims qLogical = packedRagged
+                                                     ? packedRaggedAttentionDims(
+                                                           q.getDimensions(), raggedBatchSize, compiledStage->q_layout, "q")
+                                                     : logicalAttentionDims(q.getDimensions(), compiledStage->q_layout, "q");
+    const AttentionTensorLogicalDims kLogical = packedRagged
+                                                     ? packedRaggedAttentionDims(
+                                                           k.getDimensions(), raggedBatchSize, compiledStage->k_layout, "k")
+                                                     : logicalAttentionDims(k.getDimensions(), compiledStage->k_layout, "k");
+    std::optional<CudnnRaggedAttentionScratch> raggedScratch = std::nullopt;
+    if (compiledStage->use_ragged_offsets) {
+        raggedScratch = makeRaggedAttentionScratch(q.getPlacement(), raggedBatchSize);
+    }
     if (dO.getDimensions() != o_dims) {
         throw std::runtime_error("Attention-backward dO dimensions do not match the corresponding forward attention output shape.");
     }
@@ -7460,8 +7632,8 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
             if (tensor->getPlacement() != q.getPlacement()) {
                 throw std::runtime_error(std::string("Attention-backward ragged ") + label + " placement must match q.");
             }
-            if (!isCudnnRaggedOffsetDataType(tensor->getDataType())) {
-                throw std::runtime_error(std::string("Attention-backward ragged ") + label + " dtype must be INT32.");
+            if (!isCanonicalRowPartitionOffsetDataType(tensor->getDataType())) {
+                throw std::runtime_error(std::string("Attention-backward ragged ") + label + " dtype must be UINT32 or UINT64.");
             }
             if (tensor->getDimensions() != std::vector<uint64_t>{qLogical.batch + 1}) {
                 throw std::runtime_error(std::string("Attention-backward ragged ") + label + " shape must be [B + 1].");
@@ -7489,7 +7661,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
         validate_dropout_scalar(dropout_offset, "offset");
     }
 
-    (void)compiledStage->descriptorFor(q, k, v, oScratch);
+    (void)compiledStage->descriptorFor(q, k, v, oScratch, raggedBatchSize);
     if (compiledStage->use_bias && boundBias.has_value()) {
         if (!isAllowedAttentionBiasDims(boundBias->getDimensions(),
                                         qLogical.batch,
@@ -7517,6 +7689,7 @@ std::shared_ptr<StampedAttentionBackward> FusedEquation::stampAttentionBackward(
                                                  seq_len_kv,
                                                  q_ragged_offsets,
                                                  kv_ragged_offsets,
+                                                 raggedScratch,
                                                  dropout_seed,
                                                  dropout_offset,
                                                  dO,

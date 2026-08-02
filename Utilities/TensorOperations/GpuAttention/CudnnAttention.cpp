@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
+#include "Utilities/TensorOperations/GpuAttention/CudnnRaggedAttentionMetadata.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
@@ -163,7 +164,17 @@ void requireTensorMatchesSpec(const Tensor& tensor, const AttentionTensorSpec& s
                                TensorDescriptor::getElementTypeName(tensor.getDataType()));
     }
     const vector<int64_t> dims = asInt64(tensor.getDimensions());
-    if (dims != spec.dimensions) {
+    if (spec.ragged) {
+        if (spec.dimensions.size() != 4) {
+            throw invalid_argument(string("cuDNN ragged attention tensor '") + string(name) + "' descriptor must be rank 4.");
+        }
+        const vector<int64_t> expectedPacked{spec.dimensions.at(2), spec.dimensions.at(1), spec.dimensions.at(3)};
+        if (dims != spec.dimensions && dims != expectedPacked) {
+            throw invalid_argument(string("cuDNN ragged attention tensor '") + string(name) +
+                                   "' dimension mismatch. Expected BSHD " + joinInts(spec.dimensions) + " or packed THD " +
+                                   joinInts(expectedPacked) + ", got " + joinInts(dims));
+        }
+    } else if (dims != spec.dimensions) {
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
                                joinInts(spec.dimensions) + ", got " + joinInts(dims));
     }
@@ -398,6 +409,72 @@ void requireRaggedOffsetMatchesDescriptor(const Tensor& offset, const CudnnAtten
         throw invalid_argument(string("cuDNN attention tensor '") + string(name) + "' dimension mismatch. Expected " +
                                joinInts(expected) + ", got " + joinInts(dims));
     }
+}
+
+uint64_t checkedAttentionProduct(int64_t lhs, int64_t rhs, string_view label) {
+    if (lhs <= 0 || rhs <= 0) {
+        throw invalid_argument(string(label) + " dimensions must be positive.");
+    }
+    const uint64_t a = static_cast<uint64_t>(lhs);
+    const uint64_t b = static_cast<uint64_t>(rhs);
+    if (a > numeric_limits<uint64_t>::max() / b) {
+        throw invalid_argument(string(label) + " capacity overflows UINT64.");
+    }
+    return a * b;
+}
+
+void prepareCanonicalRaggedMetadata(const CudnnAttentionDescriptor& descriptor,
+                                    const Tensor& qTensor,
+                                    const Tensor& kTensor,
+                                    const optional<Tensor>& qRowPartitionOffsets,
+                                    const optional<Tensor>& kvRowPartitionOffsets,
+                                    const optional<CudnnRaggedAttentionScratch>& scratch,
+                                    Stream stream) {
+    const bool anyRagged = descriptor.q.ragged || descriptor.k.ragged || descriptor.v.ragged || descriptor.o.ragged;
+    if (!anyRagged) {
+        return;
+    }
+    if (!qRowPartitionOffsets.has_value() || !kvRowPartitionOffsets.has_value() || !scratch.has_value()) {
+        throw invalid_argument(
+            "Ragged cuDNN attention requires canonical q/kv row partitions and preallocated backend metadata scratch.");
+    }
+
+    const uint64_t batch = static_cast<uint64_t>(descriptor.batchSize());
+    const auto qDims = qTensor.getDimensions();
+    const auto kDims = kTensor.getDimensions();
+    const uint64_t qCapacity =
+        qDims.size() == 3 ? qDims.at(0)
+                          : checkedAttentionProduct(descriptor.batchSize(), descriptor.queryLength(), "Ragged Q/O token");
+    const uint64_t kvCapacity =
+        kDims.size() == 3 ? kDims.at(0)
+                          : checkedAttentionProduct(descriptor.batchSize(), descriptor.keyValueLength(), "Ragged K/V token");
+    const uint64_t qElementsPerToken =
+        checkedAttentionProduct(descriptor.queryHeads(), descriptor.qkHeadDim(), "Ragged Q element");
+    const uint64_t oElementsPerToken =
+        checkedAttentionProduct(descriptor.queryHeads(), descriptor.vHeadDim(), "Ragged O element");
+    const uint64_t kElementsPerToken =
+        checkedAttentionProduct(descriptor.keyValueHeads(), descriptor.qkHeadDim(), "Ragged K element");
+    const uint64_t vElementsPerToken =
+        checkedAttentionProduct(descriptor.keyValueHeads(), descriptor.vHeadDim(), "Ragged V element");
+
+    convertCanonicalRowPartitionForCudnnAttention(qRowPartitionOffsets.value(),
+                                                  batch,
+                                                  qCapacity,
+                                                  qElementsPerToken,
+                                                  oElementsPerToken,
+                                                  scratch->seqLenQ,
+                                                  scratch->qElementOffsets,
+                                                  scratch->oElementOffsets,
+                                                  stream);
+    convertCanonicalRowPartitionForCudnnAttention(kvRowPartitionOffsets.value(),
+                                                  batch,
+                                                  kvCapacity,
+                                                  kElementsPerToken,
+                                                  vElementsPerToken,
+                                                  scratch->seqLenKv,
+                                                  scratch->kElementOffsets,
+                                                  scratch->vElementOffsets,
+                                                  stream);
 }
 
 void requireDropoutScalarMatchesDescriptor(const Tensor& scalar, string_view name) {
@@ -1114,18 +1191,14 @@ void CudnnAttentionDescriptor::validateForward() const {
         throwInvalidAttention("intermediateDataType should be FP32 for numerically stable cuDNN SDPA");
     const bool anyRagged = q.ragged || k.ragged || v.ragged || o.ragged;
     if (anyRagged && !usePaddingMask)
-        throwInvalidAttention("ragged attention requires usePaddingMask=true so cuDNN receives q/kv sequence lengths for THD padding-mask semantics");
+        throwInvalidAttention("ragged attention requires usePaddingMask=true so cuDNN consumes the sequence lengths derived from canonical row partitions");
     if (anyRagged) {
         if (!hasBshdPackedStrides(q) || !hasBshdPackedStrides(k) || !hasBshdPackedStrides(v) || !hasBshdPackedStrides(o))
             throwInvalidAttention(
                 "ragged attention requires BSHD physical layouts for q/k/v/o because ragged offsets index packed token-contiguous THD storage");
-        if (q.ragged != o.ragged)
-            throwInvalidAttention("ragged attention requires q and o to either both use ragged offsets or both be dense");
-        if (k.ragged != v.ragged)
-            throwInvalidAttention("ragged attention requires k and v to either both use ragged offsets or both be dense");
-        if (q.dimensions[3] != v.dimensions[3])
+        if (!(q.ragged && k.ragged && v.ragged && o.ragged))
             throwInvalidAttention(
-                "ragged attention requires value head_dim to match query/key head_dim because Thor uses shared Q/O and K/V element offsets");
+                "ragged attention requires q/k/v/o to share canonical token row partitions; partial ragged tensor sets are unsupported");
         if (usePagedKvCache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
             throwInvalidAttention("ragged attention and paged KV cache are separate variable-length modes and cannot be combined");
         if (useFp8 && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
@@ -1283,33 +1356,37 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
         requireAttentionBiasMatchesDescriptor(args.bias.value(), runtimeDescriptor, "bias");
         insertTensor(pack, UID_BIAS, args.bias.value());
     }
+    const bool ragged = runtimeDescriptor.q.ragged || runtimeDescriptor.k.ragged || runtimeDescriptor.v.ragged || runtimeDescriptor.o.ragged;
+    if (ragged) {
+        prepareCanonicalRaggedMetadata(
+            runtimeDescriptor, args.q, args.k, args.qRowPartitionOffsets, args.kvRowPartitionOffsets, args.raggedScratch, stream);
+    }
     if (runtimeDescriptor.usePaddingMask) {
-        requireOptionalGpuTensor(args.seqLenQ, "seqLenQ", gpuNum);
-        requireOptionalGpuTensor(args.seqLenKv, "seqLenKv", gpuNum);
-        requireSeqLenMatchesDescriptor(args.seqLenQ.value(), runtimeDescriptor, "seqLenQ");
-        requireSeqLenMatchesDescriptor(args.seqLenKv.value(), runtimeDescriptor, "seqLenKv");
-        insertTensor(pack, UID_SEQ_Q, args.seqLenQ.value());
-        insertTensor(pack, UID_SEQ_KV, args.seqLenKv.value());
+        if (ragged) {
+            const Tensor& qLengths = args.raggedScratch->seqLenQ;
+            const Tensor& kvLengths = args.raggedScratch->seqLenKv;
+            requireSeqLenMatchesDescriptor(qLengths, runtimeDescriptor, "seqLenQ");
+            requireSeqLenMatchesDescriptor(kvLengths, runtimeDescriptor, "seqLenKv");
+            insertTensor(pack, UID_SEQ_Q, qLengths);
+            insertTensor(pack, UID_SEQ_KV, kvLengths);
+        } else {
+            requireOptionalGpuTensor(args.seqLenQ, "seqLenQ", gpuNum);
+            requireOptionalGpuTensor(args.seqLenKv, "seqLenKv", gpuNum);
+            requireSeqLenMatchesDescriptor(args.seqLenQ.value(), runtimeDescriptor, "seqLenQ");
+            requireSeqLenMatchesDescriptor(args.seqLenKv.value(), runtimeDescriptor, "seqLenKv");
+            insertTensor(pack, UID_SEQ_Q, args.seqLenQ.value());
+            insertTensor(pack, UID_SEQ_KV, args.seqLenKv.value());
+        }
     }
-    if (runtimeDescriptor.q.ragged) {
-        requireOptionalGpuTensor(args.raggedOffsetQ, "raggedOffsetQ", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetQ.value(), runtimeDescriptor, "raggedOffsetQ");
-        insertTensor(pack, UID_RAGGED_Q, args.raggedOffsetQ.value());
-    }
-    if (runtimeDescriptor.k.ragged) {
-        requireOptionalGpuTensor(args.raggedOffsetK, "raggedOffsetK", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetK.value(), runtimeDescriptor, "raggedOffsetK");
-        insertTensor(pack, UID_RAGGED_K, args.raggedOffsetK.value());
-    }
-    if (runtimeDescriptor.v.ragged) {
-        requireOptionalGpuTensor(args.raggedOffsetV, "raggedOffsetV", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetV.value(), runtimeDescriptor, "raggedOffsetV");
-        insertTensor(pack, UID_RAGGED_V, args.raggedOffsetV.value());
-    }
-    if (runtimeDescriptor.o.ragged) {
-        requireOptionalGpuTensor(args.raggedOffsetO, "raggedOffsetO", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetO.value(), runtimeDescriptor, "raggedOffsetO");
-        insertTensor(pack, UID_RAGGED_O, args.raggedOffsetO.value());
+    if (ragged) {
+        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->qElementOffsets, runtimeDescriptor, "qElementOffsets");
+        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->kElementOffsets, runtimeDescriptor, "kElementOffsets");
+        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->vElementOffsets, runtimeDescriptor, "vElementOffsets");
+        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->oElementOffsets, runtimeDescriptor, "oElementOffsets");
+        insertTensor(pack, UID_RAGGED_Q, args.raggedScratch->qElementOffsets);
+        insertTensor(pack, UID_RAGGED_K, args.raggedScratch->kElementOffsets);
+        insertTensor(pack, UID_RAGGED_V, args.raggedScratch->vElementOffsets);
+        insertTensor(pack, UID_RAGGED_O, args.raggedScratch->oElementOffsets);
     }
     if (runtimeDescriptor.dropout.probability > 0.0f) {
         if (descriptor.dropout.usePhilox) {
@@ -1401,33 +1478,37 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& de
         insertTensor(pack, UID_BIAS, args.bias.value());
         insertTensor(pack, UID_DBIA, args.dBias.value());
     }
+    const bool ragged = runtimeDescriptor.q.ragged || runtimeDescriptor.k.ragged || runtimeDescriptor.v.ragged || runtimeDescriptor.o.ragged;
+    if (ragged) {
+        prepareCanonicalRaggedMetadata(
+            runtimeDescriptor, args.q, args.k, args.qRowPartitionOffsets, args.kvRowPartitionOffsets, args.raggedScratch, stream);
+    }
     if (runtimeDescriptor.usePaddingMask) {
-        requireOptionalGpuTensor(args.seqLenQ, "seqLenQ", gpuNum);
-        requireOptionalGpuTensor(args.seqLenKv, "seqLenKv", gpuNum);
-        requireSeqLenMatchesDescriptor(args.seqLenQ.value(), runtimeDescriptor, "seqLenQ");
-        requireSeqLenMatchesDescriptor(args.seqLenKv.value(), runtimeDescriptor, "seqLenKv");
-        insertTensor(pack, UID_SEQ_Q, args.seqLenQ.value());
-        insertTensor(pack, UID_SEQ_KV, args.seqLenKv.value());
+        if (ragged) {
+            const Tensor& qLengths = args.raggedScratch->seqLenQ;
+            const Tensor& kvLengths = args.raggedScratch->seqLenKv;
+            requireSeqLenMatchesDescriptor(qLengths, runtimeDescriptor, "seqLenQ");
+            requireSeqLenMatchesDescriptor(kvLengths, runtimeDescriptor, "seqLenKv");
+            insertTensor(pack, UID_SEQ_Q, qLengths);
+            insertTensor(pack, UID_SEQ_KV, kvLengths);
+        } else {
+            requireOptionalGpuTensor(args.seqLenQ, "seqLenQ", gpuNum);
+            requireOptionalGpuTensor(args.seqLenKv, "seqLenKv", gpuNum);
+            requireSeqLenMatchesDescriptor(args.seqLenQ.value(), runtimeDescriptor, "seqLenQ");
+            requireSeqLenMatchesDescriptor(args.seqLenKv.value(), runtimeDescriptor, "seqLenKv");
+            insertTensor(pack, UID_SEQ_Q, args.seqLenQ.value());
+            insertTensor(pack, UID_SEQ_KV, args.seqLenKv.value());
+        }
     }
-    if (runtimeDescriptor.q.ragged) {
-        requireOptionalGpuTensor(args.raggedOffsetQ, "raggedOffsetQ", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetQ.value(), runtimeDescriptor, "raggedOffsetQ");
-        insertTensor(pack, UID_RAGGED_Q, args.raggedOffsetQ.value());
-    }
-    if (runtimeDescriptor.k.ragged) {
-        requireOptionalGpuTensor(args.raggedOffsetK, "raggedOffsetK", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetK.value(), runtimeDescriptor, "raggedOffsetK");
-        insertTensor(pack, UID_RAGGED_K, args.raggedOffsetK.value());
-    }
-    if (runtimeDescriptor.v.ragged) {
-        requireOptionalGpuTensor(args.raggedOffsetV, "raggedOffsetV", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetV.value(), runtimeDescriptor, "raggedOffsetV");
-        insertTensor(pack, UID_RAGGED_V, args.raggedOffsetV.value());
-    }
-    if (runtimeDescriptor.o.ragged) {
-        requireOptionalGpuTensor(args.raggedOffsetO, "raggedOffsetO", gpuNum);
-        requireRaggedOffsetMatchesDescriptor(args.raggedOffsetO.value(), runtimeDescriptor, "raggedOffsetO");
-        insertTensor(pack, UID_RAGGED_O, args.raggedOffsetO.value());
+    if (ragged) {
+        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->qElementOffsets, runtimeDescriptor, "qElementOffsets");
+        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->kElementOffsets, runtimeDescriptor, "kElementOffsets");
+        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->vElementOffsets, runtimeDescriptor, "vElementOffsets");
+        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->oElementOffsets, runtimeDescriptor, "oElementOffsets");
+        insertTensor(pack, UID_RAGGED_Q, args.raggedScratch->qElementOffsets);
+        insertTensor(pack, UID_RAGGED_K, args.raggedScratch->kElementOffsets);
+        insertTensor(pack, UID_RAGGED_V, args.raggedScratch->vElementOffsets);
+        insertTensor(pack, UID_RAGGED_O, args.raggedScratch->oElementOffsets);
     }
     if (descriptor.dropout.probability > 0.0f && descriptor.dropout.usePhilox) {
         requireOptionalGpuTensor(args.dropoutSeed, "dropoutSeed", gpuNum);

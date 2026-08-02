@@ -399,3 +399,62 @@ def test_placed_network_basic_api(tmp_path):
     num_trainable_layers = placed2.get_num_trainable_layers()
     assert isinstance(num_trainable_layers, int)
     assert num_trainable_layers == net.get_num_trainable_layers()
+
+
+@pytest.mark.cuda
+def test_ragged_network_output_infer_returns_one_logical_physical_ragged_tensor(tmp_path):
+    batch_size = 2
+    network_name = "pytest_ragged_network_output_infer"
+    net = thor.Network(network_name)
+    tokens = thor.layers.RaggedNetworkInput(
+        net,
+        "tokens",
+        thor.DataType.fp32,
+        [2],
+        max_total_values=6,
+        batch_size=batch_size,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    thor.layers.RaggedNetworkOutput(net, "tokens_out", tokens)
+
+    placed = net.place(
+        batch_size,
+        inference_only=True,
+        forced_devices=[0],
+        forced_num_stamps_per_gpu=1,
+    )
+
+    values_np = np.array(
+        [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [99.0, 99.0], [99.0, 99.0]],
+        dtype=np.float32,
+    )
+    offsets_np = np.array([0, 1, 4], dtype=np.uint32)
+    values = _cpu_tensor(values_np, thor.DataType.fp32)
+    offsets = _cpu_tensor(offsets_np, thor.DataType.uint32)
+    ragged = thor.physical.PhysicalRaggedTensor(values, offsets)
+
+    outputs = placed.infer({"tokens": ragged})
+
+    assert set(outputs) == {"tokens_out"}
+    result = outputs["tokens_out"]
+    assert isinstance(result, thor.physical.PhysicalRaggedTensor)
+    assert np.array_equal(result.offsets.numpy(), offsets_np)
+    assert np.array_equal(result.values.numpy(), values_np)
+
+    save_dir = tmp_path / "ragged_output_artifact"
+    placed.save(str(save_dir), overwrite=False, save_optimizer_state=False)
+
+    loaded = thor.Network(network_name)
+    loaded.load(str(save_dir))
+    loaded_placed = loaded.place(
+        batch_size,
+        inference_only=True,
+        forced_devices=[0],
+        forced_num_stamps_per_gpu=1,
+    )
+    loaded_outputs = loaded_placed.infer({"tokens": ragged})
+    assert set(loaded_outputs) == {"tokens_out"}
+    loaded_result = loaded_outputs["tokens_out"]
+    assert isinstance(loaded_result, thor.physical.PhysicalRaggedTensor)
+    assert np.array_equal(loaded_result.offsets.numpy(), offsets_np)
+    assert np.array_equal(loaded_result.values.numpy(), values_np)

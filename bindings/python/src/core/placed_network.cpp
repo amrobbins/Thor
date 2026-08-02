@@ -1,11 +1,15 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/map.h>
+#include <nanobind/stl/variant.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
 #include <utility>
 
+#include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -33,9 +37,34 @@ must not submit batches concurrently with this operation.
 
     placed_network.def(
         "infer",
-        [](PlacedNetwork& self, std::map<std::string, ThorImplementation::Tensor> batch_inputs, uint64_t stamp_index) {
-            nb::gil_scoped_release release;
-            return self.infer(std::move(batch_inputs), stamp_index);
+        [](PlacedNetwork& self, nb::dict batch_inputs, uint64_t stamp_index) {
+            Batch batch;
+            for (auto item : batch_inputs) {
+                const std::string name = nb::cast<std::string>(item.first);
+                if (nb::isinstance<ThorImplementation::Tensor>(item.second)) {
+                    batch.insert(name, nb::cast<ThorImplementation::Tensor>(item.second));
+                } else if (nb::isinstance<ThorImplementation::RaggedTensor>(item.second)) {
+                    batch.insert(name, nb::cast<ThorImplementation::RaggedTensor>(item.second));
+                } else {
+                    throw nb::type_error(
+                        "PlacedNetwork.infer input values must be thor.physical.PhysicalTensor or thor.physical.PhysicalRaggedTensor.");
+                }
+            }
+
+            std::map<std::string, InferenceOutputValue> outputs;
+            {
+                nb::gil_scoped_release release;
+                outputs = self.inferLogical(batch, stamp_index);
+            }
+            nb::dict result;
+            for (auto& [name, value] : outputs) {
+                if (std::holds_alternative<ThorImplementation::Tensor>(value)) {
+                    result[nb::str(name.c_str())] = nb::cast(std::get<ThorImplementation::Tensor>(value));
+                } else {
+                    result[nb::str(name.c_str())] = nb::cast(std::get<ThorImplementation::RaggedTensor>(value));
+                }
+            }
+            return result;
         },
         "batch_inputs"_a,
         "stamp_index"_a = 0,
@@ -44,15 +73,15 @@ Run one inference batch through this placed network stamp.
 
 Parameters
 ----------
-batch_inputs : dict[str, thor.physical.PhysicalTensor]
-    Full batched input tensors keyed by NetworkInput name.
+batch_inputs : dict[str, thor.physical.PhysicalTensor | thor.physical.PhysicalRaggedTensor]
+    Logical dense or ragged input fields keyed by NetworkInput/RaggedNetworkInput name.
 stamp_index : int, default 0
     Stamped network instance to execute.
 
 Returns
 -------
-dict[str, thor.physical.PhysicalTensor]
-    Full batched output tensors keyed by NetworkOutput name. Network outputs are CPU tensors.
+dict[str, thor.physical.PhysicalTensor | thor.physical.PhysicalRaggedTensor]
+    Logical external outputs keyed by NetworkOutput/RaggedNetworkOutput name. Ragged component tensors remain implementation details.
 )nbdoc");
 
     placed_network.def("get_stamped_network", &PlacedNetwork::getStampedNetwork, "i"_a, nb::rv_policy::reference_internal);

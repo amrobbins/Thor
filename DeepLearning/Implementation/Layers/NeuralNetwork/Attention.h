@@ -22,7 +22,9 @@ class Attention final : public CustomLayer, public TrainingDropoutControllable {
               int64_t stampedId,
               std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors,
               std::optional<DynamicExpressionVariantId> deterministicTrainingVariantId,
-              bool trainingDropoutEnabled)
+              bool trainingDropoutEnabled,
+              std::vector<bool> inputDimensionsIncludeBatch = {},
+              std::optional<uint32_t> fixedBatchCapacity = std::nullopt)
         : CustomLayer(std::move(expr),
                       std::move(inputNames),
                       std::move(outputNames),
@@ -30,7 +32,11 @@ class Attention final : public CustomLayer, public TrainingDropoutControllable {
                       parameters,
                       inferenceOnly,
                       stampedId,
-                      std::move(declaredOutputDescriptors)),
+                      std::move(declaredOutputDescriptors),
+                      false,
+                      false,
+                      std::move(inputDimensionsIncludeBatch),
+                      fixedBatchCapacity),
           deterministicTrainingVariantId(deterministicTrainingVariantId) {
         setTrainingDropoutEnabled(trainingDropoutEnabled);
     }

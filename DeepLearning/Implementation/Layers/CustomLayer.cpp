@@ -260,14 +260,18 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          int64_t stampedId,
                          std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors,
                          bool usesBatchValidity,
-                         bool requiresFullBatch)
+                         bool requiresFullBatch,
+                         std::vector<bool> inputDimensionsIncludeBatch,
+                         std::optional<uint32_t> fixedBatchCapacity)
     : TrainableLayer(placement, inferenceOnly, stampedId),
       layerDefinitionExpression(std::move(expr)),
       batchValidityMaskEnabled(usesBatchValidity),
       fullBatchRequired(requiresFullBatch),
       inputNames(std::move(inputNames)),
       outputNames(std::move(outputNames)),
-      declaredOutputDescriptors(std::move(declaredOutputDescriptors)) {
+      declaredOutputDescriptors(std::move(declaredOutputDescriptors)),
+      inputDimensionsIncludeBatch(std::move(inputDimensionsIncludeBatch)),
+      fixedBatchCapacity(fixedBatchCapacity) {
     if (batchValidityMaskEnabled && fullBatchRequired)
         throw runtime_error("CustomLayer cannot both use batch validity and require a full batch.");
     validatePortNames(this->inputNames, "input");
@@ -286,6 +290,14 @@ CustomLayer::CustomLayer(DynamicExpression expr,
 
     if (!this->declaredOutputDescriptors.empty() && this->declaredOutputDescriptors.size() != this->outputNames.size()) {
         throw runtime_error("CustomLayer declared output descriptor count must match the number of output ports.");
+    }
+    if (this->inputDimensionsIncludeBatch.empty()) {
+        this->inputDimensionsIncludeBatch.assign(this->inputNames.size(), false);
+    } else if (this->inputDimensionsIncludeBatch.size() != this->inputNames.size()) {
+        throw runtime_error("CustomLayer batch-included input flag count must match the number of input ports.");
+    }
+    if (this->fixedBatchCapacity.has_value() && this->fixedBatchCapacity.value() == 0) {
+        throw runtime_error("CustomLayer fixed batch capacity must be non-zero.");
     }
     for (uint32_t outputPort = 0; outputPort < this->declaredOutputDescriptors.size(); ++outputPort) {
         const auto& descriptor = this->declaredOutputDescriptors[outputPort];
@@ -1500,11 +1512,21 @@ std::optional<Tensor> CustomLayer::inferFeatureOutputTensor(uint32_t application
     requireApplicationInputInterfaceConnected(applicationIndex);
 
     if (!declaredOutputDescriptors.empty()) {
-        std::optional<uint64_t> batchSize;
+        const DeclaredOutputDescriptor& declared = declaredOutputDescriptors[outputPortIndex];
+        if (declared.dimensionsIncludeBatch) {
+            return Tensor(placement, TensorDescriptor(declared.dataType, declared.featureDimensions));
+        }
+
+        std::optional<uint64_t> batchSize = fixedBatchCapacity.has_value()
+                                                ? std::optional<uint64_t>(fixedBatchCapacity.value())
+                                                : std::nullopt;
         for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
             const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
             if (flat >= featureInputs.size() || !featureInputs[flat].has_value()) {
                 throw runtime_error("CustomLayer missing connected feature input for port '" + inputNames[inputPort] + "'.");
+            }
+            if (inputDimensionsIncludeBatch[inputPort]) {
+                continue;
             }
 
             const std::vector<uint64_t>& inputDimensions = featureInputs[flat].value().getDescriptor().getDimensions();
@@ -1516,8 +1538,8 @@ std::optional<Tensor> CustomLayer::inferFeatureOutputTensor(uint32_t application
                 batchSize = inputDimensions.front();
             } else if (batchSize.value() != inputDimensions.front()) {
                 throw runtime_error("CustomLayer feature inputs disagree on physical batch size for application " +
-                                    std::to_string(applicationIndex) + ". Port '" + inputNames.front() + "' has batch " +
-                                    std::to_string(batchSize.value()) + ", while port '" + inputNames[inputPort] + "' has batch " +
+                                    std::to_string(applicationIndex) + ". Expected batch " + std::to_string(batchSize.value()) +
+                                    ", while port '" + inputNames[inputPort] + "' has batch " +
                                     std::to_string(inputDimensions.front()) + ".");
             }
         }
@@ -1526,7 +1548,6 @@ std::optional<Tensor> CustomLayer::inferFeatureOutputTensor(uint32_t application
             throw runtime_error("CustomLayer requires a non-zero physical batch size to construct output tensors.");
         }
 
-        const DeclaredOutputDescriptor& declared = declaredOutputDescriptors[outputPortIndex];
         std::vector<uint64_t> physicalDimensions;
         physicalDimensions.reserve(declared.featureDimensions.size() + 1);
         physicalDimensions.push_back(batchSize.value());
@@ -2126,9 +2147,14 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
         }
         const std::vector<uint64_t> inputDimensions = featureInput.value().getDimensions();
         THOR_THROW_IF_FALSE(!inputDimensions.empty());
-        THOR_THROW_IF_FALSE(inputDimensions.front() >= 1);
-        THOR_THROW_IF_FALSE(inputDimensions.front() <= std::numeric_limits<uint32_t>::max());
-        const uint32_t physicalBatchCapacity = static_cast<uint32_t>(inputDimensions.front());
+        uint32_t physicalBatchCapacity = 0;
+        if (fixedBatchCapacity.has_value()) {
+            physicalBatchCapacity = fixedBatchCapacity.value();
+        } else {
+            THOR_THROW_IF_FALSE(inputDimensions.front() >= 1);
+            THOR_THROW_IF_FALSE(inputDimensions.front() <= std::numeric_limits<uint32_t>::max());
+            physicalBatchCapacity = static_cast<uint32_t>(inputDimensions.front());
+        }
         const uint32_t resolvedValidExampleCount = batchSize == 0 ? physicalBatchCapacity : batchSize;
         THOR_THROW_IF_FALSE(resolvedValidExampleCount >= 1);
         THOR_THROW_IF_FALSE(resolvedValidExampleCount <= physicalBatchCapacity);
@@ -2812,6 +2838,9 @@ uint64_t CustomLayer::flopCountBackward() {
 }
 
 uint64_t CustomLayer::batchSizeForFlopEstimate() const {
+    if (fixedBatchCapacity.has_value()) {
+        return fixedBatchCapacity.value();
+    }
     auto batchFromTensor = [](const Tensor& tensor) -> uint64_t {
         std::vector<uint64_t> dimensions = tensor.getDescriptor().getDimensions();
         if (!dimensions.empty() && dimensions[0] > 0) {

@@ -1114,9 +1114,9 @@ matching rows are written as zeros without reading the weight table.
         if (has_page_table_k && !has_q_seq_len) {
             throw nb::value_error("paged KV attention requires q_seq_len and kv_seq_len.");
         }
-        if (has_q_ragged_offsets && !has_q_seq_len) {
+        if (has_q_ragged_offsets && has_q_seq_len) {
             throw nb::value_error(
-                "ragged attention requires q_seq_len and kv_seq_len along with q_ragged_offsets and kv_ragged_offsets.");
+                "ragged attention row partitions already define sequence lengths; do not also provide q_seq_len/kv_seq_len.");
         }
         if (has_dropout_seed != has_dropout_offset) {
             throw nb::value_error("dropout_seed and dropout_offset must be provided together for attention dropout.");
@@ -1142,8 +1142,6 @@ matching rows are written as zeros without reading the weight table.
         }
 
         if (has_q_ragged_offsets) {
-            Expression q_seq_len = expressionFromPython(q_seq_len_obj, "Expression.scaled_dot_product_attention() argument 'q_seq_len'");
-            Expression kv_seq_len = expressionFromPython(kv_seq_len_obj, "Expression.scaled_dot_product_attention() argument 'kv_seq_len'");
             Expression q_offsets = expressionFromPython(q_ragged_offsets_obj, "Expression.scaled_dot_product_attention() argument 'q_ragged_offsets'");
             Expression kv_offsets = expressionFromPython(kv_ragged_offsets_obj, "Expression.scaled_dot_product_attention() argument 'kv_ragged_offsets'");
             if (uses_dropout) {
@@ -1154,8 +1152,6 @@ matching rows are written as zeros without reading the weight table.
                                                                        k,
                                                                        v,
                                                                        expressionFromPython(bias_obj, "Expression.scaled_dot_product_attention() argument 'bias'"),
-                                                                       q_seq_len,
-                                                                       kv_seq_len,
                                                                        q_offsets,
                                                                        kv_offsets,
                                                                        dropout_seed,
@@ -1163,13 +1159,13 @@ matching rows are written as zeros without reading the weight table.
                                                                        std::move(options));
                 }
                 return Expression::scaledDotProductAttentionRagged(
-                    q, k, v, q_seq_len, kv_seq_len, q_offsets, kv_offsets, dropout_seed, dropout_offset, std::move(options));
+                    q, k, v, q_offsets, kv_offsets, dropout_seed, dropout_offset, std::move(options));
             }
             if (has_bias) {
                 return Expression::scaledDotProductAttentionRagged(
-                    q, k, v, expressionFromPython(bias_obj, "Expression.scaled_dot_product_attention() argument 'bias'"), q_seq_len, kv_seq_len, q_offsets, kv_offsets, std::move(options));
+                    q, k, v, expressionFromPython(bias_obj, "Expression.scaled_dot_product_attention() argument 'bias'"), q_offsets, kv_offsets, std::move(options));
             }
-            return Expression::scaledDotProductAttentionRagged(q, k, v, q_seq_len, kv_seq_len, q_offsets, kv_offsets, std::move(options));
+            return Expression::scaledDotProductAttentionRagged(q, k, v, q_offsets, kv_offsets, std::move(options));
         }
 
         if (uses_dropout) {
@@ -1451,8 +1447,9 @@ FP16/BF16 production support:
   Backward materializes sequence-broadcast bias to dense score space before
   cuDNN backward, then explicitly reduces dBias back to the requested bias shape.
 * When ``q_ragged_offsets`` and ``kv_ragged_offsets`` are provided, they must be
-  int32 GPU tensors with shape ``[B + 1]``.  They enable cuDNN packed/ragged
-  variable-length attention and are passed through as Q/O and K/V ragged offsets.
+  canonical uint32/uint64 GPU token row partitions with shape ``[B + 1]``.  They
+  are mutually exclusive with ``q_seq_len``/``kv_seq_len``; Thor derives cuDNN's
+  private int32 sequence lengths and independent Q/K/V/O element offsets on-device.
   Ragged + additive-bias forward is supported, but ragged + additive-bias
   backward is rejected.
 * When ``dropout_probability > 0``, ``dropout_seed`` and ``dropout_offset`` must

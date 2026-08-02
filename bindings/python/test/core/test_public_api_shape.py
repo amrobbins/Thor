@@ -10,6 +10,7 @@ def test_top_level_api_is_curated():
         "EnsembleModel",
         "MetricAggregation",
         "Network",
+        "RaggedTensor",
         "Tensor",
         "__git_version__",
         "__version__",

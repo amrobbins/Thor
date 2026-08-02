@@ -21,12 +21,16 @@ using PhysicalTensorMap = std::unordered_map<std::string, PhysicalTensor>;
 
 namespace {
 
-PhysicalTensor makeFakePlacedTensor(const Thor::Tensor& apiTensor, uint64_t batchSize) {
+PhysicalTensor makeFakePlacedTensor(const Thor::Tensor& apiTensor, uint64_t batchSize, bool dimensionsIncludeBatch = false) {
     std::vector<uint64_t> fakeDims;
-    fakeDims.reserve(apiTensor.getDimensions().size() + 1);
-    fakeDims.push_back(batchSize);
-    for (uint64_t dim : apiTensor.getDimensions()) {
-        fakeDims.push_back(dim);
+    if (dimensionsIncludeBatch) {
+        fakeDims = apiTensor.getDimensions();
+    } else {
+        fakeDims.reserve(apiTensor.getDimensions().size() + 1);
+        fakeDims.push_back(batchSize);
+        for (uint64_t dim : apiTensor.getDimensions()) {
+            fakeDims.push_back(dim);
+        }
     }
 
     ThorImplementation::TensorPlacement placement(ThorImplementation::TensorPlacement::MemDevices::CPU, 0);
@@ -190,11 +194,17 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          std::vector<std::shared_ptr<ParameterSpecification>> parameters,
                          SerializationContract serializationContract,
                          bool usesBatchValidity,
-                         bool requiresFullBatch)
+                         bool requiresFullBatch,
+                         std::set<std::string> inputDimensionsIncludeBatch,
+                         std::set<std::string> outputDimensionsIncludeBatch,
+                         std::optional<uint32_t> fixedBatchCapacity)
     : TrainableLayer(std::move(parameters)),
       expr(std::move(expr)),
       batchValidityMaskEnabled(usesBatchValidity),
-      fullBatchRequired(requiresFullBatch) {
+      fullBatchRequired(requiresFullBatch),
+      inputDimensionsIncludeBatch(std::move(inputDimensionsIncludeBatch)),
+      outputDimensionsIncludeBatch(std::move(outputDimensionsIncludeBatch)),
+      fixedBatchCapacity(fixedBatchCapacity) {
     if (batchValidityMaskEnabled && fullBatchRequired)
         throw runtime_error("CustomLayer cannot both use batch validity and require a full batch.");
     if (inputNames.empty()) {
@@ -209,6 +219,20 @@ CustomLayer::CustomLayer(DynamicExpression expr,
 
     this->inputNames = std::move(inputNames);
     this->outputNames = std::move(outputNames);
+
+    for (const std::string& name : this->inputDimensionsIncludeBatch) {
+        if (std::find(this->inputNames.begin(), this->inputNames.end(), name) == this->inputNames.end()) {
+            throw runtime_error("CustomLayer batch-included input name is not a declared input: " + name);
+        }
+    }
+    for (const std::string& name : this->outputDimensionsIncludeBatch) {
+        if (std::find(this->outputNames.begin(), this->outputNames.end(), name) == this->outputNames.end()) {
+            throw runtime_error("CustomLayer batch-included output name is not a declared output: " + name);
+        }
+    }
+    if (this->fixedBatchCapacity.has_value() && this->fixedBatchCapacity.value() == 0) {
+        throw runtime_error("CustomLayer fixed batch capacity must be non-zero.");
+    }
 
     if (inputInterfaces.empty())
         throw runtime_error("Cannot create a CustomLayer with zero input interfaces.");
@@ -449,7 +473,8 @@ CustomLayer::SerializationProbe CustomLayer::buildExpressionForBatch(const Tenso
                                                                        const TensorMap* outputInterface) const {
     PhysicalTensorMap fakeFeatureInputs;
     for (const auto& [name, apiTensor] : inputInterface) {
-        fakeFeatureInputs.emplace(name, makeFakePlacedTensor(apiTensor, batchSize));
+        fakeFeatureInputs.emplace(name,
+                                  makeFakePlacedTensor(apiTensor, batchSize, inputDimensionsIncludeBatch.contains(name)));
     }
 
     ThorImplementation::PhysicalParameter::StorageContext fakeStorageContext(fakeFeatureInputs);
@@ -480,7 +505,8 @@ CustomLayer::SerializationProbe CustomLayer::buildExpressionForBatch(const Tenso
     PhysicalTensorMap fakeOutputs;
     if (outputInterface != nullptr) {
         for (const auto& [name, apiTensor] : *outputInterface) {
-            fakeOutputs.emplace(name, makeFakePlacedTensor(apiTensor, batchSize));
+            fakeOutputs.emplace(name,
+                                makeFakePlacedTensor(apiTensor, batchSize, outputDimensionsIncludeBatch.contains(name)));
         }
     }
 
@@ -604,9 +630,14 @@ void CustomLayer::analyzeSerializableExpression(const SerializationProbe& batchO
                     "the batch-" + std::to_string(batchSize) + " builder did not produce declared output '" + outputName + "'";
                 return false;
             }
-            std::vector<uint64_t> expectedDimensions{batchSize};
+            std::vector<uint64_t> expectedDimensions;
             const std::vector<uint64_t>& logicalDimensions = declared->second.getDimensions();
-            expectedDimensions.insert(expectedDimensions.end(), logicalDimensions.begin(), logicalDimensions.end());
+            if (outputDimensionsIncludeBatch.contains(outputName)) {
+                expectedDimensions = logicalDimensions;
+            } else {
+                expectedDimensions.push_back(batchSize);
+                expectedDimensions.insert(expectedDimensions.end(), logicalDimensions.begin(), logicalDimensions.end());
+            }
             if (actualShape->second != expectedDimensions || actualDType->second != declared->second.getDataType()) {
                 serializationRejectionReason =
                     "the batch-" + std::to_string(batchSize) + " builder output '" + outputName +
@@ -953,8 +984,8 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
     const TensorMap& outputInterface = outputInterfaces.front();
     for (const std::string& outputName : outputNames) {
         const Tensor& outputTensor = outputInterface.at(outputName);
-        declaredOutputDescriptors.push_back(
-            ThorImplementation::CustomLayer::DeclaredOutputDescriptor{outputTensor.getDataType(), outputTensor.getDimensions()});
+        declaredOutputDescriptors.push_back(ThorImplementation::CustomLayer::DeclaredOutputDescriptor{
+            outputTensor.getDataType(), outputTensor.getDimensions(), outputDimensionsIncludeBatch.contains(outputName)});
     }
 
     auto physicalLayer = createPhysicalLayer(expr,
@@ -966,7 +997,16 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
                                              Layer::getId(),
                                              std::move(declaredOutputDescriptors),
                                              batchValidityMaskEnabled,
-                                             fullBatchRequired);
+                                             fullBatchRequired,
+                                             [&]() {
+                                                 std::vector<bool> flags;
+                                                 flags.reserve(inputNames.size());
+                                                 for (const std::string& name : inputNames) {
+                                                     flags.push_back(inputDimensionsIncludeBatch.contains(name));
+                                                 }
+                                                 return flags;
+                                             }(),
+                                             fixedBatchCapacity);
     physicalLayer->setLayerName(getLayerType());
     return physicalLayer;
 }
@@ -981,7 +1021,9 @@ std::shared_ptr<ThorImplementation::CustomLayer> CustomLayer::createPhysicalLaye
     int64_t stampedId,
     std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors,
     bool usesBatchValidity,
-    bool requiresFullBatch) const {
+    bool requiresFullBatch,
+    std::vector<bool> inputDimensionsIncludeBatch,
+    std::optional<uint32_t> fixedBatchCapacity) const {
     return std::make_shared<ThorImplementation::CustomLayer>(std::move(expression),
                                                               std::move(physicalInputNames),
                                                               std::move(physicalOutputNames),
@@ -991,7 +1033,9 @@ std::shared_ptr<ThorImplementation::CustomLayer> CustomLayer::createPhysicalLaye
                                                               stampedId,
                                                               std::move(declaredOutputDescriptors),
                                                               usesBatchValidity,
-                                                              requiresFullBatch);
+                                                              requiresFullBatch,
+                                                              std::move(inputDimensionsIncludeBatch),
+                                                              fixedBatchCapacity);
 }
 
 json CustomLayer::architectureJson() const {

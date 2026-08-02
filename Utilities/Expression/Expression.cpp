@@ -4138,10 +4138,9 @@ Expression Expression::attentionWithOptionalMetadata(const Expression& q,
     if (options.use_padding_mask && (q_seq_len == nullptr || kv_seq_len == nullptr)) {
         throw std::runtime_error("AttentionOptions::use_padding_mask requires q_seq_len and kv_seq_len expressions.");
     }
-    if (use_ragged_offsets && (q_seq_len == nullptr || kv_seq_len == nullptr)) {
+    if (use_ragged_offsets && (q_seq_len != nullptr || kv_seq_len != nullptr || options.use_padding_mask)) {
         throw std::runtime_error(
-            "Ragged attention requires q_seq_len and kv_seq_len expressions in addition to q/kv ragged offsets because cuDNN THD uses "
-            "sequence lengths for padding-mask semantics.");
+            "Ragged attention uses canonical q/kv row partitions; explicit q_seq_len/kv_seq_len padding metadata is redundant and unsupported.");
     }
     if (!options.use_padding_mask && (q_seq_len != nullptr || kv_seq_len != nullptr)) {
         throw std::runtime_error("q_seq_len/kv_seq_len were provided but AttentionOptions::use_padding_mask is false.");
@@ -4410,47 +4409,30 @@ Expression Expression::scaledDotProductAttentionRagged(const Expression& q,
 Expression Expression::scaledDotProductAttentionRagged(const Expression& q,
                                                        const Expression& k,
                                                        const Expression& v,
-                                                       const Expression& q_seq_len,
-                                                       const Expression& kv_seq_len,
-                                                       const Expression& q_offsets,
-                                                       const Expression& kv_offsets,
-                                                       AttentionOptions options) {
-    options.use_padding_mask = true;
-    return attentionWithOptionalMetadata(
-        q, k, v, nullptr, &q_seq_len, &kv_seq_len, &q_offsets, &kv_offsets, nullptr, nullptr, nullptr, nullptr, std::move(options));
-}
-
-Expression Expression::scaledDotProductAttentionRagged(const Expression& q,
-                                                       const Expression& k,
-                                                       const Expression& v,
                                                        const Expression& bias,
-                                                       const Expression& q_seq_len,
-                                                       const Expression& kv_seq_len,
                                                        const Expression& q_offsets,
                                                        const Expression& kv_offsets,
                                                        AttentionOptions options) {
-    options.use_padding_mask = true;
+    options.use_padding_mask = false;
     return attentionWithOptionalMetadata(
-        q, k, v, &bias, &q_seq_len, &kv_seq_len, &q_offsets, &kv_offsets, nullptr, nullptr, nullptr, nullptr, std::move(options));
+        q, k, v, &bias, nullptr, nullptr, &q_offsets, &kv_offsets, nullptr, nullptr, nullptr, nullptr, std::move(options));
 }
 
 Expression Expression::scaledDotProductAttentionRagged(const Expression& q,
                                                        const Expression& k,
                                                        const Expression& v,
-                                                       const Expression& q_seq_len,
-                                                       const Expression& kv_seq_len,
                                                        const Expression& q_offsets,
                                                        const Expression& kv_offsets,
                                                        const Expression& dropout_seed,
                                                        const Expression& dropout_offset,
                                                        AttentionOptions options) {
-    options.use_padding_mask = true;
+    options.use_padding_mask = false;
     return attentionWithOptionalMetadata(q,
                                          k,
                                          v,
                                          nullptr,
-                                         &q_seq_len,
-                                         &kv_seq_len,
+                                         nullptr,
+                                         nullptr,
                                          &q_offsets,
                                          &kv_offsets,
                                          nullptr,
@@ -4464,20 +4446,18 @@ Expression Expression::scaledDotProductAttentionRagged(const Expression& q,
                                                        const Expression& k,
                                                        const Expression& v,
                                                        const Expression& bias,
-                                                       const Expression& q_seq_len,
-                                                       const Expression& kv_seq_len,
                                                        const Expression& q_offsets,
                                                        const Expression& kv_offsets,
                                                        const Expression& dropout_seed,
                                                        const Expression& dropout_offset,
                                                        AttentionOptions options) {
-    options.use_padding_mask = true;
+    options.use_padding_mask = false;
     return attentionWithOptionalMetadata(q,
                                          k,
                                          v,
                                          &bias,
-                                         &q_seq_len,
-                                         &kv_seq_len,
+                                         nullptr,
+                                         nullptr,
                                          &q_offsets,
                                          &kv_offsets,
                                          nullptr,

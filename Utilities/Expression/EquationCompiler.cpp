@@ -2594,9 +2594,9 @@ shared_ptr<CompiledAttention> EquationCompiler::compileAttention(const PhysicalE
         }
         const ExprNode& q_offsets = validate_local_input(node.attention_ragged_offset_q_node, "q_ragged_offsets");
         const ExprNode& kv_offsets = validate_local_input(node.attention_ragged_offset_kv_node, "kv_ragged_offsets");
-        if (!isCudnnRaggedOffsetDataType(q_offsets.input_tensor_dtype.value()) ||
-            !isCudnnRaggedOffsetDataType(kv_offsets.input_tensor_dtype.value())) {
-            throw std::runtime_error("Attention ragged offset inputs must be INT32 tensors.");
+        if (!isCanonicalRowPartitionOffsetDataType(q_offsets.input_tensor_dtype.value()) ||
+            !isCanonicalRowPartitionOffsetDataType(kv_offsets.input_tensor_dtype.value())) {
+            throw std::runtime_error("Attention ragged row-partition inputs must be UINT32 or UINT64 tensors.");
         }
     }
     if (node.attention_use_paged_kv_cache) {
@@ -2783,9 +2783,9 @@ shared_ptr<CompiledAttentionBackward> EquationCompiler::compileAttentionBackward
         }
         const ExprNode& q_offsets = validate_local_input(node.attention_ragged_offset_q_node, "q_ragged_offsets");
         const ExprNode& kv_offsets = validate_local_input(node.attention_ragged_offset_kv_node, "kv_ragged_offsets");
-        if (!isCudnnRaggedOffsetDataType(q_offsets.input_tensor_dtype.value()) ||
-            !isCudnnRaggedOffsetDataType(kv_offsets.input_tensor_dtype.value())) {
-            throw std::runtime_error("Attention-backward ragged offset inputs must be INT32 tensors.");
+        if (!isCanonicalRowPartitionOffsetDataType(q_offsets.input_tensor_dtype.value()) ||
+            !isCanonicalRowPartitionOffsetDataType(kv_offsets.input_tensor_dtype.value())) {
+            throw std::runtime_error("Attention-backward ragged row-partition inputs must be UINT32 or UINT64 tensors.");
         }
     }
     if (node.attention_use_paged_kv_cache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
@@ -4821,6 +4821,24 @@ static void forceAttentionSeqLenLocalInputDType(PhysicalExpression& stage_expr, 
     input_node.backward_compute_dtype = DataType::INT32;
 }
 
+static void forceAttentionCanonicalRowPartitionLocalInputDType(PhysicalExpression& stage_expr, uint32_t local_idx, const char* label) {
+    if (local_idx >= stage_expr.nodes.size()) {
+        throw std::runtime_error(std::string("Attention row-partition local input index out of range for ") + label + ".");
+    }
+    ExprNode& input_node = stage_expr.nodes.at(local_idx);
+    if (input_node.op != ExprOp::INPUT || !input_node.input_tensor_dtype.has_value()) {
+        throw std::runtime_error(std::string("Attention row-partition local node must be a typed INPUT for ") + label + ".");
+    }
+    const DataType dtype = input_node.input_tensor_dtype.value();
+    if (!isCanonicalRowPartitionOffsetDataType(dtype)) {
+        throw std::runtime_error(std::string("Attention ") + label + " must use canonical UINT32 or UINT64 row-partition offsets.");
+    }
+    input_node.output_dtype = dtype;
+    input_node.compute_dtype = dtype;
+    input_node.backward_output_dtype = dtype;
+    input_node.backward_compute_dtype = dtype;
+}
+
 static void forceAttentionFp8ScalarLocalInputDType(PhysicalExpression& stage_expr, uint32_t local_idx, const char* label) {
     if (local_idx >= stage_expr.nodes.size()) {
         throw std::runtime_error(std::string("Attention FP8 scalar local input index out of range for ") + label + ".");
@@ -4954,8 +4972,8 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
         }
         q_ragged_offset_local = bind_parent_to_local_tensor_input(node.attention_ragged_offset_q_node, next_local_slot++);
         kv_ragged_offset_local = bind_parent_to_local_tensor_input(node.attention_ragged_offset_kv_node, next_local_slot++);
-        forceAttentionSeqLenLocalInputDType(stage_expr, q_ragged_offset_local, "q_ragged_offsets");
-        forceAttentionSeqLenLocalInputDType(stage_expr, kv_ragged_offset_local, "kv_ragged_offsets");
+        forceAttentionCanonicalRowPartitionLocalInputDType(stage_expr, q_ragged_offset_local, "q_ragged_offsets");
+        forceAttentionCanonicalRowPartitionLocalInputDType(stage_expr, kv_ragged_offset_local, "kv_ragged_offsets");
     }
     uint32_t page_table_k_local = UINT32_MAX;
     uint32_t page_table_v_local = UINT32_MAX;
@@ -5161,8 +5179,8 @@ static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpressi
         }
         q_ragged_offset_local = bind_parent_to_local_tensor_input(node.attention_ragged_offset_q_node, next_local_slot++);
         kv_ragged_offset_local = bind_parent_to_local_tensor_input(node.attention_ragged_offset_kv_node, next_local_slot++);
-        forceAttentionSeqLenLocalInputDType(stage_expr, q_ragged_offset_local, "q_ragged_offsets");
-        forceAttentionSeqLenLocalInputDType(stage_expr, kv_ragged_offset_local, "kv_ragged_offsets");
+        forceAttentionCanonicalRowPartitionLocalInputDType(stage_expr, q_ragged_offset_local, "q_ragged_offsets");
+        forceAttentionCanonicalRowPartitionLocalInputDType(stage_expr, kv_ragged_offset_local, "kv_ragged_offsets");
     }
 
     uint32_t dropout_seed_local = UINT32_MAX;

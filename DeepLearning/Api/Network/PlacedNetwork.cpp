@@ -593,6 +593,10 @@ void PlacedNetwork::save(const std::string &directory, bool overwrite, bool save
 
 std::map<std::string, ThorImplementation::Tensor> PlacedNetwork::infer(std::map<std::string, ThorImplementation::Tensor> batchInputs,
                                                                        uint64_t stampIndex) {
+    if (!network.getExternalRaggedNetworkOutputs().empty()) {
+        throw std::logic_error(
+            "PlacedNetwork::infer returns only dense Tensor outputs; this network has RaggedNetworkOutput values. Use inferLogical().");
+    }
     std::map<std::string, ThorImplementation::Tensor> batchOutputs;
     std::map<std::string, Event> outputReadyEvents;
     Event done = submitBatch(stampIndex, std::move(batchInputs), batchOutputs, outputReadyEvents, true);
@@ -601,11 +605,69 @@ std::map<std::string, ThorImplementation::Tensor> PlacedNetwork::infer(std::map<
 }
 
 std::map<std::string, ThorImplementation::Tensor> PlacedNetwork::infer(const Batch& batchInputs, uint64_t stampIndex) {
+    if (!network.getExternalRaggedNetworkOutputs().empty()) {
+        throw std::logic_error(
+            "PlacedNetwork::infer returns only dense Tensor outputs; this network has RaggedNetworkOutput values. Use inferLogical().");
+    }
     std::map<std::string, ThorImplementation::Tensor> batchOutputs;
     std::map<std::string, Event> outputReadyEvents;
     Event done = submitBatch(stampIndex, batchInputs, batchOutputs, outputReadyEvents, true);
     done.synchronize();
     return batchOutputs;
+}
+
+std::map<std::string, InferenceOutputValue> PlacedNetwork::inferLogical(const Batch& batchInputs, uint64_t stampIndex) {
+    std::map<std::string, ThorImplementation::Tensor> physicalOutputs;
+    std::map<std::string, Event> outputReadyEvents;
+    Event done = submitBatch(stampIndex, batchInputs, physicalOutputs, outputReadyEvents, true);
+    done.synchronize();
+
+    std::map<std::string, InferenceOutputValue> logicalOutputs;
+
+    // Inference placement may prune training-only outputs whose upstream inputs are
+    // unavailable (for example a loss driven by labels).  The physical outputs
+    // returned by the stamped network are therefore the authoritative set of live
+    // outputs for this placement; the original Network's external declarations may
+    // contain outputs that were intentionally pruned.
+    const std::vector<RaggedNetworkOutputReference> raggedOutputs = network.getExternalRaggedNetworkOutputs();
+    std::set<std::string> raggedComponentNames;
+    for (const RaggedNetworkOutputReference& output : raggedOutputs) {
+        raggedComponentNames.insert(output.valuesOutputName);
+        raggedComponentNames.insert(output.offsetsOutputName);
+    }
+
+    for (const auto& [name, tensor] : physicalOutputs) {
+        if (raggedComponentNames.contains(name)) {
+            continue;
+        }
+        if (!logicalOutputs.emplace(name, tensor).second) {
+            throw std::runtime_error("PlacedNetwork::inferLogical found duplicate logical output name '" + name + "'.");
+        }
+    }
+
+    for (const RaggedNetworkOutputReference& output : raggedOutputs) {
+        auto valuesIt = physicalOutputs.find(output.valuesOutputName);
+        auto offsetsIt = physicalOutputs.find(output.offsetsOutputName);
+        const bool hasValues = valuesIt != physicalOutputs.end();
+        const bool hasOffsets = offsetsIt != physicalOutputs.end();
+
+        // A ragged output is either live as a complete logical pair or pruned as a
+        // whole.  Seeing only one physical component indicates an internal graph
+        // construction/stamping error.
+        if (hasValues != hasOffsets) {
+            throw std::runtime_error("PlacedNetwork::inferLogical found incomplete physical storage for RaggedNetworkOutput '" +
+                                     output.name + "'.");
+        }
+        if (!hasValues) {
+            continue;
+        }
+        if (logicalOutputs.contains(output.name)) {
+            throw std::runtime_error("PlacedNetwork::inferLogical found duplicate logical output name '" + output.name + "'.");
+        }
+        logicalOutputs.emplace(output.name, ThorImplementation::RaggedTensor(valuesIt->second, offsetsIt->second));
+    }
+
+    return logicalOutputs;
 }
 
 Event PlacedNetwork::submitBatch(uint64_t stampIndex,

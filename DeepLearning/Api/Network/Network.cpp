@@ -1129,6 +1129,18 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
                                                              {"ragged_tensor", record.raggedTensor.serialize(archiveWriter)}});
         }
     }
+    if (!raggedNetworkOutputs.empty()) {
+        modelJson["ragged_network_outputs"] = json::array();
+        for (const auto& [name, record] : raggedNetworkOutputs) {
+            (void)name;
+            modelJson["ragged_network_outputs"].push_back(json{{"version", "1.0.0"},
+                                                              {"name", record.name},
+                                                              {"values_output_name", record.valuesOutputName},
+                                                              {"offsets_output_name", record.offsetsOutputName},
+                                                              {"values_tensor_id", record.raggedTensor.getValues().getOriginalId()},
+                                                              {"offsets_tensor_id", record.raggedTensor.getOffsets().getOriginalId()}});
+        }
+    }
     if (defaultOptimizer != nullptr)
         modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
 
@@ -1194,6 +1206,47 @@ std::vector<RaggedNetworkInputReference> Network::getExternalRaggedNetworkInputs
     return inputs;
 }
 
+void Network::registerRaggedNetworkOutput(const std::string& name,
+                                          const RaggedTensor& raggedTensor,
+                                          const std::string& valuesOutputName,
+                                          const std::string& offsetsOutputName) {
+    THOR_THROW_IF_FALSE(!name.empty());
+    THOR_THROW_IF_FALSE(raggedTensor.isInitialized());
+    THOR_THROW_IF_FALSE(!valuesOutputName.empty());
+    THOR_THROW_IF_FALSE(!offsetsOutputName.empty());
+    THOR_THROW_IF_FALSE(valuesOutputName != offsetsOutputName);
+    THOR_THROW_IF_FALSE(raggedNetworkOutputs.count(name) == 0);
+
+    RaggedNetworkOutputRecord record;
+    record.name = name;
+    record.valuesOutputName = valuesOutputName;
+    record.offsetsOutputName = offsetsOutputName;
+    record.raggedTensor = raggedTensor;
+    raggedNetworkOutputs[name] = record;
+}
+
+bool Network::hasRaggedNetworkOutput(const std::string& name) const { return raggedNetworkOutputs.count(name) != 0; }
+
+std::vector<RaggedNetworkOutputReference> Network::getExternalRaggedNetworkOutputs() const {
+    std::vector<RaggedNetworkOutputReference> outputs;
+    outputs.reserve(raggedNetworkOutputs.size());
+    for (const auto& [name, record] : raggedNetworkOutputs) {
+        outputs.push_back(RaggedNetworkOutputReference{name, record.valuesOutputName, record.offsetsOutputName, record.raggedTensor});
+    }
+    return outputs;
+}
+
+std::vector<std::string> Network::getExternalNetworkOutputNames() const {
+    std::vector<std::string> names;
+    for (const std::shared_ptr<Layer>& layer : allLayersInNetworkList) {
+        const std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(layer);
+        if (output != nullptr && output->isExternal()) {
+            names.push_back(output->getName());
+        }
+    }
+    return names;
+}
+
 json Network::architectureJson() const {
     json modelJson;
     modelJson["layers"] = json::array();
@@ -1211,6 +1264,17 @@ json Network::architectureJson() const {
                                                              {"values_input_name", record.valuesInputName},
                                                              {"offsets_input_name", record.offsetsInputName},
                                                              {"ragged_tensor", record.raggedTensor.architectureJson()}});
+        }
+    }
+    if (!raggedNetworkOutputs.empty()) {
+        modelJson["ragged_network_outputs"] = json::array();
+        for (const auto& [name, record] : raggedNetworkOutputs) {
+            (void)name;
+            modelJson["ragged_network_outputs"].push_back(json{{"version", "1.0.0"},
+                                                              {"name", record.name},
+                                                              {"values_output_name", record.valuesOutputName},
+                                                              {"offsets_output_name", record.offsetsOutputName},
+                                                              {"ragged_tensor", record.raggedTensor.architectureJson()}});
         }
     }
     if (!cloneSourceKeyByLayerId.empty()) {
@@ -1341,6 +1405,25 @@ void Network::load(const string &directory,
             const string offsetsInputName = raggedInputJson.at("offsets_input_name").get<string>();
             RaggedTensor raggedTensor = RaggedTensor::deserialize(raggedInputJson.at("ragged_tensor"), archiveReader.get());
             registerRaggedNetworkInput(name, raggedTensor, valuesInputName, offsetsInputName);
+        }
+    }
+
+    raggedNetworkOutputs.clear();
+    if (modelJson.contains("ragged_network_outputs")) {
+        const json raggedOutputs = modelJson["ragged_network_outputs"];
+        if (!raggedOutputs.is_array()) {
+            throw runtime_error("\"ragged_network_outputs\" is not a JSON array");
+        }
+        for (const json& raggedOutputJson : raggedOutputs) {
+            if (raggedOutputJson.at("version").get<string>() != "1.0.0") {
+                throw runtime_error("Unsupported ragged_network_outputs version: " + raggedOutputJson.at("version").get<string>());
+            }
+            const string name = raggedOutputJson.at("name").get<string>();
+            const string valuesOutputName = raggedOutputJson.at("values_output_name").get<string>();
+            const string offsetsOutputName = raggedOutputJson.at("offsets_output_name").get<string>();
+            Tensor values = getApiTensorByOriginalId(raggedOutputJson.at("values_tensor_id").get<uint64_t>());
+            Tensor offsets = getApiTensorByOriginalId(raggedOutputJson.at("offsets_tensor_id").get<uint64_t>());
+            registerRaggedNetworkOutput(name, RaggedTensor(values, offsets), valuesOutputName, offsetsOutputName);
         }
     }
 }
@@ -1479,6 +1562,19 @@ std::vector<std::string> Network::getRequiredNetworkInputNamesForOutputs(
     };
 
     for (const std::string& outputName : outputNames) {
+        auto raggedOutputIt = raggedNetworkOutputs.find(outputName);
+        if (raggedOutputIt != raggedNetworkOutputs.end()) {
+            auto valuesIt = outputTensorByName.find(raggedOutputIt->second.valuesOutputName);
+            auto offsetsIt = outputTensorByName.find(raggedOutputIt->second.offsetsOutputName);
+            if (valuesIt == outputTensorByName.end() || offsetsIt == outputTensorByName.end()) {
+                throw std::runtime_error("RaggedNetworkOutput '" + outputName +
+                                         "' is missing one of its physical NetworkOutput components.");
+            }
+            collectUpstreamInputs(valuesIt->second);
+            collectUpstreamInputs(offsetsIt->second);
+            continue;
+        }
+
         auto outputIt = outputTensorByName.find(outputName);
         if (outputIt == outputTensorByName.end()) {
             throw std::runtime_error("Unable to find NetworkOutput '" + outputName +
@@ -2568,6 +2664,10 @@ Network::StatusCode Network::checkForDuplicateInOutPortNames() {
         (void)record;
         inputOwnersByName[name].push_back("RaggedNetworkInput(name=\"" + name + "\")");
     }
+    for (const auto& [name, record] : raggedNetworkOutputs) {
+        (void)record;
+        outputOwnersByName[name].push_back("RaggedNetworkOutput(name=\"" + name + "\")");
+    }
 
     ostringstream duplicateInputs;
     uint32_t numDuplicateInputNames = 0;
@@ -2604,7 +2704,7 @@ Network::StatusCode Network::checkForDuplicateInOutPortNames() {
     }
     if (numDuplicateOutputNames != 0) {
         duplicateOutputs << "How to fix:\n"
-                         << "  Give every NetworkOutput a unique name. These names are runtime fetch keys.";
+                         << "  Give every NetworkOutput a unique name. RaggedNetworkOutput names share the same runtime fetch-key namespace.";
         setGraphValidationIssue(StatusCode::DUPLICATE_NAMED_NETWORK_OUTPUT,
                                 "Found " + to_string(numDuplicateOutputNames) + " duplicate network output name(s).",
                                 duplicateOutputs.str());

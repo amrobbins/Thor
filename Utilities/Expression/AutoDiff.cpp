@@ -2530,6 +2530,29 @@ static std::vector<uint64_t> inferAttentionOutputDims(const ExprNode& node,
                                                        const std::vector<uint64_t>& q_dims,
                                                        const std::vector<uint64_t>& k_dims,
                                                        const std::vector<uint64_t>& v_dims) {
+    if (node.attention_use_ragged_offsets && q_dims.size() == 3) {
+        if (node.attention_q_layout != AttentionTensorLayout::BSHD || node.attention_k_layout != AttentionTensorLayout::BSHD ||
+            node.attention_v_layout != AttentionTensorLayout::BSHD || node.attention_o_layout != AttentionTensorLayout::BSHD ||
+            k_dims.size() != 3 || v_dims.size() != 3) {
+            throw std::runtime_error(
+                "Autodiff canonical ragged attention requires packed [T,H,D] BSHD q/k/v storage.");
+        }
+        if (q_dims.at(0) == 0 || k_dims.at(0) == 0 || q_dims.at(1) == 0 || k_dims.at(1) == 0 || q_dims.at(2) == 0 ||
+            v_dims.at(2) == 0) {
+            throw std::runtime_error("Autodiff canonical ragged attention q/k/v dimensions must be non-zero.");
+        }
+        if (k_dims.at(0) != v_dims.at(0) || k_dims.at(1) != v_dims.at(1)) {
+            throw std::runtime_error("Autodiff canonical ragged attention found mismatched packed K/V dimensions.");
+        }
+        if (q_dims.at(1) % k_dims.at(1) != 0) {
+            throw std::runtime_error("Autodiff attention query heads must be an integer multiple of key/value heads.");
+        }
+        if (q_dims.at(2) != k_dims.at(2)) {
+            throw std::runtime_error("Autodiff attention q/k head dimensions must match.");
+        }
+        return {q_dims.at(0), q_dims.at(1), v_dims.at(2)};
+    }
+
     const AttentionTensorLogicalDims q = logicalAttentionDimsForAutodiff(q_dims, node.attention_q_layout, "q");
     const AttentionTensorLogicalDims k = logicalAttentionDimsForAutodiff(k_dims, node.attention_k_layout, "k");
     const AttentionTensorLogicalDims v = logicalAttentionDimsForAutodiff(v_dims, node.attention_v_layout, "v");
@@ -2559,6 +2582,10 @@ static std::vector<uint64_t> inferAttentionOutputDims(const ExprNode& node,
 static std::vector<uint64_t> inferAttentionDenseBiasDims(const ExprNode& node,
                                                           const std::vector<uint64_t>& q_dims,
                                                           const std::vector<uint64_t>& k_dims) {
+    if (node.attention_use_ragged_offsets && q_dims.size() == 3) {
+        throw std::runtime_error(
+            "Autodiff ragged attention dBias shape inference is unavailable because production ragged score-bias backward is unsupported.");
+    }
     const AttentionTensorLogicalDims q = logicalAttentionDimsForAutodiff(q_dims, node.attention_q_layout, "q");
     const AttentionTensorLogicalDims k = logicalAttentionDimsForAutodiff(k_dims, node.attention_k_layout, "k");
     if (q.batch != k.batch) {

@@ -117,6 +117,16 @@ struct CudnnAttentionDescriptor {
     std::string cacheKey(std::string_view passName, int gpuNum) const;
 };
 
+
+struct CudnnRaggedAttentionScratch {
+    Tensor seqLenQ;
+    Tensor seqLenKv;
+    Tensor qElementOffsets;
+    Tensor kElementOffsets;
+    Tensor vElementOffsets;
+    Tensor oElementOffsets;
+};
+
 struct CudnnAttentionForwardArgs {
     Tensor q;
     Tensor k;
@@ -130,10 +140,11 @@ struct CudnnAttentionForwardArgs {
     std::optional<Tensor> bias;
     std::optional<Tensor> seqLenQ;
     std::optional<Tensor> seqLenKv;
-    std::optional<Tensor> raggedOffsetQ;
-    std::optional<Tensor> raggedOffsetK;
-    std::optional<Tensor> raggedOffsetV;
-    std::optional<Tensor> raggedOffsetO;
+    // Canonical Thor token row partitions for ragged Q/O and K/V. UINT32 or UINT64.
+    std::optional<Tensor> qRowPartitionOffsets;
+    std::optional<Tensor> kvRowPartitionOffsets;
+    // Preallocated backend metadata scratch. Required only for ragged execution.
+    std::optional<CudnnRaggedAttentionScratch> raggedScratch;
     std::optional<Tensor> dropoutSeed;
     std::optional<Tensor> dropoutOffset;
     std::optional<Tensor> dropoutMask;
@@ -167,14 +178,11 @@ struct CudnnAttentionBackwardArgs {
     std::optional<Tensor> dBias;
     std::optional<Tensor> seqLenQ;
     std::optional<Tensor> seqLenKv;
-    std::optional<Tensor> raggedOffsetQ;
-    std::optional<Tensor> raggedOffsetK;
-    std::optional<Tensor> raggedOffsetV;
-    std::optional<Tensor> raggedOffsetO;
-    std::optional<Tensor> raggedOffsetDO;
-    std::optional<Tensor> raggedOffsetDQ;
-    std::optional<Tensor> raggedOffsetDK;
-    std::optional<Tensor> raggedOffsetDV;
+    // Canonical Thor token row partitions for ragged Q/O and K/V. UINT32 or UINT64.
+    std::optional<Tensor> qRowPartitionOffsets;
+    std::optional<Tensor> kvRowPartitionOffsets;
+    // Preallocated backend metadata scratch. Required only for ragged execution.
+    std::optional<CudnnRaggedAttentionScratch> raggedScratch;
     std::optional<Tensor> dropoutSeed;
     std::optional<Tensor> dropoutOffset;
 

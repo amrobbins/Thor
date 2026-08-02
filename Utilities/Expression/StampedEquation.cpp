@@ -241,6 +241,34 @@ static AttentionTensorSpec attentionSpecForTensor(const Tensor& tensor, Attentio
     return spec;
 }
 
+static AttentionTensorSpec packedRaggedAttentionSpecForTensor(const Tensor& tensor,
+                                                              AttentionTensorLayout layout,
+                                                              uint64_t batchSize,
+                                                              const char* tensor_name) {
+    if (layout != AttentionTensorLayout::BSHD) {
+        throw std::runtime_error(std::string("Canonical ragged attention tensor '") + tensor_name +
+                                 "' requires BSHD/token-major layout.");
+    }
+    const std::vector<uint64_t> dims = tensor.getDimensions();
+    if (dims.size() != 3 || batchSize == 0 || dims[0] == 0 || dims[1] == 0 || dims[2] == 0) {
+        throw std::runtime_error(std::string("Canonical ragged attention tensor '") + tensor_name +
+                                 "' must use packed [T,H,D] storage with a non-zero logical batch.");
+    }
+    AttentionTensorSpec spec;
+    spec.dimensions = {static_cast<int64_t>(batchSize),
+                       static_cast<int64_t>(dims[1]),
+                       static_cast<int64_t>(dims[0]),
+                       static_cast<int64_t>(dims[2])};
+    const uint64_t elementsPerToken = dims[1] * dims[2];
+    spec.strides = {static_cast<int64_t>(dims[0] * elementsPerToken),
+                    static_cast<int64_t>(dims[2]),
+                    static_cast<int64_t>(elementsPerToken),
+                    1};
+    spec.dataType = tensor.getDataType();
+    spec.ragged = true;
+    return spec;
+}
+
 static Tensor cudnnSemanticTensorView(const Tensor& tensor, AttentionTensorLayout layout, const char* tensor_name) {
     if (layout == AttentionTensorLayout::BHSD) {
         return tensor;
@@ -303,17 +331,29 @@ CudnnRmsNormDescriptor CompiledRmsNorm::descriptorFor(const Tensor& inputTensor,
 CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
                                                           const Tensor& kTensor,
                                                           const Tensor& vTensor,
-                                                          const Tensor& oTensor) const {
+                                                          const Tensor& oTensor,
+                                                          uint64_t raggedBatchSize) const {
     CudnnAttentionDescriptor descriptor;
-    descriptor.q = attentionSpecForTensor(qTensor, q_layout, "q");
-    descriptor.k = attentionSpecForTensor(kTensor, k_layout, "k");
-    descriptor.v = attentionSpecForTensor(vTensor, v_layout, "v");
-    descriptor.o = attentionSpecForTensor(oTensor, o_layout, "o");
-    if (use_ragged_offsets) {
-        descriptor.q.ragged = true;
-        descriptor.k.ragged = true;
-        descriptor.v.ragged = true;
-        descriptor.o.ragged = true;
+    if (use_ragged_offsets && qTensor.getDimensions().size() == 3) {
+        descriptor.q = packedRaggedAttentionSpecForTensor(qTensor, q_layout, raggedBatchSize, "q");
+        descriptor.k = packedRaggedAttentionSpecForTensor(kTensor, k_layout, raggedBatchSize, "k");
+        descriptor.v = packedRaggedAttentionSpecForTensor(vTensor, v_layout, raggedBatchSize, "v");
+        descriptor.o = packedRaggedAttentionSpecForTensor(oTensor, o_layout, raggedBatchSize, "o");
+    } else {
+        if (use_ragged_offsets && (kTensor.getDimensions().size() != 4 || vTensor.getDimensions().size() != 4 ||
+                                   oTensor.getDimensions().size() != 4)) {
+            throw std::runtime_error("Ragged attention q/k/v/o must consistently use rank-3 packed THD or rank-4 BSHD storage.");
+        }
+        descriptor.q = attentionSpecForTensor(qTensor, q_layout, "q");
+        descriptor.k = attentionSpecForTensor(kTensor, k_layout, "k");
+        descriptor.v = attentionSpecForTensor(vTensor, v_layout, "v");
+        descriptor.o = attentionSpecForTensor(oTensor, o_layout, "o");
+        if (use_ragged_offsets) {
+            descriptor.q.ragged = true;
+            descriptor.k.ragged = true;
+            descriptor.v.ragged = true;
+            descriptor.o.ragged = true;
+        }
     }
     descriptor.computeDataType = compute_dtype;
     descriptor.intermediateDataType = DataType::FP32;
@@ -323,7 +363,7 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
     descriptor.diagonalRightBound = diagonal_right_bound;
     descriptor.useAlibiMask = use_alibi_mask;
     descriptor.useBias = use_bias;
-    descriptor.usePaddingMask = use_padding_mask;
+    descriptor.usePaddingMask = use_padding_mask || use_ragged_offsets;
     descriptor.usePagedKvCache = use_paged_kv_cache;
     descriptor.pagedKv.maxSequenceLengthKv = paged_kv_max_sequence_length;
     descriptor.dropout.probability = dropout_probability;
@@ -340,17 +380,29 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
 CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& qTensor,
                                                                   const Tensor& kTensor,
                                                                   const Tensor& vTensor,
-                                                                  const Tensor& oTensor) const {
+                                                                  const Tensor& oTensor,
+                                                                  uint64_t raggedBatchSize) const {
     CudnnAttentionDescriptor descriptor;
-    descriptor.q = attentionSpecForTensor(qTensor, q_layout, "q");
-    descriptor.k = attentionSpecForTensor(kTensor, k_layout, "k");
-    descriptor.v = attentionSpecForTensor(vTensor, v_layout, "v");
-    descriptor.o = attentionSpecForTensor(oTensor, o_layout, "o");
-    if (use_ragged_offsets) {
-        descriptor.q.ragged = true;
-        descriptor.k.ragged = true;
-        descriptor.v.ragged = true;
-        descriptor.o.ragged = true;
+    if (use_ragged_offsets && qTensor.getDimensions().size() == 3) {
+        descriptor.q = packedRaggedAttentionSpecForTensor(qTensor, q_layout, raggedBatchSize, "q");
+        descriptor.k = packedRaggedAttentionSpecForTensor(kTensor, k_layout, raggedBatchSize, "k");
+        descriptor.v = packedRaggedAttentionSpecForTensor(vTensor, v_layout, raggedBatchSize, "v");
+        descriptor.o = packedRaggedAttentionSpecForTensor(oTensor, o_layout, raggedBatchSize, "o");
+    } else {
+        if (use_ragged_offsets && (kTensor.getDimensions().size() != 4 || vTensor.getDimensions().size() != 4 ||
+                                   oTensor.getDimensions().size() != 4)) {
+            throw std::runtime_error("Ragged attention q/k/v/o must consistently use rank-3 packed THD or rank-4 BSHD storage.");
+        }
+        descriptor.q = attentionSpecForTensor(qTensor, q_layout, "q");
+        descriptor.k = attentionSpecForTensor(kTensor, k_layout, "k");
+        descriptor.v = attentionSpecForTensor(vTensor, v_layout, "v");
+        descriptor.o = attentionSpecForTensor(oTensor, o_layout, "o");
+        if (use_ragged_offsets) {
+            descriptor.q.ragged = true;
+            descriptor.k.ragged = true;
+            descriptor.v.ragged = true;
+            descriptor.o.ragged = true;
+        }
     }
     descriptor.computeDataType = compute_dtype;
     descriptor.intermediateDataType = DataType::FP32;
@@ -360,7 +412,7 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
     descriptor.diagonalRightBound = diagonal_right_bound;
     descriptor.useAlibiMask = use_alibi_mask;
     descriptor.useBias = use_bias;
-    descriptor.usePaddingMask = use_padding_mask;
+    descriptor.usePaddingMask = use_padding_mask || use_ragged_offsets;
     descriptor.usePagedKvCache = use_paged_kv_cache;
     descriptor.pagedKv.maxSequenceLengthKv = paged_kv_max_sequence_length;
     descriptor.dropout.probability = dropout_probability;
@@ -429,11 +481,24 @@ void StampedAttention::runOn(Stream& run_stream) const {
         throw std::runtime_error("StampedAttention::runOn called with null compiled attention payload.");
     }
 
-    CudnnAttentionDescriptor descriptor = compiled_attention->descriptorFor(q, k, v, output);
-    Tensor cudnnQ = cudnnSemanticTensorView(q, compiled_attention->q_layout, "q");
-    Tensor cudnnK = cudnnSemanticTensorView(k, compiled_attention->k_layout, "k");
-    Tensor cudnnV = cudnnSemanticTensorView(v, compiled_attention->v_layout, "v");
-    Tensor cudnnO = cudnnSemanticTensorView(output, compiled_attention->o_layout, "o");
+    uint64_t raggedBatchSize = 0;
+    if (compiled_attention->use_ragged_offsets) {
+        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
+            throw std::runtime_error("StampedAttention requires canonical q/kv row partitions for ragged attention.");
+        }
+        const auto qOffsetDims = q_ragged_offsets->getDimensions();
+        const auto kvOffsetDims = kv_ragged_offsets->getDimensions();
+        if (qOffsetDims.size() != 1 || qOffsetDims.size() != kvOffsetDims.size() || qOffsetDims != kvOffsetDims || qOffsetDims[0] < 2) {
+            throw std::runtime_error("StampedAttention ragged q/kv row partitions must both have shape [B+1].");
+        }
+        raggedBatchSize = qOffsetDims[0] - 1;
+    }
+    CudnnAttentionDescriptor descriptor = compiled_attention->descriptorFor(q, k, v, output, raggedBatchSize);
+    const bool packedRagged = compiled_attention->use_ragged_offsets && q.getDimensions().size() == 3;
+    Tensor cudnnQ = packedRagged ? q : cudnnSemanticTensorView(q, compiled_attention->q_layout, "q");
+    Tensor cudnnK = packedRagged ? k : cudnnSemanticTensorView(k, compiled_attention->k_layout, "k");
+    Tensor cudnnV = packedRagged ? v : cudnnSemanticTensorView(v, compiled_attention->v_layout, "v");
+    Tensor cudnnO = packedRagged ? output : cudnnSemanticTensorView(output, compiled_attention->o_layout, "o");
     CudnnAttentionForwardArgs args{.q = cudnnQ, .k = cudnnK, .v = cudnnV, .o = cudnnO};
     if (compiled_attention->use_bias) {
         if (!bias.has_value()) {
@@ -449,13 +514,12 @@ void StampedAttention::runOn(Stream& run_stream) const {
         args.seqLenKv = seq_len_kv.value();
     }
     if (compiled_attention->use_ragged_offsets) {
-        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
-            throw std::runtime_error("StampedAttention requires q/kv ragged offset tensors for ragged attention.");
+        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value() || !ragged_scratch.has_value()) {
+            throw std::runtime_error("StampedAttention requires canonical q/kv row partitions and ragged metadata scratch.");
         }
-        args.raggedOffsetQ = q_ragged_offsets.value();
-        args.raggedOffsetO = q_ragged_offsets.value();
-        args.raggedOffsetK = kv_ragged_offsets.value();
-        args.raggedOffsetV = kv_ragged_offsets.value();
+        args.qRowPartitionOffsets = q_ragged_offsets.value();
+        args.kvRowPartitionOffsets = kv_ragged_offsets.value();
+        args.raggedScratch = ragged_scratch.value();
     }
     if (compiled_attention->use_paged_kv_cache) {
         if (!page_table_k.has_value() || !page_table_v.has_value()) {
@@ -562,6 +626,7 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
                                    const std::optional<Tensor>& seq_len_kv,
                                    const std::optional<Tensor>& q_ragged_offsets,
                                    const std::optional<Tensor>& kv_ragged_offsets,
+                                   const std::optional<CudnnRaggedAttentionScratch>& ragged_scratch,
                                    const std::optional<Tensor>& page_table_k,
                                    const std::optional<Tensor>& page_table_v,
                                    const std::optional<Tensor>& dropout_seed,
@@ -586,6 +651,7 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
       seq_len_kv(seq_len_kv),
       q_ragged_offsets(q_ragged_offsets),
       kv_ragged_offsets(kv_ragged_offsets),
+      ragged_scratch(ragged_scratch),
       page_table_k(page_table_k),
       page_table_v(page_table_v),
       dropout_seed(dropout_seed),
@@ -625,20 +691,33 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
         }
     }
 
-    CudnnAttentionDescriptor descriptor = compiled_attention_backward->descriptorFor(q, k, v, forwardOutput);
+    uint64_t raggedBatchSize = 0;
+    if (compiled_attention_backward->use_ragged_offsets) {
+        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
+            throw std::runtime_error("StampedAttentionBackward requires canonical q/kv row partitions for ragged attention.");
+        }
+        const auto qOffsetDims = q_ragged_offsets->getDimensions();
+        const auto kvOffsetDims = kv_ragged_offsets->getDimensions();
+        if (qOffsetDims.size() != 1 || qOffsetDims != kvOffsetDims || qOffsetDims[0] < 2) {
+            throw std::runtime_error("StampedAttentionBackward ragged q/kv row partitions must both have shape [B+1].");
+        }
+        raggedBatchSize = qOffsetDims[0] - 1;
+    }
+    CudnnAttentionDescriptor descriptor = compiled_attention_backward->descriptorFor(q, k, v, forwardOutput, raggedBatchSize);
     descriptor.generateStats = true;
 
-    Tensor cudnnQ = cudnnSemanticTensorView(q, compiled_attention_backward->q_layout, "q");
-    Tensor cudnnK = cudnnSemanticTensorView(k, compiled_attention_backward->k_layout, "k");
-    Tensor cudnnV = cudnnSemanticTensorView(v, compiled_attention_backward->v_layout, "v");
-    Tensor cudnnO = cudnnSemanticTensorView(forwardOutput, compiled_attention_backward->o_layout, "o");
-    Tensor cudnnDO = cudnnSemanticTensorView(dO, compiled_attention_backward->o_layout, "dO");
-    Tensor cudnnDQ = cudnnSemanticTensorView(dQ, compiled_attention_backward->q_layout, "dQ");
-    Tensor cudnnDK = cudnnSemanticTensorView(dK, compiled_attention_backward->k_layout, "dK");
-    Tensor cudnnDV = cudnnSemanticTensorView(dV, compiled_attention_backward->v_layout, "dV");
+    const bool packedRagged = compiled_attention_backward->use_ragged_offsets && q.getDimensions().size() == 3;
+    Tensor cudnnQ = packedRagged ? q : cudnnSemanticTensorView(q, compiled_attention_backward->q_layout, "q");
+    Tensor cudnnK = packedRagged ? k : cudnnSemanticTensorView(k, compiled_attention_backward->k_layout, "k");
+    Tensor cudnnV = packedRagged ? v : cudnnSemanticTensorView(v, compiled_attention_backward->v_layout, "v");
+    Tensor cudnnO = packedRagged ? forwardOutput : cudnnSemanticTensorView(forwardOutput, compiled_attention_backward->o_layout, "o");
+    Tensor cudnnDO = packedRagged ? dO : cudnnSemanticTensorView(dO, compiled_attention_backward->o_layout, "dO");
+    Tensor cudnnDQ = packedRagged ? dQ : cudnnSemanticTensorView(dQ, compiled_attention_backward->q_layout, "dQ");
+    Tensor cudnnDK = packedRagged ? dK : cudnnSemanticTensorView(dK, compiled_attention_backward->k_layout, "dK");
+    Tensor cudnnDV = packedRagged ? dV : cudnnSemanticTensorView(dV, compiled_attention_backward->v_layout, "dV");
 
     if (!use_saved_forward) {
-        Tensor cudnnOScratch = cudnnSemanticTensorView(oScratch, compiled_attention_backward->o_layout, "oScratch");
+        Tensor cudnnOScratch = packedRagged ? oScratch : cudnnSemanticTensorView(oScratch, compiled_attention_backward->o_layout, "oScratch");
         CudnnAttentionForwardArgs fwdArgs{.q = cudnnQ, .k = cudnnK, .v = cudnnV, .o = cudnnOScratch, .stats = stats};
         if (compiled_attention_backward->use_bias) {
             if (!bias.has_value()) {
@@ -654,13 +733,13 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
             fwdArgs.seqLenKv = seq_len_kv.value();
         }
         if (compiled_attention_backward->use_ragged_offsets) {
-            if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
-                throw std::runtime_error("StampedAttentionBackward requires q/kv ragged offset tensors for ragged attention.");
+            if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value() || !ragged_scratch.has_value()) {
+                throw std::runtime_error(
+                    "StampedAttentionBackward requires canonical q/kv row partitions and ragged metadata scratch.");
             }
-            fwdArgs.raggedOffsetQ = q_ragged_offsets.value();
-            fwdArgs.raggedOffsetO = q_ragged_offsets.value();
-            fwdArgs.raggedOffsetK = kv_ragged_offsets.value();
-            fwdArgs.raggedOffsetV = kv_ragged_offsets.value();
+            fwdArgs.qRowPartitionOffsets = q_ragged_offsets.value();
+            fwdArgs.kvRowPartitionOffsets = kv_ragged_offsets.value();
+            fwdArgs.raggedScratch = ragged_scratch.value();
         }
         if (compiled_attention_backward->dropout_probability > 0.0f) {
             if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
@@ -699,17 +778,13 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
         bwdArgs.seqLenKv = seq_len_kv.value();
     }
     if (compiled_attention_backward->use_ragged_offsets) {
-        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
-            throw std::runtime_error("StampedAttentionBackward requires q/kv ragged offset tensors for ragged attention.");
+        if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value() || !ragged_scratch.has_value()) {
+            throw std::runtime_error(
+                "StampedAttentionBackward requires canonical q/kv row partitions and ragged metadata scratch.");
         }
-        bwdArgs.raggedOffsetQ = q_ragged_offsets.value();
-        bwdArgs.raggedOffsetO = q_ragged_offsets.value();
-        bwdArgs.raggedOffsetDO = q_ragged_offsets.value();
-        bwdArgs.raggedOffsetDQ = q_ragged_offsets.value();
-        bwdArgs.raggedOffsetK = kv_ragged_offsets.value();
-        bwdArgs.raggedOffsetV = kv_ragged_offsets.value();
-        bwdArgs.raggedOffsetDK = kv_ragged_offsets.value();
-        bwdArgs.raggedOffsetDV = kv_ragged_offsets.value();
+        bwdArgs.qRowPartitionOffsets = q_ragged_offsets.value();
+        bwdArgs.kvRowPartitionOffsets = kv_ragged_offsets.value();
+        bwdArgs.raggedScratch = ragged_scratch.value();
     }
     if (compiled_attention_backward->dropout_probability > 0.0f) {
         if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
@@ -730,6 +805,7 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
                                                    const std::optional<Tensor>& seq_len_kv,
                                                    const std::optional<Tensor>& q_ragged_offsets,
                                                    const std::optional<Tensor>& kv_ragged_offsets,
+                                                   const std::optional<CudnnRaggedAttentionScratch>& ragged_scratch,
                                                    const std::optional<Tensor>& dropout_seed,
                                                    const std::optional<Tensor>& dropout_offset,
                                                    const Tensor& dO,
@@ -750,6 +826,7 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
       seq_len_kv(seq_len_kv),
       q_ragged_offsets(q_ragged_offsets),
       kv_ragged_offsets(kv_ragged_offsets),
+      ragged_scratch(ragged_scratch),
       dropout_seed(dropout_seed),
       dropout_offset(dropout_offset),
       dO(dO),

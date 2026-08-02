@@ -22,6 +22,8 @@ EXPECTED_DATA_API = {
     "FileDataset",
     "NamedDataset",
     "NumpyDataset",
+    "RaggedBatch",
+    "RaggedTensorLayout",
     "StratificationMode",
     "StratifiedFold",
     "StratifiedHoldoutKFoldManifest",

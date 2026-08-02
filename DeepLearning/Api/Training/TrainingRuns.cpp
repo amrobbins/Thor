@@ -282,7 +282,7 @@ std::vector<TrainingRunOutputSignature> collectNetworkOutputSignature(const std:
     signature.reserve(numLayers);
     for (uint32_t i = 0; i < numLayers; ++i) {
         std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(network->getLayer(i));
-        if (output == nullptr) {
+        if (output == nullptr || !output->isExternal()) {
             continue;
         }
 

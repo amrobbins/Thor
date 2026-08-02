@@ -129,6 +129,15 @@ struct RaggedNetworkInputReference {
     bool operator==(const RaggedNetworkInputReference&) const = default;
 };
 
+struct RaggedNetworkOutputReference {
+    std::string name;
+    std::string valuesOutputName;
+    std::string offsetsOutputName;
+    RaggedTensor raggedTensor;
+
+    bool operator==(const RaggedNetworkOutputReference&) const = default;
+};
+
 class Network {
    public:
     enum class StatusCode {
@@ -260,6 +269,13 @@ class Network {
                                     const std::string& offsetsInputName);
     [[nodiscard]] bool hasRaggedNetworkInput(const std::string& name) const;
     [[nodiscard]] std::vector<RaggedNetworkInputReference> getExternalRaggedNetworkInputs() const;
+    void registerRaggedNetworkOutput(const std::string& name,
+                                     const RaggedTensor& raggedTensor,
+                                     const std::string& valuesOutputName,
+                                     const std::string& offsetsOutputName);
+    [[nodiscard]] bool hasRaggedNetworkOutput(const std::string& name) const;
+    [[nodiscard]] std::vector<RaggedNetworkOutputReference> getExternalRaggedNetworkOutputs() const;
+    [[nodiscard]] std::vector<std::string> getExternalNetworkOutputNames() const;
 
    protected:
     virtual StatusCode connect(bool inferenceOnly);
@@ -304,6 +320,14 @@ class Network {
         RaggedTensor raggedTensor;
     };
     std::map<std::string, RaggedNetworkInputRecord> raggedNetworkInputs;
+
+    struct RaggedNetworkOutputRecord {
+        std::string name;
+        std::string valuesOutputName;
+        std::string offsetsOutputName;
+        RaggedTensor raggedTensor;
+    };
+    std::map<std::string, RaggedNetworkOutputRecord> raggedNetworkOutputs;
 
     std::shared_ptr<Optimizer> defaultOptimizer;
     bool optimizerResetPending = false;

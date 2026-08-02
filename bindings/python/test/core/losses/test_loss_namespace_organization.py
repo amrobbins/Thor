@@ -19,6 +19,7 @@ _CORE_FLAT_LOSSES = [
     "PinballLoss",
     "ExpectileLoss",
     "AsymmetricPowerLoss",
+    "CtcLoss",
 ]
 
 _DOMAIN_LOSSES = {

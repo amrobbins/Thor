@@ -85,7 +85,10 @@ class CustomLayer : public TrainableLayer {
                 std::vector<std::shared_ptr<ParameterSpecification>> parameters,
                 SerializationContract serializationContract,
                 bool usesBatchValidity = false,
-                bool requiresFullBatch = false);
+                bool requiresFullBatch = false,
+                std::set<std::string> inputDimensionsIncludeBatch = {},
+                std::set<std::string> outputDimensionsIncludeBatch = {},
+                std::optional<uint32_t> fixedBatchCapacity = std::nullopt);
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
@@ -103,7 +106,9 @@ class CustomLayer : public TrainableLayer {
         int64_t stampedId,
         std::vector<ThorImplementation::CustomLayer::DeclaredOutputDescriptor> declaredOutputDescriptors,
         bool usesBatchValidity,
-        bool requiresFullBatch) const;
+        bool requiresFullBatch,
+        std::vector<bool> inputDimensionsIncludeBatch,
+        std::optional<uint32_t> fixedBatchCapacity) const;
 
     void compile(std::shared_ptr<ThorImplementation::Layer> physicalLayer) override { physicalLayer->compile(); }
 
@@ -174,6 +179,10 @@ class CustomLayer : public TrainableLayer {
     std::vector<bool> emittedOutputInterface;
 
     std::unordered_map<uint64_t, std::vector<InputBinding>> inputBindingsByTensorOriginalId;
+
+    std::set<std::string> inputDimensionsIncludeBatch;
+    std::set<std::string> outputDimensionsIncludeBatch;
+    std::optional<uint32_t> fixedBatchCapacity;
 
     // getConnectionType() is asked once per physical graph connection. If the same tensor drives multiple logical
     // bindings, repeated calls rotate through those bindings so each physical (interface, port) is connected exactly once.

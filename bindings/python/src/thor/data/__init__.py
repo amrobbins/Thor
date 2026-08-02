@@ -16,6 +16,8 @@ from .._thor.training import ExampleIndexSet
 from .._thor.training import FileDataset
 from .._thor.training import NamedDataset
 from .._thor.training import NumpyDataset
+from .._thor.training import RaggedBatch
+from .._thor.training import RaggedTensorLayout
 from .._thor.training import TensorLayout
 from .._thor.training import TrainingData
 from .._thor.training import WindowedTensorChunk
@@ -49,6 +51,8 @@ __all__ = [
     "FileDataset",
     "NamedDataset",
     "NumpyDataset",
+    "RaggedBatch",
+    "RaggedTensorLayout",
     "TensorLayout",
     "TrainingData",
     "WindowedTensorChunk",

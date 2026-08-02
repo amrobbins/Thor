@@ -23,6 +23,7 @@ class CustomLayer : public TrainableLayer {
     struct DeclaredOutputDescriptor {
         DataType dataType;
         std::vector<uint64_t> featureDimensions;
+        bool dimensionsIncludeBatch = false;
     };
 
     ~CustomLayer() override = default;
@@ -62,7 +63,9 @@ class CustomLayer : public TrainableLayer {
                 int64_t stampedId,
                 std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors,
                 bool usesBatchValidity = false,
-                bool requiresFullBatch = false);
+                bool requiresFullBatch = false,
+                std::vector<bool> inputDimensionsIncludeBatch = {},
+                std::optional<uint32_t> fixedBatchCapacity = std::nullopt);
 
     // TrainableLayer
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override;
@@ -262,6 +265,8 @@ class CustomLayer : public TrainableLayer {
     std::vector<std::string> inputNames;
     std::vector<std::string> outputNames;
     std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors;
+    std::vector<bool> inputDimensionsIncludeBatch;
+    std::optional<uint32_t> fixedBatchCapacity;
 
     std::string customLayerName = "UnnamedType";
     DynamicExpressionVariantId activeTrainingVariantId = kPrimaryDynamicExpressionVariant;

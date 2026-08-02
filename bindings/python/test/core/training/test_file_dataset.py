@@ -1259,3 +1259,93 @@ def test_phase_training_binds_only_active_dataset_field_subset(tmp_path):
     # subset to monotone_inputs without changing the Trainer.
     aggregate_phase.enable()
     trainer.fit(epochs=1, max_training_batches_per_epoch=1)
+
+
+def test_python_ragged_dataset_layout_and_writer_round_trip(tmp_path):
+    dataset_path = tmp_path / "ragged_dataset"
+    layout = thor.data.DatasetLayout(
+        tensors={},
+        ragged_tensors={
+            "labels": thor.data.RaggedTensorLayout([], thor.DataType.int32),
+            "vectors": thor.data.RaggedTensorLayout([2], thor.DataType.fp32),
+        },
+    )
+
+    assert layout.has_ragged_tensors()
+    assert layout.get_ragged_tensor_specs()["labels"]["value_shape"] == []
+    assert layout.get_ragged_tensor_specs()["vectors"]["value_shape"] == [2]
+
+    writer = thor.data.DatasetWriter(dataset_path, layout, examples_per_shard=8)
+    writer.write_indexed_example(
+        {},
+        ragged_tensors={
+            "labels": np.asarray([4, 5, 6], dtype=np.int32),
+            "vectors": np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32),
+        },
+    )
+    writer.write_indexed_example(
+        {},
+        ragged_tensors={
+            "labels": np.asarray([], dtype=np.int32),
+            "vectors": np.empty((0, 2), dtype=np.float32),
+        },
+    )
+    writer.close()
+
+    manifest = json.loads((dataset_path / "manifest.json").read_text())
+    assert manifest["format"] == "thor.dataset.v1"
+    assert manifest["num_examples"] == 2
+    assert manifest["ragged_tensors"]["labels"]["value_shape"] == []
+    assert manifest["ragged_tensors"]["labels"]["storage"]["num_values"] == 3
+    assert manifest["ragged_tensors"]["vectors"]["storage"]["num_values"] == 2
+
+    dataset = thor.data.FileDataset.open(dataset_path)
+    labels_field = dataset.schema.field("labels")
+    vectors_field = dataset.schema.field("vectors")
+    assert labels_field.kind == thor.data.DatasetFieldKind.RAGGED
+    assert labels_field.dimensions == []
+    assert vectors_field.kind == thor.data.DatasetFieldKind.RAGGED
+    assert vectors_field.dimensions == [2]
+
+
+def test_python_ragged_dataset_batch_writer_accepts_uint32_and_uint64_offsets(tmp_path):
+    layout = thor.data.DatasetLayout(
+        tensors={},
+        ragged_tensors={"labels": thor.data.RaggedTensorLayout([], thor.DataType.int32)},
+    )
+
+    for dtype, suffix in ((np.uint32, "u32"), (np.uint64, "u64")):
+        path = tmp_path / f"ragged_batch_{suffix}"
+        writer = thor.data.DatasetWriter(path, layout, examples_per_shard=8)
+        writer.write_indexed_examples(
+            {},
+            ragged_tensors={
+                "labels": thor.data.RaggedBatch(
+                    np.asarray([10, 11, 20], dtype=np.int32),
+                    np.asarray([0, 2, 2, 3], dtype=dtype),
+                )
+            },
+        )
+        writer.close()
+        manifest = json.loads((path / "manifest.json").read_text())
+        assert manifest["num_examples"] == 3
+        assert manifest["ragged_tensors"]["labels"]["storage"]["num_values"] == 3
+
+
+def test_python_ragged_dataset_batch_writer_rejects_noncanonical_offsets_dtype(tmp_path):
+    layout = thor.data.DatasetLayout(
+        tensors={},
+        ragged_tensors={"labels": thor.data.RaggedTensorLayout([], thor.DataType.int32)},
+    )
+    writer = thor.data.DatasetWriter(tmp_path / "bad_offsets", layout)
+
+    with pytest.raises(TypeError, match="uint32 or numpy.uint64"):
+        writer.write_indexed_examples(
+            {},
+            ragged_tensors={
+                "labels": thor.data.RaggedBatch(
+                    np.asarray([1], dtype=np.int32),
+                    np.asarray([0, 1], dtype=np.int32),
+                )
+            },
+        )

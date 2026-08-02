@@ -251,7 +251,7 @@ struct CompiledAttention {
     DataType output_dtype = DataType::FP16;
     std::string debug_name = "thor_expr_attention";
 
-    CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o) const;
+    CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o, uint64_t raggedBatchSize = 0) const;
 };
 
 
@@ -328,7 +328,7 @@ struct CompiledAttentionBackward {
     DataType dV_dtype = DataType::FP16;
     std::string debug_name = "thor_expr_attention_backward";
 
-    CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o) const;
+    CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o, uint64_t raggedBatchSize = 0) const;
     [[nodiscard]] DataType outputDTypeFor(ExprOp op) const;
 };
 
@@ -777,6 +777,7 @@ class StampedAttention {
                      const std::optional<Tensor>& seq_len_kv,
                      const std::optional<Tensor>& q_ragged_offsets,
                      const std::optional<Tensor>& kv_ragged_offsets,
+                     const std::optional<CudnnRaggedAttentionScratch>& ragged_scratch,
                      const std::optional<Tensor>& page_table_k,
                      const std::optional<Tensor>& page_table_v,
                      const std::optional<Tensor>& dropout_seed,
@@ -803,6 +804,7 @@ class StampedAttention {
     const std::optional<Tensor> seq_len_kv;
     const std::optional<Tensor> q_ragged_offsets;
     const std::optional<Tensor> kv_ragged_offsets;
+    const std::optional<CudnnRaggedAttentionScratch> ragged_scratch;
     const std::optional<Tensor> page_table_k;
     const std::optional<Tensor> page_table_v;
     const std::optional<Tensor> dropout_seed;
@@ -838,6 +840,7 @@ class StampedAttentionBackward {
                              const std::optional<Tensor>& seq_len_kv,
                              const std::optional<Tensor>& q_ragged_offsets,
                              const std::optional<Tensor>& kv_ragged_offsets,
+                             const std::optional<CudnnRaggedAttentionScratch>& ragged_scratch,
                              const std::optional<Tensor>& dropout_seed,
                              const std::optional<Tensor>& dropout_offset,
                              const Tensor& dO,
@@ -860,6 +863,7 @@ class StampedAttentionBackward {
     const std::optional<Tensor> seq_len_kv;
     const std::optional<Tensor> q_ragged_offsets;
     const std::optional<Tensor> kv_ragged_offsets;
+    const std::optional<CudnnRaggedAttentionScratch> ragged_scratch;
     const std::optional<Tensor> dropout_seed;
     const std::optional<Tensor> dropout_offset;
     const Tensor dO;

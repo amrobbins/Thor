@@ -202,15 +202,15 @@ void requireSequenceLengthsInput(const Thor::Tensor& tensor, const std::string& 
     }
 }
 
-void requireRaggedOffsetsInput(const Thor::Tensor& tensor, const std::string& what) {
+void requireRaggedOffsetsInput(const Thor::Tensor& tensor, const std::string& what, uint64_t batchSize) {
     if (!tensor.isInitialized()) {
         throw std::invalid_argument("ScaledDotProductAttention " + what + " tensor is not initialized.");
     }
-    if (tensor.getDataType() != DataType::INT32) {
-        throw std::invalid_argument("ScaledDotProductAttention " + what + " must have dtype int32.");
+    if (!ThorImplementation::isCanonicalRowPartitionOffsetDataType(tensor.getDataType())) {
+        throw std::invalid_argument("ScaledDotProductAttention " + what + " must have canonical row-partition dtype uint32 or uint64.");
     }
-    if (tensor.getDimensions() != std::vector<uint64_t>{2}) {
-        throw std::invalid_argument("ScaledDotProductAttention " + what + " must have logical shape [2].");
+    if (batchSize == std::numeric_limits<uint64_t>::max() || tensor.getDimensions() != std::vector<uint64_t>{batchSize + 1}) {
+        throw std::invalid_argument("ScaledDotProductAttention " + what + " must have canonical shape [batch_size + 1].");
     }
 }
 
@@ -243,8 +243,14 @@ LogicalAttentionDims logicalDims(const std::vector<uint64_t>& dims, ThorImplemen
 }
 
 LogicalAttentionDims runtimeLogicalDims(const std::vector<uint64_t>& dims, ThorImplementation::AttentionTensorLayout layout) {
+    if (dims.size() == 3) {
+        if (layout != ThorImplementation::AttentionTensorLayout::BSHD) {
+            throw std::runtime_error("Canonical packed ragged ScaledDotProductAttention runtime tensors require BSHD/token-major layout.");
+        }
+        return {dims.at(1), dims.at(0), dims.at(2)};
+    }
     if (dims.size() != 4) {
-        throw std::runtime_error("ScaledDotProductAttention runtime tensors must include batch and have rank 4.");
+        throw std::runtime_error("ScaledDotProductAttention runtime tensors must use dense rank-4 or packed ragged rank-3 storage.");
     }
     if (layout == ThorImplementation::AttentionTensorLayout::BHSD) {
         return {dims.at(1), dims.at(2), dims.at(3)};
@@ -355,6 +361,8 @@ ThorImplementation::Expression makeAttentionOutputExpression(bool useBias,
                                                               float dropoutProbability,
                                                               DataType qkvDType,
                                                               DataType biasDType,
+                                                              DataType queryRaggedOffsetDType,
+                                                              DataType keyValueRaggedOffsetDType,
                                                               DataType computeDType,
                                                               DataType outputDType) {
     using ThorImplementation::AttentionOptions;
@@ -436,24 +444,22 @@ ThorImplementation::Expression makeAttentionOutputExpression(bool useBias,
                                                                     options);
         }
         if (useRaggedOffsets) {
-            Expression qSeq = Expression::input(kQuerySequenceLengthsInputName, DataType::INT32, DataType::INT32);
-            Expression kvSeq = Expression::input(kKeyValueSequenceLengthsInputName, DataType::INT32, DataType::INT32);
-            Expression qOffsets = Expression::input(kQueryRaggedOffsetsInputName, DataType::INT32, DataType::INT32);
-            Expression kvOffsets = Expression::input(kKeyValueRaggedOffsetsInputName, DataType::INT32, DataType::INT32);
+            Expression qOffsets = Expression::input(kQueryRaggedOffsetsInputName, queryRaggedOffsetDType, queryRaggedOffsetDType);
+            Expression kvOffsets =
+                Expression::input(kKeyValueRaggedOffsetsInputName, keyValueRaggedOffsetDType, keyValueRaggedOffsetDType);
             if (dropoutProbability > 0.0f) {
                 Expression dropoutSeed = Expression::tensorRuntimeScalar(kDropoutSeedInputName, DataType::INT64, DataType::INT64);
                 Expression dropoutOffset = Expression::tensorRuntimeScalar(kDropoutOffsetInputName, DataType::INT64, DataType::INT64);
                 if (bias.has_value()) {
                     return Expression::scaledDotProductAttentionRagged(
-                        q, k, v, bias.value(), qSeq, kvSeq, qOffsets, kvOffsets, dropoutSeed, dropoutOffset, options);
+                        q, k, v, bias.value(), qOffsets, kvOffsets, dropoutSeed, dropoutOffset, options);
                 }
-                return Expression::scaledDotProductAttentionRagged(
-                    q, k, v, qSeq, kvSeq, qOffsets, kvOffsets, dropoutSeed, dropoutOffset, options);
+                return Expression::scaledDotProductAttentionRagged(q, k, v, qOffsets, kvOffsets, dropoutSeed, dropoutOffset, options);
             }
             if (bias.has_value()) {
-                return Expression::scaledDotProductAttentionRagged(q, k, v, bias.value(), qSeq, kvSeq, qOffsets, kvOffsets, options);
+                return Expression::scaledDotProductAttentionRagged(q, k, v, bias.value(), qOffsets, kvOffsets, options);
             }
-            return Expression::scaledDotProductAttentionRagged(q, k, v, qSeq, kvSeq, qOffsets, kvOffsets, options);
+            return Expression::scaledDotProductAttentionRagged(q, k, v, qOffsets, kvOffsets, options);
         }
         if (useSequenceLengths) {
             Expression qSeq = Expression::input(kQuerySequenceLengthsInputName, DataType::INT32, DataType::INT32);
@@ -500,6 +506,8 @@ std::shared_ptr<const ThorImplementation::ExpressionDefinition> makeSerializable
                                                                                                      float dropoutProbability,
                                                                                                      DataType qkvDType,
                                                                                                      DataType biasDType,
+                                                                                                     DataType queryRaggedOffsetDType,
+                                                                                                     DataType keyValueRaggedOffsetDType,
                                                                                                      DataType computeDType,
                                                                                                      DataType outputDType) {
     using ThorImplementation::Expression;
@@ -518,6 +526,8 @@ std::shared_ptr<const ThorImplementation::ExpressionDefinition> makeSerializable
                                                    dropoutProbability,
                                                    qkvDType,
                                                    biasDType,
+                                                   queryRaggedOffsetDType,
+                                                   keyValueRaggedOffsetDType,
                                                    computeDType,
                                                    outputDType);
     return std::make_shared<ExpressionDefinition>(ExpressionDefinition::fromOutputs(Expression::outputs({{kOutputName, out}})));
@@ -538,6 +548,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(bool useBias,
                                                               int64_t dropoutOffset,
                                                               DataType qkvDType,
                                                               DataType biasDType,
+                                                              DataType queryRaggedOffsetDType,
+                                                              DataType keyValueRaggedOffsetDType,
                                                               DataType computeDType,
                                                               DataType outputDType) {
     using ThorImplementation::DynamicExpression;
@@ -558,6 +570,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(bool useBias,
                                                                     dropoutProbability,
                                                                     qkvDType,
                                                                     biasDType,
+                                                                    queryRaggedOffsetDType,
+                                                                    keyValueRaggedOffsetDType,
                                                                     computeDType,
                                                                     outputDType);
     std::vector<std::string> expectedInputs = attentionInputNames(useBias, useSequenceLengths, useRaggedOffsets, useFp8ForwardScaling);
@@ -571,10 +585,25 @@ ThorImplementation::DynamicExpression makeAttentionExpression(bool useBias,
             Stream& stream) -> DynamicExpressionBuild {
             const Tensor& query = inputs.at(kQueryInputName);
             const auto queryDims = query.getDimensions();
-            if (queryDims.size() != 4 || queryDims[0] == 0) {
-                throw std::runtime_error("ScaledDotProductAttention runtime query tensor must include batch and have rank 4.");
+            uint64_t batch = 0;
+            if (useRaggedOffsets) {
+                if (queryDims.size() != 3 || queryDims[0] == 0) {
+                    throw std::runtime_error("Canonical ragged ScaledDotProductAttention runtime query tensor must use packed [T,H,D] storage.");
+                }
+                const Tensor& queryOffsets = inputs.at(kQueryRaggedOffsetsInputName);
+                if (!ThorImplementation::isCanonicalRowPartitionOffsetDataType(queryOffsets.getDataType())) {
+                    throw std::runtime_error("ScaledDotProductAttention query_ragged_offsets dtype must be UINT32 or UINT64.");
+                }
+                if (queryOffsets.getDimensions().size() != 1 || queryOffsets.getTotalNumElements() < 2) {
+                    throw std::runtime_error("ScaledDotProductAttention query_ragged_offsets must have canonical shape [batch+1].");
+                }
+                batch = queryOffsets.getTotalNumElements() - 1;
+            } else {
+                if (queryDims.size() != 4 || queryDims[0] == 0) {
+                    throw std::runtime_error("Dense ScaledDotProductAttention runtime query tensor must include batch and have rank 4.");
+                }
+                batch = queryDims[0];
             }
-            const uint64_t batch = queryDims[0];
             const LogicalAttentionDims queryLogicalDims = runtimeLogicalDims(queryDims, tensorLayout);
             const LogicalAttentionDims keyValueLogicalDims = runtimeLogicalDims(inputs.at(kKeyInputName).getDimensions(), tensorLayout);
 
@@ -594,8 +623,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(bool useBias,
             };
             auto normalizeRaggedOffsets = [&](const char* name) {
                 Tensor offsets = inputs.at(name);
-                if (!ThorImplementation::isCudnnRaggedOffsetDataType(offsets.getDataType())) {
-                    throw std::runtime_error(std::string("ScaledDotProductAttention ") + name + " dtype must be INT32.");
+                if (!ThorImplementation::isCanonicalRowPartitionOffsetDataType(offsets.getDataType())) {
+                    throw std::runtime_error(std::string("ScaledDotProductAttention ") + name + " dtype must be UINT32 or UINT64.");
                 }
                 if (offsets.getTotalNumElements() < batch + 1) {
                     throw std::runtime_error(std::string("ScaledDotProductAttention ") + name + " must contain at least batch+1 elements.");
@@ -699,21 +728,25 @@ void ScaledDotProductAttention::Builder::verifyConfig() const {
     }
     if (_queryRaggedOffsetsInput.has_value() != _keyValueRaggedOffsetsInput.has_value()) {
         throw std::invalid_argument(
-            "ScaledDotProductAttention requires both queryRaggedOffsetsInput and keyValueRaggedOffsetsInput, or raggedOffsetsInput().");
+            "ScaledDotProductAttention internal canonical ragged metadata is incomplete; query and key/value row partitions must be present together.");
     }
     if (useSequenceLengths) {
         requireSequenceLengthsInput(_querySequenceLengthsInput.value(), "querySequenceLengthsInput");
         requireSequenceLengthsInput(_keyValueSequenceLengthsInput.value(), "keyValueSequenceLengthsInput");
     }
     if (useRaggedOffsets) {
-        requireRaggedOffsetsInput(_queryRaggedOffsetsInput.value(), "queryRaggedOffsetsInput");
-        requireRaggedOffsetsInput(_keyValueRaggedOffsetsInput.value(), "keyValueRaggedOffsetsInput");
-        if (!useSequenceLengths) {
-            throw std::invalid_argument("ScaledDotProductAttention raggedOffsetsInput requires sequenceLengthsInput.");
-        }
-        if (qDims.head_dim != vDims.head_dim) {
+        THOR_THROW_IF_FALSE(_queryRaggedInput.has_value() && _keyRaggedInput.has_value() && _valueRaggedInput.has_value());
+        requireRaggedOffsetsInput(
+            _queryRaggedOffsetsInput.value(), "queryRaggedOffsetsInput", _queryRaggedInput->getBatchSize());
+        requireRaggedOffsetsInput(
+            _keyValueRaggedOffsetsInput.value(), "keyValueRaggedOffsetsInput", _keyRaggedInput->getBatchSize());
+        if (useSequenceLengths) {
             throw std::invalid_argument(
-                "ScaledDotProductAttention ragged offsets currently require value head_dim to match query/key head_dim because shared Q/O and K/V element offsets are used.");
+                "ScaledDotProductAttention ragged row partitions already define sequence lengths; do not also provide sequenceLengthsInput.");
+        }
+        if (layout != ThorImplementation::AttentionTensorLayout::BSHD) {
+            throw std::invalid_argument(
+                "ScaledDotProductAttention ragged row partitions require BSHD layout because packed row offsets count token-major [S,H,D] values.");
         }
     }
 
@@ -791,7 +824,7 @@ void ScaledDotProductAttention::Builder::verifyConfig() const {
             throw std::invalid_argument("ScaledDotProductAttention experimental FP8 forward does not support dropout on the validated cuDNN surface.");
         }
         if (useRaggedOffsets) {
-            throw std::invalid_argument("ScaledDotProductAttention experimental FP8 forward does not support ragged offsets on the validated cuDNN surface.");
+            throw std::invalid_argument("ScaledDotProductAttention experimental FP8 forward does not support canonical RaggedTensor inputs on the validated cuDNN surface.");
         }
         if (useAlibi) {
             throw std::invalid_argument("ScaledDotProductAttention experimental FP8 forward does not support ALiBi on the validated cuDNN surface.");
@@ -829,8 +862,34 @@ void ScaledDotProductAttention::Builder::verifyConfig() const {
 }
 
 ScaledDotProductAttention ScaledDotProductAttention::Builder::build() {
+    const bool anyRaggedInput = _queryRaggedInput.has_value() || _keyRaggedInput.has_value() || _valueRaggedInput.has_value();
+    if (anyRaggedInput) {
+        if (!_queryRaggedInput.has_value() || !_keyRaggedInput.has_value() || !_valueRaggedInput.has_value()) {
+            throw std::invalid_argument("ScaledDotProductAttention ragged execution requires RaggedTensor query, key, and value inputs.");
+        }
+        if (_queryInput.has_value() || _keyInput.has_value() || _valueInput.has_value()) {
+            throw std::invalid_argument("ScaledDotProductAttention cannot mix dense Tensor and RaggedTensor Q/K/V inputs.");
+        }
+        if (_queryRaggedInput->getBatchSize() != _keyRaggedInput->getBatchSize() ||
+            _queryRaggedInput->getBatchSize() != _valueRaggedInput->getBatchSize()) {
+            throw std::invalid_argument("ScaledDotProductAttention RaggedTensor Q/K/V inputs must have the same logical batch size.");
+        }
+        if (_queryRaggedInput->getBatchSize() > std::numeric_limits<uint32_t>::max()) {
+            throw std::invalid_argument("ScaledDotProductAttention RaggedTensor batch size exceeds the supported placement batch capacity.");
+        }
+        if (_keyRaggedInput->getOffsets() != _valueRaggedInput->getOffsets()) {
+            throw std::invalid_argument("ScaledDotProductAttention ragged key and value inputs must share one row partition.");
+        }
+        _queryInput = _queryRaggedInput->getValues();
+        _keyInput = _keyRaggedInput->getValues();
+        _valueInput = _valueRaggedInput->getValues();
+        _queryRaggedOffsetsInput = _queryRaggedInput->getOffsets();
+        _keyValueRaggedOffsetsInput = _keyRaggedInput->getOffsets();
+    }
+
     if (!_tensorLayout.has_value()) {
-        _tensorLayout = ThorImplementation::AttentionTensorLayout::BHSD;
+        _tensorLayout = anyRaggedInput ? ThorImplementation::AttentionTensorLayout::BSHD
+                                       : ThorImplementation::AttentionTensorLayout::BHSD;
     }
     if (!_maskKind.has_value()) {
         _maskKind = ThorImplementation::AttentionMaskKind::None;
@@ -902,6 +961,10 @@ ScaledDotProductAttention ScaledDotProductAttention::Builder::build() {
                                                                 _dropoutOffset.value(),
                                                                 _queryInput->getDataType(),
                                                                 _biasInput.has_value() ? _biasInput->getDataType() : _computeDataType.value(),
+                                                                _queryRaggedOffsetsInput.has_value() ? _queryRaggedOffsetsInput->getDataType()
+                                                                                                    : ThorImplementation::kDefaultRowPartitionOffsetDataType,
+                                                                _keyValueRaggedOffsetsInput.has_value() ? _keyValueRaggedOffsetsInput->getDataType()
+                                                                                                        : ThorImplementation::kDefaultRowPartitionOffsetDataType,
                                                                 _computeDataType.value(),
                                                                 _outputDataType.value()),
                                                 inputNames,
@@ -919,6 +982,9 @@ ScaledDotProductAttention ScaledDotProductAttention::Builder::build() {
                                                 _dropoutOffset.value(),
                                                 _querySequenceLengthsInput,
                                                 _keyValueSequenceLengthsInput,
+                                                _queryRaggedInput,
+                                                _keyRaggedInput,
+                                                _valueRaggedInput,
                                                 _queryRaggedOffsetsInput,
                                                 _keyValueRaggedOffsetsInput,
                                                 _fp8DescaleQInput,
@@ -939,7 +1005,7 @@ ScaledDotProductAttention ScaledDotProductAttention::Builder::build() {
 json ScaledDotProductAttention::architectureJson() const {
     json j;
     j["factory"] = Layer::Factory::Learning.value();
-    j["version"] = "1.0.0";
+    j["version"] = "2.0.0";
     j["layer_type"] = "scaled_dot_product_attention";
     j["layer_name"] = std::string("layer") + std::to_string(getId());
 
@@ -954,7 +1020,7 @@ json ScaledDotProductAttention::architectureJson() const {
     j["dropout_offset"] = dropoutOffset;
     j["use_bias"] = getInputInterface().contains(kBiasInputName);
     j["use_sequence_lengths"] = querySequenceLengthsInput.has_value();
-    j["use_ragged_offsets"] = queryRaggedOffsetsInput.has_value();
+    j["use_ragged_input"] = queryRaggedInput.has_value();
     j["use_fp8_forward_scaling"] = fp8DescaleQInput.has_value();
     j["compute_data_type"] = computeDataType;
     j["output_data_type"] = outputDataType;
@@ -971,9 +1037,10 @@ json ScaledDotProductAttention::architectureJson() const {
         j["query_sequence_lengths_input"] = querySequenceLengthsInput.value().architectureJson();
         j["key_value_sequence_lengths_input"] = keyValueSequenceLengthsInput.value().architectureJson();
     }
-    if (queryRaggedOffsetsInput.has_value()) {
-        j["query_ragged_offsets_input"] = queryRaggedOffsetsInput.value().architectureJson();
-        j["key_value_ragged_offsets_input"] = keyValueRaggedOffsetsInput.value().architectureJson();
+    if (queryRaggedInput.has_value()) {
+        j["query_ragged_input"] = queryRaggedInput->architectureJson();
+        j["key_ragged_input"] = keyRaggedInput->architectureJson();
+        j["value_ragged_input"] = valueRaggedInput->architectureJson();
     }
     if (fp8DescaleQInput.has_value()) {
         j["fp8_descale_q_input"] = fp8DescaleQInput.value().architectureJson();
@@ -1001,7 +1068,7 @@ json ScaledDotProductAttention::serialize(thor_file::TarWriter& archiveWriter,
 }
 
 void ScaledDotProductAttention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
-    if (j.at("version").get<std::string>() != "1.0.0") {
+    if (j.at("version").get<std::string>() != "2.0.0") {
         throw std::runtime_error("Unsupported version in ScaledDotProductAttention::deserialize: " + j.at("version").get<std::string>());
     }
     if (j.at("layer_type").get<std::string>() != "scaled_dot_product_attention") {
@@ -1022,7 +1089,7 @@ void ScaledDotProductAttention::deserialize(std::shared_ptr<thor_file::TarReader
     if (j.contains("sequence_lengths_input") || j.contains("ragged_offsets_input") ||
         j.contains("use_separate_sequence_lengths") || j.contains("use_separate_ragged_offsets")) {
         throw std::runtime_error(
-            "ScaledDotProductAttention deserialize does not support legacy single-metadata fields; use query/key-value sequence lengths and ragged offsets.");
+            "ScaledDotProductAttention deserialize does not support legacy single-metadata fields; use query/key-value sequence lengths or canonical RaggedTensor inputs.");
     }
 
     std::optional<Tensor> querySequenceLengthsInput = std::nullopt;
@@ -1038,17 +1105,43 @@ void ScaledDotProductAttention::deserialize(std::shared_ptr<thor_file::TarReader
             network->getApiTensorByOriginalId(j.at("key_value_sequence_lengths_input").at("id").get<uint64_t>());
     }
 
+    if (j.contains("use_ragged_offsets") || j.contains("query_ragged_offsets_input") ||
+        j.contains("key_value_ragged_offsets_input")) {
+        throw std::runtime_error(
+            "ScaledDotProductAttention archives with raw ragged-offset inputs are unsupported; use canonical RaggedTensor inputs.");
+    }
+    auto raggedFromMetadata = [&](const json& r, const char* field) -> RaggedTensor {
+        if (!r.contains("values") || !r.contains("offsets"))
+            throw std::runtime_error(std::string("ScaledDotProductAttention deserialize malformed ") + field + ".");
+        Tensor values = network->getApiTensorByOriginalId(r.at("values").at("id").get<uint64_t>());
+        Tensor offsets = network->getApiTensorByOriginalId(r.at("offsets").at("id").get<uint64_t>());
+        return RaggedTensor(values, offsets);
+    };
+    std::optional<RaggedTensor> queryRaggedInput = std::nullopt;
+    std::optional<RaggedTensor> keyRaggedInput = std::nullopt;
+    std::optional<RaggedTensor> valueRaggedInput = std::nullopt;
     std::optional<Tensor> queryRaggedOffsetsInput = std::nullopt;
     std::optional<Tensor> keyValueRaggedOffsetsInput = std::nullopt;
-    if (j.value("use_ragged_offsets", false) || j.contains("query_ragged_offsets_input") ||
-        j.contains("key_value_ragged_offsets_input")) {
-        if (!j.contains("query_ragged_offsets_input") || !j.contains("key_value_ragged_offsets_input")) {
-            throw std::runtime_error(
-                "ScaledDotProductAttention deserialize missing query_ragged_offsets_input/key_value_ragged_offsets_input.");
+    if (j.value("use_ragged_input", false) || j.contains("query_ragged_input")) {
+        if (!j.contains("query_ragged_input") || !j.contains("key_ragged_input") || !j.contains("value_ragged_input"))
+            throw std::runtime_error("ScaledDotProductAttention deserialize missing canonical RaggedTensor Q/K/V metadata.");
+        queryRaggedInput = raggedFromMetadata(j.at("query_ragged_input"), "query_ragged_input");
+        keyRaggedInput = raggedFromMetadata(j.at("key_ragged_input"), "key_ragged_input");
+        valueRaggedInput = raggedFromMetadata(j.at("value_ragged_input"), "value_ragged_input");
+        queryInput = queryRaggedInput->getValues();
+        keyInput = keyRaggedInput->getValues();
+        valueInput = valueRaggedInput->getValues();
+        if (queryRaggedInput->getBatchSize() != keyRaggedInput->getBatchSize() ||
+            queryRaggedInput->getBatchSize() != valueRaggedInput->getBatchSize()) {
+            throw std::runtime_error("ScaledDotProductAttention deserialize RaggedTensor Q/K/V inputs must have the same logical batch size.");
         }
-        queryRaggedOffsetsInput = network->getApiTensorByOriginalId(j.at("query_ragged_offsets_input").at("id").get<uint64_t>());
-        keyValueRaggedOffsetsInput =
-            network->getApiTensorByOriginalId(j.at("key_value_ragged_offsets_input").at("id").get<uint64_t>());
+        if (queryRaggedInput->getBatchSize() > UINT32_MAX) {
+            throw std::runtime_error("ScaledDotProductAttention deserialize RaggedTensor batch size exceeds the supported placement batch capacity.");
+        }
+        queryRaggedOffsetsInput = queryRaggedInput->getOffsets();
+        keyValueRaggedOffsetsInput = keyRaggedInput->getOffsets();
+        if (keyRaggedInput->getOffsets() != valueRaggedInput->getOffsets())
+            throw std::runtime_error("ScaledDotProductAttention deserialize ragged key/value inputs do not share a row partition.");
     }
 
     std::optional<Tensor> fp8DescaleQInput = std::nullopt;
@@ -1087,6 +1180,10 @@ void ScaledDotProductAttention::deserialize(std::shared_ptr<thor_file::TarReader
 
     const ThorImplementation::AttentionTensorLayout tensorLayout =
         attentionTensorLayoutFromString(j.value("tensor_layout", std::string("bhsd")));
+    if (queryRaggedInput.has_value() && tensorLayout != ThorImplementation::AttentionTensorLayout::BSHD) {
+        throw std::runtime_error(
+            "ScaledDotProductAttention deserialize canonical RaggedTensor inputs require BSHD token-major layout.");
+    }
     const ThorImplementation::AttentionMaskKind maskKind = attentionMaskKindFromString(j.value("mask_kind", std::string("none")));
     const int64_t diagonalLeftBound = j.value("diagonal_left_bound", int64_t{0});
     const int64_t diagonalRightBound = j.value("diagonal_right_bound", int64_t{0});
@@ -1169,21 +1266,24 @@ void ScaledDotProductAttention::deserialize(std::shared_ptr<thor_file::TarReader
         throw std::runtime_error("ScaledDotProductAttention deserialize requires both query/key-value sequence lengths.");
     }
     if (queryRaggedOffsetsInput.has_value() != keyValueRaggedOffsetsInput.has_value()) {
-        throw std::runtime_error("ScaledDotProductAttention deserialize requires both query/key-value ragged offsets.");
+        throw std::runtime_error("ScaledDotProductAttention deserialize found incomplete canonical RaggedTensor row-partition metadata.");
     }
     if (querySequenceLengthsInput.has_value()) {
         requireSequenceLengthsInput(querySequenceLengthsInput.value(), "querySequenceLengthsInput");
         requireSequenceLengthsInput(keyValueSequenceLengthsInput.value(), "keyValueSequenceLengthsInput");
     }
     if (queryRaggedOffsetsInput.has_value()) {
-        if (!querySequenceLengthsInput.has_value()) {
-            throw std::runtime_error("ScaledDotProductAttention deserialize ragged offsets require sequence lengths.");
+        if (querySequenceLengthsInput.has_value()) {
+            throw std::runtime_error(
+                "ScaledDotProductAttention deserialize found redundant sequence lengths with canonical ragged row partitions.");
         }
-        requireRaggedOffsetsInput(queryRaggedOffsetsInput.value(), "queryRaggedOffsetsInput");
-        requireRaggedOffsetsInput(keyValueRaggedOffsetsInput.value(), "keyValueRaggedOffsetsInput");
-        if (qDims.head_dim != vDims.head_dim) {
-            throw std::runtime_error("ScaledDotProductAttention deserialize ragged offsets require value head_dim to match query/key head_dim.");
+        if (!queryRaggedInput.has_value() || !keyRaggedInput.has_value() || !valueRaggedInput.has_value()) {
+            throw std::runtime_error("ScaledDotProductAttention deserialize internal row-partition metadata must come from canonical RaggedTensor inputs.");
         }
+        requireRaggedOffsetsInput(
+            queryRaggedOffsetsInput.value(), "queryRaggedOffsetsInput", queryRaggedInput->getBatchSize());
+        requireRaggedOffsetsInput(
+            keyValueRaggedOffsetsInput.value(), "keyValueRaggedOffsetsInput", keyRaggedInput->getBatchSize());
     }
     if (useFp8ForwardScaling) {
         requireFp8ScaleInput(fp8DescaleQInput.value(), "fp8DescaleQInput");
@@ -1241,6 +1341,10 @@ void ScaledDotProductAttention::deserialize(std::shared_ptr<thor_file::TarReader
                                                             dropoutOffset,
                                                             queryInput.getDataType(),
                                                             biasInput.has_value() ? biasInput->getDataType() : computeDataType,
+                                                            queryRaggedOffsetsInput.has_value() ? queryRaggedOffsetsInput->getDataType()
+                                                                                              : ThorImplementation::kDefaultRowPartitionOffsetDataType,
+                                                            keyValueRaggedOffsetsInput.has_value() ? keyValueRaggedOffsetsInput->getDataType()
+                                                                                                  : ThorImplementation::kDefaultRowPartitionOffsetDataType,
                                                             computeDataType,
                                                             outputDataType),
                                     inputNames,
@@ -1258,6 +1362,9 @@ void ScaledDotProductAttention::deserialize(std::shared_ptr<thor_file::TarReader
                                     dropoutOffset,
                                     querySequenceLengthsInput,
                                     keyValueSequenceLengthsInput,
+                                    queryRaggedInput,
+                                    keyRaggedInput,
+                                    valueRaggedInput,
                                     queryRaggedOffsetsInput,
                                     keyValueRaggedOffsetsInput,
                                     fp8DescaleQInput,

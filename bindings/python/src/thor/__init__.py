@@ -13,6 +13,7 @@ from ._thor import (
     DataType,
     MetricAggregation,
     Network,
+    RaggedTensor,
     Tensor,
 )
 
@@ -60,6 +61,7 @@ __all__ = [
     "MetricAggregation",
     "EnsembleModel",
     "Network",
+    "RaggedTensor",
     "Tensor",
     "__git_version__",
     "__version__",

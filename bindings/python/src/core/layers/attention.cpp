@@ -16,6 +16,7 @@
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "bindings/python/src/core/cast.h"
@@ -163,7 +164,7 @@ void bind_attention(nb::module_& layers) {
         "__init__",
         [](Attention* self,
            Network& network,
-           Tensor feature_input,
+           nb::object feature_input,
            uint32_t num_heads,
            std::optional<uint32_t> num_key_value_heads,
            std::optional<uint32_t> head_dim,
@@ -202,9 +203,7 @@ void bind_attention(nb::module_& layers) {
            int64_t dropout_offset,
            std::optional<Tensor> query_sequence_lengths,
            std::optional<Tensor> key_value_sequence_lengths,
-           std::optional<Tensor> query_ragged_offsets,
-           std::optional<Tensor> key_value_ragged_offsets,
-           std::optional<Tensor> context_input,
+           nb::object context_input,
            std::optional<Tensor> score_bias_input,
            nb::object epilogue,
            nb::object epilogue_inputs) {
@@ -230,20 +229,25 @@ void bind_attention(nb::module_& layers) {
                 throw nb::value_error(
                     "Attention instance: query_sequence_lengths and key_value_sequence_lengths must be provided together.");
             }
-            if (query_ragged_offsets.has_value() != key_value_ragged_offsets.has_value()) {
-                throw nb::value_error(
-                    "Attention instance: query_ragged_offsets and key_value_ragged_offsets must be provided together.");
-            }
-
             Attention::Builder builder;
-            builder.network(network)
-                .featureInput(feature_input)
-                .numHeads(num_heads)
-                .hasBias(has_bias)
-                .maskKind(parseAttentionMaskKind(mask_kind));
+            builder.network(network);
+            if (nb::isinstance<RaggedTensor>(feature_input)) {
+                builder.featureInput(nb::cast<RaggedTensor>(feature_input));
+            } else if (nb::isinstance<Tensor>(feature_input)) {
+                builder.featureInput(nb::cast<Tensor>(feature_input));
+            } else {
+                throw nb::type_error("Attention feature_input must be thor.Tensor or thor.RaggedTensor.");
+            }
+            builder.numHeads(num_heads).hasBias(has_bias).maskKind(parseAttentionMaskKind(mask_kind));
 
-            if (context_input.has_value()) {
-                builder.contextInput(context_input.value());
+            if (!context_input.is_none()) {
+                if (nb::isinstance<RaggedTensor>(context_input)) {
+                    builder.contextInput(nb::cast<RaggedTensor>(context_input));
+                } else if (nb::isinstance<Tensor>(context_input)) {
+                    builder.contextInput(nb::cast<Tensor>(context_input));
+                } else {
+                    throw nb::type_error("Attention context_input must be thor.Tensor, thor.RaggedTensor, or None.");
+                }
             }
             if (score_bias_input.has_value()) {
                 builder.scoreBiasInput(score_bias_input.value());
@@ -255,11 +259,6 @@ void bind_attention(nb::module_& layers) {
                 builder.querySequenceLengthsInput(query_sequence_lengths.value());
                 builder.keyValueSequenceLengthsInput(key_value_sequence_lengths.value());
             }
-            if (query_ragged_offsets.has_value()) {
-                builder.queryRaggedOffsetsInput(query_ragged_offsets.value());
-                builder.keyValueRaggedOffsetsInput(key_value_ragged_offsets.value());
-            }
-
             if (num_key_value_heads.has_value()) {
                 builder.numKeyValueHeads(num_key_value_heads.value());
             }
@@ -367,9 +366,7 @@ void bind_attention(nb::module_& layers) {
         "dropout_offset"_a = int64_t{0},
         "query_sequence_lengths"_a.none() = nb::none(),
         "key_value_sequence_lengths"_a.none() = nb::none(),
-        "query_ragged_offsets"_a.none() = nb::none(),
-        "key_value_ragged_offsets"_a.none() = nb::none(),
-        "context_input"_a.none() = nb::none(),
+        "context_input"_a = nb::none(),
         "score_bias_input"_a.none() = nb::none(),
         "epilogue"_a.none() = nb::none(),
         "epilogue_inputs"_a.none() = nb::none(),
@@ -413,9 +410,11 @@ Supported features for FP16/BF16:
   ``[0, 1)``.  Thor advances the runtime dropout offset by ``B * Hq * Sq * Skv``.
 * Padding masks use ``query_sequence_lengths`` and ``key_value_sequence_lengths``
   together, both int32 logical ``[1]`` tensors.
-* Ragged/packed variable-length attention uses both query and key/value ragged
-  offset tensors together, both int32 logical ``[2]`` tensors that NetworkInput
-  batches into cuDNN's ``[B + 1]`` offset vectors.
+* ``feature_input`` and ``context_input`` may be ``thor.RaggedTensor`` values.
+  Ragged self-attention preserves the query row partition on output. Ragged
+  cross-attention may use independent Q/KV partitions when RoPE is disabled;
+  with RoPE, Q and KV must share the same row partition because row partitions
+  alone do not define a cross-attention positional coordinate system.
 
 Important combination rules:
 
@@ -440,7 +439,12 @@ Important combination rules:
         "compute_dtype"_a.none() = nb::none(),
         R"nbdoc(Return a named auxiliary tensor input expression for an Attention epilogue.)nbdoc");
 
-    attention.def("get_feature_output", [](Attention& self) -> Tensor { return self.getOutput("feature_output"); });
+    attention.def("get_feature_output", [](Attention& self) -> nb::object {
+        if (self.getRaggedFeatureOutput().has_value()) {
+            return nb::cast(self.getRaggedFeatureOutput().value());
+        }
+        return nb::cast(self.getOutput("feature_output"));
+    });
     attention.def("get_num_heads", &Attention::getNumHeads);
     attention.def("get_num_key_value_heads", &Attention::getNumKeyValueHeads);
     attention.def("get_head_dim", &Attention::getHeadDim);
@@ -467,15 +471,18 @@ Important combination rules:
     attention.def("get_dropout_seed", &Attention::getDropoutSeed);
     attention.def("get_dropout_offset", &Attention::getDropoutOffset);
     attention.def("get_use_cross_attention", &Attention::getUseCrossAttention);
-    attention.def("get_context_input", [](Attention& self) { return self.getContextInput(); });
+    attention.def("get_context_input", [](Attention& self) -> nb::object {
+        if (self.getRaggedContextInput().has_value()) {
+            return nb::cast(self.getRaggedContextInput().value());
+        }
+        const std::optional<Tensor> context = self.getContextInput();
+        return context.has_value() ? nb::cast(context.value()) : nb::none();
+    });
     attention.def("get_use_score_bias", &Attention::getUseScoreBias);
     attention.def("get_score_bias_input", [](Attention& self) { return self.getScoreBiasInput(); });
     attention.def("get_use_sequence_lengths", &Attention::getUseSequenceLengths);
-    attention.def("get_use_ragged_offsets", &Attention::getUseRaggedOffsets);
     attention.def("get_query_sequence_lengths_input", [](Attention& self) { return self.getQuerySequenceLengthsInput(); });
     attention.def("get_key_value_sequence_lengths_input", [](Attention& self) { return self.getKeyValueSequenceLengthsInput(); });
-    attention.def("get_query_ragged_offsets_input", [](Attention& self) { return self.getQueryRaggedOffsetsInput(); });
-    attention.def("get_key_value_ragged_offsets_input", [](Attention& self) { return self.getKeyValueRaggedOffsetsInput(); });
     attention.def("get_weights_data_type", &Attention::getWeightsDataType);
     attention.def("get_compute_data_type", &Attention::getComputeDataType);
     attention.def("get_output_data_type", &Attention::getOutputDataType);

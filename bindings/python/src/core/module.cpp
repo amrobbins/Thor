@@ -17,6 +17,7 @@ void bind_version(nb::module_ &thor);
 void bind_network(nb::module_ &thor);
 void bind_placed_network(nb::module_ &thor);
 void bind_tensor(nb::module_ &thor);
+void bind_ragged_tensor(nb::module_ &thor);
 void bind_parameter(nb::module_ &thor);
 void bind_training(nb::module_ &training);
 
@@ -68,6 +69,7 @@ NB_MODULE(_thor, thor) {
     metricAggregation.attr("__module__") = "thor";
 
     bind_tensor(thor);
+    bind_ragged_tensor(thor);
     bind_parameter(thor);
     bind_network(thor);
     bind_placed_network(thor);

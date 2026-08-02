@@ -232,6 +232,20 @@ TEST(CudnnAttentionDescriptor, AllowsPackedRaggedQOAndKVOffsetPairs) {
 }
 
 
+TEST(CudnnAttentionDescriptor, AllowsPackedRaggedAttentionWithDistinctValueHeadDimension) {
+    CudnnAttentionDescriptor descriptor = makePackedDescriptor();
+    descriptor.v = AttentionTensorSpec::bshd(3, 4, 80, 32, DataType::FP16);
+    descriptor.o = AttentionTensorSpec::bshd(3, 4, 64, 32, DataType::FP16);
+    descriptor.q.ragged = true;
+    descriptor.o.ragged = true;
+    descriptor.k.ragged = true;
+    descriptor.v.ragged = true;
+    descriptor.usePaddingMask = true;
+
+    EXPECT_NO_THROW(descriptor.validateForward());
+}
+
+
 TEST(CudnnAttentionDescriptor, RejectsRaggedOffsetsWithoutBshdPackedLayout) {
     CudnnAttentionDescriptor descriptor = makeDescriptor();
     descriptor.q.ragged = true;
@@ -270,7 +284,7 @@ TEST(CudnnAttentionDescriptor, RejectsRaggedVWithoutKOffset) {
     EXPECT_THROW(descriptor.validateForward(), std::invalid_argument);
 }
 
-TEST(CudnnAttentionDescriptor, RejectsRaggedOffsetsWithoutPaddingMaskSequenceLengthMode) {
+TEST(CudnnAttentionDescriptor, RejectsRaggedBackendWithoutPaddingMaskDescriptorMode) {
     CudnnAttentionDescriptor descriptor = makePackedDescriptor();
     descriptor.q.ragged = true;
     descriptor.o.ragged = true;

@@ -10,6 +10,7 @@
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Layers/Learning/ScaledDotProductAttention.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 
@@ -95,11 +96,11 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
         "__init__",
         [](ScaledDotProductAttention* self,
            Network& network,
-           Tensor query_input,
-           std::optional<Tensor> key_input,
-           std::optional<Tensor> value_input,
+           nb::object query_input,
+           nb::object key_input,
+           nb::object value_input,
            std::optional<Tensor> bias_input,
-           std::string tensor_layout,
+           std::optional<std::string> tensor_layout,
            std::string mask_kind,
            int64_t diagonal_left_bound,
            int64_t diagonal_right_bound,
@@ -110,9 +111,6 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
            std::optional<Tensor> sequence_lengths,
            std::optional<Tensor> query_sequence_lengths,
            std::optional<Tensor> key_value_sequence_lengths,
-           std::optional<Tensor> ragged_offsets,
-           std::optional<Tensor> query_ragged_offsets,
-           std::optional<Tensor> key_value_ragged_offsets,
            float dropout_probability,
            int64_t dropout_seed,
            int64_t dropout_offset,
@@ -125,7 +123,6 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
            std::optional<Tensor> fp8_amax_s,
            std::optional<Tensor> fp8_amax_o) {
             requireNoMixedConvenienceAndExplicit(sequence_lengths, query_sequence_lengths, key_value_sequence_lengths, "sequence_lengths");
-            requireNoMixedConvenienceAndExplicit(ragged_offsets, query_ragged_offsets, key_value_ragged_offsets, "ragged_offsets");
             if (attention_scale.has_value() && (!std::isfinite(attention_scale.value()) || attention_scale.value() <= 0.0)) {
                 throw nb::value_error("ScaledDotProductAttention instance: attention_scale must be finite and > 0.");
             }
@@ -137,19 +134,44 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
             }
 
             ScaledDotProductAttention::Builder builder;
-            builder.network(network).queryInput(query_input);
-            if (key_input.has_value() || value_input.has_value()) {
-                if (!key_input.has_value() || !value_input.has_value()) {
-                    throw nb::value_error("ScaledDotProductAttention instance: key_input and value_input must be provided together.");
+            builder.network(network);
+            const bool queryIsRagged = nb::isinstance<RaggedTensor>(query_input);
+            const bool queryIsDense = nb::isinstance<Tensor>(query_input);
+            if (!queryIsRagged && !queryIsDense)
+                throw nb::type_error("ScaledDotProductAttention query_input must be thor.Tensor or thor.RaggedTensor.");
+
+            const bool hasKey = !key_input.is_none();
+            const bool hasValue = !value_input.is_none();
+            if (hasKey != hasValue)
+                throw nb::value_error("ScaledDotProductAttention key_input and value_input must be provided together.");
+
+            if (queryIsRagged) {
+                RaggedTensor q = nb::cast<RaggedTensor>(query_input);
+                if (!hasKey) {
+                    builder.selfInput(q);
+                } else {
+                    if (!nb::isinstance<RaggedTensor>(key_input) || !nb::isinstance<RaggedTensor>(value_input))
+                        throw nb::type_error("ScaledDotProductAttention cannot mix dense and ragged Q/K/V inputs.");
+                    builder.queryInput(q)
+                        .keyInput(nb::cast<RaggedTensor>(key_input))
+                        .valueInput(nb::cast<RaggedTensor>(value_input));
                 }
-                builder.keyInput(key_input.value()).valueInput(value_input.value());
             } else {
-                builder.keyInput(query_input).valueInput(query_input);
+                Tensor q = nb::cast<Tensor>(query_input);
+                if (!hasKey) {
+                    builder.selfInput(q);
+                } else {
+                    if (!nb::isinstance<Tensor>(key_input) || !nb::isinstance<Tensor>(value_input))
+                        throw nb::type_error("ScaledDotProductAttention cannot mix dense and ragged Q/K/V inputs.");
+                    builder.queryInput(q).keyInput(nb::cast<Tensor>(key_input)).valueInput(nb::cast<Tensor>(value_input));
+                }
             }
             if (bias_input.has_value()) {
                 builder.biasInput(bias_input.value());
             }
-            builder.tensorLayout(parseAttentionTensorLayout(tensor_layout)).maskKind(parseAttentionMaskKind(mask_kind));
+            if (tensor_layout.has_value())
+                builder.tensorLayout(parseAttentionTensorLayout(tensor_layout.value()));
+            builder.maskKind(parseAttentionMaskKind(mask_kind));
             if (diagonal_left_bound != 0) {
                 builder.diagonalLeftBound(diagonal_left_bound);
             }
@@ -179,16 +201,6 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
                     builder.keyValueSequenceLengthsInput(key_value_sequence_lengths.value());
                 }
             }
-            if (ragged_offsets.has_value()) {
-                builder.raggedOffsetsInput(ragged_offsets.value());
-            } else {
-                if (query_ragged_offsets.has_value()) {
-                    builder.queryRaggedOffsetsInput(query_ragged_offsets.value());
-                }
-                if (key_value_ragged_offsets.has_value()) {
-                    builder.keyValueRaggedOffsetsInput(key_value_ragged_offsets.value());
-                }
-            }
             const bool any_fp8_scale = fp8_descale_q.has_value() || fp8_descale_k.has_value() || fp8_descale_v.has_value() ||
                                        fp8_descale_s.has_value() || fp8_scale_s.has_value() || fp8_scale_o.has_value() ||
                                        fp8_amax_s.has_value() || fp8_amax_o.has_value();
@@ -213,10 +225,10 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
         },
         "network"_a,
         "query_input"_a,
-        "key_input"_a.none() = nb::none(),
-        "value_input"_a.none() = nb::none(),
+        "key_input"_a = nb::none(),
+        "value_input"_a = nb::none(),
         "bias_input"_a.none() = nb::none(),
-        "tensor_layout"_a = "bhsd",
+        "tensor_layout"_a.none() = nb::none(),
         "mask_kind"_a = "none",
         "diagonal_left_bound"_a = 0,
         "diagonal_right_bound"_a = 0,
@@ -227,9 +239,6 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
         "sequence_lengths"_a.none() = nb::none(),
         "query_sequence_lengths"_a.none() = nb::none(),
         "key_value_sequence_lengths"_a.none() = nb::none(),
-        "ragged_offsets"_a.none() = nb::none(),
-        "query_ragged_offsets"_a.none() = nb::none(),
-        "key_value_ragged_offsets"_a.none() = nb::none(),
         "dropout_probability"_a = 0.0f,
         "dropout_seed"_a = int64_t{0},
         "dropout_offset"_a = int64_t{0},
@@ -244,8 +253,12 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
 
     sdpa.def(
         "get_feature_output",
-        [](ScaledDotProductAttention& self) -> Tensor { return self.getOutput("output"); },
-        R"nbdoc(Return the output tensor produced by this layer.)nbdoc");
+        [](ScaledDotProductAttention& self) -> nb::object {
+            if (self.getRaggedFeatureOutput().has_value())
+                return nb::cast(self.getRaggedFeatureOutput().value());
+            return nb::cast(self.getOutput("output"));
+        },
+        R"nbdoc(Return the logical Tensor or RaggedTensor produced by this layer.)nbdoc");
     sdpa.def("get_tensor_layout", [](ScaledDotProductAttention& self) { return attentionTensorLayoutName(self.getTensorLayout()); });
     sdpa.def("get_mask_kind", [](ScaledDotProductAttention& self) { return attentionMaskKindName(self.getMaskKind()); });
     sdpa.def("get_diagonal_left_bound", &ScaledDotProductAttention::getDiagonalLeftBound);
@@ -256,13 +269,14 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
     sdpa.def("get_dropout_seed", &ScaledDotProductAttention::getDropoutSeed);
     sdpa.def("get_dropout_offset", &ScaledDotProductAttention::getDropoutOffset);
     sdpa.def("get_use_sequence_lengths", &ScaledDotProductAttention::getUseSequenceLengths);
-    sdpa.def("get_use_ragged_offsets", &ScaledDotProductAttention::getUseRaggedOffsets);
+    sdpa.def("get_use_ragged_input", &ScaledDotProductAttention::getUseRaggedInput);
     sdpa.def("get_use_bias", &ScaledDotProductAttention::getUseBias);
     sdpa.def("get_bias_input", &ScaledDotProductAttention::getBiasInput);
     sdpa.def("get_query_sequence_lengths_input", &ScaledDotProductAttention::getQuerySequenceLengthsInput);
     sdpa.def("get_key_value_sequence_lengths_input", &ScaledDotProductAttention::getKeyValueSequenceLengthsInput);
-    sdpa.def("get_query_ragged_offsets_input", &ScaledDotProductAttention::getQueryRaggedOffsetsInput);
-    sdpa.def("get_key_value_ragged_offsets_input", &ScaledDotProductAttention::getKeyValueRaggedOffsetsInput);
+    sdpa.def("get_query_ragged_input", &ScaledDotProductAttention::getQueryRaggedInput);
+    sdpa.def("get_key_ragged_input", &ScaledDotProductAttention::getKeyRaggedInput);
+    sdpa.def("get_value_ragged_input", &ScaledDotProductAttention::getValueRaggedInput);
     sdpa.def("get_use_fp8_forward_scaling", &ScaledDotProductAttention::getUseFp8ForwardScaling);
     sdpa.def("get_fp8_descale_q_input", &ScaledDotProductAttention::getFp8DescaleQInput);
     sdpa.def("get_fp8_descale_k_input", &ScaledDotProductAttention::getFp8DescaleKInput);
@@ -278,10 +292,12 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
     sdpa.attr("__doc__") = R"nbdoc(
 cuDNN-backed scaled dot-product attention layer for already-projected Q/K/V tensors.
 
-API tensor shapes omit batch.  ``tensor_layout='bhsd'`` means
+Dense API tensor shapes omit batch.  ``tensor_layout='bhsd'`` means
 ``[heads, sequence, head_dim]`` and ``tensor_layout='bshd'`` means
-``[sequence, heads, head_dim]``.  Placement adds the batch dimension and the
-cuDNN stage consumes semantic ``[B, H, S, D]`` tensors.
+``[sequence, heads, head_dim]``.  Canonical ragged inputs instead use
+``thor.RaggedTensor`` packed values shaped ``[max_total_values, heads, head_dim]``
+with a separate logical row partition.  cuDNN-specific lengths and element
+offsets remain private backend metadata.
 
 FP16/BF16 production support:
 
@@ -298,11 +314,12 @@ FP16/BF16 production support:
   supports sequence broadcast.  Backward materializes sequence-broadcast bias to
   dense score space before cuDNN backward and reduces dBias back to the public
   bias shape.  Ragged + additive-bias backward is rejected.
-* ``sequence_lengths`` and ``ragged_offsets`` are self-attention conveniences.
-  Cross-attention can use ``query_sequence_lengths``/``key_value_sequence_lengths``
-  and ``query_ragged_offsets``/``key_value_ragged_offsets``.  Sequence lengths are
-  int32 logical ``[1]`` tensors.  Ragged offsets are int32 logical ``[2]`` tensors
-  that NetworkInput batches into cuDNN ``[B + 1]`` offset vectors.
+* Dense/padded attention may use ``sequence_lengths`` or the explicit
+  ``query_sequence_lengths``/``key_value_sequence_lengths`` pair.
+* Ragged attention is represented only by ``thor.RaggedTensor`` Q/K/V inputs.
+  Their canonical UINT32/UINT64 row partitions define sequence boundaries; cuDNN
+  INT32 sequence lengths and element offsets are private backend metadata.
+  Supplying dense sequence-length metadata together with RaggedTensor inputs is rejected.
 * ``dropout_probability``/``dropout_seed``/``dropout_offset`` expose cuDNN Philox
   attention dropout.  Thor advances the runtime dropout offset by
   ``B * Hq * Sq * Skv``.
@@ -318,8 +335,8 @@ Experimental FP8 forward-only support:
 * FP8 backward is not supported.  FP8 additive bias, dropout, ALiBi, ragged,
   paged KV, bottom-right/decode masks, sliding-window masks, and decode-style
   ``Sq=1, Skv>1`` are rejected on the validated public surface.
-* FP8 padding masks / sequence lengths are supported for forward; ragged offsets
-  remain disabled for FP8.
+* FP8 padding masks / sequence lengths are supported for forward; canonical RaggedTensor
+  inputs remain disabled for FP8.
 
 Important combination rules:
 

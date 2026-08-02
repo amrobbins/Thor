@@ -7,6 +7,7 @@
 #include "DeepLearning/Api/Data/BatchFieldSource.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Parameter/ParameterReference.h"
+#include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/TarFile/TarWriter.h"
 
@@ -14,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace ThorImplementation {
@@ -21,6 +23,8 @@ class DeviceStartupGuard;
 }
 
 namespace Thor {
+
+using InferenceOutputValue = std::variant<ThorImplementation::Tensor, ThorImplementation::RaggedTensor>;
 
 class PlacedNetwork {
    public:
@@ -81,6 +85,7 @@ class PlacedNetwork {
     std::map<std::string, ThorImplementation::Tensor> infer(std::map<std::string, ThorImplementation::Tensor> batchInputs,
                                                             uint64_t stampIndex = 0);
     std::map<std::string, ThorImplementation::Tensor> infer(const Batch& batchInputs, uint64_t stampIndex = 0);
+    std::map<std::string, InferenceOutputValue> inferLogical(const Batch& batchInputs, uint64_t stampIndex = 0);
     Event submitBatch(uint64_t stampIndex,
                       std::map<std::string, ThorImplementation::Tensor> batchInputs,
                       std::map<std::string, ThorImplementation::Tensor>& batchOutputs,

@@ -50,6 +50,12 @@ def _ragged_element_offsets(lengths: np.ndarray, heads: int, dim: int) -> np.nda
     return element_offsets
 
 
+def _canonical_row_offsets(lengths: np.ndarray, dtype=np.uint32) -> np.ndarray:
+    offsets = np.zeros((len(lengths) + 1,), dtype=dtype)
+    offsets[1:] = np.cumsum(lengths.astype(np.uint64)).astype(dtype)
+    return offsets
+
+
 def _pack_bshd_dense_storage(logical_bhsd: np.ndarray) -> np.ndarray:
     # Thor-side BSHD tensors are actually shaped [B,S,H,D].  References stay in
     # semantic BHSD order, so convert reference values to the Thor tensor shape.
@@ -1750,8 +1756,6 @@ def test_attention_paged_kv_cache_rejects_unsupported_combinations_early():
             q,
             k,
             v,
-            q_seq_len=q_seq_len,
-            kv_seq_len=kv_seq_len,
             q_ragged_offsets=q_offsets,
             kv_ragged_offsets=kv_offsets,
             page_table_k=page_table_k,
@@ -1798,8 +1802,6 @@ def test_attention_forward_ragged_offsets_plans_single_stage_and_validates_shape
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     scale = 0.61 / math.sqrt(16.0)
@@ -1807,8 +1809,6 @@ def test_attention_forward_ragged_offsets_plans_single_stage_and_validates_shape
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -1824,8 +1824,8 @@ def test_attention_forward_ragged_offsets_plans_single_stage_and_validates_shape
     q_np, k_np, v_np = _attention_inputs(batch=2, query_heads=2, kv_heads=2, query_len=6, kv_len=7, dtype=dtype)
     q_lengths = np.asarray([6, 4], dtype=np.int32)
     kv_lengths = np.asarray([7, 5], dtype=np.int32)
-    q_offsets_np = _ragged_element_offsets(q_lengths, heads=2, dim=16)
-    kv_offsets_np = _ragged_element_offsets(kv_lengths, heads=2, dim=16)
+    q_offsets_np = _canonical_row_offsets(q_lengths, np.uint32)
+    kv_offsets_np = _canonical_row_offsets(kv_lengths, np.uint64)
     q_storage = _pack_bshd_ragged_storage(q_np, q_lengths)
     k_storage = _pack_bshd_ragged_storage(k_np, kv_lengths)
     v_storage = _pack_bshd_ragged_storage(v_np, kv_lengths)
@@ -1834,10 +1834,8 @@ def test_attention_forward_ragged_offsets_plans_single_stage_and_validates_shape
         "q": _host_to_gpu(q_storage, dtype, stream),
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(q_offsets_np, thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(kv_offsets_np, thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(q_offsets_np, thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(kv_offsets_np, thor.DataType.uint64, stream),
     }
 
     assert eq.output_shape(inputs_gpu) == [2, 6, 2, 16]
@@ -1852,8 +1850,6 @@ def test_attention_forward_ragged_offsets_bshd_packed_matches_reference():
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     scale = 0.58 / math.sqrt(16.0)
@@ -1861,8 +1857,6 @@ def test_attention_forward_ragged_offsets_bshd_packed_matches_reference():
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -1890,10 +1884,8 @@ def test_attention_forward_ragged_offsets_bshd_packed_matches_reference():
         "q": _host_to_gpu(q_storage, dtype, stream),
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=16), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
     }
 
     assert eq.output_shape(inputs_gpu) == [2, 6, 2, 16]
@@ -1915,8 +1907,6 @@ def test_attention_forward_ragged_offsets_with_additive_bias_broadcast_shapes_ma
     k = ex.input("k")
     v = ex.input("v")
     bias = ex.input("bias")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     scale = 0.57 / math.sqrt(16.0)
@@ -1925,8 +1915,6 @@ def test_attention_forward_ragged_offsets_with_additive_bias_broadcast_shapes_ma
         k,
         v,
         bias=bias,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -1960,10 +1948,8 @@ def test_attention_forward_ragged_offsets_with_additive_bias_broadcast_shapes_ma
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
         "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=16), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
     }
 
     assert eq.output_shape(inputs_gpu) == [2, 6, 2, 16]
@@ -1983,8 +1969,6 @@ def test_attention_forward_ragged_offsets_with_dropout_is_deterministic():
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     dropout_seed = ex.input("dropout_seed")
@@ -1994,8 +1978,6 @@ def test_attention_forward_ragged_offsets_with_dropout_is_deterministic():
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -2019,10 +2001,8 @@ def test_attention_forward_ragged_offsets_with_dropout_is_deterministic():
         "q": _host_to_gpu(_pack_bshd_ragged_storage(q_np, q_lengths), dtype, stream),
         "k": _host_to_gpu(_pack_bshd_ragged_storage(k_np, kv_lengths), dtype, stream),
         "v": _host_to_gpu(_pack_bshd_ragged_storage(v_np, kv_lengths), dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=16), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
         "dropout_seed": _dropout_scalar_gpu(1234, stream),
         "dropout_offset": _dropout_scalar_gpu(5678, stream),
     }
@@ -2059,8 +2039,6 @@ def test_attention_forward_ragged_offsets_gqa_bshd_packed_matches_reference():
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     scale = 0.61 / math.sqrt(16.0)
@@ -2068,8 +2046,6 @@ def test_attention_forward_ragged_offsets_gqa_bshd_packed_matches_reference():
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -2097,10 +2073,8 @@ def test_attention_forward_ragged_offsets_gqa_bshd_packed_matches_reference():
         "q": _host_to_gpu(q_storage, dtype, stream),
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=4, dim=16), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
     }
 
     assert eq.output_shape(inputs_gpu) == [2, 6, 4, 16]
@@ -2118,8 +2092,6 @@ def test_attention_forward_ragged_offsets_mqa_bshd_packed_matches_reference():
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     scale = 0.64 / math.sqrt(16.0)
@@ -2127,8 +2099,6 @@ def test_attention_forward_ragged_offsets_mqa_bshd_packed_matches_reference():
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -2156,10 +2126,8 @@ def test_attention_forward_ragged_offsets_mqa_bshd_packed_matches_reference():
         "q": _host_to_gpu(q_storage, dtype, stream),
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=4, dim=16), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=1, dim=16), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
     }
 
     assert eq.output_shape(inputs_gpu) == [2, 6, 4, 16]
@@ -2177,8 +2145,6 @@ def test_attention_forward_ragged_offsets_causal_top_left_bshd_packed_matches_re
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     scale = 0.61 / math.sqrt(16.0)
@@ -2186,8 +2152,6 @@ def test_attention_forward_ragged_offsets_causal_top_left_bshd_packed_matches_re
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -2224,10 +2188,8 @@ def test_attention_forward_ragged_offsets_causal_top_left_bshd_packed_matches_re
         "q": _host_to_gpu(q_storage, dtype, stream),
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=16), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
     }
 
     assert eq.output_shape(inputs_gpu) == [2, 6, 2, 16]
@@ -2244,8 +2206,6 @@ def test_attention_ragged_offsets_require_bshd_physical_layouts():
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
 
@@ -2254,8 +2214,6 @@ def test_attention_ragged_offsets_require_bshd_physical_layouts():
             q,
             k,
             v,
-            q_seq_len=q_seq_len,
-            kv_seq_len=kv_seq_len,
             q_ragged_offsets=q_offsets,
             kv_ragged_offsets=kv_offsets,
             output_dtype=dtype,
@@ -2264,13 +2222,11 @@ def test_attention_ragged_offsets_require_bshd_physical_layouts():
 
 
 @pytest.mark.cuda
-def test_attention_ragged_offsets_require_int32_and_batch_plus_one_shape():
+def test_attention_ragged_offsets_require_canonical_dtype_and_batch_plus_one_shape():
     dtype = thor.DataType.fp16
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     eq = ex.compile(
@@ -2278,8 +2234,6 @@ def test_attention_ragged_offsets_require_int32_and_batch_plus_one_shape():
             q,
             k,
             v,
-            q_seq_len=q_seq_len,
-            kv_seq_len=kv_seq_len,
             q_ragged_offsets=q_offsets,
             kv_ragged_offsets=kv_offsets,
             q_layout=AttentionTensorLayout.bshd,
@@ -2303,23 +2257,19 @@ def test_attention_ragged_offsets_require_int32_and_batch_plus_one_shape():
         "q": _host_to_gpu(q_storage, dtype, stream),
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
     }
 
     bad_dtype = dict(base_inputs)
-    bad_dtype["q_offsets"] = _host_to_gpu(
-        _ragged_element_offsets(q_lengths, 2, 16).astype(np.int64), thor.DataType.int64, stream)
-    bad_dtype["kv_offsets"] = _host_to_gpu(_ragged_element_offsets(kv_lengths, 2, 16), thor.DataType.int32, stream)
-    with pytest.raises(RuntimeError, match="ragged q_offsets dtype must be INT32"):
+    bad_dtype["q_offsets"] = _host_to_gpu(_canonical_row_offsets(q_lengths, np.int32), thor.DataType.int32, stream)
+    bad_dtype["kv_offsets"] = _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream)
+    with pytest.raises(RuntimeError, match="canonical UINT32 or UINT64"):
         eq.stamp(bad_dtype, stream)
 
     bad_shape = dict(base_inputs)
-    bad_shape["q_offsets"] = _host_to_gpu(np.asarray([0, 6], dtype=np.int32), thor.DataType.int32, stream)
-    bad_shape["kv_offsets"] = _host_to_gpu(_ragged_element_offsets(kv_lengths, 2, 16), thor.DataType.int32, stream)
+    bad_shape["q_offsets"] = _host_to_gpu(np.asarray([0, 6], dtype=np.uint32), thor.DataType.uint32, stream)
+    bad_shape["kv_offsets"] = _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream)
     with pytest.raises(RuntimeError, match=r"ragged q_offsets shape must be \[B \+ 1\]"):
         eq.stamp(bad_shape, stream)
-
 
 @pytest.mark.cuda
 def test_attention_ragged_offsets_reject_unsupported_combinations_early():
@@ -2339,11 +2289,28 @@ def test_attention_ragged_offsets_reject_unsupported_combinations_early():
         ex.scaled_dot_product_attention(
             q, k, v, q_ragged_offsets=q_offsets, output_dtype=dtype, compute_dtype=thor.DataType.fp32)
 
-    with pytest.raises(ValueError, match="ragged attention requires q_seq_len and kv_seq_len"):
+    # Canonical row partitions are the complete ragged metadata mode.
+    ex.scaled_dot_product_attention(
+        q,
+        k,
+        v,
+        q_ragged_offsets=q_offsets,
+        kv_ragged_offsets=kv_offsets,
+        q_layout=AttentionTensorLayout.bshd,
+        k_layout=AttentionTensorLayout.bshd,
+        v_layout=AttentionTensorLayout.bshd,
+        o_layout=AttentionTensorLayout.bshd,
+        output_dtype=dtype,
+        compute_dtype=thor.DataType.fp32,
+    )
+
+    with pytest.raises(ValueError, match="already define sequence lengths"):
         ex.scaled_dot_product_attention(
             q,
             k,
             v,
+            q_seq_len=q_seq_len,
+            kv_seq_len=kv_seq_len,
             q_ragged_offsets=q_offsets,
             kv_ragged_offsets=kv_offsets,
             q_layout=AttentionTensorLayout.bshd,
@@ -2359,8 +2326,6 @@ def test_attention_ragged_offsets_reject_unsupported_combinations_early():
         k,
         v,
         bias=bias,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -2375,8 +2340,6 @@ def test_attention_ragged_offsets_reject_unsupported_combinations_early():
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -2395,8 +2358,6 @@ def test_attention_ragged_offsets_reject_unsupported_combinations_early():
         k,
         v,
         bias=bias,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -2410,23 +2371,18 @@ def test_attention_ragged_offsets_reject_unsupported_combinations_early():
         compute_dtype=thor.DataType.fp32,
     )
 
-
 @pytest.mark.cuda
 def test_attention_ragged_offsets_feeds_fused_epilogue_and_multi_output_reuses_stage():
     dtype = thor.DataType.fp16
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     attn = ex.scaled_dot_product_attention(
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -2453,10 +2409,8 @@ def test_attention_ragged_offsets_feeds_fused_epilogue_and_multi_output_reuses_s
         "q": _host_to_gpu(q_storage, dtype, stream),
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, 2, 16), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, 2, 16), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
     }
 
     assert eq.output_shapes(inputs_gpu) == {
@@ -2961,27 +2915,25 @@ def test_attention_accepts_fp32_qkv_when_user_inserts_explicit_cast_before_atten
 
 
 @pytest.mark.cuda
-def test_attention_ragged_offsets_reject_distinct_value_head_dim_for_shared_offset_contract():
+def test_attention_ragged_offsets_support_distinct_value_head_dim():
     dtype = thor.DataType.fp16
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
+    scale = 0.63 / math.sqrt(16.0)
     out = ex.scaled_dot_product_attention(
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
         k_layout=AttentionTensorLayout.bshd,
         v_layout=AttentionTensorLayout.bshd,
         o_layout=AttentionTensorLayout.bshd,
+        attention_scale=scale,
         output_dtype=dtype,
         compute_dtype=thor.DataType.fp32,
     )
@@ -2999,20 +2951,24 @@ def test_attention_ragged_offsets_reject_distinct_value_head_dim_for_shared_offs
     )
     q_lengths = np.asarray([4, 3], dtype=np.int32)
     kv_lengths = np.asarray([4, 2], dtype=np.int32)
+    expected = _attention_reference(
+        q_np, k_np, v_np, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
+    expected_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected, dtype), q_lengths)
+
     stream = Stream(gpu_num=0)
     inputs_gpu = {
         "q": _host_to_gpu(_pack_bshd_ragged_storage(q_np, q_lengths), dtype, stream),
         "k": _host_to_gpu(_pack_bshd_ragged_storage(k_np, kv_lengths), dtype, stream),
         "v": _host_to_gpu(_pack_bshd_ragged_storage(v_np, kv_lengths), dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=16), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
     }
 
-    with pytest.raises(RuntimeError, match="ragged offsets require value head_dim to match query/key head_dim"):
-        eq.output_shape(inputs_gpu)
-
+    assert eq.output_shape(inputs_gpu) == [2, 4, 2, 32]
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got_storage = _copy_to_host(stamped.output(), dtype, stream)
+    _assert_packed_bshd_ragged_close(got_storage, expected_storage, q_lengths)
 
 @pytest.mark.cuda
 def test_attention_invalid_gqa_head_ratio_raises_before_execution():
@@ -3225,16 +3181,12 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_bshd_packed_matches_
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     out = ex.scaled_dot_product_attention(
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -3277,10 +3229,8 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_bshd_packed_matches_
         "q": _host_to_gpu(q_storage, dtype, stream),
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=64), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=64), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
         upstream_name: _host_to_gpu(dO_storage, dtype, stream),
     }
 
@@ -3326,16 +3276,12 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_gqa_bshd_packed_matc
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     out = ex.scaled_dot_product_attention(
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -3378,10 +3324,8 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_gqa_bshd_packed_matc
         "q": _host_to_gpu(q_storage, dtype, stream),
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=4, dim=64), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=64), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
         upstream_name: _host_to_gpu(dO_storage, dtype, stream),
     }
 
@@ -3409,16 +3353,12 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_causal_top_left_bshd
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     out = ex.scaled_dot_product_attention(
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -3463,10 +3403,8 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_causal_top_left_bshd
         "q": _host_to_gpu(q_storage, dtype, stream),
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=64), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=64), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
         upstream_name: _host_to_gpu(dO_storage, dtype, stream),
     }
 
@@ -3493,16 +3431,12 @@ def test_attention_backward_with_ragged_offsets_reuses_same_plan_forward_stats_m
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     attn = ex.scaled_dot_product_attention(
         q,
         k,
         v,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -3530,10 +3464,8 @@ def test_attention_backward_with_ragged_offsets_reuses_same_plan_forward_stats_m
         "q": _host_to_gpu(q_storage, dtype, stream),
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=2, dim=64), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=64), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
     }
 
     assert bwd_eq.output_shapes(inputs_gpu) == {
@@ -4976,8 +4908,6 @@ def test_attention_compile_backward_ragged_offsets_with_full_dense_additive_bias
     k = ex.input("k")
     v = ex.input("v")
     bias = ex.input("bias")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
 
@@ -4986,8 +4916,6 @@ def test_attention_compile_backward_ragged_offsets_with_full_dense_additive_bias
         k,
         v,
         bias=bias,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -5051,8 +4979,6 @@ def test_attention_experimental_cudnn_ragged_additive_bias_backward_surface(
     k = ex.input("k")
     v = ex.input("v")
     bias = ex.input("bias")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     out = ex.scaled_dot_product_attention(
@@ -5060,8 +4986,6 @@ def test_attention_experimental_cudnn_ragged_additive_bias_backward_surface(
         k,
         v,
         bias=bias,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -5124,15 +5048,10 @@ def test_attention_experimental_cudnn_ragged_additive_bias_backward_surface(
             _host_to_gpu(v_storage, dtype, stream),
         "bias":
             _host_to_gpu(bias_np, thor.DataType.fp32, stream),
-        "q_seq_len":
-            _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len":
-            _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
         "q_offsets":
-            _host_to_gpu(
-                _ragged_element_offsets(q_lengths, heads=query_heads, dim=qk_dim), thor.DataType.int32, stream),
+            _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
         "kv_offsets":
-            _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=kv_heads, dim=qk_dim), thor.DataType.int32, stream),
+            _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
         upstream_name:
             _host_to_gpu(dO_storage, dtype, stream),
     }
@@ -5736,8 +5655,6 @@ def test_attention_experimental_cudnn_ragged_paged_kv_forward_support_surface(mo
     q = ex.input("q")
     k = ex.input("k")
     v = ex.input("v")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     page_table_k = ex.input("page_table_k")
@@ -5749,8 +5666,6 @@ def test_attention_experimental_cudnn_ragged_paged_kv_forward_support_surface(mo
                 q,
                 k,
                 v,
-                q_seq_len=q_seq_len,
-                kv_seq_len=kv_seq_len,
                 q_ragged_offsets=q_offsets,
                 kv_ragged_offsets=kv_offsets,
                 page_table_k=page_table_k,
@@ -5799,17 +5714,12 @@ def test_attention_experimental_cudnn_ragged_paged_kv_forward_support_surface(mo
             _host_to_gpu(k_container_bshd, dtype, stream),
         "v":
             _host_to_gpu(v_container_bshd, dtype, stream),
-        "q_seq_len":
-            _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len":
-            _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
         "q_offsets":
-            _host_to_gpu(
-                _ragged_element_offsets(q_lengths, heads=query_heads, dim=qk_dim), thor.DataType.int32, stream),
-        # cuDNN may ultimately reject this combination, but if it grows support this keeps the K/V offset tensor in the
-        # same batch-indexed form as the existing ragged attention API while page tables identify the physical pages.
+            _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        # If cuDNN eventually supports this combination, both row partitions remain canonical token offsets while
+        # the page tables identify physical K/V blocks.
         "kv_offsets":
-            _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=kv_heads, dim=qk_dim), thor.DataType.int32, stream),
+            _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
         "page_table_k":
             _host_to_gpu(page_table, thor.DataType.int32, stream),
         "page_table_v":
@@ -6321,8 +6231,6 @@ def test_attention_forward_ragged_gqa_cross_attention_with_broadcast_additive_bi
     k = ex.input("k")
     v = ex.input("v")
     bias = ex.input("bias")
-    q_seq_len = ex.input("q_seq_len")
-    kv_seq_len = ex.input("kv_seq_len")
     q_offsets = ex.input("q_offsets")
     kv_offsets = ex.input("kv_offsets")
     scale = 0.51 / math.sqrt(16.0)
@@ -6331,8 +6239,6 @@ def test_attention_forward_ragged_gqa_cross_attention_with_broadcast_additive_bi
         k,
         v,
         bias=bias,
-        q_seq_len=q_seq_len,
-        kv_seq_len=kv_seq_len,
         q_ragged_offsets=q_offsets,
         kv_ragged_offsets=kv_offsets,
         q_layout=AttentionTensorLayout.bshd,
@@ -6381,10 +6287,8 @@ def test_attention_forward_ragged_gqa_cross_attention_with_broadcast_additive_bi
         "k": _host_to_gpu(k_storage, dtype, stream),
         "v": _host_to_gpu(v_storage, dtype, stream),
         "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
-        "q_seq_len": _host_to_gpu(q_lengths, thor.DataType.int32, stream),
-        "kv_seq_len": _host_to_gpu(kv_lengths, thor.DataType.int32, stream),
-        "q_offsets": _host_to_gpu(_ragged_element_offsets(q_lengths, heads=4, dim=16), thor.DataType.int32, stream),
-        "kv_offsets": _host_to_gpu(_ragged_element_offsets(kv_lengths, heads=2, dim=16), thor.DataType.int32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
     }
 
     assert eq.output_shape(inputs_gpu) == [2, 5, 4, 16]
