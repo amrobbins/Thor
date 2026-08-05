@@ -90,6 +90,7 @@ class TweedieLoss::Builder {
         TweedieLoss loss;
         loss.predictionsTensor = _predictions.value();
         loss.labelsTensor = _labels.value();
+        loss.exampleWeightsTensor = _exampleWeights;
         loss.lossDataType = _lossDataType.value();
 
         loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
@@ -127,6 +128,12 @@ class TweedieLoss::Builder {
     }
 
     virtual TweedieLoss::Builder &target(Tensor _target) { return labels(_target); }
+
+    virtual TweedieLoss::Builder &exampleWeights(Tensor _exampleWeights) {
+        THOR_THROW_IF_FALSE(!this->_exampleWeights.has_value());
+        this->_exampleWeights = _exampleWeights;
+        return *this;
+    }
 
     virtual TweedieLoss::Builder &power(float _power) {
         THOR_THROW_IF_FALSE(!this->_power.has_value());
@@ -190,6 +197,7 @@ class TweedieLoss::Builder {
     std::optional<Network *> _network;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
+    std::optional<Tensor> _exampleWeights;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
     std::optional<float> _lossWeight;

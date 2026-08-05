@@ -232,6 +232,69 @@ bool cublasLtAlgorithmSupportsOutOfPlaceResult(const cublasLtMatmulAlgo_t &algor
     return status == CUBLAS_STATUS_SUCCESS && sizeWritten == sizeof(supportsOutOfPlace) && supportsOutOfPlace != 0;
 }
 
+bool cublasLtAlgorithmSupportsStridedBatch(const cublasLtMatmulAlgo_t &algorithm) {
+    int32_t supportsStridedBatch = 0;
+    size_t sizeWritten = 0;
+    const cublasStatus_t status = cublasLtMatmulAlgoCapGetAttribute(&algorithm,
+                                                                    CUBLASLT_ALGO_CAP_STRIDED_BATCH_SUPPORT,
+                                                                    &supportsStridedBatch,
+                                                                    sizeof(supportsStridedBatch),
+                                                                    &sizeWritten);
+    return status == CUBLAS_STATUS_SUCCESS && sizeWritten == sizeof(supportsStridedBatch) && supportsStridedBatch != 0;
+}
+
+uint64_t matrixStorageSpanElements(int32_t rows, int32_t cols, int32_t ld) {
+    THOR_THROW_IF_FALSE(rows > 0);
+    THOR_THROW_IF_FALSE(cols > 0);
+    THOR_THROW_IF_FALSE(ld >= cols);
+    const uint64_t rowOffset = static_cast<uint64_t>(rows - 1) * static_cast<uint64_t>(ld);
+    THOR_THROW_IF_FALSE(rowOffset <= std::numeric_limits<uint64_t>::max() - static_cast<uint64_t>(cols));
+    return rowOffset + static_cast<uint64_t>(cols);
+}
+
+uint64_t stridedBatchStorageSpanElements(uint64_t matrixSpan, int64_t stride, int32_t batchCount) {
+    THOR_THROW_IF_FALSE(batchCount > 0);
+    THOR_THROW_IF_FALSE(stride >= 0);
+    if (batchCount == 1 || stride == 0) {
+        return matrixSpan;
+    }
+    const uint64_t batchOffset = static_cast<uint64_t>(batchCount - 1) * static_cast<uint64_t>(stride);
+    THOR_THROW_IF_FALSE(batchOffset <= std::numeric_limits<uint64_t>::max() - matrixSpan);
+    return batchOffset + matrixSpan;
+}
+
+void validateStridedBatchLayoutForGemm(const CublasStridedBatchConfig &batchConfig,
+                                       int32_t rowsA,
+                                       int32_t colsA,
+                                       int32_t rowsB,
+                                       int32_t colsB,
+                                       int32_t rowsC,
+                                       int32_t colsC,
+                                       int32_t rowsD,
+                                       int32_t colsD,
+                                       int32_t ldA,
+                                       int32_t ldB,
+                                       int32_t ldC,
+                                       int32_t ldD) {
+    batchConfig.validate();
+    if (!batchConfig.isBatched()) {
+        return;
+    }
+
+    const uint64_t spanA = matrixStorageSpanElements(rowsA, colsA, ldA);
+    const uint64_t spanB = matrixStorageSpanElements(rowsB, colsB, ldB);
+    const uint64_t spanC = matrixStorageSpanElements(rowsC, colsC, ldC);
+    const uint64_t spanD = matrixStorageSpanElements(rowsD, colsD, ldD);
+
+    auto validateInputStride = [](int64_t stride, uint64_t span) {
+        THOR_THROW_IF_FALSE(stride == 0 || static_cast<uint64_t>(stride) >= span);
+    };
+    validateInputStride(batchConfig.strideA, spanA);
+    validateInputStride(batchConfig.strideB, spanB);
+    validateInputStride(batchConfig.strideC, spanC);
+    THOR_THROW_IF_FALSE(static_cast<uint64_t>(batchConfig.strideD) >= spanD);
+}
+
 uint64_t cudaDataTypeSizeInBytes(cudaDataType_t dataType) {
     switch (dataType) {
         case CUDA_R_32F:
@@ -405,8 +468,24 @@ void createLtMatrixLayoutsForRowMajorGemm(cublasLtMatrixLayout_t *ADesc,
                                           const int32_t ld_C,
                                           const int32_t ld_D,
                                           bool transposeA,
-                                          bool transposeB) {
+                                          bool transposeB,
+                                          const CublasStridedBatchConfig batchConfig) {
     int64_t ld;
+    batchConfig.validate();
+
+    auto configureStridedBatch = [&](cublasLtMatrixLayout_t desc, int64_t strideElements) {
+        if (!batchConfig.isBatched()) {
+            return;
+        }
+        const int32_t batchCount = batchConfig.batchCount;
+        const cublasLtBatchMode_t batchMode = CUBLASLT_BATCH_MODE_STRIDED;
+        CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(
+            desc, CUBLASLT_MATRIX_LAYOUT_BATCH_MODE, &batchMode, sizeof(batchMode)));
+        CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(
+            desc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount)));
+        CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(
+            desc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideElements, sizeof(strideElements)));
+    };
 
     if (usesFp8ColumnMajorLtPath(operationType)) {
         const cublasLtOrder_t columnMajorOrder = CUBLASLT_ORDER_COL;
@@ -442,6 +521,12 @@ void createLtMatrixLayoutsForRowMajorGemm(cublasLtMatrixLayout_t *ADesc,
         CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &columnMajorOrder, sizeof(columnMajorOrder)));
         ld = ld_D;
         CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+        // The FP8 row-major adapter swaps external A/B when presenting operands to cuBLASLt.
+        configureStridedBatch(*ADesc, batchConfig.strideB);
+        configureStridedBatch(*BDesc, batchConfig.strideA);
+        configureStridedBatch(*CDesc, batchConfig.strideC);
+        configureStridedBatch(*DDesc, batchConfig.strideD);
         return;
     }
 
@@ -466,6 +551,11 @@ void createLtMatrixLayoutsForRowMajorGemm(cublasLtMatrixLayout_t *ADesc,
     CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_ORDER, &rowMajorOrder, sizeof(rowMajorOrder)));
     ld = ld_D;
     CHECK_CUBLAS(cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld)));
+
+    configureStridedBatch(*ADesc, batchConfig.strideA);
+    configureStridedBatch(*BDesc, batchConfig.strideB);
+    configureStridedBatch(*CDesc, batchConfig.strideC);
+    configureStridedBatch(*DDesc, batchConfig.strideD);
 }
 }  // namespace
 
@@ -717,6 +807,127 @@ void CublasMatrixMultiply::gemm(Tensor A,
     }
 
     cublasKernel.executeKernel(A, B, C, D, ld_A, ld_B, ld_C, ld_D, workspace, alpha, beta, stream, pointerMode, fp8Scales);
+}
+
+
+void CublasMatrixMultiply::stridedBatchedGemm(Tensor A,
+                                               Tensor B,
+                                               Tensor C,
+                                               Tensor D,
+                                               std::optional<Tensor> workspace,
+                                               const int32_t A_rows,
+                                               const int32_t A_cols,
+                                               const int32_t B_rows,
+                                               const int32_t B_cols,
+                                               const int32_t ld_A,
+                                               const int32_t ld_B,
+                                               const int32_t ld_C,
+                                               const int32_t ld_D,
+                                               bool transposeA,
+                                               bool transposeB,
+                                               bool transposeC,
+                                               const float *alpha,
+                                               const float *beta,
+                                               const MatmulDataTypes dataTypes,
+                                               const CublasStridedBatchConfig batchConfig,
+                                               Stream stream,
+                                               CublasScalarPointerMode pointerMode) {
+    batchConfig.validate();
+    THOR_THROW_IF_FALSE(batchConfig.isBatched());
+    THOR_THROW_IF_FALSE(transposeC == false);
+
+    const int32_t finalRowsA = transposeA ? A_cols : A_rows;
+    const int32_t finalColsA = transposeA ? A_rows : A_cols;
+    const int32_t finalRowsB = transposeB ? B_cols : B_rows;
+    const int32_t finalColsB = transposeB ? B_rows : B_cols;
+    THOR_THROW_IF_FALSE(finalColsA == finalRowsB);
+
+    const int32_t C_rows = finalRowsA;
+    const int32_t C_cols = finalColsB;
+    const int32_t D_rows = C_rows;
+    const int32_t D_cols = C_cols;
+
+    validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::stridedBatchedGemm");
+    THOR_THROW_IF_FALSE(!isFp8Matmul(dataTypes));
+    THOR_THROW_IF_FALSE(A.getDescriptor().getDataType() == dataTypes.A);
+    THOR_THROW_IF_FALSE(B.getDescriptor().getDataType() == dataTypes.B);
+    THOR_THROW_IF_FALSE(C.getDescriptor().getDataType() == dataTypes.C);
+    THOR_THROW_IF_FALSE(D.getDescriptor().getDataType() == dataTypes.D);
+    THOR_THROW_IF_FALSE(!(C == D) || dataTypes.C == dataTypes.D);
+    if (C == D) {
+        THOR_THROW_IF_FALSE(batchConfig.strideC == batchConfig.strideD);
+    }
+
+    validateStridedBatchLayoutForGemm(
+        batchConfig, A_rows, A_cols, B_rows, B_cols, C_rows, C_cols, D_rows, D_cols, ld_A, ld_B, ld_C, ld_D);
+
+    const uint64_t spanA = matrixStorageSpanElements(A_rows, A_cols, ld_A);
+    const uint64_t spanB = matrixStorageSpanElements(B_rows, B_cols, ld_B);
+    const uint64_t spanC = matrixStorageSpanElements(C_rows, C_cols, ld_C);
+    const uint64_t spanD = matrixStorageSpanElements(D_rows, D_cols, ld_D);
+    const uint64_t storageA = stridedBatchStorageSpanElements(spanA, batchConfig.strideA, batchConfig.batchCount);
+    const uint64_t storageB = stridedBatchStorageSpanElements(spanB, batchConfig.strideB, batchConfig.batchCount);
+    const uint64_t storageC = stridedBatchStorageSpanElements(spanC, batchConfig.strideC, batchConfig.batchCount);
+    const uint64_t storageD = stridedBatchStorageSpanElements(spanD, batchConfig.strideD, batchConfig.batchCount);
+
+    auto validateStorage = [](const Tensor &tensor, DataType dataType, uint64_t requiredElements) {
+        const uint64_t elementSize = TensorDescriptor::getElementSizeInBytes(dataType);
+        THOR_THROW_IF_FALSE(requiredElements <= std::numeric_limits<uint64_t>::max() / elementSize);
+        THOR_THROW_IF_FALSE(tensor.getDescriptor().getArraySizeInBytes() >= requiredElements * elementSize);
+    };
+    validateStorage(A, dataTypes.A, storageA);
+    validateStorage(B, dataTypes.B, storageB);
+    validateStorage(C, dataTypes.C, storageC);
+    validateStorage(D, dataTypes.D, storageD);
+
+    const int gpuNum = stream.getGpuNum();
+    auto validateGpuPlacement = [gpuNum](const Tensor &tensor) {
+        THOR_THROW_IF_FALSE(tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(tensor.getPlacement().getDeviceNum() == gpuNum);
+    };
+    validateGpuPlacement(A);
+    validateGpuPlacement(B);
+    validateGpuPlacement(C);
+    validateGpuPlacement(D);
+    if (workspace.has_value()) {
+        validateGpuPlacement(workspace.value());
+    }
+
+    ScopedGpu scopedGpu(gpuNum);
+
+    KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(gpuNum),
+                                        A_rows,
+                                        A_cols,
+                                        B_rows,
+                                        B_cols,
+                                        transposeA,
+                                        transposeB,
+                                        transposeC,
+                                        ld_A,
+                                        ld_B,
+                                        ld_C,
+                                        ld_D,
+                                        workspace.has_value(),
+                                        batchConfig);
+    OperationType operationType = makeOperationType(dataTypes);
+    CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
+
+    auto maybeCublasKernel = optimalKernels.get(cublasKernelRequirement);
+    if (!maybeCublasKernel.has_value()) {
+        throw std::runtime_error(
+            "CublasMatrixMultiply::stridedBatchedGemm called before chooseOptimalStridedBatchedGemmKernel populated the cache.");
+    }
+    CublasKernel cublasKernel = maybeCublasKernel.value();
+
+    bool kernelWillRunOnGpu = false;
+    const size_t workspaceSizeInBytes = cublasKernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
+    THOR_THROW_IF_FALSE(kernelWillRunOnGpu);
+    if (workspaceSizeInBytes > 0) {
+        THOR_THROW_IF_FALSE(workspace.has_value());
+        THOR_THROW_IF_FALSE(workspace.value().getDescriptor().getArraySizeInBytes() >= workspaceSizeInBytes);
+    }
+
+    CHECK_CUBLAS(cublasKernel.runWithoutChecks(A, B, C, D, workspace, alpha, beta, stream, pointerMode));
 }
 
 cudaDataType_t CublasMatrixMultiply::mapToCublasDataType(DataType dataType) {
@@ -1194,7 +1405,8 @@ void CublasMatrixMultiply::gemmUsingHeuristicKernelChoice(
                                          ld_C,
                                          ld_D,
                                          transposeA,
-                                         transposeB);
+                                         transposeB,
+                                         CublasStridedBatchConfig::single());
 
     KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(stream.getGpuNum()),
                                         A_rows,
@@ -3101,7 +3313,8 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
                                                                    const uint64_t maxWorkspaceSize,
                                                                    const float maxWaves,
                                                                    const MatmulDataTypes dataTypes,
-                                                                   const Fp8MatmulScales fp8Scales) {
+                                                                   const Fp8MatmulScales fp8Scales,
+                                                                   const CublasStridedBatchConfig batchConfig) {
     ScopedGpu scopedGpu(gpuNum);
     cublasStatus_t cublasStatus;
 
@@ -3126,6 +3339,7 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     THOR_THROW_IF_FALSE(B_cols > 0);
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::getHeuristicGemmKernels");
     validateFp8MatmulScaleConfigurationOrThrow(dataTypes, fp8Scales, "CublasMatrixMultiply::getHeuristicGemmKernels");
+    batchConfig.validate();
 
     cublasLtMatmulDesc_t operationDesc;
     cublasLtMatrixLayout_t ADesc;
@@ -3134,6 +3348,12 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
     cublasLtMatrixLayout_t DDesc;
 
     OperationType operationType = makeOperationType(dataTypes);
+    if (batchConfig.isBatched() && usesFp8ColumnMajorLtPath(operationType)) {
+        throw std::runtime_error(
+            "CublasMatrixMultiply strided-batched GEMM currently does not support the FP8 row-major adapter.");
+    }
+    validateStridedBatchLayoutForGemm(
+        batchConfig, A_rows, A_cols, B_rows, B_cols, C_rows, C_cols, D_rows, D_cols, ld_A, ld_B, ld_C, ld_D);
     validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
                                                  A_rows,
                                                  A_cols,
@@ -3171,7 +3391,8 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
                                          ld_C,
                                          ld_D,
                                          transposeA,
-                                         transposeB);
+                                         transposeB,
+                                         batchConfig);
 
     KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(gpuNum),
                                         A_rows,
@@ -3185,7 +3406,8 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
                                         ld_B,
                                         ld_C,
                                         ld_D,
-                                        false);
+                                        false,
+                                        batchConfig);
 
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 
@@ -3222,6 +3444,9 @@ vector<CublasKernel> CublasMatrixMultiply::getHeuristicGemmKernels(const int32_t
         // CublasKernelRequirement does not encode whether C and D alias.
         // Kernels cached from this search must therefore be safe for both C == D and C != D.
         if (!cublasLtAlgorithmSupportsOutOfPlaceResult(rawResults[i].algo)) {
+            continue;
+        }
+        if (batchConfig.isBatched() && !cublasLtAlgorithmSupportsStridedBatch(rawResults[i].algo)) {
             continue;
         }
 
@@ -3465,6 +3690,148 @@ void CublasMatrixMultiply::chooseOptimalGemmKernel(int gpuNum,
     }
 }
 
+
+void CublasMatrixMultiply::chooseOptimalStridedBatchedGemmKernel(const int gpuNum,
+                                                                 const int rowsA,
+                                                                 const int colsA,
+                                                                 const int rowsB,
+                                                                 const int colsB,
+                                                                 const int ldA,
+                                                                 const int ldB,
+                                                                 const int ldC,
+                                                                 const int ldD,
+                                                                 const bool transposeA,
+                                                                 const bool transposeB,
+                                                                 const bool transposeC,
+                                                                 const MatmulDataTypes dataTypes,
+                                                                 const CublasStridedBatchConfig batchConfig,
+                                                                 const bool printResults) {
+    batchConfig.validate();
+    THOR_THROW_IF_FALSE(batchConfig.isBatched());
+    THOR_THROW_IF_FALSE(!isFp8Matmul(dataTypes));
+
+    const Fp8MatmulScales fp8Scales = Fp8MatmulScales::none();
+    const OperationType operationType = makeOperationType(dataTypes);
+
+    bool bestKernelHasWorkspace = chooseOptimalGemmKernel(gpuNum,
+                                                          rowsA,
+                                                          colsA,
+                                                          rowsB,
+                                                          colsB,
+                                                          ldA,
+                                                          ldB,
+                                                          ldC,
+                                                          ldD,
+                                                          transposeA,
+                                                          transposeB,
+                                                          transposeC,
+                                                          dataTypes,
+                                                          fp8Scales,
+                                                          true,
+                                                          printResults,
+                                                          batchConfig);
+
+    if (!bestKernelHasWorkspace) {
+        return;
+    }
+
+    chooseOptimalGemmKernel(gpuNum,
+                            rowsA,
+                            colsA,
+                            rowsB,
+                            colsB,
+                            ldA,
+                            ldB,
+                            ldC,
+                            ldD,
+                            transposeA,
+                            transposeB,
+                            transposeC,
+                            dataTypes,
+                            fp8Scales,
+                            false,
+                            printResults,
+                            batchConfig);
+
+    KernelRequirement kernelRequirementNoWorkspace(MachineEvaluator::instance().getGpuType(gpuNum),
+                                                   rowsA,
+                                                   colsA,
+                                                   rowsB,
+                                                   colsB,
+                                                   transposeA,
+                                                   transposeB,
+                                                   transposeC,
+                                                   ldA,
+                                                   ldB,
+                                                   ldC,
+                                                   ldD,
+                                                   false,
+                                                   batchConfig);
+    CublasKernelRequirement noWorkspaceCublasKernelRequirement(kernelRequirementNoWorkspace, operationType);
+
+    KernelRequirement kernelRequirementWithWorkspace(MachineEvaluator::instance().getGpuType(gpuNum),
+                                                     rowsA,
+                                                     colsA,
+                                                     rowsB,
+                                                     colsB,
+                                                     transposeA,
+                                                     transposeB,
+                                                     transposeC,
+                                                     ldA,
+                                                     ldB,
+                                                     ldC,
+                                                     ldD,
+                                                     true,
+                                                     batchConfig);
+    CublasKernelRequirement workspaceCublasKernelRequirement(kernelRequirementWithWorkspace, operationType);
+
+    std::lock_guard<std::mutex> lock(CublasMatrixMultiply::instance().mtx);
+    auto noWorkspaceKernel = optimalKernels.get(noWorkspaceCublasKernelRequirement);
+    auto workspaceKernel = optimalKernels.get(workspaceCublasKernelRequirement);
+    THOR_THROW_IF_FALSE(noWorkspaceKernel.has_value());
+    THOR_THROW_IF_FALSE(workspaceKernel.has_value());
+    if (noWorkspaceKernel->getAverageRunTimeMilliseconds() < workspaceKernel->getAverageRunTimeMilliseconds()) {
+        optimalKernels.put(workspaceCublasKernelRequirement, *noWorkspaceKernel);
+    }
+}
+
+
+unsigned int CublasMatrixMultiply::getStridedBatchedGemmWorkspaceSizeInBytes(int gpuNum,
+                                                                              int rowsA,
+                                                                              int colsA,
+                                                                              int rowsB,
+                                                                              int colsB,
+                                                                              int ldA,
+                                                                              int ldB,
+                                                                              int ldC,
+                                                                              int ldD,
+                                                                              bool transposeA,
+                                                                              bool transposeB,
+                                                                              bool transposeC,
+                                                                              MatmulDataTypes dataTypes,
+                                                                              CublasStridedBatchConfig batchConfig,
+                                                                              bool &kernelWillRunOnGpu,
+                                                                              bool workspaceAllowed) {
+    batchConfig.validate();
+    THOR_THROW_IF_FALSE(batchConfig.isBatched());
+    CublasKernel kernel = getCachedGemmKernel(gpuNum,
+                                               rowsA,
+                                               colsA,
+                                               rowsB,
+                                               colsB,
+                                               ldA,
+                                               ldB,
+                                               ldC,
+                                               ldD,
+                                               transposeA,
+                                               transposeB,
+                                               transposeC,
+                                               dataTypes,
+                                               workspaceAllowed,
+                                               batchConfig);
+    return kernel.getWorkspaceSizeInBytes(gpuNum, kernelWillRunOnGpu);
+}
+
 bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                    const int rowsA,
                                                    const int colsA,
@@ -3480,13 +3847,15 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                    const MatmulDataTypes dataTypes,
                                                    const Fp8MatmulScales fp8Scales,
                                                    const bool allowWorkspaces,
-                                                   const bool printResults) {
+                                                   const bool printResults,
+                                                   const CublasStridedBatchConfig batchConfig) {
     lock_guard<mutex> lck(CublasMatrixMultiply::instance().mtx);
 
     THOR_THROW_IF_FALSE(gpuNum >= 0);
     THOR_THROW_IF_FALSE(gpuNum < (int)MachineEvaluator::instance().getNumGpus());
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::chooseOptimalGemmKernel");
     validateFp8MatmulScaleConfigurationOrThrow(dataTypes, fp8Scales, "CublasMatrixMultiply::chooseOptimalGemmKernel");
+    batchConfig.validate();
 
     // Ensure the operation is legal
     // The number of C and D columns is specified by the sizes of A and B, so verify A and B
@@ -3510,7 +3879,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     if (printResults)
         optimizationStartEvent = stream.putEvent(true);
 
-    double opSize = (long)rowsA * (long)colsA * (long)finalColsC;
+    double opSize =
+        static_cast<double>(rowsA) * static_cast<double>(colsA) * static_cast<double>(finalColsC) * batchConfig.batchCount;
     double targetCount;
     if (opSize < pow(1024.0, 3)) {
         targetCount = 10000;
@@ -3552,9 +3922,29 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                         ldB,
                                         ldC,
                                         ldD,
-                                        allowWorkspaces);
+                                        allowWorkspaces,
+                                        batchConfig);
 
     OperationType operationType = makeOperationType(dataTypes);
+    if (batchConfig.isBatched() && usesFp8ColumnMajorLtPath(operationType)) {
+        throw std::runtime_error(
+            "CublasMatrixMultiply strided-batched GEMM currently does not support the FP8 row-major adapter.");
+    }
+    const int32_t rowsCForBatchValidation = finalRowsA;
+    const int32_t colsCForBatchValidation = finalColsB;
+    validateStridedBatchLayoutForGemm(batchConfig,
+                                      rowsA,
+                                      colsA,
+                                      rowsB,
+                                      colsB,
+                                      rowsCForBatchValidation,
+                                      colsCForBatchValidation,
+                                      rowsCForBatchValidation,
+                                      colsCForBatchValidation,
+                                      ldA,
+                                      ldB,
+                                      ldC,
+                                      ldD);
     validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
                                                  rowsA,
                                                  colsA,
@@ -3590,10 +3980,23 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     int32_t rowsD = rowsC;
 
     // Get the expected best kernels
-    uint64_t maxMatrixBytes = max({static_cast<uint64_t>(rowsA) * ldA * A_ELEMENT_SIZE,
-                                   static_cast<uint64_t>(rowsB) * ldB * B_ELEMENT_SIZE,
-                                   static_cast<uint64_t>(rowsC) * ldC * C_ELEMENT_SIZE,
-                                   static_cast<uint64_t>(rowsD) * ldD * D_ELEMENT_SIZE});
+    const uint64_t spanA = matrixStorageSpanElements(rowsA, colsA, ldA);
+    const uint64_t spanB = matrixStorageSpanElements(rowsB, colsB, ldB);
+    const uint64_t spanC = matrixStorageSpanElements(rowsC, finalColsC, ldC);
+    const uint64_t spanD = matrixStorageSpanElements(rowsD, finalColsC, ldD);
+    const uint64_t storageA = batchConfig.isBatched()
+                                  ? stridedBatchStorageSpanElements(spanA, batchConfig.strideA, batchConfig.batchCount)
+                                  : static_cast<uint64_t>(rowsA) * ldA;
+    const uint64_t storageB = batchConfig.isBatched()
+                                  ? stridedBatchStorageSpanElements(spanB, batchConfig.strideB, batchConfig.batchCount)
+                                  : static_cast<uint64_t>(rowsB) * ldB;
+    const uint64_t storageC = batchConfig.isBatched()
+                                  ? stridedBatchStorageSpanElements(spanC, batchConfig.strideC, batchConfig.batchCount)
+                                  : static_cast<uint64_t>(initialRowsC) * ldC;
+    const uint64_t storageD = batchConfig.isBatched()
+                                  ? stridedBatchStorageSpanElements(spanD, batchConfig.strideD, batchConfig.batchCount)
+                                  : static_cast<uint64_t>(rowsD) * ldD;
+    uint64_t maxMatrixBytes = max({storageA * A_ELEMENT_SIZE, storageB * B_ELEMENT_SIZE, storageC * C_ELEMENT_SIZE, storageD * D_ELEMENT_SIZE});
     const uint64_t maxCublasWorkspaceSizeInBytes = allowWorkspaces ? maxMatrixBytes : 0;
     const uint64_t maxAllowedWorkspaceSizeInBytes = allowWorkspaces ? maxMatrixBytes + fp8TemporaryWorkspaceSizeInBytes : 0;
     float maxWaves = 0.0f;
@@ -3616,7 +4019,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                 // When set to 0.0f, any number of waves allowed:
                                                 maxWaves,
                                                 dataTypes,
-                                                fp8Scales);
+                                                fp8Scales,
+                                                batchConfig);
 
     vector<CublasKernel> kernels;
     uint64_t maxWorkspaceSizeInBytes = 0;
@@ -3680,8 +4084,10 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     cudaDeviceProp deviceProperties;
     CUDA_CHECK(cudaGetDeviceProperties(&deviceProperties, gpuNum));
     long l2CacheBytes = deviceProperties.l2CacheSize;
-    long memPerInstance =
-        rowsA * ldA * A_ELEMENT_SIZE + rowsB * ldB * B_ELEMENT_SIZE + initialRowsC * ldC * C_ELEMENT_SIZE + rowsD * ldD * D_ELEMENT_SIZE;
+    const uint64_t memPerInstanceUnsigned =
+        storageA * A_ELEMENT_SIZE + storageB * B_ELEMENT_SIZE + storageC * C_ELEMENT_SIZE + storageD * D_ELEMENT_SIZE;
+    THOR_THROW_IF_FALSE(memPerInstanceUnsigned <= static_cast<uint64_t>(std::numeric_limits<long>::max()));
+    long memPerInstance = static_cast<long>(memPerInstanceUnsigned);
     long targetMatrixMemory = maxl(10 * memPerInstance, 2.5 * l2CacheBytes);
     long numInstances = minl(targetMatrixMemory / memPerInstance, 5000);
     THOR_THROW_IF_FALSE(numInstances > 0);
@@ -3707,14 +4113,21 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
     D.reserve(numInstances);
     workspace.reserve(numWorkspaceInstances);
     for (int i = 0; i < numInstances; ++i) {
-        A.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                       TensorDescriptor(dataTypes.A, {(uint64_t)rowsA, (uint64_t)ldA}));
-        B.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                       TensorDescriptor(dataTypes.B, {(uint64_t)rowsB, (uint64_t)ldB}));
-        C.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                       TensorDescriptor(dataTypes.C, {(uint64_t)initialRowsC, (uint64_t)ldC}));
-        D.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                       TensorDescriptor(dataTypes.D, {(uint64_t)rowsD, (uint64_t)ldD}));
+        if (batchConfig.isBatched()) {
+            A.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum), TensorDescriptor(dataTypes.A, {storageA}));
+            B.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum), TensorDescriptor(dataTypes.B, {storageB}));
+            C.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum), TensorDescriptor(dataTypes.C, {storageC}));
+            D.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum), TensorDescriptor(dataTypes.D, {storageD}));
+        } else {
+            A.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                           TensorDescriptor(dataTypes.A, {(uint64_t)rowsA, (uint64_t)ldA}));
+            B.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                           TensorDescriptor(dataTypes.B, {(uint64_t)rowsB, (uint64_t)ldB}));
+            C.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                           TensorDescriptor(dataTypes.C, {(uint64_t)initialRowsC, (uint64_t)ldC}));
+            D.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                           TensorDescriptor(dataTypes.D, {(uint64_t)rowsD, (uint64_t)ldD}));
+        }
     }
     for (int i = 0; i < numWorkspaceInstances; ++i) {
         workspace.emplace_back(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
@@ -4026,7 +4439,8 @@ bool CublasMatrixMultiply::chooseOptimalGemmKernel(const int gpuNum,
                                                             ldB,
                                                             ldC,
                                                             ldD,
-                                                            false);
+                                                            false,
+                                                            batchConfig);
 
         CublasKernelRequirement noWorkspaceCublasKernelRequirement(kernelRequirementWithoutWorkspace, operationType);
         optimalKernels.put(noWorkspaceCublasKernelRequirement, bestKernel);
@@ -4166,9 +4580,11 @@ CublasKernel CublasMatrixMultiply::getCachedGemmKernel(int gpuNum,
                                                      bool transposeB,
                                                      bool transposeC,
                                                      MatmulDataTypes dataTypes,
-                                                     bool workspaceAllowed) {
+                                                     bool workspaceAllowed,
+                                                     CublasStridedBatchConfig batchConfig) {
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::getCachedGemmKernel");
     validateFp8MatmulScaleConfigurationOrThrow(dataTypes, Fp8MatmulScales::none(), "CublasMatrixMultiply::getCachedGemmKernel");
+    batchConfig.validate();
 
     KernelRequirement kernelRequirement(MachineEvaluator::instance().getGpuType(gpuNum),
                                         rowsA,
@@ -4182,7 +4598,8 @@ CublasKernel CublasMatrixMultiply::getCachedGemmKernel(int gpuNum,
                                         ldB,
                                         ldC,
                                         ldD,
-                                        workspaceAllowed);
+                                        workspaceAllowed,
+                                        batchConfig);
     OperationType operationType = makeOperationType(dataTypes);
     CublasKernelRequirement cublasKernelRequirement(kernelRequirement, operationType);
 

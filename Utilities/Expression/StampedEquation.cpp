@@ -7,7 +7,6 @@
 #include "Utilities/Expression/MatmulScalarKernel.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
 #include "Utilities/Expression/SegmentedBroadcastKernel.h"
-#include "Utilities/Expression/SegmentedReductionKernel.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/TensorOperations/Copy/StridedCopy.h"
 
@@ -1217,45 +1216,22 @@ StampedSegmentedReduction::StampedSegmentedReduction(std::shared_ptr<CompiledSeg
             throw std::runtime_error("Unsupported segmented-reduction op.");
     }
 
-    if (input.getDimensions().size() == 1) {
-        cub_segmented_reduction =
-            CubSegmentedReduction(cub_op, output.getDataType()).stamp(input, output, segment_offsets, stream);
-        THOR_THROW_IF_FALSE(cub_segmented_reduction->getPath() == CubReductionPath::OffsetSegmented);
-        return;
+    if (input.getDimensions().empty() || input.getDimensions()[0] == 0 ||
+        input.getTotalNumElements() % input.getDimensions()[0] != 0 ||
+        input.getTotalNumElements() / input.getDimensions()[0] != compiled_segmented_reduction->elements_per_value) {
+        throw std::runtime_error("Segmented-reduction elements-per-value metadata does not match the input tensor shape.");
     }
 
-    if (input.getDimensions().empty() || output.getDimensions().empty() || segment_offsets.getDimensions().size() != 1 ||
-        segment_offsets.getDimensions()[0] <= 1) {
-        throw std::runtime_error("Vector segmented reduction requires values [N,D...], output [B,D...], and offsets [B+1].");
-    }
-    const uint64_t batch_size = segment_offsets.getDimensions()[0] - 1;
-    std::vector<uint64_t> expected_output_dims = input.getDimensions();
-    expected_output_dims[0] = batch_size;
-    if (output.getDimensions() != expected_output_dims) {
-        throw std::runtime_error("Vector segmented reduction output shape must be [B,D...].");
-    }
-    if (input.getDimensions()[0] == 0 ||
-        input.getTotalNumElements() % input.getDimensions()[0] != 0 ||
-        input.getTotalNumElements() / input.getDimensions()[0] != compiled_segmented_reduction->elements_per_value ||
-        output.getTotalNumElements() % batch_size != 0 ||
-        output.getTotalNumElements() / batch_size != compiled_segmented_reduction->elements_per_value) {
-        throw std::runtime_error("Vector segmented reduction elements-per-value metadata does not match tensor shapes.");
-    }
+    cub_segmented_reduction =
+        CubSegmentedReduction(cub_op, output.getDataType()).stamp(input, output, segment_offsets, stream);
+    THOR_THROW_IF_FALSE(cub_segmented_reduction->getPath() == CubReductionPath::OffsetSegmented);
 }
 
 void StampedSegmentedReduction::run() { runOn(stream); }
 
 void StampedSegmentedReduction::runOn(Stream& run_stream) const {
-    if (cub_segmented_reduction != nullptr) {
-        cub_segmented_reduction->runOn(run_stream);
-        return;
-    }
-    launchVectorSegmentedReduction(compiled_segmented_reduction->op,
-                                   input,
-                                   segment_offsets,
-                                   output,
-                                   compiled_segmented_reduction->elements_per_value,
-                                   run_stream);
+    THOR_THROW_IF_FALSE(cub_segmented_reduction != nullptr);
+    cub_segmented_reduction->runOn(run_stream);
 }
 
 StampedSegmentedBroadcast::StampedSegmentedBroadcast(std::shared_ptr<CompiledSegmentedBroadcast> compiled,
@@ -2164,40 +2140,38 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(CubArgReductionOp segme
     if (segmented_elements_per_value == 0 || grad_output.getTotalNumElements() / batch_size != segmented_elements_per_value) {
         throw std::runtime_error("Segmented reduce-min/max backward input and upstream gradient trailing extents must match.");
     }
-    this->segmented_op = segmented_op;
-    if (segmented_elements_per_value == 1) {
-        if (!indices.isInitialized() || indices.getDataType() != DataType::UINT64 || indices.getPlacement() != input.getPlacement()) {
-            throw std::runtime_error("Scalar segmented reduce-min/max backward requires UINT64 winner indices on the input GPU.");
-        }
-        cub_segmented_arg_reduction =
-            CubSegmentedArgReduction(segmented_op, DataType::UINT64).stamp(input, indices, segment_offsets, stream);
+    if (!indices.isInitialized()
+        || (indices.getDataType() != DataType::UINT32 && indices.getDataType() != DataType::UINT64)
+        || indices.getPlacement() != input.getPlacement()
+        || indices.getDimensions() != grad_output.getDimensions()) {
+        throw std::runtime_error(
+            "Segmented reduce-min/max backward requires UINT32/UINT64 winner indices shaped like the upstream gradient.");
     }
+    cub_segmented_arg_reduction =
+        CubSegmentedArgReduction(segmented_op, indices.getDataType()).stamp(input, indices, segment_offsets, stream);
 }
 
 void StampedReduceMinMaxBackward::run() { runOn(stream); }
 
 void StampedReduceMinMaxBackward::runOn(Stream& run_stream) {
     if (segment_offsets.has_value()) {
-        THOR_THROW_IF_FALSE(segmented_op.has_value());
-        if (segmented_elements_per_value > 1) {
-            launchVectorSegmentedReduceMinMaxBackward(segmented_op.value() == CubArgReductionOp::ArgMin
-                                                          ? ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD
-                                                          : ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD,
-                                                      input,
-                                                      segment_offsets.value(),
-                                                      grad_output,
-                                                      output,
-                                                      segmented_elements_per_value,
-                                                      run_stream);
-            return;
-        }
-
         THOR_THROW_IF_FALSE(cub_segmented_arg_reduction != nullptr);
         cub_segmented_arg_reduction->runOn(run_stream);
-        output.memsetAsync(run_stream, 0);
+
+        const Tensor& offsets = segment_offsets.value();
+        const uint64_t num_segments = offsets.getDimensions()[0] - 1;
+        launchSegmentedReduceMinMaxBackwardActivePrefixZero(offsets.getMemPtr(),
+                                                            offsets.getDataType(),
+                                                            num_segments,
+                                                            output.getMemPtr(),
+                                                            output.getTotalNumElements(),
+                                                            segmented_elements_per_value,
+                                                            output.getDataType(),
+                                                            run_stream.getStream());
         launchSegmentedReduceMinMaxBackwardScatter(grad_output.getMemPtr(),
-                                                   static_cast<const uint64_t*>(indices.getMemPtr()),
-                                                   (void*)output.getMemPtr(),
+                                                   indices.getMemPtr(),
+                                                   indices.getDataType(),
+                                                   output.getMemPtr(),
                                                    grad_output.getTotalNumElements(),
                                                    output.getTotalNumElements(),
                                                    grad_output.getDataType(),
@@ -2264,6 +2238,14 @@ static std::vector<cudaGraphNode_t> graphLeafNodes(cudaGraph_t graph) {
     return leaves;
 }
 
+namespace detail {
+struct ConditionalGraphCaptureAccess {
+    static void runPlanSequentially(const StampedExecutionPlan& plan, Stream& capture_stream) {
+        plan.runSequentiallyForCudaGraphCapture(capture_stream);
+    }
+};
+}  // namespace detail
+
 static void capturePlanSequentiallyIntoGraph(const StampedExecutionPlan& plan,
                                              cudaGraph_t graph,
                                              Stream& capture_stream,
@@ -2274,7 +2256,7 @@ static void capturePlanSequentiallyIntoGraph(const StampedExecutionPlan& plan,
         cudaStreamBeginCaptureToGraph(capture_stream.getStream(), graph, deps, nullptr, dependencies.size(), cudaStreamCaptureModeGlobal));
 
     try {
-        plan.runSequentialOn(capture_stream);
+        detail::ConditionalGraphCaptureAccess::runPlanSequentially(plan, capture_stream);
         CUDA_CHECK(cudaStreamEndCapture(capture_stream.getStream(), &captured_graph));
     } catch (...) {
         cudaGraph_t aborted_graph = nullptr;
@@ -2488,49 +2470,29 @@ void StampedExecutionPlan::materializeOutputsOn(Stream& run_stream) const {
     }
 }
 
-void StampedExecutionPlan::runSequentialOn(Stream& run_stream) const { runSequentialOn(run_stream, {}); }
-
-void StampedExecutionPlan::runSequentialOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
-    std::unordered_set<std::string> consumed_runtime_scalar_names;
+void StampedExecutionPlan::runSequentiallyForCudaGraphCapture(Stream& capture_stream) const {
+    // CUDA conditional bodies are intentionally captured as a single-stream subgraph.
+    // Normal execution must go through runOn(), which preserves DAG-level concurrency.
+    if (requiresRuntimeScalars()) {
+        throw std::runtime_error(
+            "Conditional CUDA graph capture does not support host runtime scalar overrides in a stamped execution plan.");
+    }
 
     for (const StampedExecutionStage& stage : steps) {
-        std::unordered_map<std::string, float> stage_runtime_scalars;
-        std::unordered_set<std::string> needed_names = runtimeScalarNamesForStage(stage);
-
-        if (!needed_names.empty()) {
-            stage_runtime_scalars.reserve(needed_names.size());
-            for (const std::string& name : needed_names) {
-                auto it = runtime_scalars.find(name);
-                if (it == runtime_scalars.end()) {
-                    throw std::runtime_error("Missing value for runtime scalar: " + name +
-                                             "  - if it was meant to be constant, use a constant scalar instead.");
-                }
-                stage_runtime_scalars.emplace(name, it->second);
-                consumed_runtime_scalar_names.insert(name);
-            }
-        }
-
-        if (stage_runtime_scalars.empty()) {
-            stage.runOn(run_stream);
-        } else {
-            stage.runOn(run_stream, stage_runtime_scalars);
-        }
+        stage.runOn(capture_stream);
     }
-
-    for (const auto& [name, _] : runtime_scalars) {
-        if (!consumed_runtime_scalar_names.contains(name)) {
-            throw std::runtime_error("Unexpected runtime scalar override for stamped execution plan: " + name);
-        }
-    }
-
-    materializeOutputsOn(run_stream);
+    materializeOutputsOn(capture_stream);
 }
 
-void StampedExecutionPlan::run() { run({}); }
+void StampedExecutionPlan::run() { runOn(stream); }
 
-void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& runtime_scalars) {
+void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& runtime_scalars) { runOn(stream, runtime_scalars); }
+
+void StampedExecutionPlan::runOn(Stream& run_stream) const { runOn(run_stream, {}); }
+
+void StampedExecutionPlan::runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
     if (steps.empty()) {
-        materializeOutputsOn(stream);
+        materializeOutputsOn(run_stream);
         return;
     }
 
@@ -2552,28 +2514,28 @@ void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& run
         }
     };
 
-    StreamEvent user_stream_ready;
+    StreamEvent caller_stream_ready;
     if (steps.size() > 1)
-        user_stream_ready = stream.putEvent();
+        caller_stream_ready = run_stream.putEvent();
 
     for (uint32_t stage_idx = 0; stage_idx < steps.size(); ++stage_idx) {
         const bool use_helper_stream = (stage_idx != 0);
         const StampedExecutionStage& stage = steps[stage_idx];
 
-        Stream& launch_stream_ref = use_helper_stream ? Expression::getNextHelperStream(stage.gpu_num) : stream;
+        Stream& launch_stream_ref = use_helper_stream ? Expression::getNextHelperStream(stage.gpu_num) : run_stream;
 
         if (use_helper_stream) {
             rememberHelperStream(launch_stream_ref);
-            launch_stream_ref.waitEvent(user_stream_ready);
+            launch_stream_ref.waitEvent(caller_stream_ready);
         }
 
         for (uint32_t dep_stage_idx : stage.dependency_stage_indices) {
             if (dep_stage_idx >= stage_idx) {
-                throw std::runtime_error("StampedExecutionPlan::run requires dependency_stage_indices to be topologically ordered.");
+                throw std::runtime_error("StampedExecutionPlan::runOn requires dependency_stage_indices to be topologically ordered.");
             }
 
             if (!completion_events[dep_stage_idx].has_value()) {
-                throw std::runtime_error("StampedExecutionPlan::run missing completion event for dependency stage.");
+                throw std::runtime_error("StampedExecutionPlan::runOn missing completion event for dependency stage.");
             }
 
             if (!(launch_stream_ref == launch_streams[dep_stage_idx])) {
@@ -2584,29 +2546,9 @@ void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& run
         std::unordered_map<std::string, float> stage_runtime_scalars;
 
         if (!runtime_scalars.empty()) {
-            std::unordered_set<std::string> needed_names;
-
-            if (stage.kind == StampedExecutionStage::Kind::FusedKernel && stage.kernel != nullptr &&
-                stage.kernel->requiresRuntimeScalars()) {
-                needed_names = stage.kernel->runtimeScalarNames();
-            } else if (stage.kind == StampedExecutionStage::Kind::CudaKernel && stage.cuda_kernel != nullptr &&
-                       stage.cuda_kernel->requiresRuntimeScalars()) {
-                needed_names = stage.cuda_kernel->runtimeScalarNames();
-            } else if (stage.kind == StampedExecutionStage::Kind::Matmul && stage.matmul != nullptr) {
-                if (stage.matmul->alphaRuntimeName().has_value()) {
-                    needed_names.insert(*stage.matmul->alphaRuntimeName());
-                }
-                if (stage.matmul->betaRuntimeName().has_value()) {
-                    needed_names.insert(*stage.matmul->betaRuntimeName());
-                }
-            } else if (stage.kind == StampedExecutionStage::Kind::Conditional && stage.conditional != nullptr &&
-                       stage.conditional->requiresRuntimeScalars()) {
-                needed_names = stage.conditional->runtimeScalarNames();
-            }
-
+            std::unordered_set<std::string> needed_names = runtimeScalarNamesForStage(stage);
             if (!needed_names.empty()) {
                 stage_runtime_scalars.reserve(needed_names.size());
-
                 for (const std::string& name : needed_names) {
                     auto it = runtime_scalars.find(name);
                     if (it == runtime_scalars.end()) {
@@ -2635,12 +2577,12 @@ void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& run
     }
 
     for (Stream& helper_stream : helper_streams_used) {
-        if (!(helper_stream == stream)) {
-            stream.waitEvent(helper_stream.putEvent());
+        if (!(helper_stream == run_stream)) {
+            run_stream.waitEvent(helper_stream.putEvent());
         }
     }
 
-    materializeOutputsOn(stream);
+    materializeOutputsOn(run_stream);
 }
 
 // static unordered_map<ReductionCacheKey, shared_ptr<BuiltReduction>> builtReductionCache;

@@ -5118,6 +5118,163 @@ static std::vector<uint64_t> computeInputStridesForBroadcastFromVisibleLayout(
     return result;
 }
 
+static std::vector<uint64_t> mapNonDenseVisibleStridesThroughSingletonShapeChange(
+    const std::vector<uint64_t>& visible_dims,
+    const std::vector<uint64_t>& visible_strides,
+    const std::vector<uint64_t>& effective_dims) {
+    if (visible_dims.size() != visible_strides.size()) {
+        throw std::runtime_error("Visible tensor dimensions and strides must have the same rank.");
+    }
+    if (visible_dims == effective_dims) {
+        return visible_strides;
+    }
+
+    // UNSQUEEZE/SQUEEZE do not alter which storage element a non-singleton
+    // logical coordinate names. Explicit RESHAPE retains Thor's stricter dense-alias
+    // contract and is validated separately before fused broadcast planning.
+    // Preserve the visible stride for every
+    // non-singleton axis and give inserted singleton axes stride zero.
+    //
+    // More general reshapes of a non-dense view are intentionally rejected:
+    // flattening/splitting non-singleton axes requires proving affine layout
+    // compatibility, which is a different operation from singleton-axis
+    // shape changes and must not silently assume packed storage.
+    std::vector<uint64_t> visible_non_singleton_dims;
+    std::vector<uint64_t> visible_non_singleton_strides;
+    visible_non_singleton_dims.reserve(visible_dims.size());
+    visible_non_singleton_strides.reserve(visible_dims.size());
+    for (size_t axis = 0; axis < visible_dims.size(); ++axis) {
+        if (visible_dims[axis] != 1ULL) {
+            visible_non_singleton_dims.push_back(visible_dims[axis]);
+            visible_non_singleton_strides.push_back(visible_strides[axis]);
+        }
+    }
+
+    std::vector<uint64_t> effective_non_singleton_dims;
+    effective_non_singleton_dims.reserve(effective_dims.size());
+    for (uint64_t dim : effective_dims) {
+        if (dim != 1ULL) {
+            effective_non_singleton_dims.push_back(dim);
+        }
+    }
+
+    if (visible_non_singleton_dims.size() != effective_non_singleton_dims.size()) {
+        std::ostringstream oss;
+        oss << "Fused kernels can only consume a non-dense tensor view through shape changes that insert or remove singleton axes. "
+            << "visible_dims=" << dimsToString(visible_dims) << ", effective_dims=" << dimsToString(effective_dims);
+        throw std::runtime_error(oss.str());
+    }
+    for (size_t axis = 0; axis < visible_non_singleton_dims.size(); ++axis) {
+        if (visible_non_singleton_dims[axis] != effective_non_singleton_dims[axis]) {
+            std::ostringstream oss;
+            oss << "Fused kernels can only consume a non-dense tensor view through shape changes that insert or remove singleton axes. "
+                << "visible_dims=" << dimsToString(visible_dims) << ", effective_dims=" << dimsToString(effective_dims);
+            throw std::runtime_error(oss.str());
+        }
+    }
+
+    std::vector<uint64_t> effective_strides(effective_dims.size(), 0ULL);
+    size_t non_singleton_axis = 0;
+    for (size_t axis = 0; axis < effective_dims.size(); ++axis) {
+        if (effective_dims[axis] == 1ULL) {
+            continue;
+        }
+        effective_strides[axis] = visible_non_singleton_strides[non_singleton_axis++];
+    }
+    return effective_strides;
+}
+
+enum class RuntimeAliasLayoutKind : uint8_t {
+    ComputedValue,
+    DenseStorageAlias,
+    NonDenseStorageAlias,
+};
+
+static bool dimensionsAndStridesAreDenseContiguous(const std::vector<uint64_t>& dims,
+                                                    const std::vector<uint64_t>& strides) {
+    if (dims.size() != strides.size()) {
+        throw std::runtime_error("Tensor dimensions and strides must have the same rank.");
+    }
+    std::vector<uint64_t> dense_strides(dims.size(), 1ULL);
+    if (!dims.empty()) {
+        for (size_t axis = dims.size() - 1; axis > 0; --axis) {
+            dense_strides[axis - 1] = dense_strides[axis] * dims[axis];
+        }
+    }
+    return strides == dense_strides;
+}
+
+static RuntimeAliasLayoutKind runtimeAliasLayoutKindForNode(
+    const PhysicalExpression& expr,
+    const std::vector<std::vector<uint64_t>>& node_dims,
+    uint32_t node_idx,
+    const std::vector<RuntimeInputValue>& stage_inputs) {
+    if (node_idx >= expr.nodes.size() || node_idx >= node_dims.size()) {
+        throw std::runtime_error("Runtime alias-layout node index out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    switch (node.op) {
+        case ExprOp::INPUT: {
+            if (node.input_slot >= stage_inputs.size()) {
+                throw std::runtime_error("Runtime alias-layout input slot out of range.");
+            }
+            return runtimeInputIsNonDenseTensorView(stage_inputs[node.input_slot])
+                       ? RuntimeAliasLayoutKind::NonDenseStorageAlias
+                       : RuntimeAliasLayoutKind::DenseStorageAlias;
+        }
+        case ExprOp::STRIDED_VIEW:
+            if (node.view_dims.size() != node.view_strides.size()) {
+                throw std::runtime_error("Strided-view alias dimensions and strides must have the same rank.");
+            }
+            return dimensionsAndStridesAreDenseContiguous(node.view_dims, node.view_strides)
+                       ? RuntimeAliasLayoutKind::DenseStorageAlias
+                       : RuntimeAliasLayoutKind::NonDenseStorageAlias;
+        case ExprOp::UNSQUEEZE:
+        case ExprOp::SQUEEZE:
+            return runtimeAliasLayoutKindForNode(expr, node_dims, node.lhs, stage_inputs);
+        case ExprOp::RESHAPE: {
+            const RuntimeAliasLayoutKind source_kind =
+                runtimeAliasLayoutKindForNode(expr, node_dims, node.lhs, stage_inputs);
+            if (source_kind == RuntimeAliasLayoutKind::NonDenseStorageAlias) {
+                return RuntimeAliasLayoutKind::NonDenseStorageAlias;
+            }
+            return source_kind == RuntimeAliasLayoutKind::ComputedValue
+                       ? RuntimeAliasLayoutKind::ComputedValue
+                       : RuntimeAliasLayoutKind::DenseStorageAlias;
+        }
+        default:
+            // A real computation defines a new dense logical value. A reshape applied
+            // to that value is not a storage alias of any non-dense runtime input.
+            return RuntimeAliasLayoutKind::ComputedValue;
+    }
+}
+
+static void validateDenseReshapeAliasSources(
+    const PhysicalExpression& expr,
+    const std::vector<std::vector<uint64_t>>& node_dims,
+    const std::unordered_set<uint32_t>& reachable_nodes,
+    const std::vector<RuntimeInputValue>& stage_inputs) {
+    for (uint32_t node_idx : reachable_nodes) {
+        if (node_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Reachable fused node index out of range while validating reshape aliases.");
+        }
+        const ExprNode& node = expr.nodes[node_idx];
+        if (node.op != ExprOp::RESHAPE) {
+            continue;
+        }
+        if (node.lhs == UINT32_MAX) {
+            throw std::runtime_error("Expression reshape is missing its source node.");
+        }
+        if (runtimeAliasLayoutKindForNode(expr, node_dims, node.lhs, stage_inputs) ==
+            RuntimeAliasLayoutKind::NonDenseStorageAlias) {
+            throw std::runtime_error(
+                "Runtime dense reshape alias cannot be applied to a non-dense tensor view; "
+                "materialize the view or use an explicit strided/unsqueeze/squeeze alias.");
+        }
+    }
+}
+
 static std::vector<uint64_t> computeRuntimeInputStridesForBroadcast(const RuntimeInputValue& input,
                                                                     const std::vector<uint64_t>& effective_dims,
                                                                     const std::vector<uint64_t>& output_dims) {
@@ -5126,13 +5283,9 @@ static std::vector<uint64_t> computeRuntimeInputStridesForBroadcast(const Runtim
     }
 
     const Tensor& tensor = runtimeInputTensor(input);
-    const std::vector<uint64_t> visible_dims = tensor.getDimensions();
-    if (effective_dims != visible_dims) {
-        throw std::runtime_error(
-            "Fused kernels cannot consume a non-dense tensor view through an additional shape-changing expression yet.");
-    }
-
-    return computeInputStridesForBroadcastFromVisibleLayout(visible_dims, tensor.getStridesElements(), output_dims);
+    const std::vector<uint64_t> effective_strides = mapNonDenseVisibleStridesThroughSingletonShapeChange(
+        tensor.getDimensions(), tensor.getStridesElements(), effective_dims);
+    return computeInputStridesForBroadcastFromVisibleLayout(effective_dims, effective_strides, output_dims);
 }
 
 static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const CompiledExecutionStage& stage,
@@ -5194,6 +5347,7 @@ static std::vector<ResolvedBroadcastGroup> buildResolvedBroadcastGroups(const Co
             std::unordered_set<uint32_t> reachable_nodes;
             collectReachableLocalNodes(stage.expr, stage.outputs[out_idx].local_node_idx, reachable_nodes);
             const auto node_dims = inferFusedStageNodeDimsForReachable(stage.expr, stage_input_dims, reachable_nodes);
+            validateDenseReshapeAliasSources(stage.expr, node_dims, reachable_nodes, stage_inputs);
 
             OutputInfo info;
             info.out_idx = out_idx;
@@ -7808,19 +7962,19 @@ std::shared_ptr<StampedReduceMinMaxBackward> FusedEquation::stampReduceMinMaxBac
             throw std::runtime_error("Segmented reduce-min/max-backward offsets placement must match packed input placement.");
         }
 
-        const uint64_t elements_per_value = input.getTotalNumElements() / input.getDimensions()[0];
-        Tensor indices;
-        if (elements_per_value == 1) {
-            if (!CubSegmentedArgReduction::isInputDataTypeSupported(compiledStage->input_dtype)) {
-                throw std::runtime_error(
-                    "Scalar segmented reduce-min/max backward input dtype is not supported by the CUB arg-reduction backend.");
-            }
-            if (!CubSegmentedArgReduction::isOffsetDataTypeSupported(offsets->getDataType())) {
-                throw std::runtime_error(
-                    "Scalar segmented reduce-min/max backward offsets dtype is not supported by the CUB arg-reduction backend.");
-            }
-            indices = Tensor(input.getPlacement(), TensorDescriptor(DataType::UINT64, grad_output.getDimensions()));
+        if (!CubSegmentedArgReduction::isInputDataTypeSupported(compiledStage->input_dtype)) {
+            throw std::runtime_error(
+                "Segmented reduce-min/max backward input dtype is not supported by the CUB arg-reduction backend.");
         }
+        if (!CubSegmentedArgReduction::isOffsetDataTypeSupported(offsets->getDataType())) {
+            throw std::runtime_error(
+                "Segmented reduce-min/max backward offsets dtype is not supported by the CUB arg-reduction backend.");
+        }
+        const DataType winner_index_dtype =
+            input.getTotalNumElements() <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
+                ? DataType::UINT32
+                : DataType::UINT64;
+        Tensor indices(input.getPlacement(), TensorDescriptor(winner_index_dtype, grad_output.getDimensions()));
         const CubArgReductionOp arg_op =
             compiledStage->op == ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD ? CubArgReductionOp::ArgMin : CubArgReductionOp::ArgMax;
         return make_shared<StampedReduceMinMaxBackward>(

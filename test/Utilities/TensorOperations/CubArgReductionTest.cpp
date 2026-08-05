@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -31,6 +32,54 @@ CubArgReductionOutputOptions fp32ValueAndUint32Index() {
     return outputs;
 }
 
+struct DenseArgReference {
+    std::vector<float> values;
+    std::vector<uint64_t> indices;
+};
+
+DenseArgReference referenceDenseMiddleAxis(const std::vector<float>& input,
+                                           uint64_t outer_size,
+                                           uint64_t reduction_size,
+                                           uint64_t inner_size,
+                                           CubArgReductionOp op) {
+    DenseArgReference reference;
+    reference.values.resize(outer_size * inner_size);
+    reference.indices.resize(outer_size * inner_size);
+
+    for (uint64_t outer = 0; outer < outer_size; ++outer) {
+        for (uint64_t component = 0; component < inner_size; ++component) {
+            float best_value = op == CubArgReductionOp::ArgMin ? std::numeric_limits<float>::infinity()
+                                                               : -std::numeric_limits<float>::infinity();
+            uint64_t best_index = std::numeric_limits<uint64_t>::max();
+            for (uint64_t row = 0; row < reduction_size; ++row) {
+                const float candidate = input[(outer * reduction_size + row) * inner_size + component];
+                const bool best_nan = std::isnan(best_value);
+                const bool candidate_nan = std::isnan(candidate);
+                bool take_candidate = false;
+                if (best_nan || candidate_nan) {
+                    if (best_nan && candidate_nan) {
+                        take_candidate = row < best_index;
+                    } else {
+                        take_candidate = candidate_nan;
+                    }
+                } else if (op == CubArgReductionOp::ArgMin) {
+                    take_candidate = candidate < best_value || (candidate == best_value && row < best_index);
+                } else {
+                    take_candidate = candidate > best_value || (candidate == best_value && row < best_index);
+                }
+                if (take_candidate) {
+                    best_value = candidate;
+                    best_index = row;
+                }
+            }
+            const uint64_t output_index = outer * inner_size + component;
+            reference.values[output_index] = best_value;
+            reference.indices[output_index] = best_index;
+        }
+    }
+    return reference;
+}
+
 }  // namespace
 
 
@@ -42,7 +91,7 @@ TEST(CubArgReduction, DefinesExplicitEmptyDomainSentinels) {
     EXPECT_EQ(CubArgReduction::getEmptyReductionIndex(), std::numeric_limits<uint64_t>::max());
 }
 
-TEST(CubArgReduction, DeviceWideContiguousAndStridedPathsProduceLocalIndices) {
+TEST(CubArgReduction, DeviceWideContiguousAndLogicalIndexPathsProduceLocalIndices) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -77,6 +126,17 @@ TEST(CubArgReduction, DeviceWideContiguousAndStridedPathsProduceLocalIndices) {
                                           0.0f, 7.0f, 6.0f, 2.0f, 3.0f, -2.0f},
                                          {2, 3, 2},
                                          stream);
+    std::shared_ptr<StampedCubArgReduction> middle_min =
+        CubArgReduction(CubArgReductionOp::ArgMin, 1, fp32ValueAndUint32Index()).stamp(strided_input, stream);
+    std::shared_ptr<StampedCubArgReduction> middle_max =
+        CubArgReduction(CubArgReductionOp::ArgMax, 1, fp32ValueAndUint32Index()).stamp(strided_input, stream);
+    EXPECT_EQ(middle_min->getPath(), CubReductionPath::TiledFixedSegment);
+    middle_min->run();
+    middle_max->run();
+    stream.synchronize();
+    expectArgOutputs(middle_min, {-1.0f, 1.0f, 0.0f, -2.0f}, {2, 0, 0, 2}, stream);
+    expectArgOutputs(middle_max, {9.0f, 8.0f, 6.0f, 7.0f}, {0, 1, 1, 0}, stream);
+
     std::shared_ptr<StampedCubArgReduction> strided_min =
         CubArgReduction(CubArgReductionOp::ArgMin, std::vector<uint32_t>{0, 2}, fp32ValueAndUint32Index())
             .stamp(strided_input, stream);
@@ -222,6 +282,174 @@ TEST(CubArgReduction, ReusesPreallocatedOutputsAndWorkspaceAcrossExecutions) {
     EXPECT_EQ(stamped->getIndexOutputTensor()->getTensorId(), index_id);
     EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), workspace_bytes);
     expectArgOutputs(stamped, {9.0f, -1.0f}, {0, 0}, stream);
+}
+
+
+TEST(CubArgReduction, DenseTiledPathCoversNarrowExactGroupedAndShardedWidths) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    const std::vector<uint64_t> inner_sizes = {2,    17,   64,   128,  256,  512,  513,   1024,
+                                                2048, 2049, 4096, 4097, 8192, 8193, 16385};
+    constexpr uint64_t outer_size = 2;
+    constexpr uint64_t reduction_size = 5;
+
+    for (uint64_t inner_size : inner_sizes) {
+        SCOPED_TRACE(inner_size);
+        std::vector<float> values(outer_size * reduction_size * inner_size);
+        for (uint64_t outer = 0; outer < outer_size; ++outer) {
+            for (uint64_t row = 0; row < reduction_size; ++row) {
+                for (uint64_t component = 0; component < inner_size; ++component) {
+                    values[(outer * reduction_size + row) * inner_size + component] =
+                        static_cast<float>((outer * 29 + row * 17 + component * 7 + row * component) % 113) - 56.0f;
+                }
+            }
+        }
+
+        Tensor input = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream);
+        for (CubArgReductionOp op : {CubArgReductionOp::ArgMin, CubArgReductionOp::ArgMax}) {
+            CubArgReductionOutputOptions outputs;
+            outputs.value_output_dtype = DataType::FP32;
+            outputs.index_output_dtype = DataType::UINT64;
+            std::shared_ptr<StampedCubArgReduction> stamped = CubArgReduction(op, 1, outputs).stamp(input, stream);
+            EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+            stamped->run();
+            stream.synchronize();
+
+            const DenseArgReference reference =
+                referenceDenseMiddleAxis(values, outer_size, reduction_size, inner_size, op);
+            expectArgOutputs(stamped, reference.values, reference.indices, stream);
+        }
+    }
+}
+
+
+TEST(CubArgReduction, DenseTiledContiguousMultiAxisUsesFlattenedLocalIndices) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer_size = 2;
+    constexpr uint64_t reduction_size = 12;
+    constexpr uint64_t inner_size = 5;
+    std::vector<float> values(outer_size * reduction_size * inner_size);
+    for (uint64_t outer = 0; outer < outer_size; ++outer) {
+        for (uint64_t row = 0; row < reduction_size; ++row) {
+            for (uint64_t component = 0; component < inner_size; ++component) {
+                const int target = static_cast<int>((outer * 3 + component * 2) % reduction_size);
+                values[(outer * reduction_size + row) * inner_size + component] =
+                    static_cast<float>(std::abs(static_cast<int>(row) - target));
+            }
+        }
+    }
+
+    Tensor input = makeGpuTensor(values, {2, 3, 4, 5}, stream);
+    for (CubArgReductionOp op : {CubArgReductionOp::ArgMin, CubArgReductionOp::ArgMax}) {
+        auto stamped = CubArgReduction(op, std::vector<uint32_t>{1, 2}, fp32ValueAndUint32Index()).stamp(input, stream);
+        EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        stamped->run();
+        stream.synchronize();
+        const DenseArgReference reference =
+            referenceDenseMiddleAxis(values, outer_size, reduction_size, inner_size, op);
+        expectArgOutputs(stamped, reference.values, reference.indices, stream);
+    }
+}
+
+TEST(CubArgReduction, DenseTiledPathSupportsValueOnlyAndIndexOnlyOutputs) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor input = makeGpuTensor({1.0f, 9.0f, 4.0f, 2.0f,
+                                  5.0f, 3.0f, 8.0f, 7.0f,
+                                  6.0f, 0.0f, 2.0f, 10.0f},
+                                 {1, 3, 4},
+                                 stream);
+
+    CubArgReductionOutputOptions value_only_options;
+    value_only_options.produce_index = false;
+    value_only_options.value_output_dtype = DataType::FP32;
+    auto value_only = CubArgReduction(CubArgReductionOp::ArgMax, 1, value_only_options).stamp(input, stream);
+    EXPECT_EQ(value_only->getPath(), CubReductionPath::TiledFixedSegment);
+
+    CubArgReductionOutputOptions index_only_options;
+    index_only_options.produce_value = false;
+    index_only_options.index_output_dtype = DataType::UINT64;
+    auto index_only = CubArgReduction(CubArgReductionOp::ArgMax, 1, index_only_options).stamp(input, stream);
+    EXPECT_EQ(index_only->getPath(), CubReductionPath::TiledFixedSegment);
+
+    value_only->run();
+    index_only->run();
+    stream.synchronize();
+
+    ASSERT_TRUE(value_only->getValueOutputTensor().has_value());
+    EXPECT_FALSE(value_only->getIndexOutputTensor().has_value());
+    expectFloatVectorNear(copyGpuTensorAsFloat(value_only->getValueOutputTensor().value(), stream),
+                          {6.0f, 9.0f, 8.0f, 10.0f});
+    EXPECT_FALSE(index_only->getValueOutputTensor().has_value());
+    ASSERT_TRUE(index_only->getIndexOutputTensor().has_value());
+    EXPECT_EQ(copyGpuTensorAsUnsigned(index_only->getIndexOutputTensor().value(), stream),
+              (std::vector<uint64_t>{2, 0, 1, 2}));
+}
+
+TEST(CubArgReduction, DenseTiledVectorizedPathsSupportEveryFloatingInputDtype) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    std::vector<DataType> input_dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+#if THOR_CUB_ENABLE_FP8_TYPES
+    input_dtypes.push_back(DataType::FP8_E4M3);
+    input_dtypes.push_back(DataType::FP8_E5M2);
+#endif
+#if THOR_CUB_ENABLE_64BIT_TYPES
+    input_dtypes.push_back(DataType::FP64);
+#endif
+
+    for (uint64_t inner_size : {64ULL, 4097ULL}) {
+        SCOPED_TRACE(inner_size);
+        constexpr uint64_t reduction_size = 5;
+        std::vector<float> values(reduction_size * inner_size);
+        for (uint64_t row = 0; row < reduction_size; ++row) {
+            for (uint64_t component = 0; component < inner_size; ++component) {
+                values[row * inner_size + component] = static_cast<float>(row + 1);
+            }
+        }
+
+        for (DataType input_dtype : input_dtypes) {
+            SCOPED_TRACE(static_cast<int>(input_dtype));
+            Tensor input = makeGpuTensor(values, {1, reduction_size, inner_size}, stream, input_dtype);
+            auto stamped =
+                CubArgReduction(CubArgReductionOp::ArgMax, 1, fp32ValueAndUint32Index()).stamp(input, stream);
+            EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+            stamped->run();
+            stream.synchronize();
+            expectArgOutputs(
+                stamped,
+                std::vector<float>(inner_size, static_cast<float>(reduction_size)),
+                std::vector<uint64_t>(inner_size, reduction_size - 1),
+                stream);
+        }
+    }
+}
+
+TEST(CubArgReduction, DenseTiledPathPreservesNaNPropagationAndLowestIndexTies) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    Tensor input = makeGpuTensor({3.0f, 7.0f,
+                                  nan, 5.0f,
+                                  2.0f, 5.0f,
+                                  nan, 1.0f},
+                                 {1, 4, 2},
+                                 stream);
+
+    auto minimum = CubArgReduction(CubArgReductionOp::ArgMin, 1, fp32ValueAndUint32Index()).stamp(input, stream);
+    auto maximum = CubArgReduction(CubArgReductionOp::ArgMax, 1, fp32ValueAndUint32Index()).stamp(input, stream);
+    EXPECT_EQ(minimum->getPath(), CubReductionPath::TiledFixedSegment);
+    EXPECT_EQ(maximum->getPath(), CubReductionPath::TiledFixedSegment);
+    minimum->run();
+    maximum->run();
+    stream.synchronize();
+
+    expectArgOutputs(minimum, {nan, 1.0f}, {1, 3}, stream);
+    expectArgOutputs(maximum, {nan, 7.0f}, {1, 0}, stream);
 }
 
 TEST(CubArgReduction, ValidatesOutputConfigurationAndPreallocatedContracts) {

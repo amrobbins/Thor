@@ -1,5 +1,7 @@
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
 
+#if THOR_FUTURE_CUB_OPS
+
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cub/device/device_select.cuh>
@@ -134,3 +136,4 @@ void cubDeviceSelectFlagged(const Tensor& temp_storage,
 }
 
 }  // namespace ThorImplementation
+#endif  // THOR_FUTURE_CUB_OPS

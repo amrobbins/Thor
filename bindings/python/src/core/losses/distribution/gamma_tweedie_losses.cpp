@@ -107,6 +107,27 @@ void validateTweedieArguments(const string &loss_name,
         throw nb::value_error(error_message.c_str());
     }
 }
+
+void maybeSetTweedieExampleWeights(TweedieLoss::Builder &builder,
+                                   Tensor predictions,
+                                   Tensor labels,
+                                   optional<Tensor> example_weights) {
+    if (!example_weights.has_value())
+        return;
+    if (example_weights.value() == predictions || example_weights.value() == labels)
+        throw nb::value_error("TweedieLoss instance: example_weights must be distinct from predictions and labels.");
+    if (!isFloatingDType(example_weights.value().getDataType()))
+        throw nb::value_error("TweedieLoss instance: example_weights must use fp16 or fp32 dtype.");
+    const vector<uint64_t>& dims = example_weights.value().getDimensions();
+    if (dims != vector<uint64_t>{1} && dims != predictions.getDimensions()) {
+        string error_message =
+            "TweedieLoss instance: example_weights dimensions must be [1] for per-example weights or match predictions. "
+            "example_weights tensor is " +
+            example_weights.value().getDescriptorString() + "; predictions tensor is " + predictions.getDescriptorString() + ".";
+        throw nb::value_error(error_message.c_str());
+    }
+    builder.exampleWeights(example_weights.value());
+}
 }  // namespace
 
 void bind_gamma_tweedie_losses(nb::module_ &losses) {
@@ -169,7 +190,8 @@ are omitted. The raw loss is:
            float eps,
            optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
-           std::optional<float> loss_weight) {
+           std::optional<float> loss_weight,
+           optional<Tensor> example_weights) {
             const string loss_name = "TweedieLoss instance";
             validateTweedieArguments(loss_name, predictions, labels, power, loss_data_type, reported_loss_shape, eps);
 
@@ -182,6 +204,7 @@ are omitted. The raw loss is:
                 .eps(eps)
                 .lossDataType(effectiveLossDataType)
                 .lossWeight(loss_weight.value_or(1.0f));
+            maybeSetTweedieExampleWeights(builder, predictions, labels, example_weights);
             setReportedLossShape(builder, reported_loss_shape);
             TweedieLoss built = builder.build();
 
@@ -196,6 +219,7 @@ are omitted. The raw loss is:
         "reported_loss_shape"_a = LossShape::BATCH,
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
+        "example_weights"_a.none() = nb::none(),
         R"nbdoc(Construct a Tweedie deviance loss.)nbdoc");
 
     tweedie_loss.def_prop_ro("power", &TweedieLoss::getPower);

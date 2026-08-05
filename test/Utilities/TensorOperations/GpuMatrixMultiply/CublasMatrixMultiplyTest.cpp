@@ -6,6 +6,7 @@
 #include "gtest/gtest.h"
 #include "omp.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -3674,5 +3675,232 @@ TEST(CublasMatrixMultiply, GemmWithDGeluBgradBackwardEpilogueMatchesCpuFP32) {
     }
     for (int i = 0; i < n; ++i) {
         ASSERT_NEAR(BiasGrad.getMemPtr<float>()[i], ExpectedBiasGrad.getMemPtr<float>()[i], 2.0e-3f * static_cast<float>(m));
+    }
+}
+
+
+TEST(CublasMatrixMultiply, StridedBatchConfigParticipatesInKernelRequirementIdentity) {
+    const CublasStridedBatchConfig batchA = CublasStridedBatchConfig::strided(4, 64, 0, 0, 96);
+    const CublasStridedBatchConfig batchB = CublasStridedBatchConfig::strided(4, 80, 0, 0, 96);
+
+    KernelRequirement requirementA("test-gpu", 8, 8, 8, 12, false, false, false, 8, 12, 12, 12, true, batchA);
+    KernelRequirement requirementB("test-gpu", 8, 8, 8, 12, false, false, false, 8, 12, 12, 12, true, batchB);
+
+    ASSERT_FALSE(requirementA == requirementB);
+
+    ASSERT_THROW(CublasStridedBatchConfig::strided(0, 64, 64, 96, 96), std::logic_error);
+    ASSERT_THROW(CublasStridedBatchConfig::strided(4, -1, 64, 96, 96), std::logic_error);
+    ASSERT_THROW(CublasStridedBatchConfig::strided(4, 64, 64, 96, 0), std::logic_error);
+}
+
+TEST(CublasMatrixMultiply, StridedBatchedGemmSupportsTransposeAndZeroStrideBroadcastFP32) {
+    ScopedGpu scopedGpu(0);
+    Stream stream(0);
+
+    constexpr int32_t batchCount = 3;
+    constexpr int32_t m = 48;
+    constexpr int32_t k = 32;
+    constexpr int32_t n = 40;
+
+    // A is stored KxM and transposed by GEMM. B and C are broadcast to every batch with stride 0.
+    constexpr int32_t rowsA = k;
+    constexpr int32_t colsA = m;
+    constexpr int32_t rowsB = k;
+    constexpr int32_t colsB = n;
+    constexpr int32_t ldA = colsA + 3;
+    constexpr int32_t ldB = colsB + 5;
+    constexpr int32_t ldC = n + 2;
+    constexpr int32_t ldD = n + 7;
+
+    constexpr int64_t strideA = static_cast<int64_t>(rowsA) * ldA;
+    constexpr int64_t strideB = 0;
+    constexpr int64_t strideC = 0;
+    constexpr int64_t strideD = static_cast<int64_t>(m) * ldD;
+
+    const CublasStridedBatchConfig batchConfig =
+        CublasStridedBatchConfig::strided(batchCount, strideA, strideB, strideC, strideD);
+
+    const uint64_t aElements = static_cast<uint64_t>(strideA) * batchCount;
+    const uint64_t bElements = static_cast<uint64_t>(rowsB) * ldB;
+    const uint64_t cElements = static_cast<uint64_t>(m) * ldC;
+    const uint64_t dElements = static_cast<uint64_t>(strideD) * batchCount;
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    Tensor A(cpuPlacement, TensorDescriptor(DataType::FP32, {aElements}));
+    Tensor B(cpuPlacement, TensorDescriptor(DataType::FP32, {bElements}));
+    Tensor C(cpuPlacement, TensorDescriptor(DataType::FP32, {cElements}));
+    Tensor Expected(cpuPlacement, TensorDescriptor(DataType::FP32, {dElements}));
+    Tensor Actual(cpuPlacement, TensorDescriptor(DataType::FP32, {dElements}));
+    Tensor A_d(gpuPlacement, TensorDescriptor(DataType::FP32, {aElements}));
+    Tensor B_d(gpuPlacement, TensorDescriptor(DataType::FP32, {bElements}));
+    Tensor C_d(gpuPlacement, TensorDescriptor(DataType::FP32, {cElements}));
+    Tensor D_d(gpuPlacement, TensorDescriptor(DataType::FP32, {dElements}));
+
+    float *a = A.getMemPtr<float>();
+    float *b = B.getMemPtr<float>();
+    float *c = C.getMemPtr<float>();
+    float *expected = Expected.getMemPtr<float>();
+    std::fill(a, a + aElements, 0.0f);
+    std::fill(b, b + bElements, 0.0f);
+    std::fill(c, c + cElements, 0.0f);
+    std::fill(expected, expected + dElements, 0.0f);
+
+    for (int32_t batch = 0; batch < batchCount; ++batch) {
+        for (int32_t row = 0; row < rowsA; ++row) {
+            for (int32_t col = 0; col < colsA; ++col) {
+                a[batch * strideA + static_cast<int64_t>(row) * ldA + col] =
+                    0.02f * static_cast<float>(1 + batch * 7 + row * 3 - col * 2);
+            }
+        }
+    }
+    for (int32_t row = 0; row < rowsB; ++row) {
+        for (int32_t col = 0; col < colsB; ++col) {
+            b[static_cast<int64_t>(row) * ldB + col] = 0.015f * static_cast<float>(1 + row * 2 + col);
+        }
+    }
+    for (int32_t row = 0; row < m; ++row) {
+        for (int32_t col = 0; col < n; ++col) {
+            c[static_cast<int64_t>(row) * ldC + col] = 0.01f * static_cast<float>(row - col);
+        }
+    }
+
+    constexpr float alpha = 1.25f;
+    constexpr float beta = 0.5f;
+    for (int32_t batch = 0; batch < batchCount; ++batch) {
+        for (int32_t row = 0; row < m; ++row) {
+            for (int32_t col = 0; col < n; ++col) {
+                float sum = 0.0f;
+                for (int32_t inner = 0; inner < k; ++inner) {
+                    const float av = a[batch * strideA + static_cast<int64_t>(inner) * ldA + row];
+                    const float bv = b[static_cast<int64_t>(inner) * ldB + col];
+                    sum += av * bv;
+                }
+                expected[batch * strideD + static_cast<int64_t>(row) * ldD + col] =
+                    alpha * sum + beta * c[static_cast<int64_t>(row) * ldC + col];
+            }
+        }
+    }
+
+    A_d.copyFromAsync(A, stream);
+    B_d.copyFromAsync(B, stream);
+    C_d.copyFromAsync(C, stream);
+    stream.synchronize();
+
+    const CublasMatrixMultiply::MatmulDataTypes dataTypes = CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP32);
+    CublasMatrixMultiply::instance().chooseOptimalStridedBatchedGemmKernel(0,
+                                                                           rowsA,
+                                                                           colsA,
+                                                                           rowsB,
+                                                                           colsB,
+                                                                           ldA,
+                                                                           ldB,
+                                                                           ldC,
+                                                                           ldD,
+                                                                           true,
+                                                                           false,
+                                                                           false,
+                                                                           dataTypes,
+                                                                           batchConfig,
+                                                                           false);
+
+    bool kernelWillRunOnGpu = false;
+    const uint64_t workspaceSize = CublasMatrixMultiply::instance().getStridedBatchedGemmWorkspaceSizeInBytes(0,
+                                                                                                               rowsA,
+                                                                                                               colsA,
+                                                                                                               rowsB,
+                                                                                                               colsB,
+                                                                                                               ldA,
+                                                                                                               ldB,
+                                                                                                               ldC,
+                                                                                                               ldD,
+                                                                                                               true,
+                                                                                                               false,
+                                                                                                               false,
+                                                                                                               dataTypes,
+                                                                                                               batchConfig,
+                                                                                                               kernelWillRunOnGpu);
+    ASSERT_TRUE(kernelWillRunOnGpu);
+
+    std::optional<Tensor> workspace;
+    if (workspaceSize > 0) {
+        workspace = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSize}));
+    }
+
+    CublasKernel cachedKernel = CublasMatrixMultiply::instance().getCachedGemmKernel(0,
+                                                                                     rowsA,
+                                                                                     colsA,
+                                                                                     rowsB,
+                                                                                     colsB,
+                                                                                     ldA,
+                                                                                     ldB,
+                                                                                     ldC,
+                                                                                     ldD,
+                                                                                     true,
+                                                                                     false,
+                                                                                     false,
+                                                                                     dataTypes,
+                                                                                     true,
+                                                                                     batchConfig);
+    int32_t descriptorBatchCount = 0;
+    int64_t descriptorStrideA = -1;
+    int64_t descriptorStrideB = -1;
+    size_t sizeWritten = 0;
+    ASSERT_EQ(cublasLtMatrixLayoutGetAttribute(cachedKernel.getADesc(),
+                                               CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                               &descriptorBatchCount,
+                                               sizeof(descriptorBatchCount),
+                                               &sizeWritten),
+              CUBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(sizeWritten, sizeof(descriptorBatchCount));
+    ASSERT_EQ(descriptorBatchCount, batchCount);
+    ASSERT_EQ(cublasLtMatrixLayoutGetAttribute(cachedKernel.getADesc(),
+                                               CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+                                               &descriptorStrideA,
+                                               sizeof(descriptorStrideA),
+                                               &sizeWritten),
+              CUBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(descriptorStrideA, strideA);
+    ASSERT_EQ(cublasLtMatrixLayoutGetAttribute(cachedKernel.getBDesc(),
+                                               CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
+                                               &descriptorStrideB,
+                                               sizeof(descriptorStrideB),
+                                               &sizeWritten),
+              CUBLAS_STATUS_SUCCESS);
+    ASSERT_EQ(descriptorStrideB, 0);
+
+    CublasMatrixMultiply::instance().stridedBatchedGemm(A_d,
+                                                         B_d,
+                                                         C_d,
+                                                         D_d,
+                                                         workspace,
+                                                         rowsA,
+                                                         colsA,
+                                                         rowsB,
+                                                         colsB,
+                                                         ldA,
+                                                         ldB,
+                                                         ldC,
+                                                         ldD,
+                                                         true,
+                                                         false,
+                                                         false,
+                                                         &alpha,
+                                                         &beta,
+                                                         dataTypes,
+                                                         batchConfig,
+                                                         stream);
+
+    Actual.copyFromAsync(D_d, stream);
+    stream.synchronize();
+
+    const float *actual = Actual.getMemPtr<float>();
+    for (int32_t batch = 0; batch < batchCount; ++batch) {
+        for (int32_t row = 0; row < m; ++row) {
+            for (int32_t col = 0; col < n; ++col) {
+                const int64_t index = batch * strideD + static_cast<int64_t>(row) * ldD + col;
+                ASSERT_NEAR(actual[index], expected[index], 3.0e-3f);
+            }
+        }
     }
 }

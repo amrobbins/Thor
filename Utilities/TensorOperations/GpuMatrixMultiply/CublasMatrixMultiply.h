@@ -141,6 +141,36 @@ class CublasMatrixMultiply {
                                          std::optional<Tensor> workspace) const;
     };
 
+    // Strided-batched GEMM:
+    //   D[b] = alpha * (op(A[b]) * op(B[b])) + beta * C[b]
+    //
+    // Batch strides are expressed in elements, matching cuBLASLt. A/B/C may use stride 0 to
+    // broadcast one matrix across the batch; D must use distinct storage for each batch item.
+    // The caller must first populate the matching optimal-kernel cache entry with
+    // chooseOptimalStridedBatchedGemmKernel(...).
+    void stridedBatchedGemm(Tensor A,
+                            Tensor B,
+                            Tensor C,
+                            Tensor D,
+                            std::optional<Tensor> workspace,
+                            const int32_t A_rows,
+                            const int32_t A_cols,
+                            const int32_t B_rows,
+                            const int32_t B_cols,
+                            const int32_t ld_A,
+                            const int32_t ld_B,
+                            const int32_t ld_C,
+                            const int32_t ld_D,
+                            bool transposeA,
+                            bool transposeB,
+                            bool transposeC,
+                            const float *alpha,
+                            const float *beta,
+                            const MatmulDataTypes dataTypes,
+                            const CublasStridedBatchConfig batchConfig,
+                            Stream stream,
+                            CublasScalarPointerMode pointerMode = CublasScalarPointerMode::Host);
+
     // fills C as C = A * B, where A, B and C are all matrices whose memory is allocated on the GPU that will be performing the computation.
     //
     // accumulate=true computes C += A * B. accumulate=false computes C = A * B.
@@ -774,6 +804,42 @@ class CublasMatrixMultiply {
             gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, false, dataTypes, printResults);
     }
 
+    // Select and cache optimal cuBLASLt kernels for one fixed strided-batched GEMM shape.
+    // Both workspace-allowed and no-workspace cache entries are populated as needed, matching
+    // the existing non-batched chooseOptimalGemmKernel behavior.
+    void chooseOptimalStridedBatchedGemmKernel(const int gpuNum,
+                                               const int rowsA,
+                                               const int colsA,
+                                               const int rowsB,
+                                               const int colsB,
+                                               const int ldA,
+                                               const int ldB,
+                                               const int ldC,
+                                               const int ldD,
+                                               const bool transposeA,
+                                               const bool transposeB,
+                                               const bool transposeC,
+                                               const MatmulDataTypes dataTypes,
+                                               const CublasStridedBatchConfig batchConfig,
+                                               const bool printResults = false);
+
+    unsigned int getStridedBatchedGemmWorkspaceSizeInBytes(int gpuNum,
+                                                            int rowsA,
+                                                            int colsA,
+                                                            int rowsB,
+                                                            int colsB,
+                                                            int ldA,
+                                                            int ldB,
+                                                            int ldC,
+                                                            int ldD,
+                                                            bool transposeA,
+                                                            bool transposeB,
+                                                            bool transposeC,
+                                                            MatmulDataTypes dataTypes,
+                                                            CublasStridedBatchConfig batchConfig,
+                                                            bool &kernelWillRunOnGpu,
+                                                            bool workspaceAllowed = true);
+
     inline unsigned int getMatrixMultiplyWorkspaceSizeInBytes(int gpuNum,
                                                               int rowsA,
                                                               int colsA,
@@ -879,7 +945,8 @@ class CublasMatrixMultiply {
                                      bool transposeB,
                                      bool transposeC,
                                      MatmulDataTypes dataTypes,
-                                     bool workspaceAllowed);
+                                     bool workspaceAllowed,
+                                     CublasStridedBatchConfig batchConfig = CublasStridedBatchConfig::single());
 
     unsigned int getGemmWorkspaceSizeInBytes(int gpuNum,
                                              int rowsA,
@@ -1035,7 +1102,8 @@ class CublasMatrixMultiply {
                                  MatmulDataTypes dataTypes,
                                  Fp8MatmulScales fp8Scales,
                                  bool allowWorkspaces,
-                                 bool printResults);
+                                 bool printResults,
+                                 CublasStridedBatchConfig batchConfig = CublasStridedBatchConfig::single());
 
     void getSupportedCublasAlgorithms(const OperationType &operationType,
                                       std::vector<cublasLtMatmulAlgo_t> &supportedAlgorithms,
@@ -1067,7 +1135,8 @@ class CublasMatrixMultiply {
                                                       // When set to 0.0f, any number of waves allowed:
                                                       const float maxWaves,
                                                       const MatmulDataTypes dataTypes,
-                                                      const Fp8MatmulScales fp8Scales);
+                                                      const Fp8MatmulScales fp8Scales,
+                                                      const CublasStridedBatchConfig batchConfig = CublasStridedBatchConfig::single());
 
    private:
     inline std::vector<CublasKernel> getHeuristicMatrixMultiplyKernels(int numChoices,

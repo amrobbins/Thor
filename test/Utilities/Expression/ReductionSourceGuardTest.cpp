@@ -125,6 +125,8 @@ TEST(ExpressionReductionArchitecture, GeneralReductionsAreCentralizedUnderCubRed
         "cub::DeviceSegmentedReduce::Reduce(",
         "cub::DeviceSegmentedReduce::ArgMin(",
         "cub::DeviceSegmentedReduce::ArgMax(",
+        "launchVectorSegmentedReduction",
+        "launchVectorSegmentedReduceMinMaxBackward",
     };
 
     std::vector<std::string> violations;

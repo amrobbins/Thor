@@ -258,6 +258,8 @@ set(THOR_MIN_CUDA_TOOLKIT_VERSION 13.3)
 string(TOUPPER "${CMAKE_BUILD_TYPE}" _thor_build_type_upper)
 if (_thor_build_type_upper MATCHES "^(RELEASE|RELWITHDEBINFO|MINSIZEREL)$")
     set(_thor_default_cuda_architectures "89;120")
+    #set(_thor_default_cuda_architectures "120")
+    #set(_thor_default_cuda_architectures "89")
     set(_thor_default_cuda_architectures_description "sm_89 for NVIDIA L4/Ada and sm_120 for RTX 50-series / Blackwell")
 else ()
     set(_thor_default_cuda_architectures "120")
@@ -1642,12 +1644,12 @@ endif ()
 add_custom_command(
         OUTPUT ${THOR_INSTALLED_CONSUMER_HEADER_STAMP}
         COMMAND ${CMAKE_COMMAND}
-                -DTHOR_SOURCE_DIR=${CMAKE_SOURCE_DIR}
-                -DTHOR_DESTINATION_DIR=${THOR_INSTALLED_CONSUMER_INCLUDE_DIR}
-                -DTHOR_GENERATED_HEADER=${CMAKE_BINARY_DIR}/generated/Thor.h
-                -DTHOR_VERSION_HEADER=${CMAKE_BINARY_DIR}/generated/ThorVersion.h
-                -DTHOR_STAMP=${THOR_INSTALLED_CONSUMER_HEADER_STAMP}
-                -P ${THOR_INSTALLED_CONSUMER_STAGE_SCRIPT}
+        -DTHOR_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+        -DTHOR_DESTINATION_DIR=${THOR_INSTALLED_CONSUMER_INCLUDE_DIR}
+        -DTHOR_GENERATED_HEADER=${CMAKE_BINARY_DIR}/generated/Thor.h
+        -DTHOR_VERSION_HEADER=${CMAKE_BINARY_DIR}/generated/ThorVersion.h
+        -DTHOR_STAMP=${THOR_INSTALLED_CONSUMER_HEADER_STAMP}
+        -P ${THOR_INSTALLED_CONSUMER_STAGE_SCRIPT}
         DEPENDS
         ${CMAKE_BINARY_DIR}/generated/Thor.h
         ${CMAKE_BINARY_DIR}/generated/ThorVersion.h

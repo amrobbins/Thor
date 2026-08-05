@@ -38,8 +38,9 @@ struct CubArgReductionOutputOptions {
 enum class CubReductionPath : uint8_t {
     DeviceTransformReduce = 0,
     ContiguousFixedSegment = 1,
-    StridedFixedSegment = 2,
-    OffsetSegmented = 3,
+    TiledFixedSegment = 2,
+    StridedFixedSegment = 3,
+    OffsetSegmented = 4,
 };
 
 /**
@@ -74,8 +75,9 @@ struct CubReductionGeometry {
     std::vector<uint32_t> axes;
     uint32_t rank = 0;
 
-    // Retained for source compatibility and diagnostics for the single-axis case. They are zero for multi-axis plans.
-    uint32_t axis = 0;
+    // When the reduced axes form one contiguous block, the input can be viewed as
+    // [outer_size, reduction_size, inner_size]. These fields are zero for disjoint-axis reductions.
+    bool reduced_axes_are_contiguous = false;
     uint64_t outer_size = 0;
     uint64_t inner_size = 0;
 
@@ -97,8 +99,9 @@ class StampedCubSegmentedReduction;
 /**
  * Describes a one-or-more-axis CUB reduction.
  *
- * CubReduction is intentionally not executable. stamp() validates the concrete tensors, selects the CUB path,
- * queries the required temporary storage, and allocates both the output and workspace. StampedCubReduction::run()
+ * CubReduction is intentionally not executable. stamp() validates the concrete tensors, selects the centralized
+ * reduction backend, queries any required temporary storage, and allocates both the output and workspace.
+ * StampedCubReduction::run()
  * subsequently performs no allocation or CUB planning.
  *
  * Reduction axes must be non-empty, unique, and strictly increasing. Every path converts input values to FP32 before
@@ -145,7 +148,7 @@ class CubReduction {
                                                                           uint64_t output_index,
                                                                           uint64_t reduction_index);
 
-    /** Queries CUB temporary storage without allocating input, output, or workspace tensors. */
+    /** Queries backend temporary storage without allocating input, output, or workspace tensors. */
     [[nodiscard]] size_t queryWorkspaceSizeInBytes(const TensorDescriptor& input_descriptor,
                                                    const Stream& stream) const;
 
@@ -167,13 +170,14 @@ class CubReduction {
 };
 
 /**
- * Describes an offset-segmented CUB reduction over a rank-1 values tensor.
+ * Describes an offset-segmented reduction over dense values [N,D...] -> [B,D...].
  *
- * Segment i is the half-open range [offsets[i], offsets[i + 1]). Inputs are converted to FP32 and all reduction
- * arithmetic is performed in FP32. Empty segments use CubReduction::getFp32EmptyReductionValue(). Mean divides by
- * the segment length in the fused output store and returns zero for an empty segment. Offset contents are validated
- * during stamping; callers that update a stamped offsets tensor must preserve the same zero-based, nondecreasing,
- * in-bounds row-partition contract.
+ * Segment i is the half-open row range [offsets[i], offsets[i + 1]). Rank-1 input retains the scalar CUB fast path;
+ * vector-valued input uses a Thor-owned coalesced CUDA backend under the same centralized API. Inputs are converted to
+ * FP32 and all reduction arithmetic is performed in FP32. Empty segments use CubReduction::getFp32EmptyReductionValue().
+ * Mean divides by the segment row count and returns zero for an empty segment. Offset contents are validated during
+ * stamping; callers that update a stamped offsets tensor must preserve the same zero-based, nondecreasing, in-bounds
+ * row-partition contract.
  */
 class CubSegmentedReduction {
    public:
@@ -249,10 +253,11 @@ class StampedCubSegmentedReduction {
 };
 
 /**
- * Describes an offset-segmented argmin or argmax over rank-1 packed values.
+ * Describes an offset-segmented argmin or argmax over packed values [N,D...].
  *
- * The output contains one global packed-value index per segment. Empty segments produce UINT64_MAX/UINT32_MAX.
- * Candidate values are compared in FP32, NaNs propagate, and the lowest packed index wins ties, matching CubArgReduction.
+ * Row offsets [B+1] produce global packed-value winner indices [B,D...]. Empty segments produce the configured
+ * UINT64_MAX/UINT32_MAX sentinel independently for every trailing component. Candidate values are compared in FP32,
+ * NaNs propagate, and the lowest packed index wins ties, matching CubArgReduction.
  */
 class CubSegmentedArgReduction {
    public:

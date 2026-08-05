@@ -40,6 +40,10 @@ namespace ThorImplementation {
 
 class StampedExecutionPlan;
 
+namespace detail {
+struct ConditionalGraphCaptureAccess;
+}
+
 enum class ReductionResultKind : uint8_t {
     Value = 0,
     Indices = 1,
@@ -995,7 +999,6 @@ class StampedReduceMinMaxBackward {
     const std::optional<Tensor> segment_offsets;
     std::shared_ptr<StampedCubArgReduction> cub_arg_reduction;
     std::shared_ptr<StampedCubSegmentedArgReduction> cub_segmented_arg_reduction;
-    std::optional<CubArgReductionOp> segmented_op;
     uint64_t segmented_elements_per_value = 1;
     ReduceMinMaxBackwardScatterPlan scatter_plan;
     Stream stream;
@@ -1415,8 +1418,8 @@ class StampedExecutionPlan {
 
     void run();
     void run(const std::unordered_map<std::string, float>& runtime_scalars);
-    void runSequentialOn(Stream& run_stream) const;
-    void runSequentialOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const;
+    void runOn(Stream& run_stream) const;
+    void runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const;
 
     [[nodiscard]] bool requiresRuntimeScalars() const;
     [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
@@ -1479,6 +1482,12 @@ class StampedExecutionPlan {
     std::unordered_map<std::string, Tensor> getFinalOutputs() const { return final_outputs; }
 
    private:
+    friend struct detail::ConditionalGraphCaptureAccess;
+
+    // Conditional CUDA graph bodies are currently captured on one stream. Keep this
+    // deliberately private so normal Expression execution always uses the dependency
+    // scheduler and its helper streams.
+    void runSequentiallyForCudaGraphCapture(Stream& capture_stream) const;
     void materializeOutputsOn(Stream& run_stream) const;
 
     const std::vector<StampedExecutionStage> steps;

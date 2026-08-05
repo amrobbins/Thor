@@ -79,6 +79,25 @@ void requireCompatibleStream(const Tensor& input, const Stream& stream) {
     return stripped;
 }
 
+[[nodiscard]] uint64_t segmentedElementsPerValue(const Tensor& input) {
+    const std::vector<uint64_t>& dimensions = input.getDimensions();
+    if (dimensions.empty()) {
+        throw std::invalid_argument("CUB segmented reduction requires values with rank >= 1.");
+    }
+    uint64_t elements_per_value = 1;
+    for (size_t axis = 1; axis < dimensions.size(); ++axis) {
+        if (dimensions[axis] != 0
+            && elements_per_value > std::numeric_limits<uint64_t>::max() / dimensions[axis]) {
+            throw std::invalid_argument("CUB segmented-reduction trailing value size overflows uint64_t.");
+        }
+        elements_per_value *= dimensions[axis];
+    }
+    if (elements_per_value == 0) {
+        throw std::invalid_argument("CUB segmented reduction requires a non-zero trailing value size.");
+    }
+    return elements_per_value;
+}
+
 std::optional<Tensor> stampDeviceIndexingMetadata(CubReductionGeometry& geometry,
                                                       const TensorPlacement& placement,
                                                       const Stream& stream) {
@@ -246,8 +265,8 @@ void validateSegmentOffsetContentsAtStamp(const Tensor& input,
             if (current < previous) {
                 throw std::invalid_argument("CUB segmented-reduction offsets must be nondecreasing.");
             }
-            if (current > input.getTotalNumElements()) {
-                throw std::invalid_argument("CUB segmented-reduction offset exceeds the values tensor capacity.");
+            if (current > input.getDimensions()[0]) {
+                throw std::invalid_argument("CUB segmented-reduction offset exceeds the values tensor row capacity.");
             }
             previous = current;
         }
@@ -276,12 +295,22 @@ void requireExpectedSegmentedOutput(const Tensor& input,
         throw std::invalid_argument(
             "CUB segmented-reduction preallocated output dtype does not match the configured output dtype.");
     }
-    if (output.getTotalNumElements() != num_segments
-        || stripSingletonDimensions(output.getDimensions())
-               != stripSingletonDimensions(std::vector<uint64_t>{num_segments})) {
-        throw std::invalid_argument(
-            "CUB segmented-reduction output must preserve the [num_segments] non-singleton layout.");
+
+    if (input.getDimensions().size() == 1) {
+        if (output.getTotalNumElements() != num_segments
+            || stripSingletonDimensions(output.getDimensions())
+                   != stripSingletonDimensions(std::vector<uint64_t>{num_segments})) {
+            throw std::invalid_argument(
+                "CUB segmented-reduction scalar output must preserve the [num_segments] non-singleton layout.");
+        }
+    } else {
+        std::vector<uint64_t> expected_dimensions = input.getDimensions();
+        expected_dimensions[0] = num_segments;
+        if (output.getDimensions() != expected_dimensions) {
+            throw std::invalid_argument("CUB segmented-reduction vector output must have shape [num_segments,D...].");
+        }
     }
+
     if (tensorStorageOverlaps(input, output) || tensorStorageOverlaps(segment_offsets, output)) {
         throw std::invalid_argument(
             "CUB segmented-reduction output storage must not overlap input or offsets storage.");
@@ -298,8 +327,11 @@ void requireExpectedSegmentedArgOutput(const Tensor& input,
     if (output.getDataType() != output_dtype) {
         throw std::invalid_argument("CUB segmented arg-reduction output dtype does not match the configured index dtype.");
     }
-    if (output.getTotalNumElements() != num_segments || output.getDimensions() != std::vector<uint64_t>{num_segments}) {
-        throw std::invalid_argument("CUB segmented arg-reduction output must have shape [num_segments].");
+    std::vector<uint64_t> expected_dimensions = input.getDimensions();
+    expected_dimensions[0] = num_segments;
+    if (output.getDimensions() != expected_dimensions) {
+        throw std::invalid_argument(
+            "CUB segmented arg-reduction output must have shape [num_segments,D...].");
     }
     if (tensorStorageOverlaps(input, output) || tensorStorageOverlaps(segment_offsets, output)) {
         throw std::invalid_argument("CUB segmented arg-reduction output storage must not overlap input or offsets storage.");
@@ -558,7 +590,6 @@ CubReductionGeometry CubReduction::analyzeGeometry(const std::vector<uint64_t>& 
     CubReductionGeometry geometry;
     geometry.axes = axes;
     geometry.rank = static_cast<uint32_t>(input_dimensions.size());
-    geometry.axis = axes.front();
     geometry.input_elements = 1;
     geometry.reduction_size = 1;
     geometry.output_elements = 1;
@@ -606,22 +637,35 @@ CubReductionGeometry CubReduction::analyzeGeometry(const std::vector<uint64_t>& 
         throw std::invalid_argument("CUB tensor reduction output element count exceeds CUB's int64 segment-count limit.");
     }
 
-    const bool reduces_to_single_output = geometry.output_elements == 1;
-    bool reduces_contiguous_suffix = !reduces_to_single_output;
-    if (reduces_contiguous_suffix) {
-        const uint32_t suffix_begin = static_cast<uint32_t>(input_dimensions.size() - axes.size());
-        for (uint32_t i = 0; i < axes.size(); ++i) {
-            if (axes[i] != suffix_begin + i) {
-                reduces_contiguous_suffix = false;
-                break;
-            }
+    geometry.reduced_axes_are_contiguous = true;
+    for (size_t i = 1; i < axes.size(); ++i) {
+        if (axes[i] != axes[i - 1] + 1) {
+            geometry.reduced_axes_are_contiguous = false;
+            break;
         }
     }
 
+    if (geometry.reduced_axes_are_contiguous) {
+        geometry.outer_size = 1;
+        geometry.inner_size = 1;
+        for (uint32_t dimension = 0; dimension < axes.front(); ++dimension) {
+            geometry.outer_size = checkedMultiply(geometry.outer_size, input_dimensions[dimension], "outer size");
+        }
+        for (uint32_t dimension = axes.back() + 1; dimension < input_dimensions.size(); ++dimension) {
+            geometry.inner_size = checkedMultiply(geometry.inner_size, input_dimensions[dimension], "inner size");
+        }
+    }
+
+    const bool reduces_to_single_output = geometry.output_elements == 1;
+    const bool has_physically_contiguous_fixed_segments =
+        geometry.reduced_axes_are_contiguous && geometry.inner_size == 1;
+
     if (reduces_to_single_output) {
         geometry.path = CubReductionPath::DeviceTransformReduce;
-    } else if (reduces_contiguous_suffix) {
+    } else if (has_physically_contiguous_fixed_segments) {
         geometry.path = CubReductionPath::ContiguousFixedSegment;
+    } else if (geometry.reduced_axes_are_contiguous) {
+        geometry.path = CubReductionPath::TiledFixedSegment;
     } else {
         geometry.path = CubReductionPath::StridedFixedSegment;
     }
@@ -629,17 +673,6 @@ CubReductionGeometry CubReduction::analyzeGeometry(const std::vector<uint64_t>& 
     if (geometry.path != CubReductionPath::DeviceTransformReduce
         && geometry.reduction_size > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument("CUB tensor reduction domain exceeds CUB's fixed segment-size int limit.");
-    }
-
-    if (axes.size() == 1) {
-        geometry.outer_size = 1;
-        geometry.inner_size = 1;
-        for (uint32_t dimension = 0; dimension < axes.front(); ++dimension) {
-            geometry.outer_size = checkedMultiply(geometry.outer_size, input_dimensions[dimension], "outer size");
-        }
-        for (uint32_t dimension = axes.front() + 1; dimension < input_dimensions.size(); ++dimension) {
-            geometry.inner_size = checkedMultiply(geometry.inner_size, input_dimensions[dimension], "inner size");
-        }
     }
 
     return geometry;
@@ -747,15 +780,15 @@ DataType CubSegmentedReduction::resolveOutputDataType(DataType input_dtype) cons
 std::shared_ptr<StampedCubSegmentedReduction> CubSegmentedReduction::stamp(
     const Tensor& input, const Tensor& segment_offsets, const Stream& stream) const {
     requireDenseContiguousGpuTensor(input, "input");
-    if (input.getDimensions().size() != 1) {
-        throw std::invalid_argument("CUB segmented reduction currently requires a rank-1 values tensor.");
-    }
+    static_cast<void>(segmentedElementsPerValue(input));
     requireSupportedFloatingStorageDType(input.getDataType(), "segmented input");
     requireSegmentOffsets(input, segment_offsets, stream);
     validateSegmentOffsetContentsAtStamp(input, segment_offsets, stream);
     const uint64_t num_segments = segment_offsets.getDimensions()[0] - 1;
+    std::vector<uint64_t> output_dimensions = input.getDimensions();
+    output_dimensions[0] = num_segments;
     Tensor output(input.getPlacement(),
-                  TensorDescriptor(resolveOutputDataType(input.getDataType()), {num_segments}));
+                  TensorDescriptor(resolveOutputDataType(input.getDataType()), output_dimensions));
     return stampValidated(input, output, segment_offsets, num_segments, stream);
 }
 
@@ -765,9 +798,7 @@ std::shared_ptr<StampedCubSegmentedReduction> CubSegmentedReduction::stamp(
     const Tensor& segment_offsets,
     const Stream& stream) const {
     requireDenseContiguousGpuTensor(input, "input");
-    if (input.getDimensions().size() != 1) {
-        throw std::invalid_argument("CUB segmented reduction currently requires a rank-1 values tensor.");
-    }
+    static_cast<void>(segmentedElementsPerValue(input));
     requireSupportedFloatingStorageDType(input.getDataType(), "segmented input");
     requireSegmentOffsets(input, segment_offsets, stream);
     validateSegmentOffsetContentsAtStamp(input, segment_offsets, stream);
@@ -787,9 +818,10 @@ std::shared_ptr<StampedCubSegmentedReduction> CubSegmentedReduction::stampValida
     uint64_t num_segments,
     const Stream& stream) const {
     const uint64_t num_items = input.getTotalNumElements();
-    if (num_items > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
-        || num_segments > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
-        throw std::invalid_argument("CUB segmented-reduction item or segment count exceeds int64 limits.");
+    if (input.getDimensions().size() == 1
+        && (num_items > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())
+            || num_segments > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()))) {
+        throw std::invalid_argument("Scalar CUB segmented-reduction item or segment count exceeds int64 limits.");
     }
 
     ScopedGpu scoped_gpu(stream.getGpuNum());
@@ -871,14 +903,14 @@ bool CubSegmentedArgReduction::isOffsetDataTypeSupported(DataType dtype) {
 std::shared_ptr<StampedCubSegmentedArgReduction> CubSegmentedArgReduction::stamp(
     const Tensor& input, const Tensor& segment_offsets, const Stream& stream) const {
     requireDenseContiguousGpuTensor(input, "input");
-    if (input.getDimensions().size() != 1) {
-        throw std::invalid_argument("CUB segmented arg reduction requires a rank-1 values tensor.");
-    }
+    static_cast<void>(segmentedElementsPerValue(input));
     requireSupportedFloatingStorageDType(input.getDataType(), "segmented arg input");
     requireSegmentOffsets(input, segment_offsets, stream);
     validateSegmentOffsetContentsAtStamp(input, segment_offsets, stream);
     const uint64_t num_segments = segment_offsets.getDimensions()[0] - 1;
-    Tensor output(input.getPlacement(), TensorDescriptor(index_output_dtype, {num_segments}));
+    std::vector<uint64_t> output_dimensions = input.getDimensions();
+    output_dimensions[0] = num_segments;
+    Tensor output(input.getPlacement(), TensorDescriptor(index_output_dtype, output_dimensions));
     return stampValidated(input, output, segment_offsets, num_segments, stream);
 }
 
@@ -888,9 +920,7 @@ std::shared_ptr<StampedCubSegmentedArgReduction> CubSegmentedArgReduction::stamp
     const Tensor& segment_offsets,
     const Stream& stream) const {
     requireDenseContiguousGpuTensor(input, "input");
-    if (input.getDimensions().size() != 1) {
-        throw std::invalid_argument("CUB segmented arg reduction requires a rank-1 values tensor.");
-    }
+    static_cast<void>(segmentedElementsPerValue(input));
     requireSupportedFloatingStorageDType(input.getDataType(), "segmented arg input");
     requireSegmentOffsets(input, segment_offsets, stream);
     validateSegmentOffsetContentsAtStamp(input, segment_offsets, stream);
@@ -1016,7 +1046,7 @@ std::shared_ptr<StampedCubArgReduction> CubArgReduction::stamp(
     requireCompatibleStream(input, stream);
     requireSupportedFloatingStorageDType(input.getDataType(), "input");
 
-    const CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), axes);
+    CubReductionGeometry geometry = CubReduction::analyzeGeometry(input.getDimensions(), axes);
     if (outputs.produce_index && outputs.index_output_dtype == DataType::UINT32
         && geometry.reduction_size > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
         throw std::invalid_argument("CUB arg reduction domain does not fit in a UINT32 local index.");

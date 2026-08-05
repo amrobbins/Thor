@@ -33,10 +33,20 @@ void launchReduceMinMaxBackwardScatter(const void* grad_output,
                                        DataType grad_input_dtype,
                                        cudaStream_t stream);
 
+void launchSegmentedReduceMinMaxBackwardActivePrefixZero(const void* segment_offsets,
+                                                         DataType offset_dtype,
+                                                         uint64_t num_segments,
+                                                         void* grad_input,
+                                                         uint64_t grad_input_numel,
+                                                         uint64_t elements_per_value,
+                                                         DataType grad_input_dtype,
+                                                         cudaStream_t stream);
+
 void launchSegmentedReduceMinMaxBackwardScatter(const void* grad_output,
-                                                const uint64_t* winner_indices,
+                                                const void* winner_indices,
+                                                DataType winner_index_dtype,
                                                 void* grad_input,
-                                                uint64_t num_segments,
+                                                uint64_t output_numel,
                                                 uint64_t grad_input_numel,
                                                 DataType grad_output_dtype,
                                                 DataType grad_input_dtype,

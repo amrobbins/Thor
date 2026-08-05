@@ -54,7 +54,7 @@ TEST(CubReduction, ContiguousFixedSegmentPathSupportsEveryValueOperation) {
                      stream);
 }
 
-TEST(CubReduction, StridedFixedSegmentPathSupportsEveryValueOperation) {
+TEST(CubReduction, TiledFixedSegmentPathSupportsEveryValueOperation) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     Tensor input = makeGpuTensor(
@@ -74,6 +74,67 @@ TEST(CubReduction, StridedFixedSegmentPathSupportsEveryValueOperation) {
                        {std::sqrt(35.0f), std::sqrt(56.0f), std::sqrt(251.0f), std::sqrt(308.0f)},
                        1.0e-5f}},
                      stream);
+}
+
+TEST(CubReduction, TiledFixedSegmentCoversWidthPoliciesAndAsyncStaging) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer_size = 2;
+    constexpr uint64_t reduction_size = 65;
+    for (uint64_t inner_size :
+         {2ULL, 3ULL, 4ULL, 5ULL, 8ULL, 9ULL, 16ULL, 17ULL, 31ULL, 32ULL, 33ULL, 63ULL, 64ULL, 65ULL, 127ULL, 128ULL, 129ULL, 255ULL, 256ULL, 257ULL, 511ULL, 512ULL, 513ULL, 1023ULL, 1024ULL, 1025ULL, 2047ULL, 2048ULL, 2049ULL, 4095ULL, 4096ULL, 4097ULL}) {
+        SCOPED_TRACE(inner_size);
+        std::vector<float> values(outer_size * reduction_size * inner_size);
+        std::vector<float> expected(outer_size * inner_size, 0.0f);
+        for (uint64_t outer = 0; outer < outer_size; ++outer) {
+            for (uint64_t row = 0; row < reduction_size; ++row) {
+                for (uint64_t component = 0; component < inner_size; ++component) {
+                    const int value = static_cast<int>((outer * 3 + row * 5 + component * 7) % 11) - 5;
+                    const uint64_t input_index = (outer * reduction_size + row) * inner_size + component;
+                    values[input_index] = static_cast<float>(value);
+                    expected[outer * inner_size + component] += static_cast<float>(value);
+                }
+            }
+        }
+
+        Tensor input = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream);
+        std::shared_ptr<StampedCubReduction> stamped =
+            CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
+        EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+    }
+}
+
+TEST(CubReduction, TiledFixedSegmentBlockShardingScalesBeyondOneBlockWidth) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer_size = 1;
+    constexpr uint64_t reduction_size = 7;
+    for (uint64_t inner_size : {4097ULL, 6144ULL, 8191ULL, 8192ULL, 8193ULL, 16384ULL, 16385ULL, 65536ULL, 65537ULL}) {
+        SCOPED_TRACE(inner_size);
+        std::vector<float> values(outer_size * reduction_size * inner_size);
+        std::vector<float> expected(outer_size * inner_size, 0.0f);
+        for (uint64_t row = 0; row < reduction_size; ++row) {
+            for (uint64_t component = 0; component < inner_size; ++component) {
+                const int value = static_cast<int>((row * 5 + component * 7) % 11) - 5;
+                values[row * inner_size + component] = static_cast<float>(value);
+                expected[component] += static_cast<float>(value);
+            }
+        }
+
+        Tensor input = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream);
+        std::shared_ptr<StampedCubReduction> stamped =
+            CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
+        EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+    }
 }
 
 TEST(CubReduction, NewOperationsDefaultOutputStorageToInputDtype) {
@@ -126,7 +187,7 @@ TEST(CubReduction, MinimumAndMaximumPropagateNanAcrossAllPaths) {
 
     Tensor whole = makeGpuTensor({1.0f, nan, -2.0f}, {3}, stream);
     Tensor contiguous = makeGpuTensor({nan, 1.0f, 2.0f, 3.0f, nan, 4.0f}, {2, 3}, stream);
-    Tensor strided = makeGpuTensor(
+    Tensor tiled = makeGpuTensor(
         {1.0f, 2.0f, nan, nan, 5.0f, 6.0f, 7.0f, 8.0f, nan, nan, 11.0f, 12.0f},
         {2, 3, 2},
         stream);
@@ -135,7 +196,7 @@ TEST(CubReduction, MinimumAndMaximumPropagateNanAcrossAllPaths) {
         SCOPED_TRACE(static_cast<int>(op));
         expectFloatVectorNear(executeFp32Output(whole, op, 0, stream), {nan});
         expectFloatVectorNear(executeFp32Output(contiguous, op, 1, stream), {nan, nan});
-        expectFloatVectorNear(executeFp32Output(strided, op, 1, stream), {nan, nan, nan, nan});
+        expectFloatVectorNear(executeFp32Output(tiled, op, 1, stream), {nan, nan, nan, nan});
     }
 }
 

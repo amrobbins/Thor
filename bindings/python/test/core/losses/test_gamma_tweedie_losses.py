@@ -188,6 +188,23 @@ def test_tweedie_loss_constructs_with_options_loss_dtype_and_shape():
     assert loss.eps == pytest.approx(1.0e-5)
 
 
+def test_tweedie_loss_accepts_per_output_example_weights():
+    n = _net("test_net_tweedie_loss_example_weights")
+    preds = _tensor_1d(4)
+    labels = _tensor_1d(4)
+    weights = _tensor_1d(4)
+
+    loss = thor.losses.distribution.TweedieLoss(
+        n,
+        preds,
+        labels,
+        power=1.5,
+        example_weights=weights,
+    )
+
+    assert loss.get_example_weights() == weights
+
+
 @pytest.mark.parametrize("loss_class", [thor.losses.distribution.GammaNLLLoss, thor.losses.distribution.TweedieLoss])
 @pytest.mark.parametrize("shape", ["batch", "per_output", "per_example", "raw"])
 def test_gamma_tweedie_loss_reported_loss_shape_variants_construct(loss_class, shape):
@@ -337,6 +354,43 @@ def test_tweedie_loss_numerical_forward_matches_reference(reported_loss_shape, p
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.cuda
+def test_tweedie_loss_example_weights_mask_forward_loss():
+    eps = 1.0e-5
+    power = 1.5
+    predictions = np.array([[0.5, 1.25, 3.5, 0.75], [2.0, 0.25, 1.5, 4.0]], dtype=np.float32)
+    labels = np.array([[0.25, 1.0, 2.0, 4.0], [3.0, 0.5, 5.0, 1.0]], dtype=np.float32)
+    weights = np.array([[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 1.0, 0.0]], dtype=np.float32)
+
+    n = thor.Network("test_net_tweedie_loss_weighted_numerical")
+    dtype = thor.DataType.fp32
+    predictions_input = thor.layers.NetworkInput(n, "predictions", [4], dtype)
+    labels_input = thor.layers.NetworkInput(n, "labels", [4], dtype)
+    weights_input = thor.layers.NetworkInput(n, "weights", [4], dtype)
+    loss = thor.losses.distribution.TweedieLoss(
+        n,
+        predictions_input.get_feature_output(),
+        labels_input.get_feature_output(),
+        power=power,
+        eps=eps,
+        loss_data_type=dtype,
+        reported_loss_shape=thor.losses.LossShape.raw,
+        example_weights=weights_input.get_feature_output(),
+    )
+    thor.layers.NetworkOutput(n, "loss", loss.get_loss(), dtype)
+
+    placed = n.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    outputs = placed.infer(
+        {
+            "predictions": _cpu_tensor(predictions, dtype),
+            "labels": _cpu_tensor(labels, dtype),
+            "weights": _cpu_tensor(weights, dtype),
+        }
+    )
+    expected = _tweedie_reference(predictions, labels, power, eps) * weights
+    np.testing.assert_allclose(np.array(outputs["loss"].numpy(), copy=True), expected, rtol=1e-5, atol=1e-6)
+
+
 def test_gamma_nll_loss_save_load_round_trip_serializes_support_layers(tmp_path):
     n = thor.Network("test_net_gamma_nll_loss_round_trip")
     dtype = thor.DataType.fp32
@@ -391,4 +445,35 @@ def test_tweedie_loss_save_load_round_trip_serializes_support_layers(tmp_path):
     loaded.load(str(save_dir))
     loaded_arch = json.loads(loaded.get_architecture_json())
     assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "custom_loss") == 1
+    assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "loss_shaper") == 1
+
+
+def test_tweedie_loss_weighted_save_load_round_trip_serializes_support_layers(tmp_path):
+    n = thor.Network("test_net_tweedie_loss_weighted_round_trip")
+    dtype = thor.DataType.fp32
+    predictions_input = thor.layers.NetworkInput(n, "predictions", [4], dtype)
+    labels_input = thor.layers.NetworkInput(n, "labels", [4], dtype)
+    weights_input = thor.layers.NetworkInput(n, "weights", [4], dtype)
+    loss = thor.losses.distribution.TweedieLoss(
+        n,
+        predictions_input.get_feature_output(),
+        labels_input.get_feature_output(),
+        power=1.5,
+        eps=1.0e-5,
+        loss_data_type=dtype,
+        reported_loss_shape=thor.losses.LossShape.per_example,
+        example_weights=weights_input.get_feature_output(),
+    )
+    thor.layers.NetworkOutput(n, "loss", loss.get_loss(), dtype)
+
+    arch = json.loads(n.get_architecture_json())
+    assert sum(1 for layer in arch["layers"] if layer["layer_type"] == "multi_input_custom_loss") == 1
+    assert sum(1 for layer in arch["layers"] if layer["layer_type"] == "loss_shaper") == 1
+
+    save_dir = tmp_path / "tweedie_weighted_model"
+    n.save(str(save_dir), overwrite=False)
+    loaded = thor.Network("test_net_tweedie_loss_weighted_round_trip")
+    loaded.load(str(save_dir))
+    loaded_arch = json.loads(loaded.get_architecture_json())
+    assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "multi_input_custom_loss") == 1
     assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "loss_shaper") == 1

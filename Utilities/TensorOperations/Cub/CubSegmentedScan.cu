@@ -372,6 +372,8 @@ void launchUniformSegmentedScan(const CubDeviceSegmentedUniformScanPlan& plan,
 
 }  // namespace
 
+#if THOR_FUTURE_CUB_OPS
+
 CubDeviceSegmentedExclusiveSumPlan prepareCubDeviceSegmentedExclusiveSum(const Tensor& input,
                                                                          const Tensor& output,
                                                                          const Tensor& segment_offsets,
@@ -728,6 +730,8 @@ void cubDeviceSegmentedUniformInclusiveSum(const CubDeviceSegmentedUniformInclus
     dispatchScanDType(plan.dtype, launch_value);
 }
 
+
+#endif  // THOR_FUTURE_CUB_OPS
 
 CubDeviceSegmentedUniformScanPlan prepareCubDeviceSegmentedUniformScan(const Tensor& input,
                                                                        const Tensor& output,

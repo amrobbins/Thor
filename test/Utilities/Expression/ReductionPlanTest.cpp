@@ -55,7 +55,7 @@ TEST(ExpressionReductionPlan, EveryDenseValueReductionBuildsACachedPlan) {
         ASSERT_TRUE(built->value_op.has_value());
         EXPECT_EQ(built->value_op.value(), test_case.cub_op);
         ASSERT_TRUE(built->geometry.has_value());
-        EXPECT_EQ(built->geometry->path, CubReductionPath::StridedFixedSegment);
+        EXPECT_EQ(built->geometry->path, CubReductionPath::TiledFixedSegment);
 
         std::shared_ptr<BuiltReduction> cached = StampedEquation::buildReduction(compiled, input, 0);
         EXPECT_EQ(cached.get(), built.get());
@@ -115,7 +115,7 @@ TEST(ExpressionReductionPlan, EveryDenseArgReductionBuildsACachedIndexPlan) {
         ASSERT_TRUE(built->arg_op.has_value());
         EXPECT_EQ(built->arg_op.value(), test_case.cub_op);
         ASSERT_TRUE(built->geometry.has_value());
-        EXPECT_EQ(built->geometry->path, CubReductionPath::StridedFixedSegment);
+        EXPECT_EQ(built->geometry->path, CubReductionPath::TiledFixedSegment);
         EXPECT_EQ(built->key.input_dtype, DataType::BF16);
         EXPECT_EQ(built->key.compute_dtype, DataType::FP32);
 

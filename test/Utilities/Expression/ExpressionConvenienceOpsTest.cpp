@@ -1,5 +1,5 @@
-#include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/AutoDiff.h"
+#include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/NewtonSchulzOrthogonalization.h"
@@ -9,9 +9,9 @@
 #include "gtest/gtest.h"
 
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <limits>
-#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -33,13 +33,13 @@ const ExprNode& outputNode(const PhysicalOutputs& outputs) {
     return outputs.expr->nodes.at(outputs.outputs[0].node_idx);
 }
 
-#define REQUIRE_CUDA_DEVICE()                                                                                          \
-    do {                                                                                                                \
-        int cuda_device_count_for_test = 0;                                                                             \
-        const cudaError_t cuda_status_for_test = cudaGetDeviceCount(&cuda_device_count_for_test);                       \
-        if (cuda_status_for_test != cudaSuccess || cuda_device_count_for_test <= 0) {                                    \
-            GTEST_SKIP() << "CUDA device is required for Expression numerical execution tests.";                        \
-        }                                                                                                               \
+#define REQUIRE_CUDA_DEVICE()                                                                     \
+    do {                                                                                          \
+        int cuda_device_count_for_test = 0;                                                       \
+        const cudaError_t cuda_status_for_test = cudaGetDeviceCount(&cuda_device_count_for_test); \
+        if (cuda_status_for_test != cudaSuccess || cuda_device_count_for_test <= 0) {             \
+            GTEST_SKIP() << "CUDA device is required for Expression numerical execution tests.";  \
+        }                                                                                         \
     } while (false)
 
 TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
@@ -145,10 +145,10 @@ Tensor runExpressionOutput(const Outputs& expression_outputs,
 }
 
 std::unordered_map<std::string, std::vector<float>> runBackwardValues(const Outputs& forward_outputs,
-                                                                     const std::unordered_map<std::string, Tensor>& inputs,
-                                                                     const std::vector<std::string>& wrt_names,
-                                                                     const std::string& upstream_input_name,
-                                                                     Stream& stream) {
+                                                                      const std::unordered_map<std::string, Tensor>& inputs,
+                                                                      const std::vector<std::string>& wrt_names,
+                                                                      const std::string& upstream_input_name,
+                                                                      Stream& stream) {
     FusedEquation forward = FusedEquation::compile(forward_outputs.physicalOutputs(), 0);
     FusedEquation backward = forward.compileBackward(wrt_names, upstream_input_name);
 
@@ -208,7 +208,6 @@ void expectUnaryBackwardValues(const std::string& case_name,
 
     expectNear(gradients.at("x_grad"), expected_grad, atol);
 }
-
 
 }  // namespace
 
@@ -344,15 +343,16 @@ TEST(ExpressionConvenienceOps, ClampWithExpressionBoundsBroadcastsBackwardGradie
     Tensor dy = makeGpuTensor({2, 3}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, stream);
 
     auto forward_outputs = Expression::outputs({{
-        "y", Expression::clamp(Expression::input("x"), Expression::input("lower"), Expression::input("upper")),
+        "y",
+        Expression::clamp(Expression::input("x"), Expression::input("lower"), Expression::input("upper")),
     }});
-    auto gradients = runBackwardValues(forward_outputs, {{"x", x}, {"lower", lower}, {"upper", upper}, {"dy", dy}}, {"x", "lower", "upper"}, "dy", stream);
+    auto gradients = runBackwardValues(
+        forward_outputs, {{"x", x}, {"lower", lower}, {"upper", upper}, {"dy", dy}}, {"x", "lower", "upper"}, "dy", stream);
 
     expectNear(gradients.at("x_grad"), {0.0f, 2.0f, 0.0f, 4.0f, 0.0f, 6.0f});
     expectNear(gradients.at("lower_grad"), {1.0f, 0.0f, 0.0f});
     expectNear(gradients.at("upper_grad"), {0.0f, 5.0f, 3.0f});
 }
-
 
 TEST(ExpressionConvenienceOps, TakeAlongAxisLowersAsIndexAwareBinaryOp) {
     auto values = Expression::input("values");
@@ -569,7 +569,8 @@ TEST(ExpressionBooleanComparisonOps, ComparisonProducesExpectedValuesWhenCastedT
     Tensor x = makeGpuTensor({2, 4}, {-2.0f, -1.0f, 0.0f, 0.5f, 1.0f, 2.0f, 3.0f, 4.0f}, stream);
     Tensor y = makeGpuTensor({2, 4}, {-2.0f, 0.0f, 0.0f, 1.0f, 0.5f, 2.0f, 4.0f, 3.0f}, stream);
 
-    auto expression_outputs = Expression::outputs({{"mask", Expression::input("x").greaterEqual(Expression::input("y")).withOutputDType(DataType::FP32)}});
+    auto expression_outputs =
+        Expression::outputs({{"mask", Expression::input("x").greaterEqual(Expression::input("y")).withOutputDType(DataType::FP32)}});
     Tensor mask = runExpressionOutput(expression_outputs, {{"x", x}, {"y", y}}, "mask", stream);
 
     EXPECT_EQ(mask.getDimensions(), (std::vector<uint64_t>{2, 4}));
@@ -591,7 +592,6 @@ TEST(ExpressionBooleanComparisonOps, LogicalCompositionProducesExpectedValuesWhe
     EXPECT_EQ(out.getDimensions(), (std::vector<uint64_t>{6}));
     expectNear(copyToCpuValues(out, stream), {1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f});
 }
-
 
 TEST(ExpressionWhereSelectOps, WhereAndSelectLowerToTernaryExpressionNodes) {
     auto x = Expression::input("x");
@@ -668,10 +668,10 @@ TEST(ExpressionWhereSelectOps, WhereProducesExpectedBroadcastedValues) {
     Tensor x = makeGpuTensor({2, 3}, {-2.0f, -1.0f, 0.0f, 1.0f, 2.0f, 3.0f}, stream);
     Tensor fallback = makeGpuTensor({1, 3}, {10.0f, 20.0f, 30.0f}, stream);
 
-    auto expression_outputs = Expression::outputs(
-        {{"z", Expression::where(Expression::input("x").greaterThan(Expression::constantScalar(0.0)),
-                                  Expression::input("x"),
-                                  Expression::input("fallback"))}});
+    auto expression_outputs = Expression::outputs({{"z",
+                                                    Expression::where(Expression::input("x").greaterThan(Expression::constantScalar(0.0)),
+                                                                      Expression::input("x"),
+                                                                      Expression::input("fallback"))}});
     Tensor out = runExpressionOutput(expression_outputs, {{"x", x}, {"fallback", fallback}}, "z", stream);
 
     EXPECT_EQ(out.getDimensions(), (std::vector<uint64_t>{2, 3}));
@@ -685,14 +685,14 @@ TEST(ExpressionWhereSelectOps, WhereBackwardMasksBranchGradientsAndIgnoresCondit
     Tensor dy = makeGpuTensor({6}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, stream);
 
     auto x_expr = Expression::input("x");
-    auto forward_outputs = Expression::outputs({{"z", Expression::where(x_expr.greaterThan(Expression::constantScalar(0.0)),
-                                                                          x_expr * x_expr,
-                                                                          x_expr * Expression::constantScalar(3.0))}});
+    auto forward_outputs = Expression::outputs(
+        {{"z",
+          Expression::where(
+              x_expr.greaterThan(Expression::constantScalar(0.0)), x_expr * x_expr, x_expr * Expression::constantScalar(3.0))}});
     auto gradients = runBackwardValues(forward_outputs, {{"x", x}, {"dy", dy}}, {"x"}, "dy", stream);
 
     expectNear(gradients.at("x_grad"), {3.0f, 6.0f, 9.0f, 8.0f, 20.0f, 36.0f});
 }
-
 
 TEST(ExpressionGraphConditionalOps, ConditionalOutputsExposeContractAndRejectMismatchedBranchNames) {
     auto x = Expression::input("x");
@@ -1004,58 +1004,62 @@ TEST(ExpressionTrigOps, CircularTrigPrimitiveBackwardProducesExpectedGradients) 
     const std::vector<float> small_values = {-0.75f, -0.5f, -0.25f, 0.0f, 0.25f, 0.5f, 0.75f};
     const std::vector<float> small_upstream = {1.0f, -2.0f, 0.5f, 3.0f, -1.5f, 2.5f, -0.75f};
 
-    expectUnaryBackwardValues("sin",
-                              small_values,
-                              small_upstream,
-                              [](const Expression& x) { return x.sin(); },
-                              expectedElementwiseGradient(small_values, small_upstream, [](double v) { return std::cos(v); }),
-                              2.0e-5f,
-                              stream);
-    expectUnaryBackwardValues("cos",
-                              small_values,
-                              small_upstream,
-                              [](const Expression& x) { return x.cos(); },
-                              expectedElementwiseGradient(small_values, small_upstream, [](double v) { return -std::sin(v); }),
-                              2.0e-5f,
-                              stream);
-    expectUnaryBackwardValues("tan",
-                              small_values,
-                              small_upstream,
-                              [](const Expression& x) { return x.tan(); },
-                              expectedElementwiseGradient(small_values, small_upstream, [](double v) {
-                                  const double c = std::cos(v);
-                                  return 1.0 / (c * c);
-                              }),
-                              3.0e-5f,
-                              stream);
-    expectUnaryBackwardValues("asin",
-                              small_values,
-                              small_upstream,
-                              [](const Expression& x) { return x.asin(); },
-                              expectedElementwiseGradient(small_values, small_upstream, [](double v) {
-                                  return 1.0 / std::sqrt(1.0 - v * v);
-                              }),
-                              3.0e-5f,
-                              stream);
-    expectUnaryBackwardValues("acos",
-                              small_values,
-                              small_upstream,
-                              [](const Expression& x) { return x.acos(); },
-                              expectedElementwiseGradient(small_values, small_upstream, [](double v) {
-                                  return -1.0 / std::sqrt(1.0 - v * v);
-                              }),
-                              3.0e-5f,
-                              stream);
+    expectUnaryBackwardValues(
+        "sin",
+        small_values,
+        small_upstream,
+        [](const Expression& x) { return x.sin(); },
+        expectedElementwiseGradient(small_values, small_upstream, [](double v) { return std::cos(v); }),
+        2.0e-5f,
+        stream);
+    expectUnaryBackwardValues(
+        "cos",
+        small_values,
+        small_upstream,
+        [](const Expression& x) { return x.cos(); },
+        expectedElementwiseGradient(small_values, small_upstream, [](double v) { return -std::sin(v); }),
+        2.0e-5f,
+        stream);
+    expectUnaryBackwardValues(
+        "tan",
+        small_values,
+        small_upstream,
+        [](const Expression& x) { return x.tan(); },
+        expectedElementwiseGradient(small_values,
+                                    small_upstream,
+                                    [](double v) {
+                                        const double c = std::cos(v);
+                                        return 1.0 / (c * c);
+                                    }),
+        3.0e-5f,
+        stream);
+    expectUnaryBackwardValues(
+        "asin",
+        small_values,
+        small_upstream,
+        [](const Expression& x) { return x.asin(); },
+        expectedElementwiseGradient(small_values, small_upstream, [](double v) { return 1.0 / std::sqrt(1.0 - v * v); }),
+        3.0e-5f,
+        stream);
+    expectUnaryBackwardValues(
+        "acos",
+        small_values,
+        small_upstream,
+        [](const Expression& x) { return x.acos(); },
+        expectedElementwiseGradient(small_values, small_upstream, [](double v) { return -1.0 / std::sqrt(1.0 - v * v); }),
+        3.0e-5f,
+        stream);
 
     const std::vector<float> atan_values = {-3.0f, -1.0f, -0.25f, 0.0f, 0.25f, 1.0f, 3.0f};
     const std::vector<float> atan_upstream = {0.25f, -1.0f, 2.0f, -3.0f, 1.5f, -0.5f, 4.0f};
-    expectUnaryBackwardValues("atan",
-                              atan_values,
-                              atan_upstream,
-                              [](const Expression& x) { return x.atan(); },
-                              expectedElementwiseGradient(atan_values, atan_upstream, [](double v) { return 1.0 / (1.0 + v * v); }),
-                              2.0e-5f,
-                              stream);
+    expectUnaryBackwardValues(
+        "atan",
+        atan_values,
+        atan_upstream,
+        [](const Expression& x) { return x.atan(); },
+        expectedElementwiseGradient(atan_values, atan_upstream, [](double v) { return 1.0 / (1.0 + v * v); }),
+        2.0e-5f,
+        stream);
 }
 
 TEST(ExpressionTrigOps, ReciprocalCircularTrigBackwardProducesExpectedGradients) {
@@ -1065,67 +1069,79 @@ TEST(ExpressionTrigOps, ReciprocalCircularTrigBackwardProducesExpectedGradients)
     const std::vector<float> reciprocal_values = {-1.25f, -0.75f, -0.25f, 0.25f, 0.75f, 1.25f};
     const std::vector<float> reciprocal_upstream = {1.0f, -2.0f, 0.5f, 3.0f, -1.5f, 2.5f};
 
-    expectUnaryBackwardValues("csc",
-                              reciprocal_values,
-                              reciprocal_upstream,
-                              [](const Expression& x) { return x.csc(); },
-                              expectedElementwiseGradient(reciprocal_values, reciprocal_upstream, [](double v) {
-                                  const double s = std::sin(v);
-                                  return -std::cos(v) / (s * s);
-                              }),
-                              5.0e-4f,
-                              stream);
-    expectUnaryBackwardValues("sec",
-                              reciprocal_values,
-                              reciprocal_upstream,
-                              [](const Expression& x) { return x.sec(); },
-                              expectedElementwiseGradient(reciprocal_values, reciprocal_upstream, [](double v) {
-                                  const double c = std::cos(v);
-                                  return std::sin(v) / (c * c);
-                              }),
-                              5.0e-4f,
-                              stream);
-    expectUnaryBackwardValues("cot",
-                              reciprocal_values,
-                              reciprocal_upstream,
-                              [](const Expression& x) { return x.cot(); },
-                              expectedElementwiseGradient(reciprocal_values, reciprocal_upstream, [](double v) {
-                                  const double s = std::sin(v);
-                                  return -1.0 / (s * s);
-                              }),
-                              5.0e-4f,
-                              stream);
+    expectUnaryBackwardValues(
+        "csc",
+        reciprocal_values,
+        reciprocal_upstream,
+        [](const Expression& x) { return x.csc(); },
+        expectedElementwiseGradient(reciprocal_values,
+                                    reciprocal_upstream,
+                                    [](double v) {
+                                        const double s = std::sin(v);
+                                        return -std::cos(v) / (s * s);
+                                    }),
+        5.0e-4f,
+        stream);
+    expectUnaryBackwardValues(
+        "sec",
+        reciprocal_values,
+        reciprocal_upstream,
+        [](const Expression& x) { return x.sec(); },
+        expectedElementwiseGradient(reciprocal_values,
+                                    reciprocal_upstream,
+                                    [](double v) {
+                                        const double c = std::cos(v);
+                                        return std::sin(v) / (c * c);
+                                    }),
+        5.0e-4f,
+        stream);
+    expectUnaryBackwardValues(
+        "cot",
+        reciprocal_values,
+        reciprocal_upstream,
+        [](const Expression& x) { return x.cot(); },
+        expectedElementwiseGradient(reciprocal_values,
+                                    reciprocal_upstream,
+                                    [](double v) {
+                                        const double s = std::sin(v);
+                                        return -1.0 / (s * s);
+                                    }),
+        5.0e-4f,
+        stream);
 
     const std::vector<float> inverse_reciprocal_values = {-4.0f, -2.0f, -1.25f, 1.25f, 2.0f, 4.0f};
     const std::vector<float> inverse_reciprocal_upstream = {-1.0f, 0.5f, -2.0f, 3.0f, -0.75f, 1.25f};
-    expectUnaryBackwardValues("acsc",
-                              inverse_reciprocal_values,
-                              inverse_reciprocal_upstream,
-                              [](const Expression& x) { return x.acsc(); },
-                              expectedElementwiseGradient(inverse_reciprocal_values, inverse_reciprocal_upstream, [](double v) {
-                                  return (-1.0 / (v * v)) / std::sqrt(1.0 - 1.0 / (v * v));
-                              }),
-                              2.0e-4f,
-                              stream);
-    expectUnaryBackwardValues("asec",
-                              inverse_reciprocal_values,
-                              inverse_reciprocal_upstream,
-                              [](const Expression& x) { return x.asec(); },
-                              expectedElementwiseGradient(inverse_reciprocal_values, inverse_reciprocal_upstream, [](double v) {
-                                  return (1.0 / (v * v)) / std::sqrt(1.0 - 1.0 / (v * v));
-                              }),
-                              2.0e-4f,
-                              stream);
+    expectUnaryBackwardValues(
+        "acsc",
+        inverse_reciprocal_values,
+        inverse_reciprocal_upstream,
+        [](const Expression& x) { return x.acsc(); },
+        expectedElementwiseGradient(inverse_reciprocal_values,
+                                    inverse_reciprocal_upstream,
+                                    [](double v) { return (-1.0 / (v * v)) / std::sqrt(1.0 - 1.0 / (v * v)); }),
+        2.0e-4f,
+        stream);
+    expectUnaryBackwardValues(
+        "asec",
+        inverse_reciprocal_values,
+        inverse_reciprocal_upstream,
+        [](const Expression& x) { return x.asec(); },
+        expectedElementwiseGradient(inverse_reciprocal_values,
+                                    inverse_reciprocal_upstream,
+                                    [](double v) { return (1.0 / (v * v)) / std::sqrt(1.0 - 1.0 / (v * v)); }),
+        2.0e-4f,
+        stream);
 
     const std::vector<float> acot_values = {-4.0f, -2.0f, -0.5f, 0.5f, 2.0f, 4.0f};
     const std::vector<float> acot_upstream = {1.25f, -0.75f, 3.0f, -2.0f, 0.5f, -1.0f};
-    expectUnaryBackwardValues("acot",
-                              acot_values,
-                              acot_upstream,
-                              [](const Expression& x) { return x.acot(); },
-                              expectedElementwiseGradient(acot_values, acot_upstream, [](double v) { return -1.0 / (1.0 + v * v); }),
-                              2.0e-4f,
-                              stream);
+    expectUnaryBackwardValues(
+        "acot",
+        acot_values,
+        acot_upstream,
+        [](const Expression& x) { return x.acot(); },
+        expectedElementwiseGradient(acot_values, acot_upstream, [](double v) { return -1.0 / (1.0 + v * v); }),
+        2.0e-4f,
+        stream);
 }
 
 TEST(ExpressionTrigOps, SinProducesExpectedValues) {
@@ -1360,8 +1376,8 @@ TEST(ExpressionHyperbolicTrigOps, InverseReciprocalHyperbolicTrigHelpersLowerToD
 
 TEST(ExpressionHyperbolicTrigOps, HyperbolicTrigOpsStayInSingleFusedStage) {
     auto x = Expression::input("x");
-    auto y = x.sinh() + x.cosh() + x.tanh() + x.asinh() + x.acosh() + x.atanh() + x.csch() + x.sech() + x.coth() + x.acsch() +
-             x.asech() + x.acoth();
+    auto y = x.sinh() + x.cosh() + x.tanh() + x.asinh() + x.acosh() + x.atanh() + x.csch() + x.sech() + x.coth() + x.acsch() + x.asech() +
+             x.acoth();
 
     auto outputs = Expression::outputs({{"y", y}}).physicalOutputs();
     resolveOutputsDTypesInPlace(outputs, {DataType::FP32});
@@ -1386,62 +1402,68 @@ TEST(ExpressionHyperbolicTrigOps, HyperbolicTrigPrimitiveBackwardProducesExpecte
     const std::vector<float> values = {-2.0f, -1.0f, -0.25f, 0.0f, 0.25f, 1.0f, 2.0f};
     const std::vector<float> upstream = {1.0f, -2.0f, 0.5f, 3.0f, -1.5f, 2.5f, -0.75f};
 
-    expectUnaryBackwardValues("sinh",
-                              values,
-                              upstream,
-                              [](const Expression& x) { return x.sinh(); },
-                              expectedElementwiseGradient(values, upstream, [](double v) { return std::cosh(v); }),
-                              4.0e-5f,
-                              stream);
-    expectUnaryBackwardValues("cosh",
-                              values,
-                              upstream,
-                              [](const Expression& x) { return x.cosh(); },
-                              expectedElementwiseGradient(values, upstream, [](double v) { return std::sinh(v); }),
-                              4.0e-5f,
-                              stream);
-    expectUnaryBackwardValues("tanh",
-                              values,
-                              upstream,
-                              [](const Expression& x) { return x.tanh(); },
-                              expectedElementwiseGradient(values, upstream, [](double v) {
-                                  const double t = std::tanh(v);
-                                  return 1.0 - t * t;
-                              }),
-                              4.0e-5f,
-                              stream);
+    expectUnaryBackwardValues(
+        "sinh",
+        values,
+        upstream,
+        [](const Expression& x) { return x.sinh(); },
+        expectedElementwiseGradient(values, upstream, [](double v) { return std::cosh(v); }),
+        4.0e-5f,
+        stream);
+    expectUnaryBackwardValues(
+        "cosh",
+        values,
+        upstream,
+        [](const Expression& x) { return x.cosh(); },
+        expectedElementwiseGradient(values, upstream, [](double v) { return std::sinh(v); }),
+        4.0e-5f,
+        stream);
+    expectUnaryBackwardValues(
+        "tanh",
+        values,
+        upstream,
+        [](const Expression& x) { return x.tanh(); },
+        expectedElementwiseGradient(values,
+                                    upstream,
+                                    [](double v) {
+                                        const double t = std::tanh(v);
+                                        return 1.0 - t * t;
+                                    }),
+        4.0e-5f,
+        stream);
 
     const std::vector<float> asinh_values = {-8.0f, -2.0f, -0.25f, 0.0f, 0.25f, 2.0f, 8.0f};
     const std::vector<float> asinh_upstream = {-1.0f, 0.5f, -2.0f, 3.0f, -0.75f, 1.25f, 2.0f};
-    expectUnaryBackwardValues("asinh",
-                              asinh_values,
-                              asinh_upstream,
-                              [](const Expression& x) { return x.asinh(); },
-                              expectedElementwiseGradient(asinh_values, asinh_upstream, [](double v) { return 1.0 / std::sqrt(v * v + 1.0); }),
-                              4.0e-5f,
-                              stream);
+    expectUnaryBackwardValues(
+        "asinh",
+        asinh_values,
+        asinh_upstream,
+        [](const Expression& x) { return x.asinh(); },
+        expectedElementwiseGradient(asinh_values, asinh_upstream, [](double v) { return 1.0 / std::sqrt(v * v + 1.0); }),
+        4.0e-5f,
+        stream);
 
     const std::vector<float> acosh_values = {1.125f, 1.5f, 2.0f, 4.0f, 8.0f};
     const std::vector<float> acosh_upstream = {1.0f, -2.0f, 0.5f, -0.75f, 1.25f};
-    expectUnaryBackwardValues("acosh",
-                              acosh_values,
-                              acosh_upstream,
-                              [](const Expression& x) { return x.acosh(); },
-                              expectedElementwiseGradient(acosh_values, acosh_upstream, [](double v) {
-                                  return 1.0 / (std::sqrt(v - 1.0) * std::sqrt(v + 1.0));
-                              }),
-                              6.0e-5f,
-                              stream);
+    expectUnaryBackwardValues(
+        "acosh",
+        acosh_values,
+        acosh_upstream,
+        [](const Expression& x) { return x.acosh(); },
+        expectedElementwiseGradient(acosh_values, acosh_upstream, [](double v) { return 1.0 / (std::sqrt(v - 1.0) * std::sqrt(v + 1.0)); }),
+        6.0e-5f,
+        stream);
 
     const std::vector<float> atanh_values = {-0.75f, -0.5f, -0.25f, 0.0f, 0.25f, 0.5f, 0.75f};
     const std::vector<float> atanh_upstream = {0.25f, -1.0f, 2.0f, -3.0f, 1.5f, -0.5f, 4.0f};
-    expectUnaryBackwardValues("atanh",
-                              atanh_values,
-                              atanh_upstream,
-                              [](const Expression& x) { return x.atanh(); },
-                              expectedElementwiseGradient(atanh_values, atanh_upstream, [](double v) { return 1.0 / (1.0 - v * v); }),
-                              5.0e-5f,
-                              stream);
+    expectUnaryBackwardValues(
+        "atanh",
+        atanh_values,
+        atanh_upstream,
+        [](const Expression& x) { return x.atanh(); },
+        expectedElementwiseGradient(atanh_values, atanh_upstream, [](double v) { return 1.0 / (1.0 - v * v); }),
+        5.0e-5f,
+        stream);
 }
 
 TEST(ExpressionHyperbolicTrigOps, ReciprocalHyperbolicTrigBackwardProducesExpectedGradients) {
@@ -1451,74 +1473,87 @@ TEST(ExpressionHyperbolicTrigOps, ReciprocalHyperbolicTrigBackwardProducesExpect
     const std::vector<float> reciprocal_values = {-2.0f, -1.0f, -0.5f, 0.5f, 1.0f, 2.0f};
     const std::vector<float> reciprocal_upstream = {1.0f, -2.0f, 0.5f, 3.0f, -1.5f, 2.5f};
 
-    expectUnaryBackwardValues("csch",
-                              reciprocal_values,
-                              reciprocal_upstream,
-                              [](const Expression& x) { return x.csch(); },
-                              expectedElementwiseGradient(reciprocal_values, reciprocal_upstream, [](double v) {
-                                  const double s = std::sinh(v);
-                                  return -std::cosh(v) / (s * s);
-                              }),
-                              8.0e-5f,
-                              stream);
-    expectUnaryBackwardValues("coth",
-                              reciprocal_values,
-                              reciprocal_upstream,
-                              [](const Expression& x) { return x.coth(); },
-                              expectedElementwiseGradient(reciprocal_values, reciprocal_upstream, [](double v) {
-                                  const double s = std::sinh(v);
-                                  return -1.0 / (s * s);
-                              }),
-                              8.0e-5f,
-                              stream);
+    expectUnaryBackwardValues(
+        "csch",
+        reciprocal_values,
+        reciprocal_upstream,
+        [](const Expression& x) { return x.csch(); },
+        expectedElementwiseGradient(reciprocal_values,
+                                    reciprocal_upstream,
+                                    [](double v) {
+                                        const double s = std::sinh(v);
+                                        return -std::cosh(v) / (s * s);
+                                    }),
+        8.0e-5f,
+        stream);
+    expectUnaryBackwardValues(
+        "coth",
+        reciprocal_values,
+        reciprocal_upstream,
+        [](const Expression& x) { return x.coth(); },
+        expectedElementwiseGradient(reciprocal_values,
+                                    reciprocal_upstream,
+                                    [](double v) {
+                                        const double s = std::sinh(v);
+                                        return -1.0 / (s * s);
+                                    }),
+        8.0e-5f,
+        stream);
 
     const std::vector<float> sech_values = {-2.0f, -1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 2.0f};
     const std::vector<float> sech_upstream = {-1.0f, 0.5f, -2.0f, 3.0f, -0.75f, 1.25f, 2.0f};
-    expectUnaryBackwardValues("sech",
-                              sech_values,
-                              sech_upstream,
-                              [](const Expression& x) { return x.sech(); },
-                              expectedElementwiseGradient(sech_values, sech_upstream, [](double v) {
-                                  const double c = std::cosh(v);
-                                  return -std::sinh(v) / (c * c);
-                              }),
-                              6.0e-5f,
-                              stream);
+    expectUnaryBackwardValues(
+        "sech",
+        sech_values,
+        sech_upstream,
+        [](const Expression& x) { return x.sech(); },
+        expectedElementwiseGradient(sech_values,
+                                    sech_upstream,
+                                    [](double v) {
+                                        const double c = std::cosh(v);
+                                        return -std::sinh(v) / (c * c);
+                                    }),
+        6.0e-5f,
+        stream);
 
     const std::vector<float> inverse_values = {-4.0f, -2.0f, -0.5f, 0.5f, 2.0f, 4.0f};
     const std::vector<float> inverse_upstream = {1.25f, -0.75f, 3.0f, -2.0f, 0.5f, -1.0f};
-    expectUnaryBackwardValues("acsch",
-                              inverse_values,
-                              inverse_upstream,
-                              [](const Expression& x) { return x.acsch(); },
-                              expectedElementwiseGradient(inverse_values, inverse_upstream, [](double v) {
-                                  return (-1.0 / (v * v)) / std::sqrt(1.0 + 1.0 / (v * v));
-                              }),
-                              6.0e-5f,
-                              stream);
+    expectUnaryBackwardValues(
+        "acsch",
+        inverse_values,
+        inverse_upstream,
+        [](const Expression& x) { return x.acsch(); },
+        expectedElementwiseGradient(
+            inverse_values, inverse_upstream, [](double v) { return (-1.0 / (v * v)) / std::sqrt(1.0 + 1.0 / (v * v)); }),
+        6.0e-5f,
+        stream);
 
     const std::vector<float> asech_values = {0.125f, 0.25f, 0.5f, 0.75f};
     const std::vector<float> asech_upstream = {1.0f, -2.0f, 0.5f, -0.75f};
-    expectUnaryBackwardValues("asech",
-                              asech_values,
-                              asech_upstream,
-                              [](const Expression& x) { return x.asech(); },
-                              expectedElementwiseGradient(asech_values, asech_upstream, [](double v) {
-                                  const double inv = 1.0 / v;
-                                  return (-1.0 / (v * v)) / (std::sqrt(inv - 1.0) * std::sqrt(inv + 1.0));
-                              }),
-                              8.0e-5f,
-                              stream);
+    expectUnaryBackwardValues(
+        "asech",
+        asech_values,
+        asech_upstream,
+        [](const Expression& x) { return x.asech(); },
+        expectedElementwiseGradient(asech_values,
+                                    asech_upstream,
+                                    [](double v) {
+                                        const double inv = 1.0 / v;
+                                        return (-1.0 / (v * v)) / (std::sqrt(inv - 1.0) * std::sqrt(inv + 1.0));
+                                    }),
+        8.0e-5f,
+        stream);
 
     const std::vector<float> acoth_values = {-4.0f, -2.0f, -1.25f, 1.25f, 2.0f, 4.0f};
     const std::vector<float> acoth_upstream = {-1.0f, 0.5f, -2.0f, 3.0f, -0.75f, 1.25f};
-    expectUnaryBackwardValues("acoth",
-                              acoth_values,
-                              acoth_upstream,
-                              [](const Expression& x) { return x.acoth(); },
-                              expectedElementwiseGradient(acoth_values, acoth_upstream, [](double v) { return -1.0 / (v * v - 1.0); }),
-                              8.0e-5f,
-                              stream);
+    expectUnaryBackwardValues(
+        "acoth",
+        acoth_values,
+        acoth_upstream,
+        [](const Expression& x) { return x.acoth(); },
+        expectedElementwiseGradient(acoth_values, acoth_upstream, [](double v) { return -1.0 / (v * v - 1.0); }),
+        8.0e-5f,
+        stream);
 }
 
 TEST(ExpressionHyperbolicTrigOps, SinhProducesExpectedValues) {
@@ -1714,33 +1749,31 @@ TEST(ExpressionErrorFunctionOps, ErrorFunctionBackwardProducesExpectedGradients)
     const std::vector<float> values = {-1.5f, -1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 1.5f};
     const std::vector<float> upstream = {1.0f, -2.0f, 0.5f, 3.0f, -1.5f, 2.5f, -0.75f};
 
-    expectUnaryBackwardValues("erf",
-                              values,
-                              upstream,
-                              [](const Expression& x) { return x.erf(); },
-                              expectedElementwiseGradient(values, upstream, [two_over_sqrt_pi](double v) {
-                                  return two_over_sqrt_pi * std::exp(-(v * v));
-                              }),
-                              5.0e-5f,
-                              stream);
-    expectUnaryBackwardValues("erfc",
-                              values,
-                              upstream,
-                              [](const Expression& x) { return x.erfc(); },
-                              expectedElementwiseGradient(values, upstream, [two_over_sqrt_pi](double v) {
-                                  return -two_over_sqrt_pi * std::exp(-(v * v));
-                              }),
-                              5.0e-5f,
-                              stream);
-    expectUnaryBackwardValues("erfcx",
-                              values,
-                              upstream,
-                              [](const Expression& x) { return x.erfcx(); },
-                              expectedElementwiseGradient(values, upstream, [two_over_sqrt_pi](double v) {
-                                  return 2.0 * v * std::exp(v * v) * std::erfc(v) - two_over_sqrt_pi;
-                              }),
-                              1.0e-3f,
-                              stream);
+    expectUnaryBackwardValues(
+        "erf",
+        values,
+        upstream,
+        [](const Expression& x) { return x.erf(); },
+        expectedElementwiseGradient(values, upstream, [two_over_sqrt_pi](double v) { return two_over_sqrt_pi * std::exp(-(v * v)); }),
+        5.0e-5f,
+        stream);
+    expectUnaryBackwardValues(
+        "erfc",
+        values,
+        upstream,
+        [](const Expression& x) { return x.erfc(); },
+        expectedElementwiseGradient(values, upstream, [two_over_sqrt_pi](double v) { return -two_over_sqrt_pi * std::exp(-(v * v)); }),
+        5.0e-5f,
+        stream);
+    expectUnaryBackwardValues(
+        "erfcx",
+        values,
+        upstream,
+        [](const Expression& x) { return x.erfcx(); },
+        expectedElementwiseGradient(
+            values, upstream, [two_over_sqrt_pi](double v) { return 2.0 * v * std::exp(v * v) * std::erfc(v) - two_over_sqrt_pi; }),
+        1.0e-3f,
+        stream);
 
     const std::vector<float> erfinv_values = {-0.9f, -0.5f, -0.25f, 0.0f, 0.25f, 0.5f, 0.9f};
     const std::vector<float> erfinv_upstream = {-1.0f, 0.5f, -2.0f, 3.0f, -0.75f, 1.25f, 2.0f};
@@ -1750,30 +1783,32 @@ TEST(ExpressionErrorFunctionOps, ErrorFunctionBackwardProducesExpectedGradients)
     for (float inverse : erfinv_outputs) {
         erfinv_derivatives.push_back(static_cast<float>(sqrt_pi_over_two * std::exp(static_cast<double>(inverse) * inverse)));
     }
-    expectUnaryBackwardValues("erfinv",
-                              erfinv_values,
-                              erfinv_upstream,
-                              [](const Expression& x) { return x.erfinv(); },
-                              scaleDerivatives(erfinv_derivatives, erfinv_upstream),
-                              1.0e-4f,
-                              stream);
+    expectUnaryBackwardValues(
+        "erfinv",
+        erfinv_values,
+        erfinv_upstream,
+        [](const Expression& x) { return x.erfinv(); },
+        scaleDerivatives(erfinv_derivatives, erfinv_upstream),
+        1.0e-4f,
+        stream);
 
     const std::vector<float> erfcinv_values = {0.1f, 0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.9f};
     const std::vector<float> erfcinv_upstream = {1.0f, -2.0f, 0.5f, 3.0f, -1.5f, 2.5f, -0.75f, 1.25f};
-    const std::vector<float> erfcinv_outputs = {1.163087154f, 0.813419848f, 0.476936276f, 0.225312055f,
-                                                0.0f, -0.225312055f, -0.476936276f, -1.163087154f};
+    const std::vector<float> erfcinv_outputs = {
+        1.163087154f, 0.813419848f, 0.476936276f, 0.225312055f, 0.0f, -0.225312055f, -0.476936276f, -1.163087154f};
     std::vector<float> erfcinv_derivatives;
     erfcinv_derivatives.reserve(erfcinv_outputs.size());
     for (float inverse : erfcinv_outputs) {
         erfcinv_derivatives.push_back(static_cast<float>(-sqrt_pi_over_two * std::exp(static_cast<double>(inverse) * inverse)));
     }
-    expectUnaryBackwardValues("erfcinv",
-                              erfcinv_values,
-                              erfcinv_upstream,
-                              [](const Expression& x) { return x.erfcinv(); },
-                              scaleDerivatives(erfcinv_derivatives, erfcinv_upstream),
-                              1.0e-4f,
-                              stream);
+    expectUnaryBackwardValues(
+        "erfcinv",
+        erfcinv_values,
+        erfcinv_upstream,
+        [](const Expression& x) { return x.erfcinv(); },
+        scaleDerivatives(erfcinv_derivatives, erfcinv_upstream),
+        1.0e-4f,
+        stream);
 }
 
 TEST(ExpressionErrorFunctionOps, ErfProducesExpectedValues) {
@@ -1825,7 +1860,8 @@ TEST(ExpressionErrorFunctionOps, ErfinvProducesExpectedValues) {
     Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
 
     EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{7}));
-    expectNear(copyToCpuValues(y, stream), {-1.163087154f, -0.476936276f, -0.225312055f, 0.0f, 0.225312055f, 0.476936276f, 1.163087154f}, 2.0e-5f);
+    expectNear(
+        copyToCpuValues(y, stream), {-1.163087154f, -0.476936276f, -0.225312055f, 0.0f, 0.225312055f, 0.476936276f, 1.163087154f}, 2.0e-5f);
 }
 
 TEST(ExpressionErrorFunctionOps, ErfcinvProducesExpectedValues) {
@@ -1838,7 +1874,9 @@ TEST(ExpressionErrorFunctionOps, ErfcinvProducesExpectedValues) {
     Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
 
     EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 4}));
-    expectNear(copyToCpuValues(y, stream), {1.163087154f, 0.813419848f, 0.476936276f, 0.225312055f, 0.0f, -0.225312055f, -0.476936276f, -1.163087154f}, 2.0e-5f);
+    expectNear(copyToCpuValues(y, stream),
+               {1.163087154f, 0.813419848f, 0.476936276f, 0.225312055f, 0.0f, -0.225312055f, -0.476936276f, -1.163087154f},
+               2.0e-5f);
 }
 
 TEST(ExpressionErrorFunctionOps, InverseErrorFunctionsRoundTripThroughForwardFunctions) {
@@ -1861,7 +1899,6 @@ TEST(ExpressionErrorFunctionOps, InverseErrorFunctionsRoundTripThroughForwardFun
     expectNear(copyToCpuValues(erfc_roundtrip, stream), erfc_values, 3.0e-5f);
 }
 
-
 TEST(ExpressionGammaFunctionOps, PrimitiveGammaFunctionOpsLowerToUnaryExpressionNodes) {
     auto x = Expression::input("x");
 
@@ -1880,7 +1917,6 @@ TEST(ExpressionGammaFunctionOps, PrimitiveGammaFunctionOpsLowerToUnaryExpression
     }
 }
 
-
 TEST(ExpressionAutoDiffShapeSpecialization, RuntimeScalarsDoNotRequireTensorDimensions) {
     Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
     Expression scale = Expression::tensorRuntimeScalar("scale", DataType::FP32, DataType::FP32);
@@ -1890,11 +1926,7 @@ TEST(ExpressionAutoDiffShapeSpecialization, RuntimeScalarsDoNotRequireTensorDime
         {"x", {2, 3}},
     };
 
-    EXPECT_NO_THROW((void)buildBackwardOutputs(
-        forward,
-        {"x"},
-        std::nullopt,
-        forwardInputDims));
+    EXPECT_NO_THROW((void)buildBackwardOutputs(forward, {"x"}, std::nullopt, forwardInputDims));
 }
 
 TEST(ExpressionGammaFunctionOps, GammaFunctionOpsStayInSingleFusedStage) {
@@ -1947,20 +1979,22 @@ TEST(ExpressionGammaFunctionOps, TgammaAndLgammaBackwardProduceExpectedGradients
         tgamma_derivatives.push_back(static_cast<float>(std::tgamma(static_cast<double>(values[i])) * digamma_values[i]));
     }
 
-    expectUnaryBackwardValues("tgamma",
-                              values,
-                              upstream,
-                              [](const Expression& x) { return x.tgamma(); },
-                              scaleDerivatives(tgamma_derivatives, upstream),
-                              3.0e-4f,
-                              stream);
-    expectUnaryBackwardValues("lgamma",
-                              values,
-                              upstream,
-                              [](const Expression& x) { return x.lgamma(); },
-                              scaleDerivatives(digamma_values, upstream),
-                              1.0e-4f,
-                              stream);
+    expectUnaryBackwardValues(
+        "tgamma",
+        values,
+        upstream,
+        [](const Expression& x) { return x.tgamma(); },
+        scaleDerivatives(tgamma_derivatives, upstream),
+        3.0e-4f,
+        stream);
+    expectUnaryBackwardValues(
+        "lgamma",
+        values,
+        upstream,
+        [](const Expression& x) { return x.lgamma(); },
+        scaleDerivatives(digamma_values, upstream),
+        1.0e-4f,
+        stream);
 }
 
 TEST(ExpressionGammaFunctionOps, DigammaAutodiffRejectsUntilTrigammaExists) {
@@ -2006,17 +2040,19 @@ TEST(ExpressionGammaFunctionOps, DigammaProducesExpectedValues) {
     Tensor y = runExpressionOutput(expression_outputs, {{"x", x}}, "y", stream);
 
     EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{9}));
-    expectNear(copyToCpuValues(y, stream), {
-        0.036489974f,
-        -4.227453709f,
-        -1.963510036f,
-        -0.577215672f,
-        0.036489974f,
-        0.422784328f,
-        0.922784328f,
-        1.256117702f,
-        2.015641451f,
-    }, 2.0e-5f);
+    expectNear(copyToCpuValues(y, stream),
+               {
+                   0.036489974f,
+                   -4.227453709f,
+                   -1.963510036f,
+                   -0.577215672f,
+                   0.036489974f,
+                   0.422784328f,
+                   0.922784328f,
+                   1.256117702f,
+                   2.015641451f,
+               },
+               2.0e-5f);
 }
 
 TEST(ExpressionGammaFunctionOps, DigammaProducesNanAtNonpositiveIntegerPoles) {
@@ -2037,12 +2073,8 @@ TEST(ExpressionGammaFunctionOps, DigammaProducesNanAtNonpositiveIntegerPoles) {
 
 namespace {
 
-std::vector<double> matmulCpu(const std::vector<double>& a,
-                              uint64_t a_rows,
-                              uint64_t a_cols,
-                              const std::vector<double>& b,
-                              uint64_t b_rows,
-                              uint64_t b_cols) {
+std::vector<double> matmulCpu(
+    const std::vector<double>& a, uint64_t a_rows, uint64_t a_cols, const std::vector<double>& b, uint64_t b_rows, uint64_t b_cols) {
     if (a_cols != b_rows) {
         throw std::runtime_error("matmulCpu dimension mismatch.");
     }
@@ -2141,7 +2173,6 @@ std::vector<float> toFloatValues(const std::vector<double>& values) {
 
 }  // namespace
 
-
 TEST(ExpressionConvenienceOps, GlobalFusedKernelCacheKeepsRuntimeScalarNamesStampLocal) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -2175,10 +2206,7 @@ TEST(ExpressionConvenienceOps, FusedKernelConsumesNonDenseStridedInputView) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    Tensor boxes = makeGpuTensor({2, 4},
-                                 {0.10f, 0.20f, 1.40f, 1.80f,
-                                  2.00f, 0.50f, 3.50f, 1.90f},
-                                 stream);
+    Tensor boxes = makeGpuTensor({2, 4}, {0.10f, 0.20f, 1.40f, 1.80f, 2.00f, 0.50f, 3.50f, 1.90f}, stream);
     Tensor x1 = boxes.aliasView({2}, {4}, 0);
     ASSERT_FALSE(x1.isDenseContiguous());
 
@@ -2190,16 +2218,11 @@ TEST(ExpressionConvenienceOps, FusedKernelConsumesNonDenseStridedInputView) {
     expectNear(copyToCpuValues(y, stream), {1.20f, 5.00f});
 }
 
-
 TEST(ExpressionConvenienceOps, ConvenienceRunPlanCacheKeysNonDenseInputStrides) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    Tensor storage = makeGpuTensor({3, 4},
-                                   {0.0f, 1.0f, 2.0f, 3.0f,
-                                    4.0f, 5.0f, 6.0f, 7.0f,
-                                    8.0f, 9.0f, 10.0f, 11.0f},
-                                   stream);
+    Tensor storage = makeGpuTensor({3, 4}, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f}, stream);
     Tensor stride4 = storage.aliasView({3}, {4}, 0);
     Tensor stride2 = storage.aliasView({3}, {2}, 0);
     ASSERT_FALSE(stride4.isDenseContiguous());
@@ -2226,16 +2249,11 @@ TEST(ExpressionConvenienceOps, ConvenienceRunPlanCacheKeysNonDenseInputStrides) 
     expectNear(copyToCpuValues(yStride2, stream), {0.0f, 6.0f, 12.0f});
 }
 
-
 TEST(ExpressionConvenienceOps, InternalStridedViewAliasExecutesInStampedAndConvenienceRuns) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    Tensor storage = makeGpuTensor({3, 4},
-                                   {0.0f, 1.0f, 2.0f, 3.0f,
-                                    4.0f, 5.0f, 6.0f, 7.0f,
-                                    8.0f, 9.0f, 10.0f, 11.0f},
-                                   stream);
+    Tensor storage = makeGpuTensor({3, 4}, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f}, stream);
 
     auto x = Expression::input("x");
     auto view = x.stridedView({3}, {4}, 2);
@@ -2257,11 +2275,8 @@ TEST(ExpressionConvenienceOps, InternalRankTwoStridedViewUsesBothRuntimeStrides)
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    Tensor storage = makeGpuTensor({3, 5},
-                                   {0.0f, 1.0f, 2.0f, 3.0f, 4.0f,
-                                    5.0f, 6.0f, 7.0f, 8.0f, 9.0f,
-                                    10.0f, 11.0f, 12.0f, 13.0f, 14.0f},
-                                   stream);
+    Tensor storage =
+        makeGpuTensor({3, 5}, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f}, stream);
 
     auto x = Expression::input("x");
     auto view = x.stridedView({3, 2}, {5, 2}, 1);
@@ -2274,16 +2289,12 @@ TEST(ExpressionConvenienceOps, InternalRankTwoStridedViewUsesBothRuntimeStrides)
     expectNear(copyToCpuValues(y, stream), {1.5f, 3.5f, 6.5f, 8.5f, 11.5f, 13.5f});
 }
 
-
 TEST(ExpressionConvenienceOps, InternalStridedViewCanAliasFromNonDenseRootViewBase) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    Tensor storage = makeGpuTensor({3, 5},
-                                   {0.0f, 1.0f, 2.0f, 3.0f, 4.0f,
-                                    5.0f, 6.0f, 7.0f, 8.0f, 9.0f,
-                                    10.0f, 11.0f, 12.0f, 13.0f, 14.0f},
-                                   stream);
+    Tensor storage =
+        makeGpuTensor({3, 5}, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f}, stream);
     Tensor paddedRows = storage.aliasView({3, 4}, {5, 1}, 0);
     ASSERT_FALSE(paddedRows.isDenseContiguous());
 
@@ -2302,11 +2313,7 @@ TEST(ExpressionConvenienceOps, NonDenseRootViewBroadcastsWithDenseInput) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    Tensor storage = makeGpuTensor({3, 4},
-                                   {0.0f, 1.0f, 2.0f, 3.0f,
-                                    4.0f, 5.0f, 6.0f, 7.0f,
-                                    8.0f, 9.0f, 10.0f, 11.0f},
-                                   stream);
+    Tensor storage = makeGpuTensor({3, 4}, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f}, stream);
     Tensor column = storage.aliasView({3, 1}, {4, 1}, 0);
     Tensor bias = makeGpuTensor({1, 2}, {1.0f, 2.0f}, stream);
     ASSERT_FALSE(column.isDenseContiguous());
@@ -2322,14 +2329,50 @@ TEST(ExpressionConvenienceOps, NonDenseRootViewBroadcastsWithDenseInput) {
     expectNear(copyToCpuValues(y, stream), {1.0f, 2.0f, 5.0f, 6.0f, 9.0f, 10.0f});
 }
 
+TEST(ExpressionConvenienceOps, InternalNonDenseStridedViewCanBeUnsqueezedThenBroadcast) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor storage = makeGpuTensor({3, 2}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, stream);
+    Tensor bias = makeGpuTensor({2, 1, 3}, {10.0f, 20.0f, 30.0f, 100.0f, 200.0f, 300.0f}, stream);
+
+    auto x = Expression::input("x");
+    auto b = Expression::input("b");
+    auto transposed = x.stridedView({2, 3}, {1, 2});
+    auto expressionOutputs = Expression::outputs({{"y", transposed.unsqueeze({0}) + b}});
+    FusedEquation eq = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+
+    Tensor y(gpuPlacement, TensorDescriptor(DataType::FP32, {2, 2, 3}));
+    eq.run({{"x", storage}, {"b", bias}}, y, stream);
+
+    expectNear(copyToCpuValues(y, stream), {11.0f, 23.0f, 35.0f, 12.0f, 24.0f, 36.0f, 101.0f, 203.0f, 305.0f, 102.0f, 204.0f, 306.0f});
+}
+
+TEST(ExpressionConvenienceOps, NonDenseRootViewCanBeSqueezedThenBroadcast) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor storage = makeGpuTensor({3, 2}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, stream);
+    Tensor transposed_with_singleton = storage.aliasView({2, 1, 3}, {1, 6, 2}, 0);
+    Tensor bias = makeGpuTensor({1, 3}, {10.0f, 20.0f, 30.0f}, stream);
+    ASSERT_FALSE(transposed_with_singleton.isDenseContiguous());
+
+    auto x = Expression::input("x");
+    auto b = Expression::input("b");
+    auto expressionOutputs = Expression::outputs({{"y", x.squeeze({1}) + b}});
+    FusedEquation eq = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+
+    Tensor y(gpuPlacement, TensorDescriptor(DataType::FP32, {2, 3}));
+    eq.run({{"x", transposed_with_singleton}, {"b", bias}}, y, stream);
+
+    expectNear(copyToCpuValues(y, stream), {11.0f, 23.0f, 35.0f, 12.0f, 24.0f, 36.0f});
+}
+
 TEST(ExpressionConvenienceOps, MultipleInternalStridedViewsExecuteCorrectlyThroughConvenienceRun) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    Tensor storage = makeGpuTensor({2, 4},
-                                   {0.0f, 1.0f, 2.0f, 3.0f,
-                                    4.0f, 5.0f, 6.0f, 7.0f},
-                                   stream);
+    Tensor storage = makeGpuTensor({2, 4}, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f}, stream);
 
     auto x = Expression::input("x");
     auto first = x.stridedView({2}, {4}, 0);
@@ -2351,18 +2394,13 @@ TEST(ExpressionConvenienceOps, MultipleInternalStridedViewsExecuteCorrectlyThrou
     expectNear(copyToCpuValues(outputs.at("third"), stream), {6.0f, 18.0f});
 }
 
-
 TEST(ExpressionConvenienceOps, BroadcastStatsSurviveFlattenAndUnflattenReshapeFusion) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
     Tensor x = makeGpuTensor({2, 3, 4},
-                             {0.0f, 1.0f, 2.0f, 3.0f,
-                              4.0f, 5.0f, 6.0f, 7.0f,
-                              8.0f, 9.0f, 10.0f, 11.0f,
-                              12.0f, 13.0f, 14.0f, 15.0f,
-                              16.0f, 17.0f, 18.0f, 19.0f,
-                              20.0f, 21.0f, 22.0f, 23.0f},
+                             {0.0f,  1.0f,  2.0f,  3.0f,  4.0f,  5.0f,  6.0f,  7.0f,  8.0f,  9.0f,  10.0f, 11.0f,
+                              12.0f, 13.0f, 14.0f, 15.0f, 16.0f, 17.0f, 18.0f, 19.0f, 20.0f, 21.0f, 22.0f, 23.0f},
                              stream);
     Tensor stats = makeGpuTensor({6, 1}, {100.0f, 200.0f, 300.0f, 400.0f, 500.0f, 600.0f}, stream);
 
@@ -2373,12 +2411,8 @@ TEST(ExpressionConvenienceOps, BroadcastStatsSurviveFlattenAndUnflattenReshapeFu
 
     EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{2, 3, 4}));
     expectNear(copyToCpuValues(y, stream),
-               {100.0f, 101.0f, 102.0f, 103.0f,
-                204.0f, 205.0f, 206.0f, 207.0f,
-                308.0f, 309.0f, 310.0f, 311.0f,
-                412.0f, 413.0f, 414.0f, 415.0f,
-                516.0f, 517.0f, 518.0f, 519.0f,
-                620.0f, 621.0f, 622.0f, 623.0f});
+               {100.0f, 101.0f, 102.0f, 103.0f, 204.0f, 205.0f, 206.0f, 207.0f, 308.0f, 309.0f, 310.0f, 311.0f,
+                412.0f, 413.0f, 414.0f, 415.0f, 516.0f, 517.0f, 518.0f, 519.0f, 620.0f, 621.0f, 622.0f, 623.0f});
 }
 
 TEST(ExpressionConvenienceOps, BackwardReshapesPublicOutputAdjointToInternalMulShape) {
@@ -2386,33 +2420,20 @@ TEST(ExpressionConvenienceOps, BackwardReshapesPublicOutputAdjointToInternalMulS
     Stream stream(0);
 
     Tensor x = makeGpuTensor({6, 4},
-                             {0.0f, 1.0f, 2.0f, 3.0f,
-                              4.0f, 5.0f, 6.0f, 7.0f,
-                              8.0f, 9.0f, 10.0f, 11.0f,
-                              12.0f, 13.0f, 14.0f, 15.0f,
-                              16.0f, 17.0f, 18.0f, 19.0f,
-                              20.0f, 21.0f, 22.0f, 23.0f},
+                             {0.0f,  1.0f,  2.0f,  3.0f,  4.0f,  5.0f,  6.0f,  7.0f,  8.0f,  9.0f,  10.0f, 11.0f,
+                              12.0f, 13.0f, 14.0f, 15.0f, 16.0f, 17.0f, 18.0f, 19.0f, 20.0f, 21.0f, 22.0f, 23.0f},
                              stream);
     Tensor dy = makeGpuTensor({2, 3, 4},
-                              {1.0f, 0.5f, -1.0f, 2.0f,
-                               1.5f, -0.5f, 0.25f, 3.0f,
-                               -2.0f, 4.0f, 0.75f, -1.5f,
-                               2.5f, -3.0f, 1.25f, 0.0f,
-                               0.5f, 2.0f, -0.25f, 1.0f,
-                               -1.0f, 0.125f, 3.5f, -2.5f},
+                              {1.0f, 0.5f,  -1.0f, 2.0f, 1.5f, -0.5f, 0.25f,  3.0f, -2.0f, 4.0f,   0.75f, -1.5f,
+                               2.5f, -3.0f, 1.25f, 0.0f, 0.5f, 2.0f,  -0.25f, 1.0f, -1.0f, 0.125f, 3.5f,  -2.5f},
                               stream);
 
     auto xin = Expression::input("x");
     auto forwardOutputs = Expression::outputs({{"y", (xin * xin).reshape({2, 3, 4})}});
     auto gradients = runBackwardValues(forwardOutputs, {{"x", x}, {"dy", dy}}, {"x"}, "dy", stream);
 
-    expectNear(gradients.at("x_grad"),
-               {0.0f, 1.0f, -4.0f, 12.0f,
-                12.0f, -5.0f, 3.0f, 42.0f,
-                -32.0f, 72.0f, 15.0f, -33.0f,
-                60.0f, -78.0f, 35.0f, 0.0f,
-                16.0f, 68.0f, -9.0f, 38.0f,
-                -40.0f, 5.25f, 154.0f, -115.0f});
+    expectNear(gradients.at("x_grad"), {0.0f,  1.0f,   -4.0f, 12.0f, 12.0f, -5.0f, 3.0f,  42.0f, -32.0f, 72.0f, 15.0f,  -33.0f,
+                                        60.0f, -78.0f, 35.0f, 0.0f,  16.0f, 68.0f, -9.0f, 38.0f, -40.0f, 5.25f, 154.0f, -115.0f});
 }
 
 TEST(ExpressionConvenienceOps, TerminalStridedViewMaterializesIntoCallerProvidedDenseOutput) {
@@ -2420,7 +2441,7 @@ TEST(ExpressionConvenienceOps, TerminalStridedViewMaterializesIntoCallerProvided
     Stream stream(0);
 
     Tensor storage = makeGpuTensor({2, 6, 2},
-                                   {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f,
+                                   {0.0f,  1.0f,  2.0f,  3.0f,  4.0f,  5.0f,  6.0f,  7.0f,  8.0f,  9.0f,  10.0f, 11.0f,
                                     12.0f, 13.0f, 14.0f, 15.0f, 16.0f, 17.0f, 18.0f, 19.0f, 20.0f, 21.0f, 22.0f, 23.0f},
                                    stream);
 
@@ -2434,20 +2455,14 @@ TEST(ExpressionConvenienceOps, TerminalStridedViewMaterializesIntoCallerProvided
     EXPECT_EQ(plan.output("y"), denseOutput);
     plan.run();
 
-    expectNear(copyToCpuValues(denseOutput, stream),
-               {6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f,
-                18.0f, 19.0f, 20.0f, 21.0f, 22.0f, 23.0f});
+    expectNear(copyToCpuValues(denseOutput, stream), {6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 18.0f, 19.0f, 20.0f, 21.0f, 22.0f, 23.0f});
 }
 
 TEST(ExpressionConvenienceOps, StridedViewBackwardScattersToDenseSourceGradient) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    Tensor storage = makeGpuTensor({3, 4},
-                                   {0.0f, 1.0f, 2.0f, 3.0f,
-                                    4.0f, 5.0f, 6.0f, 7.0f,
-                                    8.0f, 9.0f, 10.0f, 11.0f},
-                                   stream);
+    Tensor storage = makeGpuTensor({3, 4}, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f}, stream);
     Tensor upstream = makeGpuTensor({3}, {1.0f, 0.5f, -2.0f}, stream);
 
     auto x = Expression::input("x");
@@ -2455,20 +2470,14 @@ TEST(ExpressionConvenienceOps, StridedViewBackwardScattersToDenseSourceGradient)
     auto forwardOutputs = Expression::outputs({{"y", column * column}});
     auto gradients = runBackwardValues(forwardOutputs, {{"x", storage}, {"dy", upstream}}, {"x"}, "dy", stream);
 
-    expectNear(gradients.at("x_grad"),
-               {0.0f, 2.0f, 0.0f, 0.0f,
-                0.0f, 5.0f, 0.0f, 0.0f,
-                0.0f, -36.0f, 0.0f, 0.0f});
+    expectNear(gradients.at("x_grad"), {0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 5.0f, 0.0f, 0.0f, 0.0f, -36.0f, 0.0f, 0.0f});
 }
 
 TEST(ExpressionConvenienceOps, DenseReshapeAliasRejectsNonDenseStridedSourceView) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
-    Tensor storage = makeGpuTensor({2, 4},
-                                   {0.0f, 1.0f, 2.0f, 3.0f,
-                                    4.0f, 5.0f, 6.0f, 7.0f},
-                                   stream);
+    Tensor storage = makeGpuTensor({2, 4}, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f}, stream);
 
     auto x = Expression::input("x");
     auto view = x.stridedView({2}, {4}, 0).reshape({1, 2});
@@ -2529,8 +2538,14 @@ TEST(NewtonSchulzOrthogonalization, WideMatrixMatchesCpuReference) {
     constexpr uint64_t rows = 2;
     constexpr uint64_t cols = 4;
     const std::vector<float> inputValues = {
-        0.8f, -0.4f, 1.2f, 0.5f,
-        -1.1f, 0.3f, 0.7f, -0.9f,
+        0.8f,
+        -0.4f,
+        1.2f,
+        0.5f,
+        -1.1f,
+        0.3f,
+        0.7f,
+        -0.9f,
     };
     Tensor x = makeGpuTensor({rows, cols}, inputValues, stream);
 
@@ -2549,10 +2564,14 @@ TEST(NewtonSchulzOrthogonalization, TallMatrixTransposePathMatchesCpuReference) 
     constexpr uint64_t rows = 4;
     constexpr uint64_t cols = 2;
     const std::vector<float> inputValues = {
-        0.8f, -0.4f,
-        1.2f, 0.5f,
-        -1.1f, 0.3f,
-        0.7f, -0.9f,
+        0.8f,
+        -0.4f,
+        1.2f,
+        0.5f,
+        -1.1f,
+        0.3f,
+        0.7f,
+        -0.9f,
     };
     Tensor x = makeGpuTensor({rows, cols}, inputValues, stream);
 
@@ -2572,10 +2591,14 @@ TEST(NewtonSchulzOrthogonalization, TallMatrixRightPolynomialPathMatchesCpuRefer
     constexpr uint64_t rows = 4;
     constexpr uint64_t cols = 2;
     const std::vector<float> inputValues = {
-        0.8f, -0.4f,
-        1.2f, 0.5f,
-        -1.1f, 0.3f,
-        0.7f, -0.9f,
+        0.8f,
+        -0.4f,
+        1.2f,
+        0.5f,
+        -1.1f,
+        0.3f,
+        0.7f,
+        -0.9f,
     };
     Tensor x = makeGpuTensor({rows, cols}, inputValues, stream);
 
@@ -2599,8 +2622,8 @@ TEST(ExpressionConvenienceOps, Uint64RowLengthDifferenceIsExactBeforeFloatingCon
     Tensor ends = makeGpuUint64Tensor({2}, {16777219ULL, 16777225ULL}, stream);
 
     Expression exactLengths = (Expression::input("ends") - Expression::input("starts")).cast(DataType::FP32);
-    Tensor result = runExpressionOutput(
-        Expression::outputs({{"lengths", exactLengths}}), {{"starts", starts}, {"ends", ends}}, "lengths", stream);
+    Tensor result =
+        runExpressionOutput(Expression::outputs({{"lengths", exactLengths}}), {{"starts", starts}, {"ends", ends}}, "lengths", stream);
 
     expectNear(copyToCpuValues(result, stream), {3.0f, 5.0f}, 0.0f);
 }
@@ -2634,19 +2657,14 @@ TEST(ExpressionConvenienceOps, DynamicNtkRuntimeEffectiveSequenceLengthControlsF
 
     Expression xExpr = Expression::input("x");
     Expression maxLength = Expression::input("lengths").cast(DataType::FP32).reduce_max({0}, {});
-    Outputs runtimeOutputs = Expression::outputs(
-        {{"y", xExpr.rotaryPositionEmbeddingWithEffectiveSequenceLength(maxLength, dynamicOptions)}});
-    Outputs referenceOutputs = Expression::outputs(
-        {{"y", xExpr.rotaryPositionEmbedding(unscaledOptions)}});
-    Outputs physicalExtentOutputs = Expression::outputs(
-        {{"y", xExpr.rotaryPositionEmbedding(dynamicOptions)}});
+    Outputs runtimeOutputs =
+        Expression::outputs({{"y", xExpr.rotaryPositionEmbeddingWithEffectiveSequenceLength(maxLength, dynamicOptions)}});
+    Outputs referenceOutputs = Expression::outputs({{"y", xExpr.rotaryPositionEmbedding(unscaledOptions)}});
+    Outputs physicalExtentOutputs = Expression::outputs({{"y", xExpr.rotaryPositionEmbedding(dynamicOptions)}});
 
-    const auto runtimeValues = copyToCpuValues(
-        runExpressionOutput(runtimeOutputs, {{"x", x}, {"lengths", lengths}}, "y", stream), stream);
-    const auto referenceValues = copyToCpuValues(
-        runExpressionOutput(referenceOutputs, {{"x", x}}, "y", stream), stream);
-    const auto physicalExtentValues = copyToCpuValues(
-        runExpressionOutput(physicalExtentOutputs, {{"x", x}}, "y", stream), stream);
+    const auto runtimeValues = copyToCpuValues(runExpressionOutput(runtimeOutputs, {{"x", x}, {"lengths", lengths}}, "y", stream), stream);
+    const auto referenceValues = copyToCpuValues(runExpressionOutput(referenceOutputs, {{"x", x}}, "y", stream), stream);
+    const auto physicalExtentValues = copyToCpuValues(runExpressionOutput(physicalExtentOutputs, {{"x", x}}, "y", stream), stream);
 
     // max(lengths)=4 does not activate Dynamic-NTK, even though physical S=6 would.
     expectNear(runtimeValues, referenceValues, 2.0e-5f);
@@ -2656,10 +2674,8 @@ TEST(ExpressionConvenienceOps, DynamicNtkRuntimeEffectiveSequenceLengthControlsF
     }
     EXPECT_TRUE(differsFromPhysicalExtent);
 
-    const auto runtimeGradients = runBackwardValues(
-        runtimeOutputs, {{"x", x}, {"lengths", lengths}, {"dy", dy}}, {"x"}, "dy", stream);
-    const auto referenceGradients = runBackwardValues(
-        referenceOutputs, {{"x", x}, {"dy", dy}}, {"x"}, "dy", stream);
+    const auto runtimeGradients = runBackwardValues(runtimeOutputs, {{"x", x}, {"lengths", lengths}, {"dy", dy}}, {"x"}, "dy", stream);
+    const auto referenceGradients = runBackwardValues(referenceOutputs, {{"x", x}, {"dy", dy}}, {"x"}, "dy", stream);
     expectNear(runtimeGradients.at("x_grad"), referenceGradients.at("x_grad"), 2.0e-5f);
 }
 
@@ -2695,19 +2711,13 @@ TEST(ExpressionConvenienceOps, LongRopeRuntimeEffectiveSequenceLengthSelectsShor
 
     Expression xExpr = Expression::input("x");
     Expression maxLength = Expression::input("lengths").cast(DataType::FP32).reduce_max({0}, {});
-    Outputs runtimeOutputs = Expression::outputs(
-        {{"y", xExpr.rotaryPositionEmbeddingWithEffectiveSequenceLength(maxLength, longOptions)}});
-    Outputs shortReferenceOutputs = Expression::outputs(
-        {{"y", xExpr.rotaryPositionEmbedding(shortReference)}});
-    Outputs physicalExtentOutputs = Expression::outputs(
-        {{"y", xExpr.rotaryPositionEmbedding(longOptions)}});
+    Outputs runtimeOutputs = Expression::outputs({{"y", xExpr.rotaryPositionEmbeddingWithEffectiveSequenceLength(maxLength, longOptions)}});
+    Outputs shortReferenceOutputs = Expression::outputs({{"y", xExpr.rotaryPositionEmbedding(shortReference)}});
+    Outputs physicalExtentOutputs = Expression::outputs({{"y", xExpr.rotaryPositionEmbedding(longOptions)}});
 
-    const auto runtimeValues = copyToCpuValues(
-        runExpressionOutput(runtimeOutputs, {{"x", x}, {"lengths", lengths}}, "y", stream), stream);
-    const auto shortValues = copyToCpuValues(
-        runExpressionOutput(shortReferenceOutputs, {{"x", x}}, "y", stream), stream);
-    const auto physicalExtentValues = copyToCpuValues(
-        runExpressionOutput(physicalExtentOutputs, {{"x", x}}, "y", stream), stream);
+    const auto runtimeValues = copyToCpuValues(runExpressionOutput(runtimeOutputs, {{"x", x}, {"lengths", lengths}}, "y", stream), stream);
+    const auto shortValues = copyToCpuValues(runExpressionOutput(shortReferenceOutputs, {{"x", x}}, "y", stream), stream);
+    const auto physicalExtentValues = copyToCpuValues(runExpressionOutput(physicalExtentOutputs, {{"x", x}}, "y", stream), stream);
 
     // max(lengths)=4 must select short factors; physical S=6 would incorrectly select long factors.
     expectNear(runtimeValues, shortValues, 2.0e-5f);
@@ -2717,10 +2727,8 @@ TEST(ExpressionConvenienceOps, LongRopeRuntimeEffectiveSequenceLengthSelectsShor
     }
     EXPECT_TRUE(differsFromPhysicalExtent);
 
-    const auto runtimeGradients = runBackwardValues(
-        runtimeOutputs, {{"x", x}, {"lengths", lengths}, {"dy", dy}}, {"x"}, "dy", stream);
-    const auto referenceGradients = runBackwardValues(
-        shortReferenceOutputs, {{"x", x}, {"dy", dy}}, {"x"}, "dy", stream);
+    const auto runtimeGradients = runBackwardValues(runtimeOutputs, {{"x", x}, {"lengths", lengths}, {"dy", dy}}, {"x"}, "dy", stream);
+    const auto referenceGradients = runBackwardValues(shortReferenceOutputs, {{"x", x}, {"dy", dy}}, {"x"}, "dy", stream);
     expectNear(runtimeGradients.at("x_grad"), referenceGradients.at("x_grad"), 2.0e-5f);
 }
 

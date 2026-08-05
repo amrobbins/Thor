@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Api/Layers/Loss/TweedieLoss.h"
+#include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
 
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
@@ -15,6 +16,7 @@ namespace {
 
 constexpr const char* kPredictionsName = "predictions";
 constexpr const char* kLabelsName = "labels";
+constexpr const char* kExampleWeightsName = "example_weights";
 constexpr const char* kLossName = "loss";
 constexpr const char* kGradientName = "predictions_grad";
 constexpr float kSpecialPowerTolerance = 1.0e-6f;
@@ -23,6 +25,19 @@ void validateFloatingDType(const char* tensorName, DataType dtype) {
     if (dtype != DataType::FP16 && dtype != DataType::FP32) {
         throw runtime_error(string("Unsupported TweedieLoss ") + tensorName + " dtype: " +
                             ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
+    }
+}
+
+void validateExampleWeights(Tensor predictions, Tensor labels, std::optional<Tensor> exampleWeights) {
+    if (!exampleWeights.has_value())
+        return;
+    if (exampleWeights.value() == predictions || exampleWeights.value() == labels)
+        throw runtime_error("TweedieLoss example_weights tensor must be distinct from predictions and labels.");
+    validateFloatingDType("example_weights", exampleWeights.value().getDataType());
+    const vector<uint64_t>& dims = exampleWeights.value().getDimensions();
+    if (dims != vector<uint64_t>{1} && dims != predictions.getDimensions()) {
+        throw runtime_error(
+            "TweedieLoss example_weights dimensions must be [1] for per-example weights or match predictions dimensions.");
     }
 }
 
@@ -69,6 +84,45 @@ ThorImplementation::DynamicExpression makeTweedieLossExpression(DataType lossDat
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
+ThorImplementation::DynamicExpression makeWeightedTweedieLossExpression(DataType lossDataType, float power, float eps) {
+    validateFloatingDType("loss", lossDataType);
+    THOR_THROW_IF_FALSE(std::isfinite(power));
+
+    ThorImplementation::Expression predictions = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression exampleWeights =
+        ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression mean = safePositive(predictions, eps);
+    ThorImplementation::Expression target = labels.max(ThorImplementation::Expression(0.0));
+    ThorImplementation::Expression safeTarget = safePositive(target, eps);
+
+    ThorImplementation::Expression two(2.0);
+    ThorImplementation::Expression loss = [&]() -> ThorImplementation::Expression {
+        if (isSpecialPower(power, 0.0f)) {
+            ThorImplementation::Expression diff = target - mean;
+            return diff * diff;
+        }
+        if (isSpecialPower(power, 1.0f)) {
+            return two * (target * (safeTarget / mean).ln() - target + mean);
+        }
+        if (isSpecialPower(power, 2.0f)) {
+            return two * ((mean / safeTarget).ln() + target / mean - ThorImplementation::Expression(1.0));
+        }
+
+        ThorImplementation::Expression p(power);
+        ThorImplementation::Expression one(1.0);
+        ThorImplementation::Expression twoMinusP = two - p;
+        ThorImplementation::Expression oneMinusP = one - p;
+        return two * (safeTarget.pow(twoMinusP) / (oneMinusP * twoMinusP) -
+                      target * mean.pow(oneMinusP) / oneMinusP + mean.pow(twoMinusP) / twoMinusP);
+    }();
+    loss = (loss * exampleWeights).withOutputDType(lossDataType);
+
+    ThorImplementation::ExpressionDefinition definition =
+        ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs({{kLossName, loss}}));
+    return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
+}
+
 ThorImplementation::DynamicExpression makeTweedieGradientExpression(DataType predictionsDataType, float power, float eps) {
     validateFloatingDType("predictions", predictionsDataType);
     THOR_THROW_IF_FALSE(std::isfinite(power));
@@ -90,30 +144,71 @@ ThorImplementation::DynamicExpression makeTweedieGradientExpression(DataType pre
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
+ThorImplementation::DynamicExpression makeWeightedTweedieGradientExpression(DataType predictionsDataType, float power, float eps) {
+    validateFloatingDType("predictions", predictionsDataType);
+    THOR_THROW_IF_FALSE(std::isfinite(power));
+
+    ThorImplementation::Expression predictions = ThorImplementation::Expression::input(kPredictionsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression labels = ThorImplementation::Expression::input(kLabelsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression exampleWeights =
+        ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+    ThorImplementation::Expression mean = safePositive(predictions, eps);
+    ThorImplementation::Expression target = labels.max(ThorImplementation::Expression(0.0));
+    ThorImplementation::Expression p(power);
+    ThorImplementation::Expression two(2.0);
+    ThorImplementation::Expression scale(ThorImplementation::Loss::getLossScalingFactor());
+
+    ThorImplementation::Expression gradient =
+        two * (mean.pow(ThorImplementation::Expression(1.0) - p) -
+               target * mean.pow(ThorImplementation::Expression(0.0) - p));
+    gradient = (gradient * exampleWeights * scale).withOutputDType(predictionsDataType);
+
+    ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
+        ThorImplementation::Expression::outputs({{kGradientName, gradient}}));
+    return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
+}
+
 }  // namespace
 
 void TweedieLoss::buildSupportLayersAndAddToNetwork() {
     validateFloatingDType("predictions", predictionsTensor.getDataType());
     validateFloatingDType("labels", labelsTensor.getDataType());
+    validateExampleWeights(predictionsTensor, labelsTensor, exampleWeightsTensor);
     THOR_THROW_IF_FALSE(std::isfinite(power));
     THOR_THROW_IF_FALSE(eps > 0.0f);
 
-    CustomLoss rawTweedieLoss = CustomLoss::Builder()
-                                    .network(*network)
-                                    .lossExpression(makeTweedieLossExpression(lossDataType, power, eps))
-                                    .gradientExpression(makeTweedieGradientExpression(predictionsTensor.getDataType(), power, eps))
-                                    .predictions(predictionsTensor)
-                                    .labels(labelsTensor)
-                                    .predictionsName(kPredictionsName)
-                                    .labelsName(kLabelsName)
-                                    .lossName(kLossName)
-                                    .gradientName(kGradientName)
-                                    .lossDataType(lossDataType)
-                                       .lossWeight(lossWeight.value_or(1.0f))
-                                    .reportsRawLoss()
-                                    .build();
-
-    lossShaperInput = rawTweedieLoss.getLoss();
+    if (exampleWeightsTensor.has_value()) {
+        MultiInputCustomLoss rawTweedieLoss = MultiInputCustomLoss::Builder()
+                                                   .network(*network)
+                                                   .lossExpression(makeWeightedTweedieLossExpression(lossDataType, power, eps))
+                                                   .gradientExpression(
+                                                       makeWeightedTweedieGradientExpression(predictionsTensor.getDataType(), power, eps))
+                                                   .input(kPredictionsName, predictionsTensor, std::string(kGradientName))
+                                                   .auxiliaryInput(kLabelsName, labelsTensor)
+                                                   .auxiliaryInput(kExampleWeightsName, exampleWeightsTensor.value())
+                                                   .lossName(kLossName)
+                                                   .lossDataType(lossDataType)
+                                                   .lossWeight(lossWeight.value_or(1.0f))
+                                                   .reportsRawLoss()
+                                                   .build();
+        lossShaperInput = rawTweedieLoss.getLoss();
+    } else {
+        CustomLoss rawTweedieLoss = CustomLoss::Builder()
+                                        .network(*network)
+                                        .lossExpression(makeTweedieLossExpression(lossDataType, power, eps))
+                                        .gradientExpression(makeTweedieGradientExpression(predictionsTensor.getDataType(), power, eps))
+                                        .predictions(predictionsTensor)
+                                        .labels(labelsTensor)
+                                        .predictionsName(kPredictionsName)
+                                        .labelsName(kLabelsName)
+                                        .lossName(kLossName)
+                                        .gradientName(kGradientName)
+                                        .lossDataType(lossDataType)
+                                        .lossWeight(lossWeight.value_or(1.0f))
+                                        .reportsRawLoss()
+                                        .build();
+        lossShaperInput = rawTweedieLoss.getLoss();
+    }
 
     finalizeLossReporting();
 }
@@ -147,6 +242,10 @@ void TweedieLoss::deserialize(const json& j, Network* network) {
     loss.eps = j.value("eps", 1.0e-6f);
     loss.predictionsTensor = predictions;
     loss.labelsTensor = labels;
+    if (j.contains("example_weights_tensor")) {
+        originalTensorId = j["example_weights_tensor"].at("id").get<uint64_t>();
+        loss.exampleWeightsTensor = network->getApiTensorByOriginalId(originalTensorId);
+    }
     loss.network = network;
     loss.initialized = true;
     loss.buildSupportLayersAndAddToNetwork();

@@ -3,6 +3,16 @@
 // Shared build policy for CUB storage dtypes. Keep this header intentionally
 // small so callers that only need the policy do not have to parse the complete
 // CubDevicePrimitives API.
+// Generic CUB wrappers that are not used by Thor production code are kept behind this
+// build-time switch. Production currently uses the generic scan/arg-scan families;
+// embedding radix sort/RLE uses its own deliberately narrow direct-CUB instantiations
+// and is not controlled by this switch. Leave the future wrapper code in-tree so the
+// surface can be restored without reconstructing it, but do not instantiate its CUB
+// template cartesian in normal builds.
+#ifndef THOR_FUTURE_CUB_OPS
+#define THOR_FUTURE_CUB_OPS false
+#endif
+
 #ifndef THOR_CUB_ENABLE_64BIT_TYPES
 #ifdef THOR_CUB_RADIX_SORT_ENABLE_64BIT_KEYS
 #define THOR_CUB_ENABLE_64BIT_TYPES THOR_CUB_RADIX_SORT_ENABLE_64BIT_KEYS

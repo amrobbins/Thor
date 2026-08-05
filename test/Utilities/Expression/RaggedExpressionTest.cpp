@@ -1314,6 +1314,56 @@ TEST(RaggedExpression, VectorSegmentAutodiffExecutesForFp16Bf16AndFp32) {
     }
 }
 
+TEST(RaggedExpression, VectorSegmentMinBackwardReusesDynamicActivePrefixWithoutTouchingReservedCapacity) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 5;
+    constexpr uint64_t elements_per_value = 2;
+    const RaggedExpression ragged = RaggedExpression::input(
+        "x", makeDescriptor(DataType::FP32, {elements_per_value}, batch_size, max_total_values, DataType::UINT32));
+    Tensor values = makeGpuTensor<float>({max_total_values, elements_per_value},
+                                         {1.0F, 10.0F,
+                                          2.0F, 9.0F,
+                                          3.0F, 8.0F,
+                                          4.0F, 7.0F,
+                                          99.0F, 100.0F},
+                                         stream);
+    Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 1U, 3U}, stream);
+    Tensor upstream = makeGpuTensor<float>({batch_size, elements_per_value}, {10.0F, 11.0F, 20.0F, 21.0F}, stream);
+    Tensor gradient(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, elements_per_value}));
+    gradient.fill(777.0, stream);
+
+    FusedEquation forward =
+        FusedEquation::compile(Expression::outputs({{"y", ragged.segment_min()}}).physicalOutputs(), 0);
+    FusedEquation backward = forward.compileBackward({"x.values"}, "dy");
+    StampedExecutionPlan plan = backward.stamp({{"x.values", values}, {"x.offsets", offsets}, {"dy", upstream}},
+                                               stream,
+                                               {},
+                                               {{"x.values_grad", gradient}});
+
+    plan.run();
+    stream.synchronize();
+    expectNear(copyToCpuValues(plan.output("x.values_grad"), stream),
+               {10.0F, 11.0F,
+                20.0F, 0.0F,
+                0.0F, 21.0F,
+                777.0F, 777.0F,
+                777.0F, 777.0F});
+
+    overwriteGpuTensor<uint32_t>(offsets, {0U, 2U, 4U}, stream);
+    gradient.fill(888.0, stream);
+    plan.run();
+    stream.synchronize();
+    expectNear(copyToCpuValues(plan.output("x.values_grad"), stream),
+               {10.0F, 0.0F,
+                0.0F, 11.0F,
+                20.0F, 0.0F,
+                0.0F, 21.0F,
+                888.0F, 888.0F});
+}
+
 TEST(RaggedExpression, VectorSegmentMinMaxAutodiffMatchesFiniteDifferencesAndPreservesUnusedCapacity) {
     REQUIRE_CUDA_DEVICE();
 

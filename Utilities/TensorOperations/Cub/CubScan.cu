@@ -387,6 +387,8 @@ void cubDeviceScan(const Tensor& temp_storage,
     cubDeviceScan(plan, temp_storage, input, output, stream);
 }
 
+#if THOR_FUTURE_CUB_OPS
+
 CubDeviceExclusiveSumPlan prepareCubDeviceExclusiveSum(const Tensor& input,
                                                        const Tensor& output,
                                                        uint64_t num_items) {
@@ -470,6 +472,8 @@ void cubDeviceInclusiveSum(const Tensor& temp_storage,
     cubDeviceScan(
         temp_storage, temp_storage_bytes, input, output, num_items, stream, CubScanOp::Sum, CubScanMode::Inclusive, CubScanDirection::Forward);
 }
+
+#endif  // THOR_FUTURE_CUB_OPS
 
 namespace {
 

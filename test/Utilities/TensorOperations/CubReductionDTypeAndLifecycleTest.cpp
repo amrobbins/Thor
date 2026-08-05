@@ -26,6 +26,78 @@ TEST(CubReduction, EverySupportedInputStorageDtypeAccumulatesInFp32) {
 #endif
 }
 
+TEST(CubReduction, AwkwardLargeVectorizedShardsHandleAlignmentAndPaddedInputTailForEveryStorageDtype) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer_size = 2;
+    constexpr uint64_t reduction_size = 3;
+    constexpr uint64_t inner_size = 4097;
+    std::vector<float> values(outer_size * reduction_size * inner_size);
+    std::vector<float> expected(outer_size * inner_size, 0.0f);
+    for (uint64_t outer = 0; outer < outer_size; ++outer) {
+        for (uint64_t row = 0; row < reduction_size; ++row) {
+            for (uint64_t component = 0; component < inner_size; ++component) {
+                const float value = static_cast<float>(static_cast<int>((outer + row + component) % 5) - 2);
+                values[(outer * reduction_size + row) * inner_size + component] = value;
+                expected[outer * inner_size + component] += value;
+            }
+        }
+    }
+
+    const auto run_dtype = [&](DataType dtype) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        Tensor input = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream, dtype);
+        std::shared_ptr<StampedCubReduction> stamped =
+            CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
+        EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+    };
+
+    run_dtype(DataType::FP32);
+    run_dtype(DataType::FP16);
+    run_dtype(DataType::BF16);
+#if THOR_CUB_ENABLE_FP8_TYPES
+    run_dtype(DataType::FP8_E4M3);
+    run_dtype(DataType::FP8_E5M2);
+#endif
+#if THOR_CUB_ENABLE_64BIT_TYPES
+    run_dtype(DataType::FP64);
+#endif
+}
+
+#if THOR_CUB_ENABLE_64BIT_TYPES
+TEST(CubReduction, WideFp64RowsRespectGroupedStageCapacityAndVectorDirectBoundaries) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    for (uint64_t inner_size : {511ULL, 512ULL, 513ULL, 1023ULL, 1024ULL, 1025ULL, 2047ULL, 2048ULL, 2049ULL, 4096ULL}) {
+        SCOPED_TRACE(inner_size);
+        constexpr uint64_t reduction_size = 3;
+        std::vector<float> values(reduction_size * inner_size);
+        for (uint64_t row = 0; row < reduction_size; ++row) {
+            for (uint64_t component = 0; component < inner_size; ++component) {
+                values[row * inner_size + component] = static_cast<float>(row + 1);
+            }
+        }
+
+        Tensor input =
+            makeGpuTensor(values, {1, reduction_size, inner_size}, stream, DataType::FP64);
+        std::shared_ptr<StampedCubReduction> stamped =
+            CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
+        EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(
+            copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+            std::vector<float>(inner_size, 6.0f));
+    }
+}
+#endif
+
 TEST(CubReduction, WholeTensorBf16SumAccumulatesInFp32AndDefaultsOutputToInputDtype) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

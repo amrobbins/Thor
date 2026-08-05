@@ -12,6 +12,7 @@ using namespace ThorImplementation;
 TEST(CubReductionGeometry, SelectsBestSingleAxisPath) {
     const CubReductionGeometry scalar = CubReduction::analyzeGeometry({257}, 0);
     EXPECT_EQ(scalar.path, CubReductionPath::DeviceTransformReduce);
+    EXPECT_TRUE(scalar.reduced_axes_are_contiguous);
     EXPECT_EQ(scalar.outer_size, 1U);
     EXPECT_EQ(scalar.reduction_size, 257U);
     EXPECT_EQ(scalar.inner_size, 1U);
@@ -20,19 +21,21 @@ TEST(CubReductionGeometry, SelectsBestSingleAxisPath) {
 
     const CubReductionGeometry contiguous = CubReduction::analyzeGeometry({2, 3, 4}, 2);
     EXPECT_EQ(contiguous.path, CubReductionPath::ContiguousFixedSegment);
+    EXPECT_TRUE(contiguous.reduced_axes_are_contiguous);
     EXPECT_EQ(contiguous.outer_size, 6U);
     EXPECT_EQ(contiguous.reduction_size, 4U);
     EXPECT_EQ(contiguous.inner_size, 1U);
     EXPECT_EQ(contiguous.output_elements, 6U);
     EXPECT_EQ(contiguous.output_dimensions, (std::vector<uint64_t>{2, 3, 1}));
 
-    const CubReductionGeometry strided = CubReduction::analyzeGeometry({2, 3, 4}, 1);
-    EXPECT_EQ(strided.path, CubReductionPath::StridedFixedSegment);
-    EXPECT_EQ(strided.outer_size, 2U);
-    EXPECT_EQ(strided.reduction_size, 3U);
-    EXPECT_EQ(strided.inner_size, 4U);
-    EXPECT_EQ(strided.output_elements, 8U);
-    EXPECT_EQ(strided.output_dimensions, (std::vector<uint64_t>{2, 1, 4}));
+    const CubReductionGeometry tiled = CubReduction::analyzeGeometry({2, 3, 4}, 1);
+    EXPECT_EQ(tiled.path, CubReductionPath::TiledFixedSegment);
+    EXPECT_TRUE(tiled.reduced_axes_are_contiguous);
+    EXPECT_EQ(tiled.outer_size, 2U);
+    EXPECT_EQ(tiled.reduction_size, 3U);
+    EXPECT_EQ(tiled.inner_size, 4U);
+    EXPECT_EQ(tiled.output_elements, 8U);
+    EXPECT_EQ(tiled.output_dimensions, (std::vector<uint64_t>{2, 1, 4}));
 }
 
 TEST(CubReductionGeometry, RejectsInvalidSingleAxisGeometry) {
@@ -44,6 +47,9 @@ TEST(CubReductionGeometry, RejectsInvalidSingleAxisGeometry) {
 TEST(CubReductionGeometry, SelectsBestMultiAxisPathAndShapes) {
     const CubReductionGeometry all_axes = CubReduction::analyzeGeometry({2, 3, 4}, std::vector<uint32_t>{0, 1, 2});
     EXPECT_EQ(all_axes.path, CubReductionPath::DeviceTransformReduce);
+    EXPECT_TRUE(all_axes.reduced_axes_are_contiguous);
+    EXPECT_EQ(all_axes.outer_size, 1U);
+    EXPECT_EQ(all_axes.inner_size, 1U);
     EXPECT_EQ(all_axes.input_elements, 24U);
     EXPECT_EQ(all_axes.reduction_size, 24U);
     EXPECT_EQ(all_axes.output_elements, 1U);
@@ -53,29 +59,62 @@ TEST(CubReductionGeometry, SelectsBestMultiAxisPathAndShapes) {
     const CubReductionGeometry suffix =
         CubReduction::analyzeGeometry({2, 3, 4, 5}, std::vector<uint32_t>{2, 3});
     EXPECT_EQ(suffix.path, CubReductionPath::ContiguousFixedSegment);
+    EXPECT_TRUE(suffix.reduced_axes_are_contiguous);
+    EXPECT_EQ(suffix.outer_size, 6U);
     EXPECT_EQ(suffix.reduction_size, 20U);
+    EXPECT_EQ(suffix.inner_size, 1U);
     EXPECT_EQ(suffix.output_elements, 6U);
     EXPECT_EQ(suffix.output_dimensions, (std::vector<uint64_t>{2, 3, 1, 1}));
     EXPECT_EQ(suffix.squeezed_output_dimensions, (std::vector<uint64_t>{2, 3}));
 
+    const CubReductionGeometry middle =
+        CubReduction::analyzeGeometry({2, 3, 4, 5}, std::vector<uint32_t>{1, 2});
+    EXPECT_EQ(middle.path, CubReductionPath::TiledFixedSegment);
+    EXPECT_TRUE(middle.reduced_axes_are_contiguous);
+    EXPECT_EQ(middle.outer_size, 2U);
+    EXPECT_EQ(middle.reduction_size, 12U);
+    EXPECT_EQ(middle.inner_size, 5U);
+    EXPECT_EQ(middle.output_elements, 10U);
+    EXPECT_EQ(middle.output_dimensions, (std::vector<uint64_t>{2, 1, 1, 5}));
+    EXPECT_EQ(middle.squeezed_output_dimensions, (std::vector<uint64_t>{2, 5}));
+
     const CubReductionGeometry disjoint =
         CubReduction::analyzeGeometry({2, 3, 4, 5}, std::vector<uint32_t>{1, 3});
     EXPECT_EQ(disjoint.path, CubReductionPath::StridedFixedSegment);
+    EXPECT_FALSE(disjoint.reduced_axes_are_contiguous);
+    EXPECT_EQ(disjoint.outer_size, 0U);
     EXPECT_EQ(disjoint.reduction_size, 15U);
+    EXPECT_EQ(disjoint.inner_size, 0U);
     EXPECT_EQ(disjoint.output_elements, 8U);
     EXPECT_EQ(disjoint.output_dimensions, (std::vector<uint64_t>{2, 1, 4, 1}));
     EXPECT_EQ(disjoint.squeezed_output_dimensions, (std::vector<uint64_t>{2, 4}));
 
     const CubReductionGeometry leading =
         CubReduction::analyzeGeometry({2, 3, 4}, std::vector<uint32_t>{0, 1});
-    EXPECT_EQ(leading.path, CubReductionPath::StridedFixedSegment);
+    EXPECT_EQ(leading.path, CubReductionPath::TiledFixedSegment);
+    EXPECT_TRUE(leading.reduced_axes_are_contiguous);
+    EXPECT_EQ(leading.outer_size, 1U);
+    EXPECT_EQ(leading.reduction_size, 6U);
+    EXPECT_EQ(leading.inner_size, 4U);
     EXPECT_EQ(leading.output_dimensions, (std::vector<uint64_t>{1, 1, 4}));
     EXPECT_EQ(leading.squeezed_output_dimensions, (std::vector<uint64_t>{4}));
+
+    const CubReductionGeometry singleton_trailing =
+        CubReduction::analyzeGeometry({2, 3, 1}, std::vector<uint32_t>{1});
+    EXPECT_EQ(singleton_trailing.path, CubReductionPath::ContiguousFixedSegment);
+    EXPECT_TRUE(singleton_trailing.reduced_axes_are_contiguous);
+    EXPECT_EQ(singleton_trailing.outer_size, 2U);
+    EXPECT_EQ(singleton_trailing.reduction_size, 3U);
+    EXPECT_EQ(singleton_trailing.inner_size, 1U);
+    EXPECT_EQ(singleton_trailing.output_elements, 2U);
 
     const CubReductionGeometry singleton_retained =
         CubReduction::analyzeGeometry({1, 3, 1}, std::vector<uint32_t>{1});
     EXPECT_EQ(singleton_retained.path, CubReductionPath::DeviceTransformReduce);
+    EXPECT_TRUE(singleton_retained.reduced_axes_are_contiguous);
+    EXPECT_EQ(singleton_retained.outer_size, 1U);
     EXPECT_EQ(singleton_retained.reduction_size, 3U);
+    EXPECT_EQ(singleton_retained.inner_size, 1U);
     EXPECT_EQ(singleton_retained.output_elements, 1U);
 }
 

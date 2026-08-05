@@ -539,6 +539,8 @@ TEST(CubDevicePrimitives, DTypeSupportPolicyMatchesFeatureDefines) {
 #endif
 }
 
+#if THOR_FUTURE_CUB_OPS
+
 TEST(CubDevicePrimitives, SortKeysDescendingSupportsFp16AndBf16Keys) {
     expectSortKeysDescendingFloatingDType<__half>({0.5f, -1.0f, 3.0f, 2.0f}, {3.0f, 2.0f, 0.5f, -1.0f});
     expectSortKeysDescendingFloatingDType<__nv_bfloat16>({0.5f, -1.0f, 3.0f, 2.0f}, {3.0f, 2.0f, 0.5f, -1.0f});
@@ -1347,6 +1349,8 @@ TEST(CubDevicePrimitives, SegmentedExclusiveScanSupportsFp16AndBf16Values) {
         {1.0f, 2.0f, -0.5f, 3.0f, 4.0f}, {0U, 3U, 5U}, {0.0f, 1.0f, 3.0f, 0.0f, 3.0f}, 0.01f);
 }
 
+#endif  // THOR_FUTURE_CUB_OPS
+
 TEST(CubDevicePrimitives, DeviceScanSupportsReverseDirection) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -1570,6 +1574,8 @@ TEST(CubDevicePrimitives, SegmentedScanSupportsRaggedReverseDirection) {
     EXPECT_EQ(copyGpuVector<uint32_t>(exclusive_out, stream), (std::vector<uint32_t>{5U, 3U, 0U, 18U, 13U, 7U, 0U}));
 }
 
+#if THOR_FUTURE_CUB_OPS
+
 TEST(CubDevicePrimitives, SegmentedExclusiveScanRejectsUnsupportedDTypesAndMismatches) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -1592,6 +1598,10 @@ TEST(CubDevicePrimitives, SegmentedExclusiveScanRejectsUnsupportedDTypesAndMisma
     Tensor fp8_offsets = makeGpuVector<uint32_t>({0U, 2U}, stream);
     EXPECT_THROW((void)prepareCubDeviceSegmentedExclusiveSum(fp8_input, fp8_output, fp8_offsets, 2, 1), std::invalid_argument);
 }
+
+#endif  // THOR_FUTURE_CUB_OPS
+
+#if THOR_FUTURE_CUB_OPS
 
 TEST(CubDevicePrimitives, RunLengthEncodeUint32RowsAndExclusiveScanCounts) {
     REQUIRE_CUDA_DEVICE();
@@ -1894,3 +1904,5 @@ TEST(CubDevicePrimitives, PreparedPlanRejectsUndersizedWorkspace) {
     Tensor too_small(gpuPlacement, TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(sort_plan.temp_storage_bytes - 1)}));
     EXPECT_THROW(cubDeviceRadixSortKeys(sort_plan, too_small, keys_in, keys_out, stream), std::invalid_argument);
 }
+
+#endif  // THOR_FUTURE_CUB_OPS

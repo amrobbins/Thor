@@ -4,15 +4,17 @@
 #include <cuda/std/functional>
 
 namespace ThorImplementation::CubReductionInternal {
+namespace {
 
-size_t querySumReductionBytes(DataType input_dtype,
-                                  const void* input,
-                                  uint64_t input_elements,
-                                  DataType output_dtype,
-                                  void* output,
-                                  const CubReductionGeometry& geometry,
-                                  float output_scale,
-                                  const Stream& stream) {
+size_t queryAdditiveReductionBytes(DataType input_dtype,
+                                   const void* input,
+                                   uint64_t input_elements,
+                                   DataType output_dtype,
+                                   void* output,
+                                   const CubReductionGeometry& geometry,
+                                   float divisor,
+                                   float output_scale,
+                                   const Stream& stream) {
     return queryOperationReductionBytes(input_dtype,
                                         input,
                                         input_elements,
@@ -22,18 +24,19 @@ size_t querySumReductionBytes(DataType input_dtype,
                                         cuda::std::plus<float>{},
                                         0.0f,
                                         IdentityFp32{},
-                                        IdentityFp32{},
+                                        AdditiveFinalizeFp32{divisor},
                                         output_scale,
                                         stream);
 }
 
-void launchSumReduction(const Tensor& temp_storage,
-                            size_t temp_storage_bytes,
-                            const Tensor& input,
-                            Tensor& output,
-                            const CubReductionGeometry& geometry,
-                            float output_scale,
-                            Stream& stream) {
+void launchAdditiveReduction(const Tensor& temp_storage,
+                             size_t temp_storage_bytes,
+                             const Tensor& input,
+                             Tensor& output,
+                             const CubReductionGeometry& geometry,
+                             float divisor,
+                             float output_scale,
+                             Stream& stream) {
     launchOperationReduction(temp_storage,
                              temp_storage_bytes,
                              input,
@@ -42,9 +45,77 @@ void launchSumReduction(const Tensor& temp_storage,
                              cuda::std::plus<float>{},
                              0.0f,
                              IdentityFp32{},
-                             IdentityFp32{},
+                             AdditiveFinalizeFp32{divisor},
                              output_scale,
                              stream);
+}
+
+}  // namespace
+
+size_t querySumReductionBytes(DataType input_dtype,
+                              const void* input,
+                              uint64_t input_elements,
+                              DataType output_dtype,
+                              void* output,
+                              const CubReductionGeometry& geometry,
+                              float output_scale,
+                              const Stream& stream) {
+    return queryAdditiveReductionBytes(input_dtype,
+                                       input,
+                                       input_elements,
+                                       output_dtype,
+                                       output,
+                                       geometry,
+                                       1.0f,
+                                       output_scale,
+                                       stream);
+}
+
+void launchSumReduction(const Tensor& temp_storage,
+                        size_t temp_storage_bytes,
+                        const Tensor& input,
+                        Tensor& output,
+                        const CubReductionGeometry& geometry,
+                        float output_scale,
+                        Stream& stream) {
+    launchAdditiveReduction(
+        temp_storage, temp_storage_bytes, input, output, geometry, 1.0f, output_scale, stream);
+}
+
+size_t queryMeanReductionBytes(DataType input_dtype,
+                               const void* input,
+                               uint64_t input_elements,
+                               DataType output_dtype,
+                               void* output,
+                               const CubReductionGeometry& geometry,
+                               float output_scale,
+                               const Stream& stream) {
+    return queryAdditiveReductionBytes(input_dtype,
+                                       input,
+                                       input_elements,
+                                       output_dtype,
+                                       output,
+                                       geometry,
+                                       static_cast<float>(geometry.reduction_size),
+                                       output_scale,
+                                       stream);
+}
+
+void launchMeanReduction(const Tensor& temp_storage,
+                         size_t temp_storage_bytes,
+                         const Tensor& input,
+                         Tensor& output,
+                         const CubReductionGeometry& geometry,
+                         float output_scale,
+                         Stream& stream) {
+    launchAdditiveReduction(temp_storage,
+                            temp_storage_bytes,
+                            input,
+                            output,
+                            geometry,
+                            static_cast<float>(geometry.reduction_size),
+                            output_scale,
+                            stream);
 }
 
 }  // namespace ThorImplementation::CubReductionInternal

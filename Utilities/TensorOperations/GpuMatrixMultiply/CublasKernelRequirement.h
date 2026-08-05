@@ -6,9 +6,49 @@
 #include <cuda_fp16.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstddef>
 #include <functional>
 #include <utility>
+
+struct CublasStridedBatchConfig {
+    int32_t batchCount = 1;
+    int64_t strideA = 0;
+    int64_t strideB = 0;
+    int64_t strideC = 0;
+    int64_t strideD = 0;
+
+    static CublasStridedBatchConfig single() { return {}; }
+
+    static CublasStridedBatchConfig strided(int32_t batchCount,
+                                             int64_t strideA,
+                                             int64_t strideB,
+                                             int64_t strideC,
+                                             int64_t strideD) {
+        CublasStridedBatchConfig config{batchCount, strideA, strideB, strideC, strideD};
+        config.validate();
+        return config;
+    }
+
+    bool isBatched() const { return batchCount > 1; }
+
+    void validate() const {
+        THOR_THROW_IF_FALSE(batchCount > 0);
+        THOR_THROW_IF_FALSE(strideA >= 0);
+        THOR_THROW_IF_FALSE(strideB >= 0);
+        THOR_THROW_IF_FALSE(strideC >= 0);
+        THOR_THROW_IF_FALSE(strideD >= 0);
+        if (batchCount == 1) {
+            THOR_THROW_IF_FALSE(strideA == 0 && strideB == 0 && strideC == 0 && strideD == 0);
+        } else {
+            // A/B/C may intentionally use stride zero to broadcast one matrix across the batch.
+            // D is the output and each batch item must have distinct storage.
+            THOR_THROW_IF_FALSE(strideD > 0);
+        }
+    }
+
+    bool operator==(const CublasStridedBatchConfig &other) const = default;
+};
 
 struct KernelRequirement {
     KernelRequirement(const std::string gpuType,
@@ -23,7 +63,8 @@ struct KernelRequirement {
                       const int ldB,
                       const int ldC,
                       const int ldD,
-                      const bool allowWorkspace)
+                      const bool allowWorkspace,
+                      const CublasStridedBatchConfig batchConfig = CublasStridedBatchConfig::single())
         : gpuType(gpuType),
           rowsA(rowsA),
           colsA(colsA),
@@ -36,13 +77,15 @@ struct KernelRequirement {
           ldB(ldB),
           ldC(ldC),
           ldD(ldD),
-          allowWorkspace(allowWorkspace) {
+          allowWorkspace(allowWorkspace),
+          batchConfig(batchConfig) {
         THOR_THROW_IF_FALSE(rowsA > 0);
         THOR_THROW_IF_FALSE(colsA > 0);
         THOR_THROW_IF_FALSE(rowsB > 0);
         THOR_THROW_IF_FALSE(colsB > 0);
         THOR_THROW_IF_FALSE(ldA >= colsA);
         THOR_THROW_IF_FALSE(ldB >= colsB);
+        batchConfig.validate();
 
         int finalRowsA = transposeA == false ? rowsA : colsA;
         int finalColsA = transposeA == false ? colsA : rowsA;
@@ -83,11 +126,13 @@ struct KernelRequirement {
     const int ldC;
     const int ldD;
     const bool allowWorkspace;
+    const CublasStridedBatchConfig batchConfig;
 
     bool operator==(const KernelRequirement &other) const {
         return gpuType == other.gpuType && rowsA == other.rowsA && colsA == other.colsA && rowsB == other.rowsB && colsB == other.colsB &&
                transposeA == other.transposeA && transposeB == other.transposeB && transposeC == other.transposeC && ldA == other.ldA &&
-               ldB == other.ldB && ldC == other.ldC && ldD == other.ldD && allowWorkspace == other.allowWorkspace;
+               ldB == other.ldB && ldC == other.ldC && ldD == other.ldD && allowWorkspace == other.allowWorkspace &&
+               batchConfig == other.batchConfig;
     }
 
     bool operator<(const KernelRequirement &other) const {
@@ -113,6 +158,11 @@ struct hash<KernelRequirement> {
         hashValue = (hashValue ^ (hash<int>()(k.ldB))) << 1;
         hashValue = (hashValue ^ (hash<int>()(k.ldC))) << 1;
         hashValue = (hashValue ^ (hash<int>()(k.ldD))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.batchConfig.batchCount))) << 1;
+        hashValue = (hashValue ^ (hash<int64_t>()(k.batchConfig.strideA))) << 1;
+        hashValue = (hashValue ^ (hash<int64_t>()(k.batchConfig.strideB))) << 1;
+        hashValue = (hashValue ^ (hash<int64_t>()(k.batchConfig.strideC))) << 1;
+        hashValue = (hashValue ^ (hash<int64_t>()(k.batchConfig.strideD))) << 1;
         hashValue = hashValue ^ hash<std::string>()(k.gpuType);
 
         return hashValue;

@@ -1,9 +1,9 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
-#include "Utilities/Common/LowPrecisionFloat.h"
 #include <cmath>
 #include <exception>
 #include <limits>
 #include <optional>
+#include "Utilities/Common/LowPrecisionFloat.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Expression/CudaHelpers.h"
@@ -149,7 +149,7 @@ Tensor::~Tensor() noexcept {
         if (shouldDestroy) {
             destroy();
         }
-    } catch (const std::exception& error) {
+    } catch (const std::exception &error) {
         // Destructors are implicitly noexcept. Letting a CUDA cleanup failure escape
         // here calls std::terminate and masks the operation error that caused the
         // cleanup failure (for example, an asynchronous kernel failure reported by
@@ -213,8 +213,8 @@ void Tensor::allocateMemory(uint32_t alignmentBytes) {
 
     unsigned long memBytes;
     memBytes = descriptor.getArraySizeInBytes();
-    // All tensors add 32 bytes of padding to make writing up to a full double4 past the end safe.
-    memBytes += 32;
+    // All tensors add 128 bytes of padding to make reading and writing 32 * 4 bytes past the end safe.
+    memBytes += 128;
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
         if (alignmentBytes <= 256) {

@@ -27,7 +27,7 @@ TEST(CubReduction, MultiAxisContiguousSuffixUsesFixedSegments) {
     expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), {21.0f, 57.0f});
 }
 
-TEST(CubReduction, MultiAxisDisjointAndLeadingAxesUseLogicalIndexMapping) {
+TEST(CubReduction, MultiAxisDisjointUsesLogicalIndexMappingAndLeadingAxesUseTiledReduction) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     Tensor input = makeGpuTensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
@@ -43,7 +43,7 @@ TEST(CubReduction, MultiAxisDisjointAndLeadingAxesUseLogicalIndexMapping) {
 
     std::shared_ptr<StampedCubReduction> leading =
         CubReduction(CubReductionOp::Sum, std::vector<uint32_t>{0, 1}, DataType::FP32).stamp(input, stream);
-    EXPECT_EQ(leading->getPath(), CubReductionPath::StridedFixedSegment);
+    EXPECT_EQ(leading->getPath(), CubReductionPath::TiledFixedSegment);
     EXPECT_EQ(leading->getOutputTensor().getDimensions(), (std::vector<uint64_t>{1, 1, 2}));
     leading->run();
     stream.synchronize();

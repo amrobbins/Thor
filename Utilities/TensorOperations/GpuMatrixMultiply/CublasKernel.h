@@ -372,7 +372,9 @@ class CublasKernel : private ReferenceCounted {
             int finalColsB = cublasKernelRequirement->kernelRequirement.transposeB == false
                                  ? cublasKernelRequirement->kernelRequirement.colsB
                                  : cublasKernelRequirement->kernelRequirement.rowsB;
-            double TFLOPS = (2.0 * finalRowsA * finalColsA * finalColsB) / (timePerKernelMs * 1.0e9);
+            double TFLOPS =
+                (2.0 * finalRowsA * finalColsA * finalColsB * cublasKernelRequirement->kernelRequirement.batchConfig.batchCount) /
+                (timePerKernelMs * 1.0e9);
             std::string TFLOPSString = std::to_string(TFLOPS);
 
             description += " kernelTime: " + timePerKernelMsString + "ms";
@@ -710,6 +712,24 @@ class CublasKernel : private ReferenceCounted {
         CDesc = new cublasLtMatrixLayout_t;
         DDesc = new cublasLtMatrixLayout_t;
 
+        const CublasStridedBatchConfig &batchConfig = cublasKernelRequirement->kernelRequirement.batchConfig;
+        auto configureStridedBatch = [&](cublasLtMatrixLayout_t desc, int64_t strideElements) {
+            if (!batchConfig.isBatched()) {
+                return;
+            }
+            const int32_t batchCount = batchConfig.batchCount;
+            const cublasLtBatchMode_t batchMode = CUBLASLT_BATCH_MODE_STRIDED;
+            cublasStatus = cublasLtMatrixLayoutSetAttribute(
+                desc, CUBLASLT_MATRIX_LAYOUT_BATCH_MODE, &batchMode, sizeof(batchMode));
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            cublasStatus = cublasLtMatrixLayoutSetAttribute(
+                desc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &batchCount, sizeof(batchCount));
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
+            cublasStatus = cublasLtMatrixLayoutSetAttribute(
+                desc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &strideElements, sizeof(strideElements));
+            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
+        };
+
         if (usesFp8ColumnMajorLtPath()) {
             const KernelRequirement &kr = cublasKernelRequirement->kernelRequirement;
             const cublasLtOrder_t columnMajorOrder = CUBLASLT_ORDER_COL;
@@ -765,6 +785,12 @@ class CublasKernel : private ReferenceCounted {
             cublasStatus = cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
             THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
 
+            // The FP8 row-major adapter swaps external A/B when presenting the operation to cuBLASLt.
+            configureStridedBatch(*ADesc, batchConfig.strideB);
+            configureStridedBatch(*BDesc, batchConfig.strideA);
+            configureStridedBatch(*CDesc, batchConfig.strideC);
+            configureStridedBatch(*DDesc, batchConfig.strideD);
+
             return;
         }
 
@@ -816,6 +842,11 @@ class CublasKernel : private ReferenceCounted {
         ld = cublasKernelRequirement->kernelRequirement.ldD;
         cublasStatus = cublasLtMatrixLayoutSetAttribute(*DDesc, CUBLASLT_MATRIX_LAYOUT_LD, &ld, sizeof(ld));
         THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
+
+        configureStridedBatch(*ADesc, batchConfig.strideA);
+        configureStridedBatch(*BDesc, batchConfig.strideB);
+        configureStridedBatch(*CDesc, batchConfig.strideC);
+        configureStridedBatch(*DDesc, batchConfig.strideD);
     }
 
     void construct(CublasKernelRequirement cublasKernelRequirement, CublasKernelOptions cublasKernelOptions, std::string gpuType) {
@@ -826,6 +857,11 @@ class CublasKernel : private ReferenceCounted {
         this->gpuType = gpuType;
 
         validateFp8RowMajorGemmShapeAndLayoutOrThrow("CublasKernel::construct");
+        if (this->cublasKernelRequirement->kernelRequirement.batchConfig.isBatched() && usesFp8ColumnMajorLtPath()) {
+            throw std::runtime_error(
+                "CublasKernel strided-batched GEMM currently supports FP16, BF16, FP32, and other non-FP8 Lt paths; "
+                "the FP8 row-major adapter needs a batched transpose-workspace implementation first.");
+        }
         allocateCublasResources();
     }
 

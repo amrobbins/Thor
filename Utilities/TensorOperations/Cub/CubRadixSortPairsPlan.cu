@@ -1,5 +1,7 @@
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitiveSupport.h"
 
+#if THOR_FUTURE_CUB_OPS
+
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cub/cub.cuh>
@@ -82,3 +84,4 @@ size_t cubDeviceRadixSortPairsTempBytes(const Tensor& keys_in,
 
 
 }  // namespace ThorImplementation
+#endif  // THOR_FUTURE_CUB_OPS
