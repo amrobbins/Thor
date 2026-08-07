@@ -22,6 +22,7 @@
 #include "Utilities/Expression/CompiledEquation.h"
 #include "Utilities/Expression/InPlaceRopeKernel.h"
 #include "Utilities/Expression/FlatScatterAddKernel.h"
+#include "Utilities/Expression/ExecutionDiagnostics.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
@@ -52,6 +53,11 @@ enum class ReductionResultKind : uint8_t {
 struct ReductionCacheKey {
     const ExprOp op;
     const std::vector<uint64_t> input_dims;
+    // CubReduction's physical permutation/tiled candidate and retained-output order are derived from
+    // (input_dims, input_strides, reduction_axes). Keep the physical strides in the cache identity so
+    // plans for incompatible zero-copy views can never be reused. Tensor storage offsets are intentionally
+    // excluded because getMemPtr() already points at the visible view origin and the stamped plan is offset-invariant.
+    const std::vector<uint64_t> input_strides;
     std::vector<uint64_t> reduction_axes;
     std::vector<uint64_t> squeeze_axes;
     const DataType input_dtype;
@@ -64,6 +70,7 @@ struct ReductionCacheKey {
 
     ReductionCacheKey(ExprOp op,
                       std::vector<uint64_t> input_dims,
+                      std::vector<uint64_t> input_strides,
                       std::vector<uint64_t> reduction_axes,
                       std::vector<uint64_t> squeeze_axes,
                       DataType input_dtype,
@@ -73,6 +80,7 @@ struct ReductionCacheKey {
                       int device_num)
         : op(op),
           input_dims(std::move(input_dims)),
+          input_strides(std::move(input_strides)),
           reduction_axes(std::move(reduction_axes)),
           squeeze_axes(std::move(squeeze_axes)),
           input_dtype(input_dtype),
@@ -148,6 +156,7 @@ struct MatmulCacheKey {
     const bool transpose_a;
     const bool transpose_b;
     const bool transpose_c;
+    const CublasStridedBatchConfig batch_config;
     const bool bias_epilogue;
     const MatmulEpilogue epilogue;
     const MatmulBackwardEpilogue backward_epilogue;
@@ -173,6 +182,7 @@ struct MatmulCacheKey {
                    bool transpose_a,
                    bool transpose_b,
                    bool transpose_c,
+                   CublasStridedBatchConfig batch_config,
                    bool bias_epilogue,
                    MatmulEpilogue epilogue,
                    MatmulBackwardEpilogue backward_epilogue,
@@ -195,6 +205,7 @@ struct MatmulCacheKey {
           transpose_a(transpose_a),
           transpose_b(transpose_b),
           transpose_c(transpose_c),
+          batch_config(batch_config),
           bias_epilogue(bias_epilogue),
           epilogue(epilogue),
           backward_epilogue(backward_epilogue),
@@ -494,6 +505,12 @@ class StampedReduction {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    [[nodiscard]] CubReductionPath getPath() const {
+        if (!cub_reduction) {
+            throw std::runtime_error("StampedReduction has no CUB reduction backend.");
+        }
+        return cub_reduction->getPath();
+    }
 
     StampedReduction(std::shared_ptr<BuiltReduction> built,
                      const Tensor& input,
@@ -720,6 +737,7 @@ class StampedMatmul {
 
     [[nodiscard]] std::optional<std::string> alphaRuntimeName() const { return alpha_runtime_name; }
     [[nodiscard]] std::optional<std::string> betaRuntimeName() const { return beta_runtime_name; }
+    [[nodiscard]] StampedMatmulKernelDiagnostic kernelDiagnostic() const;
 
    private:
     const std::shared_ptr<CompiledMatmul> compiled_matmul;
@@ -1073,7 +1091,28 @@ class StampedConditional {
 };
 
 struct StampedExecutionStage {
-    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, SegmentedReduction, SegmentedBroadcast, Scan, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward, ScanMinMaxBackward, Conditional };
+    enum class Kind {
+        FusedKernel,
+        CudaKernel,
+        Reduction,
+        ArgMinMax,
+        SegmentedReduction,
+        SegmentedBroadcast,
+        Scan,
+        Softmax,
+        RmsNorm,
+        EmbeddingLookup,
+        Matmul,
+        DependencyBarrier,
+        InPlaceRope,
+        Attention,
+        AttentionBackward,
+        Convolution,
+        ConvolutionBackward,
+        ReduceMinMaxBackward,
+        ScanMinMaxBackward,
+        Conditional
+    };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
             case Kind::FusedKernel:
@@ -1098,6 +1137,8 @@ struct StampedExecutionStage {
                 return "EmbeddingLookup";
             case Kind::Matmul:
                 return "Matmul";
+            case Kind::DependencyBarrier:
+                return "DependencyBarrier";
             case Kind::InPlaceRope:
                 return "InPlaceRope";
             case Kind::Attention:
@@ -1244,6 +1285,10 @@ struct StampedExecutionStage {
           flop_count(flop_count),
           matmul(matmul) {}
 
+    static StampedExecutionStage dependencyBarrier(uint32_t gpu_num, std::vector<uint32_t> dependency_stage_indices) {
+        return StampedExecutionStage(gpu_num, std::move(dependency_stage_indices));
+    }
+
     explicit StampedExecutionStage(const std::shared_ptr<StampedInPlaceRope>& in_place_rope,
                                    std::vector<uint32_t> dependency_stage_indices = {},
                                    uint64_t flop_count = 0)
@@ -1316,6 +1361,14 @@ struct StampedExecutionStage {
           flop_count(flop_count),
           conditional(conditional) {}
 
+   private:
+    explicit StampedExecutionStage(uint32_t barrier_gpu_num, std::vector<uint32_t> barrier_dependencies)
+        : kind(Kind::DependencyBarrier),
+          dependency_stage_indices(std::move(barrier_dependencies)),
+          gpu_num(barrier_gpu_num),
+          flop_count(0) {}
+
+   public:
     [[nodiscard]] uint64_t flopCount() const { return flop_count; }
 
     void runOn(Stream& run_stream) const { runOn(run_stream, {}); }
@@ -1363,6 +1416,10 @@ struct StampedExecutionStage {
                 matmul->runOn(run_stream);
             else
                 matmul->runOn(run_stream, runtime_scalars);
+        } else if (kind == Kind::DependencyBarrier) {
+            // Dependency-only stage. The execution scheduler waits on all declared prerequisites before reaching
+            // this point and records a completion event only when a later stage consumes the barrier. No CUDA work is
+            // required here.
         } else if (kind == Kind::InPlaceRope) {
             THOR_THROW_IF_FALSE(in_place_rope != nullptr);
             in_place_rope->runOn(run_stream);
@@ -1396,6 +1453,24 @@ struct StampedExecutionStage {
     }
 };
 
+namespace detail {
+
+// Logical stream assignment for a stamped execution DAG. Lane 0 is the caller stream. Additional lanes represent
+// genuine parallel branches and are mapped to Expression helper streams by StampedExecutionPlan::runOn(). Keeping
+// this topology pass separate from CUDA submission makes the intended scheduling policy explicit and unit-testable.
+struct StampedExecutionSchedule {
+    std::vector<uint32_t> stage_lane_indices;
+    std::vector<uint32_t> lane_gpu_nums;
+    std::vector<bool> stage_has_downstream_dependency;
+    std::vector<bool> stage_needs_completion_event;
+    bool needs_caller_ready_event = false;
+};
+
+[[nodiscard]] StampedExecutionSchedule buildStampedExecutionSchedule(const std::vector<StampedExecutionStage>& steps,
+                                                                      uint32_t caller_gpu_num);
+
+}  // namespace detail
+
 // A caller-provided final output is part of the public execution contract. If the
 // expression terminates in a storage alias rather than an executable stage, the
 // plan materializes that alias after all stages complete and exposes destination
@@ -1414,7 +1489,9 @@ class StampedExecutionPlan {
         : steps(std::move(steps)),
           final_outputs(std::move(final_outputs)),
           stream(stream),
-          output_materializations(std::move(output_materializations)) {}
+          output_materializations(std::move(output_materializations)),
+          execution_schedule(
+              detail::buildStampedExecutionSchedule(this->steps, static_cast<uint32_t>(stream.getGpuNum()))) {}
 
     void run();
     void run(const std::unordered_map<std::string, float>& runtime_scalars);
@@ -1450,6 +1527,39 @@ class StampedExecutionPlan {
         out.reserve(steps.size());
         for (const StampedExecutionStage& step : steps) {
             out.push_back(StampedExecutionStage::kindToString(step.kind));
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::vector<StampedMatmulStageDiagnostic> matmulStageDiagnostics() const {
+        std::vector<StampedMatmulStageDiagnostic> out;
+        for (size_t stage_index = 0; stage_index < steps.size(); ++stage_index) {
+            const StampedExecutionStage& step = steps[stage_index];
+            if (step.kind != StampedExecutionStage::Kind::Matmul) {
+                continue;
+            }
+            if (!step.matmul) {
+                throw std::runtime_error("Matmul execution stage is missing its stamped matmul.");
+            }
+            StampedMatmulStageDiagnostic diagnostic;
+            diagnostic.stage_index = static_cast<uint32_t>(stage_index);
+            diagnostic.lane_index = execution_schedule.stage_lane_indices.at(stage_index);
+            diagnostic.dependency_count = static_cast<uint32_t>(step.dependency_stage_indices.size());
+            diagnostic.kernel = step.matmul->kernelDiagnostic();
+            out.push_back(diagnostic);
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::vector<CubReductionPath> reductionPaths() const {
+        std::vector<CubReductionPath> out;
+        for (const StampedExecutionStage& step : steps) {
+            if (step.kind == StampedExecutionStage::Kind::Reduction) {
+                if (!step.reduction) {
+                    throw std::runtime_error("Reduction execution stage is missing its stamped reduction.");
+                }
+                out.push_back(step.reduction->getPath());
+            }
         }
         return out;
     }
@@ -1494,6 +1604,7 @@ class StampedExecutionPlan {
     std::unordered_map<std::string, Tensor> final_outputs;
     Stream stream;
     std::vector<StampedOutputMaterialization> output_materializations;
+    const detail::StampedExecutionSchedule execution_schedule;
 };
 
 }  // namespace ThorImplementation
@@ -1507,6 +1618,9 @@ struct hash<ThorImplementation::ReductionCacheKey> {
         hashCombine(h, hash<size_t>{}(k.input_dims.size()));
         for (uint64_t d : k.input_dims)
             hashCombine(h, hash<uint64_t>{}(d));
+        hashCombine(h, hash<size_t>{}(k.input_strides.size()));
+        for (uint64_t stride : k.input_strides)
+            hashCombine(h, hash<uint64_t>{}(stride));
         hashCombine(h, hash<size_t>{}(k.reduction_axes.size()));
         for (uint64_t axis : k.reduction_axes)
             hashCombine(h, hash<uint64_t>{}(axis));
@@ -1553,6 +1667,11 @@ struct hash<ThorImplementation::MatmulCacheKey> {
         hashCombine(h, hash<bool>{}(k.transpose_a));
         hashCombine(h, hash<bool>{}(k.transpose_b));
         hashCombine(h, hash<bool>{}(k.transpose_c));
+        hashCombine(h, hash<int32_t>{}(k.batch_config.batchCount));
+        hashCombine(h, hash<int64_t>{}(k.batch_config.strideA));
+        hashCombine(h, hash<int64_t>{}(k.batch_config.strideB));
+        hashCombine(h, hash<int64_t>{}(k.batch_config.strideC));
+        hashCombine(h, hash<int64_t>{}(k.batch_config.strideD));
         hashCombine(h, hash<bool>{}(k.bias_epilogue));
         hashCombine(h, hash<int>{}(static_cast<int>(k.epilogue)));
         hashCombine(h, hash<int>{}(static_cast<int>(k.backward_epilogue)));

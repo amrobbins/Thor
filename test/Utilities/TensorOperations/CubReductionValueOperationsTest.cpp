@@ -76,6 +76,245 @@ TEST(CubReduction, TiledFixedSegmentPathSupportsEveryValueOperation) {
                      stream);
 }
 
+TEST(CubReduction, PermutationAwareTiledPathSupportsEveryValueOperation) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor storage = makeGpuTensor(
+        {-1.0f, 2.0f, -3.0f, 4.0f, -5.0f, 6.0f, -7.0f, 8.0f, -9.0f, 10.0f, -11.0f, 12.0f},
+        {2, 3, 2},
+        stream);
+    Tensor permuted = storage.aliasView({2, 2, 3}, {1, 6, 2}, 0);
+
+    expectOperations(permuted,
+                     2,
+                     {{CubReductionOp::Sum, {-9.0f, -27.0f, 12.0f, 30.0f}, 0.0f},
+                      {CubReductionOp::Product, {-15.0f, -693.0f, 48.0f, 960.0f}, 0.0f},
+                      {CubReductionOp::Mean, {-3.0f, -9.0f, 4.0f, 10.0f}, 0.0f},
+                      {CubReductionOp::Min, {-5.0f, -11.0f, 2.0f, 8.0f}, 0.0f},
+                      {CubReductionOp::Max, {-1.0f, -7.0f, 6.0f, 12.0f}, 0.0f},
+                      {CubReductionOp::L1Norm, {9.0f, 27.0f, 12.0f, 30.0f}, 0.0f},
+                      {CubReductionOp::L2Norm,
+                       {std::sqrt(35.0f), std::sqrt(251.0f), std::sqrt(56.0f), std::sqrt(308.0f)},
+                       1.0e-5f}},
+                     stream);
+}
+
+TEST(CubReduction, TiledFixedSegmentCanCoalescePermutedDenseOutputWithoutIntermediate) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer = 35;
+    constexpr uint64_t reduction = 3;
+    constexpr uint64_t inner = 37;
+    std::vector<float> values(outer * reduction * inner);
+    std::vector<float> expected(inner * outer, 0.0f);
+    for (uint64_t i = 0; i < outer; ++i) {
+        for (uint64_t j = 0; j < reduction; ++j) {
+            for (uint64_t k = 0; k < inner; ++k) {
+                const float value = static_cast<float>((i % 7) * 0.5 + j * 2.0 + (k % 11) * 0.25);
+                values[(i * reduction + j) * inner + k] = value;
+                expected[k * outer + i] += value;
+            }
+        }
+    }
+
+    Tensor storage = makeGpuTensor(values, {outer, reduction, inner}, stream);
+    Tensor permuted = storage.aliasView(
+        {inner, outer, reduction}, {1, reduction * inner, inner}, 0);
+    Tensor squeezed_output(gpuPlacement, TensorDescriptor(DataType::FP32, {inner, outer}));
+    std::shared_ptr<StampedCubReduction> stamped =
+        CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, squeezed_output, stream);
+
+    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+    EXPECT_TRUE(stamped->getGeometry().tiled_output_permuted);
+    EXPECT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
+    EXPECT_EQ(stamped->getOutputTensor().getDimensions(), (std::vector<uint64_t>{inner, outer}));
+    EXPECT_EQ(stamped->getOutputTensor().getMemPtr<void>(), squeezed_output.getMemPtr<void>());
+
+    stamped->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+}
+
+TEST(CubReduction, PermutationAwareExactWarpWidthHandlesShortReduction) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer = 11;
+    constexpr uint64_t reduction = 2;
+    constexpr uint64_t inner = 32;
+    std::vector<float> values(outer * reduction * inner);
+    std::vector<float> expected(inner * outer, 0.0f);
+    for (uint64_t i = 0; i < outer; ++i) {
+        for (uint64_t j = 0; j < reduction; ++j) {
+            for (uint64_t k = 0; k < inner; ++k) {
+                const float value = static_cast<float>(static_cast<int>((i * 3 + j * 5 + k * 7) % 13) - 6);
+                values[(i * reduction + j) * inner + k] = value;
+                expected[k * outer + i] += value;
+            }
+        }
+    }
+
+    Tensor storage = makeGpuTensor(values, {outer, reduction, inner}, stream);
+    Tensor permuted = storage.aliasView(
+        {inner, outer, reduction}, {1, reduction * inner, inner}, 0);
+    std::shared_ptr<StampedCubReduction> stamped =
+        CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, stream);
+
+    ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+    ASSERT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
+    stamped->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+}
+
+TEST(CubReduction, SharedTransposePermutedTiledWriterSupportsStorageDTypesAndTailTiles) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer = 513;  // enough retained tiles to exercise one-warp/component-tile production geometry
+    constexpr uint64_t reduction = 2;
+    constexpr uint64_t inner = 65;   // both component and outer dimensions have partial final tiles
+    std::vector<float> values(outer * reduction * inner);
+    std::vector<float> expected(inner * outer, 0.0f);
+    for (uint64_t i = 0; i < outer; ++i) {
+        for (uint64_t j = 0; j < reduction; ++j) {
+            for (uint64_t k = 0; k < inner; ++k) {
+                const float value = static_cast<float>(static_cast<int>((i + j * 3 + k * 5) % 9) - 4) * 0.5f;
+                values[(i * reduction + j) * inner + k] = value;
+                expected[k * outer + i] += value;
+            }
+        }
+    }
+
+    std::vector<DataType> input_dtypes = {DataType::FP16, DataType::BF16, DataType::FP32};
+#if THOR_CUB_ENABLE_FP8_TYPES
+    input_dtypes.push_back(DataType::FP8_E4M3);
+    input_dtypes.push_back(DataType::FP8_E5M2);
+#endif
+#if THOR_CUB_ENABLE_64BIT_TYPES
+    input_dtypes.push_back(DataType::FP64);
+#endif
+    for (DataType dtype : input_dtypes) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        Tensor storage = makeGpuTensor(values, {outer, reduction, inner}, stream, dtype);
+        Tensor input = storage.aliasView(
+            {inner, outer, reduction}, {1, reduction * inner, inner}, 0);
+        std::shared_ptr<StampedCubReduction> stamped =
+            CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(input, stream);
+        ASSERT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected, 1.0e-4f);
+    }
+}
+
+TEST(CubReduction, SharedTransposePermutedTiledWriterCoversRetainedWidthRegimes) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer = 9;
+    constexpr uint64_t reduction = 3;
+    for (uint64_t inner : {2ULL,
+                           31ULL,
+                           32ULL,
+                           33ULL,
+                           64ULL,
+                           65ULL,
+                           128ULL,
+                           129ULL,
+                           256ULL,
+                           257ULL,
+                           511ULL,
+                           512ULL,
+                           513ULL,
+                           1024ULL,
+                           2048ULL,
+                           4096ULL,
+                           4097ULL,
+                           8193ULL}) {
+        SCOPED_TRACE(inner);
+        std::vector<float> values(outer * reduction * inner);
+        std::vector<float> expected(inner * outer, 0.0f);
+        for (uint64_t i = 0; i < outer; ++i) {
+            for (uint64_t j = 0; j < reduction; ++j) {
+                for (uint64_t k = 0; k < inner; ++k) {
+                    const float value = static_cast<float>(static_cast<int>((i * 7 + j * 5 + k * 3) % 17) - 8)
+                                        * 0.125f;
+                    values[(i * reduction + j) * inner + k] = value;
+                    expected[k * outer + i] += value;
+                }
+            }
+        }
+
+        Tensor storage = makeGpuTensor(values, {outer, reduction, inner}, stream);
+        Tensor permuted = storage.aliasView(
+            {inner, outer, reduction}, {1, reduction * inner, inner}, 0);
+        std::shared_ptr<StampedCubReduction> stamped =
+            CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, stream);
+        ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        ASSERT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
+
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected, 1.0e-5f);
+    }
+}
+
+TEST(CubReduction, SharedTransposePermutedTiledWriterHonorsDenseViewStorageOffset) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer = 9;
+    constexpr uint64_t reduction = 5;
+    constexpr uint64_t inner = 35;
+    constexpr uint64_t offset = 17;
+    const uint64_t visible_elements = outer * reduction * inner;
+    std::vector<float> storage_values(offset + visible_elements + 11, -999.0f);
+    std::vector<float> expected(inner * outer, 0.0f);
+    for (uint64_t i = 0; i < outer; ++i) {
+        for (uint64_t j = 0; j < reduction; ++j) {
+            for (uint64_t k = 0; k < inner; ++k) {
+                const float value = static_cast<float>(static_cast<int>((i * 3 + j * 7 + k) % 11) - 5);
+                storage_values[offset + (i * reduction + j) * inner + k] = value;
+                expected[k * outer + i] += value;
+            }
+        }
+    }
+
+    Tensor storage = makeGpuTensor(storage_values, {storage_values.size()}, stream);
+    Tensor input = storage.aliasView(
+        {inner, outer, reduction}, {1, reduction * inner, inner}, offset);
+    std::shared_ptr<StampedCubReduction> stamped =
+        CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(input, stream);
+    ASSERT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
+
+    stamped->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+}
+
+TEST(CubReduction, SharedTransposePermutedTiledWriterGridStridesPast65535OuterRows) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer = 65537;
+    constexpr uint64_t reduction = 2;
+    constexpr uint64_t inner = 33;
+    std::vector<float> values(outer * reduction * inner, 1.0f);
+    Tensor storage = makeGpuTensor(values, {outer, reduction, inner}, stream);
+    Tensor input = storage.aliasView(
+        {inner, outer, reduction}, {1, reduction * inner, inner}, 0);
+    std::shared_ptr<StampedCubReduction> stamped =
+        CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(input, stream);
+    ASSERT_TRUE(stamped->getGeometry().tiled_output_shared_transpose);
+
+    stamped->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+                          std::vector<float>(inner * outer, 2.0f));
+}
+
 TEST(CubReduction, TiledFixedSegmentCoversWidthPoliciesAndAsyncStaging) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -102,6 +341,45 @@ TEST(CubReduction, TiledFixedSegmentCoversWidthPoliciesAndAsyncStaging) {
         std::shared_ptr<StampedCubReduction> stamped =
             CubReduction(CubReductionOp::Sum, 1, DataType::FP32).stamp(input, stream);
         EXPECT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream), expected);
+    }
+}
+
+TEST(CubReduction, PermutationAwareTiledPathCoversTunedWidthPolicies) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t outer_size = 3;
+    constexpr uint64_t reduction_size = 65;
+    for (uint64_t inner_size :
+         {2ULL, 3ULL, 5ULL, 17ULL, 32ULL, 33ULL, 63ULL, 64ULL, 65ULL, 127ULL, 128ULL, 129ULL, 255ULL, 256ULL,
+          257ULL, 511ULL, 512ULL, 513ULL, 1024ULL, 2048ULL, 4096ULL, 4097ULL}) {
+        SCOPED_TRACE(inner_size);
+        std::vector<float> values(outer_size * reduction_size * inner_size);
+        std::vector<float> expected(inner_size * outer_size, 0.0f);
+        for (uint64_t outer = 0; outer < outer_size; ++outer) {
+            for (uint64_t row = 0; row < reduction_size; ++row) {
+                for (uint64_t component = 0; component < inner_size; ++component) {
+                    const int value = static_cast<int>((outer * 3 + row * 5 + component * 7) % 11) - 5;
+                    values[(outer * reduction_size + row) * inner_size + component] = static_cast<float>(value);
+                    expected[component * outer_size + outer] += static_cast<float>(value);
+                }
+            }
+        }
+
+        Tensor storage = makeGpuTensor(values, {outer_size, reduction_size, inner_size}, stream);
+        Tensor permuted = storage.aliasView(
+            {inner_size, outer_size, reduction_size},
+            {1, reduction_size * inner_size, inner_size},
+            0);
+        std::shared_ptr<StampedCubReduction> stamped =
+            CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, stream);
+        ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        ASSERT_TRUE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
+        EXPECT_TRUE(stamped->getGeometry().tiled_output_permuted);
         EXPECT_EQ(stamped->getWorkspaceSizeInBytes(), 1U);
         stamped->run();
         stream.synchronize();

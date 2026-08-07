@@ -529,6 +529,13 @@ TEST(TrainingRunsStatsReporter, RunningSummaryUsesDeclaredMetricAggregationContr
     reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(
         TrainingEvent::statsUpdated(batch1), "fold_0"));
 
+    // The reporter drains queued events before emitting a summary, so without
+    // an explicit boundary the epoch-one-final row is scheduling-dependent: the
+    // worker may consume epoch2Batch0 in the same drain and only emit afterward.
+    // This test asserts both the exact completed epoch-one aggregate and the
+    // epoch-two smoothed aggregate, so make the observation point deterministic.
+    reporter.flush();
+
     TrainingStatsSnapshot epoch2Batch0 = makeStats(TrainingEventPhase::TRAIN, 1.0);
     epoch2Batch0.epoch = 2;
     epoch2Batch0.stepInEpoch = 1;

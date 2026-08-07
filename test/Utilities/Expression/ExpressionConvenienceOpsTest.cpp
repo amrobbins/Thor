@@ -2329,6 +2329,29 @@ TEST(ExpressionConvenienceOps, NonDenseRootViewBroadcastsWithDenseInput) {
     expectNear(copyToCpuValues(y, stream), {1.0f, 2.0f, 5.0f, 6.0f, 9.0f, 10.0f});
 }
 
+TEST(ExpressionConvenienceOps, TallMaterializedTransposeSpillsLogicalRowTilesAcrossGridYAndZ) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t TILE_DIM = 32;
+    constexpr uint64_t CUDA_GRID_Y_LIMIT = 65535;
+    constexpr uint64_t rows = TILE_DIM * CUDA_GRID_Y_LIMIT + 1;
+    constexpr uint64_t cols = 2;
+
+    Tensor x(gpuPlacement, TensorDescriptor(DataType::FP32, {rows, cols}));
+    ASSERT_EQ(cudaMemsetAsync(x.getMemPtr<void>(), 0, x.getArraySizeInBytes(), stream.getStream()), cudaSuccess);
+
+    Expression input = Expression::input("x");
+    FusedEquation eq = FusedEquation::compile(Expression::outputs({{"y", input.transpose()}}).physicalOutputs(), 0);
+    Tensor y(gpuPlacement, TensorDescriptor(DataType::FP32, {cols, rows}));
+
+    EXPECT_NO_THROW({
+        eq.run({{"x", x}}, y, stream);
+        stream.synchronize();
+    });
+    EXPECT_EQ(y.getDimensions(), (std::vector<uint64_t>{cols, rows}));
+}
+
 TEST(ExpressionConvenienceOps, InternalNonDenseStridedViewCanBeUnsqueezedThenBroadcast) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

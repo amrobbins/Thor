@@ -71,12 +71,47 @@ struct CubReductionDeviceIndexing {
 
 static_assert(std::is_trivially_copyable_v<CubReductionDeviceIndexing>);
 
+enum class CubReductionTiledRetainedOutputOrder : uint8_t {
+    NaturalOuterInner = 0,
+    PermutedInnerOuter = 1,
+};
+
+/**
+ * Production planning metadata for a zero-copy logical permutation whose visible storage is physically dense.
+ *
+ * Singleton axes are intentionally omitted from the physical axis vectors and logical retained-order vector because
+ * they do not affect address order.
+ * The source can therefore be traversed as one dense [outer, reduction, inner] tensor even though its logical Tensor
+ * view is non-dense. retained_output_order describes whether the logical dense output order matches the natural
+ * [outer..., inner...] retained order or requires the flattened [inner..., outer...] retained-axis permutation.
+ *
+ * When this metadata is present, the value-reduction planner can execute the view through the normal optimized
+ * TiledFixedSegment family without materializing the logical permutation. The tuned kernels consume the source pointer
+ * as dense physical [outer, reduction, inner] storage and use the retained-output write strides below to produce the
+ * requested logical dense output order directly.
+ */
+struct CubReductionPermutationAwareTiledGeometry {
+    std::vector<uint32_t> physical_outer_axes;
+    std::vector<uint32_t> physical_reduction_axes;
+    std::vector<uint32_t> physical_inner_axes;
+    std::vector<uint32_t> logical_non_singleton_retained_axes;
+
+    uint64_t outer_size = 0;
+    uint64_t reduction_size = 0;
+    uint64_t inner_size = 0;
+
+    CubReductionTiledRetainedOutputOrder retained_output_order =
+        CubReductionTiledRetainedOutputOrder::NaturalOuterInner;
+};
+
 struct CubReductionGeometry {
     std::vector<uint32_t> axes;
     uint32_t rank = 0;
 
-    // When the reduced axes form one contiguous block, the input can be viewed as
-    // [outer_size, reduction_size, inner_size]. These fields are zero for disjoint-axis reductions.
+    // For an ordinary dense tensor whose reduced axes form one contiguous logical block, the input can be viewed as
+    // [outer_size, reduction_size, inner_size]. For a production permutation-aware tiled reduction these fields are
+    // instead the equivalent dense physical [outer, reduction, inner] geometry recovered from the view's strides.
+    // They remain zero for layouts that cannot use either tiled geometry.
     bool reduced_axes_are_contiguous = false;
     uint64_t outer_size = 0;
     uint64_t inner_size = 0;
@@ -88,6 +123,32 @@ struct CubReductionGeometry {
     std::vector<uint64_t> squeezed_output_dimensions;
     CubReductionIndexing indexing;
     CubReductionDeviceIndexing device_indexing;
+
+    // DeviceTransformReduce normally consumes a dense pointer directly.  A rank-1
+    // non-dense view (for example, an extracted matrix diagonal) is still an
+    // affine sequence and can use the same single-output CUB reduction without
+    // materializing or paying the fully general logical-axis index mapping.
+    bool device_transform_uses_affine_stride = false;
+    uint64_t affine_input_stride = 1;
+
+    // Physical-layout analysis is relative to input.getMemPtr(), which already includes a Tensor view's storage
+    // element offset.  Storage offsets are therefore intentionally not baked into this reusable geometry.
+    bool physical_layout_is_dense_permutation = false;
+    std::vector<uint32_t> physical_non_singleton_axis_order;
+    std::optional<CubReductionPermutationAwareTiledGeometry> permutation_aware_tiled_geometry = std::nullopt;
+
+    // TiledFixedSegment logically produces a dense [outer_size, inner_size] matrix after reducing the physically
+    // contiguous middle domain. Natural output uses output_index = outer * inner_size + inner. Production
+    // permutation-aware planning can instead request dense [inner_size, outer_size]. Input traversal and reduction
+    // parallelism remain in the tuned tiled implementation; only the retained-output writer changes.
+    uint64_t tiled_output_outer_stride = 0;
+    uint64_t tiled_output_inner_stride = 0;
+    bool tiled_output_permuted = false;
+    // A permuted retained output is finalized through a small shared-memory tile before global storage. This keeps the
+    // reduction itself in registers while turning the dense [inner,outer] destination into coalesced writes across
+    // adjacent outer coordinates. No reduction/permutation intermediate is allocated in global memory.
+    bool tiled_output_shared_transpose = false;
+
     CubReductionPath path = CubReductionPath::DeviceTransformReduce;
 };
 
@@ -142,8 +203,11 @@ class CubReduction {
                                                                uint32_t axis);
     [[nodiscard]] static CubReductionGeometry analyzeGeometry(const std::vector<uint64_t>& input_dimensions,
                                                                const std::vector<uint32_t>& axes);
+    [[nodiscard]] static CubReductionGeometry analyzeGeometry(const std::vector<uint64_t>& input_dimensions,
+                                                               const std::vector<uint64_t>& input_strides,
+                                                               const std::vector<uint32_t>& axes);
 
-    /** Maps one logical (output, reduction) coordinate pair to the source tensor's row-major physical index. */
+    /** Maps one logical (output, reduction) coordinate pair to the source tensor's physical element offset. */
     [[nodiscard]] static uint64_t mapLogicalReductionIndexToPhysicalIndex(const CubReductionGeometry& geometry,
                                                                           uint64_t output_index,
                                                                           uint64_t reduction_index);

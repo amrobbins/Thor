@@ -4,6 +4,7 @@
 #include <algorithm>
 
 #include "Utilities/Expression/AutoDiff.h"
+#include "Utilities/Expression/BatchedMatmulPlan.h"
 #include "Utilities/Expression/CudaSourceEmitter.h"
 #include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/EquationCompiler.h"
@@ -81,6 +82,25 @@ static const Tensor& runtimeInputTensor(const RuntimeInputValue& value) {
         throw std::runtime_error("Expected tensor runtime input.");
     }
     return std::get<Tensor>(value);
+}
+
+static Tensor groupedMatmulBatchView(const Tensor& tensor,
+                                     uint64_t batch_count,
+                                     uint64_t batch_stride_elements,
+                                     uint64_t relative_element_offset,
+                                     const char* role) {
+    const std::vector<uint64_t> dims = tensor.getDimensions();
+    const std::vector<uint64_t> strides = tensor.getStridesElements();
+    if (dims.size() < 2 || strides.size() != dims.size()) {
+        throw std::runtime_error(std::string("Grouped MATMUL ") + role + " requires a rank >= 2 tensor with valid strides.");
+    }
+    if (batch_count == 0) {
+        throw std::runtime_error(std::string("Grouped MATMUL ") + role + " requires a non-zero batch count.");
+    }
+
+    return tensor.aliasView({batch_count, dims[dims.size() - 2], dims[dims.size() - 1]},
+                            {batch_stride_elements, strides[strides.size() - 2], strides[strides.size() - 1]},
+                            relative_element_offset);
 }
 
 static Tensor runtimeInputTensorScalarView(const RuntimeInputValue& value, const char* label) {
@@ -793,8 +813,15 @@ static std::vector<uint64_t> inferExpressionMatmulOutputDims(const ExprNode& nod
                                                              const std::vector<uint64_t>& lhs_dims,
                                                              const std::vector<uint64_t>& rhs_dims,
                                                              const std::vector<uint64_t>* aux_dims = nullptr) {
+    if (node.op == ExprOp::MATMUL) {
+        if (aux_dims != nullptr) {
+            throw std::runtime_error("MATMUL shape inference does not accept an auxiliary addend tensor.");
+        }
+        return planBatchedMatmulShape(lhs_dims, rhs_dims, node.transpose_lhs, node.transpose_rhs).output_dimensions;
+    }
+
     if (lhs_dims.size() != 2 || rhs_dims.size() != 2) {
-        throw std::runtime_error("Matmul/gemm shape inference currently only supports rank-2 tensors.");
+        throw std::runtime_error("GEMM shape inference currently only supports rank-2 matrix operands.");
     }
 
     const uint64_t a_rows = node.transpose_lhs ? lhs_dims[1] : lhs_dims[0];
@@ -803,7 +830,7 @@ static std::vector<uint64_t> inferExpressionMatmulOutputDims(const ExprNode& nod
     const uint64_t b_cols = node.transpose_rhs ? rhs_dims[0] : rhs_dims[1];
 
     if (a_cols != b_rows) {
-        throw std::runtime_error("Matmul/gemm shape inference found incompatible matrix dimensions.");
+        throw std::runtime_error("GEMM shape inference found incompatible matrix dimensions.");
     }
 
     std::vector<uint64_t> out_dims{a_rows, b_cols};
@@ -2047,20 +2074,24 @@ static std::vector<uint64_t> resolveMatmulOutputDimsFromInputs(const CompiledMat
 
     const auto& a_dims = stage_input_dims[0];
     const auto& b_dims = stage_input_dims[1];
-    if (a_dims.size() != 2 || b_dims.size() != 2) {
-        throw std::runtime_error("Matmul/gemm stage currently only supports rank-2 tensors.");
+
+    std::vector<uint64_t> out_dims;
+    if (compiled_stage.op == ExprOp::MATMUL) {
+        out_dims = planBatchedMatmulShape(a_dims, b_dims, compiled_stage.transpose_lhs, compiled_stage.transpose_rhs).output_dimensions;
+    } else {
+        if (a_dims.size() != 2 || b_dims.size() != 2) {
+            throw std::runtime_error("GEMM stage currently only supports rank-2 matrix operands.");
+        }
+        const uint64_t a_rows = compiled_stage.transpose_lhs ? a_dims[1] : a_dims[0];
+        const uint64_t a_cols = compiled_stage.transpose_lhs ? a_dims[0] : a_dims[1];
+        const uint64_t b_rows = compiled_stage.transpose_rhs ? b_dims[1] : b_dims[0];
+        const uint64_t b_cols = compiled_stage.transpose_rhs ? b_dims[0] : b_dims[1];
+        if (a_cols != b_rows) {
+            throw std::runtime_error("GEMM stage has incompatible matrix dimensions.");
+        }
+        out_dims = {a_rows, b_cols};
     }
 
-    const uint64_t a_rows = compiled_stage.transpose_lhs ? a_dims[1] : a_dims[0];
-    const uint64_t a_cols = compiled_stage.transpose_lhs ? a_dims[0] : a_dims[1];
-    const uint64_t b_rows = compiled_stage.transpose_rhs ? b_dims[1] : b_dims[0];
-    const uint64_t b_cols = compiled_stage.transpose_rhs ? b_dims[0] : b_dims[1];
-
-    if (a_cols != b_rows) {
-        throw std::runtime_error("Matmul/gemm stage has incompatible matrix dimensions.");
-    }
-
-    std::vector<uint64_t> out_dims{a_rows, b_cols};
     if (compiled_stage.op == ExprOp::GEMM) {
         const auto& c_dims = stage_input_dims[2];
         if (c_dims.size() == 1) {
@@ -2526,17 +2557,29 @@ static void addMatmulParameterFanOverrides(const CompiledExecutionStage& stage,
     const CompiledMatmul& compiled = *stage.matmul;
     const std::vector<uint64_t>& lhs_dims = stage_input_dims[0];
     const std::vector<uint64_t>& rhs_dims = stage_input_dims[1];
-    if (lhs_dims.size() != 2 || rhs_dims.size() != 2) {
-        throw std::runtime_error("Matmul/gemm parameter fan override inference currently only supports rank-2 inputs.");
-    }
 
-    const uint64_t lhs_rows = compiled.transpose_lhs ? lhs_dims[1] : lhs_dims[0];
-    const uint64_t lhs_cols = compiled.transpose_lhs ? lhs_dims[0] : lhs_dims[1];
-    const uint64_t rhs_rows = compiled.transpose_rhs ? rhs_dims[1] : rhs_dims[0];
-    const uint64_t rhs_cols = compiled.transpose_rhs ? rhs_dims[0] : rhs_dims[1];
-
-    if (lhs_cols != rhs_rows) {
-        throw std::runtime_error("Matmul/gemm parameter fan override inference found incompatible matrix dimensions.");
+    uint64_t lhs_rows = 0;
+    uint64_t lhs_cols = 0;
+    uint64_t rhs_rows = 0;
+    uint64_t rhs_cols = 0;
+    if (compiled.op == ExprOp::MATMUL) {
+        const BatchedMatmulShapePlan shape =
+            planBatchedMatmulShape(lhs_dims, rhs_dims, compiled.transpose_lhs, compiled.transpose_rhs);
+        lhs_rows = shape.m;
+        lhs_cols = shape.k;
+        rhs_rows = shape.k;
+        rhs_cols = shape.n;
+    } else {
+        if (lhs_dims.size() != 2 || rhs_dims.size() != 2) {
+            throw std::runtime_error("GEMM parameter fan override inference currently only supports rank-2 inputs.");
+        }
+        lhs_rows = compiled.transpose_lhs ? lhs_dims[1] : lhs_dims[0];
+        lhs_cols = compiled.transpose_lhs ? lhs_dims[0] : lhs_dims[1];
+        rhs_rows = compiled.transpose_rhs ? rhs_dims[1] : rhs_dims[0];
+        rhs_cols = compiled.transpose_rhs ? rhs_dims[0] : rhs_dims[1];
+        if (lhs_cols != rhs_rows) {
+            throw std::runtime_error("GEMM parameter fan override inference found incompatible matrix dimensions.");
+        }
     }
 
     auto maybe_add = [&](size_t operand_idx, uint64_t fan_in, uint64_t fan_out) {
@@ -3949,7 +3992,10 @@ static uint64_t computeMatmulStageFlops(const CompiledMatmul& matmul, const std:
     const uint64_t out_numel = numelFromDims(out_dims);
 
     const auto& a_dims = stage_input_dims.at(0);
-    const uint64_t k = matmul.transpose_lhs ? a_dims.at(0) : a_dims.at(1);
+    if (a_dims.size() < 2) {
+        throw std::runtime_error("Matmul/gemm FLOP accounting requires rank >= 2 matrix operands.");
+    }
+    const uint64_t k = matmul.transpose_lhs ? a_dims.at(a_dims.size() - 2) : a_dims.back();
 
     const bool alpha_dynamic = (matmul.alpha_input_slot != UINT32_MAX);
     const bool beta_dynamic = (matmul.beta_input_slot != UINT32_MAX);
@@ -8932,6 +8978,105 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     }
                     Tensor lhsTensor = runtimeInputTensor(stageInputs[0]);
                     Tensor rhsTensor = runtimeInputTensor(stageInputs[1]);
+
+                    const bool plain_groupable_matmul =
+                        stage.matmul->epilogue == MatmulEpilogue::Default &&
+                        stage.matmul->backward_epilogue == MatmulBackwardEpilogue::Default &&
+                        !stage.matmul->bgrad_output_dtype.has_value();
+                    if (plain_groupable_matmul) {
+                        Tensor fullOutput;
+                        if (preallocated.has_value()) {
+                            fullOutput = preallocated.value();
+                            if (fullOutput.getPlacement() != lhsTensor.getPlacement()) {
+                                throw std::runtime_error(
+                                    "Preallocated grouped matmul output tensor placement does not match the input placement.");
+                            }
+                            if (fullOutput.getDataType() != stage.matmul->output_dtype) {
+                                throw std::runtime_error(
+                                    "Preallocated grouped matmul output tensor dtype does not match the compiled output dtype.");
+                            }
+                            if (fullOutput.getDimensions() != output_dims) {
+                                throw std::runtime_error(
+                                    "Preallocated grouped matmul output tensor dimensions are incompatible with the matmul output shape.");
+                            }
+                        } else {
+                            fullOutput =
+                                Tensor(lhsTensor.getPlacement(), TensorDescriptor(stage.matmul->output_dtype, output_dims));
+                        }
+
+                        const BatchedMatmulLayoutPlan layoutPlan =
+                            planBatchedMatmulLayout(lhsTensor,
+                                                   rhsTensor,
+                                                   fullOutput,
+                                                   stage.matmul->transpose_lhs,
+                                                   stage.matmul->transpose_rhs);
+                        if (!layoutPlan.canLowerWithoutMaterialization()) {
+                            throw std::runtime_error(
+                                "Expression MATMUL layout cannot be consumed directly by cuBLASLt without "
+                                "materialization/postprocessing. Grouped MATMUL lowering does not materialize operands.");
+                        }
+
+                        if (!layoutPlan.grouping.isSingleStridedBatch()) {
+                            const std::vector<MatmulBatchGroup> groups = materializeBatchedMatmulGroups(layoutPlan);
+                            if (groups.empty()) {
+                                throw std::runtime_error("Grouped MATMUL planner returned no execution groups.");
+                            }
+                            if (stage_flops % groups.size() != 0) {
+                                throw std::runtime_error("Grouped MATMUL FLOP accounting does not divide evenly across groups.");
+                            }
+                            const uint64_t group_flops = stage_flops / groups.size();
+
+                            std::vector<uint32_t> group_stage_indices;
+                            group_stage_indices.reserve(groups.size());
+                            for (const MatmulBatchGroup& group : groups) {
+                                Tensor lhsGroup = groupedMatmulBatchView(lhsTensor,
+                                                                        group.batch_count,
+                                                                        group.lhs_batch_stride_elements,
+                                                                        group.lhs_relative_element_offset,
+                                                                        "lhs");
+                                Tensor rhsGroup = groupedMatmulBatchView(rhsTensor,
+                                                                        group.batch_count,
+                                                                        group.rhs_batch_stride_elements,
+                                                                        group.rhs_relative_element_offset,
+                                                                        "rhs");
+                                Tensor outputGroup = groupedMatmulBatchView(fullOutput,
+                                                                           group.batch_count,
+                                                                           group.output_batch_stride_elements,
+                                                                           group.output_relative_element_offset,
+                                                                           "output");
+
+                                std::shared_ptr<StampedMatmul> groupMatmul =
+                                    stampMatmul(stage.matmul,
+                                                lhsGroup,
+                                                rhsGroup,
+                                                std::optional<Tensor>(outputGroup),
+                                                stream,
+                                                alpha_input,
+                                                beta_input,
+                                                alpha_runtime_name,
+                                                beta_runtime_name,
+                                                epilogue_aux,
+                                                std::nullopt);
+                                if (groupMatmul->getOutputTensor().getDimensions() != outputGroup.getDimensions()) {
+                                    throw std::runtime_error(
+                                        "Grouped MATMUL stamped output dimensions do not match the planned output view.");
+                                }
+
+                                const uint32_t group_stage_idx = static_cast<uint32_t>(stampedStages.size());
+                                group_stage_indices.push_back(group_stage_idx);
+                                stampedStages.emplace_back(groupMatmul, dependency_stage_indices, group_flops);
+                            }
+
+                            const uint32_t barrier_stage_idx = static_cast<uint32_t>(stampedStages.size());
+                            stampedStages.emplace_back(StampedExecutionStage::dependencyBarrier(
+                                lhsTensor.getPlacement().getDeviceNum(), std::move(group_stage_indices)));
+
+                            values[matrixStageOutput.value_id] = fullOutput;
+                            producer_stage_by_value_id[matrixStageOutput.value_id] = barrier_stage_idx;
+                            break;
+                        }
+                    }
+
                     stampedMatmul = stampMatmul(stage.matmul,
                                                 lhsTensor,
                                                 rhsTensor,

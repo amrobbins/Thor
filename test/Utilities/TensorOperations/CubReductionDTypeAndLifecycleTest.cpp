@@ -26,6 +26,39 @@ TEST(CubReduction, EverySupportedInputStorageDtypeAccumulatesInFp32) {
 #endif
 }
 
+TEST(CubReduction, PermutationAwareTiledPathSupportsEveryInputStorageDtype) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    const std::vector<float> values = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+                                       7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f};
+    const auto run_dtype = [&](DataType dtype) {
+        SCOPED_TRACE(static_cast<int>(dtype));
+        Tensor storage = makeGpuTensor(values, {2, 3, 2}, stream, dtype);
+        Tensor permuted = storage.aliasView({2, 2, 3}, {1, 6, 2}, 0);
+        std::shared_ptr<StampedCubReduction> stamped =
+            CubReduction(CubReductionOp::Sum, 2, DataType::FP32).stamp(permuted, stream);
+        ASSERT_EQ(stamped->getPath(), CubReductionPath::TiledFixedSegment);
+        ASSERT_TRUE(stamped->getGeometry().permutation_aware_tiled_geometry.has_value());
+        EXPECT_EQ(stamped->getAccumulatorDataType(), DataType::FP32);
+        stamped->run();
+        stream.synchronize();
+        expectFloatVectorNear(copyGpuTensorAsFloat(stamped->getOutputTensor(), stream),
+                              {9.0f, 27.0f, 12.0f, 30.0f});
+    };
+
+    run_dtype(DataType::FP32);
+    run_dtype(DataType::FP16);
+    run_dtype(DataType::BF16);
+#if THOR_CUB_ENABLE_FP8_TYPES
+    run_dtype(DataType::FP8_E4M3);
+    run_dtype(DataType::FP8_E5M2);
+#endif
+#if THOR_CUB_ENABLE_64BIT_TYPES
+    run_dtype(DataType::FP64);
+#endif
+}
+
 TEST(CubReduction, AwkwardLargeVectorizedShardsHandleAlignmentAndPaddedInputTailForEveryStorageDtype) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

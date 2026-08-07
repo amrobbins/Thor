@@ -35,6 +35,58 @@ const std::vector<ReductionCase> valueReductionCases = {
 
 }  // namespace
 
+TEST(ExpressionReductionPlan, CacheKeySeparatesPhysicalPermutationLayouts) {
+    ReductionCacheKey ijk_to_ki(ExprOp::REDUCE_SUM,
+                                {32, 7, 5},
+                                {1, 160, 32},
+                                {2},
+                                {2},
+                                DataType::FP32,
+                                DataType::FP32,
+                                DataType::FP32,
+                                ReductionResultKind::Value,
+                                0);
+    ReductionCacheKey different_physical_layout(ExprOp::REDUCE_SUM,
+                                                {32, 7, 5},
+                                                {35, 5, 1},
+                                                {2},
+                                                {2},
+                                                DataType::FP32,
+                                                DataType::FP32,
+                                                DataType::FP32,
+                                                ReductionResultKind::Value,
+                                                0);
+
+    EXPECT_NE(ijk_to_ki, different_physical_layout);
+}
+
+TEST(ExpressionReductionPlan, PhysicalPermutationValueReductionBuildsPermutationAwareTiledPlan) {
+    REQUIRE_CUDA_DEVICE();
+
+    TensorPlacement gpu_placement(TensorPlacement::MemDevices::GPU, 0);
+    Tensor storage(gpu_placement, TensorDescriptor(DataType::FP32, {7, 5, 32}));
+    Tensor input = storage.aliasView({32, 7, 5}, {1, 160, 32}, 0);
+    auto compiled = std::make_shared<CompiledReduction>(ExprOp::REDUCE_SUM,
+                                                        std::vector<uint64_t>{2},
+                                                        std::vector<uint64_t>{2},
+                                                        DataType::FP32,
+                                                        DataType::FP32,
+                                                        DataType::FP32);
+
+    std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(compiled, input, 0);
+    ASSERT_NE(built, nullptr);
+    ASSERT_TRUE(built->geometry.has_value());
+    EXPECT_EQ(built->geometry->path, CubReductionPath::TiledFixedSegment);
+    ASSERT_TRUE(built->geometry->permutation_aware_tiled_geometry.has_value());
+    EXPECT_EQ(built->geometry->outer_size, 7U);
+    EXPECT_EQ(built->geometry->reduction_size, 5U);
+    EXPECT_EQ(built->geometry->inner_size, 32U);
+    EXPECT_TRUE(built->geometry->tiled_output_permuted);
+    EXPECT_TRUE(built->geometry->tiled_output_shared_transpose);
+    EXPECT_EQ(built->geometry->tiled_output_outer_stride, 1U);
+    EXPECT_EQ(built->geometry->tiled_output_inner_stride, 7U);
+}
+
 TEST(ExpressionReductionPlan, EveryDenseValueReductionBuildsACachedPlan) {
     REQUIRE_CUDA_DEVICE();
 

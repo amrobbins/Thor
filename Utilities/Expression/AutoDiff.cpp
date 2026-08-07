@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "Utilities/Expression/BatchedMatmulPlan.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/StampedEquation.h"
 
@@ -2465,8 +2466,18 @@ std::vector<uint64_t> inferMatmulOutputDims(const ExprNode& node,
                                             const std::vector<uint64_t>& lhs_dims,
                                             const std::vector<uint64_t>& rhs_dims,
                                             const std::vector<uint64_t>* aux_dims = nullptr) {
+    if (node.op == ExprOp::MATMUL) {
+        if (aux_dims != nullptr) {
+            throw std::runtime_error("Autodiff MATMUL shape inference does not accept an addend tensor.");
+        }
+        return planBatchedMatmulShape(lhs_dims, rhs_dims, node.transpose_lhs, node.transpose_rhs).output_dimensions;
+    }
+
+    if (node.op != ExprOp::GEMM) {
+        throw std::runtime_error("Autodiff matmul shape inference requires a MATMUL or GEMM node.");
+    }
     if (lhs_dims.size() != 2 || rhs_dims.size() != 2) {
-        throw std::runtime_error("Autodiff shape inference for matmul/gemm currently only supports rank-2 tensors.");
+        throw std::runtime_error("Autodiff shape inference for GEMM currently only supports rank-2 tensors.");
     }
 
     const uint64_t a_rows = node.transpose_lhs ? lhs_dims[1] : lhs_dims[0];
@@ -2495,6 +2506,18 @@ std::vector<uint64_t> inferMatmulOutputDims(const ExprNode& node,
     }
 
     return out_dims;
+}
+
+std::vector<uint64_t> rawBatchedMatmulOperandGradientDims(const std::vector<uint64_t>& output_dims,
+                                                          const std::vector<uint64_t>& operand_dims) {
+    if (output_dims.size() < 2 || operand_dims.size() < 2) {
+        throw std::runtime_error("Autodiff batched matmul operand-gradient shape inference requires rank >= 2 tensors.");
+    }
+
+    std::vector<uint64_t> grad_dims(output_dims.begin(), output_dims.end() - 2);
+    grad_dims.push_back(operand_dims[operand_dims.size() - 2]);
+    grad_dims.push_back(operand_dims.back());
+    return grad_dims;
 }
 
 struct AttentionTensorLogicalDims {
@@ -4401,7 +4424,9 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     }
 
                     lhs_grad = builder.buildScaledByGemmFactor(node.alpha_node, node.alpha_fp, lhs_grad);
-                    addContributionToChild(node.lhs, lhs_grad, lhs_dims);
+                    const std::vector<uint64_t> lhs_grad_dims =
+                        has_forward_dims ? rawBatchedMatmulOperandGradientDims(node_dims, lhs_dims) : lhs_dims;
+                    addContributionToChild(node.lhs, lhs_grad, lhs_grad_dims, lhs_grad_dtype);
                 }
 
                 if (node_reaches_requested_inputs.at(node.rhs)) {
@@ -4421,7 +4446,9 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     }
 
                     rhs_grad = builder.buildScaledByGemmFactor(node.alpha_node, node.alpha_fp, rhs_grad);
-                    addContributionToChild(node.rhs, rhs_grad, rhs_dims);
+                    const std::vector<uint64_t> rhs_grad_dims =
+                        has_forward_dims ? rawBatchedMatmulOperandGradientDims(node_dims, rhs_dims) : rhs_dims;
+                    addContributionToChild(node.rhs, rhs_grad, rhs_grad_dims, rhs_grad_dtype);
                 }
                 break;
             }

@@ -234,14 +234,29 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
         if (batchCount64 != 0 && row_tiles_64 > std::numeric_limits<uint64_t>::max() / batchCount64) {
             throw std::runtime_error("Fused tiled-transpose launch grid dimensions exceed uint64_t.");
         }
-        const uint64_t grid_y_64 = batchCount64 * row_tiles_64;
-        if (grid_x_64 > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) ||
-            grid_y_64 > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
-            throw std::runtime_error("Fused tiled-transpose launch grid dimensions exceed uint32_t.");
+        const uint64_t flat_grid_y_64 = batchCount64 * row_tiles_64;
+
+        // CUDA supports a much larger X grid than Y/Z. A tall transpose can require more than 65,535
+        // row/batch tiles, so spill that logical dimension across Y and Z. The generated tiled-transpose
+        // kernels reconstruct the flat tile index as blockIdx.y + blockIdx.z * gridDim.y.
+        constexpr uint64_t MAX_CUDA_GRID_X = 2147483647ULL;
+        constexpr uint64_t MAX_CUDA_GRID_YZ = 65535ULL;
+        if (grid_x_64 > MAX_CUDA_GRID_X) {
+            throw std::runtime_error("Fused tiled-transpose launch grid X dimension exceeds the CUDA limit.");
         }
+
+        const uint64_t grid_y_64 = std::max<uint64_t>(1ULL, std::min<uint64_t>(flat_grid_y_64, MAX_CUDA_GRID_YZ));
+        const uint64_t grid_z_64 =
+            flat_grid_y_64 == 0 ? 1ULL : flat_grid_y_64 / grid_y_64 + static_cast<uint64_t>(flat_grid_y_64 % grid_y_64 != 0);
+        if (grid_z_64 > MAX_CUDA_GRID_YZ) {
+            throw std::runtime_error("Fused tiled-transpose launch flattened Y dimension exceeds CUDA Y/Z grid capacity.");
+        }
+
         const uint32_t grid_x = static_cast<uint32_t>(grid_x_64);
         const uint32_t grid_y = static_cast<uint32_t>(grid_y_64);
-        CU_CHECK(cuLaunchKernel(compiledEquation->kernel, grid_x, grid_y, 1, TILE_DIM, BLOCK_ROWS, 1, 0, stream, args.data(), nullptr));
+        const uint32_t grid_z = static_cast<uint32_t>(grid_z_64);
+        CU_CHECK(cuLaunchKernel(
+            compiledEquation->kernel, grid_x, grid_y, grid_z, TILE_DIM, BLOCK_ROWS, 1, 0, stream, args.data(), nullptr));
         return;
     }
 

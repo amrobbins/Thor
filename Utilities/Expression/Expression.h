@@ -695,6 +695,9 @@ class Expression {
                                      cudnnSoftmaxMode_t mode = CUDNN_SOFTMAX_MODE_CHANNEL) const;
     [[nodiscard]] Expression logSoftmax(cudnnSoftmaxMode_t mode = CUDNN_SOFTMAX_MODE_CHANNEL) const;
 
+    // Matrix multiply with NumPy/PyTorch-style batched semantics:
+    //   [..., M, K] @ [..., K, N] -> broadcast_batch(...), M, N
+    // transpose_lhs/transpose_rhs apply only to the final two matrix axes.
     [[nodiscard]] static Expression matmul(const Expression& lhs,
                                            const Expression& rhs,
                                            bool transpose_lhs = false,

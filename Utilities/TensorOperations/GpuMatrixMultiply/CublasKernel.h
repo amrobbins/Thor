@@ -62,7 +62,17 @@ class CublasKernel : private ReferenceCounted {
 
     void recordRun(double executionTimeOfRun) { cublasKernelOptions->runStats.recordRun(executionTimeOfRun); }
 
-    double getAverageRunTimeMilliseconds() { return cublasKernelOptions->runStats.getAverageRunTimeMilliseconds(); }
+    double getAverageRunTimeMilliseconds() const { return cublasKernelOptions->runStats.getAverageRunTimeMilliseconds(); }
+
+    int getMeasuredRunCount() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        return cublasKernelOptions->runStats.runCount;
+    }
+
+    int getAlgorithmId() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        return cublasKernelOptions->algorithmId;
+    }
 
     void stashRunStats() { cublasKernelOptions->runStats.stashRunStats(); }
 

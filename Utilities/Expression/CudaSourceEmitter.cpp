@@ -6011,9 +6011,11 @@ static std::string emitTiledTransposeMaterializedFused(const PhysicalExecutionSt
        << " batchCount) {\n";
     ss << "  const " << index_type << " rowTiles = (numRows + static_cast<" << index_type << ">(TILE_DIM) - 1) / static_cast<" << index_type
        << ">(TILE_DIM);\n";
-    ss << "  const " << index_type << " batchIdx = static_cast<" << index_type << ">(blockIdx.y) / rowTiles;\n";
+    ss << "  const " << index_type << " flatBlockY = static_cast<" << index_type << ">(blockIdx.y)"
+       << " + static_cast<" << index_type << ">(blockIdx.z) * static_cast<" << index_type << ">(gridDim.y);\n";
+    ss << "  const " << index_type << " batchIdx = flatBlockY / rowTiles;\n";
     ss << "  if (batchIdx >= batchCount) return;\n";
-    ss << "  const " << index_type << " rowTile = static_cast<" << index_type << ">(blockIdx.y) - batchIdx * rowTiles;\n";
+    ss << "  const " << index_type << " rowTile = flatBlockY - batchIdx * rowTiles;\n";
     ss << "  const " << index_type << " matrixOffset = batchIdx * numRows * numCols;\n\n";
 
     if (emit_decoupled_line_vectorized_path) {
@@ -6605,9 +6607,11 @@ static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const Comp
        << " batchCount) {\n";
     ss << "  const " << index_type << " rowTiles = (numRows + static_cast<" << index_type << ">(TILE_DIM) - 1) / static_cast<" << index_type
        << ">(TILE_DIM);\n";
-    ss << "  const " << index_type << " batchIdx = static_cast<" << index_type << ">(blockIdx.y) / rowTiles;\n";
+    ss << "  const " << index_type << " flatBlockY = static_cast<" << index_type << ">(blockIdx.y)"
+       << " + static_cast<" << index_type << ">(blockIdx.z) * static_cast<" << index_type << ">(gridDim.y);\n";
+    ss << "  const " << index_type << " batchIdx = flatBlockY / rowTiles;\n";
     ss << "  if (batchIdx >= batchCount) return;\n";
-    ss << "  const " << index_type << " rowTile = static_cast<" << index_type << ">(blockIdx.y) - batchIdx * rowTiles;\n";
+    ss << "  const " << index_type << " rowTile = flatBlockY - batchIdx * rowTiles;\n";
     ss << "  const " << index_type << " matrixOffset = batchIdx * numRows * numCols;\n\n";
 
     if (emit_decoupled_line_vectorized_path) {
@@ -7092,9 +7096,11 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
     ss << "  static constexpr unsigned int LOGICAL_TRANSPOSE_TILE_COL_SCALARS = TILE_DIM * LOGICAL_TRANSPOSE_PACK_SCALARS;\n";
     ss << "  const " << index_type << " rowTiles = (numRows + static_cast<" << index_type << ">(TILE_DIM) - 1) / static_cast<" << index_type
        << ">(TILE_DIM);\n";
-    ss << "  const " << index_type << " batchIdx = static_cast<" << index_type << ">(blockIdx.y) / rowTiles;\n";
+    ss << "  const " << index_type << " flatBlockY = static_cast<" << index_type << ">(blockIdx.y)"
+       << " + static_cast<" << index_type << ">(blockIdx.z) * static_cast<" << index_type << ">(gridDim.y);\n";
+    ss << "  const " << index_type << " batchIdx = flatBlockY / rowTiles;\n";
     ss << "  if (batchIdx >= batchCount) return;\n";
-    ss << "  const " << index_type << " rowTile = static_cast<" << index_type << ">(blockIdx.y) - batchIdx * rowTiles;\n";
+    ss << "  const " << index_type << " rowTile = flatBlockY - batchIdx * rowTiles;\n";
     ss << "  const " << index_type << " matrixOffset = batchIdx * numRows * numCols;\n";
 
     for (uint32_t frontier_idx : frontier_indices) {

@@ -2,6 +2,7 @@
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 #include "Utilities/CudaDriver/CudaGraphConditional.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "Utilities/Expression/BatchedMatmulPlan.h"
 #include "Utilities/Expression/EquationRunner.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/MatmulScalarKernel.h"
@@ -1659,6 +1660,51 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
     }
 }
 
+StampedMatmulKernelDiagnostic StampedMatmul::kernelDiagnostic() const {
+    const MatmulCacheKey& key = built_matmul->key;
+    StampedMatmulKernelDiagnostic diagnostic;
+    diagnostic.m = key.transpose_a ? key.a_cols : key.a_rows;
+    diagnostic.k = key.transpose_a ? key.a_rows : key.a_cols;
+    const int32_t rhs_k = key.transpose_b ? key.b_cols : key.b_rows;
+    diagnostic.n = key.transpose_b ? key.b_rows : key.b_cols;
+    if (diagnostic.k != rhs_k) {
+        throw std::runtime_error("StampedMatmul kernel diagnostic found incompatible effective GEMM dimensions.");
+    }
+    diagnostic.batch_count = key.batch_config.batchCount;
+    const uint64_t m = static_cast<uint64_t>(diagnostic.m);
+    const uint64_t n = static_cast<uint64_t>(diagnostic.n);
+    const uint64_t k = static_cast<uint64_t>(diagnostic.k);
+    const uint64_t batch = static_cast<uint64_t>(diagnostic.batch_count);
+    if (m != 0 && n > std::numeric_limits<uint64_t>::max() / m) {
+        throw std::runtime_error("StampedMatmul kernel diagnostic FLOP count overflow.");
+    }
+    const uint64_t mn = m * n;
+    if (mn != 0 && k > std::numeric_limits<uint64_t>::max() / mn) {
+        throw std::runtime_error("StampedMatmul kernel diagnostic FLOP count overflow.");
+    }
+    const uint64_t mnk = mn * k;
+    if (mnk != 0 && batch > std::numeric_limits<uint64_t>::max() / mnk) {
+        throw std::runtime_error("StampedMatmul kernel diagnostic FLOP count overflow.");
+    }
+    const uint64_t fma_count = mnk * batch;
+    if (fma_count > std::numeric_limits<uint64_t>::max() / 2) {
+        throw std::runtime_error("StampedMatmul kernel diagnostic FLOP count overflow.");
+    }
+    diagnostic.flop_count = fma_count * 2;
+    diagnostic.workspace_bytes = built_matmul->workspace_bytes;
+
+    if (built_matmul->cublas_kernel.has_value()) {
+        const CublasKernel& kernel = built_matmul->cublas_kernel.value();
+        diagnostic.has_measured_kernel = kernel.getMeasuredRunCount() > 0;
+        diagnostic.waves_count = kernel.getWavesCount(static_cast<int>(gpuNum()));
+        if (diagnostic.has_measured_kernel) {
+            diagnostic.picker_runtime_ms = kernel.getAverageRunTimeMilliseconds();
+        }
+        diagnostic.algorithm_id = kernel.getAlgorithmId();
+    }
+    return diagnostic;
+}
+
 struct ResolvedMatmulScale {
     float host_value = 1.0f;
     const float* ptr = nullptr;
@@ -1860,11 +1906,10 @@ void StampedMatmul::run() { runOn(stream); }
 void StampedMatmul::runOn(Stream& run_stream) const { runOn(run_stream, {}); }
 
 void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
-    if (lhs.getDimensions().size() != 2 || rhs.getDimensions().size() != 2 || output.getDimensions().size() != 2) {
-        throw std::runtime_error("StampedMatmul currently only supports rank-2 tensors.");
-    }
-
     if (compiled_matmul->op == ExprOp::MATMUL) {
+        if (lhs.getDimensions().size() < 2 || rhs.getDimensions().size() < 2 || output.getDimensions().size() < 2) {
+            throw std::runtime_error("Stamped MATMUL requires rank >= 2 tensors.");
+        }
         if (compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default) {
             if (compiled_matmul->epilogue != MatmulEpilogue::Default) {
                 throw std::runtime_error("Stamped MATMUL cannot combine forward and backward cuBLASLt epilogues in one stage.");
@@ -1917,6 +1962,9 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
         return;
     }
 
+    if (lhs.getDimensions().size() != 2 || rhs.getDimensions().size() != 2 || output.getDimensions().size() != 2) {
+        throw std::runtime_error("Stamped GEMM currently requires rank-2 matrix tensors.");
+    }
     if (!addend.has_value()) {
         throw std::runtime_error("Stamped GEMM requires an addend tensor.");
     }
@@ -2484,6 +2532,148 @@ void StampedExecutionPlan::runSequentiallyForCudaGraphCapture(Stream& capture_st
     materializeOutputsOn(capture_stream);
 }
 
+namespace {
+
+class StampedExecutionEventPool {
+   public:
+    Event acquire(uint32_t gpu_num) {
+        auto& gpu_events = free_events_[gpu_num];
+        if (gpu_events.empty()) {
+            return Event(static_cast<int32_t>(gpu_num), /*enableTiming=*/false, /*expectingHostToWaitOnThisOne=*/false);
+        }
+
+        Event event = gpu_events.back();
+        gpu_events.pop_back();
+        return event;
+    }
+
+    void release(const Event& event) { free_events_[static_cast<uint32_t>(event.getGpuNum())].push_back(event); }
+
+   private:
+    std::unordered_map<uint32_t, std::vector<Event>> free_events_;
+};
+
+// Submission is already host-thread local. A thread-local pool avoids both CUDA event create/destroy calls and a
+// contended global lease lock in the hot path. Events are returned after all record/wait API calls for this submission
+// have been issued; CUDA stream waits retain the captured event generation even if the handle is recorded again later.
+StampedExecutionEventPool& stampedExecutionEventPool() {
+    thread_local StampedExecutionEventPool pool;
+    return pool;
+}
+
+class StampedExecutionEventLeases {
+   public:
+    explicit StampedExecutionEventLeases(size_t expected_event_count) { leased_events_.reserve(expected_event_count); }
+
+    Event acquire(uint32_t gpu_num) {
+        Event event = stampedExecutionEventPool().acquire(gpu_num);
+        leased_events_.push_back(event);
+        return event;
+    }
+
+    ~StampedExecutionEventLeases() {
+        for (const Event& event : leased_events_) {
+            stampedExecutionEventPool().release(event);
+        }
+    }
+
+   private:
+    std::vector<Event> leased_events_;
+};
+
+}  // namespace
+
+detail::StampedExecutionSchedule detail::buildStampedExecutionSchedule(const std::vector<StampedExecutionStage>& steps,
+                                                                        uint32_t caller_gpu_num) {
+    StampedExecutionSchedule schedule;
+    schedule.stage_lane_indices.resize(steps.size());
+    schedule.stage_has_downstream_dependency.assign(steps.size(), false);
+    schedule.stage_needs_completion_event.assign(steps.size(), false);
+    schedule.lane_gpu_nums.push_back(caller_gpu_num);
+
+    if (steps.empty()) {
+        return schedule;
+    }
+
+    std::vector<std::vector<uint32_t>> children(steps.size());
+    for (uint32_t stage_idx = 0; stage_idx < steps.size(); ++stage_idx) {
+        for (uint32_t dep_stage_idx : steps[stage_idx].dependency_stage_indices) {
+            if (dep_stage_idx >= stage_idx) {
+                throw std::runtime_error(
+                    "StampedExecutionPlan::runOn requires dependency_stage_indices to be topologically ordered.");
+            }
+            children[dep_stage_idx].push_back(stage_idx);
+        }
+    }
+
+    // At a fork, exactly one child continues on the producer's lane. Other children receive new lanes and therefore
+    // may execute concurrently. Prefer the first same-GPU child so a normal linear chain never leaves its stream.
+    std::vector<std::optional<uint32_t>> continuation_child(steps.size());
+    for (uint32_t stage_idx = 0; stage_idx < steps.size(); ++stage_idx) {
+        for (uint32_t child_idx : children[stage_idx]) {
+            if (steps[child_idx].gpu_num == steps[stage_idx].gpu_num) {
+                continuation_child[stage_idx] = child_idx;
+                break;
+            }
+        }
+    }
+
+    bool caller_root_claimed = false;
+    for (uint32_t stage_idx = 0; stage_idx < steps.size(); ++stage_idx) {
+        const StampedExecutionStage& stage = steps[stage_idx];
+
+        std::optional<uint32_t> inherited_lane;
+        for (uint32_t dep_stage_idx : stage.dependency_stage_indices) {
+            if (!continuation_child[dep_stage_idx].has_value() ||
+                continuation_child[dep_stage_idx].value() != stage_idx ||
+                steps[dep_stage_idx].gpu_num != stage.gpu_num) {
+                continue;
+            }
+
+            const uint32_t candidate_lane = schedule.stage_lane_indices[dep_stage_idx];
+            if (!inherited_lane.has_value() || candidate_lane == 0) {
+                inherited_lane = candidate_lane;
+            }
+            if (candidate_lane == 0) {
+                break;
+            }
+        }
+
+        if (inherited_lane.has_value()) {
+            schedule.stage_lane_indices[stage_idx] = inherited_lane.value();
+            continue;
+        }
+
+        if (stage.dependency_stage_indices.empty() && !caller_root_claimed && stage.gpu_num == caller_gpu_num) {
+            schedule.stage_lane_indices[stage_idx] = 0;
+            caller_root_claimed = true;
+            continue;
+        }
+
+        schedule.stage_lane_indices[stage_idx] = static_cast<uint32_t>(schedule.lane_gpu_nums.size());
+        schedule.lane_gpu_nums.push_back(stage.gpu_num);
+    }
+
+    for (uint32_t stage_idx = 0; stage_idx < steps.size(); ++stage_idx) {
+        if (steps[stage_idx].dependency_stage_indices.empty() && schedule.stage_lane_indices[stage_idx] != 0) {
+            schedule.needs_caller_ready_event = true;
+        }
+        for (uint32_t dep_stage_idx : steps[stage_idx].dependency_stage_indices) {
+            schedule.stage_has_downstream_dependency[dep_stage_idx] = true;
+            if (schedule.stage_lane_indices[dep_stage_idx] != schedule.stage_lane_indices[stage_idx]) {
+                schedule.stage_needs_completion_event[dep_stage_idx] = true;
+            }
+        }
+    }
+    for (uint32_t stage_idx = 0; stage_idx < steps.size(); ++stage_idx) {
+        if (!schedule.stage_has_downstream_dependency[stage_idx] && schedule.stage_lane_indices[stage_idx] != 0) {
+            schedule.stage_needs_completion_event[stage_idx] = true;
+        }
+    }
+
+    return schedule;
+}
+
 void StampedExecutionPlan::run() { runOn(stream); }
 
 void StampedExecutionPlan::run(const std::unordered_map<std::string, float>& runtime_scalars) { runOn(stream, runtime_scalars); }
@@ -2496,55 +2686,103 @@ void StampedExecutionPlan::runOn(Stream& run_stream, const std::unordered_map<st
         return;
     }
 
-    using StreamEvent = std::decay_t<decltype(std::declval<Stream&>().putEvent())>;
+    // The overwhelmingly common single-stage plan needs no DAG scheduler at runtime. Runtime-scalar plans retain the
+    // general path so their override validation semantics remain unchanged.
+    if (steps.size() == 1 && steps.front().dependency_stage_indices.empty() && runtime_scalars.empty()) {
+        steps.front().runOn(run_stream);
+        materializeOutputsOn(run_stream);
+        return;
+    }
 
-    std::vector<std::optional<StreamEvent>> completion_events(steps.size());
+    std::optional<detail::StampedExecutionSchedule> alternate_schedule;
+    const detail::StampedExecutionSchedule* schedule_ptr = &execution_schedule;
+    if (run_stream.getGpuNum() != stream.getGpuNum()) {
+        alternate_schedule = detail::buildStampedExecutionSchedule(steps, static_cast<uint32_t>(run_stream.getGpuNum()));
+        schedule_ptr = &alternate_schedule.value();
+    }
+    const detail::StampedExecutionSchedule& schedule = *schedule_ptr;
 
-    std::vector<Stream> launch_streams;
-    launch_streams.reserve(steps.size());
+    // No branch means no scheduler: CUDA stream ordering is the entire dependency mechanism. This is the normal path
+    // for a linear multi-stage expression and intentionally performs no helper-stream lookup or event bookkeeping.
+    if (schedule.lane_gpu_nums.size() == 1) {
+        std::unordered_set<std::string> consumed_runtime_scalar_names;
+        for (const StampedExecutionStage& stage : steps) {
+            std::unordered_map<std::string, float> stage_runtime_scalars;
+            if (!runtime_scalars.empty()) {
+                std::unordered_set<std::string> needed_names = runtimeScalarNamesForStage(stage);
+                if (!needed_names.empty()) {
+                    stage_runtime_scalars.reserve(needed_names.size());
+                    for (const std::string& name : needed_names) {
+                        auto it = runtime_scalars.find(name);
+                        if (it == runtime_scalars.end()) {
+                            throw std::runtime_error(
+                                "Missing value for runtime scalar: " + name +
+                                "  - if it was meant to be constant, use a constant scalar instead.");
+                        }
+                        stage_runtime_scalars.emplace(name, it->second);
+                        consumed_runtime_scalar_names.insert(name);
+                    }
+                }
+            }
 
-    std::vector<Stream> helper_streams_used;
-    helper_streams_used.reserve(steps.size());
+            if (stage_runtime_scalars.empty())
+                stage.runOn(run_stream);
+            else
+                stage.runOn(run_stream, stage_runtime_scalars);
+        }
 
+        for (const auto& [name, _] : runtime_scalars) {
+            if (!consumed_runtime_scalar_names.contains(name)) {
+                throw std::runtime_error("Unexpected runtime scalar override for stamped execution plan: " + name);
+            }
+        }
+        materializeOutputsOn(run_stream);
+        return;
+    }
+
+    std::vector<Stream> lane_streams;
+    lane_streams.reserve(schedule.lane_gpu_nums.size());
+    lane_streams.push_back(run_stream);
+    for (uint32_t lane_idx = 1; lane_idx < schedule.lane_gpu_nums.size(); ++lane_idx) {
+        lane_streams.push_back(Expression::getNextHelperStream(schedule.lane_gpu_nums[lane_idx]));
+    }
+
+    size_t expected_event_count = schedule.needs_caller_ready_event ? 1 : 0;
+    for (bool needs_event : schedule.stage_needs_completion_event) {
+        expected_event_count += needs_event ? 1 : 0;
+    }
+
+    StampedExecutionEventLeases event_leases(expected_event_count);
+    std::optional<Event> caller_stream_ready;
+    if (schedule.needs_caller_ready_event) {
+        caller_stream_ready = event_leases.acquire(static_cast<uint32_t>(run_stream.getGpuNum()));
+        run_stream.putEvent(caller_stream_ready.value());
+    }
+
+    std::vector<std::optional<Event>> completion_events(steps.size());
     std::unordered_set<std::string> consumed_runtime_scalar_names;
 
-    auto rememberHelperStream = [&](Stream& helper_stream) {
-        if (std::find(helper_streams_used.begin(), helper_streams_used.end(), helper_stream) == helper_streams_used.end()) {
-            helper_streams_used.push_back(helper_stream);
-        }
-    };
-
-    StreamEvent caller_stream_ready;
-    if (steps.size() > 1)
-        caller_stream_ready = run_stream.putEvent();
-
     for (uint32_t stage_idx = 0; stage_idx < steps.size(); ++stage_idx) {
-        const bool use_helper_stream = (stage_idx != 0);
         const StampedExecutionStage& stage = steps[stage_idx];
+        Stream& launch_stream_ref = lane_streams[schedule.stage_lane_indices[stage_idx]];
 
-        Stream& launch_stream_ref = use_helper_stream ? Expression::getNextHelperStream(stage.gpu_num) : run_stream;
-
-        if (use_helper_stream) {
-            rememberHelperStream(launch_stream_ref);
-            launch_stream_ref.waitEvent(caller_stream_ready);
+        if (stage.dependency_stage_indices.empty() && schedule.stage_lane_indices[stage_idx] != 0) {
+            THOR_THROW_IF_FALSE(caller_stream_ready.has_value());
+            launch_stream_ref.waitEvent(caller_stream_ready.value());
         }
 
         for (uint32_t dep_stage_idx : stage.dependency_stage_indices) {
-            if (dep_stage_idx >= stage_idx) {
-                throw std::runtime_error("StampedExecutionPlan::runOn requires dependency_stage_indices to be topologically ordered.");
+            Stream& dependency_stream = lane_streams[schedule.stage_lane_indices[dep_stage_idx]];
+            if (launch_stream_ref == dependency_stream) {
+                continue;
             }
-
             if (!completion_events[dep_stage_idx].has_value()) {
-                throw std::runtime_error("StampedExecutionPlan::runOn missing completion event for dependency stage.");
+                throw std::runtime_error("StampedExecutionPlan::runOn missing completion event for cross-stream dependency stage.");
             }
-
-            if (!(launch_stream_ref == launch_streams[dep_stage_idx])) {
-                launch_stream_ref.waitEvent(completion_events[dep_stage_idx].value());
-            }
+            launch_stream_ref.waitEvent(completion_events[dep_stage_idx].value());
         }
 
         std::unordered_map<std::string, float> stage_runtime_scalars;
-
         if (!runtime_scalars.empty()) {
             std::unordered_set<std::string> needed_names = runtimeScalarNamesForStage(stage);
             if (!needed_names.empty()) {
@@ -2566,8 +2804,10 @@ void StampedExecutionPlan::runOn(Stream& run_stream, const std::unordered_map<st
         else
             stage.runOn(launch_stream_ref, stage_runtime_scalars);
 
-        completion_events[stage_idx] = launch_stream_ref.putEvent();
-        launch_streams.push_back(launch_stream_ref);
+        if (schedule.stage_needs_completion_event[stage_idx]) {
+            completion_events[stage_idx] = event_leases.acquire(stage.gpu_num);
+            launch_stream_ref.putEvent(completion_events[stage_idx].value());
+        }
     }
 
     for (const auto& [name, _] : runtime_scalars) {
@@ -2576,10 +2816,15 @@ void StampedExecutionPlan::runOn(Stream& run_stream, const std::unordered_map<st
         }
     }
 
-    for (Stream& helper_stream : helper_streams_used) {
-        if (!(helper_stream == run_stream)) {
-            run_stream.waitEvent(helper_stream.putEvent());
+    // Only terminal helper work needs an explicit final join. Helper branches that rejoin a caller-stream stage have
+    // already been transitively joined by that stage's cross-stream dependency wait.
+    for (uint32_t stage_idx = 0; stage_idx < steps.size(); ++stage_idx) {
+        Stream& launch_stream_ref = lane_streams[schedule.stage_lane_indices[stage_idx]];
+        if (schedule.stage_has_downstream_dependency[stage_idx] || launch_stream_ref == run_stream) {
+            continue;
         }
+        THOR_THROW_IF_FALSE(completion_events[stage_idx].has_value());
+        run_stream.waitEvent(completion_events[stage_idx].value());
     }
 
     materializeOutputsOn(run_stream);
@@ -3284,9 +3529,23 @@ static CublasMatrixMultiply::BackwardEpilogueFusion toCublasBackwardEpilogueFusi
 static int32_t leadingDimensionForStoredMatrix(const Tensor& matrix) {
     const std::vector<uint64_t> dims = matrix.getDimensions();
     if (dims.size() != 2) {
-        throw std::runtime_error("Matmul/gemm workspace planning currently only supports rank-2 tensors.");
+        throw std::runtime_error("GEMM/epilogue workspace planning currently only supports rank-2 tensors.");
     }
     return static_cast<int32_t>(dims[1]);
+}
+
+static int32_t checkedMatmulInt32(uint64_t value, const char* role) {
+    if (value > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::runtime_error(std::string("Expression matmul ") + role + " exceeds the cuBLASLt int32 limit.");
+    }
+    return static_cast<int32_t>(value);
+}
+
+static int64_t checkedMatmulInt64(uint64_t value, const char* role) {
+    if (value > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+        throw std::runtime_error(std::string("Expression matmul ") + role + " exceeds the cuBLASLt int64 stride limit.");
+    }
+    return static_cast<int64_t>(value);
 }
 
 std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
@@ -3300,9 +3559,18 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     if (!compiled_matmul) {
         throw std::runtime_error("buildMatmul requires non-null compiled payload.");
     }
-    if (lhs.getDimensions().size() != 2 || rhs.getDimensions().size() != 2 || output.getDimensions().size() != 2) {
-        throw std::runtime_error("buildMatmul currently only supports rank-2 tensors.");
+
+    const bool plain_matmul = compiled_matmul->op == ExprOp::MATMUL && compiled_matmul->epilogue == MatmulEpilogue::Default &&
+                              compiled_matmul->backward_epilogue == MatmulBackwardEpilogue::Default &&
+                              !compiled_matmul->bgrad_output_dtype.has_value();
+    if (plain_matmul) {
+        if (lhs.getDimensions().size() < 2 || rhs.getDimensions().size() < 2 || output.getDimensions().size() < 2) {
+            throw std::runtime_error("buildMatmul requires rank >= 2 tensors for MATMUL.");
+        }
+    } else if (lhs.getDimensions().size() != 2 || rhs.getDimensions().size() != 2 || output.getDimensions().size() != 2) {
+        throw std::runtime_error("GEMM and fused MATMUL epilogues currently require rank-2 tensors.");
     }
+
     if (compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default && !epilogue_aux.has_value()) {
         throw std::runtime_error("buildMatmul backward cuBLASLt epilogue requires epilogue_aux.");
     }
@@ -3315,6 +3583,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     if (compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default && compiled_matmul->epilogue != MatmulEpilogue::Default) {
         throw std::runtime_error("buildMatmul cannot combine forward and backward cuBLASLt epilogues in one stage.");
     }
+
     bool use_bias_epilogue = false;
     if (compiled_matmul->op == ExprOp::GEMM) {
         if (!addend.has_value()) {
@@ -3330,16 +3599,65 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
         }
     }
 
-    const std::vector<uint64_t> lhs_dims = lhs.getDimensions();
-    const std::vector<uint64_t> rhs_dims = rhs.getDimensions();
-    const int32_t a_rows = static_cast<int32_t>(lhs_dims[0]);
-    const int32_t a_cols = static_cast<int32_t>(lhs_dims[1]);
-    const int32_t b_rows = static_cast<int32_t>(rhs_dims[0]);
-    const int32_t b_cols = static_cast<int32_t>(rhs_dims[1]);
-    const int32_t ld_a = leadingDimensionForStoredMatrix(lhs);
-    const int32_t ld_b = leadingDimensionForStoredMatrix(rhs);
-    const int32_t ld_d = leadingDimensionForStoredMatrix(output);
-    const int32_t ld_c = addend.has_value() ? (use_bias_epilogue ? ld_d : leadingDimensionForStoredMatrix(addend.value())) : ld_d;
+    int32_t a_rows = 0;
+    int32_t a_cols = 0;
+    int32_t b_rows = 0;
+    int32_t b_cols = 0;
+    int32_t ld_a = 0;
+    int32_t ld_b = 0;
+    int32_t ld_c = 0;
+    int32_t ld_d = 0;
+    bool backend_transpose_a = compiled_matmul->transpose_lhs;
+    bool backend_transpose_b = compiled_matmul->transpose_rhs;
+    bool backend_transpose_c = compiled_matmul->transpose_aux;
+    CublasStridedBatchConfig batch_config = CublasStridedBatchConfig::single();
+
+    if (plain_matmul) {
+        const BatchedMatmulLayoutPlan layout_plan =
+            planBatchedMatmulLayout(lhs, rhs, output, compiled_matmul->transpose_lhs, compiled_matmul->transpose_rhs);
+        if (!layout_plan.canLowerWithoutMaterialization()) {
+            throw std::runtime_error(
+                "Expression MATMUL layout cannot be consumed directly by cuBLASLt without materialization/postprocessing. "
+                "Plain MATMUL lowering does not materialize operands; use a directly addressable view/layout.");
+        }
+        if (!layout_plan.grouping.isSingleStridedBatch()) {
+            throw std::runtime_error(
+                "Expression MATMUL buildMatmul received a layout that requires multiple regular strided-batched groups. "
+                "The Expression lowering layer must decompose it into single-group views before building cuBLASLt kernels.");
+        }
+
+        a_rows = checkedMatmulInt32(layout_plan.lhs_matrix.stored_rows, "lhs rows");
+        a_cols = checkedMatmulInt32(layout_plan.lhs_matrix.stored_cols, "lhs columns");
+        b_rows = checkedMatmulInt32(layout_plan.rhs_matrix.stored_rows, "rhs rows");
+        b_cols = checkedMatmulInt32(layout_plan.rhs_matrix.stored_cols, "rhs columns");
+        ld_a = checkedMatmulInt32(layout_plan.lhs_matrix.leading_dimension, "lhs leading dimension");
+        ld_b = checkedMatmulInt32(layout_plan.rhs_matrix.leading_dimension, "rhs leading dimension");
+        ld_d = checkedMatmulInt32(layout_plan.output_matrix.leading_dimension, "output leading dimension");
+        ld_c = ld_d;
+        backend_transpose_a = layout_plan.lhs_matrix.backend_transpose;
+        backend_transpose_b = layout_plan.rhs_matrix.backend_transpose;
+        backend_transpose_c = false;
+
+        if (layout_plan.grouping.batch_count > 1) {
+            batch_config = CublasStridedBatchConfig::strided(
+                checkedMatmulInt32(layout_plan.grouping.batch_count, "batch count"),
+                checkedMatmulInt64(layout_plan.grouping.lhs_batch_stride_elements, "lhs batch stride"),
+                checkedMatmulInt64(layout_plan.grouping.rhs_batch_stride_elements, "rhs batch stride"),
+                checkedMatmulInt64(layout_plan.grouping.output_batch_stride_elements, "output C batch stride"),
+                checkedMatmulInt64(layout_plan.grouping.output_batch_stride_elements, "output D batch stride"));
+        }
+    } else {
+        const std::vector<uint64_t> lhs_dims = lhs.getDimensions();
+        const std::vector<uint64_t> rhs_dims = rhs.getDimensions();
+        a_rows = checkedMatmulInt32(lhs_dims[0], "lhs rows");
+        a_cols = checkedMatmulInt32(lhs_dims[1], "lhs columns");
+        b_rows = checkedMatmulInt32(rhs_dims[0], "rhs rows");
+        b_cols = checkedMatmulInt32(rhs_dims[1], "rhs columns");
+        ld_a = leadingDimensionForStoredMatrix(lhs);
+        ld_b = leadingDimensionForStoredMatrix(rhs);
+        ld_d = leadingDimensionForStoredMatrix(output);
+        ld_c = addend.has_value() ? (use_bias_epilogue ? ld_d : leadingDimensionForStoredMatrix(addend.value())) : ld_d;
+    }
 
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{
         lhs.getDescriptor().getDataType(),
@@ -3387,9 +3705,10 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                        ld_b,
                        ld_c,
                        ld_d,
-                       compiled_matmul->transpose_lhs,
-                       compiled_matmul->transpose_rhs,
-                       compiled_matmul->transpose_aux,
+                       backend_transpose_a,
+                       backend_transpose_b,
+                       backend_transpose_c,
+                       batch_config,
                        use_bias_epilogue,
                        compiled_matmul->epilogue,
                        compiled_matmul->backward_epilogue,
@@ -3412,19 +3731,44 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     const char* diagnostic_path = "unknown";
 
     if (compiled_matmul->op == ExprOp::MATMUL && !use_cublaslt_epilogue_wrapper) {
-        CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(device_num,
-                                                                           a_rows,
-                                                                           a_cols,
-                                                                           b_rows,
-                                                                           b_cols,
-                                                                           ld_a,
-                                                                           ld_b,
-                                                                           ld_d,
-                                                                           compiled_matmul->transpose_lhs,
-                                                                           compiled_matmul->transpose_rhs,
-                                                                           dataTypes,
-                                                                           print_verbose_matmul_diagnostics);
-        diagnostic_path = "optimal-matmul-picker";
+        if (batch_config.isBatched()) {
+            if (dataTypes.A == DataType::FP8_E4M3 || dataTypes.A == DataType::FP8_E5M2 || dataTypes.B == DataType::FP8_E4M3 ||
+                dataTypes.B == DataType::FP8_E5M2) {
+                throw std::runtime_error(
+                    "Expression strided-batched MATMUL does not yet support FP8 because the centralized FP8 transpose-workspace path "
+                    "is not batch-aware.");
+            }
+            CublasMatrixMultiply::instance().chooseOptimalStridedBatchedGemmKernel(device_num,
+                                                                                    a_rows,
+                                                                                    a_cols,
+                                                                                    b_rows,
+                                                                                    b_cols,
+                                                                                    ld_a,
+                                                                                    ld_b,
+                                                                                    ld_c,
+                                                                                    ld_d,
+                                                                                    backend_transpose_a,
+                                                                                    backend_transpose_b,
+                                                                                    backend_transpose_c,
+                                                                                    dataTypes,
+                                                                                    batch_config,
+                                                                                    print_verbose_matmul_diagnostics);
+            diagnostic_path = "optimal-strided-batched-matmul-picker";
+        } else {
+            CublasMatrixMultiply::instance().chooseOptimalMatrixMultiplyKernel(device_num,
+                                                                               a_rows,
+                                                                               a_cols,
+                                                                               b_rows,
+                                                                               b_cols,
+                                                                               ld_a,
+                                                                               ld_b,
+                                                                               ld_d,
+                                                                               backend_transpose_a,
+                                                                               backend_transpose_b,
+                                                                               dataTypes,
+                                                                               print_verbose_matmul_diagnostics);
+            diagnostic_path = "optimal-matmul-picker";
+        }
         built->cublas_kernel = CublasMatrixMultiply::instance().getCachedGemmKernel(device_num,
                                                                                     a_rows,
                                                                                     a_cols,
@@ -3432,13 +3776,14 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                                     b_cols,
                                                                                     ld_a,
                                                                                     ld_b,
+                                                                                    ld_c,
                                                                                     ld_d,
-                                                                                    ld_d,
-                                                                                    compiled_matmul->transpose_lhs,
-                                                                                    compiled_matmul->transpose_rhs,
-                                                                                    false,
+                                                                                    backend_transpose_a,
+                                                                                    backend_transpose_b,
+                                                                                    backend_transpose_c,
                                                                                     dataTypes,
-                                                                                    true);
+                                                                                    true,
+                                                                                    batch_config);
         built->workspace_bytes = built->cublas_kernel->getWorkspaceSizeInBytes(device_num);
         kernelWillRunOnGpu = true;
     } else if (use_cublaslt_epilogue_wrapper) {
@@ -3781,8 +4126,16 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
 
     const std::vector<uint64_t> input_dims = input.getDimensions();
 
-    ReductionCacheKey key(
-        op, input_dims, reduction_axes, squeeze_axes, input_dtype, output_dtype, compute_dtype, result_kind, device_num);
+    ReductionCacheKey key(op,
+                          input_dims,
+                          input.getStridesElements(),
+                          reduction_axes,
+                          squeeze_axes,
+                          input_dtype,
+                          output_dtype,
+                          compute_dtype,
+                          result_kind,
+                          device_num);
 
     std::shared_ptr<BuiltReduction> hit = cacheLookup(key);
     if (hit)
@@ -3794,7 +4147,7 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
     }
 
     const std::vector<uint32_t> axes = narrowReductionAxes(built->key.reduction_axes);
-    built->geometry = CubReduction::analyzeGeometry(input_dims, axes);
+    built->geometry = CubReduction::analyzeGeometry(input_dims, input.getStridesElements(), axes);
 
     switch (built->key.result_kind) {
         case ReductionResultKind::Value:

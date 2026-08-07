@@ -167,7 +167,10 @@ int groupedFullRowWarps(uint64_t inner_size, DataType input_dtype) {
 }
 
 const char* tiledStrategyName(uint64_t inner_size, DataType input_dtype) {
-    if (inner_size <= 32) {
+    if (inner_size == 32) {
+        return "vector_direct_x1";
+    }
+    if (inner_size < 32) {
         return "async_full_row_narrow";
     }
     if (inner_size < 64) {

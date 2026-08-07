@@ -23,6 +23,10 @@ implementation. Expression's vector-valued segmented forward caller is migrated 
 3. A tiled row-vector CUDA/CUB-warp backend when the reduced axes are one contiguous block with trailing values.
 4. Fixed-size segmented reduction over a logical counting/transform iterator only for genuinely disjoint reduced axes.
 
+The tiled path also accepts zero-copy logical permutations when stride analysis proves that the visible source is physically dense `[outer, reduction, inner]` storage. In that case the reducer traverses the physical source layout directly and writes the requested retained-axis dense order without materializing the permutation. Natural `[outer,inner]` output keeps the ordinary tuned store mapping. Production `[inner,outer]` output uses the shared-transpose retained writer described below so final global stores remain coalesced.
+
+For production `[inner,outer]` writes, eight physical warps reduce adjacent outer rows for one contiguous retained-component tile. Each lane owns a contiguous register packet, using the same <=16 FP32-accumulator budget and CUDA vector-packet loaders as the direct full-row family; retained widths above 512 become independent 512-component tiles rather than increasing per-thread state. Reduction state never leaves registers. Only finalized FP32 retained values are staged through a padded shared-memory tile, after which threads read that tile in transposed order and write adjacent outer coordinates contiguously in dense `[inner,outer]`. The largest retained tile is 8 x 512 values (about 16 KiB), there is no global reduction/permutation intermediate, and grid-stride iteration handles arbitrarily tall outputs without treating 65,535 as a `grid.x` architectural limit.
+
 The tiled path views the input as `[outer, reduction, inner]` and selects a layout-aware kernel by trailing width.
 For `inner <= 32`, each physical warp owns the complete trailing row and a private two-stage `cuda::memcpy_async`
 global-to-shared pipeline. The pipeline copies several complete consecutive rows as one contiguous slab and overlaps

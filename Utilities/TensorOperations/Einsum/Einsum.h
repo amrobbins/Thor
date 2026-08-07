@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/Expression/ExecutionDiagnostics.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Einsum/EinsumPlanner.h"
 
@@ -13,15 +14,22 @@
 namespace ThorImplementation {
 
 class StampedExecutionPlan;
-class StampedMatmul;
-class CublasKernel;
 
-// Concrete execution path chosen after an einsum has been parsed/planned and
-// stamped against physical tensors.
+// Algebraic lowering selected by einsum. Physical execution is always owned by
+// Expression/StampedExecutionPlan.
 enum class EinsumExecutionPath {
     GENERIC,
     GEMM,
     BATCHED_GEMM,
+    PAIR_PRODUCT,
+    // A selected exact/bridge multi-operand contraction tree lowered entirely
+    // into the existing Expression primitives. Individual internal nodes may
+    // be GEMM, batched GEMM, pair product, and/or CUB pre-reductions.
+    EXACT_CONTRACTION,
+
+    // A selected bounded-beam contraction tree for 7+ operands, lowered through
+    // the same pair execution machinery as exact/bridge contraction trees.
+    BEAM_CONTRACTION,
 };
 
 class StampedEinsum;
@@ -30,10 +38,10 @@ class StampedEinsum;
  * Describes a GPU einsum operation.
  *
  * The textual equation is parsed and planned at stamp time because concrete
- * tensor dimensions are required to resolve broadcasting and ellipses.
- * Standalone reductions in the generic path are always delegated to the
- * centralized CubReduction utility.  Matrix K reductions are intrinsic to
- * GEMM and therefore are not standalone reduction stages.
+ * tensor dimensions are required to resolve broadcasting and ellipses. The
+ * resulting operation is lowered completely into an Expression graph. Matrix
+ * contractions use Expression::matmul; all independent sums use
+ * Expression::reduce_sum and therefore the centralized CubReduction backend.
  */
 class Einsum {
    public:
@@ -46,16 +54,23 @@ class Einsum {
                                                        const Tensor& preallocated_output,
                                                        const Stream& stream) const;
 
+    // Diagnostic/reference surface used to compare optimized lowering against
+    // the original whole-equation broadcast-product + reduction implementation.
+    // This deliberately bypasses pair and contraction-tree lowering while preserving
+    // parsing, dtype, accumulation, and output semantics. It is not intended as
+    // a production execution policy.
+    [[nodiscard]] std::shared_ptr<StampedEinsum> stampGenericReference(
+        const std::vector<Tensor>& inputs, const Stream& stream) const;
+
    private:
     std::string equation;
 };
 
 /**
- * Fully planned/stamped einsum execution.
+ * Fully stamped einsum execution.
  *
- * run()/runOn() allocate nothing and perform no planner or kernel-selection
- * work.  Generic standalone sums are represented by cub_reduction and run
- * only through StampedCubReduction.
+ * Einsum owns no CUDA kernels, helper streams, reductions, or GEMM launch
+ * machinery. run()/runOn() delegate directly to the stamped Expression DAG.
  */
 class StampedEinsum {
    public:
@@ -65,39 +80,29 @@ class StampedEinsum {
     [[nodiscard]] Tensor getOutputTensor() const { return output; }
     [[nodiscard]] const EinsumPlan& getPlan() const { return plan; }
     [[nodiscard]] EinsumExecutionPath getExecutionPath() const { return execution_path; }
-    [[nodiscard]] bool usesStandaloneReduction() const { return cub_reduction != nullptr; }
-    [[nodiscard]] bool usesStridedBatchedGemm() const { return batched_matrix_kernel != nullptr; }
-    [[nodiscard]] std::optional<CubReductionPath> getStandaloneReductionPath() const {
-        if (!cub_reduction) {
-            return std::nullopt;
-        }
-        return cub_reduction->getPath();
-    }
+    [[nodiscard]] bool usesStandaloneReduction() const;
+    [[nodiscard]] bool usesStridedBatchedGemm() const { return uses_strided_batched_gemm; }
+    [[nodiscard]] std::vector<CubReductionPath> getStandaloneReductionPaths() const;
+    [[nodiscard]] std::optional<CubReductionPath> getStandaloneReductionPath() const;
+    [[nodiscard]] std::vector<std::string> getExpressionStageKindNames() const;
+    [[nodiscard]] std::vector<StampedMatmulStageDiagnostic> getExpressionMatmulStageDiagnostics() const;
 
     // Public for consistency with Thor's other stamped execution objects; callers
     // normally obtain this through Einsum::stamp().
     StampedEinsum(EinsumPlan plan,
-                  std::vector<Tensor> inputs,
                   Tensor output,
                   const Stream& stream,
                   EinsumExecutionPath execution_path,
-                  std::shared_ptr<StampedExecutionPlan> generic_preparation,
-                  std::shared_ptr<StampedCubReduction> cub_reduction,
-                  std::vector<std::shared_ptr<StampedMatmul>> matrix_batches,
-                  std::shared_ptr<CublasKernel> batched_matrix_kernel,
-                  std::optional<Tensor> matrix_workspace);
+                  bool uses_strided_batched_gemm,
+                  std::shared_ptr<StampedExecutionPlan> execution);
 
    private:
     EinsumPlan plan;
-    std::vector<Tensor> inputs;
     Tensor output;
     Stream stream;
     EinsumExecutionPath execution_path = EinsumExecutionPath::GENERIC;
-    std::shared_ptr<StampedExecutionPlan> generic_preparation;
-    std::shared_ptr<StampedCubReduction> cub_reduction;
-    std::vector<std::shared_ptr<StampedMatmul>> matrix_batches;
-    std::shared_ptr<CublasKernel> batched_matrix_kernel;
-    std::optional<Tensor> matrix_workspace;
+    bool uses_strided_batched_gemm = false;
+    std::shared_ptr<StampedExecutionPlan> execution;
 };
 
 }  // namespace ThorImplementation

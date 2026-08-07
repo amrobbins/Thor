@@ -1470,6 +1470,51 @@ target_compile_options(thor_type_converter_benchmark PRIVATE
         $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
 )
 
+add_executable(thor_einsum_benchmark EXCLUDE_FROM_ALL
+        benchmarks/EinsumBenchmark.cpp
+)
+thor_apply_linker_settings(thor_einsum_benchmark)
+thor_enable_release_host_lto(thor_einsum_benchmark)
+thor_enable_release_no_semantic_interposition(thor_einsum_benchmark)
+target_link_libraries(thor_einsum_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_einsum_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_einsum_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_einsum_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0 -ggdb>
+)
+
+add_executable(thor_einsum_exact_planner_benchmark EXCLUDE_FROM_ALL
+        benchmarks/EinsumExactPlannerBenchmark.cpp
+)
+thor_apply_linker_settings(thor_einsum_exact_planner_benchmark)
+thor_enable_release_host_lto(thor_einsum_exact_planner_benchmark)
+thor_enable_release_no_semantic_interposition(thor_einsum_exact_planner_benchmark)
+target_link_libraries(thor_einsum_exact_planner_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_einsum_exact_planner_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_einsum_exact_planner_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_einsum_exact_planner_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0 -ggdb>
+)
+
+add_executable(thor_einsum_primitive_cost_benchmark EXCLUDE_FROM_ALL
+        benchmarks/EinsumPrimitiveCostCalibrationBenchmark.cpp
+)
+thor_apply_linker_settings(thor_einsum_primitive_cost_benchmark)
+thor_enable_release_host_lto(thor_einsum_primitive_cost_benchmark)
+thor_enable_release_no_semantic_interposition(thor_einsum_primitive_cost_benchmark)
+target_link_libraries(thor_einsum_primitive_cost_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_einsum_primitive_cost_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_einsum_primitive_cost_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_einsum_primitive_cost_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0 -ggdb>
+)
+
 # ============================================================
 # Install & Export for find_package()
 # ============================================================

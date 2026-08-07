@@ -40,7 +40,7 @@ struct RunStats {
         mtx.unlock();
     }
 
-    inline double getAverageRunTimeMilliseconds() {
+    inline double getAverageRunTimeMilliseconds() const {
         // Updates should not be concurrently ongoing when running this function.
         THOR_THROW_IF_FALSE(runCount > 0);
         return totalExecutionTimeMilliseconds / runCount;
