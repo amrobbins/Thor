@@ -18,6 +18,7 @@ def test_top_level_api_is_curated():
         "constraints",
         "data",
         "ensembles",
+        "einsum",
         "initializers",
         "layers",
         "losses",

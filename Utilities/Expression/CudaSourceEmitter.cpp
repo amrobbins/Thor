@@ -2277,6 +2277,13 @@ static std::string emitTakeAlongAxisSourceIndexForDomain(std::ostringstream& ss,
     return var_name;
 }
 
+static std::string emitInputStorageIndexForLogicalIndex(std::ostringstream& ss,
+                                                        const SpecializedBroadcastGroup* group,
+                                                        uint32_t input_slot,
+                                                        const std::string& idx_expr,
+                                                        const std::string& suffix,
+                                                        const std::string& indent);
+
 static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
                                               const PhysicalExpression& expr,
                                               const SpecializedBroadcastGroup& group,
@@ -2307,10 +2314,20 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
     switch (n.op) {
         case ExprOp::INPUT: {
             const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
-            const std::string offset_var = "offset" + suffix;
-            emitBroadcastOffsetForDomain(ss, group.node_dims[node_idx], domain_dims, idx_expr, offset_var, indent, use_uint32_index_math);
+
+            // The caller's index is expressed in the logical evaluation domain.
+            // First collapse any broadcasted axes into this input node's logical
+            // dense index. Then map that logical index through the runtime input's
+            // visible storage layout. The second step is essential when a stage
+            // input is itself a strided tensor view: indexing in[slot][logical]
+            // directly would silently treat that view as dense contiguous.
+            const std::string logical_offset_var = "logical_offset" + suffix;
+            emitBroadcastOffsetForDomain(
+                ss, group.node_dims[node_idx], domain_dims, idx_expr, logical_offset_var, indent, use_uint32_index_math);
+            const std::string storage_idx = emitInputStorageIndexForLogicalIndex(
+                ss, &group, n.input_slot, logical_offset_var, suffix + "_storage", indent);
             ss << indent << "const " << output_type << " " << var << " = "
-               << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + offset_var + "]", input_tensor_dtype, emitted_dtype) << ";\n";
+               << castScalarExpr("in" + std::to_string(n.input_slot) + "[" + storage_idx + "]", input_tensor_dtype, emitted_dtype) << ";\n";
             return var;
         }
         case ExprOp::RUNTIME_SCALAR: {
@@ -2397,8 +2414,20 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
     }
 
     if (n.op == ExprOp::RESHAPE || n.op == ExprOp::UNSQUEEZE || n.op == ExprOp::SQUEEZE) {
-        const std::string value =
-            emitIndexMappedScalarValue(ss, expr, group, n.lhs, idx_expr, group.node_dims[n.lhs], indent, use_uint32_index_math, counter);
+        // Shape-only aliases preserve linear element order, but the alias itself may
+        // be broadcast by a parent expression. First map the caller's logical index
+        // into this node's own dense domain, then carry that linear index through
+        // the alias to its same-numel child. Without this step an unsqueezed [B,1]
+        // child evaluated in a [B,D] broadcast domain would incorrectly pass the
+        // [B,D] linear index directly to its [B] input.
+        std::string alias_idx = idx_expr;
+        if (group.node_dims[node_idx] != domain_dims) {
+            alias_idx = "alias_idx" + suffix;
+            emitBroadcastOffsetForDomain(
+                ss, group.node_dims[node_idx], domain_dims, idx_expr, alias_idx, indent, use_uint32_index_math);
+        }
+        const std::string value = emitIndexMappedScalarValue(
+            ss, expr, group, n.lhs, alias_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
     }
 
@@ -3148,10 +3177,27 @@ static void emitScalarStridedViewBackwardNode(std::ostringstream& ss,
         ss << indent << "}\n";
     }
     ss << indent << "if (view_bw_residual_" << node_idx << " != 0ULL) view_bw_in_view_" << node_idx << " = false;\n";
-    std::unordered_set<std::string> emitted;
-    const std::string suffix = stridedViewBackwardSafeSuffix(node_idx);
-    const std::string grad_value = emitScalarValueAtIndex(
-        ss, expr, grad_source_idx, "view_bw_linear_" + std::to_string(node_idx), suffix, indent, emitted, group);
+    std::string grad_value;
+    if (group != nullptr) {
+        if (group->node_dims.size() != expr.nodes.size()) {
+            throw runtime_error("strided_view_backward requires per-node dimensions for broadcast-aware child emission.");
+        }
+        uint32_t counter = 0;
+        grad_value = emitIndexMappedScalarValue(ss,
+                                                expr,
+                                                *group,
+                                                grad_source_idx,
+                                                "view_bw_linear_" + std::to_string(node_idx),
+                                                n.view_dims,
+                                                indent,
+                                                /*use_uint32_index_math=*/false,
+                                                counter);
+    } else {
+        std::unordered_set<std::string> emitted;
+        const std::string suffix = stridedViewBackwardSafeSuffix(node_idx);
+        grad_value = emitScalarValueAtIndex(
+            ss, expr, grad_source_idx, "view_bw_linear_" + std::to_string(node_idx), suffix, indent, emitted, group);
+    }
     const DataType grad_value_dtype = emittedScalarNodeValueDType(grad_source);
 
     const std::string cast_load = castScalarExpr(grad_value, grad_value_dtype, emitted_dtype);

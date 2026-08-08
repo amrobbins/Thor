@@ -1140,11 +1140,57 @@ struct FlattenedLogicalGroup {
     return result;
 }
 
+[[nodiscard]] uint64_t mergeRuntimePairDimension(uint64_t current, uint64_t incoming) {
+    if (current == 0 || current == incoming) {
+        return incoming;
+    }
+    if (current == 1) {
+        return incoming;
+    }
+    if (incoming == 1) {
+        return current;
+    }
+    throw std::runtime_error(
+        "Einsum contraction-tree runtime operands have incompatible logical dimensions.");
+}
+
+[[nodiscard]] std::vector<uint64_t> runtimePairLabelDimensions(
+    const EinsumPlan& root_plan,
+    const LogicalEinsumOperand& lhs,
+    const LogicalEinsumOperand& rhs) {
+    std::vector<uint64_t> dimensions(root_plan.equation.label_dimensions.size(), 0);
+    const auto merge_operand = [&dimensions](const LogicalEinsumOperand& operand) {
+        if (operand.labels.size() != operand.dimensions.size()) {
+            throw std::runtime_error(
+                "Einsum contraction-tree runtime operand label/dimension metadata has inconsistent rank.");
+        }
+        for (size_t axis = 0; axis < operand.labels.size(); ++axis) {
+            const int32_t label = operand.labels[axis];
+            if (label < 0 || static_cast<size_t>(label) >= dimensions.size()) {
+                throw std::runtime_error(
+                    "Einsum contraction-tree runtime operand contains an invalid label.");
+            }
+            uint64_t& merged = dimensions[static_cast<size_t>(label)];
+            merged = mergeRuntimePairDimension(merged, operand.dimensions[axis]);
+        }
+    };
+    merge_operand(lhs);
+    merge_operand(rhs);
+    return dimensions;
+}
+
 [[nodiscard]] EinsumPlan selectedPairExecutionPlan(const EinsumPlan& root_plan,
-                                                   const EinsumPairPhysicalCandidate& candidate) {
+                                                   const EinsumPairPhysicalCandidate& candidate,
+                                                   const LogicalEinsumOperand& lhs,
+                                                   const LogicalEinsumOperand& rhs) {
     EinsumPlan pair_plan;
     pair_plan.kind = candidate.kind;
-    pair_plan.equation.label_dimensions = root_plan.equation.label_dimensions;
+    // Contraction-tree intermediates intentionally retain local singleton
+    // broadcast extents until a later pair actually meets a non-singleton
+    // operand.  Reconstruct this pair from the runtime logical operands rather
+    // than the whole-equation dimensions, otherwise a batch-1 intermediate can
+    // be incorrectly reinterpreted as batch-N storage.
+    pair_plan.equation.label_dimensions = runtimePairLabelDimensions(root_plan, lhs, rhs);
     pair_plan.equation.output_labels = candidate.result.labels;
     pair_plan.equation.output_dimensions = candidate.result.dimensions;
     pair_plan.matrix_multiply = candidate.matrix_multiply;
@@ -1246,7 +1292,7 @@ struct LoweredPairContraction {
     LogicalEinsumOperand lhs,
     LogicalEinsumOperand rhs,
     DataType output_dtype) {
-    const EinsumPlan pair_plan = selectedPairExecutionPlan(root_plan, candidate);
+    const EinsumPlan pair_plan = selectedPairExecutionPlan(root_plan, candidate, lhs, rhs);
 
     if (candidate.matrix_multiply.has_value()) {
         const std::optional<MatrixExpressionLayoutPlan> matmul_layout = expressionMatmulLayoutPlan(
@@ -1424,11 +1470,11 @@ struct LoweredContractionTree {
     return combined.reduce_sum(reduction_axes, squeeze_axes, DataType::FP32).withOutputDType(output_dtype);
 }
 
-[[nodiscard]] std::shared_ptr<StampedEinsum> stampImpl(const std::string& equation,
-                                                       const std::vector<Tensor>& inputs,
-                                                       const std::optional<Tensor>& preallocated_output,
-                                                       const Stream& stream,
-                                                       bool force_generic_reference = false) {
+[[nodiscard]] std::shared_ptr<StampedEinsum> stampPlanImpl(EinsumPlan plan,
+                                                           const std::vector<Tensor>& inputs,
+                                                           const std::optional<Tensor>& preallocated_output,
+                                                           const Stream& stream,
+                                                           bool force_generic_reference = false) {
     requireSupportedInputs(inputs, stream);
 
     std::vector<std::vector<uint64_t>> input_dimensions;
@@ -1436,7 +1482,6 @@ struct LoweredContractionTree {
     for (const Tensor& input : inputs) {
         input_dimensions.push_back(input.getDimensions());
     }
-    EinsumPlan plan = EinsumPlanner::parseAndPlan(equation, input_dimensions);
     const std::vector<uint64_t> output_dimensions = physicalOutputDimensions(plan);
     (void)checkedProduct(output_dimensions, "output");
 
@@ -1446,12 +1491,17 @@ struct LoweredContractionTree {
     }
 
     EinsumExecutionPath execution_path = EinsumExecutionPath::GENERIC;
+    EinsumGenericExecutionReason generic_execution_reason = EinsumGenericExecutionReason::NONE;
     bool uses_strided_batched_gemm = false;
     Expression result = [&]() -> Expression {
         if (force_generic_reference) {
+            generic_execution_reason = EinsumGenericExecutionReason::EXPLICIT_REFERENCE;
             return genericExpression(plan, inputs, output_dtype);
         }
+
+        bool selected_multi_operand_tree = false;
         if (plan.exact_contraction.has_value()) {
+            selected_multi_operand_tree = true;
             const EinsumExactContractionPlan& exact = *plan.exact_contraction;
             std::optional<LoweredContractionTree> lowered = lowerContractionTree(
                 plan, input_dimensions, exact.steps, exact.result, output_dtype);
@@ -1462,6 +1512,7 @@ struct LoweredContractionTree {
             }
         }
         if (plan.beam_contraction.has_value()) {
+            selected_multi_operand_tree = true;
             const EinsumBeamContractionPlan& beam = *plan.beam_contraction;
             std::optional<LoweredContractionTree> lowered = lowerContractionTree(
                 plan, input_dimensions, beam.steps, beam.result, output_dtype);
@@ -1471,16 +1522,30 @@ struct LoweredContractionTree {
                 return std::move(lowered->expression);
             }
         }
-        if (inputs.size() == 2 && (plan.matrix_multiply.has_value() || plan.pair_product.has_value())) {
-            LogicalEinsumOperand lhs = logicalInputOperand(0, input_dimensions[0], plan);
-            LogicalEinsumOperand rhs = logicalInputOperand(1, input_dimensions[1], plan);
-            std::optional<LoweredPairContraction> lowered =
-                lowerPairContraction(plan, std::move(lhs), std::move(rhs), output_dtype);
-            if (lowered.has_value()) {
-                execution_path = lowered->execution_path;
-                uses_strided_batched_gemm = lowered->uses_strided_batched_gemm;
-                return std::move(lowered->expression);
+
+        if (inputs.size() == 2) {
+            if (plan.matrix_multiply.has_value() || plan.pair_product.has_value()) {
+                LogicalEinsumOperand lhs = logicalInputOperand(0, input_dimensions[0], plan);
+                LogicalEinsumOperand rhs = logicalInputOperand(1, input_dimensions[1], plan);
+                std::optional<LoweredPairContraction> lowered =
+                    lowerPairContraction(plan, std::move(lhs), std::move(rhs), output_dtype);
+                if (lowered.has_value()) {
+                    execution_path = lowered->execution_path;
+                    uses_strided_batched_gemm = lowered->uses_strided_batched_gemm;
+                    return std::move(lowered->expression);
+                }
+                generic_execution_reason =
+                    EinsumGenericExecutionReason::BINARY_OPTIMIZED_LOWERING_UNAVAILABLE;
+            } else {
+                generic_execution_reason = EinsumGenericExecutionReason::BINARY_GENERAL_PLAN;
             }
+        } else if (inputs.size() == 1) {
+            generic_execution_reason = EinsumGenericExecutionReason::UNARY_DIRECT;
+        } else if (selected_multi_operand_tree) {
+            generic_execution_reason =
+                EinsumGenericExecutionReason::MULTI_OPERAND_TREE_LOWERING_UNAVAILABLE;
+        } else {
+            generic_execution_reason = EinsumGenericExecutionReason::MULTI_OPERAND_PLAN_UNAVAILABLE;
         }
         return genericExpression(plan, inputs, output_dtype);
     }();
@@ -1509,8 +1574,45 @@ struct LoweredContractionTree {
                                            output,
                                            stream,
                                            execution_path,
+                                           generic_execution_reason,
                                            uses_strided_batched_gemm,
                                            std::make_shared<StampedExecutionPlan>(std::move(stamped)));
+}
+
+
+[[nodiscard]] std::shared_ptr<StampedEinsum> stampImpl(const std::string& equation,
+                                                       const std::vector<Tensor>& inputs,
+                                                       const std::optional<Tensor>& preallocated_output,
+                                                       const Stream& stream,
+                                                       bool force_generic_reference = false) {
+    requireSupportedInputs(inputs, stream);
+    std::vector<std::vector<uint64_t>> input_dimensions;
+    input_dimensions.reserve(inputs.size());
+    for (const Tensor& input : inputs) {
+        input_dimensions.push_back(input.getDimensions());
+    }
+    return stampPlanImpl(EinsumPlanner::parseAndPlan(equation, input_dimensions),
+                         inputs,
+                         preallocated_output,
+                         stream,
+                         force_generic_reference);
+}
+
+[[nodiscard]] std::shared_ptr<StampedEinsum> stampResolvedImpl(
+    const ResolvedEinsumEquation& resolved_equation,
+    const std::vector<Tensor>& inputs,
+    const std::optional<Tensor>& preallocated_output,
+    const Stream& stream) {
+    requireSupportedInputs(inputs, stream);
+    std::vector<std::vector<uint64_t>> input_dimensions;
+    input_dimensions.reserve(inputs.size());
+    for (const Tensor& input : inputs) {
+        input_dimensions.push_back(input.getDimensions());
+    }
+    return stampPlanImpl(EinsumPlanner::plan(resolved_equation, input_dimensions),
+                         inputs,
+                         preallocated_output,
+                         stream);
 }
 
 }  // namespace
@@ -1531,6 +1633,14 @@ std::shared_ptr<StampedEinsum> Einsum::stamp(const std::vector<Tensor>& inputs,
     return stampImpl(equation, inputs, preallocated_output, stream);
 }
 
+std::shared_ptr<StampedEinsum> Einsum::stampResolvedEquation(
+    const ResolvedEinsumEquation& resolved_equation,
+    const std::vector<Tensor>& inputs,
+    const Tensor& preallocated_output,
+    const Stream& stream) {
+    return stampResolvedImpl(resolved_equation, inputs, preallocated_output, stream);
+}
+
 std::shared_ptr<StampedEinsum> Einsum::stampGenericReference(
     const std::vector<Tensor>& inputs, const Stream& stream) const {
     return stampImpl(equation, inputs, std::nullopt, stream, true);
@@ -1540,16 +1650,26 @@ StampedEinsum::StampedEinsum(EinsumPlan plan,
                              Tensor output,
                              const Stream& stream,
                              EinsumExecutionPath execution_path,
+                             EinsumGenericExecutionReason generic_execution_reason,
                              bool uses_strided_batched_gemm,
                              std::shared_ptr<StampedExecutionPlan> execution)
     : plan(std::move(plan)),
       output(std::move(output)),
       stream(stream),
       execution_path(execution_path),
+      generic_execution_reason(generic_execution_reason),
       uses_strided_batched_gemm(uses_strided_batched_gemm),
       execution(std::move(execution)) {
     if (!this->execution) {
         throw std::invalid_argument("StampedEinsum requires a stamped Expression execution plan.");
+    }
+    if (execution_path == EinsumExecutionPath::GENERIC &&
+        generic_execution_reason == EinsumGenericExecutionReason::NONE) {
+        throw std::invalid_argument("Generic einsum execution requires an observable generic-execution reason.");
+    }
+    if (execution_path != EinsumExecutionPath::GENERIC &&
+        generic_execution_reason != EinsumGenericExecutionReason::NONE) {
+        throw std::invalid_argument("Optimized einsum execution must not report a generic-execution reason.");
     }
 }
 

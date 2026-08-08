@@ -15,6 +15,7 @@ from ._thor import (
     Network,
     RaggedTensor,
     Tensor,
+    _infer_network_for_tensors,
 )
 
 
@@ -53,6 +54,41 @@ from . import random as random
 from . import runtime as runtime
 from . import training as training
 
+
+def einsum(
+    equation: str,
+    *operands: Tensor,
+    network: Network | None = None,
+) -> Tensor:
+    """Create a symbolic einsum operation and return its output tensor.
+
+    The equation describes feature dimensions only; Thor's batch dimension is
+    implicit and is preserved. The operation owns no trainable parameters and
+    remains differentiable with respect to every operand on a live gradient path.
+
+    When ``network`` is omitted, Thor infers the unique live Python-created
+    network that contains every operand. Pass ``network=...`` explicitly when
+    working with ambiguous loaded/cloned networks or tensors that are not yet
+    associated with a network.
+    """
+    if not isinstance(equation, str):
+        raise TypeError(f"thor.einsum() equation must be str, got {type(equation).__name__}")
+    if not operands:
+        raise ValueError("thor.einsum() requires at least one operand.")
+    if any(not isinstance(operand, Tensor) for operand in operands):
+        bad_index = next(i for i, operand in enumerate(operands) if not isinstance(operand, Tensor))
+        raise TypeError(
+            f"thor.einsum() operand[{bad_index}] must be thor.Tensor, "
+            f"got {type(operands[bad_index]).__name__}"
+        )
+    if network is not None and not isinstance(network, Network):
+        raise TypeError(f"thor.einsum() network must be thor.Network or None, got {type(network).__name__}")
+
+    resolved_network = network if network is not None else _infer_network_for_tensors(list(operands))
+    layer = layers.Einsum(resolved_network, equation, list(operands))
+    return layer.get_feature_output()
+
+
 __all__ = [
     "BATCH_VALIDITY_MASK_NAME",
     "METRIC_AGGREGATION_DENOMINATOR_NAME",
@@ -69,6 +105,7 @@ __all__ = [
     "constraints",
     "data",
     "ensembles",
+    "einsum",
     "initializers",
     "layers",
     "losses",

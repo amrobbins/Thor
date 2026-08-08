@@ -17,6 +17,7 @@
 
 #include <functional>
 #include <limits>
+#include <queue>
 #include <stdexcept>
 #include <sstream>
 #include "DeepLearning/Implementation/ThorError.h"
@@ -8285,17 +8286,25 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         }
     }
 
-    auto preallocatedForStageOutput = [&](const CompiledStageOutput& stage_output,
-                                          const std::vector<uint64_t>& output_dims) -> std::optional<Tensor> {
+    auto preallocatedDestinationForStageOutput = [&](const CompiledStageOutput& stage_output) -> std::optional<Tensor> {
         auto named_it = preallocated_final_outputs_by_name.find(stage_output.name);
         if (named_it != preallocated_final_outputs_by_name.end()) {
             return named_it->second;
         }
         auto value_it = preallocated_outputs_by_source_value_id.find(stage_output.value_id);
-        if (value_it == preallocated_outputs_by_source_value_id.end()) {
+        if (value_it != preallocated_outputs_by_source_value_id.end()) {
+            return value_it->second;
+        }
+        return std::nullopt;
+    };
+
+    auto preallocatedForStageOutput = [&](const CompiledStageOutput& stage_output,
+                                          const std::vector<uint64_t>& output_dims) -> std::optional<Tensor> {
+        std::optional<Tensor> destination = preallocatedDestinationForStageOutput(stage_output);
+        if (!destination.has_value()) {
             return std::nullopt;
         }
-        Tensor tensor = value_it->second;
+        Tensor tensor = destination.value();
         std::vector<uint64_t> resolved_output_dims =
             resolveDynamicAliasDims(tensor.getDimensions(), output_dims, true, "Preallocated stage output alias");
         tensor.reshape(resolved_output_dims);
@@ -8307,6 +8316,50 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
     std::unordered_map<uint32_t, uint32_t> producer_stage_by_value_id;
     producer_stage_by_value_id.reserve(compiled_outputs->stages.size() * 2);
+
+    // Caller-provided final outputs can intentionally alias root inputs. Optimizers rely on this for in-place
+    // weights/state updates. The logical Expression DAG is SSA-like, so a root input remains the old value even when
+    // another terminal branch writes the same physical allocation. Dataflow dependencies alone do not encode that
+    // write-after-read lifetime. Record physical reads of unproduced/root values and direct writes into caller storage;
+    // once all stages are stamped, add the missing anti-dependencies and stably topologically reorder the stages.
+    // This keeps genuine branch parallelism while preventing an in-place optimizer-state output from racing a sibling
+    // branch that still consumes the old state.
+    std::vector<std::vector<uint64_t>> external_read_tensor_ids_by_stage;
+    std::vector<std::vector<uint64_t>> preallocated_write_tensor_ids_by_stage;
+
+    auto runtimeInputTensorId = [](const RuntimeInputValue& value) -> std::optional<uint64_t> {
+        if (const Tensor* tensor = std::get_if<Tensor>(&value)) {
+            return tensor->getTensorId();
+        }
+        if (const TensorScalarBinding* binding = std::get_if<TensorScalarBinding>(&value)) {
+            return binding->buffer.getTensorId();
+        }
+        return std::nullopt;
+    };
+
+    auto appendUniqueTensorId = [](std::vector<uint64_t>& tensor_ids, uint64_t tensor_id) {
+        if (std::find(tensor_ids.begin(), tensor_ids.end(), tensor_id) == tensor_ids.end()) {
+            tensor_ids.push_back(tensor_id);
+        }
+    };
+
+    std::unordered_set<uint64_t> input_tensor_ids;
+    input_tensor_ids.reserve(inputs.size() + tensor_scalar_inputs.size());
+    for (const auto& input : inputs) {
+        input_tensor_ids.insert(input.second.getTensorId());
+    }
+    for (const auto& tensor_scalar_input : tensor_scalar_inputs) {
+        input_tensor_ids.insert(tensor_scalar_input.second.buffer.getTensorId());
+    }
+
+    std::unordered_set<uint64_t> aliased_preallocated_tensor_ids;
+    aliased_preallocated_tensor_ids.reserve(preallocated_final_outputs_by_name.size());
+    for (const auto& preallocated_output : preallocated_final_outputs_by_name) {
+        const uint64_t tensor_id = preallocated_output.second.getTensorId();
+        if (input_tensor_ids.contains(tensor_id)) {
+            aliased_preallocated_tensor_ids.insert(tensor_id);
+        }
+    }
 
     std::unordered_map<uint32_t, std::shared_ptr<AttentionForwardState>> attention_forward_state_by_stage_idx;
     attention_forward_state_by_stage_idx.reserve(compiled_outputs->stages.size());
@@ -8388,6 +8441,22 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
             continue;
         }
+
+        std::sort(dependency_stage_indices.begin(), dependency_stage_indices.end());
+
+        std::vector<uint64_t> external_read_tensor_ids;
+        for (size_t input_idx = 0; input_idx < stage.input_value_ids.size(); ++input_idx) {
+            const uint32_t value_id = stage.input_value_ids[input_idx];
+            if (producer_stage_by_value_id.contains(value_id)) {
+                continue;
+            }
+            std::optional<uint64_t> tensor_id = runtimeInputTensorId(stageInputs[input_idx]);
+            if (tensor_id.has_value() && aliased_preallocated_tensor_ids.contains(tensor_id.value())) {
+                appendUniqueTensorId(external_read_tensor_ids, tensor_id.value());
+            }
+        }
+
+        const uint32_t stamped_stage_begin = static_cast<uint32_t>(stampedStages.size());
 
         const uint64_t stage_flops = computeStageFlops(stage, stage_input_dims);
 
@@ -9595,10 +9664,156 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 break;
             }
         }
+
+        const uint32_t stamped_stage_end = static_cast<uint32_t>(stampedStages.size());
+        if (!aliased_preallocated_tensor_ids.empty()) {
+            while (external_read_tensor_ids_by_stage.size() < stampedStages.size()) {
+                external_read_tensor_ids_by_stage.emplace_back();
+                preallocated_write_tensor_ids_by_stage.emplace_back();
+            }
+            for (uint32_t stamped_stage_idx = stamped_stage_begin; stamped_stage_idx < stamped_stage_end; ++stamped_stage_idx) {
+                for (uint64_t tensor_id : external_read_tensor_ids) {
+                    appendUniqueTensorId(external_read_tensor_ids_by_stage[stamped_stage_idx], tensor_id);
+                }
+            }
+
+            for (const CompiledStageOutput& stage_output : stage.outputs) {
+                std::optional<Tensor> destination = preallocatedDestinationForStageOutput(stage_output);
+                if (!destination.has_value() || !aliased_preallocated_tensor_ids.contains(destination->getTensorId())) {
+                    continue;
+                }
+                auto value_it = values.find(stage_output.value_id);
+                auto producer_it = producer_stage_by_value_id.find(stage_output.value_id);
+                if (value_it == values.end() || producer_it == producer_stage_by_value_id.end()) {
+                    continue;
+                }
+                std::optional<uint64_t> produced_tensor_id = runtimeInputTensorId(value_it->second);
+                if (!produced_tensor_id.has_value() || produced_tensor_id.value() != destination->getTensorId()) {
+                    continue;
+                }
+                const uint32_t writer_stage_idx = producer_it->second;
+                if (writer_stage_idx >= preallocated_write_tensor_ids_by_stage.size()) {
+                    throw std::runtime_error("Preallocated Expression output writer stage index is out of range.");
+                }
+                appendUniqueTensorId(preallocated_write_tensor_ids_by_stage[writer_stage_idx], destination->getTensorId());
+            }
+        }
+
         applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
     }
 
     applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
+
+    bool added_storage_anti_dependency = false;
+    if (!aliased_preallocated_tensor_ids.empty()) {
+        if (external_read_tensor_ids_by_stage.size() != stampedStages.size() ||
+            preallocated_write_tensor_ids_by_stage.size() != stampedStages.size()) {
+            throw std::runtime_error("Expression storage-hazard metadata does not match the stamped stage count.");
+        }
+
+        std::unordered_map<uint64_t, std::vector<uint32_t>> external_readers_by_tensor_id;
+        for (uint32_t stage_idx = 0; stage_idx < external_read_tensor_ids_by_stage.size(); ++stage_idx) {
+            for (uint64_t tensor_id : external_read_tensor_ids_by_stage[stage_idx]) {
+                external_readers_by_tensor_id[tensor_id].push_back(stage_idx);
+            }
+        }
+
+        auto addUniqueDependency = [](std::vector<uint32_t>& dependencies, uint32_t stage_idx) {
+            if (std::find(dependencies.begin(), dependencies.end(), stage_idx) != dependencies.end()) {
+                return false;
+            }
+            dependencies.push_back(stage_idx);
+            return true;
+        };
+
+        for (uint32_t writer_stage_idx = 0; writer_stage_idx < preallocated_write_tensor_ids_by_stage.size(); ++writer_stage_idx) {
+            for (uint64_t tensor_id : preallocated_write_tensor_ids_by_stage[writer_stage_idx]) {
+                auto readers_it = external_readers_by_tensor_id.find(tensor_id);
+                if (readers_it == external_readers_by_tensor_id.end()) {
+                    continue;
+                }
+                for (uint32_t reader_stage_idx : readers_it->second) {
+                    if (reader_stage_idx != writer_stage_idx) {
+                        added_storage_anti_dependency |=
+                            addUniqueDependency(stampedStages[writer_stage_idx].dependency_stage_indices, reader_stage_idx);
+                    }
+                }
+            }
+        }
+    }
+
+    // Anti-dependencies can point from an earlier stamped writer to a later independent reader in the compiler's
+    // original emission order. Re-establish a stable topological order after adding them so runOn() retains its simple
+    // forward-submission invariant. Existing dataflow edges and the new storage-lifetime edges are both preserved.
+    if (added_storage_anti_dependency) {
+        const uint32_t stage_count = static_cast<uint32_t>(stampedStages.size());
+        std::vector<std::vector<uint32_t>> children(stage_count);
+        std::vector<uint32_t> indegree(stage_count, 0);
+        for (uint32_t stage_idx = 0; stage_idx < stage_count; ++stage_idx) {
+            std::vector<uint32_t>& dependencies = stampedStages[stage_idx].dependency_stage_indices;
+            std::sort(dependencies.begin(), dependencies.end());
+            dependencies.erase(std::unique(dependencies.begin(), dependencies.end()), dependencies.end());
+            for (uint32_t dependency_stage_idx : dependencies) {
+                if (dependency_stage_idx >= stage_count || dependency_stage_idx == stage_idx) {
+                    throw std::runtime_error("Expression storage anti-dependency referenced an invalid stamped stage.");
+                }
+                children[dependency_stage_idx].push_back(stage_idx);
+                ++indegree[stage_idx];
+            }
+        }
+
+        std::priority_queue<uint32_t, std::vector<uint32_t>, std::greater<uint32_t>> ready;
+        for (uint32_t stage_idx = 0; stage_idx < stage_count; ++stage_idx) {
+            if (indegree[stage_idx] == 0) {
+                ready.push(stage_idx);
+            }
+        }
+
+        std::vector<uint32_t> topological_order;
+        topological_order.reserve(stage_count);
+        while (!ready.empty()) {
+            const uint32_t stage_idx = ready.top();
+            ready.pop();
+            topological_order.push_back(stage_idx);
+            for (uint32_t child_idx : children[stage_idx]) {
+                if (--indegree[child_idx] == 0) {
+                    ready.push(child_idx);
+                }
+            }
+        }
+        if (topological_order.size() != stage_count) {
+            throw std::runtime_error(
+                "A caller-provided Expression output aliases an input whose old value remains live across a dependent write; "
+                "the requested in-place output cannot preserve Expression value semantics.");
+        }
+
+        bool already_topological = true;
+        for (uint32_t new_idx = 0; new_idx < stage_count; ++new_idx) {
+            if (topological_order[new_idx] != new_idx) {
+                already_topological = false;
+                break;
+            }
+        }
+        if (!already_topological) {
+            std::vector<uint32_t> new_index_by_old(stage_count);
+            for (uint32_t new_idx = 0; new_idx < stage_count; ++new_idx) {
+                new_index_by_old[topological_order[new_idx]] = new_idx;
+            }
+
+            std::vector<StampedExecutionStage> reordered_stages;
+            reordered_stages.reserve(stage_count);
+            for (uint32_t old_idx : topological_order) {
+                reordered_stages.push_back(stampedStages[old_idx]);
+            }
+            for (StampedExecutionStage& reordered_stage : reordered_stages) {
+                for (uint32_t& dependency_stage_idx : reordered_stage.dependency_stage_indices) {
+                    dependency_stage_idx = new_index_by_old[dependency_stage_idx];
+                }
+                std::sort(reordered_stage.dependency_stage_indices.begin(), reordered_stage.dependency_stage_indices.end());
+            }
+            stampedStages = std::move(reordered_stages);
+        }
+    }
 
     std::unordered_map<std::string, Tensor> finalOutputsByName;
     finalOutputsByName.reserve(compiled_outputs->final_outputs.size());

@@ -28,6 +28,7 @@ void bind_custom_layer(nb::module_ &m);
 void bind_flatten(nb::module_ &m);
 void bind_finite_check(nb::module_ &m);
 void bind_embedding(nb::module_ &m);
+void bind_einsum(nb::module_ &m);
 void bind_fully_connected(nb::module_ &m);
 void bind_instance_norm(nb::module_ &m);
 void bind_layer_norm(nb::module_ &m);
@@ -76,6 +77,7 @@ void bind_layers(nb::module_ &layers) {
     bind_flatten(layers);
     bind_finite_check(layers);
     bind_embedding(layers);
+    bind_einsum(layers);
     bind_fully_connected(layers);
     bind_instance_norm(layers);
     bind_layer_norm(layers);

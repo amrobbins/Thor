@@ -3,12 +3,16 @@
 #include <cuda_fp8.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
+#include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/vector.h>
 
 namespace nb = nanobind;
+using namespace nb::literals;
 
 #include "DeepLearning/Api/BatchValidity.h"
 #include "DeepLearning/Api/Layers/Metrics/MetricAggregation.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "bindings/python/src/core/network_registry.h"
 
 using DataType = ThorImplementation::DataType;
 
@@ -73,6 +77,28 @@ NB_MODULE(_thor, thor) {
     bind_parameter(thor);
     bind_network(thor);
     bind_placed_network(thor);
+
+    thor.def(
+        "_infer_network_for_tensors",
+        [](const std::vector<Thor::Tensor>& tensors) -> std::shared_ptr<Thor::Network> {
+            if (tensors.empty()) {
+                throw nb::value_error("thor.einsum() requires at least one operand.");
+            }
+            const std::vector<std::shared_ptr<Thor::Network>> matches =
+                Thor::PythonBindings::pythonNetworksContainingAllTensors(tensors);
+            if (matches.empty()) {
+                throw nb::value_error(
+                    "thor.einsum() could not infer a Network containing every operand; "
+                    "pass network=... explicitly or ensure all operands belong to the same Python-created Network.");
+            }
+            if (matches.size() != 1) {
+                throw nb::value_error(
+                    "thor.einsum() found more than one live Network containing every operand; "
+                    "pass network=... explicitly to disambiguate.");
+            }
+            return matches.front();
+        },
+        "tensors"_a);
 
     auto activations = thor.def_submodule("activations");
     bind_activations(activations);

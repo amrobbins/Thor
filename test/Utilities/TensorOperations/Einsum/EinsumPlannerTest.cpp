@@ -3,8 +3,10 @@
 #include "DeepLearning/Implementation/Tensor/DataType.h"
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -941,7 +943,12 @@ TEST(EinsumPlanner, BeamPlannerBuildsSevenOperandTreeWithExactFiveOperandTail) {
     EXPECT_EQ(beam.beam_levels, 2u);
     EXPECT_GT(beam.expanded_state_count, 0u);
     EXPECT_GT(beam.generated_state_count, 0u);
+    EXPECT_GT(beam.deferred_disconnected_pair_count, 0u);
+    EXPECT_GT(beam.truncated_state_count, 0u);
     EXPECT_GT(beam.retained_state_count, 0u);
+    EXPECT_EQ(beam.generated_state_count,
+              beam.deduplicated_state_count + beam.truncated_state_count +
+                  beam.retained_state_count);
     EXPECT_GT(beam.exact_tail_count, 0u);
     EXPECT_LE(beam.exact_tail_count, EinsumPlanner::DEFAULT_BEAM_WIDTH);
 
@@ -962,8 +969,88 @@ TEST(EinsumPlanner, BeamPlannerBuildsSevenOperandTreeWithExactFiveOperandTail) {
               std::string::npos);
     EXPECT_NE(description.find("exact_tail_active_operands=5 beam_levels=2"),
               std::string::npos);
+    EXPECT_NE(description.find("deferred_disconnected_pairs="), std::string::npos);
+    EXPECT_NE(description.find("truncated_states="), std::string::npos);
     EXPECT_NE(description.find("weights={fma:1,fused:128,reduction:64,materialization:128,writes:64}"),
               std::string::npos);
+}
+
+TEST(EinsumPlanner, DiagnosticBeamWidthDoesNotChangeProductionDefault) {
+    const std::string equation = "ab,bc,cd,de,ef,fg,gh->ah";
+    const std::vector<std::vector<uint64_t>> shapes =
+        {{2, 3}, {3, 4}, {4, 5}, {5, 6}, {6, 7}, {7, 8}, {8, 9}};
+
+    const EinsumPlan production = EinsumPlanner::parseAndPlan(equation, shapes);
+    const EinsumPlan diagnostic =
+        EinsumPlanner::parseAndPlanWithBeamWidthForDiagnostics(equation, shapes, 64);
+
+    ASSERT_TRUE(production.beam_contraction.has_value());
+    ASSERT_TRUE(diagnostic.beam_contraction.has_value());
+    EXPECT_EQ(production.beam_contraction->beam_width,
+              EinsumPlanner::DEFAULT_BEAM_WIDTH);
+    EXPECT_EQ(diagnostic.beam_contraction->beam_width, 64u);
+    EXPECT_EQ(EinsumPlanner::DEFAULT_BEAM_WIDTH, 32u);
+}
+
+TEST(EinsumPlanner, DiagnosticBeamWidthRejectsZero) {
+    try {
+        (void)EinsumPlanner::parseAndPlanWithBeamWidthForDiagnostics(
+            "ab,bc,cd,de,ef,fg,gh->ah",
+            {{2, 3}, {3, 4}, {4, 5}, {5, 6}, {6, 7}, {7, 8}, {8, 9}},
+            0);
+        FAIL() << "Expected zero diagnostic beam width to be rejected.";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(), "Einsum beam width must be greater than zero.");
+    }
+}
+
+TEST(EinsumPlanner, BeamPlannerDisconnectedPruningPreservesScalarFactors) {
+    const EinsumPlan plan = EinsumPlanner::parseAndPlan(
+        "ab,bc,cd,de,ef,fg,->a",
+        {{2, 3}, {3, 4}, {4, 5}, {5, 6}, {6, 7}, {7, 8}, {}});
+
+    ASSERT_TRUE(plan.beam_contraction.has_value());
+    const EinsumBeamContractionPlan& beam = *plan.beam_contraction;
+    EXPECT_GT(beam.deferred_disconnected_pair_count, 0u);
+    ASSERT_EQ(beam.steps.size(), 6u);
+    EXPECT_EQ(beam.steps.back().result_source_mask, 127u);
+    EXPECT_TRUE(beam.result.dense_storage);
+    EXPECT_EQ(beam.result.labels, labels("a"));
+}
+
+TEST(EinsumPlanner, BeamPlannerDisconnectedPruningPreservesSharedElementwiseMerges) {
+    const EinsumPlan plan = EinsumPlanner::parseAndPlan(
+        "a,a,a,a,a,a,a->a",
+        {{17}, {17}, {17}, {17}, {17}, {17}, {17}});
+
+    ASSERT_TRUE(plan.beam_contraction.has_value());
+    const EinsumBeamContractionPlan& beam = *plan.beam_contraction;
+    // All live dimensions are shared passthrough labels. There is no
+    // independent-axis expansion to defer, so ordinary elementwise pair
+    // products must remain eligible.
+    EXPECT_EQ(beam.deferred_disconnected_pair_count, 0u);
+    ASSERT_EQ(beam.steps.size(), 6u);
+    for (const EinsumExactContractionStep& step : beam.steps) {
+        EXPECT_EQ(step.physical_candidate.kind, EinsumPlanKind::ELEMENTWISE);
+    }
+}
+
+TEST(EinsumPlanner, BeamPlannerDisconnectedPruningPreservesClosedComponentChoices) {
+    const EinsumPlan plan = EinsumPlanner::parseAndPlan(
+        "ab,bc,de,ef,gh,hi,jk->acdfgijk",
+        {{2, 3}, {3, 5}, {7, 11}, {11, 13}, {17, 19}, {19, 23}, {29, 31}});
+
+    ASSERT_TRUE(plan.beam_contraction.has_value());
+    const EinsumBeamContractionPlan& beam = *plan.beam_contraction;
+    EXPECT_GT(beam.deferred_disconnected_pair_count, 0u);
+    EXPECT_EQ(beam.cost.estimated_execution_units, uint64_t{26'661'878'206});
+    ASSERT_EQ(beam.steps.size(), 6u);
+    EXPECT_EQ(beam.steps[0].result_source_mask, 3u);
+    EXPECT_EQ(beam.steps[1].result_source_mask, 7u);
+    EXPECT_EQ(beam.steps[2].result_source_mask, 24u);
+    EXPECT_EQ(beam.steps[3].result_source_mask, 31u);
+    EXPECT_EQ(beam.steps[4].result_source_mask, 96u);
+    EXPECT_EQ(beam.steps[5].result_source_mask, 127u);
 }
 
 TEST(EinsumPlanner, BeamPlannerIsDeterministic) {
@@ -983,6 +1070,8 @@ TEST(EinsumPlanner, BeamPlannerIsDeterministic) {
     EXPECT_EQ(lhs.expanded_state_count, rhs.expanded_state_count);
     EXPECT_EQ(lhs.generated_state_count, rhs.generated_state_count);
     EXPECT_EQ(lhs.deduplicated_state_count, rhs.deduplicated_state_count);
+    EXPECT_EQ(lhs.deferred_disconnected_pair_count, rhs.deferred_disconnected_pair_count);
+    EXPECT_EQ(lhs.truncated_state_count, rhs.truncated_state_count);
     EXPECT_EQ(lhs.retained_state_count, rhs.retained_state_count);
     ASSERT_EQ(lhs.steps.size(), rhs.steps.size());
     for (size_t step = 0; step < lhs.steps.size(); ++step) {
@@ -1009,12 +1098,73 @@ TEST(EinsumPlanner, BeamPlannerComposesBatchedGemms) {
 
     ASSERT_TRUE(plan.beam_contraction.has_value());
     const EinsumBeamContractionPlan& beam = *plan.beam_contraction;
+    // Nonadjacent operands share only the persistent batch label. That label
+    // survives the pair, so those batched outer products should be deferred
+    // while each side still has true chain-contraction work available.
+    EXPECT_GT(beam.deferred_disconnected_pair_count, 0u);
     ASSERT_EQ(beam.steps.size(), 6u);
     EXPECT_EQ(beam.steps.back().result_source_mask, 127u);
     EXPECT_GT(beam.cost.matmul_group_count, 0u);
     for (const EinsumExactContractionStep& step : beam.steps) {
         EXPECT_EQ(step.physical_candidate.kind, EinsumPlanKind::BATCHED_GEMM);
     }
+}
+
+TEST(EinsumPlanner, DenseBinaryRankOneToThreeExplicitEquationsAlwaysHaveOptimizedPairLowering) {
+    const std::string alphabet = "abc";
+    std::vector<std::string> operand_subscripts;
+    for (size_t rank = 1; rank <= 3; ++rank) {
+        size_t count = 1;
+        for (size_t axis = 0; axis < rank; ++axis) count *= alphabet.size();
+        for (size_t encoded = 0; encoded < count; ++encoded) {
+            size_t remaining = encoded;
+            std::string subscript(rank, 'a');
+            for (size_t axis = rank; axis > 0; --axis) {
+                subscript[axis - 1] = alphabet[remaining % alphabet.size()];
+                remaining /= alphabet.size();
+            }
+            operand_subscripts.push_back(std::move(subscript));
+        }
+    }
+
+    size_t audited_equations = 0;
+    for (const std::string& lhs : operand_subscripts) {
+        for (const std::string& rhs : operand_subscripts) {
+            std::set<char> present_labels(lhs.begin(), lhs.end());
+            present_labels.insert(rhs.begin(), rhs.end());
+            const std::vector<char> present(present_labels.begin(), present_labels.end());
+
+            std::vector<std::string> outputs{std::string{}};
+            for (size_t mask = 1; mask < (size_t{1} << present.size()); ++mask) {
+                std::string output;
+                for (size_t label_index = 0; label_index < present.size(); ++label_index) {
+                    if ((mask & (size_t{1} << label_index)) != 0) {
+                        output.push_back(present[label_index]);
+                    }
+                }
+                std::sort(output.begin(), output.end());
+                do {
+                    outputs.push_back(output);
+                } while (std::next_permutation(output.begin(), output.end()));
+            }
+
+            for (const std::string& output : outputs) {
+                const std::string equation = lhs + "," + rhs + "->" + output;
+                const EinsumPlan plan = EinsumPlanner::parseAndPlan(
+                    equation,
+                    {std::vector<uint64_t>(lhs.size(), 2), std::vector<uint64_t>(rhs.size(), 2)});
+                ++audited_equations;
+                EXPECT_TRUE(plan.matrix_multiply.has_value() || plan.pair_product.has_value())
+                    << "equation=" << equation;
+                EXPECT_NE(plan.kind, EinsumPlanKind::GENERAL) << "equation=" << equation;
+            }
+        }
+    }
+
+    // This is deliberately broad enough to include reductions, diagonals,
+    // transposed free axes, shared surviving labels, true contractions, and
+    // outer/pair products rather than a hand-selected set of friendly forms.
+    EXPECT_EQ(audited_equations, 18084u);
 }
 
 TEST(EinsumPlanner, ExactDescriptionExplainsSelectedPhysicalTreeAndCosts) {

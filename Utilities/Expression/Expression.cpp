@@ -2826,6 +2826,31 @@ Expression::Expression(double value) {
 }
 
 Expression Expression::constantScalar(double value) { return Expression(value); }
+
+Expression Expression::fill(double value,
+                            const std::vector<uint64_t>& dims,
+                            std::optional<DataType> output_dtype) {
+    if (dims.empty()) {
+        throw std::invalid_argument("Expression::fill requires non-empty concrete dimensions; use constantScalar for a scalar.");
+    }
+    for (uint64_t d : dims) {
+        if (d == 0 || d == std::numeric_limits<uint64_t>::max()) {
+            throw std::invalid_argument("Expression::fill requires concrete non-zero dimensions.");
+        }
+    }
+
+    auto out = std::make_shared<PhysicalExpression>();
+    ExprNode node{};
+    node.op = ExprOp::FILL;
+    node.scalar_fp = value;
+    node.fill_dims = dims;
+    if (output_dtype.has_value()) {
+        node.output_dtype = output_dtype.value();
+    }
+    out->nodes.push_back(node);
+    out->output_node = 0;
+    return Expression(out, 0);
+}
 // Expression Expression::scalar(int64_t value) { return Expression(value); }
 
 PhysicalExpression Expression::expression() const {
@@ -3449,6 +3474,47 @@ Expression Expression::stridedView(const std::vector<uint64_t>& dims,
     node.view_dims = dims;
     node.view_strides = strides_elements;
     node.view_element_offset = element_offset;
+    return out;
+}
+
+Expression Expression::stridedViewBackward(const std::vector<uint64_t>& source_dims,
+                                           const std::vector<uint64_t>& view_dims,
+                                           const std::vector<uint64_t>& view_strides_elements,
+                                           uint64_t view_element_offset) const {
+    if (!expr)
+        throw std::runtime_error("Cannot create a strided-view backward from an empty expression");
+    if (source_dims.empty()) {
+        throw std::invalid_argument("Expression::stridedViewBackward requires non-empty source dimensions.");
+    }
+    if (view_dims.empty() || view_dims.size() != view_strides_elements.size()) {
+        throw std::invalid_argument(
+            "Expression::stridedViewBackward requires view dimensions and strides with the same non-zero rank.");
+    }
+
+    uint64_t dense_tail = 1;
+    for (int64_t axis = static_cast<int64_t>(view_dims.size()) - 1; axis >= 0; --axis) {
+        if (view_dims[axis] == 0 || view_dims[axis] == std::numeric_limits<uint64_t>::max() ||
+            view_strides_elements[axis] < dense_tail) {
+            throw std::invalid_argument(
+                "Expression::stridedViewBackward requires canonical non-overlapping row-major-like strides.");
+        }
+        if (dense_tail > std::numeric_limits<uint64_t>::max() / view_dims[axis]) {
+            throw std::overflow_error("Expression::stridedViewBackward view element count overflows uint64_t.");
+        }
+        dense_tail *= view_dims[axis];
+    }
+    for (uint64_t d : source_dims) {
+        if (d == 0 || d == std::numeric_limits<uint64_t>::max()) {
+            throw std::invalid_argument("Expression::stridedViewBackward requires concrete non-zero source dimensions.");
+        }
+    }
+
+    Expression out = unaryOp(*this, ExprOp::STRIDED_VIEW_BACKWARD);
+    ExprNode& node = out.expr->nodes[out.nodeIndex];
+    node.fill_dims = source_dims;
+    node.view_dims = view_dims;
+    node.view_strides = view_strides_elements;
+    node.view_element_offset = view_element_offset;
     return out;
 }
 

@@ -505,6 +505,9 @@ class Expression {
                                                         std::optional<DataType> compute_dtype = std::nullopt,
                                                         std::optional<DataType> output_dtype = std::nullopt);
     [[nodiscard]] static Expression constantScalar(double value);
+    [[nodiscard]] static Expression fill(double value,
+                                         const std::vector<uint64_t>& dims,
+                                         std::optional<DataType> output_dtype = std::nullopt);
 
     [[nodiscard]] static Expression fromPhysicalNode(std::shared_ptr<PhysicalExpression> expr, uint32_t nodeIndex) {
         if (!expr) {
@@ -623,6 +626,10 @@ class Expression {
     [[nodiscard]] Expression stridedView(const std::vector<uint64_t>& dims,
                                          const std::vector<uint64_t>& strides_elements,
                                          uint64_t element_offset = 0) const;
+    [[nodiscard]] Expression stridedViewBackward(const std::vector<uint64_t>& source_dims,
+                                                 const std::vector<uint64_t>& view_dims,
+                                                 const std::vector<uint64_t>& view_strides_elements,
+                                                 uint64_t view_element_offset = 0) const;
     [[nodiscard]] Expression aliasView(const std::vector<uint64_t>& dims,
                                        const std::vector<uint64_t>& strides_elements,
                                        uint64_t element_offset = 0) const {

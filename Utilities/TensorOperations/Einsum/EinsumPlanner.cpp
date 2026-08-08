@@ -2307,6 +2307,85 @@ bool beamStatePreferred(const BeamPlannerState& lhs, const BeamPlannerState& rhs
     return lhs.physical_signature < rhs.physical_signature;
 }
 
+bool shouldDeferDisconnectedBeamPair(
+    uint64_t lhs_source_mask,
+    uint64_t rhs_source_mask,
+    uint64_t source_full_mask,
+    const std::vector<int32_t>& surviving_labels,
+    const std::vector<uint64_t>& label_operand_masks,
+    const std::vector<uint64_t>& label_dimensions) {
+    const uint64_t pair_source_mask = lhs_source_mask | rhs_source_mask;
+    const uint64_t outside_mask = source_full_mask ^ pair_source_mask;
+    if (outside_mask == 0) {
+        return false;
+    }
+
+    std::vector<bool> label_survives(label_operand_masks.size(), false);
+    for (int32_t label : surviving_labels) {
+        if (label < 0 || static_cast<size_t>(label) >= label_operand_masks.size() ||
+            static_cast<size_t>(label) >= label_dimensions.size()) {
+            throw std::logic_error(
+                "Internal einsum beam planner error: invalid surviving label while pruning disconnected pairs.");
+        }
+        label_survives[static_cast<size_t>(label)] = true;
+    }
+
+    bool lhs_has_outside_dependency = false;
+    bool rhs_has_outside_dependency = false;
+    for (size_t label_index = 0; label_index < label_operand_masks.size(); ++label_index) {
+        const uint64_t operand_mask = label_operand_masks[label_index];
+        const bool on_lhs = (operand_mask & lhs_source_mask) != 0;
+        const bool on_rhs = (operand_mask & rhs_source_mask) != 0;
+        if (on_lhs && on_rhs && !label_survives[label_index]) {
+            // A shared label eliminated by this pair is true contraction work.
+            // Keep the pair eligible even when it also shares passthrough batch
+            // or output labels.
+            return false;
+        }
+        if ((operand_mask & outside_mask) != 0) {
+            lhs_has_outside_dependency = lhs_has_outside_dependency || on_lhs;
+            rhs_has_outside_dependency = rhs_has_outside_dependency || on_rhs;
+        }
+    }
+
+    if (!lhs_has_outside_dependency || !rhs_has_outside_dependency) {
+        // Keep merges involving a closed component. In a bounded beam those
+        // states can preserve useful cross-component diversity even when a
+        // later outer product would be no more expensive algebraically. Only
+        // prune when both sides still have connected work available elsewhere.
+        return false;
+    }
+
+    bool lhs_has_exclusive_non_unit_survivor = false;
+    bool rhs_has_exclusive_non_unit_survivor = false;
+    for (int32_t label : surviving_labels) {
+        const size_t label_index = static_cast<size_t>(label);
+        if (label_dimensions[label_index] <= 1) {
+            continue;
+        }
+        const uint64_t operand_mask = label_operand_masks[label_index];
+        const bool on_lhs = (operand_mask & lhs_source_mask) != 0;
+        const bool on_rhs = (operand_mask & rhs_source_mask) != 0;
+        lhs_has_exclusive_non_unit_survivor =
+            lhs_has_exclusive_non_unit_survivor || (on_lhs && !on_rhs);
+        rhs_has_exclusive_non_unit_survivor =
+            rhs_has_exclusive_non_unit_survivor || (on_rhs && !on_lhs);
+    }
+
+    // Shared labels that survive this pair (for example a persistent batch
+    // label) do not make the merge useful contraction work. If both sides also
+    // contribute independent non-unit surviving axes, combining them now forms
+    // an outer-product expansion over those axes. When both sides still have
+    // dependencies elsewhere, postponing that expansion until connected work
+    // has completed cannot increase primitive work or intermediate size.
+    //
+    // Requiring an exclusive non-unit survivor on both sides preserves early
+    // elementwise merges whose only live dimensions are shared, and preserves
+    // scalar/unit-only factors for the same reason as the original rule.
+    return lhs_has_exclusive_non_unit_survivor &&
+           rhs_has_exclusive_non_unit_survivor;
+}
+
 std::optional<EinsumBeamContractionPlan> planBeamContraction(
     const ResolvedEinsumEquation& equation,
     const std::vector<EinsumLogicalOperandPlan>& logical_operands,
@@ -2386,6 +2465,18 @@ std::optional<EinsumBeamContractionPlan> planBeamContraction(
                                              iteration_labels,
                                              label_operand_masks,
                                              output_labels);
+                    if (shouldDeferDisconnectedBeamPair(first_source_mask,
+                                                        second_source_mask,
+                                                        source_full_mask,
+                                                        surviving_labels,
+                                                        label_operand_masks,
+                                                        equation.label_dimensions)) {
+                        diagnostics.deferred_disconnected_pair_count = checkedAddPhysicalCost(
+                            diagnostics.deferred_disconnected_pair_count,
+                            1,
+                            "beam deferred disconnected-pair count");
+                        continue;
+                    }
 
                     const auto expand_orientation = [&](size_t lhs_index, size_t rhs_index) {
                         const ExactPlannerRealization& lhs = state.active[lhs_index];
@@ -2453,6 +2544,10 @@ std::optional<EinsumBeamContractionPlan> planBeamContraction(
 
         std::sort(next_states.begin(), next_states.end(), beamStatePreferred);
         if (next_states.size() > beam_width) {
+            diagnostics.truncated_state_count = checkedAddPhysicalCost(
+                diagnostics.truncated_state_count,
+                static_cast<uint64_t>(next_states.size() - beam_width),
+                "beam truncated-state count");
             next_states.resize(beam_width);
         }
         diagnostics.retained_state_count = checkedAddPhysicalCost(
@@ -2544,6 +2639,16 @@ EinsumPairContractionPlan EinsumPlanner::planPair(const EinsumLogicalOperandPlan
 
 EinsumPlan EinsumPlanner::plan(const ResolvedEinsumEquation& equation,
                                const std::vector<std::vector<uint64_t>>& input_dimensions) {
+    return planWithBeamWidth(equation, input_dimensions, DEFAULT_BEAM_WIDTH);
+}
+
+EinsumPlan EinsumPlanner::planWithBeamWidth(
+    const ResolvedEinsumEquation& equation,
+    const std::vector<std::vector<uint64_t>>& input_dimensions,
+    uint32_t beam_width) {
+    if (beam_width == 0) {
+        throw std::invalid_argument("Einsum beam width must be greater than zero.");
+    }
     if (equation.inputs.size() > MAX_SOURCE_OPERANDS) {
         throw std::invalid_argument(
             "Einsum supports at most " + std::to_string(MAX_SOURCE_OPERANDS) +
@@ -2600,7 +2705,7 @@ EinsumPlan EinsumPlanner::plan(const ResolvedEinsumEquation& equation,
                 planBeamContraction(equation,
                                     plan.logical_operands,
                                     plan.iteration_labels,
-                                    DEFAULT_BEAM_WIDTH);
+                                    beam_width);
         }
         plan.kind = equation.reduction_labels.empty() ? EinsumPlanKind::ELEMENTWISE : EinsumPlanKind::GENERAL;
     }
@@ -2611,6 +2716,16 @@ EinsumPlan EinsumPlanner::plan(const ResolvedEinsumEquation& equation,
 EinsumPlan EinsumPlanner::parseAndPlan(const std::string& equation,
                                        const std::vector<std::vector<uint64_t>>& input_dimensions) {
     return plan(EinsumParser::parseAndResolve(equation, input_dimensions), input_dimensions);
+}
+
+EinsumPlan EinsumPlanner::parseAndPlanWithBeamWidthForDiagnostics(
+    const std::string& equation,
+    const std::vector<std::vector<uint64_t>>& input_dimensions,
+    uint32_t beam_width) {
+    return planWithBeamWidth(
+        EinsumParser::parseAndResolve(equation, input_dimensions),
+        input_dimensions,
+        beam_width);
 }
 
 std::string EinsumPlanner::describeExactContraction(const EinsumPlan& plan) {
@@ -2761,6 +2876,8 @@ std::string EinsumPlanner::describeBeamContraction(const EinsumPlan& plan) {
         << " expanded_states=" << beam.expanded_state_count
         << " generated_states=" << beam.generated_state_count
         << " deduplicated_states=" << beam.deduplicated_state_count
+        << " deferred_disconnected_pairs=" << beam.deferred_disconnected_pair_count
+        << " truncated_states=" << beam.truncated_state_count
         << " retained_states=" << beam.retained_state_count
         << " exact_tails=" << beam.exact_tail_count
         << " weights={fma:1,fused:" << kExactFusedElementwiseWeight

@@ -10,11 +10,13 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "bindings/python/src/core/network_registry.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
 using namespace Thor;
+namespace pybind = Thor::PythonBindings;
 
 namespace {
 
@@ -85,7 +87,9 @@ void bind_network(nb::module_ &m) {
         "__new__",
         [](nb::handle cls, std::string name) -> std::shared_ptr<Network> {
             (void)cls;
-            return std::make_shared<Network>(std::move(name));
+            auto network = std::make_shared<Network>(std::move(name));
+            pybind::registerPythonNetwork(network);
+            return network;
         },
         "cls"_a,
         "name"_a,
@@ -147,6 +151,7 @@ allows the decrypted source to compile/run after signature verification.
                          allow_unsafe_loaded_cuda_kernel_source,
                          trusted_cuda_kernel_public_key,
                          trusted_cuda_kernel_source_decryption_key);
+            pybind::registerPythonNetwork(loaded);
             return loaded;
         },
         "directory"_a,

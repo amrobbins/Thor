@@ -1500,6 +1500,36 @@ target_compile_options(thor_einsum_exact_planner_benchmark PRIVATE
         $<$<CONFIG:Debug>:-O0 -ggdb>
 )
 
+add_executable(thor_einsum_planner_scalability_benchmark EXCLUDE_FROM_ALL
+        benchmarks/EinsumPlannerScalabilityBenchmark.cpp
+)
+thor_apply_linker_settings(thor_einsum_planner_scalability_benchmark)
+thor_enable_release_host_lto(thor_einsum_planner_scalability_benchmark)
+thor_enable_release_no_semantic_interposition(thor_einsum_planner_scalability_benchmark)
+target_link_libraries(thor_einsum_planner_scalability_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_einsum_planner_scalability_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_einsum_planner_scalability_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_einsum_planner_scalability_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0 -ggdb>
+)
+
+add_executable(thor_einsum_multi_operand_execution_benchmark EXCLUDE_FROM_ALL
+        benchmarks/EinsumMultiOperandExecutionBenchmark.cpp
+)
+thor_apply_linker_settings(thor_einsum_multi_operand_execution_benchmark)
+thor_enable_release_host_lto(thor_einsum_multi_operand_execution_benchmark)
+thor_enable_release_no_semantic_interposition(thor_einsum_multi_operand_execution_benchmark)
+target_link_libraries(thor_einsum_multi_operand_execution_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_einsum_multi_operand_execution_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_einsum_multi_operand_execution_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_einsum_multi_operand_execution_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0 -ggdb>
+)
+
 add_executable(thor_einsum_primitive_cost_benchmark EXCLUDE_FROM_ALL
         benchmarks/EinsumPrimitiveCostCalibrationBenchmark.cpp
 )

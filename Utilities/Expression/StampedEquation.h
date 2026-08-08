@@ -1161,7 +1161,7 @@ struct StampedExecutionStage {
 
     const Kind kind;
 
-    const std::vector<uint32_t> dependency_stage_indices;
+    std::vector<uint32_t> dependency_stage_indices;
     const uint32_t gpu_num;
     const uint64_t flop_count = 0;
 
@@ -1527,6 +1527,15 @@ class StampedExecutionPlan {
         out.reserve(steps.size());
         for (const StampedExecutionStage& step : steps) {
             out.push_back(StampedExecutionStage::kindToString(step.kind));
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::vector<std::vector<uint32_t>> stageDependencyIndices() const {
+        std::vector<std::vector<uint32_t>> out;
+        out.reserve(steps.size());
+        for (const StampedExecutionStage& step : steps) {
+            out.push_back(step.dependency_stage_indices);
         }
         return out;
     }

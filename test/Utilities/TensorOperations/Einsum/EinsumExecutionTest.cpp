@@ -4,10 +4,14 @@
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -42,6 +46,10 @@ Tensor makeGpuTensor(const std::vector<uint64_t>& dims, const std::vector<float>
     return gpu;
 }
 
+Tensor makeUninitializedGpuTensor(const std::vector<uint64_t>& dims) {
+    return Tensor(gpuPlacement, TensorDescriptor(DataType::FP32, dims));
+}
+
 std::vector<float> copyToCpu(const Tensor& gpu, Stream& stream) {
     Tensor cpu(cpuPlacement, gpu.getDescriptor());
     cpu.copyFromAsync(gpu, stream);
@@ -71,6 +79,182 @@ std::vector<float> randomSmallValues(size_t count, std::mt19937& rng) {
     return values;
 }
 
+struct RandomizedEinsumDifferentialCase {
+    std::string equation;
+    std::vector<std::vector<uint64_t>> dimensions;
+};
+
+uint32_t randomizedEinsumDifferentialSeed() {
+    const char* seed_environment = std::getenv("THOR_EINSUM_RANDOM_DIFFERENTIAL_SEED");
+    return seed_environment != nullptr ? static_cast<uint32_t>(std::stoul(seed_environment)) : 0xE15A0304u;
+}
+
+int randomizedEinsumDifferentialRunsPerOperandCount() {
+    const char* runs_environment = std::getenv("THOR_EINSUM_RANDOM_DIFFERENTIAL_RUNS_PER_OPERAND_COUNT");
+    const int runs = runs_environment != nullptr ? std::stoi(runs_environment) : 1;
+    if (runs <= 0) {
+        throw std::invalid_argument("THOR_EINSUM_RANDOM_DIFFERENTIAL_RUNS_PER_OPERAND_COUNT must be positive.");
+    }
+    return runs;
+}
+
+std::string describeDimensions(const std::vector<std::vector<uint64_t>>& dimensions) {
+    std::ostringstream out;
+    out << '[';
+    for (size_t operand = 0; operand < dimensions.size(); ++operand) {
+        if (operand != 0) {
+            out << ',';
+        }
+        out << '[';
+        for (size_t axis = 0; axis < dimensions[operand].size(); ++axis) {
+            if (axis != 0) {
+                out << ',';
+            }
+            out << dimensions[operand][axis];
+        }
+        out << ']';
+    }
+    out << ']';
+    return out.str();
+}
+
+RandomizedEinsumDifferentialCase makeRandomizedEinsumDifferentialCase(
+    size_t operand_count, int trial, std::mt19937& rng) {
+    if (operand_count < 2 || operand_count > 10) {
+        throw std::invalid_argument("Randomized einsum differential cases support two through ten operands.");
+    }
+
+    static const std::string label_pool = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    size_t next_label_index = 0;
+    const auto next_label = [&]() -> char {
+        if (next_label_index >= label_pool.size()) {
+            throw std::logic_error("Randomized einsum differential case exhausted the label pool.");
+        }
+        return label_pool[next_label_index++];
+    };
+
+    std::vector<std::vector<char>> operand_labels(operand_count);
+    std::vector<std::vector<std::pair<char, uint64_t>>> local_dimensions(operand_count);
+    const auto add_label = [&](size_t operand, char label, uint64_t dimension) {
+        operand_labels.at(operand).push_back(label);
+        auto& dimensions_for_operand = local_dimensions.at(operand);
+        const auto existing = std::find_if(dimensions_for_operand.begin(),
+                                           dimensions_for_operand.end(),
+                                           [&](const auto& item) { return item.first == label; });
+        if (existing == dimensions_for_operand.end()) {
+            dimensions_for_operand.emplace_back(label, dimension);
+        } else if (existing->second != dimension) {
+            throw std::logic_error("Randomized einsum differential case assigned inconsistent local dimensions.");
+        }
+    };
+    const auto local_dimension = [&](size_t operand, char label) -> uint64_t {
+        const auto& dimensions_for_operand = local_dimensions.at(operand);
+        const auto existing = std::find_if(dimensions_for_operand.begin(),
+                                           dimensions_for_operand.end(),
+                                           [&](const auto& item) { return item.first == label; });
+        if (existing == dimensions_for_operand.end()) {
+            throw std::logic_error("Randomized einsum differential case is missing a local dimension.");
+        }
+        return existing->second;
+    };
+
+    // A connected chain is the backbone. Every connector dimension is two so
+    // that no trial degenerates into an all-unit contraction. Additional
+    // labels below create broadcast, reduction, diagonal, and cyclic structure
+    // without making the whole-equation generic reference large.
+    std::vector<char> connector_labels(operand_count + 1);
+    for (char& label : connector_labels) {
+        label = next_label();
+    }
+    for (size_t operand = 0; operand < operand_count; ++operand) {
+        add_label(operand, connector_labels[operand], 2);
+        add_label(operand, connector_labels[operand + 1], 2);
+    }
+
+    std::vector<char> output_labels = {connector_labels.front(), connector_labels.back()};
+
+    const bool add_batch = (operand_count % 2) == 1;
+    if (add_batch) {
+        const char batch_label = next_label();
+        output_labels.push_back(batch_label);
+        std::bernoulli_distribution broadcast_distribution(0.35);
+        bool any_full_batch = false;
+        for (size_t operand = 0; operand < operand_count; ++operand) {
+            const bool broadcast = broadcast_distribution(rng);
+            const uint64_t local_batch_dimension = broadcast ? 1 : 2;
+            any_full_batch = any_full_batch || local_batch_dimension == 2;
+            add_label(operand, batch_label, local_batch_dimension);
+        }
+        if (!any_full_batch) {
+            auto& dimensions_for_operand = local_dimensions.front();
+            auto batch = std::find_if(dimensions_for_operand.begin(),
+                                      dimensions_for_operand.end(),
+                                      [&](const auto& item) { return item.first == batch_label; });
+            batch->second = 2;
+        }
+    }
+
+    const bool add_local_reduction = (operand_count % 3) != 1;
+    if (add_local_reduction) {
+        std::uniform_int_distribution<size_t> operand_distribution(0, operand_count - 1);
+        add_label(operand_distribution(rng), next_label(), 2);
+    }
+
+    const bool add_cross_link = operand_count >= 4 && (operand_count % 2) == 0;
+    if (add_cross_link) {
+        std::uniform_int_distribution<size_t> first_distribution(0, operand_count - 3);
+        const size_t first = first_distribution(rng);
+        std::uniform_int_distribution<size_t> second_distribution(first + 2, operand_count - 1);
+        const size_t second = second_distribution(rng);
+        const char cross_label = next_label();
+        add_label(first, cross_label, 2);
+        add_label(second, cross_label, 2);
+    }
+
+    const bool add_diagonal = operand_count >= 3 && (operand_count % 3) == 0;
+    if (add_diagonal) {
+        std::uniform_int_distribution<size_t> operand_distribution(0, operand_count - 1);
+        const size_t operand = operand_distribution(rng);
+        std::uniform_int_distribution<size_t> axis_distribution(0, operand_labels[operand].size() - 1);
+        const char diagonal_label = operand_labels[operand][axis_distribution(rng)];
+        add_label(operand, diagonal_label, local_dimension(operand, diagonal_label));
+    }
+
+    // A nonzero trial count is intended for stress/reproduction runs. Perturb
+    // one extra structural feature so repeated trials do more than reshuffle
+    // the same axes.
+    if (trial > 0 && operand_count >= 4) {
+        std::uniform_int_distribution<size_t> operand_distribution(0, operand_count - 1);
+        add_label(operand_distribution(rng), next_label(), 2);
+    }
+
+    std::vector<std::vector<uint64_t>> dimensions(operand_count);
+    std::vector<std::string> subscripts(operand_count);
+    for (size_t operand = 0; operand < operand_count; ++operand) {
+        std::shuffle(operand_labels[operand].begin(), operand_labels[operand].end(), rng);
+        subscripts[operand].assign(operand_labels[operand].begin(), operand_labels[operand].end());
+        dimensions[operand].reserve(operand_labels[operand].size());
+        for (char label : operand_labels[operand]) {
+            dimensions[operand].push_back(local_dimension(operand, label));
+        }
+    }
+    std::shuffle(output_labels.begin(), output_labels.end(), rng);
+
+    std::ostringstream equation;
+    for (size_t operand = 0; operand < operand_count; ++operand) {
+        if (operand != 0) {
+            equation << ',';
+        }
+        equation << subscripts[operand];
+    }
+    equation << "->";
+    for (char label : output_labels) {
+        equation << label;
+    }
+
+    return RandomizedEinsumDifferentialCase{equation.str(), std::move(dimensions)};
+}
+
 }  // namespace
 
 TEST(EinsumExecution, DirectGemmUsesMatrixPathWithoutStandaloneReduction) {
@@ -81,6 +265,8 @@ TEST(EinsumExecution, DirectGemmUsesMatrixPathWithoutStandaloneReduction) {
 
     auto einsum = Einsum("ik,kj->ij").stamp({lhs, rhs}, stream);
     EXPECT_EQ(einsum->getExecutionPath(), EinsumExecutionPath::GEMM);
+    EXPECT_EQ(einsum->getGenericExecutionReason(), EinsumGenericExecutionReason::NONE);
+    EXPECT_FALSE(einsum->isWholeEquationGenericFallback());
     EXPECT_FALSE(einsum->usesStandaloneReduction());
     EXPECT_EQ(einsum->getExpressionStageKindNames(), (std::vector<std::string>{"Matmul"}));
     EXPECT_EQ(einsum->getOutputTensor().getDimensions(), (std::vector<uint64_t>{2, 2}));
@@ -781,6 +967,8 @@ TEST(EinsumExecution, UnaryPermutationMaterializesIntoThorOutputWithoutReduction
 
     auto einsum = Einsum("ij->ji").stamp({input}, stream);
     EXPECT_EQ(einsum->getExecutionPath(), EinsumExecutionPath::GENERIC);
+    EXPECT_EQ(einsum->getGenericExecutionReason(), EinsumGenericExecutionReason::UNARY_DIRECT);
+    EXPECT_FALSE(einsum->isWholeEquationGenericFallback());
     EXPECT_FALSE(einsum->usesStandaloneReduction());
     EXPECT_EQ(einsum->getOutputTensor().getDimensions(), (std::vector<uint64_t>{3, 2}));
     EXPECT_NE(einsum->getOutputTensor().getMemPtr<void>(), input.getMemPtr<void>());
@@ -1435,6 +1623,8 @@ TEST(EinsumExecution, UnaryPermutationAndReductionUsesCentralPermutationAwareTil
 
     auto einsum = Einsum("ijk->ki").stamp({input}, stream);
     EXPECT_EQ(einsum->getExecutionPath(), EinsumExecutionPath::GENERIC);
+    EXPECT_EQ(einsum->getGenericExecutionReason(), EinsumGenericExecutionReason::UNARY_DIRECT);
+    EXPECT_FALSE(einsum->isWholeEquationGenericFallback());
     EXPECT_TRUE(einsum->usesStandaloneReduction());
     ASSERT_TRUE(einsum->getStandaloneReductionPath().has_value());
     EXPECT_EQ(einsum->getStandaloneReductionPath().value(), CubReductionPath::TiledFixedSegment);
@@ -1552,6 +1742,67 @@ TEST(EinsumExecution, RejectsOutputThatOverlapsAnInput) {
     EXPECT_THROW((void)Einsum("ik,kj->ij").stamp({lhs, rhs}, lhs, stream), std::invalid_argument);
 }
 
+TEST(EinsumExecution, CommonTwoToTenOperandFamiliesDoNotReachWholeEquationGenericFallback) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    struct AuditCase {
+        const char* equation;
+        std::vector<std::vector<uint64_t>> dimensions;
+    };
+    const std::vector<AuditCase> cases = {
+        {"ik,kj->ij", {{3, 4}, {4, 5}}},
+        {"bij,bjk->bik", {{2, 3, 4}, {2, 4, 5}}},
+        {"iik,kj->ij", {{3, 3, 4}, {4, 5}}},
+        {"i,j->ij", {{3}, {4}}},
+        {"ir,sj->ij", {{3, 2}, {5, 4}}},
+        {"ab,bc,cd->ad", {{2, 3}, {3, 4}, {4, 5}}},
+        {"ab,bc,cd,de->ae", {{2, 3}, {3, 4}, {4, 5}, {5, 2}}},
+        {"ab,bc,cd,de,ef->af", {{2, 3}, {3, 4}, {4, 5}, {5, 3}, {3, 2}}},
+        {"ab,bc,cd,de,ef,fg->ag", {{2, 3}, {3, 4}, {4, 5}, {5, 3}, {3, 4}, {4, 2}}},
+        {"ab,bc,cd,de,ef,fg,gh->ah",
+         {{2, 3}, {3, 4}, {4, 5}, {5, 3}, {3, 4}, {4, 5}, {5, 2}}},
+        {"zab,zbc,zcd,zde,zef,zfg,zgh->zah",
+         {{2, 3, 4}, {2, 4, 5}, {2, 5, 3}, {2, 3, 4}, {2, 4, 5}, {2, 5, 3}, {2, 3, 4}}},
+        {"ab,bc,cd,de,ef,fg,bg->ae",
+         {{3, 3}, {3, 3}, {3, 3}, {3, 3}, {3, 3}, {3, 3}, {3, 3}}},
+        {"bxij,bjk,kl,lm,mn,no,op->bip",
+         {{2, 3, 4, 5}, {2, 5, 3}, {3, 4}, {4, 3}, {3, 5}, {5, 3}, {3, 4}}},
+        {"ab,bc,cd,de,ef,fg,gh,hi,ij,jk->ak",
+         {{2, 3}, {3, 4}, {4, 5}, {5, 3}, {3, 4}, {4, 5}, {5, 3}, {3, 4}, {4, 5}, {5, 2}}},
+    };
+
+    for (const AuditCase& test_case : cases) {
+        std::vector<Tensor> inputs;
+        inputs.reserve(test_case.dimensions.size());
+        for (const auto& dimensions : test_case.dimensions) {
+            inputs.push_back(makeUninitializedGpuTensor(dimensions));
+        }
+
+        auto stamped = Einsum(test_case.equation).stamp(inputs, stream);
+        EXPECT_NE(stamped->getExecutionPath(), EinsumExecutionPath::GENERIC)
+            << "equation=" << test_case.equation;
+        EXPECT_EQ(stamped->getGenericExecutionReason(), EinsumGenericExecutionReason::NONE)
+            << "equation=" << test_case.equation;
+        EXPECT_FALSE(stamped->isWholeEquationGenericFallback())
+            << "equation=" << test_case.equation;
+
+        const auto assert_no_generic_pair_steps = [&](const auto& contraction) {
+            for (const EinsumExactContractionStep& step : contraction.steps) {
+                EXPECT_NE(step.physical_candidate.kind, EinsumPlanKind::GENERAL)
+                    << "equation=" << test_case.equation
+                    << " result_mask=" << step.result_source_mask;
+            }
+        };
+        if (stamped->getPlan().exact_contraction.has_value()) {
+            assert_no_generic_pair_steps(*stamped->getPlan().exact_contraction);
+        }
+        if (stamped->getPlan().beam_contraction.has_value()) {
+            assert_no_generic_pair_steps(*stamped->getPlan().beam_contraction);
+        }
+    }
+}
+
 TEST(EinsumExecution, GenericReferenceExplicitlyBypassesSelectedExactTree) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -1565,7 +1816,11 @@ TEST(EinsumExecution, GenericReferenceExplicitlyBypassesSelectedExactTree) {
     ASSERT_TRUE(optimized->getPlan().exact_contraction.has_value());
     ASSERT_TRUE(reference->getPlan().exact_contraction.has_value());
     EXPECT_EQ(optimized->getExecutionPath(), EinsumExecutionPath::EXACT_CONTRACTION);
+    EXPECT_EQ(optimized->getGenericExecutionReason(), EinsumGenericExecutionReason::NONE);
+    EXPECT_FALSE(optimized->isWholeEquationGenericFallback());
     EXPECT_EQ(reference->getExecutionPath(), EinsumExecutionPath::GENERIC);
+    EXPECT_EQ(reference->getGenericExecutionReason(), EinsumGenericExecutionReason::EXPLICIT_REFERENCE);
+    EXPECT_FALSE(reference->isWholeEquationGenericFallback());
 
     optimized->run();
     reference->run();
@@ -1573,54 +1828,151 @@ TEST(EinsumExecution, GenericReferenceExplicitlyBypassesSelectedExactTree) {
                copyToCpu(reference->getOutputTensor(), stream));
 }
 
-TEST(EinsumExecution, RandomizedExactThreeToFiveOperandChainsMatchWholeEquationGenericReference) {
+TEST(EinsumExecution, ContractionTreePreservesPairLocalSingletonBatchUntilLaterBroadcast) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
-    std::mt19937 rng(0x7A11C0DEu);
-    std::uniform_int_distribution<uint64_t> dimension_distribution(1, 4);
 
-    struct ChainCase {
-        const char* equation;
-        size_t operand_count;
+    // This is the first failing case found by the randomized 2-10 operand
+    // differential stress run from THOR_EINSUM_RANDOM_DIFFERENTIAL_SEED=
+    // 0xE15A0304 with 10 runs per operand count.  The first selected pair is
+    // operands 1 and 2.  Their shared e extent is locally 1 even though the
+    // whole equation resolves e to 2 because operand 0 supplies the later
+    // non-singleton broadcast extent.
+    const std::string equation = "efaba,bec,cde->ade";
+    const std::vector<std::vector<uint64_t>> dimensions = {
+        {2, 2, 2, 2, 2},
+        {2, 1, 2},
+        {2, 2, 1},
     };
-    const std::vector<ChainCase> cases = {
-        {"ab,bc,cd->ad", 3},
-        {"ab,bc,cd,de->ae", 4},
-        {"ab,bc,cd,de,ef->af", 5},
-    };
+    std::mt19937 rng(0x305u);
+    std::vector<Tensor> inputs;
+    for (const auto& operand_dimensions : dimensions) {
+        size_t element_count = 1;
+        for (uint64_t dimension : operand_dimensions) {
+            element_count *= static_cast<size_t>(dimension);
+        }
+        inputs.push_back(
+            makeGpuTensor(operand_dimensions, randomSmallValues(element_count, rng), stream));
+    }
 
-    for (const ChainCase& test_case : cases) {
-        for (int trial = 0; trial < 4; ++trial) {
-            std::vector<uint64_t> chain_dimensions(test_case.operand_count + 1);
-            for (uint64_t& dimension : chain_dimensions) {
-                dimension = dimension_distribution(rng);
-            }
+    Einsum operation(equation);
+    auto optimized = operation.stamp(inputs, stream);
+    auto reference = operation.stampGenericReference(inputs, stream);
+    ASSERT_TRUE(optimized->getPlan().exact_contraction.has_value());
+    ASSERT_EQ(optimized->getPlan().exact_contraction->steps.size(), 2u);
 
-            std::vector<Tensor> inputs;
-            inputs.reserve(test_case.operand_count);
-            for (size_t operand = 0; operand < test_case.operand_count; ++operand) {
-                const uint64_t rows = chain_dimensions[operand];
-                const uint64_t columns = chain_dimensions[operand + 1];
-                inputs.push_back(makeGpuTensor({rows, columns},
-                                               randomSmallValues(static_cast<size_t>(rows * columns), rng),
-                                               stream));
-            }
+    const EinsumExactContractionStep& first_step =
+        optimized->getPlan().exact_contraction->steps.front();
+    EXPECT_EQ(first_step.lhs_source_mask, 2u);
+    EXPECT_EQ(first_step.rhs_source_mask, 4u);
+    EXPECT_EQ(first_step.physical_candidate.kind, EinsumPlanKind::BATCHED_GEMM);
 
-            Einsum operation(test_case.equation);
-            auto optimized = operation.stamp(inputs, stream);
-            auto reference = operation.stampGenericReference(inputs, stream);
-            ASSERT_TRUE(optimized->getPlan().exact_contraction.has_value());
-            EXPECT_EQ(optimized->getExecutionPath(), EinsumExecutionPath::EXACT_CONTRACTION);
-            EXPECT_EQ(reference->getExecutionPath(), EinsumExecutionPath::GENERIC);
+    const int32_t batch_label = EinsumParser::labelId('e');
+    const auto batch_axis = std::find(first_step.physical_candidate.result.labels.begin(),
+                                      first_step.physical_candidate.result.labels.end(),
+                                      batch_label);
+    ASSERT_NE(batch_axis, first_step.physical_candidate.result.labels.end());
+    const size_t batch_axis_index = static_cast<size_t>(
+        batch_axis - first_step.physical_candidate.result.labels.begin());
+    EXPECT_EQ(first_step.physical_candidate.result.dimensions[batch_axis_index], 1u);
+    EXPECT_EQ(optimized->getPlan().equation.label_dimensions[static_cast<size_t>(batch_label)], 2u);
 
-            optimized->run();
-            reference->run();
-            const std::vector<float> optimized_values = copyToCpu(optimized->getOutputTensor(), stream);
-            const std::vector<float> reference_values = copyToCpu(reference->getOutputTensor(), stream);
-            ASSERT_EQ(optimized_values.size(), reference_values.size());
-            for (size_t element = 0; element < optimized_values.size(); ++element) {
-                EXPECT_NEAR(optimized_values[element], reference_values[element], 2.0e-4f)
-                    << "equation=" << test_case.equation << " trial=" << trial << " element=" << element;
+    optimized->run();
+    reference->run();
+    expectNear(copyToCpu(optimized->getOutputTensor(), stream),
+               copyToCpu(reference->getOutputTensor(), stream),
+               1.0e-4f);
+}
+
+TEST(EinsumExecution, RandomizedTwoToTenOperandNetworksMatchWholeEquationGenericReference) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    const uint32_t seed = randomizedEinsumDifferentialSeed();
+    const int runs_per_operand_count = randomizedEinsumDifferentialRunsPerOperandCount();
+    std::mt19937 rng(seed);
+
+    for (size_t operand_count = 2; operand_count <= 10; ++operand_count) {
+        for (int trial = 0; trial < runs_per_operand_count; ++trial) {
+            const RandomizedEinsumDifferentialCase test_case =
+                makeRandomizedEinsumDifferentialCase(operand_count, trial, rng);
+
+            try {
+                std::vector<Tensor> inputs;
+                inputs.reserve(operand_count);
+                for (const auto& dimensions : test_case.dimensions) {
+                    size_t element_count = 1;
+                    for (uint64_t dimension : dimensions) {
+                        element_count *= static_cast<size_t>(dimension);
+                    }
+                    inputs.push_back(makeGpuTensor(dimensions, randomSmallValues(element_count, rng), stream));
+                }
+
+                Einsum operation(test_case.equation);
+                auto optimized = operation.stamp(inputs, stream);
+                auto reference = operation.stampGenericReference(inputs, stream);
+
+                ASSERT_NE(optimized->getExecutionPath(), EinsumExecutionPath::GENERIC)
+                    << "Randomized einsum unexpectedly reached generic execution. Reproduce with "
+                    << "THOR_EINSUM_RANDOM_DIFFERENTIAL_SEED=" << seed
+                    << " THOR_EINSUM_RANDOM_DIFFERENTIAL_RUNS_PER_OPERAND_COUNT=" << runs_per_operand_count
+                    << ". operand_count=" << operand_count << " trial=" << trial
+                    << " equation=" << test_case.equation
+                    << " dimensions=" << describeDimensions(test_case.dimensions);
+                EXPECT_EQ(optimized->getGenericExecutionReason(), EinsumGenericExecutionReason::NONE);
+                EXPECT_FALSE(optimized->isWholeEquationGenericFallback());
+                EXPECT_EQ(reference->getExecutionPath(), EinsumExecutionPath::GENERIC);
+                EXPECT_EQ(reference->getGenericExecutionReason(), EinsumGenericExecutionReason::EXPLICIT_REFERENCE);
+
+                if (operand_count >= 3 && operand_count <= 6) {
+                    ASSERT_TRUE(optimized->getPlan().exact_contraction.has_value())
+                        << "equation=" << test_case.equation;
+                } else if (operand_count >= 7) {
+                    ASSERT_TRUE(optimized->getPlan().beam_contraction.has_value())
+                        << "equation=" << test_case.equation;
+                }
+
+                const auto assert_no_generic_pair_steps = [&](const auto& contraction) {
+                    for (const EinsumExactContractionStep& step : contraction.steps) {
+                        ASSERT_NE(step.physical_candidate.kind, EinsumPlanKind::GENERAL)
+                            << "equation=" << test_case.equation
+                            << " result_mask=" << step.result_source_mask;
+                    }
+                };
+                if (optimized->getPlan().exact_contraction.has_value()) {
+                    assert_no_generic_pair_steps(*optimized->getPlan().exact_contraction);
+                }
+                if (optimized->getPlan().beam_contraction.has_value()) {
+                    assert_no_generic_pair_steps(*optimized->getPlan().beam_contraction);
+                }
+
+                optimized->run();
+                reference->run();
+                const std::vector<float> optimized_values = copyToCpu(optimized->getOutputTensor(), stream);
+                const std::vector<float> reference_values = copyToCpu(reference->getOutputTensor(), stream);
+                ASSERT_EQ(optimized_values.size(), reference_values.size())
+                    << "equation=" << test_case.equation;
+                for (size_t element = 0; element < optimized_values.size(); ++element) {
+                    const float expected = reference_values[element];
+                    const float tolerance = 5.0e-4f + 5.0e-4f * std::abs(expected);
+                    if (std::abs(optimized_values[element] - expected) > tolerance) {
+                        FAIL() << "Randomized einsum differential mismatch. Reproduce with "
+                               << "THOR_EINSUM_RANDOM_DIFFERENTIAL_SEED=" << seed
+                               << " THOR_EINSUM_RANDOM_DIFFERENTIAL_RUNS_PER_OPERAND_COUNT="
+                               << runs_per_operand_count << ". operand_count=" << operand_count
+                               << " trial=" << trial << " equation=" << test_case.equation
+                               << " dimensions=" << describeDimensions(test_case.dimensions)
+                               << " element=" << element << " actual=" << optimized_values[element]
+                               << " expected=" << expected << " tolerance=" << tolerance;
+                    }
+                }
+            } catch (const std::exception& error) {
+                FAIL() << "Randomized einsum differential threw an exception. Reproduce with "
+                       << "THOR_EINSUM_RANDOM_DIFFERENTIAL_SEED=" << seed
+                       << " THOR_EINSUM_RANDOM_DIFFERENTIAL_RUNS_PER_OPERAND_COUNT="
+                       << runs_per_operand_count << ". operand_count=" << operand_count
+                       << " trial=" << trial << " equation=" << test_case.equation
+                       << " dimensions=" << describeDimensions(test_case.dimensions)
+                       << " exception=" << error.what();
             }
         }
     }

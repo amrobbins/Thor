@@ -32,6 +32,38 @@ enum class EinsumExecutionPath {
     BEAM_CONTRACTION,
 };
 
+// Why a stamped operation is executing through the whole-equation generic
+// expression. NONE means an optimized execution path was selected. The
+// distinctions are intentionally observable so production fallback can be
+// audited without conflating benign unary execution with a failed optimized
+// multi-operand lowering.
+enum class EinsumGenericExecutionReason {
+    NONE,
+
+    // Explicit correctness/reference surface requested by stampGenericReference().
+    EXPLICIT_REFERENCE,
+
+    // Unary permutation/reduction uses the generic Expression formulation as
+    // its native implementation; there is no multi-operand broadcast product.
+    UNARY_DIRECT,
+
+    // The binary planner selected GENERAL because no GEMM/batched-GEMM or
+    // pair-product realization was preferred/available.
+    BINARY_GENERAL_PLAN,
+
+    // The binary planner selected an optimized realization, but runtime
+    // Expression lowering could not reconstruct it.
+    BINARY_OPTIMIZED_LOWERING_UNAVAILABLE,
+
+    // Exact/bridge/beam planning did not produce a representable contraction
+    // tree. This can occur only through the planner's overflow-safe fallback.
+    MULTI_OPERAND_PLAN_UNAVAILABLE,
+
+    // A contraction tree was selected, but one of its speculative physical
+    // candidates could not be reconstructed by the execution backend.
+    MULTI_OPERAND_TREE_LOWERING_UNAVAILABLE,
+};
+
 class StampedEinsum;
 
 /**
@@ -53,6 +85,17 @@ class Einsum {
     [[nodiscard]] std::shared_ptr<StampedEinsum> stamp(const std::vector<Tensor>& inputs,
                                                        const Tensor& preallocated_output,
                                                        const Stream& stream) const;
+
+    // Implementation-layer surface for equations that have already been
+    // normalized against concrete physical tensor shapes.  This is used by
+    // DeepLearning layers to prepend Thor's implicit runtime batch axis without
+    // consuming a user-visible ASCII label or changing ellipsis placement.
+    // The supplied equation is validated again against inputs before stamping.
+    [[nodiscard]] static std::shared_ptr<StampedEinsum> stampResolvedEquation(
+        const ResolvedEinsumEquation& resolved_equation,
+        const std::vector<Tensor>& inputs,
+        const Tensor& preallocated_output,
+        const Stream& stream);
 
     // Diagnostic/reference surface used to compare optimized lowering against
     // the original whole-equation broadcast-product + reduction implementation.
@@ -80,6 +123,14 @@ class StampedEinsum {
     [[nodiscard]] Tensor getOutputTensor() const { return output; }
     [[nodiscard]] const EinsumPlan& getPlan() const { return plan; }
     [[nodiscard]] EinsumExecutionPath getExecutionPath() const { return execution_path; }
+    [[nodiscard]] EinsumGenericExecutionReason getGenericExecutionReason() const {
+        return generic_execution_reason;
+    }
+    [[nodiscard]] bool isWholeEquationGenericFallback() const {
+        return execution_path == EinsumExecutionPath::GENERIC &&
+               generic_execution_reason != EinsumGenericExecutionReason::EXPLICIT_REFERENCE &&
+               generic_execution_reason != EinsumGenericExecutionReason::UNARY_DIRECT;
+    }
     [[nodiscard]] bool usesStandaloneReduction() const;
     [[nodiscard]] bool usesStridedBatchedGemm() const { return uses_strided_batched_gemm; }
     [[nodiscard]] std::vector<CubReductionPath> getStandaloneReductionPaths() const;
@@ -93,6 +144,7 @@ class StampedEinsum {
                   Tensor output,
                   const Stream& stream,
                   EinsumExecutionPath execution_path,
+                  EinsumGenericExecutionReason generic_execution_reason,
                   bool uses_strided_batched_gemm,
                   std::shared_ptr<StampedExecutionPlan> execution);
 
@@ -101,6 +153,7 @@ class StampedEinsum {
     Tensor output;
     Stream stream;
     EinsumExecutionPath execution_path = EinsumExecutionPath::GENERIC;
+    EinsumGenericExecutionReason generic_execution_reason = EinsumGenericExecutionReason::NONE;
     bool uses_strided_batched_gemm = false;
     std::shared_ptr<StampedExecutionPlan> execution;
 };

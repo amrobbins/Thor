@@ -354,6 +354,17 @@ struct EinsumBeamContractionPlan {
     uint64_t expanded_state_count = 0;
     uint64_t generated_state_count = 0;
     uint64_t deduplicated_state_count = 0;
+    // Number of unordered active-pair choices skipped before pair planning
+    // because they would form a non-scalar outer-product expansion while both
+    // sides still have label dependencies on other active operands. Shared
+    // labels that merely survive the pair (for example a persistent batch
+    // label) do not prevent deferral; a shared label eliminated by the pair is
+    // true contraction work and always keeps the pair eligible.
+    uint64_t deferred_disconnected_pair_count = 0;
+    // Number of physically unique next-frontier states discarded only because
+    // the sorted frontier exceeded beam_width. Together with retained_state_count,
+    // this makes the effect of the beam-width cutoff directly observable.
+    uint64_t truncated_state_count = 0;
     uint64_t retained_state_count = 0;
     uint64_t exact_tail_count = 0;
 };
@@ -408,6 +419,15 @@ class EinsumPlanner {
     static EinsumPlan parseAndPlan(const std::string& equation,
                                    const std::vector<std::vector<uint64_t>>& input_dimensions);
 
+    // Diagnostics/benchmark-only entry point for evaluating beam-width quality.
+    // Production planning always uses DEFAULT_BEAM_WIDTH through plan()/parseAndPlan();
+    // callers must not use this as a runtime policy surface. The explicit width only
+    // affects 7+ operand beam planning; exact and six-operand planning are unchanged.
+    static EinsumPlan parseAndPlanWithBeamWidthForDiagnostics(
+        const std::string& equation,
+        const std::vector<std::vector<uint64_t>>& input_dimensions,
+        uint32_t beam_width);
+
     // Deterministic, human-readable description of the selected exact tree.
     // Intended for tests, diagnostics, and benchmark output; planning remains
     // speculative and Expression-free. Returns an empty string when no exact
@@ -426,6 +446,12 @@ class EinsumPlanner {
     static EinsumPairContractionPlan planPair(const EinsumLogicalOperandPlan& lhs,
                                               const EinsumLogicalOperandPlan& rhs,
                                               const std::vector<int32_t>& surviving_labels);
+
+   private:
+    static EinsumPlan planWithBeamWidth(
+        const ResolvedEinsumEquation& equation,
+        const std::vector<std::vector<uint64_t>>& input_dimensions,
+        uint32_t beam_width);
 };
 
 }  // namespace ThorImplementation

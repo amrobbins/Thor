@@ -2496,6 +2496,66 @@ TEST(ExpressionConvenienceOps, StridedViewBackwardScattersToDenseSourceGradient)
     expectNear(gradients.at("x_grad"), {0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 5.0f, 0.0f, 0.0f, 0.0f, -36.0f, 0.0f, 0.0f});
 }
 
+TEST(ExpressionConvenienceOps, StridedViewBackwardComposesWithBroadcastChildWithoutMaterialization) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor upstream = makeGpuTensor({2}, {1.5f, -0.75f}, stream);
+
+    auto dy = Expression::input("dy");
+    auto expanded = dy.unsqueeze({1}) + Expression::fill(0.0, {2, 3}, DataType::FP32);
+    auto dense = expanded.stridedViewBackward(
+        /*source_dims=*/{2, 3, 3},
+        /*view_dims=*/{2, 3},
+        /*view_strides_elements=*/{9, 4},
+        /*view_element_offset=*/0);
+    auto expressionOutputs = Expression::outputs({{"dx", dense}});
+    FusedEquation equation = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+
+    auto plan = equation.prepareConvenienceRunPlanForInputs({{"dy", upstream}});
+    ASSERT_EQ(plan->stages.size(), 1u);
+
+    Tensor gradient(gpuPlacement, TensorDescriptor(DataType::FP32, {2, 3, 3}));
+    equation.run({{"dy", upstream}}, gradient, stream);
+
+    expectNear(copyToCpuValues(gradient, stream),
+               {1.5f, 0.0f, 0.0f,
+                0.0f, 1.5f, 0.0f,
+                0.0f, 0.0f, 1.5f,
+                -0.75f, 0.0f, 0.0f,
+                0.0f, -0.75f, 0.0f,
+                0.0f, 0.0f, -0.75f});
+}
+
+TEST(ExpressionConvenienceOps, StridedViewBackwardBroadcastChildHonorsRuntimeStridedInputLayout) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor storage = makeGpuTensor({3, 4}, {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f}, stream);
+    Tensor strided = storage.aliasView({3}, {4}, 1);
+
+    auto v = Expression::input("v");
+    auto expanded = v.unsqueeze({1}) + Expression::fill(0.0, {3, 2}, DataType::FP32);
+    auto dense = expanded.stridedViewBackward(
+        /*source_dims=*/{3, 2, 2},
+        /*view_dims=*/{3, 2},
+        /*view_strides_elements=*/{4, 3},
+        /*view_element_offset=*/0);
+    auto expressionOutputs = Expression::outputs({{"dx", dense}});
+    FusedEquation equation = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+
+    auto plan = equation.prepareConvenienceRunPlanForInputs({{"v", strided}});
+    ASSERT_EQ(plan->stages.size(), 1u);
+
+    Tensor gradient(gpuPlacement, TensorDescriptor(DataType::FP32, {3, 2, 2}));
+    equation.run({{"v", strided}}, gradient, stream);
+
+    expectNear(copyToCpuValues(gradient, stream),
+               {1.0f, 0.0f, 0.0f, 1.0f,
+                5.0f, 0.0f, 0.0f, 5.0f,
+                9.0f, 0.0f, 0.0f, 9.0f});
+}
+
 TEST(ExpressionConvenienceOps, DenseReshapeAliasRejectsNonDenseStridedSourceView) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -2510,6 +2570,31 @@ TEST(ExpressionConvenienceOps, DenseReshapeAliasRejectsNonDenseStridedSourceView
     EXPECT_THROW((void)eq.stamp({{"x", storage}}, stream), std::runtime_error);
     Tensor y(gpuPlacement, TensorDescriptor(DataType::FP32, {1, 2}));
     EXPECT_THROW(eq.run({{"x", storage}}, y, stream), std::runtime_error);
+}
+
+TEST(ExpressionConvenienceOps, PreallocatedOutputAliasingInputWaitsForSiblingReaders) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor input = makeGpuTensor({3}, {1.0f, 2.0f, 3.0f}, stream);
+    auto x = Expression::input("x");
+    auto expression_outputs = Expression::outputs({
+        {"norm", x.reduce_norm2(/*reduction_axes=*/{}, /*squeeze_axes=*/{UINT64_MAX}, DataType::FP32)},
+        {"state", x + Expression::constantScalar(1.0)},
+    });
+
+    FusedEquation equation = FusedEquation::compile(expression_outputs.physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"x", input}}, stream, {}, {{"state", input}});
+
+    // "state" is intentionally in-place, but "norm" still denotes the old x value. The
+    // physical output alias therefore needs a write-after-read dependency even though the
+    // two logical outputs have no producer/consumer edge in the Expression DAG.
+    EXPECT_EQ(plan.stageKindNames(), (std::vector<std::string>{"Reduction", "FusedKernel"}));
+    EXPECT_EQ(plan.stageDependencyIndices(), (std::vector<std::vector<uint32_t>>{{}, {0}}));
+
+    plan.run();
+    expectNear(copyToCpuValues(plan.output("norm"), stream), {std::sqrt(14.0f)});
+    expectNear(copyToCpuValues(input, stream), {2.0f, 3.0f, 4.0f});
 }
 
 TEST(ExpressionConvenienceOps, DenseValueReductionsExecuteThroughTheCentralReductionUtility) {
