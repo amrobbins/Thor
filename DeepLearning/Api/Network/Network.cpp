@@ -810,14 +810,6 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                 continue;
             }
 
-            const shared_ptr<Stub> stub = dynamic_pointer_cast<Stub>(layer);
-            if (stub) {
-                // FIXME: Stub should cause all dangling tensors to be optimized away.
-                //        currently when forward is called for a layer that is a stub, output tensor will not have been allocated
-                //        and can cause memory out of bounds. Since stub is a future feature it is not being fixed yet.
-                continue;
-            }
-
             stampLayer(inputTensor.value(), layer, gpuNum, batchSize, stampedNetwork, inferenceOnly);
         }
 
@@ -2992,21 +2984,31 @@ void Network::topologicalSort() {
 // TODO: create a slice of a network that uses at most N bytes, given a specified batch size. return both network slices.
 uint64_t Network::computeFirstInstanceMemRequirements(uint32_t batchSize, TensorPlacement tensorPlacement) {
     uint64_t bytes = 0;
+    std::set<const Layer*> countedLayers;
 
-    for (auto it = network.begin(); it != network.end(); ++it) {
-        const shared_ptr<Layer> layer = *it;
-        // It is only valid to get first instance bytes on single layers
-        bytes += layer->getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+    // orderedNetwork is the DAG that stampNetwork() actually walks.  In particular,
+    // loaded training artifacts placed for inference have already had their loss and
+    // label-only branches pruned before topologicalSort() builds orderedNetwork.
+    // Multi-input layers may appear once per connected input, so count each logical
+    // API layer exactly once.
+    for (const auto& orderedEntry : orderedNetwork) {
+        const shared_ptr<Layer>& layer = orderedEntry.second;
+        if (layer != nullptr && countedLayers.insert(layer.get()).second) {
+            bytes += layer->getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+        }
     }
     return bytes;
 }
 
 uint64_t Network::computeNonFirstInstanceMemRequirements(uint32_t batchSize, TensorPlacement tensorPlacement) {
     uint64_t bytes = 0;
+    std::set<const Layer*> countedLayers;
 
-    for (auto it = network.begin(); it != network.end(); ++it) {
-        const shared_ptr<Layer> layer = *it;
-        bytes += layer->getNonFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+    for (const auto& orderedEntry : orderedNetwork) {
+        const shared_ptr<Layer>& layer = orderedEntry.second;
+        if (layer != nullptr && countedLayers.insert(layer.get()).second) {
+            bytes += layer->getNonFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+        }
     }
     return bytes;
 }

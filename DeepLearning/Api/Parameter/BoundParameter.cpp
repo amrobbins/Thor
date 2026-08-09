@@ -199,7 +199,7 @@ json BoundParameter::serialize(json parameterJson,
     // Serialize the parameter values
     std::optional<ThorImplementation::Tensor> physicalStorage = physicalParameter->getStorage();
     THOR_THROW_IF_FALSE(physicalStorage.has_value());
-    string parameterStorageFile = (filenamePrefix + "_parameter_" + parameterSpecification->getName() + ".gds");
+    string parameterStorageFile = (filenamePrefix + "_parameter_" + parameterSpecification->getName() + ".tensor");
     parameterJson["storage_file"] = parameterStorageFile;
     archiveWriter.addArchiveFile(parameterStorageFile, physicalStorage.value());
 

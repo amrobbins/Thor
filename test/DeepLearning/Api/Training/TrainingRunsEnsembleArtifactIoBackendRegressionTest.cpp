@@ -8,6 +8,8 @@
 #include "Utilities/Common/Event.h"
 #include "Utilities/TarFile/UringDirect.h"
 
+#include <cuda_runtime.h>
+
 #include "gtest/gtest.h"
 
 #include <chrono>
@@ -84,6 +86,23 @@ void synchronizeEvents(std::vector<Event>& events) {
         event.synchronize();
     }
     events.clear();
+}
+
+
+bool releaseArtifactIoGateEnabled() {
+    const char* value = std::getenv("THOR_RELEASE_ARTIFACT_IO_GATE");
+    return value != nullptr && std::string(value) == "1";
+}
+
+void requireCudaDeviceOrSkip() {
+    int deviceCount = 0;
+    const cudaError_t status = cudaGetDeviceCount(&deviceCount);
+    if (status != cudaSuccess || deviceCount <= 0) {
+        if (releaseArtifactIoGateEnabled()) {
+            throw std::runtime_error("Release artifact-I/O gate requires an available CUDA device.");
+        }
+        GTEST_SKIP() << "TrainingRuns artifact-I/O regression requires a CUDA device.";
+    }
 }
 
 bool isUnavailableExplicitUringDirect(const BackendCase& backend, const std::string& message) {
@@ -187,13 +206,10 @@ void loadAndPlaceSavedEnsemble(const std::filesystem::path& ensembleDir) {
 
 class TrainingRunsEnsembleArtifactIoBackendRegression : public ::testing::TestWithParam<BackendCase> {};
 
-// Disabled by default because this is a slow, GPU-backed end-to-end artifact
-// regression. It is valuable as a manual production-path probe, but it should
-// not be part of the default test set.
-// Run explicitly with:
-//   --gtest_also_run_disabled_tests
-//   --gtest_filter=ExplicitBackends/TrainingRunsEnsembleArtifactIoBackendRegression.DISABLED_*
+// Disabled in the ordinary suite because this is a slow, GPU-backed end-to-end
+// artifact regression. It is a required member of the check-release-artifact-io gate.
 TEST_P(TrainingRunsEnsembleArtifactIoBackendRegression, DISABLED_SaveEnsembleThenLoadAndPlacePreservesGpuBackedParameterPayloadCrcs) {
+    requireCudaDeviceOrSkip();
     const BackendCase backend = GetParam();
     ScopedEnvVar scopedBackend("THOR_IO_BACKEND", backend.envValue);
 
@@ -216,7 +232,7 @@ TEST_P(TrainingRunsEnsembleArtifactIoBackendRegression, DISABLED_SaveEnsembleThe
         loadAndPlaceSavedEnsemble(ensembleDir);
     } catch (const std::runtime_error& e) {
         std::filesystem::remove_all(root);
-        if (isUnavailableExplicitUringDirect(backend, e.what())) {
+        if (isUnavailableExplicitUringDirect(backend, e.what()) && !releaseArtifactIoGateEnabled()) {
             GTEST_SKIP() << "Explicit uring_direct backend is unavailable in this runtime: " << e.what();
         }
         throw;
@@ -229,11 +245,10 @@ TEST_P(TrainingRunsEnsembleArtifactIoBackendRegression, DISABLED_SaveEnsembleThe
 }
 
 
-// Disabled by default because this is a targeted, slow, fault-injected production-path
-// regression. Run explicitly with:
-//   --gtest_also_run_disabled_tests
-//   --gtest_filter=TrainingRunsEnsembleArtifactShortIoRegression.DISABLED_*
+// Disabled in the ordinary suite because this is a targeted, slow, fault-injected
+// production-path regression. It is a required member of the check-release-artifact-io gate.
 TEST(TrainingRunsEnsembleArtifactShortIoRegression, DISABLED_ShortUringWriteDuringSaveEnsembleStillLoadsAndPlaces) {
+    requireCudaDeviceOrSkip();
     // This is the closest regression to the production SKU failure.  Member artifacts
     // and the verification read use pread_direct so the only fault-injected phase is
     // the final ensemble archive write.  The 4096-feature FC weights are 16 KiB each,
@@ -263,7 +278,7 @@ TEST(TrainingRunsEnsembleArtifactShortIoRegression, DISABLED_ShortUringWriteDuri
         loadAndPlaceSavedEnsemble(ensembleDir);
     } catch (const std::runtime_error& e) {
         std::filesystem::remove_all(root);
-        if (isUnavailableExplicitUringDirect(BackendCase{"uring_direct", "uring_direct"}, e.what())) {
+        if (isUnavailableExplicitUringDirect(BackendCase{"uring_direct", "uring_direct"}, e.what()) && !releaseArtifactIoGateEnabled()) {
             GTEST_SKIP() << "Explicit uring_direct backend is unavailable in this runtime: " << e.what();
         }
         throw;
@@ -276,6 +291,7 @@ TEST(TrainingRunsEnsembleArtifactShortIoRegression, DISABLED_ShortUringWriteDuri
 }
 
 TEST(TrainingRunsEnsembleArtifactShortIoRegression, DISABLED_ShortUringReadDuringImmediateLoadAndPlaceStillSucceeds) {
+    requireCudaDeviceOrSkip();
     // This is the complementary reader isolation test.  The complete ensemble artifact
     // is produced with pread_direct, then only Network::load()/place() uses uring_direct.
     // A 16 KiB parameter payload guarantees that the injected 4 KiB CQE is truly short.
@@ -301,7 +317,7 @@ TEST(TrainingRunsEnsembleArtifactShortIoRegression, DISABLED_ShortUringReadDurin
             << "The intended immediate ensemble archive short-read completion was not exercised.";
     } catch (const std::runtime_error& e) {
         std::filesystem::remove_all(root);
-        if (isUnavailableExplicitUringDirect(BackendCase{"uring_direct", "uring_direct"}, e.what())) {
+        if (isUnavailableExplicitUringDirect(BackendCase{"uring_direct", "uring_direct"}, e.what()) && !releaseArtifactIoGateEnabled()) {
             GTEST_SKIP() << "Explicit uring_direct backend is unavailable in this runtime: " << e.what();
         }
         throw;

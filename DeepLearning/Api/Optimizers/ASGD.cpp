@@ -105,7 +105,7 @@ json ASGD::serialize(thor_file::TarWriter& archiveWriter,
         THOR_THROW_IF_FALSE(!filenamePrefix.empty());
 
         string optimizerName = filenamePrefix + "_asgd";
-        string averagedWeightsFile = optimizerName + "_averaged_weights.gds";
+        string averagedWeightsFile = optimizerName + "_averaged_weights.tensor";
         j["averaged_weights_tensor"] = averagedWeightsFile;
 
         shared_ptr<ThorImplementation::ASGD> physicalASGD = dynamic_pointer_cast<ThorImplementation::ASGD>(physicalOptimizer);

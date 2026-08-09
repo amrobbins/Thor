@@ -13,6 +13,8 @@
 
 namespace ThorImplementation {
 
+class Tensor;
+
 // In-place conversions are supported and are about 20% slower than non-in-place conversions
 // To do an inplace conversion, just send the same pointer to the source and dest.
 class TypeConverter {
@@ -21,6 +23,9 @@ class TypeConverter {
     // Conversion will be performed on the specified device, both memory pointers must be local to the device.
     // If the device is a GPU, then the stream must belong to the device.
     // All tensor types are convertible to all tensor types, the conversion rules follow the C++ rule for the base type
+    // Low-level raw-memory conversion. For asynchronous CPU conversion, callers
+    // must keep source and destination memory alive until the stream reaches the
+    // callback. Tensor-backed callers should use the Tensor overload below.
     static void convertType(void *source,
                             void *dest,
                             DataType sourceDataType,
@@ -29,29 +34,23 @@ class TypeConverter {
                             Stream stream,
                             int deviceNum);
 
+    // Tensor-backed CPU conversion. Callback state retains both tensors until
+    // the callback has completed, so the asynchronous operation owns the
+    // storage lifetime it depends on without adding ownership traffic to GPU
+    // conversion launch paths.
+    static void convertType(const Tensor &source,
+                            const Tensor &dest,
+                            DataType sourceDataType,
+                            DataType destDataType,
+                            long numElements,
+                            Stream stream);
+
     static constexpr int THREADS_PER_SYNCED_BLOCK = 1024;
     static constexpr int THREADS_PER_UNSYNCED_BLOCK = 256;
 
    private:
-    struct Args {
-        void *source;
-        void *dest;
-        long numElements;
-        DataType sourceDataType;
-        DataType destDataType;
-
-        Args(void *source,
-             void *dest,
-             DataType sourceDataType,
-             DataType destDataType,
-             long numElements) {
-            this->source = source;
-            this->dest = dest;
-            this->numElements = numElements;
-            this->sourceDataType = sourceDataType;
-            this->destDataType = destDataType;
-        }
-    };
+    struct Args;
+    struct TensorArgs;
 
     // Convert on CPU between two types. In place or out of place is supported.
     static void CUDART_CB cpuConvertType(void *data);

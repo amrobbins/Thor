@@ -490,7 +490,13 @@ struct GpuSubmitCoordinatorTiming {
 
 class GpuSubmitCoordinator {
    public:
-    explicit GpuSubmitCoordinator(int gpuNum) : gpuNum(gpuNum), worker(&GpuSubmitCoordinator::workerLoop, this) {}
+    explicit GpuSubmitCoordinator(int gpuNum) : gpuNum(gpuNum) {
+        // Do not start the worker from a member initializer. Member construction
+        // follows declaration order, and the worker may begin executing
+        // immediately. It must not observe mutex/cv/queue/stopping before those
+        // members have finished construction.
+        worker = std::thread(&GpuSubmitCoordinator::workerLoop, this);
+    }
 
     ~GpuSubmitCoordinator() { stop(); }
 
@@ -591,11 +597,13 @@ class GpuSubmitCoordinator {
     }
 
     int gpuNum;
-    std::thread worker;
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<std::function<void()>> queue;
     bool stopping = false;
+    // Keep the worker last as an additional construction-order safeguard. It is
+    // started only from the constructor body after all state above exists.
+    std::thread worker;
 };
 
 class GpuSubmitCoordinatorRegistry {

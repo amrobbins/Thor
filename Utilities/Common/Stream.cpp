@@ -1,14 +1,177 @@
-#include <optional>
 #include "Utilities/Common/Stream.h"
-#include "Utilities/Common/HostFunctionCleanupQueue.h"
-#include "Utilities/Expression/CudaHelpers.h"
+
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Common/HostFunctionCleanupQueue.h"
+#include "Utilities/Common/SharedOwnership.h"
+#include "Utilities/Expression/CudaHelpers.h"
+
+#include <atomic>
+#include <cstdio>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <utility>
+#include <vector>
 
 using namespace std;
 
-int Stream::numCudnnHandles = 0;
-int Stream::numCublasHandles = 0;
-int Stream::numCublasLtHandles = 0;
+namespace {
+
+atomic<uint64_t> nextStreamId{1};
+atomic<int> numCudnnHandles{0};
+atomic<int> numCublasHandles{0};
+atomic<int> numCublasLtHandles{0};
+
+void reportCudaCleanupFailure(const char *operation, cudaError_t status) noexcept {
+    if (status == cudaSuccess)
+        return;
+    ThorImplementation::SharedOwnership::reportCleanupFailure("Stream", operation, cudaGetErrorString(status));
+}
+
+void reportCudnnCleanupFailure(const char *operation, cudnnStatus_t status) noexcept {
+    if (status == CUDNN_STATUS_SUCCESS)
+        return;
+    ThorImplementation::SharedOwnership::reportCleanupFailure("Stream", operation, cudnnGetErrorString(status));
+}
+
+void reportCublasCleanupFailure(const char *operation, cublasStatus_t status) noexcept {
+    if (status == CUBLAS_STATUS_SUCCESS)
+        return;
+
+    char detail[64];
+    std::snprintf(detail, sizeof(detail), "cuBLAS status %d", static_cast<int>(status));
+    ThorImplementation::SharedOwnership::reportCleanupFailure("Stream", operation, detail);
+}
+
+}  // namespace
+
+struct Stream::HostFunctionFailureState {
+    mutex mtx;
+    exception_ptr firstFailure;
+
+    void captureCurrentException() noexcept {
+        try {
+            lock_guard<mutex> lock(mtx);
+            if (firstFailure == nullptr)
+                firstFailure = current_exception();
+        } catch (...) {
+            // Nothing may escape a CUDA host callback. Failure to record the
+            // original exception leaves no safe recovery path.
+            terminate();
+        }
+    }
+
+    exception_ptr takeFailure() {
+        lock_guard<mutex> lock(mtx);
+        exception_ptr failure = firstFailure;
+        firstFailure = nullptr;
+        return failure;
+    }
+};
+
+struct Stream::State {
+    State(int gpuNum, uint64_t id) : gpuNum(gpuNum), id(id) {}
+
+    ~State() noexcept {
+        if (processLifetime ||
+            (cudaStream == nullptr && !cudnnHandle.has_value() && !cublasHandle.has_value() && !cublasLtHandle.has_value()))
+            return;
+
+        ThorImplementation::SharedOwnership::cleanupNoThrow("Stream", "release CUDA stream state", [&]() {
+            int previousGpuNum = -1;
+            const cudaError_t getDeviceStatus = cudaGetDevice(&previousGpuNum);
+            if (getDeviceStatus != cudaSuccess) {
+                reportCudaCleanupFailure("cudaGetDevice before stream cleanup", getDeviceStatus);
+                return;
+            }
+
+            const bool switchGpu = previousGpuNum != gpuNum;
+            if (switchGpu) {
+                const cudaError_t setDeviceStatus = cudaSetDevice(gpuNum);
+                if (setDeviceStatus != cudaSuccess) {
+                    reportCudaCleanupFailure("cudaSetDevice before stream cleanup", setDeviceStatus);
+                    return;
+                }
+            }
+
+            if (cudnnHandle.has_value()) {
+                numCudnnHandles.fetch_sub(1, memory_order_relaxed);
+                reportCudnnCleanupFailure("cudnnDestroy", cudnnDestroy(cudnnHandle.value()));
+                cudnnHandle.reset();
+            }
+
+            if (cublasHandle.has_value()) {
+                numCublasHandles.fetch_sub(1, memory_order_relaxed);
+                reportCublasCleanupFailure("cublasDestroy", cublasDestroy(cublasHandle.value()));
+                cublasHandle.reset();
+            }
+
+            if (cublasLtHandle.has_value()) {
+                numCublasLtHandles.fetch_sub(1, memory_order_relaxed);
+                reportCublasCleanupFailure("cublasLtDestroy", cublasLtDestroy(cublasLtHandle.value()));
+                cublasLtHandle.reset();
+            }
+
+            if (cudaStream != nullptr) {
+                reportCudaCleanupFailure("cudaStreamDestroy", cudaStreamDestroy(cudaStream));
+                cudaStream = nullptr;
+            }
+
+            if (switchGpu)
+                reportCudaCleanupFailure("cudaSetDevice after stream cleanup", cudaSetDevice(previousGpuNum));
+        });
+    }
+
+    int gpuNum;
+    cudaStream_t cudaStream = nullptr;
+    optional<cudnnHandle_t> cudnnHandle;
+    optional<cublasHandle_t> cublasHandle;
+    optional<cublasLtHandle_t> cublasLtHandle;
+
+    mutex libraryHandleMutex;
+    HostFunctionFailureState hostFunctionFailureState;
+
+    uint64_t id;
+    bool processLifetime = false;
+};
+
+Stream::Stream(int gpuNum, Priority priority) { construct(gpuNum, priority); }
+
+Stream::Stream(ThorImplementation::TensorPlacement placement, Priority priority) {
+    const int gpuNum = placement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU ? placement.getDeviceNum() : 0;
+    construct(gpuNum, priority);
+}
+
+Stream::operator cudaStream_t() const {
+    THOR_THROW_IF_FALSE(!uninitialized());
+    return state->cudaStream;
+}
+
+Event Stream::putEvent(bool enableTiming, bool expectingHostToWaitOnThisOne) const {
+    THOR_THROW_IF_FALSE(!uninitialized());
+
+    ScopedGpu scopedGpu(state->gpuNum);
+
+    Event event(state->gpuNum, enableTiming, expectingHostToWaitOnThisOne);
+    event.record(*this);
+
+    return event;
+}
+
+void Stream::putEvent(Event &event, bool enableTiming, bool expectingHostToWaitOnThisOne) const {
+    THOR_THROW_IF_FALSE(!uninitialized());
+
+    ScopedGpu scopedGpu(state->gpuNum);
+
+    if (!event.isInitialized()) {
+        event = Event(state->gpuNum, enableTiming, expectingHostToWaitOnThisOne);
+    } else {
+        THOR_THROW_IF_FALSE(event.getGpuNum() == state->gpuNum);
+        THOR_THROW_IF_FALSE(event.usesBlockingSync() == expectingHostToWaitOnThisOne);
+    }
+    event.record(*this);
+}
 
 Stream GradientUpdateStreamPool::getNext() {
     unique_lock<mutex> lck(mtx);
@@ -117,9 +280,9 @@ void Stream::setMaxNumDownloadStreams(uint32_t numDownloadStreams) {
 void Stream::waitEvent(Event event) const {
     THOR_THROW_IF_FALSE(!uninitialized());
 
-    ScopedGpu scopedGpu(gpuNum);
+    ScopedGpu scopedGpu(state->gpuNum);
 
-    CUDA_CHECK(cudaStreamWaitEvent(cudaStream, event.getEvent(), 0));
+    CUDA_CHECK(cudaStreamWaitEvent(state->cudaStream, event.getEvent(), 0));
 }
 
 void Stream::synchronize() const {
@@ -132,6 +295,7 @@ void Stream::synchronize() const {
         /*enableTiming=*/false,
         /*expectingHostToWaitOnThisOne=*/true);
     completionEvent.synchronize();
+    rethrowHostFunctionFailure();
 }
 
 void Stream::deviceSynchronize(int gpuNum) {
@@ -139,25 +303,128 @@ void Stream::deviceSynchronize(int gpuNum) {
     CUDA_CHECK(cudaDeviceSynchronize());
 }
 
+void CUDART_CB Stream::hostFunctionTrampoline(void *rawArgs) noexcept {
+    auto *args = static_cast<HostFunctionArgsBase *>(rawArgs);
+    if (args == nullptr || args->function == nullptr || args->failureState == nullptr)
+        terminate();
+
+    auto *failureState = static_cast<HostFunctionFailureState *>(args->failureState);
+    try {
+        args->function(args);
+    } catch (...) {
+        failureState->captureCurrentException();
+    }
+}
+
+void Stream::rethrowHostFunctionFailure() const {
+    THOR_THROW_IF_FALSE(!uninitialized());
+    exception_ptr failure = state->hostFunctionFailureState.takeFailure();
+    if (failure != nullptr)
+        rethrow_exception(failure);
+}
+
 void Stream::enqueueHostFunction(cudaHostFn_t function, std::unique_ptr<HostFunctionArgsBase> &&args) {
     THOR_THROW_IF_FALSE(function != nullptr);
     THOR_THROW_IF_FALSE(args != nullptr);
+    THOR_THROW_IF_FALSE(!uninitialized());
 
-    CUDA_CHECK(cudaLaunchHostFunc(*this, function, args.get()));
+    args->function = function;
+    args->failureState = &state->hostFunctionFailureState;
+    CUDA_CHECK(cudaLaunchHostFunc(*this, &Stream::hostFunctionTrampoline, args.get()));
     HostFunctionCleanupQueue::instance().push(*this, std::move(args));
     THOR_THROW_IF_FALSE(args == nullptr);
 }
 
-void Stream::construct(int gpuNum, Priority priority) {
-    ReferenceCounted::initialize();
+cudnnHandle_t Stream::getCudnnHandle() const {
+    THOR_THROW_IF_FALSE(!uninitialized());
+    lock_guard<mutex> lock(state->libraryHandleMutex);
 
-    cudnnHandle = new std::optional<cudnnHandle_t>;
-    cublasHandle = new std::optional<cublasHandle_t>;
-    cublasLtHandle = new std::optional<cublasLtHandle_t>;
-    mtx = new std::mutex;
+    if (!state->cudnnHandle.has_value()) {
+        ScopedGpu scopedGpu(state->gpuNum);
+        cudnnHandle_t handle = nullptr;
+        const cudnnStatus_t createStatus = cudnnCreate(&handle);
+        if (createStatus != CUDNN_STATUS_SUCCESS) {
+            printf("cudnnStatus %d : %s   gpu:%d   numCudnnHandles %d\n",
+                   createStatus,
+                   cudnnGetErrorString(createStatus),
+                   state->gpuNum,
+                   numCudnnHandles.load(memory_order_relaxed));
+            fflush(stdout);
+        }
+        THOR_THROW_IF_FALSE(createStatus == CUDNN_STATUS_SUCCESS);
+
+        const cudnnStatus_t setStreamStatus = cudnnSetStream(handle, state->cudaStream);
+        if (setStreamStatus != CUDNN_STATUS_SUCCESS) {
+            reportCudnnCleanupFailure("cudnnDestroy after cudnnSetStream failure", cudnnDestroy(handle));
+            THOR_THROW_IF_FALSE(setStreamStatus == CUDNN_STATUS_SUCCESS);
+        }
+
+        state->cudnnHandle = handle;
+        numCudnnHandles.fetch_add(1, memory_order_relaxed);
+    }
+
+    return state->cudnnHandle.value();
+}
+
+cudaStream_t Stream::getStream() const {
+    THOR_THROW_IF_FALSE(!uninitialized());
+    return state->cudaStream;
+}
+
+cublasHandle_t Stream::getCublasHandle() const {
+    THOR_THROW_IF_FALSE(!uninitialized());
+    lock_guard<mutex> lock(state->libraryHandleMutex);
+
+    if (!state->cublasHandle.has_value()) {
+        ScopedGpu scopedGpu(state->gpuNum);
+        cublasHandle_t handle = nullptr;
+        const cublasStatus_t createStatus = cublasCreate(&handle);
+        if (createStatus != CUBLAS_STATUS_SUCCESS) {
+            printf("cublasStatus %d    gpu:%d   numcublasHandles %d\n",
+                   createStatus,
+                   state->gpuNum,
+                   numCublasHandles.load(memory_order_relaxed));
+            fflush(stdout);
+        }
+        THOR_THROW_IF_FALSE(createStatus == CUBLAS_STATUS_SUCCESS);
+
+        const cublasStatus_t setStreamStatus = cublasSetStream(handle, state->cudaStream);
+        if (setStreamStatus != CUBLAS_STATUS_SUCCESS) {
+            reportCublasCleanupFailure("cublasDestroy after cublasSetStream failure", cublasDestroy(handle));
+            THOR_THROW_IF_FALSE(setStreamStatus == CUBLAS_STATUS_SUCCESS);
+        }
+
+        state->cublasHandle = handle;
+        numCublasHandles.fetch_add(1, memory_order_relaxed);
+    }
+
+    return state->cublasHandle.value();
+}
+
+cublasLtHandle_t Stream::getCublasLtHandle() const { return getCublasLtHandleUnchecked(); }
+
+cublasLtHandle_t Stream::getCublasLtHandleUnchecked() const {
+    THOR_THROW_IF_FALSE(!uninitialized());
+    THOR_THROW_IF_FALSE(state->cublasLtHandle.has_value());
+    return state->cublasLtHandle.value();
+}
+
+int Stream::getGpuNum() const {
+    THOR_THROW_IF_FALSE(!uninitialized());
+    return state->gpuNum;
+}
+
+void Stream::informIsStatic() {
+    THOR_THROW_IF_FALSE(!uninitialized());
+    state->processLifetime = true;
+}
+
+uint64_t Stream::getId() const { return state != nullptr ? state->id : 0; }
+
+void Stream::construct(int gpuNum, Priority priority) {
+    auto newState = make_shared<State>(gpuNum, nextStreamId.fetch_add(1, memory_order_relaxed));
 
     ScopedGpu scopedGpu(gpuNum);
-    this->gpuNum = gpuNum;
 
     // greatestPriority is given the highest priority in terms of execution, and its numerical value is the minimum of the allowed
     // range.
@@ -171,60 +438,20 @@ void Stream::construct(int gpuNum, Priority priority) {
     else
         priorityValue = greatestPriority + 2;
 
-    CUDA_CHECK(cudaStreamCreateWithPriority(&cudaStream, cudaStreamNonBlocking, priorityValue));
+    CUDA_CHECK(cudaStreamCreateWithPriority(&newState->cudaStream, cudaStreamNonBlocking, priorityValue));
 
-    cublasStatus_t cublasStatus;
-    cublasLtHandle_t ltHandle;
-    cublasStatus = cublasLtCreate(&ltHandle);
+    cublasLtHandle_t ltHandle = nullptr;
+    const cublasStatus_t cublasStatus = cublasLtCreate(&ltHandle);
     if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
-        printf("cublasLtStatus %d    gpu:%d   numCublasLtHandles %d\n", cublasStatus, gpuNum, numCublasLtHandles);
+        printf("cublasLtStatus %d    gpu:%d   numCublasLtHandles %d\n",
+               cublasStatus,
+               gpuNum,
+               numCublasLtHandles.load(memory_order_relaxed));
         fflush(stdout);
     }
     THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
-    numCublasLtHandles += 1;
-    *cublasLtHandle = ltHandle;
-}
+    newState->cublasLtHandle = ltHandle;
+    numCublasLtHandles.fetch_add(1, memory_order_relaxed);
 
-void Stream::destroy() {
-    // If this is a static stream, it is too late to free cuda resources, or interact with cuda, when it is destroyed.
-    // Doesn't much matter as the program is exiting anyway.
-    if (!isStatic) {
-        ScopedGpu scopedGpu(gpuNum);
-
-        // can't destroy the cudnn handle at the point when the static string is destroyed
-        if (cudnnHandle->has_value()) {
-            numCudnnHandles -= 1;
-
-            cudnnStatus_t cudnnStatus;
-            cudnnStatus = cudnnDestroy(cudnnHandle->value());
-            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-        }
-
-        if (cublasHandle->has_value()) {
-            numCublasHandles -= 1;
-
-            cublasStatus_t cublasStatus;
-            cublasStatus = cublasDestroy(cublasHandle->value());
-            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
-        }
-
-        if (cublasLtHandle->has_value()) {
-            numCublasLtHandles -= 1;
-
-            cublasStatus_t cublasStatus;
-            cublasStatus = cublasLtDestroy(cublasLtHandle->value());
-            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
-        }
-
-        CUDA_CHECK(cudaStreamDestroy(cudaStream));
-
-        delete cudnnHandle;
-        cudnnHandle = nullptr;
-        delete cublasHandle;
-        cublasHandle = nullptr;
-        delete cublasLtHandle;
-        cublasLtHandle = nullptr;
-    }
-    delete mtx;
-    mtx = nullptr;
+    state = std::move(newState);
 }

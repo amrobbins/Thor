@@ -1644,6 +1644,24 @@ std::string canonicalize(const PhysicalOutputs& outputs) {
     }
     ss << "]";
 
+    if (outputs.isConditional()) {
+        if (!outputs.conditional) {
+            throw std::runtime_error("canonicalize(PhysicalOutputs): conditional outputs are missing their conditional payload.");
+        }
+        ss << ";conditional={predicate=" << canonicalize(outputs.conditional->predicate)
+           << ";then=" << canonicalize(outputs.conditional->then_branch)
+           << ";else=" << canonicalize(outputs.conditional->else_branch) << "}";
+        ss << ";outputs=[";
+        for (size_t i = 0; i < outputs.outputs.size(); ++i) {
+            if (i > 0)
+                ss << ",";
+            const NamedOutput& output = outputs.outputs[i];
+            ss << "{" << output.name << ":" << output.node_idx << "}";
+        }
+        ss << "]";
+        return ss.str();
+    }
+
     std::vector<std::string> memo(outputs.expr->nodes.size());
     std::vector<uint8_t> memoReady(outputs.expr->nodes.size(), 0);
     ss << ";outputs=[";
@@ -1663,9 +1681,186 @@ std::string canonicalize(const PhysicalOutputs& outputs) {
 
 std::string expressionHash(const PhysicalOutputs& outputs) { return "fnv1a64:" + hex64(fnv1a64(canonicalize(outputs))); }
 
+static bool physicalOutputsTreeHasCudaKernelExpressions(const PhysicalOutputs& outputs) {
+    if (outputs.expr && !outputs.expr->cuda_kernel_expressions.empty()) {
+        return true;
+    }
+    if (!outputs.isConditional()) {
+        return false;
+    }
+    return physicalOutputsTreeHasCudaKernelExpressions(outputs.conditional->predicate) ||
+           physicalOutputsTreeHasCudaKernelExpressions(outputs.conditional->then_branch) ||
+           physicalOutputsTreeHasCudaKernelExpressions(outputs.conditional->else_branch);
+}
+
+static std::vector<std::string> physicalOutputsInputNames(const PhysicalOutputs& outputs) {
+    std::vector<std::string> names;
+    if (!outputs.expr) {
+        return names;
+    }
+    names.reserve(outputs.expr->inputs.size());
+    for (const NamedInput& input : outputs.expr->inputs) {
+        names.push_back(input.name);
+    }
+    return names;
+}
+
+static std::vector<std::string> physicalOutputsNamedOutputNames(const PhysicalOutputs& outputs) {
+    std::vector<std::string> names;
+    names.reserve(outputs.outputs.size());
+    for (const NamedOutput& output : outputs.outputs) {
+        names.push_back(output.name);
+    }
+    return names;
+}
+
+static ExpressionDefinition definitionForPhysicalOutputs(const PhysicalOutputs& outputs) {
+    ExpressionDefinition definition;
+    definition.outputs = outputs;
+    definition.expected_input_names = physicalOutputsInputNames(outputs);
+    definition.expected_output_names = physicalOutputsNamedOutputNames(outputs);
+    definition.canonical_hash = expressionHash(outputs);
+    return definition;
+}
+
+static bool serializedExpressionTreeHasCudaKernels(const json& j) {
+    if (j.contains("cuda_kernels") && !j.at("cuda_kernels").empty()) {
+        return true;
+    }
+    if (!j.contains("conditional")) {
+        return false;
+    }
+    const json& conditional = j.at("conditional");
+    if (!conditional.is_object()) {
+        return false;
+    }
+    return serializedExpressionTreeHasCudaKernels(conditional.at("predicate")) ||
+           serializedExpressionTreeHasCudaKernels(conditional.at("then_branch")) ||
+           serializedExpressionTreeHasCudaKernels(conditional.at("else_branch"));
+}
+
 void ExpressionDefinition::validate() const {
     if (outputs.isConditional()) {
-        throw std::runtime_error("ExpressionDefinition validation for graph-level conditional Outputs is not implemented yet.");
+        if (!outputs.expr) {
+            throw std::runtime_error("Conditional ExpressionDefinition requires a non-null root PhysicalExpression.");
+        }
+        if (!outputs.conditional) {
+            throw std::runtime_error("Conditional ExpressionDefinition is missing its conditional payload.");
+        }
+        if (!outputs.expr->nodes.empty()) {
+            throw std::runtime_error("Conditional ExpressionDefinition root must not contain executable expression nodes.");
+        }
+        if (physicalOutputsTreeHasCudaKernelExpressions(outputs)) {
+            throw std::runtime_error(
+                "ExpressionDefinition serialization of graph-level conditionals containing CudaKernelExpression nodes is not supported yet.");
+        }
+        if (outputs.outputs.empty()) {
+            throw std::runtime_error("Conditional ExpressionDefinition requires at least one named output.");
+        }
+
+        std::unordered_set<uint32_t> seen_slots;
+        std::unordered_set<std::string> seen_input_names;
+        std::unordered_map<std::string, NamedInput::Kind> root_input_kinds;
+        for (const NamedInput& input : outputs.expr->inputs) {
+            if (input.name.empty()) {
+                throw std::runtime_error("ExpressionDefinition input name cannot be empty.");
+            }
+            if (!seen_slots.insert(input.slot).second) {
+                throw std::runtime_error("ExpressionDefinition has duplicate input slot " + std::to_string(input.slot) + ".");
+            }
+            if (!seen_input_names.insert(input.name).second) {
+                throw std::runtime_error("ExpressionDefinition has duplicate input name '" + input.name + "'.");
+            }
+            root_input_kinds.emplace(input.name, input.kind);
+        }
+        for (uint32_t i = 0; i < outputs.expr->inputs.size(); ++i) {
+            if (!seen_slots.contains(i)) {
+                throw std::runtime_error("ExpressionDefinition input slots must be contiguous starting at 0.");
+            }
+        }
+
+        const PhysicalConditionalOutputs& conditional = *outputs.conditional;
+        definitionForPhysicalOutputs(conditional.predicate).validate();
+        definitionForPhysicalOutputs(conditional.then_branch).validate();
+        definitionForPhysicalOutputs(conditional.else_branch).validate();
+
+        if (conditional.predicate.outputs.size() != 1) {
+            throw std::runtime_error("Conditional ExpressionDefinition predicate must expose exactly one output.");
+        }
+        if (conditional.then_branch.outputs.empty() || conditional.else_branch.outputs.empty()) {
+            throw std::runtime_error("Conditional ExpressionDefinition requires non-empty then and else branches.");
+        }
+        const std::vector<std::string> then_names = physicalOutputsNamedOutputNames(conditional.then_branch);
+        const std::vector<std::string> else_names = physicalOutputsNamedOutputNames(conditional.else_branch);
+        if (then_names != else_names) {
+            throw std::runtime_error("Conditional ExpressionDefinition then/else output names and ordering must match.");
+        }
+        if (outputs.outputs.size() != then_names.size()) {
+            throw std::runtime_error("Conditional ExpressionDefinition root output count must match the branch output count.");
+        }
+
+        std::unordered_set<std::string> seen_output_names;
+        for (size_t i = 0; i < outputs.outputs.size(); ++i) {
+            const NamedOutput& output = outputs.outputs[i];
+            if (output.name.empty()) {
+                throw std::runtime_error("ExpressionDefinition output name cannot be empty.");
+            }
+            if (!seen_output_names.insert(output.name).second) {
+                throw std::runtime_error("ExpressionDefinition has duplicate output name '" + output.name + "'.");
+            }
+            if (output.name != then_names[i]) {
+                throw std::runtime_error("Conditional ExpressionDefinition root output names must match branch output names in order.");
+            }
+            if (output.node_idx != i) {
+                throw std::runtime_error("Conditional ExpressionDefinition root output node indices must be branch-output ordinals.");
+            }
+        }
+
+        std::unordered_map<std::string, NamedInput::Kind> branch_input_kinds;
+        auto merge_branch_inputs = [&](const PhysicalOutputs& branch_outputs) {
+            if (!branch_outputs.expr) {
+                throw std::runtime_error("Conditional ExpressionDefinition child is missing its root PhysicalExpression.");
+            }
+            for (const NamedInput& input : branch_outputs.expr->inputs) {
+                auto [it, inserted] = branch_input_kinds.emplace(input.name, input.kind);
+                if (!inserted && it->second != input.kind) {
+                    throw std::runtime_error("Conditional ExpressionDefinition input kind mismatch for input '" + input.name + "'.");
+                }
+            }
+        };
+        merge_branch_inputs(conditional.predicate);
+        merge_branch_inputs(conditional.then_branch);
+        merge_branch_inputs(conditional.else_branch);
+
+        if (branch_input_kinds.size() != root_input_kinds.size()) {
+            throw std::runtime_error("Conditional ExpressionDefinition root inputs must exactly match the union of predicate/branch inputs.");
+        }
+        for (const auto& [name, kind] : branch_input_kinds) {
+            auto root_it = root_input_kinds.find(name);
+            if (root_it == root_input_kinds.end() || root_it->second != kind) {
+                throw std::runtime_error("Conditional ExpressionDefinition root input contract does not match child input '" + name + "'.");
+            }
+        }
+
+        if (!expected_input_names.empty()) {
+            std::unordered_set<std::string> expected(expected_input_names.begin(), expected_input_names.end());
+            if (expected.size() != expected_input_names.size()) {
+                throw std::runtime_error("ExpressionDefinition expected_input_names contains duplicates.");
+            }
+            if (expected != seen_input_names) {
+                throw std::runtime_error("ExpressionDefinition expected_input_names do not match the serialized inputs.");
+            }
+        }
+        if (!expected_output_names.empty()) {
+            std::unordered_set<std::string> expected(expected_output_names.begin(), expected_output_names.end());
+            if (expected.size() != expected_output_names.size()) {
+                throw std::runtime_error("ExpressionDefinition expected_output_names contains duplicates.");
+            }
+            if (expected != seen_output_names) {
+                throw std::runtime_error("ExpressionDefinition expected_output_names do not match the serialized outputs.");
+            }
+        }
+        return;
     }
     if (!outputs.expr) {
         throw std::runtime_error("ExpressionDefinition requires a non-null PhysicalExpression.");
@@ -1941,6 +2136,14 @@ json ExpressionDefinition::architectureJson() const {
         j["outputs"].push_back(json{{"name", output.name}, {"node", output.node_idx}});
     }
 
+    if (outputs.isConditional()) {
+        j["conditional"] = json{
+            {"predicate", definitionForPhysicalOutputs(outputs.conditional->predicate).architectureJson()},
+            {"then_branch", definitionForPhysicalOutputs(outputs.conditional->then_branch).architectureJson()},
+            {"else_branch", definitionForPhysicalOutputs(outputs.conditional->else_branch).architectureJson()},
+        };
+    }
+
     const std::string computed_hash = expressionHash(outputs);
     j["canonical_hash"] = computed_hash;
     return j;
@@ -2034,8 +2237,9 @@ void ExpressionDefinition::allowUnsafeLoadedCudaKernelSourceCompilation(const st
 ExpressionDefinition ExpressionDefinition::fromOutputs(const Outputs& outputs) {
     ExpressionDefinition definition;
     definition.outputs = outputs.physicalOutputs();
-    if (definition.outputs.isConditional()) {
-        throw std::runtime_error("ExpressionDefinition serialization for graph-level conditional Outputs is not implemented yet.");
+    if (definition.outputs.isConditional() && physicalOutputsTreeHasCudaKernelExpressions(definition.outputs)) {
+        throw std::runtime_error(
+            "ExpressionDefinition serialization of graph-level conditionals containing CudaKernelExpression nodes is not supported yet.");
     }
 
     for (const NamedInput& input : definition.outputs.expr->inputs) {
@@ -2059,6 +2263,11 @@ ExpressionDefinition ExpressionDefinition::deserialize(const json& j,
     const int schema_version = j.at("schema_version").get<int>();
     if (schema_version != 1) {
         throw std::runtime_error("Unsupported thor.expression schema_version: " + std::to_string(schema_version));
+    }
+
+    if (j.contains("conditional") && serializedExpressionTreeHasCudaKernels(j)) {
+        throw std::runtime_error(
+            "ExpressionDefinition deserialization of graph-level conditionals containing CudaKernelExpression nodes is not supported yet.");
     }
 
     json expression_json = j;
@@ -2121,6 +2330,27 @@ ExpressionDefinition ExpressionDefinition::deserialize(const json& j,
             .name = output_json.at("name").get<std::string>(),
             .node_idx = output_json.at("node").get<uint32_t>(),
         });
+    }
+
+    if (expression_json.contains("conditional")) {
+        const json& conditional_json = expression_json.at("conditional");
+        if (!conditional_json.is_object()) {
+            throw std::runtime_error("ExpressionDefinition conditional field must be an object.");
+        }
+        auto conditional = std::make_shared<PhysicalConditionalOutputs>();
+        conditional->predicate =
+            deserialize(conditional_json.at("predicate"), allow_unsafe_loaded_cuda_source, trusted_ed25519_public_key,
+                        trusted_source_decryption_key)
+                .outputs;
+        conditional->then_branch =
+            deserialize(conditional_json.at("then_branch"), allow_unsafe_loaded_cuda_source, trusted_ed25519_public_key,
+                        trusted_source_decryption_key)
+                .outputs;
+        conditional->else_branch =
+            deserialize(conditional_json.at("else_branch"), allow_unsafe_loaded_cuda_source, trusted_ed25519_public_key,
+                        trusted_source_decryption_key)
+                .outputs;
+        definition.outputs.conditional = std::move(conditional);
     }
 
     definition.validate();

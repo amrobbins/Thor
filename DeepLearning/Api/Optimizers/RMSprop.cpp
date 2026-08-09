@@ -80,7 +80,7 @@ json RMSprop::serialize(thor_file::TarWriter& archiveWriter,
         THOR_THROW_IF_FALSE(!filenamePrefix.empty());
 
         string optimizerName = filenamePrefix + "_rmsprop";
-        string squareAverageFile = optimizerName + "_square_average.gds";
+        string squareAverageFile = optimizerName + "_square_average.tensor";
         j["square_average_tensor"] = squareAverageFile;
 
         shared_ptr<ThorImplementation::RMSprop> physicalRMSprop = dynamic_pointer_cast<ThorImplementation::RMSprop>(physicalOptimizer);

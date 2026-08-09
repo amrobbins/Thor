@@ -93,8 +93,8 @@ json Adamax::serialize(thor_file::TarWriter& archiveWriter,
         THOR_THROW_IF_FALSE(!filenamePrefix.empty());
 
         string optimizerName = filenamePrefix + "_adamax";
-        string mFile = optimizerName + "_m.gds";
-        string uFile = optimizerName + "_u.gds";
+        string mFile = optimizerName + "_m.tensor";
+        string uFile = optimizerName + "_u.tensor";
         j["m_tensor"] = mFile;
         j["u_tensor"] = uFile;
 

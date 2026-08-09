@@ -4,8 +4,6 @@
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "Event.h"
 #include "ScopedGpu.h"
-#include <optional>
-#include "Utilities/Common/ReferenceCounted.h"
 #include "Utilities/Common/HostFunctionArgs.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 
@@ -15,78 +13,48 @@
 #include "cuda.h"
 #include "cuda_runtime.h"
 
-#include <stdio.h>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <unordered_map>
 
-#define DEBUG_REF_COUNTS
-
 /**
- * A reference counted container for cudaStream_t.
+ * A shared-ownership container for cudaStream_t and the library handles bound
+ * to that stream.
+ *
+ * Distinct Stream handle objects may be copied, assigned, reset, and destroyed
+ * concurrently while referring to the same CUDA stream. Concurrent mutation
+ * of the same Stream handle object requires external synchronization, matching
+ * the std::shared_ptr ownership contract documented in SharedOwnership.h.
  *
  * Also carries the gpuNum that the stream exists on.
  */
-class Stream : private ReferenceCounted {
+class Stream {
    public:
-    Stream() : ReferenceCounted() { isStatic = false; }
+    Stream() = default;
 
     enum class Priority { HIGH = 3, REGULAR = 4, LOW = 5 };
 
-    explicit Stream(int gpuNum, Priority priority = Priority::REGULAR) { construct(gpuNum, priority); }
+    explicit Stream(int gpuNum, Priority priority = Priority::REGULAR);
 
-    Stream(const Stream &other) {
-        // implemented using operator=
-        *this = other;
-    }
+    Stream(const Stream &other) = default;
+    Stream(Stream &&other) noexcept = default;
 
-    explicit Stream(ThorImplementation::TensorPlacement placement, Priority priority = Priority::REGULAR) {
-        int gpuNum = placement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU ? placement.getDeviceNum() : 0;
-        construct(gpuNum, priority);
-    }
+    explicit Stream(ThorImplementation::TensorPlacement placement, Priority priority = Priority::REGULAR);
 
-    Stream &operator=(const Stream &other) {
-        copyFrom(other);
+    Stream &operator=(const Stream &other) = default;
+    Stream &operator=(Stream &&other) noexcept = default;
 
-        return *this;
-    }
+    operator cudaStream_t() const;
 
-    operator cudaStream_t() const {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        return cudaStream;
-    }
+    virtual ~Stream() = default;
 
-    virtual ~Stream() {
-        bool shouldDestroy = ReferenceCounted::removeReference();
-        if (shouldDestroy)
-            destroy();
-    }
+    Event putEvent(bool enableTiming = false, bool expectingHostToWaitOnThisOne = false) const;
 
-    Event putEvent(bool enableTiming = false, bool expectingHostToWaitOnThisOne = false) const {
-        THOR_THROW_IF_FALSE(!uninitialized());
-
-        ScopedGpu scopedGpu(gpuNum);
-
-        Event event(gpuNum, enableTiming, expectingHostToWaitOnThisOne);
-        event.record(*this);
-
-        return event;
-    }
-
-    void putEvent(Event& event, bool enableTiming = false, bool expectingHostToWaitOnThisOne = false) const {
-        THOR_THROW_IF_FALSE(!uninitialized());
-
-        ScopedGpu scopedGpu(gpuNum);
-
-        if (!event.isInitialized()) {
-            event = Event(gpuNum, enableTiming, expectingHostToWaitOnThisOne);
-        } else {
-            THOR_THROW_IF_FALSE(event.getGpuNum() == gpuNum);
-            THOR_THROW_IF_FALSE(event.usesBlockingSync() == expectingHostToWaitOnThisOne);
-        }
-        event.record(*this);
-    }
+    void putEvent(Event &event, bool enableTiming = false, bool expectingHostToWaitOnThisOne = false) const;
 
     void waitEvent(Event event) const;
 
@@ -94,87 +62,34 @@ class Stream : private ReferenceCounted {
 
     static void deviceSynchronize(int gpuNum);
 
+    // Enqueue host work without allowing exceptions to escape through CUDA's C callback boundary.
+    // Any exception thrown by the callback is captured and rethrown by synchronize().
     void enqueueHostFunction(cudaHostFn_t function, std::unique_ptr<HostFunctionArgsBase> &&args);
 
-    cudnnHandle_t getCudnnHandle() const {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        mtx->lock();
-        if (!cudnnHandle->has_value()) {
-            ScopedGpu scopedGpu(gpuNum);
-            cudnnStatus_t cudnnStatus;
-            cudnnHandle_t handle;
-            cudnnStatus = cudnnCreate(&handle);
-            if (cudnnStatus != CUDNN_STATUS_SUCCESS) {
-                printf("cudnnStatus %d : %s   gpu:%d   numCudnnHandles %d\n",
-                       cudnnStatus,
-                       cudnnGetErrorString(cudnnStatus),
-                       gpuNum,
-                       numCudnnHandles);
-                fflush(stdout);
-            }
-            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            numCudnnHandles += 1;
-            cudnnStatus = cudnnSetStream(handle, cudaStream);
-            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            *cudnnHandle = handle;
-        }
-        mtx->unlock();
-        return cudnnHandle->value();
-    }
+    cudnnHandle_t getCudnnHandle() const;
 
-    cudaStream_t getStream() const {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        return cudaStream;
-    }
+    cudaStream_t getStream() const;
 
-    cublasHandle_t getCublasHandle() const {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        mtx->lock();
-        if (!cublasHandle->has_value()) {
-            ScopedGpu scopedGpu(gpuNum);
-            cublasStatus_t cublasStatus;
-            cublasHandle_t handle;
-            cublasStatus = cublasCreate(&handle);
-            if (cublasStatus != CUBLAS_STATUS_SUCCESS) {
-                printf("cublasStatus %d    gpu:%d   numcublasHandles %d\n", cublasStatus, gpuNum, numCublasHandles);
-                fflush(stdout);
-            }
-            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
-            numCublasHandles += 1;
-            cublasStatus = cublasSetStream(handle, cudaStream);
-            THOR_THROW_IF_FALSE(cublasStatus == CUBLAS_STATUS_SUCCESS);
-            *cublasHandle = handle;
-        }
-        mtx->unlock();
-        return cublasHandle->value();
-    }
+    cublasHandle_t getCublasHandle() const;
 
-    cublasLtHandle_t getCublasLtHandle() const {
-        return getCublasLtHandleUnchecked();
-    }
+    cublasLtHandle_t getCublasLtHandle() const;
 
-    cublasLtHandle_t getCublasLtHandleUnchecked() const {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        THOR_THROW_IF_FALSE(cublasLtHandle->has_value());
-        return cublasLtHandle->value();
-    }
+    cublasLtHandle_t getCublasLtHandleUnchecked() const;
 
-    bool operator==(const Stream &other) const { return cudaStream == other.cudaStream && cudaStream != nullptr; }
+    bool operator==(const Stream &other) const { return state != nullptr && state == other.state; }
 
-    int getGpuNum() const {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        return gpuNum;
-    }
+    int getGpuNum() const;
 
     bool isInitialized() const { return !uninitialized(); }
 
     virtual std::string getObjectName() const { return "Stream"; }
 
-    // It is too late to destroy the cuDNN handle when the destructor of a static string is called,
-    // so just don't destroy the cuDNN handle of a static string.
-    void informIsStatic() { isStatic = true; }
+    // Process-lifetime streams cannot safely interact with CUDA from static
+    // destruction. Mark the shared resource state so every handle agrees that
+    // CUDA/library resources intentionally survive until process exit.
+    void informIsStatic();
 
-    uint64_t getId() const { return getReferenceCountedId(); }
+    uint64_t getId() const;
 
     static Stream getNextUploadStream(uint32_t deviceNum);
     static void setMaxNumUploadStreams(uint32_t numGradientUpdateStreams);
@@ -183,37 +98,19 @@ class Stream : private ReferenceCounted {
     static void setMaxNumDownloadStreams(uint32_t numGradientUpdateStreams);
 
    private:
+    struct HostFunctionFailureState;
+    struct State;
+
+    static void CUDART_CB hostFunctionTrampoline(void *rawArgs) noexcept;
+    void rethrowHostFunctionFailure() const;
+
     void construct(int gpuNum, Priority priority);
-
-    void copyFrom(const Stream &other) {
-        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
-
-        gpuNum = other.gpuNum;
-        cudaStream = other.cudaStream;
-        cudnnHandle = other.cudnnHandle;
-        cublasHandle = other.cublasHandle;
-        cublasLtHandle = other.cublasLtHandle;
-        isStatic = other.isStatic;
-        mtx = other.mtx;
-    }
-
-    void destroy();
+    bool uninitialized() const { return state == nullptr; }
 
    private:
-    int gpuNum;
-    cudaStream_t cudaStream;
-    std::optional<cudnnHandle_t> *cudnnHandle;
-    std::optional<cublasHandle_t> *cublasHandle;
-    std::optional<cublasLtHandle_t> *cublasLtHandle;
+    std::shared_ptr<State> state;
 
-    bool isStatic = false;
     static std::unordered_map<uint32_t, Stream> staticDeviceStreams;
-
-    static int numCudnnHandles;
-    static int numCublasHandles;
-    static int numCublasLtHandles;
-
-    std::mutex *mtx;
 };
 
 /**

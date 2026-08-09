@@ -66,19 +66,10 @@ class BatchNormalization : public TrainableLayer {
         return physicalBatchNormalization;
     }
 
-    std::vector<Event> initialize(std::shared_ptr<ThorImplementation::TrainableLayer> physicalLayer,
-                                  bool isFirstStamp,
-                                  std::shared_ptr<ThorImplementation::TrainableLayer> sisterPhysicalLayer,
-                                  std::optional<Event> sisterPhysicalLayerLoadedEvent);
-
    private:
     double exponentialRunningAverageFactor;
     double epsilon;
-
-    std::optional<std::string> runningMeansFile;
-    std::optional<std::string> runningVariancesFile;
     uint64_t numItemsObserved = 0;
-    std::shared_ptr<Optimizer> optimizer;
 };
 
 class BatchNormalization::Builder {
@@ -98,10 +89,8 @@ class BatchNormalization::Builder {
         if (_epsilon.has_value())
             batchNormalization.epsilon = _epsilon.value();
 
-        // BatchNorm owns trainable scale and bias parameters. Register them as API parameters so network default optimizers,
-        // freeze/unfreeze, TrainingProgram parameter discovery, and serialization all see the same trainable surface as the
-        // physical cuDNN batchnorm layer. Running mean/variance are non-trainable implementation state and remain serialized
-        // explicitly by BatchNormalization::serialize().
+        // BatchNorm owns trainable scale/bias plus persistent non-trainable running statistics. Register all four as API
+        // parameters so initialization and save/load use the same ParameterSpecification machinery as other trainable layers.
         const std::vector<uint64_t>& inputDims = batchNormalization.featureInputs.front().getDimensions();
         THOR_THROW_IF_FALSE(!inputDims.empty());
         const uint64_t channelCount = inputDims.front();
@@ -119,6 +108,24 @@ class BatchNormalization::Builder {
         if (_layerOptimizer != nullptr)
             biasesBuilder.optimizer(_layerOptimizer);
         batchNormalization.addParameter(std::make_shared<ParameterSpecification>(biasesBuilder.build()));
+
+        std::shared_ptr<Initializer> runningMeanInitializer = UniformRandom::Builder().minValue(0.0f).maxValue(0.0f).build();
+        ParameterSpecification::Builder runningMeanBuilder;
+        runningMeanBuilder.name("running_mean")
+            .shape({channelCount})
+            .dtype(DataType::FP32)
+            .initializer(runningMeanInitializer)
+            .trainable(false);
+        batchNormalization.addParameter(std::make_shared<ParameterSpecification>(runningMeanBuilder.build()));
+
+        std::shared_ptr<Initializer> runningVarianceInitializer = UniformRandom::Builder().minValue(1.0f).maxValue(1.0f).build();
+        ParameterSpecification::Builder runningVarianceBuilder;
+        runningVarianceBuilder.name("running_variance")
+            .shape({channelCount})
+            .dtype(DataType::FP32)
+            .initializer(runningVarianceInitializer)
+            .trainable(false);
+        batchNormalization.addParameter(std::make_shared<ParameterSpecification>(runningVarianceBuilder.build()));
 
         batchNormalization.initialized = true;
 

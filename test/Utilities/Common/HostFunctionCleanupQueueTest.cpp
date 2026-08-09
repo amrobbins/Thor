@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 
 namespace {
 
@@ -32,6 +33,16 @@ void countedHostFunction(void *rawArgs) {
     args->callbacks.fetch_add(1, std::memory_order_relaxed);
     args->callbackRan.store(true, std::memory_order_release);
 }
+
+struct ThrowingHostFunctionArgs : HostFunctionArgsBase {
+    explicit ThrowingHostFunctionArgs(std::atomic<uint32_t> &destructions) : destructions(destructions) {}
+
+    ~ThrowingHostFunctionArgs() override { destructions.fetch_add(1, std::memory_order_relaxed); }
+
+    std::atomic<uint32_t> &destructions;
+};
+
+void throwingHostFunction(void *) { throw std::runtime_error("host callback failure"); }
 
 }  // namespace
 
@@ -65,4 +76,26 @@ TEST(HostFunctionCleanupQueue, RetainsArgumentsUntilCallbacksComplete) {
     EXPECT_EQ(earlyDestructions.load(), 0u);
     EXPECT_EQ(HostFunctionCleanupQueue::instance().getPendingCount(), 0u);
     EXPECT_EQ(HostFunctionCleanupQueue::instance().getActiveCount(), 0u);
+}
+
+TEST(HostFunctionCleanupQueue, CallbackExceptionsAreRethrownByStreamSynchronize) {
+    Stream stream(0);
+    Stream submissionStream = stream;
+    std::atomic<uint32_t> destructions = 0;
+
+    submissionStream.enqueueHostFunction(throwingHostFunction, std::make_unique<ThrowingHostFunctionArgs>(destructions));
+
+    try {
+        stream.synchronize();
+        FAIL() << "Expected Stream::synchronize() to rethrow the host callback exception";
+    } catch (const std::runtime_error &error) {
+        EXPECT_STREQ(error.what(), "host callback failure");
+    }
+
+    // The failure is consumed at the synchronization boundary; subsequent
+    // successful synchronization is not poisoned by an old callback failure.
+    EXPECT_NO_THROW(stream.synchronize());
+
+    HostFunctionCleanupQueue::instance().waitForEmpty();
+    EXPECT_EQ(destructions.load(std::memory_order_relaxed), 1u);
 }

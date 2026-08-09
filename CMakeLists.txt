@@ -1421,6 +1421,68 @@ target_link_libraries(thor_tests PRIVATE PkgConfig::LIBURING)   # FIXME: I think
 include(GoogleTest)
 gtest_discover_tests(thor_tests)
 
+# Slow, GPU-backed regressions that reproduce production artifact-I/O failure
+# modes stay disabled in the ordinary test suite, but are mandatory for release
+# qualification. THOR_RELEASE_ARTIFACT_IO_GATE=1 turns unavailable CUDA/io_uring
+# prerequisites into failures rather than skips so this target cannot pass
+# without exercising the production paths it is intended to gate.
+set(THOR_RELEASE_ARTIFACT_IO_GTEST_FILTER
+        "*TarWriterReaderBackendRegression.PreservesModelArtifactPayloadCrcsInArchiveOrder*:
+*TarWriterReaderBackendRegression.DISABLED_PreservesModelArtifactPayloadCrcsInNetworkLikeReadOrder*:
+*TarWriterReaderBackendRegression.DISABLED_PreservesModelArtifactPayloadCrcsWhenLargeEntriesShareOneShard*:
+TarWriterReaderProductionGeometryRegression.DISABLED_UringWriterPreservesObservedLayer9282OffsetAndSize:
+*TrainingRunsEnsembleArtifactIoBackendRegression.DISABLED_SaveEnsembleThenLoadAndPlacePreservesGpuBackedParameterPayloadCrcs*:
+TrainingRunsEnsembleArtifactShortIoRegression.DISABLED_ShortUringWriteDuringSaveEnsembleStillLoadsAndPlaces:
+TrainingRunsEnsembleArtifactShortIoRegression.DISABLED_ShortUringReadDuringImmediateLoadAndPlaceStillSucceeds")
+string(REPLACE "\n" "" THOR_RELEASE_ARTIFACT_IO_GTEST_FILTER "${THOR_RELEASE_ARTIFACT_IO_GTEST_FILTER}")
+
+add_custom_target(check-release-artifact-io
+        COMMAND ${CMAKE_COMMAND} -E env
+        "THOR_RELEASE_ARTIFACT_IO_GATE=1"
+        $<TARGET_FILE:thor_tests>
+        --gtest_color=yes
+        --gtest_also_run_disabled_tests
+        "--gtest_filter=${THOR_RELEASE_ARTIFACT_IO_GTEST_FILTER}"
+        DEPENDS thor_tests
+        USES_TERMINAL
+        COMMENT "Thor: running release-gating production artifact-I/O regressions"
+        VERBATIM
+)
+
+# Shared-ownership qualification gate. The individual ownership migrations keep
+# focused tests in their natural test files; this target gathers those tests
+# into one release gate and repeatedly shuffles them to exercise control-block
+# churn and cross-test resource teardown. The disabled preflight makes a
+# missing CUDA device a hard failure for this gate instead of allowing the
+# GPU-backed Stream tests to skip and the gate to pass vacuously.
+set(THOR_RELEASE_SHARED_OWNERSHIP_GTEST_FILTER
+        "SharedOwnership.*:
+SharedOwnershipReleaseQualification.DISABLED_ReleaseGateRequiresCudaDevice:
+Event.DefaultEventIsUninitializedWithZeroIdentity:
+Event.CopiesAndMovesShareOneEventIdentity:
+Event.IndependentlyCreatedEventsHaveDistinctIdentities:
+Event.DistinctHandlesMayCopyAndDestroyOneEventConcurrently:
+StreamSharedOwnership.*:
+ConvolutionKernelRequirementSharedOwnership.*:
+CublasKernelSharedOwnership.*:
+TensorSharedOwnership.*")
+string(REPLACE "\n" "" THOR_RELEASE_SHARED_OWNERSHIP_GTEST_FILTER "${THOR_RELEASE_SHARED_OWNERSHIP_GTEST_FILTER}")
+
+add_custom_target(check-release-shared-ownership
+        COMMAND ${CMAKE_COMMAND} -E env
+        "THOR_RELEASE_SHARED_OWNERSHIP_GATE=1"
+        $<TARGET_FILE:thor_tests>
+        --gtest_color=yes
+        --gtest_also_run_disabled_tests
+        --gtest_shuffle
+        --gtest_repeat=5
+        "--gtest_filter=${THOR_RELEASE_SHARED_OWNERSHIP_GTEST_FILTER}"
+        DEPENDS thor_tests
+        USES_TERMINAL
+        COMMENT "Thor: running release-gating shared-ownership qualification"
+        VERBATIM
+)
+
 # Per-configuration flags
 target_compile_definitions(thor_tests PRIVATE
         THOR_GTEST

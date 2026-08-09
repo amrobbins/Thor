@@ -80,8 +80,8 @@ json Adadelta::serialize(thor_file::TarWriter& archiveWriter,
         THOR_THROW_IF_FALSE(!filenamePrefix.empty());
 
         string optimizerName = filenamePrefix + "_adadelta";
-        string gradientSquareAverageFile = optimizerName + "_gradient_square_average.gds";
-        string updateSquareAverageFile = optimizerName + "_update_square_average.gds";
+        string gradientSquareAverageFile = optimizerName + "_gradient_square_average.tensor";
+        string updateSquareAverageFile = optimizerName + "_update_square_average.tensor";
         j["gradient_square_average_tensor"] = gradientSquareAverageFile;
         j["update_square_average_tensor"] = updateSquareAverageFile;
 

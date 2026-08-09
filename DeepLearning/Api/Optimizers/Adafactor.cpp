@@ -106,8 +106,8 @@ json Adafactor::serialize(thor_file::TarWriter& archiveWriter,
 
         string optimizerName = filenamePrefix + "_adafactor";
         if (physicalAdafactor->isUsingFactoredPath()) {
-            string rowFile = optimizerName + "_row_second_moment.gds";
-            string columnFile = optimizerName + "_column_second_moment.gds";
+            string rowFile = optimizerName + "_row_second_moment.tensor";
+            string columnFile = optimizerName + "_column_second_moment.tensor";
             j["selected_optimizer"] = string("factored");
             j["row_second_moment_tensor"] = rowFile;
             j["column_second_moment_tensor"] = columnFile;
@@ -120,7 +120,7 @@ json Adafactor::serialize(thor_file::TarWriter& archiveWriter,
             if (columnSecondMoment.has_value())
                 archiveWriter.addArchiveFile(columnFile, columnSecondMoment.value());
         } else {
-            string secondMomentFile = optimizerName + "_second_moment.gds";
+            string secondMomentFile = optimizerName + "_second_moment.tensor";
             j["selected_optimizer"] = string("unfactored");
             j["second_moment_tensor"] = secondMomentFile;
 

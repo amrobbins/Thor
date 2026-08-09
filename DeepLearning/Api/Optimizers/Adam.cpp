@@ -116,8 +116,8 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
         THOR_THROW_IF_FALSE(physicalAdam != nullptr);
 
         string optimizerName = filenamePrefix + "_adam";
-        string mFile = optimizerName + "_m.gds";
-        string vFile = optimizerName + "_v.gds";
+        string mFile = optimizerName + "_m.tensor";
+        string vFile = optimizerName + "_v.tensor";
         j["m_tensor"] = mFile;
         j["v_tensor"] = vFile;
 
@@ -130,7 +130,7 @@ json Adam::serialize(thor_file::TarWriter &archiveWriter,
             archiveWriter.addArchiveFile(vFile, v.value());
 
         if (physicalAdam->getAmsgrad()) {
-            string vhatFile = optimizerName + "_vhat.gds";
+            string vhatFile = optimizerName + "_vhat.tensor";
             j["vhat_tensor"] = vhatFile;
             std::optional<ThorImplementation::Tensor> vhat = physicalAdam->getParameter("vhat")->getStorage();
             if (vhat.has_value())

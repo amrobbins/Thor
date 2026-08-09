@@ -251,6 +251,33 @@ void host_runtime_scalar_dtype_reject_kernel(const float* x, float alpha, float*
                  std::invalid_argument);
 }
 
+
+TEST(CudaKernelExpression, ConditionalExpressionDefinitionRejectsCudaKernelBranches) {
+    auto op = CudaKernelExpression::builder("conditional_identity")
+                  .source(R"cuda(
+extern "C" __global__
+void conditional_identity_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] = x[i];
+    }
+}
+)cuda")
+                  .entry("conditional_identity_kernel")
+                  .input("x", DataType::FP32)
+                  .outputLike("y", DataType::FP32, "x")
+                  .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("y"))
+                  .launchGrid1D(CudaKernelExpression::DimExpr::numel("y"), 128)
+                  .build();
+
+    Outputs cuda_branch = op.apply({{"x", Expression::input("x", DataType::FP32, DataType::FP32)}});
+    auto predicate = Expression::input("predicate_value").greaterThan(Expression::constantScalar(0.0));
+    Outputs ordinary_branch = Expression::outputs({{"y", Expression::input("x")}});
+    Outputs conditional = Outputs::conditional(predicate, cuda_branch, ordinary_branch);
+
+    EXPECT_THROW((void)ExpressionDefinition::fromOutputs(conditional), std::runtime_error);
+}
+
 TEST(CudaKernelExpression, SerializedCudaSourceIsInspectableAndRequiresUnsafeOptInToRunAfterLoad) {
     Stream stream(0);
     Tensor x = makeGpuTensor({2, 3}, {1.0f, -2.0f, 3.0f, 4.5f, -5.0f, 6.0f}, stream);

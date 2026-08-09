@@ -1,10 +1,9 @@
 #pragma once
 
-#include "Utilities/Common/ReferenceCounted.h"
 #include "Utilities/Common/ScopedGpu.h"
 
-
-#include <atomic>
+#include <cstdint>
+#include <memory>
 
 #include "cuda.h"
 #include "cuda_runtime.h"
@@ -12,18 +11,25 @@
 class Stream;
 
 /**
- * A reference counted container for cudaEvent_t.
+ * A shared-ownership container for cudaEvent_t.
+ *
+ * Distinct Event handle objects may be copied, assigned, reset, and destroyed
+ * concurrently while referring to the same CUDA event. Concurrent mutation of
+ * the same Event handle object requires external synchronization, matching the
+ * std::shared_ptr ownership contract documented in SharedOwnership.h.
  *
  * Also carries the gpuNum that the event exists on.
  */
-class Event : private ReferenceCounted {
+class Event {
    public:
-    Event();
+    Event() = default;
 
     explicit Event(int32_t gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne = false);
-    Event(const Event &event);
+    Event(const Event &event) = default;
+    Event(Event &&event) noexcept = default;
 
-    Event &operator=(const Event &other);
+    Event &operator=(const Event &other) = default;
+    Event &operator=(Event &&other) noexcept = default;
 
     virtual ~Event();
 
@@ -48,13 +54,8 @@ class Event : private ReferenceCounted {
     uint64_t getId() const;
 
    private:
-    int32_t gpuNum;
-    cudaEvent_t cudaEvent;
-    bool blockingSync = false;
+    struct State;
+    std::shared_ptr<State> state;
 
     void construct(int32_t gpuNum, bool enableTiming, bool expectingHostToWaitOnThisOne);
-
-    void copyFrom(const Event &other);
-
-    void destroy();
 };

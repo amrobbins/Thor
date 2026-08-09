@@ -295,8 +295,8 @@ TEST(AdamWApi, InitializeAsNewIgnoresSerializedStateAndResetsTime) {
     std::shared_ptr<Api::AdamW> savedAdamW = Api::AdamW::Builder().build();
     json stateJson = savedAdamW->architectureJson();
     stateJson["t"] = 12.0f;
-    stateJson["m_tensor"] = "missing_adamw_m.gds";
-    stateJson["v_tensor"] = "missing_adamw_v.gds";
+    stateJson["m_tensor"] = "missing_adamw_m.tensor";
+    stateJson["v_tensor"] = "missing_adamw_v.tensor";
 
     std::shared_ptr<thor_file::TarReader> archiveReader;
     std::shared_ptr<Api::Optimizer> optimizer = Api::Optimizer::deserialize(archiveReader, stateJson, nullptr);
@@ -480,8 +480,8 @@ TEST(AdamWApi, SerializeWithStateRecordsMomentFilesAndPhysicalTime) {
 
     ASSERT_TRUE(stateJson.contains("m_tensor"));
     ASSERT_TRUE(stateJson.contains("v_tensor"));
-    EXPECT_EQ(stateJson.at("m_tensor").get<std::string>(), "layer123_weights_adamw_m.gds");
-    EXPECT_EQ(stateJson.at("v_tensor").get<std::string>(), "layer123_weights_adamw_v.gds");
+    EXPECT_EQ(stateJson.at("m_tensor").get<std::string>(), "layer123_weights_adamw_m.tensor");
+    EXPECT_EQ(stateJson.at("v_tensor").get<std::string>(), "layer123_weights_adamw_v.tensor");
 
     thor_file::TarWriter architectureOnlyWriter("adamw_api_architecture_only_test");
     json architectureOnlyJson = adamw->serialize(architectureOnlyWriter, stream, nullptr, "", /*saveOptimizerState=*/false);

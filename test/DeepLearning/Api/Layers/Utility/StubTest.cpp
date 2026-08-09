@@ -1,5 +1,7 @@
 #include <optional>
 #include "DeepLearning/Api/Layers/Utility/Stub.h"
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
+#include "DeepLearning/Implementation/Layers/Utility/Stub.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 
@@ -124,10 +126,14 @@ TEST(UtilityApiLayers, StubSerializeDeserialize) {
     ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork stampedNetwork = newPlacedNetwork->getStampedNetwork(0);
     vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
-    ASSERT_EQ(otherLayers.size(), 0U);
+    ASSERT_EQ(otherLayers.size(), 1U);
+    shared_ptr<ThorImplementation::Stub> physicalStub =
+        dynamic_pointer_cast<ThorImplementation::Stub>(otherLayers.front());
+    ASSERT_NE(physicalStub, nullptr);
+    ASSERT_TRUE(physicalStub->getFeatureInput().has_value());
+    ASSERT_FALSE(physicalStub->getFeatureOutput().has_value());
+    ASSERT_FALSE(physicalStub->getErrorOutput().has_value());
 
-    // There is no stamped stub layer.
-    // The fact that the network successfully places, with an otherwise dangling output, is the test that the stub layer worked.
     vector<shared_ptr<ThorImplementation::NetworkInput>> inputLayers = stampedNetwork.getInputs();
     ASSERT_EQ(inputLayers.size(), 1U);
     vector<uint64_t> stampedDimensions = {batchSize};
@@ -139,5 +145,66 @@ TEST(UtilityApiLayers, StubSerializeDeserialize) {
 
     shared_ptr<ThorImplementation::NetworkInput> stampedInput = dynamic_pointer_cast<ThorImplementation::NetworkInput>(inputLayers[0]);
     ASSERT_NE(stampedInput, nullptr);
-    ASSERT_TRUE(!stampedInput->getFeatureOutput().has_value());
+    ASSERT_TRUE(stampedInput->getFeatureOutput().has_value());
+}
+
+
+TEST(UtilityApiLayers, StubExecutesAsPhysicalSinkAfterComputeLayer) {
+    constexpr uint32_t batchSize = 4;
+    constexpr uint64_t numFeatures = 5;
+
+    Network network("stubExecutionNetwork");
+    NetworkInput networkInput =
+        NetworkInput::Builder().network(network).name("input").dimensions({numFeatures}).dataType(DataType::FP32).build();
+    TypeConverter typeConverter = TypeConverter::Builder()
+                                      .network(network)
+                                      .featureInput(networkInput.getFeatureOutput().value())
+                                      .newDataType(DataType::FP16)
+                                      .build();
+    Stub stub = Stub::Builder().network(network).inputTensor(typeConverter.getFeatureOutput().value()).build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, true);
+    ASSERT_NE(placedNetwork, nullptr);
+    for (Event &event : initDoneEvents) {
+        event.synchronize();
+    }
+
+    ThorImplementation::StampedNetwork &stampedNetwork = placedNetwork->getStampedNetwork(0);
+    shared_ptr<ThorImplementation::NetworkInput> physicalInput =
+        dynamic_pointer_cast<ThorImplementation::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(networkInput.getId()));
+    shared_ptr<ThorImplementation::Layer> physicalTypeConverter =
+        stampedNetwork.getPhysicalLayerFromApiLayer(typeConverter.getId());
+    shared_ptr<ThorImplementation::Stub> physicalStub =
+        dynamic_pointer_cast<ThorImplementation::Stub>(stampedNetwork.getPhysicalLayerFromApiLayer(stub.getId()));
+
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalTypeConverter, nullptr);
+    ASSERT_NE(physicalStub, nullptr);
+
+    // Stub is a real terminal physical consumer.  That connection forces the
+    // compute layer immediately upstream to own a valid feature-output tensor,
+    // while Stub itself deliberately exposes no output and no backward path.
+    ASSERT_TRUE(physicalTypeConverter->getFeatureOutput().has_value());
+    ASSERT_TRUE(physicalStub->getFeatureInput().has_value());
+    ASSERT_FALSE(physicalStub->getFeatureOutput().has_value());
+    ASSERT_FALSE(physicalStub->getErrorOutput().has_value());
+
+    ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::TensorDescriptor inputDescriptor(ThorImplementation::DataType::FP32, {batchSize, numFeatures});
+    ThorImplementation::Tensor inputHost(cpuPlacement, inputDescriptor);
+    float *inputValues = static_cast<float *>(inputHost.getMemPtr());
+    for (uint64_t i = 0; i < batchSize * numFeatures; ++i) {
+        inputValues[i] = static_cast<float>(i) * 0.125f - 0.75f;
+    }
+
+    // Before Stub had a physical sink, this path left the compute layer's
+    // featureOutput empty and execution could fail when its infer() required an
+    // output tensor.  Execute the complete chain and wait for the sink stream.
+    physicalInput->forward(inputHost, false, batchSize);
+    vector<Event> completionEvents = physicalStub->getSynchronizeEvents();
+    ASSERT_FALSE(completionEvents.empty());
+    for (Event &event : completionEvents) {
+        event.synchronize();
+    }
 }

@@ -1,8 +1,10 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
+#include <atomic>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 
 #include "cuda.h"
 #include "cuda_runtime.h"
@@ -103,40 +105,90 @@ TEST(Tensor, Copies) {
     }
 }
 
-TEST(Tensor, CopiesSeeBackingMemorySwaps) {
+TEST(TensorSharedOwnership, CopiesAndAliasesKeepAllocationAliveAfterOriginalReset) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorDescriptor descriptor(DataType::FP32, {8});
+
+    Tensor original(cpuPlacement, descriptor);
+    float *originalMemory = original.getMemPtr<float>();
+    for (uint32_t i = 0; i < 8; ++i)
+        originalMemory[i] = 10.0f + static_cast<float>(i);
+
+    const uint64_t tensorId = original.getTensorId();
+    Tensor copy = original;
+    Tensor alias = original.aliasView({4}, {1}, 2);
+
+    original.dropReference();
+
+    ASSERT_FALSE(original.isInitialized());
+    ASSERT_EQ(original.getTensorId(), 0U);
+    ASSERT_TRUE(copy.isInitialized());
+    ASSERT_TRUE(alias.isInitialized());
+    ASSERT_EQ(copy.getTensorId(), tensorId);
+    ASSERT_EQ(alias.getTensorId(), tensorId);
+    ASSERT_EQ(copy.getMemPtr<float>(), originalMemory);
+    ASSERT_EQ(alias.getMemPtr<float>(), originalMemory + 2);
+
+    for (uint32_t i = 0; i < 4; ++i)
+        ASSERT_EQ(alias.getMemPtr<float>()[i], 12.0f + static_cast<float>(i));
+}
+
+TEST(TensorSharedOwnership, MoveTransfersHandleAndMovedFromTensorIsUninitialized) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorDescriptor descriptor(DataType::FP32, {4});
 
-    Tensor active(cpuPlacement, descriptor);
-    Tensor prefetch(cpuPlacement, descriptor);
-    Tensor stampedCopy = active;
+    Tensor original(cpuPlacement, descriptor);
+    const uint64_t tensorId = original.getTensorId();
+    float *memory = original.getMemPtr<float>();
 
-    const uint64_t activeId = active.getTensorId();
-    const uint64_t prefetchId = prefetch.getTensorId();
+    Tensor moved = std::move(original);
 
-    float *activeMemBefore = active.getMemPtr<float>();
-    float *prefetchMemBefore = prefetch.getMemPtr<float>();
-    ASSERT_NE(activeMemBefore, prefetchMemBefore);
+    ASSERT_FALSE(original.isInitialized());
+    ASSERT_EQ(original.getTensorId(), 0U);
+    ASSERT_TRUE(moved.isInitialized());
+    ASSERT_EQ(moved.getTensorId(), tensorId);
+    ASSERT_EQ(moved.getMemPtr<float>(), memory);
+}
 
-    for (uint32_t i = 0; i < 4; ++i) {
-        activeMemBefore[i] = 10.0f + static_cast<float>(i);
-        prefetchMemBefore[i] = 20.0f + static_cast<float>(i);
+TEST(TensorSharedOwnership, DistinctHandlesCanCopyMoveAndDestroyConcurrently) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorDescriptor descriptor(DataType::FP32, {16});
+    Tensor stableSource(cpuPlacement, descriptor);
+
+    const uint64_t tensorId = stableSource.getTensorId();
+    float *memory = stableSource.getMemPtr<float>();
+    std::atomic<bool> failed{false};
+
+    constexpr uint32_t numThreads = 8;
+    constexpr uint32_t iterationsPerThread = 10000;
+    std::vector<std::thread> threads;
+    threads.reserve(numThreads);
+
+    for (uint32_t threadIndex = 0; threadIndex < numThreads; ++threadIndex) {
+        threads.emplace_back([&]() {
+            for (uint32_t iteration = 0; iteration < iterationsPerThread; ++iteration) {
+                Tensor copy = stableSource;
+                Tensor moved = std::move(copy);
+                Tensor assigned;
+                assigned = moved;
+
+                if (copy.isInitialized() || copy.getTensorId() != 0U || !moved.isInitialized() || !assigned.isInitialized() ||
+                    moved.getTensorId() != tensorId || assigned.getTensorId() != tensorId || moved.getMemPtr<float>() != memory ||
+                    assigned.getMemPtr<float>() != memory) {
+                    failed.store(true, std::memory_order_relaxed);
+                    return;
+                }
+            }
+        });
     }
 
-    active.swapBackingMemoryWith(prefetch);
+    for (std::thread &thread : threads)
+        thread.join();
 
-    ASSERT_EQ(active.getTensorId(), activeId);
-    ASSERT_EQ(prefetch.getTensorId(), prefetchId);
-    ASSERT_EQ(stampedCopy.getTensorId(), activeId);
-
-    ASSERT_EQ(active.getMemPtr<float>(), prefetchMemBefore);
-    ASSERT_EQ(stampedCopy.getMemPtr<float>(), prefetchMemBefore);
-    ASSERT_EQ(prefetch.getMemPtr<float>(), activeMemBefore);
-
-    for (uint32_t i = 0; i < 4; ++i) {
-        ASSERT_EQ(stampedCopy.getMemPtr<float>()[i], 20.0f + static_cast<float>(i));
-        ASSERT_EQ(prefetch.getMemPtr<float>()[i], 10.0f + static_cast<float>(i));
-    }
+    ASSERT_FALSE(failed.load(std::memory_order_relaxed));
+    ASSERT_TRUE(stableSource.isInitialized());
+    ASSERT_EQ(stableSource.getTensorId(), tensorId);
+    ASSERT_EQ(stableSource.getMemPtr<float>(), memory);
 }
 
 // Reshape keeps contents unchanged
@@ -234,38 +286,6 @@ TEST(Tensor, Reshapes) {
         }
 
         delete[] expected;
-    }
-}
-
-// Resize destroys contents.
-TEST(Tensor, Resizes) {
-    srand(time(nullptr));
-
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
-
-    for (uint32_t t = 0; t < 5; ++t) {
-        Stream stream(0);
-        vector<unsigned long> dimensions;
-        dimensions.push_back(1 + (rand() % 200));
-        dimensions.push_back(1 + (rand() % 200));
-        TensorDescriptor descriptor(DataType::FP32, dimensions);
-
-        TensorPlacement placement;
-        int num = rand() % 2;
-        if (num == 0)
-            placement = cpuPlacement;
-        else
-            placement = gpuPlacement;
-
-        Tensor tensor(placement, descriptor);
-        ASSERT_EQ(tensor.getDescriptor().getDimensions(), dimensions);
-
-        dimensions.clear();
-        dimensions.push_back(1 + (rand() % 200));
-        dimensions.push_back(1 + (rand() % 200));
-        tensor.resize(dimensions);
-        ASSERT_EQ(tensor.getDescriptor().getDimensions(), dimensions);
     }
 }
 
@@ -1601,481 +1621,6 @@ TEST(Tensor, ClearAsyncGpu) {
             int8_t expected = 0;
             int8_t actual = tMem_h[i];
             ASSERT_EQ((uint32_t)expected, (uint32_t)actual);
-        }
-    }
-}
-
-unsigned long long getFreeMemoryLinux() {
-    std::string token;
-    unsigned long long memFree = 0;
-
-    std::ifstream file("/proc/meminfo");
-    if (file.is_open()) {
-        while (file >> token) {
-            if (token == "MemFree:") {
-                if (file >> memFree) {
-                    break;
-                }
-            }
-            // Skip the rest of the line
-            file.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-        }
-        file.close();
-    }
-    return memFree;  // kB
-}
-
-TEST(Tensor, loadFromFileCpu) {
-    srand(time(nullptr));
-
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    Stream stream(0);
-
-    for (uint32_t t = 0; t < 10; ++t) {
-        DataType dataType;
-        uint32_t dt = rand() % 9;
-        if (dt == 0)
-            dataType = DataType::FP16;
-        else if (dt == 1)
-            dataType = DataType::FP32;
-        else if (dt == 2)
-            dataType = DataType::UINT8;
-        else if (dt == 3)
-            dataType = DataType::UINT16;
-        else if (dt == 4)
-            dataType = DataType::UINT32;
-        else if (dt == 5)
-            dataType = DataType::UINT64;
-        else if (dt == 6)
-            dataType = DataType::INT8;
-        else if (dt == 7)
-            dataType = DataType::INT16;
-        else if (dt == 8)
-            dataType = DataType::INT32;
-        else
-            dataType = DataType::INT64;
-
-        uint32_t numDimensions = (rand() % 5) + 1;
-        uint64_t maxStageSize;
-        maxStageSize = pow(1000000.0, 1.0 / numDimensions);
-        vector<uint64_t> dimensions;
-        for (uint32_t d = 0; d < numDimensions; ++d)
-            dimensions.push_back(1 + (rand() % maxStageSize));
-
-        TensorDescriptor descriptor(dataType, dimensions);
-        Tensor tensor(cpuPlacement, descriptor);
-
-        // Prepare a test file
-        char testFileName[] = "/tmp/tensor_test_data.bin.XXXXXX";  // XXXXXX will be replaced with a unique sequence
-
-        int fileDescriptor = mkstemp(testFileName);
-        ASSERT_NE(fileDescriptor, -1);
-
-        Tensor dataTensor;
-        if (dataType == DataType::FP16)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, -500, 500);
-        else if (dataType == DataType::FP32)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, -20000, 2000);
-        else if (dataType == DataType::UINT8)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 255);
-        else if (dataType == DataType::UINT16)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 65535);
-        else if (dataType == DataType::UINT32)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 4294967295);
-        else if (dataType == DataType::UINT64)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 254294967295);
-        else if (dataType == DataType::INT8)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, -128, 127);
-        else if (dataType == DataType::INT16)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, -32768, 32767);
-        else if (dataType == DataType::INT32)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, -2147483648, 2147483647);
-        else  // dataType == DataType::INT64)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, -252147483648, 252147483647);
-        Tensor suffixDataTensor(cpuPlacement, TensorDescriptor(DataType::UINT8, {99}));
-        uint8_t suffixValue = rand() % 256;
-        suffixDataTensor.fill(suffixValue, stream);
-        stream.synchronize();
-        ssize_t bytes_written;
-        bytes_written = write(fileDescriptor, dataTensor.getMemPtr(), dataTensor.getArraySizeInBytes());
-        assert(bytes_written == static_cast<ssize_t>(dataTensor.getArraySizeInBytes()));
-        bytes_written = write(fileDescriptor, suffixDataTensor.getMemPtr(), suffixDataTensor.getArraySizeInBytes());
-        assert(bytes_written == static_cast<ssize_t>(suffixDataTensor.getArraySizeInBytes()));
-        close(fileDescriptor);
-
-        uint32_t fileOffset = 0;
-        if (tensor.getTotalNumElements() > 200)
-            fileOffset = rand() % 100;
-        Tensor::FileAccess fileAccess = Tensor::FileAccess::READ_ONLY;
-        if (rand() % 2)
-            fileAccess = Tensor::FileAccess::READ_WRITE;
-        // Attach the file to the tensor
-        tensor.attachFile(testFileName, fileOffset, fileAccess);
-
-        // Call loadFromFile, then clean up.
-        try {
-            tensor.loadFromFile(stream);
-            stream.synchronize();
-        } catch (runtime_error &err) {
-            printf("runtime_error: %s\n", err.what());
-            ASSERT_TRUE(false);
-        }
-        tensor.detachFile();
-        remove(testFileName);
-
-        // Verify the result. Checking that they are byte for byte the same.
-        const uint8_t *tensorMem = (uint8_t *)tensor.getMemPtr();
-        const uint8_t *dataTensorMem = (uint8_t *)dataTensor.getMemPtr();
-        for (uint64_t i = 0; i < dataTensor.getArraySizeInBytes(); ++i) {
-            if (i + fileOffset >= dataTensor.getArraySizeInBytes()) {
-                EXPECT_EQ(suffixValue, tensorMem[i]);
-            } else {
-                ASSERT_EQ(dataTensorMem[i + fileOffset], tensorMem[i]);
-            }
-        }
-    }
-}
-
-TEST(Tensor, loadFromFileGpu) {
-    srand(time(nullptr));
-
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
-    Stream stream(0);
-
-    for (uint32_t t = 0; t < 10; ++t) {
-        DataType dataType;
-        uint32_t dt = rand() % 9;
-        if (dt == 0)
-            dataType = DataType::FP16;
-        else if (dt == 1)
-            dataType = DataType::FP32;
-        else if (dt == 2)
-            dataType = DataType::UINT8;
-        else if (dt == 3)
-            dataType = DataType::UINT16;
-        else if (dt == 4)
-            dataType = DataType::UINT32;
-        else if (dt == 5)
-            dataType = DataType::UINT64;
-        else if (dt == 6)
-            dataType = DataType::INT8;
-        else if (dt == 7)
-            dataType = DataType::INT16;
-        else if (dt == 8)
-            dataType = DataType::INT32;
-        else
-            dataType = DataType::INT64;
-
-        uint32_t numDimensions = (rand() % 5) + 1;
-        uint64_t maxStageSize;
-        maxStageSize = pow(1000000.0, 1.0 / numDimensions);
-        vector<uint64_t> dimensions;
-        for (uint32_t d = 0; d < numDimensions; ++d)
-            dimensions.push_back(1 + (rand() % maxStageSize));
-
-        TensorDescriptor descriptor(dataType, dimensions);
-        Tensor tensor(gpuPlacement, descriptor);
-        Tensor tensor_h(cpuPlacement, descriptor);
-
-        // Prepare a test file
-        char testFileName[] = "/tmp/tensor_test_data.bin.XXXXXX";  // XXXXXX will be replaced with a unique sequence
-
-        int fileDescriptor = mkstemp(testFileName);
-        ASSERT_NE(fileDescriptor, -1);
-
-        Tensor dataTensor;
-        if (dataType == DataType::FP16)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, -500, 500);
-        else if (dataType == DataType::FP32)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, -20000, 2000);
-        else if (dataType == DataType::UINT8)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 255);
-        else if (dataType == DataType::UINT16)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 65535);
-        else if (dataType == DataType::UINT32)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 4294967295);
-        else if (dataType == DataType::UINT64)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 254294967295);
-        else if (dataType == DataType::INT8)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, -128, 127);
-        else if (dataType == DataType::INT16)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, -32768, 32767);
-        else if (dataType == DataType::INT32)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, -2147483648, 2147483647);
-        else  // dataType == DataType::INT64)
-            dataTensor = Tensor::randoms(cpuPlacement, descriptor, stream, -252147483648, 252147483647);
-        Tensor suffixDataTensor(cpuPlacement, TensorDescriptor(DataType::UINT8, {99}));
-        uint8_t suffixValue = rand() % 256;
-        suffixDataTensor.fill(suffixValue, stream);
-        stream.synchronize();
-        ssize_t bytes_written;
-        bytes_written = write(fileDescriptor, dataTensor.getMemPtr(), dataTensor.getArraySizeInBytes());
-        assert(bytes_written == static_cast<ssize_t>(dataTensor.getArraySizeInBytes()));
-        bytes_written = write(fileDescriptor, suffixDataTensor.getMemPtr(), suffixDataTensor.getArraySizeInBytes());
-        assert(bytes_written == static_cast<ssize_t>(suffixDataTensor.getArraySizeInBytes()));
-        close(fileDescriptor);
-
-        uint32_t fileOffset = 0;
-        if (tensor.getTotalNumElements() > 200)
-            fileOffset = rand() % 100;
-        Tensor::FileAccess fileAccess = Tensor::FileAccess::READ_ONLY;
-        if (rand() % 2)
-            fileAccess = Tensor::FileAccess::READ_WRITE;
-        // Attach the file to the tensor
-        tensor.attachFile(testFileName, fileOffset, fileAccess);
-
-        // Call loadFromFile, then clean up.
-        try {
-            tensor.loadFromFile(stream);
-            tensor_h.copyFromAsync(tensor, stream);
-            stream.synchronize();
-        } catch (runtime_error &err) {
-            printf("runtime_error: %s\n", err.what());
-            ASSERT_TRUE(false);
-        }
-        tensor.detachFile();
-        remove(testFileName);
-
-        // Verify the result. Checking that they are byte for byte the same.
-        const uint8_t *tensorMem = (uint8_t *)tensor_h.getMemPtr();
-        const uint8_t *dataTensorMem = (uint8_t *)dataTensor.getMemPtr();
-        for (uint64_t i = 0; i < dataTensor.getArraySizeInBytes(); ++i) {
-            if (i + fileOffset >= dataTensor.getArraySizeInBytes()) {
-                EXPECT_EQ(suffixValue, tensorMem[i]);
-            } else {
-                ASSERT_EQ(dataTensorMem[i + fileOffset], tensorMem[i]);
-            }
-        }
-    }
-}
-
-void printFileContents(const std::string &filename) {
-    // Open the file in binary mode to read bytes
-    std::ifstream file(filename, std::ios::binary);
-    if (!file.is_open()) {
-        printf("Failed to open file: %s\n", filename.c_str());
-        return;
-    }
-
-    // Read and print each byte as an unsigned integer
-    uint8_t byte;
-    size_t index = 0;
-    while (file.read(reinterpret_cast<char *>(&byte), sizeof(byte))) {
-        printf("%zu: %u ", index++, static_cast<unsigned int>(byte));
-    }
-    printf("\n");
-
-    file.close();  // Close the file after reading
-}
-
-void printTensorContents(Tensor tensor) {
-    uint8_t *mem = (uint8_t *)tensor.getMemPtr();
-    uint64_t numBytes = tensor.getArraySizeInBytes();
-    for (uint64_t i = 0; i < numBytes; ++i)
-        printf("%zu: %u ", i, mem[i]);
-    printf("\n");
-}
-
-TEST(Tensor, writeToFileCpu) {
-    srand(time(nullptr));
-
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    Stream stream(0);
-
-    for (uint32_t t = 0; t < 10; ++t) {
-        DataType dataType;
-        uint32_t dt = rand() % 9;
-        if (dt == 0)
-            dataType = DataType::FP16;
-        else if (dt == 1)
-            dataType = DataType::FP32;
-        else if (dt == 2)
-            dataType = DataType::UINT8;
-        else if (dt == 3)
-            dataType = DataType::UINT16;
-        else if (dt == 4)
-            dataType = DataType::UINT32;
-        else if (dt == 5)
-            dataType = DataType::UINT64;
-        else if (dt == 6)
-            dataType = DataType::INT8;
-        else if (dt == 7)
-            dataType = DataType::INT16;
-        else if (dt == 8)
-            dataType = DataType::INT32;
-        else
-            dataType = DataType::INT64;
-
-        uint32_t numDimensions = (rand() % 5) + 1;
-        uint64_t maxStageSize;
-        maxStageSize = pow(1000000.0, 1.0 / numDimensions);
-        vector<uint64_t> dimensions;
-        for (uint32_t d = 0; d < numDimensions; ++d)
-            dimensions.push_back(1 + (rand() % maxStageSize));
-
-        TensorDescriptor descriptor(dataType, dimensions);
-
-        // Prepare a test file
-        char testFileName[] = "/tmp/tensor_test_data.bin.XXXXXX";  // XXXXXX will be replaced with a unique sequence
-
-        int fileDescriptor = mkstemp(testFileName);
-        ASSERT_NE(fileDescriptor, -1);
-
-        Tensor tensor(cpuPlacement, descriptor);
-        if (dataType == DataType::FP16)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, -500, 500);
-        else if (dataType == DataType::FP32)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, -20000, 2000);
-        else if (dataType == DataType::UINT8)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 255);
-        else if (dataType == DataType::UINT16)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 65535);
-        else if (dataType == DataType::UINT32)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 4294967295);
-        else if (dataType == DataType::UINT64)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, 0, 254294967295);
-        else if (dataType == DataType::INT8)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, -128, 127);
-        else if (dataType == DataType::INT16)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, -32768, 32767);
-        else if (dataType == DataType::INT32)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, -2147483648, 2147483647);
-        else  // dataType == DataType::INT64)
-            tensor = Tensor::randoms(cpuPlacement, descriptor, stream, -252147483648, 252147483647);
-
-        uint32_t fileOffset = 0;
-        fileOffset = rand() % 1000;
-        Tensor::FileAccess fileAccess = Tensor::FileAccess::WRITE_ONLY;
-        if (rand() % 2)
-            fileAccess = Tensor::FileAccess::READ_WRITE;
-        // Attach the file to the tensor
-        tensor.attachFile(testFileName, fileOffset, fileAccess);
-
-        // Call loadFromFile, then clean up.
-        Tensor fileTensor = tensor.clone();
-        fileTensor.attachFile(testFileName, fileOffset, rand() % 2 ? Tensor::FileAccess::READ_ONLY : Tensor::FileAccess::READ_WRITE);
-        try {
-            tensor.dumpToFile(stream);
-            fileTensor.loadFromFile(stream);
-            stream.synchronize();
-        } catch (runtime_error &err) {
-            printf("runtime_error: %s\n", err.what());
-            ASSERT_TRUE(false);
-        }
-        tensor.detachFile();
-        remove(testFileName);
-
-        // Verify the result. Checking that they are byte for byte the same.
-        const uint8_t *tensorMem = (uint8_t *)tensor.getMemPtr();
-        const uint8_t *fileTensorMem = (uint8_t *)fileTensor.getMemPtr();
-        for (uint64_t i = 0; i < tensor.getArraySizeInBytes(); ++i) {
-            if (fileTensorMem[i] != tensorMem[i])
-                printf("%ld\n", i);
-            ASSERT_EQ(fileTensorMem[i], tensorMem[i]);
-        }
-    }
-}
-
-TEST(Tensor, writeToFileGpu) {
-    srand(time(nullptr));
-
-    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU);
-    Stream stream(0);
-
-    for (uint32_t t = 0; t < 10; ++t) {
-        DataType dataType;
-        uint32_t dt = rand() % 9;
-        if (dt == 0)
-            dataType = DataType::FP16;
-        else if (dt == 1)
-            dataType = DataType::FP32;
-        else if (dt == 2)
-            dataType = DataType::UINT8;
-        else if (dt == 3)
-            dataType = DataType::UINT16;
-        else if (dt == 4)
-            dataType = DataType::UINT32;
-        else if (dt == 5)
-            dataType = DataType::UINT64;
-        else if (dt == 6)
-            dataType = DataType::INT8;
-        else if (dt == 7)
-            dataType = DataType::INT16;
-        else if (dt == 8)
-            dataType = DataType::INT32;
-        else
-            dataType = DataType::INT64;
-
-        uint32_t numDimensions = (rand() % 5) + 1;
-        uint64_t maxStageSize;
-        maxStageSize = pow(1000000.0, 1.0 / numDimensions);
-        vector<uint64_t> dimensions;
-        for (uint32_t d = 0; d < numDimensions; ++d)
-            dimensions.push_back(1 + (rand() % maxStageSize));
-
-        TensorDescriptor descriptor(dataType, dimensions);
-
-        // Prepare a test file
-        char testFileName[] = "/tmp/tensor_test_data.bin.XXXXXX";  // XXXXXX will be replaced with a unique sequence
-
-        int fileDescriptor = mkstemp(testFileName);
-        ASSERT_NE(fileDescriptor, -1);
-
-        Tensor tensor(gpuPlacement, descriptor);
-        if (dataType == DataType::FP16)
-            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, -500, 500);
-        else if (dataType == DataType::FP32)
-            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, -20000, 2000);
-        else if (dataType == DataType::UINT8)
-            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, 0, 255);
-        else if (dataType == DataType::UINT16)
-            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, 0, 65535);
-        else if (dataType == DataType::UINT32)
-            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, 0, 4294967295);
-        else if (dataType == DataType::UINT64)
-            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, 0, 254294967295);
-        else if (dataType == DataType::INT8)
-            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, -128, 127);
-        else if (dataType == DataType::INT16)
-            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, -32768, 32767);
-        else if (dataType == DataType::INT32)
-            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, -2147483648, 2147483647);
-        else  // dataType == DataType::INT64)
-            tensor = Tensor::randoms(gpuPlacement, descriptor, stream, -252147483648, 252147483647);
-
-        uint32_t fileOffset = 0;
-        fileOffset = rand() % 1000;
-        Tensor::FileAccess fileAccess = Tensor::FileAccess::WRITE_ONLY;
-        if (rand() % 2)
-            fileAccess = Tensor::FileAccess::READ_WRITE;
-        // Attach the file to the tensor
-        tensor.attachFile(testFileName, fileOffset, fileAccess);
-
-        // Call loadFromFile, then clean up.
-        Tensor fileTensor = tensor.clone(cpuPlacement);
-        Tensor tensor_h = tensor.clone(cpuPlacement);
-        tensor_h.copyFromAsync(tensor, stream);
-        fileTensor.attachFile(testFileName, fileOffset, rand() % 2 ? Tensor::FileAccess::READ_ONLY : Tensor::FileAccess::READ_WRITE);
-        try {
-            tensor.dumpToFile(stream);
-            fileTensor.loadFromFile(stream);
-            stream.synchronize();
-        } catch (runtime_error &err) {
-            printf("runtime_error: %s\n", err.what());
-            ASSERT_TRUE(false);
-        }
-        tensor.detachFile();
-        remove(testFileName);
-
-        // Verify the result. Checking that they are byte for byte the same.
-        const uint8_t *tensorMem = (uint8_t *)tensor_h.getMemPtr();
-        const uint8_t *fileTensorMem = (uint8_t *)fileTensor.getMemPtr();
-        for (uint64_t i = 0; i < tensor.getArraySizeInBytes(); ++i) {
-            if (fileTensorMem[i] != tensorMem[i])
-                printf("%ld\n", i);
-            ASSERT_EQ(fileTensorMem[i], tensorMem[i]);
         }
     }
 }

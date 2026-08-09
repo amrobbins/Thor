@@ -70,7 +70,7 @@ json Adagrad::serialize(thor_file::TarWriter& archiveWriter,
         THOR_THROW_IF_FALSE(!filenamePrefix.empty());
 
         string optimizerName = filenamePrefix + "_adagrad";
-        string accumulatorFile = optimizerName + "_accumulator.gds";
+        string accumulatorFile = optimizerName + "_accumulator.tensor";
         j["accumulator_tensor"] = accumulatorFile;
 
         shared_ptr<ThorImplementation::Adagrad> physicalAdagrad = dynamic_pointer_cast<ThorImplementation::Adagrad>(physicalOptimizer);

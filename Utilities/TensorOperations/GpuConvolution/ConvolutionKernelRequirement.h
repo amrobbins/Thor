@@ -1,23 +1,31 @@
 #pragma once
 
 #include "DeepLearning/Implementation/ThorError.h"
-#include "Utilities/Common/ReferenceCounted.h"
+#include "Utilities/Common/SharedOwnership.h"
 
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cudnn.h>
 
-#include <atomic>
+#include <memory>
 #include <string>
 #include <utility>
 
 class ConvolutionKernelRequirement;
 namespace std {
 template <>
-struct std::hash<ConvolutionKernelRequirement>;
+struct hash<ConvolutionKernelRequirement>;
 }
 
-class ConvolutionKernelRequirement : private ReferenceCounted {
+/**
+ * Value-type handle describing one convolution kernel requirement and its
+ * shared cuDNN descriptors.
+ *
+ * Copies share one descriptor-owning State through std::shared_ptr. Distinct
+ * handles may therefore be copied, moved, assigned, and destroyed concurrently
+ * according to the shared-ownership contract in Utilities/Common/SharedOwnership.h.
+ */
+class ConvolutionKernelRequirement {
    public:
     ConvolutionKernelRequirement() = delete;
 
@@ -47,69 +55,59 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
                   numInputRows);
     }
 
-    ConvolutionKernelRequirement(const ConvolutionKernelRequirement &other) {
-        // implemented using operator=
-        *this = other;
-    }
+    ConvolutionKernelRequirement(const ConvolutionKernelRequirement &other) = default;
+    ConvolutionKernelRequirement(ConvolutionKernelRequirement &&other) noexcept = default;
 
-    ConvolutionKernelRequirement &operator=(const ConvolutionKernelRequirement &other) {
-        copyFrom(other);
-        return *this;
-    }
+    ConvolutionKernelRequirement &operator=(const ConvolutionKernelRequirement &other) = default;
+    ConvolutionKernelRequirement &operator=(ConvolutionKernelRequirement &&other) noexcept = default;
 
-    virtual ~ConvolutionKernelRequirement() {
-        bool shouldDestroy = ReferenceCounted::removeReference();
-        if (shouldDestroy)
-            destroy();
-    }
+    virtual ~ConvolutionKernelRequirement() = default;
 
     cudnnConvolutionDescriptor_t getConvolutionDescriptor() {
         THOR_THROW_IF_FALSE(!uninitialized());
 
-        if (*ppConvolutionDescriptor != nullptr)
-            return **ppConvolutionDescriptor;
-        // FIXME: I don't think that I should new this, cudnn will allocate it. Look for any other instance and fix too.
-        *ppConvolutionDescriptor = new cudnnConvolutionDescriptor_t;
+        if (state->convolutionDescriptor != nullptr)
+            return state->convolutionDescriptor;
 
-        cudnnStatus_t cudnnStatus;
-
-        cudnnStatus = cudnnCreateConvolutionDescriptor(*ppConvolutionDescriptor);
+        cudnnStatus_t cudnnStatus = cudnnCreateConvolutionDescriptor(&state->convolutionDescriptor);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        cudnnStatus = cudnnSetConvolution2dDescriptor(**ppConvolutionDescriptor,
-                                                      topAndBottomPadHeight,
-                                                      leftAndRightPadWidth,
-                                                      filterVerticalStride,
-                                                      filterHorizontalStride,
+        cudnnStatus = cudnnSetConvolution2dDescriptor(state->convolutionDescriptor,
+                                                      state->topAndBottomPadHeight,
+                                                      state->leftAndRightPadWidth,
+                                                      state->filterVerticalStride,
+                                                      state->filterHorizontalStride,
                                                       1,
                                                       1,
                                                       CUDNN_CROSS_CORRELATION,
                                                       CUDNN_DATA_FLOAT);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        cudnnStatus = cudnnSetConvolutionMathType(**ppConvolutionDescriptor, CUDNN_TENSOR_OP_MATH);
+        cudnnStatus = cudnnSetConvolutionMathType(state->convolutionDescriptor, CUDNN_TENSOR_OP_MATH);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        return **ppConvolutionDescriptor;
+        return state->convolutionDescriptor;
     }
 
     cudnnFilterDescriptor_t getWeightsFilterDescriptor() {
         THOR_THROW_IF_FALSE(!uninitialized());
 
-        if (*ppFilterDescriptor != nullptr)
-            return **ppFilterDescriptor;
-        *ppFilterDescriptor = new cudnnFilterDescriptor_t;
+        if (state->filterDescriptor != nullptr)
+            return state->filterDescriptor;
 
-        cudnnStatus_t cudnnStatus;
-
-        cudnnStatus = cudnnCreateFilterDescriptor(*ppFilterDescriptor);
+        cudnnStatus_t cudnnStatus = cudnnCreateFilterDescriptor(&state->filterDescriptor);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        cudnnStatus = cudnnSetFilter4dDescriptor(
-            **ppFilterDescriptor, CUDNN_DATA_HALF, CUDNN_TENSOR_NCHW, numOutputChannels, numInputChannels, filterHeight, filterWidth);
+        cudnnStatus = cudnnSetFilter4dDescriptor(state->filterDescriptor,
+                                                 CUDNN_DATA_HALF,
+                                                 CUDNN_TENSOR_NCHW,
+                                                 state->numOutputChannels,
+                                                 state->numInputChannels,
+                                                 state->filterHeight,
+                                                 state->filterWidth);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        return **ppFilterDescriptor;
+        return state->filterDescriptor;
     }
 
     cudnnFilterDescriptor_t getWeightsGradientFilterDescriptor() {
@@ -124,32 +122,31 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
     cudnnTensorDescriptor_t getDataInputTensorDescriptor() {
         THOR_THROW_IF_FALSE(!uninitialized());
 
-        if (*ppInputTensorDescriptor != nullptr)
-            return **ppInputTensorDescriptor;
-        *ppInputTensorDescriptor = new cudnnTensorDescriptor_t;
+        if (state->inputTensorDescriptor != nullptr)
+            return state->inputTensorDescriptor;
 
-        cudnnStatus_t cudnnStatus;
-
-        cudnnStatus = cudnnCreateTensorDescriptor(*ppInputTensorDescriptor);
+        cudnnStatus_t cudnnStatus = cudnnCreateTensorDescriptor(&state->inputTensorDescriptor);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        cudnnStatus = cudnnSetTensor4dDescriptor(
-            **ppInputTensorDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, batchSize, numInputChannels, numInputRows, numInputColumns);
+        cudnnStatus = cudnnSetTensor4dDescriptor(state->inputTensorDescriptor,
+                                                 CUDNN_TENSOR_NCHW,
+                                                 CUDNN_DATA_HALF,
+                                                 state->batchSize,
+                                                 state->numInputChannels,
+                                                 state->numInputRows,
+                                                 state->numInputColumns);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        return **ppInputTensorDescriptor;
+        return state->inputTensorDescriptor;
     }
 
     cudnnTensorDescriptor_t getDataOutputTensorDescriptor() {
         THOR_THROW_IF_FALSE(!uninitialized());
 
-        if (*ppOutputTensorDescriptor != nullptr)
-            return **ppOutputTensorDescriptor;
-        *ppOutputTensorDescriptor = new cudnnTensorDescriptor_t;
+        if (state->outputTensorDescriptor != nullptr)
+            return state->outputTensorDescriptor;
 
-        cudnnStatus_t cudnnStatus;
-
-        cudnnStatus = cudnnCreateTensorDescriptor(*ppOutputTensorDescriptor);
+        cudnnStatus_t cudnnStatus = cudnnCreateTensorDescriptor(&state->outputTensorDescriptor);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
         int computedBatchSize;
@@ -163,13 +160,14 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
                                                             &computedNumOutputChannels,
                                                             &computedNumOutputRows,
                                                             &computedNumOutputColumns);
+        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        THOR_THROW_IF_FALSE(computedBatchSize == batchSize);
-        THOR_THROW_IF_FALSE(computedNumOutputChannels == numOutputChannels);
-        numOutputRows = computedNumOutputRows;
-        numOutputColumns = computedNumOutputColumns;
+        THOR_THROW_IF_FALSE(computedBatchSize == state->batchSize);
+        THOR_THROW_IF_FALSE(computedNumOutputChannels == state->numOutputChannels);
+        state->numOutputRows = computedNumOutputRows;
+        state->numOutputColumns = computedNumOutputColumns;
 
-        cudnnStatus = cudnnSetTensor4dDescriptor(**ppOutputTensorDescriptor,
+        cudnnStatus = cudnnSetTensor4dDescriptor(state->outputTensorDescriptor,
                                                  CUDNN_TENSOR_NCHW,
                                                  CUDNN_DATA_HALF,
                                                  computedBatchSize,
@@ -178,24 +176,22 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
                                                  computedNumOutputColumns);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        return **ppOutputTensorDescriptor;
+        return state->outputTensorDescriptor;
     }
 
     cudnnTensorDescriptor_t getBiasesTensorDescriptor() {
         THOR_THROW_IF_FALSE(!uninitialized());
 
-        if (*ppBiasesDescriptor != nullptr)
-            return **ppBiasesDescriptor;
-        *ppBiasesDescriptor = new cudnnTensorDescriptor_t;
+        if (state->biasesDescriptor != nullptr)
+            return state->biasesDescriptor;
 
-        cudnnStatus_t cudnnStatus;
-
-        cudnnStatus = cudnnCreateTensorDescriptor(*ppBiasesDescriptor);
+        cudnnStatus_t cudnnStatus = cudnnCreateTensorDescriptor(&state->biasesDescriptor);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-        cudnnStatus = cudnnSetTensor4dDescriptor(**ppBiasesDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, 1, numOutputChannels, 1, 1);
+        cudnnStatus = cudnnSetTensor4dDescriptor(
+            state->biasesDescriptor, CUDNN_TENSOR_NCHW, CUDNN_DATA_HALF, 1, state->numOutputChannels, 1, 1);
         THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-        return **ppBiasesDescriptor;
+        return state->biasesDescriptor;
     }
 
     cudnnTensorDescriptor_t getErrorInputTensorDescriptor() {
@@ -211,69 +207,71 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
     bool operator==(const ConvolutionKernelRequirement &other) const {
         THOR_THROW_IF_FALSE(!uninitialized());
         THOR_THROW_IF_FALSE(!other.uninitialized());
-        return gpuType == other.gpuType && filterWidth == other.filterWidth && filterHeight == other.filterHeight &&
-               filterHorizontalStride == other.filterHorizontalStride && filterVerticalStride == other.filterVerticalStride &&
-               leftAndRightPadWidth == other.leftAndRightPadWidth && topAndBottomPadHeight == other.topAndBottomPadHeight &&
-               numInputChannels == other.numInputChannels && numOutputChannels == other.numOutputChannels && batchSize == other.batchSize &&
-               numInputColumns == other.numInputColumns && numInputRows == other.numInputRows &&
-               numOutputColumns == other.numOutputColumns && numOutputRows == other.numOutputRows;
+        return state->gpuType == other.state->gpuType && state->filterWidth == other.state->filterWidth &&
+               state->filterHeight == other.state->filterHeight && state->filterHorizontalStride == other.state->filterHorizontalStride &&
+               state->filterVerticalStride == other.state->filterVerticalStride &&
+               state->leftAndRightPadWidth == other.state->leftAndRightPadWidth &&
+               state->topAndBottomPadHeight == other.state->topAndBottomPadHeight && state->numInputChannels == other.state->numInputChannels &&
+               state->numOutputChannels == other.state->numOutputChannels && state->batchSize == other.state->batchSize &&
+               state->numInputColumns == other.state->numInputColumns && state->numInputRows == other.state->numInputRows &&
+               state->numOutputColumns == other.state->numOutputColumns && state->numOutputRows == other.state->numOutputRows;
     }
 
     std::string getGpuType() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return gpuType;
+        return state->gpuType;
     }
     int getFilterWidth() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return filterWidth;
+        return state->filterWidth;
     }
     int getFilterHeight() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return filterHeight;
+        return state->filterHeight;
     }
     int getFilterHorizontalStride() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return filterHorizontalStride;
+        return state->filterHorizontalStride;
     }
     int getFilterVerticalStride() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return filterVerticalStride;
+        return state->filterVerticalStride;
     }
     int getLeftAndRightPadWidth() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return leftAndRightPadWidth;
+        return state->leftAndRightPadWidth;
     }
     int getTopAndBottomPadHeight() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return topAndBottomPadHeight;
+        return state->topAndBottomPadHeight;
     }
     int getNumInputChannels() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return numInputChannels;
+        return state->numInputChannels;
     }
     int getNumOutputChannels() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return numOutputChannels;
+        return state->numOutputChannels;
     }
     int getBatchSize() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return batchSize;
+        return state->batchSize;
     }
     int getNumInputColumns() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return numInputColumns;
+        return state->numInputColumns;
     }
     int getNumInputRows() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return numInputRows;
+        return state->numInputRows;
     }
     int getNumOutputColumns() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return numOutputColumns;
+        return state->numOutputColumns;
     }
     int getNumOutputRows() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return numOutputRows;
+        return state->numOutputRows;
     }
 
     std::string toString() const {
@@ -292,26 +290,77 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
     }
 
    private:
-    std::string gpuType;
-    int filterWidth;
-    int filterHeight;
-    int filterHorizontalStride;
-    int filterVerticalStride;
-    int leftAndRightPadWidth;
-    int topAndBottomPadHeight;
-    int numInputChannels;
-    int numOutputChannels;
-    int batchSize;
-    int numInputColumns;
-    int numInputRows;
-    int numOutputColumns;
-    int numOutputRows;
+    struct State {
+        State(const std::string &gpuType,
+              int filterWidth,
+              int filterHeight,
+              int filterHorizontalStride,
+              int filterVerticalStride,
+              int leftAndRightPadWidth,
+              int topAndBottomPadHeight,
+              int numInputChannels,
+              int numOutputChannels,
+              int batchSize,
+              int numInputColumns,
+              int numInputRows)
+            : gpuType(gpuType),
+              filterWidth(filterWidth),
+              filterHeight(filterHeight),
+              filterHorizontalStride(filterHorizontalStride),
+              filterVerticalStride(filterVerticalStride),
+              leftAndRightPadWidth(leftAndRightPadWidth),
+              topAndBottomPadHeight(topAndBottomPadHeight),
+              numInputChannels(numInputChannels),
+              numOutputChannels(numOutputChannels),
+              batchSize(batchSize),
+              numInputColumns(numInputColumns),
+              numInputRows(numInputRows) {}
 
-    cudnnConvolutionDescriptor_t **ppConvolutionDescriptor;
-    cudnnFilterDescriptor_t **ppFilterDescriptor;
-    cudnnTensorDescriptor_t **ppInputTensorDescriptor;
-    cudnnTensorDescriptor_t **ppOutputTensorDescriptor;
-    cudnnTensorDescriptor_t **ppBiasesDescriptor;
+        ~State() noexcept {
+            destroyDescriptorNoThrow("cudnnDestroyConvolutionDescriptor", convolutionDescriptor, cudnnDestroyConvolutionDescriptor);
+            destroyDescriptorNoThrow("cudnnDestroyFilterDescriptor", filterDescriptor, cudnnDestroyFilterDescriptor);
+            destroyDescriptorNoThrow("cudnnDestroyTensorDescriptor(input)", inputTensorDescriptor, cudnnDestroyTensorDescriptor);
+            destroyDescriptorNoThrow("cudnnDestroyTensorDescriptor(output)", outputTensorDescriptor, cudnnDestroyTensorDescriptor);
+            destroyDescriptorNoThrow("cudnnDestroyTensorDescriptor(biases)", biasesDescriptor, cudnnDestroyTensorDescriptor);
+        }
+
+        template <typename Descriptor, typename Destroy>
+        static void destroyDescriptorNoThrow(const char *operation, Descriptor &descriptor, Destroy destroy) noexcept {
+            if (descriptor == nullptr)
+                return;
+
+            ThorImplementation::SharedOwnership::cleanupNoThrow("ConvolutionKernelRequirement", operation, [&]() {
+                const cudnnStatus_t status = destroy(descriptor);
+                THOR_THROW_IF_FALSE(status == CUDNN_STATUS_SUCCESS);
+            });
+            descriptor = nullptr;
+        }
+
+        std::string gpuType;
+        int filterWidth;
+        int filterHeight;
+        int filterHorizontalStride;
+        int filterVerticalStride;
+        int leftAndRightPadWidth;
+        int topAndBottomPadHeight;
+        int numInputChannels;
+        int numOutputChannels;
+        int batchSize;
+        int numInputColumns;
+        int numInputRows;
+        int numOutputColumns = 0;
+        int numOutputRows = 0;
+
+        cudnnConvolutionDescriptor_t convolutionDescriptor = nullptr;
+        cudnnFilterDescriptor_t filterDescriptor = nullptr;
+        cudnnTensorDescriptor_t inputTensorDescriptor = nullptr;
+        cudnnTensorDescriptor_t outputTensorDescriptor = nullptr;
+        cudnnTensorDescriptor_t biasesDescriptor = nullptr;
+    };
+
+    std::shared_ptr<State> state;
+
+    bool uninitialized() const { return state == nullptr; }
 
     void construct(const std::string gpuType,
                    const int filterWidth,
@@ -337,105 +386,28 @@ class ConvolutionKernelRequirement : private ReferenceCounted {
         THOR_THROW_IF_FALSE(numInputColumns > 0);
         THOR_THROW_IF_FALSE(numInputRows > 0);
 
-        ReferenceCounted::initialize();
+        state = std::make_shared<State>(gpuType,
+                                        filterWidth,
+                                        filterHeight,
+                                        filterHorizontalStride,
+                                        filterVerticalStride,
+                                        leftAndRightPadWidth,
+                                        topAndBottomPadHeight,
+                                        numInputChannels,
+                                        numOutputChannels,
+                                        batchSize,
+                                        numInputColumns,
+                                        numInputRows);
 
-        this->gpuType = gpuType;
-        this->filterWidth = filterWidth;
-        this->filterHeight = filterHeight;
-        this->filterHorizontalStride = filterHorizontalStride;
-        this->filterVerticalStride = filterVerticalStride;
-        this->leftAndRightPadWidth = leftAndRightPadWidth;
-        this->topAndBottomPadHeight = topAndBottomPadHeight;
-        this->numInputChannels = numInputChannels;
-        this->numOutputChannels = numOutputChannels;
-        this->batchSize = batchSize;
-        this->numInputColumns = numInputColumns;
-        this->numInputRows = numInputRows;
-
-        ppConvolutionDescriptor = new cudnnConvolutionDescriptor_t *;
-        *ppConvolutionDescriptor = nullptr;
-        ppFilterDescriptor = new cudnnFilterDescriptor_t *;
-        *ppFilterDescriptor = nullptr;
-        ppInputTensorDescriptor = new cudnnTensorDescriptor_t *;
-        *ppInputTensorDescriptor = nullptr;
-        ppOutputTensorDescriptor = new cudnnTensorDescriptor_t *;
-        *ppOutputTensorDescriptor = nullptr;
-        ppBiasesDescriptor = new cudnnTensorDescriptor_t *;
-        *ppBiasesDescriptor = nullptr;
-
-        // Eagerly call all the get...Descriptor() functions to avoid needing to lock when populating the structures
+        // Populate every descriptor before construction completes. Once a requirement
+        // is visible to other threads, its shared State is immutable except for the
+        // cuDNN objects themselves, so ordinary getters require no lazy-init lock.
         getConvolutionDescriptor();
         getWeightsFilterDescriptor();
         getWeightsGradientFilterDescriptor();
+        getDataInputTensorDescriptor();
         getDataOutputTensorDescriptor();
-    }
-
-    void copyFrom(const ConvolutionKernelRequirement &other) {
-        *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
-
-        gpuType = other.gpuType;
-        filterWidth = other.filterWidth;
-        filterHeight = other.filterHeight;
-        filterHorizontalStride = other.filterHorizontalStride;
-        filterVerticalStride = other.filterVerticalStride;
-        leftAndRightPadWidth = other.leftAndRightPadWidth;
-        topAndBottomPadHeight = other.topAndBottomPadHeight;
-        numInputChannels = other.numInputChannels;
-        numOutputChannels = other.numOutputChannels;
-        batchSize = other.batchSize;
-        numInputColumns = other.numInputColumns;
-        numInputRows = other.numInputRows;
-        numOutputColumns = other.numOutputColumns;
-        numOutputRows = other.numOutputRows;
-        ppConvolutionDescriptor = other.ppConvolutionDescriptor;
-        ppFilterDescriptor = other.ppFilterDescriptor;
-        ppInputTensorDescriptor = other.ppInputTensorDescriptor;
-        ppOutputTensorDescriptor = other.ppOutputTensorDescriptor;
-        ppBiasesDescriptor = other.ppBiasesDescriptor;
-    }
-
-    void destroy() {
-        cudnnStatus_t cudnnStatus;
-
-        if (*ppConvolutionDescriptor != nullptr) {
-            cudnnStatus = cudnnDestroyConvolutionDescriptor(**ppConvolutionDescriptor);
-            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            delete *ppConvolutionDescriptor;
-        }
-        delete ppConvolutionDescriptor;
-        ppConvolutionDescriptor = nullptr;
-
-        if (*ppFilterDescriptor != nullptr) {
-            cudnnStatus = cudnnDestroyFilterDescriptor(**ppFilterDescriptor);
-            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            delete *ppFilterDescriptor;
-        }
-        delete ppFilterDescriptor;
-        ppFilterDescriptor = nullptr;
-
-        if (*ppInputTensorDescriptor != nullptr) {
-            cudnnStatus = cudnnDestroyTensorDescriptor(**ppInputTensorDescriptor);
-            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            delete *ppInputTensorDescriptor;
-        }
-        delete ppInputTensorDescriptor;
-        ppInputTensorDescriptor = nullptr;
-
-        if (*ppOutputTensorDescriptor != nullptr) {
-            cudnnStatus = cudnnDestroyTensorDescriptor(**ppOutputTensorDescriptor);
-            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            delete *ppOutputTensorDescriptor;
-        }
-        delete ppOutputTensorDescriptor;
-        ppOutputTensorDescriptor = nullptr;
-
-        if (*ppBiasesDescriptor != nullptr) {
-            cudnnStatus = cudnnDestroyTensorDescriptor(**ppBiasesDescriptor);
-            THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
-            delete *ppBiasesDescriptor;
-        }
-        delete ppBiasesDescriptor;
-        ppBiasesDescriptor = nullptr;
+        getBiasesTensorDescriptor();
     }
 
     friend class std::hash<ConvolutionKernelRequirement>;
@@ -446,19 +418,21 @@ namespace std {
 template <>
 struct hash<ConvolutionKernelRequirement> {
     size_t operator()(const ConvolutionKernelRequirement &k) const {
+        THOR_THROW_IF_FALSE(!k.uninitialized());
+
         size_t hashValue;
-        hashValue = (hash<int>()(k.numInputRows)) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.filterWidth))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.filterHeight))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.filterHorizontalStride))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.filterVerticalStride))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.leftAndRightPadWidth))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.topAndBottomPadHeight))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.numInputChannels))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.numOutputChannels))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.batchSize))) << 1;
-        hashValue = (hashValue ^ (hash<int>()(k.numInputColumns))) << 1;
-        hashValue = hashValue ^ hash<string>()(k.gpuType);
+        hashValue = (hash<int>()(k.state->numInputRows)) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.state->filterWidth))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.state->filterHeight))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.state->filterHorizontalStride))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.state->filterVerticalStride))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.state->leftAndRightPadWidth))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.state->topAndBottomPadHeight))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.state->numInputChannels))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.state->numOutputChannels))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.state->batchSize))) << 1;
+        hashValue = (hashValue ^ (hash<int>()(k.state->numInputColumns))) << 1;
+        hashValue = hashValue ^ hash<string>()(k.state->gpuType);
         return hashValue;
     }
 };

@@ -1,11 +1,9 @@
 #pragma once
 
-#include <optional>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
-#include "Utilities/Common/ReferenceCounted.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
@@ -13,8 +11,6 @@
 #include "Utilities/TensorOperations/GpuMatrixTranspose/gpuMatrixTranspose.h"
 #include "Utilities/WorkQueue/WorkQueueUnordered.h"
 
-#include <fcntl.h>
-#include <unistd.h>
 #include <algorithm>
 #include <atomic>
 #include <deque>
@@ -42,22 +38,29 @@
 namespace ThorImplementation {
 
 /**
- * A multidimensional array that is allocated in either cpu or device mem.
+ * A multidimensional array allocated in either CPU or device memory.
  *
- * Note: copyFromAsync preserves the source value whereas moveFromAsync does not necessarily
- *       preserve the source value. The only thing that move buys you is that it allows
- *       copying across devices where the destination data type is smaller than the source data type.
+ * Tensor handles use std::shared_ptr-backed allocation ownership. Distinct
+ * Tensor handle objects may be copied, assigned, reset, and destroyed
+ * concurrently while sharing one allocation. Concurrent mutation of the same
+ * Tensor handle object requires external synchronization, matching the
+ * SharedOwnership.h contract. View metadata (descriptor, offset, and strides)
+ * belongs to each Tensor handle while BackingMemory owns the allocation.
  */
 
-class Tensor : private ReferenceCounted {
-   public:
-    Tensor();
-    Tensor(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes = 0);
-    Tensor(const Tensor &tensorInstance);
-    Tensor &operator=(const Tensor &tensorInstance);
-    virtual ~Tensor();
+class Tensor {
+    friend class TypeConverter;
 
-    bool isInitialized() const { return !uninitialized(); }
+   public:
+    Tensor() = default;
+    Tensor(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes = 0);
+    Tensor(const Tensor &tensorInstance) = default;
+    Tensor(Tensor &&tensorInstance) noexcept = default;
+    Tensor &operator=(const Tensor &tensorInstance) = default;
+    Tensor &operator=(Tensor &&tensorInstance) noexcept = default;
+    virtual ~Tensor() = default;
+
+    bool isInitialized() const { return backingMemory != nullptr; }
 
     Tensor clone() const { return uninitialized() ? Tensor() : Tensor(placement, descriptor); }
     Tensor clone(TensorPlacement newPlacement) const { return uninitialized() ? Tensor() : Tensor(newPlacement, descriptor); }
@@ -84,25 +87,12 @@ class Tensor : private ReferenceCounted {
     ElementDataType *getElementPointer(std::vector<uint64_t> dimensionIndex);
     TensorDescriptor getDescriptor() const;
 
-    uint64_t getTensorId() const { return instanceId; }
+    uint64_t getTensorId() const { return isInitialized() ? instanceId : 0; }
 
     void copyFromAsync(Tensor source, Stream stream);
 
-    void moveFromAsync(Tensor source, Stream stream);
-
     void downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
     void uploadSection(Tensor &dest, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
-
-    enum class FileAccess { INVALID = 0, READ_ONLY, WRITE_ONLY, READ_WRITE };
-    void attachFile(const std::string &fileName,
-                    const off_t fileOffset,
-                    const FileAccess fileAccessRequirement,
-                    bool createEmptyFile = false);
-    void attachFile(const std::string &fileName, const off_t fileOffset, const FileAccess fileAccessRequirement, int32_t fileDescriptor);
-    void detachFile();
-    std::string getAttachedFilename() { return fileName; }
-    void loadFromFile(Stream stream, std::optional<uint32_t> crc = std::nullopt);
-    void dumpToFile(Stream stream);
 
     // The values are set at the end of stream
     static Tensor zeros(TensorPlacement placement, TensorDescriptor descriptor, Stream stream);
@@ -156,8 +146,6 @@ class Tensor : private ReferenceCounted {
     [[nodiscard]] bool isDenseContiguous() const;
     [[nodiscard]] uint64_t getStorageElementOffset() const { return storageElementOffset; }
     [[nodiscard]] std::vector<uint64_t> getStridesElements() const;
-    void resize(std::vector<uint64_t> dimensions);
-    void swapBackingMemoryWith(Tensor &other);
     // void concatenateFrom(std::vector<Tensor> sources);
     // void splitInto(std::vector<Tensor> destinations);
 
@@ -170,8 +158,6 @@ class Tensor : private ReferenceCounted {
     bool operator==(const Tensor &other) const;
     bool operator!=(const Tensor &other) const;
     bool operator<(const Tensor &other) const;
-
-    using ReferenceCounted::getReferenceCount;
 
     // Convenience functions to pass information from the descriptor
     DataType getDataType() const {
@@ -201,10 +187,16 @@ class Tensor : private ReferenceCounted {
     static uint64_t getThreadIdHash64(uint64_t seed = 0);
 
    private:
-    void copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue);
+    void copyFromAsyncImpl(Tensor source, Stream copyStream);
 
     TensorPlacement placement;
     struct BackingMemory {
+        explicit BackingMemory(TensorPlacement placement) : placement(placement) {}
+        ~BackingMemory() noexcept;
+
+        void releaseChecked();
+
+        TensorPlacement placement;
         void *mem = nullptr;
         bool cpuMemPinnedViaCudaHostRegister = false;
     };
@@ -214,15 +206,9 @@ class Tensor : private ReferenceCounted {
     uint64_t storageNumElements = 0;
     std::vector<uint64_t> customStridesElements;
 
-    uint64_t instanceId;
+    uint64_t instanceId = 0;
 
     TensorDescriptor descriptor;
-
-    std::string fileName;
-    int32_t fileDescriptor = 0;
-    bool ownsFileDescriptor = false;
-    FileAccess fileAccessRequirement;
-    off_t fileOffset;
 
     // FIXME: get rid of this override descriptor nonsense
     bool descriptorOverridden = false;
@@ -232,6 +218,7 @@ class Tensor : private ReferenceCounted {
 
     void *getBaseMemPtr() const;
     void allocateMemory(uint32_t alignmentBytes = 0);
+    bool uninitialized() const { return backingMemory == nullptr; }
 
     template <typename T>
     void launchFillValueGpuKernel(T value, T *mem, uint64_t numElements, uint32_t deviceNum, Stream stream);
@@ -243,8 +230,6 @@ class Tensor : private ReferenceCounted {
     void clearDescriptorOverride();
 
     void construct(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes);
-    void copyObject(const Tensor &other);
-    void destroy();
 };
 
 }  // namespace ThorImplementation

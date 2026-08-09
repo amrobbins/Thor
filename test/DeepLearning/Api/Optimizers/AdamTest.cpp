@@ -380,9 +380,9 @@ TEST(AdamApi, SerializeWithStateRecordsMomentFilesAndPhysicalTime) {
     ASSERT_TRUE(stateJson.contains("m_tensor"));
     ASSERT_TRUE(stateJson.contains("v_tensor"));
     ASSERT_TRUE(stateJson.contains("vhat_tensor"));
-    EXPECT_EQ(stateJson.at("m_tensor").get<std::string>(), "layer123_weights_adam_m.gds");
-    EXPECT_EQ(stateJson.at("v_tensor").get<std::string>(), "layer123_weights_adam_v.gds");
-    EXPECT_EQ(stateJson.at("vhat_tensor").get<std::string>(), "layer123_weights_adam_vhat.gds");
+    EXPECT_EQ(stateJson.at("m_tensor").get<std::string>(), "layer123_weights_adam_m.tensor");
+    EXPECT_EQ(stateJson.at("v_tensor").get<std::string>(), "layer123_weights_adam_v.tensor");
+    EXPECT_EQ(stateJson.at("vhat_tensor").get<std::string>(), "layer123_weights_adam_vhat.tensor");
 
     EXPECT_FALSE(stateJson.contains("m_bias_tensor"));
     EXPECT_FALSE(stateJson.contains("v_bias_tensor"));

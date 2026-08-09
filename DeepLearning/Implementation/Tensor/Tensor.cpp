@@ -1,8 +1,10 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+
+#include "Utilities/Common/SharedOwnership.h"
 #include <cmath>
-#include <exception>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
-#include <optional>
 #include "Utilities/Common/LowPrecisionFloat.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
@@ -127,60 +129,70 @@ uint64_t Tensor::getThreadIdHash64(uint64_t seed) {
     return splitmixA64(seed) ^ splitmixB64(tag);
 }
 
-Tensor::Tensor() : ReferenceCounted() {}
+Tensor::BackingMemory::~BackingMemory() noexcept {
+    SharedOwnership::cleanupNoThrow("Tensor", "release backing memory", [&]() { releaseChecked(); });
+}
+
+void Tensor::BackingMemory::releaseChecked() {
+    if (mem == nullptr)
+        return;
+
+    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
+        void *memory = mem;
+        mem = nullptr;
+
+        if (cpuMemPinnedViaCudaHostRegister) {
+            cpuMemPinnedViaCudaHostRegister = false;
+            const cudaError_t unregisterStatus = cudaHostUnregister(memory);
+            free(memory);
+            CUDA_CHECK(unregisterStatus);
+        } else {
+            CUDA_CHECK(cudaFreeHost(memory));
+        }
+        return;
+    }
+
+    THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    int previousGpuNum = -1;
+    CUDA_CHECK(cudaGetDevice(&previousGpuNum));
+    const int targetGpuNum = placement.getDeviceNum();
+    const bool switchGpu = previousGpuNum != targetGpuNum;
+    if (switchGpu)
+        CUDA_CHECK(cudaSetDevice(targetGpuNum));
+
+    void *memory = mem;
+    mem = nullptr;
+    const cudaError_t freeStatus = cudaFree(memory);
+    const cudaError_t restoreStatus = switchGpu ? cudaSetDevice(previousGpuNum) : cudaSuccess;
+
+    CUDA_CHECK(freeStatus);
+    CUDA_CHECK(restoreStatus);
+}
 
 Tensor::Tensor(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes) {
     construct(placement, descriptor, alignmentBytes);
 }
 
-Tensor::Tensor(const Tensor &tensorInstance) {
-    // implemented using operator=
-    *this = tensorInstance;
-}
-
-Tensor &Tensor::operator=(const Tensor &other) {
-    copyObject(other);
-    return *this;
-}
-
-Tensor::~Tensor() noexcept {
-    try {
-        const bool shouldDestroy = ReferenceCounted::removeReference();
-        if (shouldDestroy) {
-            destroy();
-        }
-    } catch (const std::exception &error) {
-        // Destructors are implicitly noexcept. Letting a CUDA cleanup failure escape
-        // here calls std::terminate and masks the operation error that caused the
-        // cleanup failure (for example, an asynchronous kernel failure reported by
-        // cudaFree). Explicit operations and assignments still report destroy()
-        // failures normally; destructor cleanup can only preserve and report them.
-        fprintf(stderr, "Tensor destructor cleanup failed: %s\n", error.what());
-        fflush(stderr);
-    } catch (...) {
-        fprintf(stderr, "Tensor destructor cleanup failed with an unknown exception.\n");
-        fflush(stderr);
-    }
-}
-
 bool Tensor::operator==(const Tensor &other) const {
     THOR_THROW_IF_FALSE(!uninitialized());
+    THOR_THROW_IF_FALSE(!other.uninitialized());
     return instanceId == other.instanceId;
 }
 
 bool Tensor::operator!=(const Tensor &other) const {
     THOR_THROW_IF_FALSE(!uninitialized());
+    THOR_THROW_IF_FALSE(!other.uninitialized());
     return instanceId != other.instanceId;
 }
 
 bool Tensor::operator<(const Tensor &other) const {
     THOR_THROW_IF_FALSE(!uninitialized());
+    THOR_THROW_IF_FALSE(!other.uninitialized());
     return instanceId < other.instanceId;
 }
 
 void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, uint32_t alignmentBytes) {
-    ReferenceCounted::initialize();
-
     THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
                         placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(placement.getDeviceNum() >= 0);
@@ -196,8 +208,8 @@ void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, u
     customStridesElements.clear();
     descriptorOverridden = false;
 
-    backingMemory = std::make_shared<BackingMemory>();
-    instanceId = nextInstanceId.fetch_add(1);
+    backingMemory = std::make_shared<BackingMemory>(placement);
+    instanceId = nextInstanceId.fetch_add(1, std::memory_order_relaxed);
 
     allocateMemory(alignmentBytes);
 }
@@ -205,167 +217,56 @@ void Tensor::construct(TensorPlacement placement, TensorDescriptor descriptor, u
 static inline bool isPow2(std::size_t x) { return x && ((x & (x - 1)) == 0); }
 
 void Tensor::allocateMemory(uint32_t alignmentBytes) {
+    THOR_THROW_IF_FALSE(backingMemory != nullptr);
+    THOR_THROW_IF_FALSE(backingMemory->mem == nullptr);
+    THOR_THROW_IF_FALSE(backingMemory->placement == placement);
+
     unsigned long numElements = descriptor.getTotalNumElements();
     THOR_THROW_IF_FALSE(numElements > 0);
 
     if (alignmentBytes != 0)
         THOR_THROW_IF_FALSE(isPow2(alignmentBytes));
 
-    unsigned long memBytes;
-    memBytes = descriptor.getArraySizeInBytes();
+    unsigned long memBytes = descriptor.getArraySizeInBytes();
     // All tensors add 128 bytes of padding to make reading and writing 32 * 4 bytes past the end safe.
     memBytes += 128;
 
     if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
         if (alignmentBytes <= 256) {
-            // Cuda gives this natively
+            // CUDA provides this alignment natively.
             CUDA_CHECK(cudaHostAlloc(&backingMemory->mem, memBytes, cudaHostAllocPortable));
         } else {
             void *p = nullptr;
-            int prc = posix_memalign(&p, alignmentBytes, memBytes);
-            if (prc != 0 || !p) {
+            const int prc = posix_memalign(&p, alignmentBytes, memBytes);
+            if (prc != 0 || p == nullptr)
                 throw std::runtime_error(std::string("posix_memalign failed: ") + std::strerror(prc));
-            }
+
             // Pin it so it still behaves like cudaHostAlloc memory for GPU transfers.
-            CUDA_CHECK(cudaHostRegister(p, memBytes, cudaHostRegisterPortable));
+            const cudaError_t registerStatus = cudaHostRegister(p, memBytes, cudaHostRegisterPortable);
+            if (registerStatus != cudaSuccess) {
+                free(p);
+                CUDA_CHECK(registerStatus);
+            }
             backingMemory->mem = p;
             backingMemory->cpuMemPinnedViaCudaHostRegister = true;
         }
-    } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        ScopedGpu scopedGpu(placement.getDeviceNum());
-        CUDA_CHECK(cudaMalloc(&backingMemory->mem, memBytes));
-    } else {
-        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
-                            placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-    }
-}
-
-void Tensor::attachFile(const std::string &fileName, const off_t fileOffset, const FileAccess fileAccessRequirement, bool createEmptyFile) {
-    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
-                        getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-
-    if (!this->fileName.empty())
-        detachFile();
-    THOR_THROW_IF_FALSE(this->fileName.empty());
-    this->fileName = fileName;
-
-    this->fileAccessRequirement = fileAccessRequirement;
-
-    int32_t o_flags = O_CLOEXEC;
-    if (fileAccessRequirement == FileAccess::READ_ONLY)
-        o_flags |= O_RDONLY;
-    else if (fileAccessRequirement == FileAccess::WRITE_ONLY)
-        o_flags |= O_WRONLY;
-    else
-        o_flags |= O_RDWR;
-    if (createEmptyFile && fileAccessRequirement != FileAccess::READ_ONLY)
-        o_flags |= O_CREAT | O_TRUNC;
-
-    // Get a handle to the file with the necessary flags
-    if (o_flags & O_CREAT) {
-        fileDescriptor = open(fileName.c_str(), o_flags, 0644);
-    } else {
-        fileDescriptor = open(fileName.c_str(), o_flags);
-    }
-    if (fileDescriptor < 0) {
-        printf("Error opening file %s  fileDescriptor %d errno %d\n", fileName.c_str(), fileDescriptor, errno);
-        printf("open(\"%s\", flags=0x%x) failed: %s (errno=%d), createEmptyFile=%d, access=%d\n",
-               fileName.c_str(),
-               o_flags,
-               strerror(errno),
-               errno,
-               (int)createEmptyFile,
-               (int)fileAccessRequirement);
-        fflush(stdout);
-        THOR_THROW_IF_FALSE(fileDescriptor >= 0);
-    }
-    ownsFileDescriptor = true;
-
-    // GpuDirect Storage takes pointers to its parameters:
-    this->fileOffset = fileOffset;
-}
-
-// With existing file descriptor
-void Tensor::attachFile(const std::string &fileName,
-                        const off_t fileOffset,
-                        const FileAccess fileAccessRequirement,
-                        int32_t fileDescriptor) {
-    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
-                        getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-
-    if (!this->fileName.empty())
-        detachFile();
-    THOR_THROW_IF_FALSE(this->fileName.empty());
-    this->fileName = fileName;
-
-    this->fileAccessRequirement = fileAccessRequirement;
-
-    this->fileDescriptor = fileDescriptor;
-    ownsFileDescriptor = false;
-
-    this->fileOffset = fileOffset;
-}
-
-void Tensor::detachFile() {
-    if (fileName.empty()) {
         return;
     }
 
-    if (ownsFileDescriptor)
-        close(fileDescriptor);
+    THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
 
-    fileName.clear();
-}
+    int previousGpuNum = -1;
+    CUDA_CHECK(cudaGetDevice(&previousGpuNum));
+    const int targetGpuNum = placement.getDeviceNum();
+    const bool switchGpu = previousGpuNum != targetGpuNum;
+    if (switchGpu)
+        CUDA_CHECK(cudaSetDevice(targetGpuNum));
 
-void Tensor::copyObject(const Tensor &other) {
-    *((ReferenceCounted *)this) = *((ReferenceCounted *)&other);
+    const cudaError_t allocationStatus = cudaMalloc(&backingMemory->mem, memBytes);
+    const cudaError_t restoreStatus = switchGpu ? cudaSetDevice(previousGpuNum) : cudaSuccess;
 
-    placement = other.placement;
-    backingMemory = other.backingMemory;
-    storageElementOffset = other.storageElementOffset;
-    storageNumElements = other.storageNumElements;
-    customStridesElements = other.customStridesElements;
-    instanceId = other.instanceId;
-
-    descriptor = other.descriptor;
-    descriptorOverridden = other.descriptorOverridden;
-    overriddenDescriptor = other.overriddenDescriptor;
-}
-
-void Tensor::destroy() {
-    detachFile();  // detachFile is a NOP when there is no attached file
-
-    if (backingMemory == nullptr || backingMemory->mem == nullptr) {
-        return;
-    }
-
-    if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        void *memory = backingMemory->mem;
-        backingMemory->mem = nullptr;
-
-        if (backingMemory->cpuMemPinnedViaCudaHostRegister) {
-            backingMemory->cpuMemPinnedViaCudaHostRegister = false;
-            try {
-                CUDA_CHECK(cudaHostUnregister(memory));
-            } catch (...) {
-                free(memory);
-                throw;
-            }
-            free(memory);
-        } else {
-            CUDA_CHECK(cudaFreeHost(memory));
-        }
-
-    } else if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        ScopedGpu scopedGpu(getPlacement().getDeviceNum());
-
-        void *memory = backingMemory->mem;
-        backingMemory->mem = nullptr;
-        CUDA_CHECK(cudaFree(memory));
-    } else {
-        THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU ||
-                            placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
-    }
+    CUDA_CHECK(allocationStatus);
+    CUDA_CHECK(restoreStatus);
 }
 
 void *Tensor::getBaseMemPtr() const {
@@ -727,40 +628,6 @@ bool Tensor::isDenseContiguous() const {
     return getStridesElements() == denseStridesForDims(getDimensions());
 }
 
-void Tensor::swapBackingMemoryWith(Tensor &other) {
-    THOR_THROW_IF_FALSE(isInitialized());
-    THOR_THROW_IF_FALSE(other.isInitialized());
-    THOR_THROW_IF_FALSE(getDescriptor() == other.getDescriptor());
-    THOR_THROW_IF_FALSE(getPlacement() == other.getPlacement());
-    THOR_THROW_IF_FALSE(storageElementOffset == 0);
-    THOR_THROW_IF_FALSE(other.storageElementOffset == 0);
-    THOR_THROW_IF_FALSE(storageNumElements == other.storageNumElements);
-    THOR_THROW_IF_FALSE(fileName.empty());
-    THOR_THROW_IF_FALSE(other.fileName.empty());
-    THOR_THROW_IF_FALSE(!descriptorOverridden);
-    THOR_THROW_IF_FALSE(!other.descriptorOverridden);
-    THOR_THROW_IF_FALSE(!hasCustomStrides());
-    THOR_THROW_IF_FALSE(!other.hasCustomStrides());
-    THOR_THROW_IF_FALSE(backingMemory != nullptr);
-    THOR_THROW_IF_FALSE(other.backingMemory != nullptr);
-    THOR_THROW_IF_FALSE(backingMemory->mem != nullptr);
-    THOR_THROW_IF_FALSE(other.backingMemory->mem != nullptr);
-
-    std::swap(backingMemory->mem, other.backingMemory->mem);
-    std::swap(backingMemory->cpuMemPinnedViaCudaHostRegister, other.backingMemory->cpuMemPinnedViaCudaHostRegister);
-}
-
-// Change the dimensions of the tensor, possibly changing the amount of memory used.
-// Frees the old memory and uses a new, uninitialized block of memory.
-void Tensor::resize(vector<unsigned long> dimensions) {
-    descriptor = TensorDescriptor(descriptor.getDataType(), dimensions);
-    destroy();
-    storageElementOffset = 0;
-    storageNumElements = descriptor.getTotalNumElements();
-    customStridesElements.clear();
-    allocateMemory();
-}
-
 // Stream is on either the source or dest device
 void Tensor::copyFromAsync(Tensor source, Stream stream) {
     THOR_THROW_IF_FALSE(!uninitialized());
@@ -772,7 +639,7 @@ void Tensor::copyFromAsync(Tensor source, Stream stream) {
     if (!devicesInvolved.empty())
         THOR_THROW_IF_FALSE(stream.getGpuNum() == devicesInvolved[0] ||
                             (devicesInvolved.size() == 2 && stream.getGpuNum() == devicesInvolved[1]));
-    copyFromAsync(source, stream, true);
+    copyFromAsyncImpl(source, stream);
 }
 
 void Tensor::downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes) {
@@ -809,209 +676,6 @@ void Tensor::uploadSection(Tensor &dest, Stream &stream, uint64_t sourceOffset, 
         cudaMemcpyAsync(destMemBytes + destOffset, sourceMemBytes + sourceOffset, sizeBytes, cudaMemcpyHostToDevice, stream.getStream()));
 }
 
-// If the tensor changes datatypes such that the size changes, then stream must be on the device with the larger tensor size.
-// Otherwise stream may be on either device
-void Tensor::moveFromAsync(Tensor source, Stream stream) {
-    THOR_THROW_IF_FALSE(!uninitialized());
-    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
-                        getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    THOR_THROW_IF_FALSE(!fileName.empty());
-    THOR_THROW_IF_FALSE(fileAccessRequirement != FileAccess::READ_ONLY);
-
-    vector<int> devicesInvolved;
-    if (source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
-        devicesInvolved.push_back(source.getPlacement().getDeviceNum());
-    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU)
-        devicesInvolved.push_back(getPlacement().getDeviceNum());
-    if (!devicesInvolved.empty())
-        THOR_THROW_IF_FALSE(stream.getGpuNum() == devicesInvolved[0] ||
-                            (devicesInvolved.size() == 2 && stream.getGpuNum() == devicesInvolved[1]));
-    copyFromAsync(source, stream, false);
-}
-
-struct CheckIoBytesParams : HostFunctionArgsBase {
-    CheckIoBytesParams(const ssize_t expectedBytes, const ssize_t *actualBytes) : expectedBytes(expectedBytes), actualBytes(actualBytes) {}
-    const ssize_t expectedBytes;
-    const ssize_t *actualBytes;
-};
-
-void checkBytesIoOp(void *params) {
-    HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
-    THOR_THROW_IF_FALSE(baseParams != nullptr);
-    CheckIoBytesParams *checkIoBytesParams = dynamic_cast<CheckIoBytesParams *>(baseParams);
-    THOR_THROW_IF_FALSE(checkIoBytesParams != nullptr);
-
-    if (*(checkIoBytesParams->actualBytes) != checkIoBytesParams->expectedBytes) {
-        string errorString;
-        errorString = "GpuDirect Storage transfer initiated to transfer " + to_string(checkIoBytesParams->expectedBytes) +
-                      " bytes, but gpuDirectStorage reported that it transferred " + to_string(*(checkIoBytesParams->actualBytes)) +
-                      " bytes.";
-        // FIXME: This is thrown by a worker thread. Does it need to put the exception into a sync queue for the main thread?
-        throw runtime_error(errorString.c_str());
-    }
-}
-
-struct PerformReadParams : HostFunctionArgsBase {
-    PerformReadParams(void *memPtr, size_t totalBytesToRead, const string &fileName, const off_t fileOffset, const int32_t fileDescriptor)
-        : memPtr(memPtr), totalBytesToRead(totalBytesToRead), fileName(fileName), fileOffset(fileOffset), fileDescriptor(fileDescriptor) {}
-    const void *memPtr;
-    const size_t totalBytesToRead;
-    const string fileName;
-    const off_t fileOffset;
-    const int32_t fileDescriptor;
-};
-
-static void read_exact_at(int fd, uint8_t *p, size_t total, off_t offset, const std::string &fileName) {
-    size_t left = total;
-
-    while (left > 0) {
-        ssize_t n = pread(fd, p, left, offset);
-
-        if (n > 0) {
-            p += static_cast<size_t>(n);
-            left -= static_cast<size_t>(n);
-            offset += static_cast<off_t>(n);
-            continue;
-        }
-
-        if (n == 0) {
-            throw std::runtime_error("EOF reading " + fileName + " (wanted " + std::to_string(total) + " bytes, got " +
-                                     std::to_string(total - left) + ")");
-        }
-
-        int e = errno;
-        if (e == EINTR)
-            continue;
-        if (e == EAGAIN)
-            continue;
-
-        throw std::runtime_error("pread failed for " + fileName + " at offset " + std::to_string(static_cast<long long>(offset)) +
-                                 " (wanted " + std::to_string(left) + " bytes): " + std::string(strerror(e)));
-    }
-}
-
-void performRead(void *params) {
-    HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
-    THOR_THROW_IF_FALSE(baseParams != nullptr);
-    PerformReadParams *performReadParams = dynamic_cast<PerformReadParams *>(baseParams);
-    THOR_THROW_IF_FALSE(performReadParams != nullptr);
-
-    uint8_t *memPtr = (uint8_t *)performReadParams->memPtr;
-    const size_t totalBytesToRead = performReadParams->totalBytesToRead;
-    const string fileName = performReadParams->fileName;
-    const off_t fileOffset = performReadParams->fileOffset;
-    const int32_t fileDescriptor = performReadParams->fileDescriptor;
-
-    read_exact_at(fileDescriptor, memPtr, totalBytesToRead, fileOffset, fileName);
-}
-
-struct PerformWriteParams : HostFunctionArgsBase {
-    PerformWriteParams(void *memPtr, size_t totalBytesToWrite, const string &fileName, const off_t fileOffset, const int32_t fileDescriptor)
-        : memPtr(memPtr),
-          totalBytesToWrite(totalBytesToWrite),
-          fileName(fileName),
-          fileOffset(fileOffset),
-          fileDescriptor(fileDescriptor) {}
-    const void *memPtr;
-    const size_t totalBytesToWrite;
-    const string fileName;
-    const off_t fileOffset;
-    const int32_t fileDescriptor;
-};
-
-void performWrite(void *params) {
-    HostFunctionArgsBase *baseParams = static_cast<HostFunctionArgsBase *>(params);
-    THOR_THROW_IF_FALSE(baseParams != nullptr);
-    PerformWriteParams *performWriteParams = dynamic_cast<PerformWriteParams *>(baseParams);
-    THOR_THROW_IF_FALSE(performWriteParams != nullptr);
-
-    const void *memPtr = performWriteParams->memPtr;
-    const size_t totalBytesToWrite = performWriteParams->totalBytesToWrite;
-    const string fileName = performWriteParams->fileName;
-    const off_t fileOffset = performWriteParams->fileOffset;
-    const int32_t fileDescriptor = performWriteParams->fileDescriptor;
-
-    ssize_t bytesWritten = 0;
-    size_t bytesLeftToWrite = totalBytesToWrite;
-    if (lseek(fileDescriptor, fileOffset, SEEK_SET) < 0) {
-        string errorString = "Error seeking to " + to_string(fileOffset) + " in file " + fileName;
-        throw runtime_error(errorString);
-    }
-
-    uint8_t *runningMemPtr = (uint8_t *)memPtr;
-    while (bytesLeftToWrite > 0) {
-        bytesWritten = write(fileDescriptor, runningMemPtr, bytesLeftToWrite);
-
-        if (bytesWritten <= 0 || (size_t)bytesWritten > bytesLeftToWrite) {
-            close(fileDescriptor);
-            string errorString = "write failed for file " + fileName + ", requesting " + to_string(bytesLeftToWrite) + " bytes at offset " +
-                                 to_string(totalBytesToWrite - bytesLeftToWrite) + ".  bytesWritten value " + to_string(bytesWritten);
-            throw runtime_error(errorString);
-        }
-
-        bytesLeftToWrite -= bytesWritten;
-        runningMemPtr += bytesWritten;
-    }
-}
-
-void Tensor::loadFromFile(Stream stream, std::optional<uint32_t> crc) {
-    THOR_THROW_IF_FALSE(
-        !crc.has_value());  // Need to solve for this. Not using GDS now so not solving it. ArchiveReader checks crc internally now.
-
-    THOR_THROW_IF_FALSE(!uninitialized());
-    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
-                        getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    THOR_THROW_IF_FALSE(!fileName.empty());
-    THOR_THROW_IF_FALSE(fileAccessRequirement != FileAccess::WRITE_ONLY);
-
-    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        // Can't deallocate the bounce buffer in stream.enqueueHostFunction(), so this process is synchronous.
-        TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-        Tensor bounceBuffer = clone(cpuPlacement);
-        // disk -> cpu
-        PerformReadParams args(bounceBuffer.getMemPtr(), getArraySizeInBytes(), fileName, fileOffset, fileDescriptor);
-        performRead(&args);
-        // cpu -> gpu
-        copyFromAsync(bounceBuffer, stream);
-        Event copyDoneEvent = stream.putEvent(false, true);
-        copyDoneEvent.synchronize();
-    } else {
-        std::unique_ptr<HostFunctionArgsBase> args(
-            new PerformReadParams(getMemPtr(), getArraySizeInBytes(), fileName, fileOffset, fileDescriptor));
-        stream.enqueueHostFunction(performRead, std::move(args));
-    }
-}
-
-void Tensor::dumpToFile(Stream stream) {
-    THOR_THROW_IF_FALSE(!uninitialized());
-    THOR_THROW_IF_FALSE(getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU ||
-                        getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
-    THOR_THROW_IF_FALSE(!fileName.empty());
-    THOR_THROW_IF_FALSE(fileAccessRequirement != FileAccess::READ_ONLY);
-
-    if (getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU) {
-        // Since no gpu direct, allocate a cpu buffer, copy data into that buffer, copy data from buffer to gpu.
-        // I can't do this asynchronously because I need to free the host buffer once it is finished and can't call cuda functions
-        // on a stream enqueued host function.
-        // So when gpuDirectStorage is not available and enabled, this will be a synchronous operation.
-        // It could be made async if I am ok keeping the other tensor alive.
-        // Can't deallocate the bounce buffer in stream.enqueueHostFunction(), so this process is synchronous.
-        TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
-        Tensor bounceBuffer = clone(cpuPlacement);
-        // gpu -> cpu
-        bounceBuffer.copyFromAsync(*this, stream);
-        Event copyDoneEvent = stream.putEvent(false, true);
-        copyDoneEvent.synchronize();
-        // cpu -> disk
-        PerformWriteParams args(bounceBuffer.getMemPtr(), getArraySizeInBytes(), fileName, fileOffset, fileDescriptor);
-        performWrite(&args);
-    } else {
-        std::unique_ptr<HostFunctionArgsBase> args(
-            new PerformWriteParams(getMemPtr(), getArraySizeInBytes(), fileName, fileOffset, fileDescriptor));
-        stream.enqueueHostFunction(performWrite, std::move(args));
-    }
-}
-
 TensorDescriptor Tensor::getDescriptor() const {
     THOR_THROW_IF_FALSE(!uninitialized());
 
@@ -1032,7 +696,7 @@ void Tensor::clearDescriptorOverride() {
     descriptorOverridden = false;
 }
 
-void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSourceValue) {
+void Tensor::copyFromAsyncImpl(Tensor source, Stream copyStream) {
     THOR_THROW_IF_FALSE(!uninitialized());
     THOR_THROW_IF_FALSE(!source.uninitialized());
 
@@ -1068,8 +732,7 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
     // If the destination data type is smaller than the source data type, preserving copyFromAsync intentionally
     // rejects the operation on the C++ side.  Supporting that case without mutating the source requires a hidden
     // temporary, which can mask an unexpected slow path in performance-sensitive C++ code.  The Python binding
-    // implements that as an explicit binding-level convenience instead.  Non-preserving move-style copies may
-    // still down-convert the source in-place before moving the narrower value.
+    // implements that as an explicit binding-level convenience instead.
     if (sourceDescriptor.getDataType() != destDescriptor.getDataType() && source.placement != placement) {
         if (sourceDescriptor.getArraySizeInBytes() <= destDescriptor.getArraySizeInBytes()) {
             if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU)
@@ -1077,46 +740,31 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
 
             Tensor meWithSourceDataType = *this;
             meWithSourceDataType.overrideDescriptor(sourceDescriptor);
-            meWithSourceDataType.copyFromAsync(source, copyStream, mustPreserveSourceValue);
+            meWithSourceDataType.copyFromAsyncImpl(source, copyStream);
 
-            TypeConverter::convertType(
-                destMem,
-                destMem,
-                sourceDescriptor.getDataType(),
-                destDescriptor.getDataType(),
-                sourceDescriptor.getTotalNumElements(),
-                copyStream,
-                placement.getMemDevice() == TensorPlacement::MemDevices::CPU ? MachineEvaluator::CPU_DEVICE_NUM : destDeviceNum);
+            if (placement.getMemDevice() == TensorPlacement::MemDevices::CPU) {
+                TypeConverter::convertType(meWithSourceDataType,
+                                           *this,
+                                           sourceDescriptor.getDataType(),
+                                           destDescriptor.getDataType(),
+                                           sourceDescriptor.getTotalNumElements(),
+                                           copyStream);
+            } else {
+                TypeConverter::convertType(destMem,
+                                           destMem,
+                                           sourceDescriptor.getDataType(),
+                                           destDescriptor.getDataType(),
+                                           sourceDescriptor.getTotalNumElements(),
+                                           copyStream,
+                                           destDeviceNum);
+            }
 
             return;
         } else {
-            if (mustPreserveSourceValue) {
-                throw runtime_error(
-                    "Tensor::copyFromAsync refuses preserving cross-placement copies where the destination data type is "
-                    "smaller than the source data type because that requires a hidden temporary; use an explicit "
-                    "staging buffer (fast) or a temporary (slow) when this path is intended");
-            }
-
-            if (source.placement.getMemDevice() == TensorPlacement::MemDevices::GPU)
-                THOR_THROW_IF_FALSE(source.placement.getDeviceNum() == copyStream.getGpuNum());
-
-            TypeConverter::convertType(
-                sourceMem,
-                sourceMem,
-                sourceDescriptor.getDataType(),
-                destDescriptor.getDataType(),
-                sourceDescriptor.getTotalNumElements(),
-                copyStream,
-                source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU ? MachineEvaluator::CPU_DEVICE_NUM : sourceDeviceNum);
-
-            Tensor sourceWithMyDataType = source;
-            sourceWithMyDataType.overrideDescriptor(destDescriptor);
-            copyFromAsync(sourceWithMyDataType, copyStream, mustPreserveSourceValue);
-
-            if (source.placement.getMemDevice() != TensorPlacement::MemDevices::CPU && copyStream.getGpuNum() != sourceDeviceNum)
-                copyStream.waitEvent(copyStream.putEvent());
-
-            return;
+            throw runtime_error(
+                "Tensor::copyFromAsync refuses preserving cross-placement copies where the destination data type is "
+                "smaller than the source data type because that requires a hidden temporary; use an explicit "
+                "staging buffer (fast) or a temporary (slow) when this path is intended");
         }
     }
 
@@ -1130,13 +778,12 @@ void Tensor::copyFromAsync(Tensor source, Stream copyStream, bool mustPreserveSo
         } else {
             // Convert between data types on cpu.
             // Note that this may be an in-place conversion
-            TypeConverter::convertType(sourceMem,
-                                       destMem,
+            TypeConverter::convertType(source,
+                                       *this,
                                        sourceDescriptor.getDataType(),
                                        destDescriptor.getDataType(),
                                        destDescriptor.getTotalNumElements(),
-                                       copyStream,
-                                       MachineEvaluator::CPU_DEVICE_NUM);
+                                       copyStream);
         }
     } else if (source.placement.getMemDevice() == TensorPlacement::MemDevices::CPU &&
                placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {

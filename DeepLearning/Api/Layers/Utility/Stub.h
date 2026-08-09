@@ -2,6 +2,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
+#include "DeepLearning/Implementation/Layers/Utility/Stub.h"
 #include <optional>
 
 // Attach Stub to output tensors that would be dangling and are not wanted as NetworkOutputs.
@@ -14,7 +15,13 @@ class Stub : public Layer {
     Stub();
     ~Stub() override;
 
-    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override { return std::vector<Tensor>(); }
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override {
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        THOR_THROW_IF_FALSE(inputTensor == featureInput.value());
+        return {};
+    }
+
+    std::vector<Tensor> getAllOutputTensors() const override { return {}; }
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Stub>(*this); }
 
@@ -33,16 +40,19 @@ class Stub : public Layer {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
+        (void)placement;
+        (void)drivingLayer;
+        (void)drivingApiLayer;
         (void)inferenceOnly;
-        THOR_UNREACHABLE();
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
+        return std::make_shared<ThorImplementation::Stub>();
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         return 0;
     }
-
-   private:
-    Tensor getFeatureOutput();
 };
 
 class Stub::Builder {

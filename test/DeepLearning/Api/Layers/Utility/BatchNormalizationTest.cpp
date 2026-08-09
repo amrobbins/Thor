@@ -381,10 +381,10 @@
 //         EXPECT_FALSE(batchNormalizationJ.at("variances_tensor").get<string>().empty());
 //
 //         string file_prefix = "layer" + to_string(batchNormalization.getId());
-//         EXPECT_EQ(batchNormalizationJ.at("weights_tensor").get<string>(), file_prefix + "_weights.gds");
-//         EXPECT_EQ(batchNormalizationJ.at("biases_tensor").get<string>(), file_prefix + "_biases.gds");
-//         EXPECT_EQ(batchNormalizationJ.at("means_tensor").get<string>(), file_prefix + "_means.gds");
-//         EXPECT_EQ(batchNormalizationJ.at("variances_tensor").get<string>(), file_prefix + "_variances.gds");
+//         EXPECT_EQ(batchNormalizationJ.at("weights_tensor").get<string>(), file_prefix + "_weights.tensor");
+//         EXPECT_EQ(batchNormalizationJ.at("biases_tensor").get<string>(), file_prefix + "_biases.tensor");
+//         EXPECT_EQ(batchNormalizationJ.at("means_tensor").get<string>(), file_prefix + "_means.tensor");
+//         EXPECT_EQ(batchNormalizationJ.at("variances_tensor").get<string>(), file_prefix + "_variances.tensor");
 //
 //         // printf("%s\n", networkInputJ.dump(4).c_str());
 //         // printf("%s\n", batchNormalizationJ.dump(4).c_str());
@@ -488,3 +488,250 @@
 //     filesystem::remove("/tmp/testModel.thor.tar");
 // }
 #include <optional>
+
+#include "DeepLearning/Api/Layers/Utility/BatchNormalization.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/BatchNormalization.h"
+#include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
+#include "Utilities/TarFile/TarWriter.h"
+
+#include "gtest/gtest.h"
+
+#include <chrono>
+#include <cstdint>
+#include <filesystem>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace {
+
+namespace Api = Thor;
+namespace Impl = ThorImplementation;
+using DataType = Impl::DataType;
+using std::shared_ptr;
+using std::string;
+using std::vector;
+
+Impl::TensorPlacement batchNormCpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
+
+void synchronizeBatchNormEvents(vector<Event>& events) {
+    for (Event& event : events) {
+        event.synchronize();
+    }
+}
+
+vector<float> readBatchNormParameter(const shared_ptr<Impl::PhysicalParameter>& parameter, Stream& stream) {
+    EXPECT_NE(parameter, nullptr);
+    if (parameter == nullptr || !parameter->getStorage().has_value()) {
+        return {};
+    }
+
+    Impl::Tensor deviceTensor = parameter->getStorage().value();
+    EXPECT_EQ(deviceTensor.getDataType(), DataType::FP32);
+    Impl::Tensor cpuTensor = deviceTensor.clone(batchNormCpuPlacement);
+    cpuTensor.copyFromAsync(deviceTensor, stream);
+    stream.synchronize();
+
+    const float* mem = cpuTensor.getMemPtr<float>();
+    return vector<float>(mem, mem + cpuTensor.getTotalNumElements());
+}
+
+void setBatchNormParameter(const shared_ptr<Impl::PhysicalParameter>& parameter, const vector<float>& values, Stream& stream) {
+    ASSERT_NE(parameter, nullptr);
+    ASSERT_TRUE(parameter->getStorage().has_value());
+
+    Impl::Tensor deviceTensor = parameter->getStorage().value();
+    ASSERT_EQ(deviceTensor.getDataType(), DataType::FP32);
+    ASSERT_EQ(deviceTensor.getTotalNumElements(), values.size());
+
+    Impl::Tensor cpuTensor = deviceTensor.clone(batchNormCpuPlacement);
+    float* mem = cpuTensor.getMemPtr<float>();
+    for (uint64_t i = 0; i < values.size(); ++i) {
+        mem[i] = values[i];
+    }
+    deviceTensor.copyFromAsync(cpuTensor, stream);
+}
+
+template <typename LayerT>
+shared_ptr<LayerT> findOnlyBatchNormTestLayerOfType(Api::Network& network) {
+    shared_ptr<LayerT> found;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < network.getNumLayers(); ++i) {
+        shared_ptr<LayerT> candidate = std::dynamic_pointer_cast<LayerT>(network.getLayer(i));
+        if (candidate != nullptr) {
+            found = candidate;
+            ++count;
+        }
+    }
+    EXPECT_EQ(count, 1u);
+    return found;
+}
+
+struct PlacedBatchNormFixture {
+    shared_ptr<Api::PlacedNetwork> placedNetwork;
+    shared_ptr<Impl::BatchNormalization> physicalBatchNorm;
+};
+
+PlacedBatchNormFixture placeBatchNorm(Api::Network& network, const Api::BatchNormalization& batchNorm, uint32_t batchSize) {
+    vector<Event> initDoneEvents;
+    PlacedBatchNormFixture fixture;
+    fixture.placedNetwork = network.place(batchSize, initDoneEvents, true);
+    synchronizeBatchNormEvents(initDoneEvents);
+    EXPECT_NE(fixture.placedNetwork, nullptr);
+    if (fixture.placedNetwork == nullptr) {
+        return fixture;
+    }
+
+    fixture.physicalBatchNorm = std::dynamic_pointer_cast<Impl::BatchNormalization>(
+        fixture.placedNetwork->getStampedNetwork(0).getPhysicalLayerFromApiLayer(batchNorm.getId()));
+    EXPECT_NE(fixture.physicalBatchNorm, nullptr);
+    return fixture;
+}
+
+std::filesystem::path makeUniqueBatchNormArchiveDir(const string& testName) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / (testName + "_" + std::to_string(now));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+}  // namespace
+
+TEST(BatchNormalizationApi, BuilderRegistersAndInitializesAllPersistentState) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t channels = 3;
+
+    Api::Network network("batch_norm_initial_state");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({channels, 2, 2})
+                                  .dataType(DataType::FP16)
+                                  .build();
+    Api::BatchNormalization batchNorm = Api::BatchNormalization::Builder()
+                                                .network(network)
+                                                .featureInput(input.getFeatureOutput().value())
+                                                .build();
+    Api::NetworkOutput::Builder()
+        .network(network)
+        .name("output")
+        .inputTensor(batchNorm.getFeatureOutput().value())
+        .dataType(DataType::FP16)
+        .build();
+
+    EXPECT_EQ(batchNorm.listParameters(), (vector<string>{"weights", "biases", "running_mean", "running_variance"}));
+    EXPECT_TRUE(batchNorm.getParameterSpecification("weights")->isTrainable());
+    EXPECT_TRUE(batchNorm.getParameterSpecification("biases")->isTrainable());
+    EXPECT_FALSE(batchNorm.getParameterSpecification("running_mean")->isTrainable());
+    EXPECT_FALSE(batchNorm.getParameterSpecification("running_variance")->isTrainable());
+
+    const nlohmann::json architecture = batchNorm.architectureJson();
+    ASSERT_TRUE(architecture.at("parameters").is_object());
+    EXPECT_EQ(architecture.at("parameters").size(), 4u);
+    EXPECT_EQ(architecture.at("num_items_observed").get<uint64_t>(), 0u);
+
+    PlacedBatchNormFixture fixture = placeBatchNorm(network, batchNorm, batchSize);
+    ASSERT_NE(fixture.physicalBatchNorm, nullptr);
+    EXPECT_EQ(fixture.physicalBatchNorm->listParameters(),
+              (vector<string>{"weights", "biases", "running_mean", "running_variance"}));
+
+    Stream stream = fixture.physicalBatchNorm->getStreams()[0];
+    EXPECT_EQ(readBatchNormParameter(fixture.physicalBatchNorm->getParameter("weights"), stream), vector<float>(channels, 1.0f));
+    EXPECT_EQ(readBatchNormParameter(fixture.physicalBatchNorm->getParameter("biases"), stream), vector<float>(channels, 0.0f));
+    EXPECT_EQ(readBatchNormParameter(fixture.physicalBatchNorm->getParameter("running_mean"), stream), vector<float>(channels, 0.0f));
+    EXPECT_EQ(readBatchNormParameter(fixture.physicalBatchNorm->getParameter("running_variance"), stream), vector<float>(channels, 1.0f));
+}
+
+TEST(BatchNormalizationApi, PlacedSaveLoadRoundTripRestoresParametersAndRunningState) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t channels = 3;
+    constexpr uint64_t itemsObserved = 37;
+    const vector<float> weights = {1.25f, 0.75f, -0.5f};
+    const vector<float> biases = {0.1f, -0.2f, 0.3f};
+    const vector<float> runningMean = {2.0f, -1.0f, 0.5f};
+    const vector<float> runningVariance = {4.0f, 2.5f, 0.25f};
+
+    const string networkName = "batch_norm_state_round_trip";
+    std::filesystem::path archiveDir = makeUniqueBatchNormArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("input")
+                                      .dimensions({channels, 2, 2})
+                                      .dataType(DataType::FP32)
+                                      .build();
+        Api::BatchNormalization batchNorm = Api::BatchNormalization::Builder()
+                                                    .network(network)
+                                                    .featureInput(input.getFeatureOutput().value())
+                                                    .exponentialRunningAverageFactor(0.125)
+                                                    .epsilon(0.0002)
+                                                    .build();
+        Api::NetworkOutput::Builder()
+            .network(network)
+            .name("output")
+            .inputTensor(batchNorm.getFeatureOutput().value())
+            .dataType(DataType::FP32)
+            .build();
+
+        PlacedBatchNormFixture fixture = placeBatchNorm(network, batchNorm, batchSize);
+        ASSERT_NE(fixture.physicalBatchNorm, nullptr);
+        Stream stream = fixture.physicalBatchNorm->getStreams()[0];
+        setBatchNormParameter(fixture.physicalBatchNorm->getParameter("weights"), weights, stream);
+        setBatchNormParameter(fixture.physicalBatchNorm->getParameter("biases"), biases, stream);
+        setBatchNormParameter(fixture.physicalBatchNorm->getParameter("running_mean"), runningMean, stream);
+        setBatchNormParameter(fixture.physicalBatchNorm->getParameter("running_variance"), runningVariance, stream);
+        fixture.physicalBatchNorm->setNumItemsObserved(itemsObserved);
+        stream.synchronize();
+
+        thor_file::TarWriter formatWriter("batch_norm_serialization_format");
+        nlohmann::json serialized =
+            batchNorm.serialize(formatWriter, stream, false, fixture.placedNetwork->getStampedNetwork(0));
+        EXPECT_EQ(serialized.at("num_items_observed").get<uint64_t>(), itemsObserved);
+        ASSERT_TRUE(serialized.at("parameters").is_object());
+        EXPECT_EQ(serialized.at("parameters").size(), 4u);
+        for (const string& parameterName : vector<string>{"weights", "biases", "running_mean", "running_variance"}) {
+            ASSERT_TRUE(serialized.at("parameters").contains(parameterName));
+            EXPECT_TRUE(serialized.at("parameters").at(parameterName).contains("storage_file"));
+        }
+        EXPECT_FALSE(serialized.contains("weights_tensor"));
+        EXPECT_FALSE(serialized.contains("biases_tensor"));
+        EXPECT_FALSE(serialized.contains("means_tensor"));
+        EXPECT_FALSE(serialized.contains("variances_tensor"));
+
+        fixture.placedNetwork->save(archiveDir.string(), true, false);
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+        shared_ptr<Api::BatchNormalization> loadedBatchNorm = findOnlyBatchNormTestLayerOfType<Api::BatchNormalization>(loadedNetwork);
+        ASSERT_NE(loadedBatchNorm, nullptr);
+        EXPECT_DOUBLE_EQ(loadedBatchNorm->getExponentialRunningAverageFactor().value(), 0.125);
+        EXPECT_DOUBLE_EQ(loadedBatchNorm->getEpsilon().value(), 0.0002);
+        EXPECT_EQ(loadedBatchNorm->listParameters(), (vector<string>{"weights", "biases", "running_mean", "running_variance"}));
+
+        const nlohmann::json loadedArchitecture = loadedBatchNorm->architectureJson();
+        EXPECT_EQ(loadedArchitecture.at("num_items_observed").get<uint64_t>(), itemsObserved);
+        ASSERT_TRUE(loadedArchitecture.at("parameters").is_object());
+        EXPECT_EQ(loadedArchitecture.at("parameters").size(), 4u);
+
+        PlacedBatchNormFixture loadedFixture = placeBatchNorm(loadedNetwork, *loadedBatchNorm, batchSize);
+        ASSERT_NE(loadedFixture.physicalBatchNorm, nullptr);
+        Stream loadedStream = loadedFixture.physicalBatchNorm->getStreams()[0];
+        EXPECT_EQ(readBatchNormParameter(loadedFixture.physicalBatchNorm->getParameter("weights"), loadedStream), weights);
+        EXPECT_EQ(readBatchNormParameter(loadedFixture.physicalBatchNorm->getParameter("biases"), loadedStream), biases);
+        EXPECT_EQ(readBatchNormParameter(loadedFixture.physicalBatchNorm->getParameter("running_mean"), loadedStream), runningMean);
+        EXPECT_EQ(readBatchNormParameter(loadedFixture.physicalBatchNorm->getParameter("running_variance"), loadedStream), runningVariance);
+        EXPECT_EQ(loadedFixture.physicalBatchNorm->getNumItemsObserved(), itemsObserved);
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        throw;
+    }
+
+    std::filesystem::remove_all(archiveDir);
+}

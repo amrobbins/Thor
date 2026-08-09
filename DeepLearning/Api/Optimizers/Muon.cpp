@@ -143,7 +143,7 @@ json Muon::serialize(thor_file::TarWriter& archiveWriter,
 
         if (physicalMuon->isUsingMuonMatrixPath()) {
             string optimizerName = filenamePrefix + "_muon";
-            string momentumTensorFile = optimizerName + "_momentum.gds";
+            string momentumTensorFile = optimizerName + "_momentum.tensor";
             j["selected_optimizer"] = string("muon");
             j["momentum_tensor"] = momentumTensorFile;
             optional<ThorImplementation::Tensor> momentum = selected->getParameter("momentum")->getStorage();

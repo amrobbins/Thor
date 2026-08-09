@@ -589,8 +589,9 @@ def test_graph_conditional_output_contract_and_branch_name_validation():
     with pytest.raises(RuntimeError):
         thor.physical.Outputs.conditional(predicate, then_outputs, mismatched_else)
 
-    with pytest.raises(RuntimeError):
-        conditional.to_json()
+    payload = conditional.to_json()
+    restored = thor.physical.Outputs.from_json(payload)
+    assert restored.output_names() == ["y"]
 
 
 @pytest.mark.cuda

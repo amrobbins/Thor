@@ -108,10 +108,18 @@ fs::path uniqueTempDir(const std::string& stem) {
     return fs::temp_directory_path() / (stem + "_" + std::to_string(::getpid()) + "_" + std::to_string(now));
 }
 
+bool releaseArtifactIoGateEnabled() {
+    const char* value = std::getenv("THOR_RELEASE_ARTIFACT_IO_GATE");
+    return value != nullptr && std::string(value) == "1";
+}
+
 void requireCudaDeviceOrSkip() {
     int deviceCount = 0;
     cudaError_t status = cudaGetDeviceCount(&deviceCount);
     if (status != cudaSuccess || deviceCount <= 0) {
+        if (releaseArtifactIoGateEnabled()) {
+            throw std::runtime_error("Release artifact-I/O gate requires an available CUDA device.");
+        }
         GTEST_SKIP() << "TarWriter/TarReader backend CRC regression requires a CUDA device.";
     }
 }
@@ -184,24 +192,24 @@ std::vector<TensorSpec> archiveRegressionTensorSpecs() {
     // per-op chunk size.  The io_uring CRC bug observed in SkuForecaster artifacts
     // manifested as a TarReader content CRC mismatch for one layer parameter file.
     return {
-        {"layer4300_weights_parameter_weights.gds", 257'003ULL, 11},
-        {"layer4300_biases_parameter_weights.gds", 5'000'000ULL, 12},
-        {"layer4311_weights_parameter_weights.gds", 1'048'576ULL + 123ULL, 13},
-        {"layer4311_biases_parameter_weights.gds", 333'337ULL, 14},
-        {"layer4322_weights_parameter_weights.gds", 16'777'216ULL + 123ULL, 15},
-        {"layer4322_biases_parameter_weights.gds", 65'539ULL, 16},
-        {"layer4333_weights_parameter_weights.gds", 3'145'729ULL, 17},
-        {"layer4333_biases_parameter_weights.gds", 786'461ULL, 18},
-        {"layer4344_weights_parameter_weights.gds", 16'777'216ULL + 7'777ULL, 19},
-        {"layer4344_biases_parameter_weights.gds", 98'309ULL, 20},
-        {"layer4357_weights_parameter_weights.gds", 5'000'000ULL, 21},
-        {"layer4357_biases_parameter_weights.gds", 524'309ULL, 22},
-        {"layer4368_weights_parameter_weights.gds", 16'777'216ULL + 31ULL, 23},
-        {"layer4368_biases_parameter_weights.gds", 131'101ULL, 24},
-        {"layer4379_weights_parameter_weights.gds", 8'388'608ULL + 511ULL, 25},
-        {"layer4379_biases_parameter_weights.gds", 262'153ULL, 26},
-        {"layer4388_weights_parameter_weights.gds", 2'097'191ULL, 27},
-        {"layer4388_biases_parameter_weights.gds", 17'411ULL, 28},
+        {"layer4300_weights_parameter_weights.tensor", 257'003ULL, 11},
+        {"layer4300_biases_parameter_weights.tensor", 5'000'000ULL, 12},
+        {"layer4311_weights_parameter_weights.tensor", 1'048'576ULL + 123ULL, 13},
+        {"layer4311_biases_parameter_weights.tensor", 333'337ULL, 14},
+        {"layer4322_weights_parameter_weights.tensor", 16'777'216ULL + 123ULL, 15},
+        {"layer4322_biases_parameter_weights.tensor", 65'539ULL, 16},
+        {"layer4333_weights_parameter_weights.tensor", 3'145'729ULL, 17},
+        {"layer4333_biases_parameter_weights.tensor", 786'461ULL, 18},
+        {"layer4344_weights_parameter_weights.tensor", 16'777'216ULL + 7'777ULL, 19},
+        {"layer4344_biases_parameter_weights.tensor", 98'309ULL, 20},
+        {"layer4357_weights_parameter_weights.tensor", 5'000'000ULL, 21},
+        {"layer4357_biases_parameter_weights.tensor", 524'309ULL, 22},
+        {"layer4368_weights_parameter_weights.tensor", 16'777'216ULL + 31ULL, 23},
+        {"layer4368_biases_parameter_weights.tensor", 131'101ULL, 24},
+        {"layer4379_weights_parameter_weights.tensor", 8'388'608ULL + 511ULL, 25},
+        {"layer4379_biases_parameter_weights.tensor", 262'153ULL, 26},
+        {"layer4388_weights_parameter_weights.tensor", 2'097'191ULL, 27},
+        {"layer4388_biases_parameter_weights.tensor", 17'411ULL, 28},
     };
 }
 
@@ -272,7 +280,7 @@ void runTarArchiveRoundTripForBackend(const BackendCase& backend,
         try {
             writer.createArchive(archiveDir.path(), /*overwriteIfExists=*/true);
         } catch (const std::runtime_error& e) {
-            if (isUnavailableExplicitUringDirect(backend, e.what())) {
+            if (isUnavailableExplicitUringDirect(backend, e.what()) && !releaseArtifactIoGateEnabled()) {
                 GTEST_SKIP() << "Explicit uring_direct backend is unavailable in this runtime: " << e.what();
             }
             throw;
@@ -295,7 +303,7 @@ void runTarArchiveRoundTripForBackend(const BackendCase& backend,
         try {
             reader.executeReadRequests();
         } catch (const std::runtime_error& e) {
-            if (isUnavailableExplicitUringDirect(backend, e.what())) {
+            if (isUnavailableExplicitUringDirect(backend, e.what()) && !releaseArtifactIoGateEnabled()) {
                 GTEST_SKIP() << "Explicit uring_direct backend is unavailable in this runtime: " << e.what();
             }
             throw;
@@ -386,7 +394,7 @@ void runFaultInjectedSingleShardRoundTrip(TarShortIoFault fault) {
             expectDeterministicBytes(actual.data(), actual.size(), specs[i].seed, specs[i].pathInTar);
         }
     } catch (const std::runtime_error& e) {
-        if (isUnavailableExplicitUringDirect(BackendCase{"uring_direct", "uring_direct"}, e.what())) {
+        if (isUnavailableExplicitUringDirect(BackendCase{"uring_direct", "uring_direct"}, e.what()) && !releaseArtifactIoGateEnabled()) {
             GTEST_SKIP() << "Explicit uring_direct backend is unavailable in this runtime: " << e.what();
         }
         throw;
@@ -403,12 +411,14 @@ TEST_P(TarWriterReaderBackendRegression, PreservesModelArtifactPayloadCrcsInArch
     runTarArchiveRoundTripForBackend(GetParam(), sequentialReadOrder(specs.size()), /*repetitions=*/1, "archive_order");
 }
 
+// Release-gating regression. Run through the check-release-artifact-io CMake target.
 TEST_P(TarWriterReaderBackendRegression, DISABLED_PreservesModelArtifactPayloadCrcsInNetworkLikeReadOrder) {
     requireCudaDeviceOrSkip();
     const std::vector<TensorSpec> specs = archiveRegressionTensorSpecs();
     runTarArchiveRoundTripForBackend(GetParam(), networkLikeScrambledReadOrder(specs.size()), /*repetitions=*/8, "network_like_read_order");
 }
 
+// Release-gating regression. Run through the check-release-artifact-io CMake target.
 TEST_P(TarWriterReaderBackendRegression, DISABLED_PreservesModelArtifactPayloadCrcsWhenLargeEntriesShareOneShard) {
     requireCudaDeviceOrSkip();
     const std::vector<TensorSpec> specs = archiveRegressionTensorSpecs();
@@ -431,7 +441,7 @@ TEST(TarWriterReaderFileShardingRegression, PreservesOneLogicalFileAcrossPayload
     constexpr uint64_t kArchiveShardBytes = 1'100'000ULL;
     constexpr uint32_t kSeed = 2718;
     const std::string archiveName = "file_sharding_regression";
-    const std::string logicalPath = "layer0_weights_parameter_weights.gds";
+    const std::string logicalPath = "layer0_weights_parameter_weights.tensor";
 
     Tensor source = makeGpuUint8Tensor(kPayloadBytes, kSeed);
     thor_file::TarWriter writer(archiveName, kArchiveShardBytes, kFileShardBytes);
@@ -474,7 +484,7 @@ TEST(TarWriterReaderDiagnostics, CrcMismatchReportsIndependentBufferedPreadClass
     ScopedEnvVar tarReadBackend("THOR_TAR_READ_IO_BACKEND", "pread_direct");
     ScopedDirectory archiveDir(uniqueTempDir("thor_tar_crc_mismatch_diagnostic"));
     const std::string archiveName = "crc_mismatch_diagnostic";
-    const TensorSpec spec{"layer9282_weights_parameter_weights.gds", 64'003ULL, 9282};
+    const TensorSpec spec{"layer9282_weights_parameter_weights.tensor", 64'003ULL, 9282};
 
     {
         Tensor source = makeGpuUint8Tensor(spec.numBytes, spec.seed);
@@ -521,6 +531,7 @@ TEST(TarWriterReaderDiagnostics, CrcMismatchReportsIndependentBufferedPreadClass
     }
 }
 
+// Release-gating regression reproducing an observed production archive geometry.
 TEST(TarWriterReaderProductionGeometryRegression, DISABLED_UringWriterPreservesObservedLayer9282OffsetAndSize) {
     requireCudaDeviceOrSkip();
     ScopedUringDirectShortIoHooks hooks;
@@ -536,7 +547,7 @@ TEST(TarWriterReaderProductionGeometryRegression, DISABLED_UringWriterPreservesO
     constexpr uint64_t kFillerPayloadBytes = 26'445'312ULL;
     constexpr uint64_t kArchiveLimitBytes = 1'000'000'000ULL;
     constexpr uint32_t kRepeatedEntryCount = 6;
-    const std::string targetPath = "layer9282_weights_parameter_weights.gds";
+    const std::string targetPath = "layer9282_weights_parameter_weights.tensor";
 
     ScopedEnvVar globalBackend("THOR_IO_BACKEND", "pread_direct");
     ScopedEnvVar writerBackend("THOR_TAR_WRITE_IO_BACKEND", "uring_direct");
@@ -557,15 +568,15 @@ TEST(TarWriterReaderProductionGeometryRegression, DISABLED_UringWriterPreservesO
                                 /*archiveShardSizeLimitBytes=*/kArchiveLimitBytes,
                                 /*fileShardSizeLimitBytes=*/500'000'000ULL);
     for (uint32_t i = 0; i < kRepeatedEntryCount; ++i) {
-        writer.addArchiveFile("prefix_layer_" + std::to_string(i) + "_weights.gds", (i & 1u) == 0 ? largeA : largeB);
+        writer.addArchiveFile("prefix_layer_" + std::to_string(i) + "_weights.tensor", (i & 1u) == 0 ? largeA : largeB);
     }
-    writer.addArchiveFile("prefix_alignment_filler.gds", filler);
+    writer.addArchiveFile("prefix_alignment_filler.tensor", filler);
     writer.addArchiveFile(targetPath, target);
 
     try {
         writer.createArchive(archiveDir.path(), /*overwriteIfExists=*/true);
     } catch (const std::runtime_error& e) {
-        if (isUnavailableExplicitUringDirect(BackendCase{"uring_direct", "uring_direct"}, e.what())) {
+        if (isUnavailableExplicitUringDirect(BackendCase{"uring_direct", "uring_direct"}, e.what()) && !releaseArtifactIoGateEnabled()) {
             GTEST_SKIP() << "Explicit uring_direct backend is unavailable in this runtime: " << e.what();
         }
         throw;

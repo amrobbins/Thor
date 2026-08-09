@@ -2,12 +2,9 @@
 
 #include <optional>
 #include <vector>
-#include "DeepLearning/Implementation/Initializers/Initializer.h"
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "DeepLearning/Implementation/ThorError.h"
-
-// FIXME: More work to do on this, compare to old get it exact.
 
 namespace ThorImplementation {
 
@@ -65,9 +62,6 @@ class BatchNormalization : public TrainableLayer {
 
    protected:
     void compileImpl() override;
-
-    std::shared_ptr<ThorImplementation::Initializer> resultRunningMeanInitializer = nullptr;
-    std::shared_ptr<ThorImplementation::Initializer> resultRunningVarianceInitializer = nullptr;
 
    private:
     void computeFeatureOut(uint32_t connectionNumber) override;

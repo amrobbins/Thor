@@ -113,8 +113,8 @@ json Lamb::serialize(thor_file::TarWriter& archiveWriter,
         THOR_THROW_IF_FALSE(!filenamePrefix.empty());
 
         string optimizerName = filenamePrefix + "_lamb";
-        string mFile = optimizerName + "_m.gds";
-        string vFile = optimizerName + "_v.gds";
+        string mFile = optimizerName + "_m.tensor";
+        string vFile = optimizerName + "_v.tensor";
         j["m_tensor"] = mFile;
         j["v_tensor"] = vFile;
 

@@ -110,7 +110,7 @@ json Lars::serialize(thor_file::TarWriter& archiveWriter,
         THOR_THROW_IF_FALSE(!filenamePrefix.empty());
 
         string optimizerName = filenamePrefix + "_lars";
-        string velocityFile = optimizerName + "_velocity.gds";
+        string velocityFile = optimizerName + "_velocity.tensor";
         j["velocity_tensor"] = velocityFile;
 
         shared_ptr<ThorImplementation::Lars> physicalLars = dynamic_pointer_cast<ThorImplementation::Lars>(physicalOptimizer);

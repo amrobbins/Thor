@@ -713,17 +713,69 @@ TEST(ExpressionGraphConditionalOps, ConditionalOutputsExposeContractAndRejectMis
     EXPECT_THROW((void)Outputs::conditional(predicate, then_outputs, mismatched_else), std::runtime_error);
 }
 
-TEST(ExpressionGraphConditionalOps, CompileBackwardAndExpressionDefinitionRejectConditionalOutputs) {
+TEST(ExpressionGraphConditionalOps, ExpressionDefinitionRoundTripsConditionalAndCompileBackwardRemainsUnsupported) {
     auto x = Expression::input("x");
     auto predicate = Expression::input("predicate_value").greaterThan(Expression::constantScalar(0.0));
     Outputs conditional = Outputs::conditional(predicate,
                                                Expression::outputs({{"y", x + Expression::constantScalar(1.0)}}),
                                                Expression::outputs({{"y", x - Expression::constantScalar(1.0)}}));
 
-    EXPECT_THROW((void)ExpressionDefinition::fromOutputs(conditional), std::runtime_error);
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(conditional);
+    nlohmann::json payload = definition.architectureJson();
+    ASSERT_TRUE(payload.contains("conditional"));
+    EXPECT_EQ(payload.at("nodes").size(), 0u);
+    EXPECT_EQ(payload.at("outputs").at(0).at("node").get<uint32_t>(), 0u);
 
-    FusedEquation equation = FusedEquation::compile(conditional.physicalOutputs(), 0);
+    ExpressionDefinition loaded = ExpressionDefinition::deserialize(payload);
+    EXPECT_TRUE(loaded.outputs.isConditional());
+    EXPECT_EQ(loaded.canonical_hash, definition.canonical_hash);
+    EXPECT_EQ(loaded.architectureJson(), payload);
+
+    FusedEquation equation = FusedEquation::compile(loaded.outputs, 0);
     EXPECT_THROW((void)equation.compileBackward({"x"}, "dy"), std::runtime_error);
+}
+
+TEST(ExpressionGraphConditionalOps, NestedConditionalDefinitionRoundTripsAndTamperingIsRejected) {
+    auto x = Expression::input("x");
+    auto outer_predicate = Expression::input("outer_predicate").greaterThan(Expression::constantScalar(0.0));
+    auto inner_predicate = Expression::input("inner_predicate").greaterThan(Expression::constantScalar(0.0));
+
+    Outputs inner = Outputs::conditional(
+        inner_predicate,
+        Expression::outputs({{"y", x + Expression::constantScalar(2.0)}, {"z", x * Expression::constantScalar(3.0)}}),
+        Expression::outputs({{"y", x - Expression::constantScalar(2.0)}, {"z", x * Expression::constantScalar(4.0)}}));
+    Outputs outer = Outputs::conditional(
+        outer_predicate,
+        inner,
+        Expression::outputs({{"y", x + Expression::constantScalar(10.0)}, {"z", x * Expression::constantScalar(5.0)}}));
+
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(outer);
+    nlohmann::json payload = definition.architectureJson();
+    ASSERT_TRUE(payload.at("conditional").at("then_branch").contains("conditional"));
+
+    ExpressionDefinition loaded = ExpressionDefinition::deserialize(payload);
+    EXPECT_TRUE(loaded.outputs.isConditional());
+    ASSERT_TRUE(loaded.outputs.conditional->then_branch.isConditional());
+    EXPECT_EQ(loaded.expected_input_names, definition.expected_input_names);
+    EXPECT_EQ(loaded.expected_output_names, (std::vector<std::string>{"y", "z"}));
+    EXPECT_EQ(loaded.architectureJson(), payload);
+
+    nlohmann::json tampered = payload;
+    auto& nested_then_nodes = tampered["conditional"]["then_branch"]["conditional"]["then_branch"]["nodes"];
+    bool changed_scalar = false;
+    for (auto& node : nested_then_nodes) {
+        if (node.at("op").get<std::string>() == "scalar_fp") {
+            node["scalar_fp"] = 1234.0f;
+            changed_scalar = true;
+            break;
+        }
+    }
+    ASSERT_TRUE(changed_scalar);
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(tampered), std::runtime_error);
+
+    nlohmann::json unsupported_cuda = payload;
+    unsupported_cuda["conditional"]["then_branch"]["cuda_kernels"] = nlohmann::json::array({nlohmann::json::object()});
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(unsupported_cuda), std::runtime_error);
 }
 
 TEST(ExpressionGraphConditionalOps, RunsThenAndElseBranchesWithDeviceScalarPredicate) {
@@ -735,7 +787,9 @@ TEST(ExpressionGraphConditionalOps, RunsThenAndElseBranchesWithDeviceScalarPredi
     Outputs conditional = Outputs::conditional(predicate,
                                                Expression::outputs({{"y", x_expr + Expression::constantScalar(10.0)}}),
                                                Expression::outputs({{"y", x_expr - Expression::constantScalar(10.0)}}));
-    FusedEquation equation = FusedEquation::compile(conditional.physicalOutputs(), 0);
+    ExpressionDefinition loaded =
+        ExpressionDefinition::deserialize(ExpressionDefinition::fromOutputs(conditional).architectureJson());
+    FusedEquation equation = FusedEquation::compile(loaded.outputs, 0);
 
     Tensor x = makeGpuTensor({4}, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
 

@@ -1,4 +1,5 @@
 #include "TypeConverter.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/LowPrecisionFloat.h"
@@ -20,6 +21,40 @@ struct Converter<FROM_TYPE, __nv_fp8_e4m3> {
     inline __nv_fp8_e4m3 operator()(FROM_TYPE x) const { return ThorLowPrecision::toFp8E4M3Satfinite(x); }
 };
 
+struct TypeConverter::Args : HostFunctionArgsBase {
+    Args(void *source,
+         void *dest,
+         DataType sourceDataType,
+         DataType destDataType,
+         long numElements)
+        : source(source),
+          dest(dest),
+          numElements(numElements),
+          sourceDataType(sourceDataType),
+          destDataType(destDataType) {}
+
+    void *source;
+    void *dest;
+    long numElements;
+    DataType sourceDataType;
+    DataType destDataType;
+};
+
+struct TypeConverter::TensorArgs final : Args {
+    TensorArgs(const Tensor &sourceTensor,
+               const Tensor &destTensor,
+               void *source,
+               void *dest,
+               DataType sourceDataType,
+               DataType destDataType,
+               long numElements)
+        : Args(source, dest, sourceDataType, destDataType, numElements), sourceTensor(sourceTensor), destTensor(destTensor) {}
+
+    Tensor sourceTensor;
+    Tensor destTensor;
+};
+
+
 void TypeConverter::convertType(void *source,
                                 void *dest,
                                 DataType sourceDataType,
@@ -35,14 +70,34 @@ void TypeConverter::convertType(void *source,
         return;
 
     if (deviceNum == -1) {
-        // CPU
-        Args *args = new Args(source, dest, sourceDataType, destDataType, numElements);
-        CUDA_CHECK(cudaLaunchHostFunc(stream.getStream(), cpuConvertType, args));
+        auto args = make_unique<Args>(source, dest, sourceDataType, destDataType, numElements);
+        stream.enqueueHostFunction(cpuConvertType, std::move(args));
     } else {
         // GPU
         THOR_THROW_IF_FALSE(stream.getGpuNum() == deviceNum);
         gpuConvertType(source, dest, sourceDataType, destDataType, numElements, stream);
     }
+}
+
+void TypeConverter::convertType(const Tensor &source,
+                                const Tensor &dest,
+                                DataType sourceDataType,
+                                DataType destDataType,
+                                long numElements,
+                                Stream stream) {
+    THOR_THROW_IF_FALSE(sourceDataType != destDataType);
+    THOR_THROW_IF_FALSE(source.isInitialized());
+    THOR_THROW_IF_FALSE(dest.isInitialized());
+    THOR_THROW_IF_FALSE(source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(dest.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(numElements >= 0);
+    if (numElements == 0)
+        return;
+
+    void *sourceMem = source.getBaseMemPtr();
+    void *destMem = dest.getBaseMemPtr();
+    auto args = make_unique<TensorArgs>(source, dest, sourceMem, destMem, sourceDataType, destDataType, numElements);
+    stream.enqueueHostFunction(cpuConvertType, std::move(args));
 }
 
 //----------------------------------
@@ -839,7 +894,6 @@ void CUDART_CB TypeConverter::cpuConvertType(void *data) {
             THOR_UNREACHABLE();
     }
 
-    delete args;
 }
 
 template <typename FROM_TYPE, typename TO_TYPE>
