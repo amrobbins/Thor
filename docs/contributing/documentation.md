@@ -39,7 +39,7 @@ The generated static site is written to `site/`. The `--strict` build is the can
 
 ## Continuous integration
 
-The `Documentation` GitHub Actions workflow runs for every pull request and every push to `main`. It installs only the dependencies in `requirements/docs.txt` and runs the same strict production build used locally:
+The `Documentation` GitHub Actions workflow runs for every pull request and every push to `master`. It installs only the dependencies in `requirements/docs.txt` and runs the same strict production build used locally:
 
 ```bash
 zensical build --clean --strict
@@ -103,6 +103,6 @@ That mode additionally fails for every resolved public symbol without a referenc
 
 Production publication is intentionally separate from pull-request validation so the ordinary `Documentation` workflow can keep read-only repository permissions.
 
-The `Publish documentation` workflow rebuilds the same strict site on pushes to `main`, uploads the generated `site/` directory as a GitHub Pages artifact, and deploys it to the `github-pages` environment. It can also be run manually with `workflow_dispatch`.
+The `Publish documentation` workflow rebuilds the same strict site on pushes to `master`, uploads the generated `site/` directory as a GitHub Pages artifact, and deploys it to the `github-pages` environment. It can also be run manually with `workflow_dispatch`.
 
 Before the first deployment, configure the repository once in **Settings → Pages → Build and deployment → Source** and select **GitHub Actions**. No generated HTML is committed to the repository.

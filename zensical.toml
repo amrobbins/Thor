@@ -4,7 +4,7 @@ site_description = "Thor deep learning framework documentation"
 site_url = "https://amrobbins.github.io/Thor/"
 repo_url = "https://github.com/amrobbins/Thor"
 repo_name = "amrobbins/Thor"
-edit_uri = "edit/main/docs/"
+edit_uri = "edit/master/docs/"
 docs_dir = "docs"
 site_dir = "site"
 
