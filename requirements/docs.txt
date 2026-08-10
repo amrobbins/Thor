@@ -1,0 +1,4 @@
+# Keep the documentation toolchain independent from Thor's CUDA/Python build.
+# Upgrade intentionally after validating the generated site and CI build.
+zensical==0.0.53
+mkdocstrings-python==2.0.5

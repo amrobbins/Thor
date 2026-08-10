@@ -1,0 +1,85 @@
+[project]
+site_name = "Thor"
+site_description = "Thor deep learning framework documentation"
+site_url = "https://amrobbins.github.io/Thor/"
+repo_url = "https://github.com/amrobbins/Thor"
+repo_name = "amrobbins/Thor"
+edit_uri = "edit/main/docs/"
+docs_dir = "docs"
+site_dir = "site"
+
+nav = [
+  { "Home" = "index.md" },
+  { "Getting Started" = "getting-started/index.md" },
+  { "Tutorials" = "tutorials/index.md" },
+  { "Guides" = "guides/index.md" },
+  { "Concepts" = "concepts/index.md" },
+  { "API Reference" = [
+    { "Overview" = "reference/index.md" },
+    { "Core" = "reference/core.md" },
+    { "Ensembles" = "reference/ensembles.md" },
+  ] },
+  { "Contributing" = [{ "Documentation" = "contributing/documentation.md" }] },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.code.copy",
+  "content.tabs.link",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.top",
+  "search.highlight",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[project.validation]
+invalid_links = true
+invalid_link_anchors = true
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+md_in_html = {}
+toc = { permalink = true }
+pymdownx.details = {}
+pymdownx.highlight = { anchor_linenums = true, line_spans = "__span", pygments_lang_class = true }
+pymdownx.inlinehilite = {}
+pymdownx.superfences = {}
+pymdownx.tabbed = { alternate_style = true }
+
+[project.plugins.mkdocstrings.handlers.python]
+# Griffe reads Thor's Python sources statically. Native extension inspection is
+# deliberately disabled so docs builds never import thor._thor or require CUDA.
+paths = ["bindings/python/src", "docs/_api_stubs"]
+
+[project.plugins.mkdocstrings.handlers.python.options]
+allow_inspection = false
+find_stubs_package = true
+separate_signature = true
+show_signature_annotations = true
+signature_crossrefs = false
+show_root_heading = true
+show_root_full_path = true
+show_source = false
