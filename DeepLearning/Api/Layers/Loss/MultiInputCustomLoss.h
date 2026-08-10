@@ -104,8 +104,6 @@ class MultiInputCustomLoss : public Loss {
     static std::string joinNames(const std::set<std::string>& names);
     static PhysicalTensor makeFakePlacedTensor(const Tensor& apiTensor);
     static Tensor logicalLossTensorFromFakeOutput(const std::vector<uint64_t>& fakeOutputDims, DataType dtype);
-    static DataType findOutputDType(const std::shared_ptr<ThorImplementation::CompiledOutputs>& compiledOutputs,
-                                    const std::string& outputName);
 
     void validateInputSpecs() const;
     void validateExpressionNames(const ThorImplementation::DynamicExpression& expression,

@@ -43,6 +43,23 @@ class StampedExecutionPlan;
 
 namespace detail {
 struct ConditionalGraphCaptureAccess;
+
+struct ConditionalRuntimeScalarKernelArgument {
+    uint32_t kernel_argument_index = 0;
+    std::string name;
+    float multiplier = 1.0f;
+};
+
+struct ConditionalRuntimeScalarKernelBinding {
+    cudaGraphNode_t source_node = nullptr;
+    bool use_driver_api = false;
+    cudaKernelNodeParams runtime_template_params{};
+    CUDA_KERNEL_NODE_PARAMS driver_template_params{};
+    std::vector<void*> template_kernel_params;
+    std::vector<void*> launch_kernel_params;
+    std::vector<float> runtime_values;
+    std::vector<ConditionalRuntimeScalarKernelArgument> runtime_arguments;
+};
 }
 
 enum class ReductionResultKind : uint8_t {
@@ -457,6 +474,8 @@ class StampedEquation {
         int device_num);
 
    private:
+    friend struct detail::ConditionalGraphCaptureAccess;
+
     std::shared_ptr<CompiledEquation> compiledEquation;
     // CompiledEquation objects are globally cached by structural expression shape.
     // Semantic binding names belong to this stamp, not to the cached kernel.
@@ -488,6 +507,8 @@ class StampedCudaKernel {
     [[nodiscard]] Tensor getOutputTensor() const;
 
    private:
+    friend struct detail::ConditionalGraphCaptureAccess;
+
     std::shared_ptr<CompiledCudaKernel> compiled;
     std::vector<Tensor> inputs;
     std::vector<TensorScalarBinding> tensor_runtime_scalars;
@@ -740,6 +761,9 @@ class StampedMatmul {
     [[nodiscard]] StampedMatmulKernelDiagnostic kernelDiagnostic() const;
 
    private:
+    friend struct detail::ConditionalGraphCaptureAccess;
+
+    void runOnConditionalGraphCapture(Stream& run_stream) const;
     const std::shared_ptr<CompiledMatmul> compiled_matmul;
     const std::shared_ptr<BuiltMatmul> built_matmul;
     const Tensor lhs;
@@ -1082,12 +1106,15 @@ class StampedConditional {
     uint32_t gpuNum() const;
 
    private:
+    friend struct detail::ConditionalGraphCaptureAccess;
+
     std::shared_ptr<StampedExecutionPlan> predicate_plan;
     std::shared_ptr<StampedExecutionPlan> then_plan;
     std::shared_ptr<StampedExecutionPlan> else_plan;
     std::vector<std::string> output_names;
     Stream stream;
-    CudaGraphExecutable conditional_graph;
+    mutable CudaGraphExecutable conditional_graph;
+    mutable std::vector<detail::ConditionalRuntimeScalarKernelBinding> runtime_scalar_kernel_bindings;
 };
 
 struct StampedExecutionStage {
@@ -1603,10 +1630,6 @@ class StampedExecutionPlan {
    private:
     friend struct detail::ConditionalGraphCaptureAccess;
 
-    // Conditional CUDA graph bodies are currently captured on one stream. Keep this
-    // deliberately private so normal Expression execution always uses the dependency
-    // scheduler and its helper streams.
-    void runSequentiallyForCudaGraphCapture(Stream& capture_stream) const;
     void materializeOutputsOn(Stream& run_stream) const;
 
     const std::vector<StampedExecutionStage> steps;

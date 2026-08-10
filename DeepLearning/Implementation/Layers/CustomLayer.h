@@ -18,6 +18,8 @@
 #include <vector>
 
 namespace ThorImplementation {
+class Loss;
+
 class CustomLayer : public TrainableLayer {
    public:
     struct DeclaredOutputDescriptor {
@@ -108,7 +110,8 @@ class CustomLayer : public TrainableLayer {
                                          std::string labelsName,
                                          std::string gradientName,
                                          const Tensor& batchValidityMask,
-                                         std::string batchValidityMaskName);
+                                         std::string batchValidityMaskName,
+                                         Loss* ownerLoss = nullptr);
     bool unregisterFusedCustomLossGradient(const Tensor& predictions);
     uint32_t getNumFusedCustomLossGradients() const;
 
@@ -133,6 +136,7 @@ class CustomLayer : public TrainableLayer {
         std::string batchValidityMaskName;
         std::string fusedLabelsInputName;
         std::string fusedBatchValidityMaskInputName;
+        Loss* ownerLoss = nullptr;
     };
 
     struct FusedOptimizerRuntimeScalarBinding {
@@ -217,6 +221,7 @@ class CustomLayer : public TrainableLayer {
     bool hasConnectedUpstreamErrorOutput() const;
     void recordEffectiveParameterBatchSizeForApplication(uint32_t applicationIndex, uint32_t batchSize);
     bool canFuseOptimizerUpdatesForApplication(uint32_t applicationIndex) const;
+    bool applicationHasConditionalBackwardVariant(uint32_t applicationIndex) const;
     bool applicationHasFusedCustomLossGradient(uint32_t applicationIndex) const;
     StampedExecutionVariant& stampedVariant(uint32_t applicationIndex, DynamicExpressionVariantId variantId);
     const StampedExecutionVariant& stampedVariant(uint32_t applicationIndex, DynamicExpressionVariantId variantId) const;

@@ -3,10 +3,12 @@
 #include "Utilities/Expression/FusedEquation.h"
 
 #include "gtest/gtest.h"
+#include <algorithm>
 
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
+#include <unordered_set>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -239,6 +241,55 @@ void host_runtime_scalar_scale_kernel(const float* x, float alpha, float* y, int
     expectNear(copyToCpuValues(y, stream), {-2.0f, 4.0f, -6.0f, -9.0f, 10.0f, -12.0f});
 }
 
+TEST(CudaKernelExpression, ConditionalHostRuntimeScalarInputUpdatesCapturedKernelNode) {
+    Stream stream(0);
+    Tensor x = makeGpuTensor({2, 3}, {1.0f, -2.0f, 3.0f, 4.5f, -5.0f, 6.0f}, stream);
+    Tensor predicateValue = makeGpuTensor({1}, {1.0f}, stream);
+
+    auto op = CudaKernelExpression::builder("conditional_host_runtime_scalar_scale")
+                  .source(R"cuda(
+extern "C" __global__
+void conditional_host_runtime_scalar_scale_kernel(const float* x, float alpha, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] = alpha * x[i];
+    }
+}
+)cuda")
+                  .entry("conditional_host_runtime_scalar_scale_kernel")
+                  .input("x", DataType::FP32)
+                  .hostRuntimeScalarInput("alpha", DataType::FP32)
+                  .outputLike("y", DataType::FP32, "x")
+                  .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("y"))
+                  .launch([](const CudaKernelExpression::LaunchContext& ctx) {
+                      constexpr uint32_t block = 128;
+                      const uint32_t grid = static_cast<uint32_t>((ctx.numel("y") + block - 1) / block);
+                      return CudaKernelLaunchConfig{dim3(grid, 1, 1), dim3(block, 1, 1), 0};
+                  })
+                  .build();
+
+    Expression xExpr = Expression::input("x");
+    Outputs cudaBranch = op.apply({
+        {"x", xExpr},
+        {"alpha", Expression::runtimeScalar("alpha", DataType::FP32, DataType::FP32)},
+    });
+    Expression predicate = Expression::input("predicate_value").greaterThan(Expression::constantScalar(0.0));
+    Outputs conditional = Outputs::conditional(
+        predicate,
+        cudaBranch,
+        Expression::outputs({{"y", xExpr - Expression::constantScalar(1.0)}}));
+
+    FusedEquation eq = FusedEquation::compile(conditional.physicalOutputs(), 0);
+    auto plan = eq.stamp({{"x", x}, {"predicate_value", predicateValue}}, stream);
+    EXPECT_EQ(plan.stageKindNames(), std::vector<std::string>{"Conditional"});
+    EXPECT_EQ(plan.runtimeScalarNames(), (std::unordered_set<std::string>{"alpha"}));
+
+    plan.run({{"alpha", 2.0f}});
+    expectNear(copyToCpuValues(plan.output("y"), stream), {2.0f, -4.0f, 6.0f, 9.0f, -10.0f, 12.0f});
+    plan.run({{"alpha", -3.0f}});
+    expectNear(copyToCpuValues(plan.output("y"), stream), {-3.0f, 6.0f, -9.0f, -13.5f, 15.0f, -18.0f});
+}
+
 TEST(CudaKernelExpression, HostRuntimeScalarInputRejectsNonFp32DType) {
     EXPECT_THROW((void)CudaKernelExpression::builder("host_runtime_scalar_dtype_reject")
                      .source(R"cuda(
@@ -252,7 +303,236 @@ void host_runtime_scalar_dtype_reject_kernel(const float* x, float alpha, float*
 }
 
 
-TEST(CudaKernelExpression, ConditionalExpressionDefinitionRejectsCudaKernelBranches) {
+
+TEST(CudaKernelExpression, ExplicitBackwardKernelMatchesAnalyticVectorJacobianProduct) {
+    Stream stream(0);
+    Tensor x = makeGpuTensor({2, 3}, {1.0f, -2.0f, 3.0f, 4.5f, -5.0f, 6.0f}, stream);
+    Tensor dy = makeGpuTensor({2, 3}, {0.5f, 1.0f, -2.0f, 3.0f, -0.25f, 4.0f}, stream);
+
+    auto backward = CudaKernelExpression::builder("square_backward")
+                        .source(R"cuda(
+extern "C" __global__
+void square_backward_kernel(const float* x, const float* dy, float* dx, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        dx[i] = 2.0f * x[i] * dy[i];
+    }
+}
+)cuda")
+                        .entry("square_backward_kernel")
+                        .input("x", DataType::FP32)
+                        .input("dy", DataType::FP32)
+                        .outputLike("dx", DataType::FP32, "x")
+                        .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("dx"))
+                        .launchGrid1D(CudaKernelExpression::DimExpr::numel("dx"), 128)
+                        .build();
+
+    auto square = CudaKernelExpression::builder("square")
+                      .source(R"cuda(
+extern "C" __global__
+void square_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] = x[i] * x[i];
+    }
+}
+)cuda")
+                      .entry("square_kernel")
+                      .input("x", DataType::FP32)
+                      .outputLike("y", DataType::FP32, "x")
+                      .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("y"))
+                      .launchGrid1D(CudaKernelExpression::DimExpr::numel("y"), 128)
+                      .backward("y", std::move(backward), "dy", {{"dx", "x"}})
+                      .build();
+
+    Outputs outputs = square.apply({{"x", Expression::input("x", DataType::FP32, DataType::FP32)}});
+    FusedEquation forward = FusedEquation::compile(outputs.physicalOutputs(), 0);
+    FusedEquation backward_equation = forward.compileBackward({"x"}, "dy");
+    auto plan = backward_equation.stamp({{"x", x}, {"dy", dy}}, stream);
+    const std::vector<std::string> stage_kinds = plan.stageKindNames();
+    EXPECT_NE(std::find(stage_kinds.begin(), stage_kinds.end(), "CudaKernel"), stage_kinds.end());
+    plan.run();
+
+    expectNear(copyToCpuValues(plan.output("x_grad"), stream),
+               {1.0f, -4.0f, -12.0f, 27.0f, 2.5f, 48.0f});
+}
+
+
+TEST(CudaKernelExpression, ConditionalCompileBackwardExecutesExplicitCudaVjpOnSelectedBranch) {
+    Stream stream(0);
+
+    auto backward = CudaKernelExpression::builder("conditional_square_backward")
+                        .source(R"cuda(
+extern "C" __global__
+void conditional_square_backward_kernel(const float* x, const float* dy, float* dx, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        dx[i] = 2.0f * x[i] * dy[i];
+    }
+}
+)cuda")
+                        .entry("conditional_square_backward_kernel")
+                        .input("x", DataType::FP32)
+                        .input("dy", DataType::FP32)
+                        .outputLike("dx", DataType::FP32, "x")
+                        .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("dx"))
+                        .launchGrid1D(CudaKernelExpression::DimExpr::numel("dx"), 128)
+                        .build();
+
+    auto square = CudaKernelExpression::builder("conditional_square")
+                      .source(R"cuda(
+extern "C" __global__
+void conditional_square_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] = x[i] * x[i];
+    }
+}
+)cuda")
+                      .entry("conditional_square_kernel")
+                      .input("x", DataType::FP32)
+                      .outputLike("y", DataType::FP32, "x")
+                      .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("y"))
+                      .launchGrid1D(CudaKernelExpression::DimExpr::numel("y"), 128)
+                      .backward("y", std::move(backward), "dy", {{"dx", "x"}})
+                      .build();
+
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto predicate_value = Expression::input("predicate_value", DataType::FP32, DataType::FP32);
+    Outputs cuda_branch = square.apply({{"x", x}});
+    Outputs ordinary_branch =
+        Expression::outputs({{"y", x * Expression::constantScalar(3.0)}});
+    Outputs conditional = Outputs::conditional(
+        predicate_value.greaterThan(Expression::constantScalar(0.0)),
+        cuda_branch,
+        ordinary_branch);
+
+    FusedEquation backward_equation =
+        FusedEquation::compile(conditional.physicalOutputs(), 0).compileBackward({"x"}, "dy");
+
+    Tensor x_tensor = makeGpuTensor({2, 3}, {1.0f, -2.0f, 3.0f, 4.5f, -5.0f, 6.0f}, stream);
+    Tensor dy = makeGpuTensor({2, 3}, {0.5f, 1.0f, -2.0f, 3.0f, -0.25f, 4.0f}, stream);
+    Tensor positive = makeGpuTensor({1}, {1.0f}, stream);
+    Tensor negative = makeGpuTensor({1}, {-1.0f}, stream);
+
+    StampedExecutionPlan cuda_plan = backward_equation.stamp(
+        {{"x", x_tensor}, {"predicate_value", positive}, {"dy", dy}}, stream);
+    cuda_plan.run();
+    expectNear(copyToCpuValues(cuda_plan.output("x_grad"), stream),
+               {1.0f, -4.0f, -12.0f, 27.0f, 2.5f, 48.0f});
+
+    StampedExecutionPlan ordinary_plan = backward_equation.stamp(
+        {{"x", x_tensor}, {"predicate_value", negative}, {"dy", dy}}, stream);
+    ordinary_plan.run();
+    expectNear(copyToCpuValues(ordinary_plan.output("x_grad"), stream),
+               {1.5f, 3.0f, -6.0f, 9.0f, -0.75f, 12.0f});
+}
+
+TEST(CudaKernelExpression, MissingExplicitBackwardIsRejectedOnlyWhenCudaOutputParticipatesInBackpropagation) {
+    auto forward_only = CudaKernelExpression::builder("forward_only_scale")
+                            .source(R"cuda(
+extern "C" __global__
+void forward_only_scale_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = 2.0f * x[i];
+}
+)cuda")
+                            .entry("forward_only_scale_kernel")
+                            .input("x", DataType::FP32)
+                            .outputLike("y", DataType::FP32, "x")
+                            .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("y"))
+                            .launchGrid1D(CudaKernelExpression::DimExpr::numel("y"), 128)
+                            .build();
+
+    Outputs outputs = forward_only.apply({{"x", Expression::input("x", DataType::FP32, DataType::FP32)}});
+    FusedEquation forward = FusedEquation::compile(outputs.physicalOutputs(), 0);
+    EXPECT_THROW((void)forward.compileBackward({"x"}, "dy"), std::runtime_error);
+}
+
+TEST(CudaKernelExpression, ExplicitBackwardCudaSourceIsEncryptedSignedAndTamperDetected) {
+    auto backward = CudaKernelExpression::builder("signed_backward")
+                        .source(R"cuda(
+extern "C" __global__
+void signed_backward_kernel(const float* x, const float* dy, float* dx, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) dx[i] = 3.0f * dy[i];
+}
+)cuda")
+                        .entry("signed_backward_kernel")
+                        .input("x", DataType::FP32)
+                        .input("dy", DataType::FP32)
+                        .outputLike("dx", DataType::FP32, "x")
+                        .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("dx"))
+                        .launchGrid1D(CudaKernelExpression::DimExpr::numel("dx"), 128)
+                        .build();
+    auto forward = CudaKernelExpression::builder("signed_forward")
+                       .source(R"cuda(
+extern "C" __global__
+void signed_forward_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = 3.0f * x[i];
+}
+)cuda")
+                       .entry("signed_forward_kernel")
+                       .input("x", DataType::FP32)
+                       .outputLike("y", DataType::FP32, "x")
+                       .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("y"))
+                       .launchGrid1D(CudaKernelExpression::DimExpr::numel("y"), 128)
+                       .backward("y", std::move(backward), "dy", {{"dx", "x"}})
+                       .build();
+
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(
+        forward.apply({{"x", Expression::input("x", DataType::FP32, DataType::FP32)}}));
+    nlohmann::json protected_json = definition.architectureJsonWithCudaKernelManifestSignature();
+
+    ASSERT_TRUE(protected_json.contains("cuda_kernels"));
+    ASSERT_EQ(protected_json.at("cuda_kernels").size(), 1u);
+    const auto& forward_json = protected_json.at("cuda_kernels").at(0);
+    ASSERT_TRUE(forward_json.contains("encrypted_source"));
+    ASSERT_FALSE(forward_json.contains("source"));
+    ASSERT_TRUE(forward_json.contains("backward"));
+    ASSERT_EQ(forward_json.at("backward").size(), 1u);
+    const auto& backward_json = forward_json.at("backward").at(0).at("kernel");
+    EXPECT_TRUE(backward_json.contains("encrypted_source"));
+    EXPECT_FALSE(backward_json.contains("source"));
+
+    const auto in_memory_sources = definition.cudaKernelSourceInfo();
+    ASSERT_EQ(in_memory_sources.size(), 2u);
+    EXPECT_EQ(in_memory_sources[0].name, "signed_forward");
+    EXPECT_EQ(in_memory_sources[1].name, "signed_backward");
+
+    const auto protected_sources = collectCudaKernelSourceInfo(protected_json);
+    ASSERT_EQ(protected_sources.size(), 2u);
+    EXPECT_TRUE(protected_sources[0].source_encrypted);
+    EXPECT_TRUE(protected_sources[1].source_encrypted);
+    EXPECT_FALSE(protected_sources[0].signature.empty());
+    EXPECT_EQ(protected_sources[1].signature, protected_sources[0].signature);
+
+    const auto keys = collectCudaKernelOutOfBandKeys(protected_json);
+    ASSERT_EQ(keys.size(), 1u);
+    ExpressionDefinition loaded = ExpressionDefinition::deserialize(
+        protected_json, true, keys.at(0).signing_public_key, keys.at(0).source_decryption_key);
+
+    Stream stream(0);
+    Tensor x = makeGpuTensor({2, 2}, {1.0f, -2.0f, 3.0f, -4.0f}, stream);
+    Tensor dy = makeGpuTensor({2, 2}, {0.5f, 1.0f, -2.0f, 4.0f}, stream);
+    FusedEquation loaded_forward = FusedEquation::compile(loaded.outputs, 0);
+    FusedEquation loaded_backward = loaded_forward.compileBackward({"x"}, "dy");
+    auto loaded_plan = loaded_backward.stamp({{"x", x}, {"dy", dy}}, stream);
+    loaded_plan.run();
+    expectNear(copyToCpuValues(loaded_plan.output("x_grad"), stream), {1.5f, 3.0f, -6.0f, 12.0f});
+
+    nlohmann::json tampered = protected_json;
+    std::string ciphertext = tampered.at("cuda_kernels").at(0).at("backward").at(0).at("kernel").at("encrypted_source").get<std::string>();
+    ASSERT_FALSE(ciphertext.empty());
+    ciphertext.back() = ciphertext.back() == '0' ? '1' : '0';
+    tampered["cuda_kernels"][0]["backward"][0]["kernel"]["encrypted_source"] = ciphertext;
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(
+                     tampered, false, keys.at(0).signing_public_key, keys.at(0).source_decryption_key),
+                 std::runtime_error);
+}
+
+TEST(CudaKernelExpression, ConditionalExpressionDefinitionProtectsAndRoundTripsCudaKernelBranches) {
     auto op = CudaKernelExpression::builder("conditional_identity")
                   .source(R"cuda(
 extern "C" __global__
@@ -275,8 +555,110 @@ void conditional_identity_kernel(const float* x, float* y, int64_t n) {
     Outputs ordinary_branch = Expression::outputs({{"y", Expression::input("x")}});
     Outputs conditional = Outputs::conditional(predicate, cuda_branch, ordinary_branch);
 
-    EXPECT_THROW((void)ExpressionDefinition::fromOutputs(conditional), std::runtime_error);
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(conditional);
+    EXPECT_TRUE(definition.hasCudaKernelExpressions());
+    std::vector<CudaKernelSourceInspection> sourceInfo = definition.cudaKernelSourceInfo();
+    ASSERT_EQ(sourceInfo.size(), 1u);
+    EXPECT_EQ(sourceInfo.front().name, "conditional_identity");
+
+    nlohmann::json payload = definition.architectureJsonWithCudaKernelManifestSignature();
+    EXPECT_FALSE(payload.contains("cuda_kernel_manifest_signature"));
+    const nlohmann::json& thenPayload = payload.at("conditional").at("then_branch");
+    ASSERT_TRUE(thenPayload.contains("cuda_kernels"));
+    ASSERT_TRUE(thenPayload.contains("cuda_kernel_manifest_signature"));
+    ASSERT_EQ(thenPayload.at("cuda_kernels").size(), 1u);
+    EXPECT_FALSE(thenPayload.at("cuda_kernels").at(0).contains("source"));
+    EXPECT_TRUE(thenPayload.at("cuda_kernels").at(0).contains("encrypted_source"));
+
+    EXPECT_EQ(definition.cudaKernelSigningPublicKeys().size(), 1u);
+    EXPECT_EQ(definition.cudaKernelOutOfBandKeys().size(), 1u);
+
+    std::vector<CudaKernelOutOfBandKeys> keys = collectCudaKernelOutOfBandKeys(payload);
+    ASSERT_EQ(keys.size(), 1u);
+    ASSERT_FALSE(keys.front().signing_public_key.empty());
+    ASSERT_FALSE(keys.front().source_decryption_key.empty());
+
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(payload), std::runtime_error);
+
+    ExpressionDefinition loaded = ExpressionDefinition::deserialize(
+        payload, false, keys.front().signing_public_key, keys.front().source_decryption_key);
+    EXPECT_TRUE(loaded.outputs.isConditional());
+    EXPECT_TRUE(loaded.hasCudaKernelExpressions());
+    std::vector<CudaKernelSourceInspection> loadedSourceInfo = loaded.cudaKernelSourceInfo();
+    ASSERT_EQ(loadedSourceInfo.size(), 1u);
+    EXPECT_EQ(loadedSourceInfo.front().name, "conditional_identity");
+    EXPECT_FALSE(loadedSourceInfo.front().loaded_source_compilation_allowed);
+
+    nlohmann::json tamperedSource = payload;
+    std::string encryptedSource = tamperedSource["conditional"]["then_branch"]["cuda_kernels"][0]["encrypted_source"].get<std::string>();
+    ASSERT_FALSE(encryptedSource.empty());
+    encryptedSource.back() = encryptedSource.back() == '0' ? '1' : '0';
+    tamperedSource["conditional"]["then_branch"]["cuda_kernels"][0]["encrypted_source"] = encryptedSource;
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(
+                     tamperedSource, true, keys.front().signing_public_key, keys.front().source_decryption_key),
+                 std::runtime_error);
+
+    nlohmann::json tamperedLaunch = payload;
+    tamperedLaunch["conditional"]["then_branch"]["cuda_kernels"][0]["launch"]["block_size"] = 256;
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(
+                     tamperedLaunch, true, keys.front().signing_public_key, keys.front().source_decryption_key),
+                 std::runtime_error);
+
+    nlohmann::json unsignedNestedKernel = payload;
+    unsignedNestedKernel["conditional"]["then_branch"].erase("cuda_kernel_manifest_signature");
+    EXPECT_THROW((void)ExpressionDefinition::deserialize(
+                     unsignedNestedKernel, true, keys.front().signing_public_key, keys.front().source_decryption_key),
+                 std::runtime_error);
 }
+
+TEST(CudaKernelExpression, ConditionalExpressionDefinitionProtectsCudaKernelsInElseBothAndNestedBranches) {
+    auto op = CudaKernelExpression::builder("conditional_branch_identity")
+                  .source(R"cuda(
+extern "C" __global__
+void conditional_branch_identity_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = x[i];
+}
+)cuda")
+                  .entry("conditional_branch_identity_kernel")
+                  .input("x", DataType::FP32)
+                  .outputLike("y", DataType::FP32, "x")
+                  .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("y"))
+                  .launchGrid1D(CudaKernelExpression::DimExpr::numel("y"), 128)
+                  .build();
+
+    auto cudaBranch = [&]() { return op.apply({{"x", Expression::input("x", DataType::FP32, DataType::FP32)}}); };
+    auto ordinaryBranch = [&]() { return Expression::outputs({{"y", Expression::input("x")}}); };
+    auto predicate = [](const char* name) { return Expression::input(name).greaterThan(Expression::constantScalar(0.0)); };
+
+    const std::vector<Outputs> cases = {
+        Outputs::conditional(predicate("else_predicate"), ordinaryBranch(), cudaBranch()),
+        Outputs::conditional(predicate("both_predicate"), cudaBranch(), cudaBranch()),
+        Outputs::conditional(predicate("outer_predicate"),
+                             Outputs::conditional(predicate("inner_predicate"), ordinaryBranch(), cudaBranch()),
+                             ordinaryBranch()),
+    };
+
+    for (const Outputs& outputs : cases) {
+        ExpressionDefinition definition = ExpressionDefinition::fromOutputs(outputs);
+        EXPECT_TRUE(definition.hasCudaKernelExpressions());
+        nlohmann::json payload = definition.architectureJsonWithCudaKernelManifestSignature();
+        std::vector<CudaKernelSourceInspection> protectedSources = collectCudaKernelSourceInfo(payload);
+        ASSERT_FALSE(protectedSources.empty());
+        for (const CudaKernelSourceInspection& source : protectedSources) {
+            EXPECT_TRUE(source.source_encrypted);
+            EXPECT_FALSE(source.signature.empty());
+        }
+
+        std::vector<CudaKernelOutOfBandKeys> keys = collectCudaKernelOutOfBandKeys(payload);
+        ASSERT_EQ(keys.size(), 1u);
+        ExpressionDefinition loaded = ExpressionDefinition::deserialize(
+            payload, false, keys.front().signing_public_key, keys.front().source_decryption_key);
+        EXPECT_TRUE(loaded.hasCudaKernelExpressions());
+        EXPECT_EQ(loaded.cudaKernelSourceInfo().size(), protectedSources.size());
+    }
+}
+
 
 TEST(CudaKernelExpression, SerializedCudaSourceIsInspectableAndRequiresUnsafeOptInToRunAfterLoad) {
     Stream stream(0);

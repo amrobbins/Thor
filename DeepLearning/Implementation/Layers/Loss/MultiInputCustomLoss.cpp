@@ -69,42 +69,6 @@ string MultiInputCustomLoss::joinNames(const set<string>& names) {
     return oss.str();
 }
 
-DataType MultiInputCustomLoss::findOutputDType(const shared_ptr<CompiledOutputs>& compiledOutputs, const string& outputName) {
-    optional<DataType> outputDType;
-    for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-        for (size_t outputIndex = 0; outputIndex < stage.outputs.size(); ++outputIndex) {
-            const CompiledStageOutput& output = stage.outputs[outputIndex];
-            if (output.name == outputName) {
-                outputDType = stage.outputDType(outputIndex);
-                break;
-            }
-        }
-        if (outputDType.has_value())
-            break;
-    }
-
-    if (!outputDType.has_value()) {
-        for (const CompiledStageOutput& finalOutput : compiledOutputs->final_outputs) {
-            if (finalOutput.name != outputName)
-                continue;
-            for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-                for (size_t outputIndex = 0; outputIndex < stage.outputs.size(); ++outputIndex) {
-                    if (stage.outputs[outputIndex].value_id == finalOutput.value_id) {
-                        outputDType = stage.outputDType(outputIndex);
-                        break;
-                    }
-                }
-                if (outputDType.has_value())
-                    break;
-            }
-        }
-    }
-
-    if (!outputDType.has_value())
-        throw runtime_error("MultiInputCustomLoss expression did not infer output dtype for '" + outputName + "'.");
-    return outputDType.value();
-}
-
 uint32_t MultiInputCustomLoss::requireInputIndexFromConnectionType(int connectionType) const {
     if (connectionType < 0 || static_cast<size_t>(connectionType) >= inputNames.size()) {
         throw runtime_error("MultiInputCustomLoss input connection type is out of range.");
@@ -197,8 +161,13 @@ pair<vector<uint64_t>, DataType> MultiInputCustomLoss::inferExpressionOutputDesc
         throw runtime_error("MultiInputCustomLoss " + what + " expression did not infer output shape for '" + outputName + "'.");
     }
 
-    shared_ptr<CompiledOutputs> compiledOutputs = build.equation->compileForInputs(build.stamp_inputs, {}, build.tensor_scalar_inputs);
-    return {shapeIt->second, findOutputDType(compiledOutputs, outputName)};
+    const unordered_map<string, DataType> outputDTypes =
+        build.equation->getOutputDataTypes(build.stamp_inputs, build.tensor_scalar_inputs);
+    auto dtypeIt = outputDTypes.find(outputName);
+    if (dtypeIt == outputDTypes.end()) {
+        throw runtime_error("MultiInputCustomLoss " + what + " expression did not infer output dtype for '" + outputName + "'.");
+    }
+    return {shapeIt->second, dtypeIt->second};
 }
 
 DynamicExpression MultiInputCustomLoss::weightedLossExpression() const {

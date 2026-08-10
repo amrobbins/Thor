@@ -6,6 +6,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/Layers/Utility/TensorFanout.h"
 
+#include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
@@ -320,6 +321,55 @@ DynamicExpression buildSingleInputSingleOutputExpression(const TensorPlacement& 
     });
 }
 
+
+DynamicExpression buildCudaSquareWithExplicitBackwardExpression() {
+    auto backward = CudaKernelExpression::builder("custom_layer_square_backward")
+                        .source(R"cuda(
+extern "C" __global__
+void custom_layer_square_backward_kernel(const float* feature_input,
+                                         const float* upstream_gradient,
+                                         float* feature_input_grad,
+                                         int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        feature_input_grad[i] = 2.0f * feature_input[i] * upstream_gradient[i];
+    }
+}
+)cuda")
+                        .entry("custom_layer_square_backward_kernel")
+                        .input("feature_input", DataType::FP32)
+                        .input("upstream_gradient", DataType::FP32)
+                        .outputLike("feature_input_grad", DataType::FP32, "feature_input")
+                        .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("feature_input_grad"))
+                        .launchGrid1D(CudaKernelExpression::DimExpr::numel("feature_input_grad"), 128)
+                        .build();
+
+    auto forward = CudaKernelExpression::builder("custom_layer_square")
+                       .source(R"cuda(
+extern "C" __global__
+void custom_layer_square_kernel(const float* feature_input, float* feature_output, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        feature_output[i] = feature_input[i] * feature_input[i];
+    }
+}
+)cuda")
+                       .entry("custom_layer_square_kernel")
+                       .input("feature_input", DataType::FP32)
+                       .outputLike("feature_output", DataType::FP32, "feature_input")
+                       .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("feature_output"))
+                       .launchGrid1D(CudaKernelExpression::DimExpr::numel("feature_output"), 128)
+                       .backward("feature_output",
+                                 std::move(backward),
+                                 "upstream_gradient",
+                                 {{"feature_input_grad", "feature_input"}})
+                       .build();
+
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(
+        forward.apply({{"feature_input", Expression::input("feature_input", DataType::FP32, DataType::FP32)}}));
+    return DynamicExpression::fromExpressionDefinition(std::move(definition));
+}
+
 DynamicExpression buildEvaluationVariantExpression(const TensorPlacement& placement) {
     return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
                                          const DynamicExpression::TensorMap& outputs,
@@ -479,6 +529,92 @@ DynamicExpression buildSingleInputScaleExpression(const TensorPlacement& placeme
             outputs,
             {}};
     });
+}
+
+DynamicExpression buildConditionalScaleExpression(const TensorPlacement& placement) {
+    return DynamicExpression(
+        {"x", "scale"},
+        {"out"},
+        [placement](const DynamicExpression::TensorMap& inputs,
+                    const DynamicExpression::TensorMap& outputs,
+                    Stream& stream) -> DynamicExpressionBuild {
+            (void)stream;
+            auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+            auto scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+            auto predicate = x.reduce_sum().greaterThan(Expression::constantScalar(0.0));
+            Outputs conditional = Outputs::conditional(
+                predicate,
+                Expression::outputs({{"out", x * scale}}),
+                Expression::outputs({{"out", x * scale * Expression::constantScalar(2.0)}}));
+            return DynamicExpressionBuild{
+                std::make_shared<FusedEquation>(FusedEquation::compile(conditional.physicalOutputs(), placement.getDeviceNum())),
+                inputs,
+                {},
+                outputs,
+                {}};
+        });
+}
+
+DynamicExpression buildConditionalCudaSquareWithExplicitBackwardExpression(const TensorPlacement& placement) {
+    auto backward = CudaKernelExpression::builder("conditional_custom_layer_square_backward")
+                        .source(R"cuda(
+extern "C" __global__
+void conditional_custom_layer_square_backward_kernel(const float* x,
+                                                      const float* upstream_gradient,
+                                                      float* x_grad,
+                                                      int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        x_grad[i] = 2.0f * x[i] * upstream_gradient[i];
+    }
+}
+)cuda")
+                        .entry("conditional_custom_layer_square_backward_kernel")
+                        .input("x", DataType::FP32)
+                        .input("upstream_gradient", DataType::FP32)
+                        .outputLike("x_grad", DataType::FP32, "x")
+                        .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("x_grad"))
+                        .launchGrid1D(CudaKernelExpression::DimExpr::numel("x_grad"), 128)
+                        .build();
+
+    auto forward = CudaKernelExpression::builder("conditional_custom_layer_square")
+                       .source(R"cuda(
+extern "C" __global__
+void conditional_custom_layer_square_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] = x[i] * x[i];
+    }
+}
+)cuda")
+                       .entry("conditional_custom_layer_square_kernel")
+                       .input("x", DataType::FP32)
+                       .outputLike("y", DataType::FP32, "x")
+                       .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("y"))
+                       .launchGrid1D(CudaKernelExpression::DimExpr::numel("y"), 128)
+                       .backward("y", std::move(backward), "upstream_gradient", {{"x_grad", "x"}})
+                       .build();
+
+    return DynamicExpression(
+        {"x"},
+        {"y"},
+        [placement, forward = std::move(forward)](const DynamicExpression::TensorMap& inputs,
+                                                  const DynamicExpression::TensorMap& outputs,
+                                                  Stream& stream) -> DynamicExpressionBuild {
+            (void)stream;
+            auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+            auto predicate = x.reduce_sum().greaterThan(Expression::constantScalar(0.0));
+            Outputs conditional = Outputs::conditional(
+                predicate,
+                forward.apply({{"x", x}}),
+                Expression::outputs({{"y", x * Expression::constantScalar(3.0)}}));
+            return DynamicExpressionBuild{
+                std::make_shared<FusedEquation>(FusedEquation::compile(conditional.physicalOutputs(), placement.getDeviceNum())),
+                inputs,
+                {},
+                outputs,
+                {}};
+        });
 }
 
 DynamicExpression buildSingleInputScaleVariantExpression(const TensorPlacement& placement) {
@@ -665,6 +801,48 @@ TEST(CustomLayer, InferenceOnlyUsesEvaluationVariant) {
     expectAllClose(readCpuTensor(result_h), {12.0f, 7.0f});
 
     cleanupLayers({&input, &custom, &sink});
+}
+
+
+TEST(CustomLayer, CudaKernelExplicitBackwardPropagatesNumericallyThroughCustomLayer) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor featureIn_h(cpuPlacement, descriptor);
+    writeCpuTensor(featureIn_h, {1.0f, -2.0f, 3.0f, 4.0f, -5.0f, 6.0f});
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    CustomLayer custom(buildCudaSquareWithExplicitBackwardExpression(), gpuPlacement, {}, false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    input.forward(featureIn_h, false, batchSize);
+    ASSERT_TRUE(sink.getFeatureInput().has_value());
+    Tensor result_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(result_h), {1.0f, 4.0f, 9.0f, 16.0f, 25.0f, 36.0f});
+
+    Tensor gradOut_h(cpuPlacement, descriptor);
+    writeCpuTensor(gradOut_h, {0.5f, 1.0f, -2.0f, 3.0f, -0.25f, 4.0f});
+    ASSERT_TRUE(sink.getErrorOutput().has_value());
+    sink.getErrorOutput().value().copyFromAsync(gradOut_h, custom.getStreams()[0]);
+    custom.getStreams()[0].synchronize();
+
+    sink.backward(sink.getErrorOutput(), batchSize);
+    ASSERT_EQ(bridge.backwardCalls, 1);
+    ASSERT_EQ(custom.getErrorOutputs().size(), 1u);
+    ASSERT_TRUE(custom.getErrorOutputs()[0].has_value());
+    Tensor inputGradient_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(inputGradient_h), {1.0f, -4.0f, -12.0f, 24.0f, 2.5f, 48.0f});
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
 }
 
 TEST(CustomLayer, BackwardCapableExecutionVariantUsesMatchingForwardAndBackwardPlans) {
@@ -863,6 +1041,154 @@ TEST(SliceImplementation, TerminalAliasMaterializesDenseForwardOutputAndScatters
     expectAllClose(readCpuTensor(inputGradient_h), expectedBackward);
 
     cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, ConditionalCudaBranchBackpropagatesNumericallyThroughCustomLayer) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    CustomLayer custom(buildConditionalCudaSquareWithExplicitBackwardExpression(gpuPlacement),
+                       {"x"},
+                       {"y"},
+                       gpuPlacement,
+                       {},
+                       false);
+    CountingPassthrough sink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&input, &gradientRivet, &bridge, &custom, &sink});
+
+    auto runPass = [&](const std::vector<float>& inputValues,
+                       const std::vector<float>& outputGradient,
+                       const std::vector<float>& expectedForward,
+                       const std::vector<float>& expectedInputGradient,
+                       uint32_t expectedCalls) {
+        Tensor x_h(cpuPlacement, descriptor);
+        Tensor grad_h(cpuPlacement, descriptor);
+        writeCpuTensor(x_h, inputValues);
+        writeCpuTensor(grad_h, outputGradient);
+
+        input.forward(x_h, false, batchSize);
+        ASSERT_EQ(sink.forwardCalls, expectedCalls);
+        Tensor y_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
+        expectAllClose(readCpuTensor(y_h), expectedForward, 3e-5f, 3e-5f);
+
+        sink.getErrorOutput().value().copyFromAsync(grad_h, custom.getStreams()[0]);
+        custom.getStreams()[0].synchronize();
+        sink.backward(sink.getErrorOutput(), batchSize);
+        ASSERT_EQ(bridge.backwardCalls, expectedCalls);
+
+        Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+        expectAllClose(readCpuTensor(xGrad_h), expectedInputGradient, 4e-5f, 4e-5f);
+    };
+
+    runPass({1.0f, -2.0f, 3.0f, 4.0f, -1.0f, 2.0f},
+            {0.5f, 1.0f, -2.0f, 3.0f, -0.25f, 4.0f},
+            {1.0f, 4.0f, 9.0f, 16.0f, 1.0f, 4.0f},
+            {1.0f, -4.0f, -12.0f, 24.0f, 0.5f, 16.0f},
+            1);
+    runPass({-1.0f, -2.0f, -3.0f, -4.0f, -5.0f, -6.0f},
+            {1.0f, 2.0f, -1.0f, 0.5f, -0.25f, 3.0f},
+            {-3.0f, -6.0f, -9.0f, -12.0f, -15.0f, -18.0f},
+            {3.0f, 6.0f, -3.0f, 1.5f, -0.75f, 9.0f},
+            2);
+
+    cleanupLayers({&input, &gradientRivet, &bridge, &custom, &sink});
+}
+
+TEST(CustomLayer, ConditionalTrainingFallsBackToMaterializedCustomLossAndOptimizerGradients) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+    const float learningRate = 0.5f;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    const std::vector<float> initialScale{1.5f, -2.0f, 0.5f};
+    auto scale = std::make_shared<FixedVectorParameter>("scale", initialScale, true);
+    scale->setOptimizer(std::static_pointer_cast<Optimizer>(std::make_shared<Sgd>(9910, learningRate, 0.0f, 0.0f, false)));
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput labelsInput(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    GradientRivet gradientRivet;
+    CountingPassthrough bridge;
+    CustomLayer custom(buildConditionalScaleExpression(gpuPlacement), {"x"}, {"out"}, gpuPlacement, {scale}, false);
+    CustomLoss loss(buildSquaredErrorLossExpression(gpuPlacement), buildSquaredErrorGradientExpression(gpuPlacement));
+    CountingPassthrough lossSink;
+
+    input.connectToNextLayer(&gradientRivet);
+    gradientRivet.connectToNextLayer(&bridge);
+    bridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&loss, 0, static_cast<int>(Loss::ConnectionType::FORWARD_BACKWARD));
+    labelsInput.connectToNextLayer(&loss, 0, static_cast<int>(Loss::ConnectionType::LABELS));
+    loss.connectToNextLayer(&lossSink);
+
+    compileAndInitialize({&input, &labelsInput, &gradientRivet, &bridge, &custom, &loss, &lossSink});
+
+    EXPECT_FALSE(loss.isGradientFusedIntoDrivingLayer())
+        << "Conditional CustomLayer backward should use the ordinary materialized CustomLoss gradient path.";
+    ASSERT_TRUE(scale->getOptimizer()->getWeightsGradient().has_value())
+        << "Conditional parameter gradients should fall back from flat dense optimizer fusion.";
+
+    std::vector<float> expectedScale = initialScale;
+    auto runPass = [&](const std::vector<float>& inputValues,
+                       const std::vector<float>& labels,
+                       float branchFactor,
+                       uint32_t expectedCalls) {
+        Tensor x_h(cpuPlacement, descriptor);
+        Tensor labels_h(cpuPlacement, descriptor);
+        writeCpuTensor(x_h, inputValues);
+        writeCpuTensor(labels_h, labels);
+
+        std::vector<float> expectedLoss(inputValues.size());
+        std::vector<float> expectedInputGrad(inputValues.size());
+        std::vector<float> rawScaleGradient(features, 0.0f);
+        for (uint64_t i = 0; i < inputValues.size(); ++i) {
+            const uint64_t f = i % features;
+            const float prediction = inputValues[i] * expectedScale[f] * branchFactor;
+            const float diff = prediction - labels[i];
+            const float predictionGrad = 2.0f * Loss::getLossScalingFactor() * diff;
+            expectedLoss[i] = diff * diff;
+            expectedInputGrad[i] = predictionGrad * expectedScale[f] * branchFactor;
+            rawScaleGradient[f] += inputValues[i] * predictionGrad * branchFactor;
+        }
+        const std::vector<float> nextScale =
+            applySgdReferenceUpdate(expectedScale, rawScaleGradient, learningRate, batchSize);
+
+        input.forward(x_h, false, batchSize);
+        labelsInput.forward(labels_h, false, batchSize);
+        ASSERT_EQ(lossSink.forwardCalls, expectedCalls);
+        ASSERT_EQ(bridge.backwardCalls, expectedCalls);
+
+        Stream lossStream = loss.getStream();
+        Stream gradientUpdateStream = custom.getGradientUpdateStream().value();
+        Tensor loss_h = copyTensorToCpu(lossSink.getFeatureInput().value(), lossStream);
+        Tensor xGrad_h = copyTensorToCpu(custom.getErrorOutputs()[0].value(), custom.getStreams()[0]);
+        Tensor scaleGrad_h = copyTensorToCpu(scale->getOptimizer()->getWeightsGradient().value(), gradientUpdateStream);
+        Tensor scaleWeights_h = copyTensorToCpu(scale->getStorage().value(), gradientUpdateStream);
+
+        expectAllClose(readCpuTensor(loss_h), expectedLoss, 3e-5f, 3e-5f);
+        expectAllClose(readCpuTensor(xGrad_h), expectedInputGrad, 4e-5f, 4e-5f);
+        expectAllClose(readCpuTensor(scaleGrad_h), rawScaleGradient, 5e-5f, 5e-5f);
+        expectAllClose(readCpuTensor(scaleWeights_h), nextScale, 5e-5f, 5e-5f);
+        expectedScale = nextScale;
+    };
+
+    runPass({1.0f, 2.0f, -1.0f, 0.5f, -2.0f, 3.0f},
+            {0.0f, -1.0f, 2.0f, 1.0f, -2.0f, 4.0f},
+            1.0f,
+            1);
+    runPass({-1.0f, -2.0f, -0.5f, -3.0f, -1.5f, -2.0f},
+            {0.5f, -1.5f, 1.0f, -2.0f, 0.25f, -0.75f},
+            2.0f,
+            2);
+
+    cleanupLayers({&input, &labelsInput, &gradientRivet, &bridge, &custom, &loss, &lossSink});
 }
 
 TEST(CustomLayer, SingleInputTrainableParameterFusesGradientIntoSgdUpdate) {

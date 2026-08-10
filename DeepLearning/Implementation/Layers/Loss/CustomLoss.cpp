@@ -43,42 +43,6 @@ void validateName(const std::string& name, const std::string& what) {
 }
 
 
-DataType findOutputDType(const std::shared_ptr<CompiledOutputs>& compiledOutputs, const std::string& outputName) {
-    std::optional<DataType> outputDType;
-    for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-        for (size_t outputIndex = 0; outputIndex < stage.outputs.size(); ++outputIndex) {
-            const CompiledStageOutput& output = stage.outputs[outputIndex];
-            if (output.name == outputName) {
-                outputDType = stage.outputDType(outputIndex);
-                break;
-            }
-        }
-        if (outputDType.has_value())
-            break;
-    }
-
-    if (!outputDType.has_value()) {
-        for (const CompiledStageOutput& finalOutput : compiledOutputs->final_outputs) {
-            if (finalOutput.name != outputName)
-                continue;
-            for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-                for (size_t outputIndex = 0; outputIndex < stage.outputs.size(); ++outputIndex) {
-                    if (stage.outputs[outputIndex].value_id == finalOutput.value_id) {
-                        outputDType = stage.outputDType(outputIndex);
-                        break;
-                    }
-                }
-                if (outputDType.has_value())
-                    break;
-            }
-        }
-    }
-
-    if (!outputDType.has_value())
-        throw std::runtime_error("CustomLoss expression did not infer output dtype for '" + outputName + "'.");
-    return outputDType.value();
-}
-
 DynamicExpression applyBatchValidityMaskToGradient(const DynamicExpression& expression,
                                                    const std::string& gradientName,
                                                    DataType gradientDataType,
@@ -102,23 +66,18 @@ DynamicExpression applyBatchValidityMaskToGradient(const DynamicExpression& expr
                 expressionInputs.erase(Thor::BATCH_VALIDITY_MASK_NAME);
             DynamicExpressionBuild build = expression.build(expressionInputs, {}, stream);
             const PhysicalOutputs& rawOutputs = build.equation->physicalOutputs();
-            if (rawOutputs.isConditional() || !rawOutputs.expr) {
-                throw std::runtime_error("CustomLoss cannot apply batch validity masking to conditional or empty gradient outputs.");
-            }
-
-            std::optional<Expression> rawGradient;
-            for (const NamedOutput& output : rawOutputs.outputs) {
-                if (output.name == gradientName) {
-                    rawGradient = Expression::fromPhysicalNode(rawOutputs.expr, output.node_idx);
-                    break;
-                }
-            }
-            if (!rawGradient.has_value())
-                throw std::runtime_error("CustomLoss batch validity masking could not find gradient output '" + gradientName + "'.");
-
-            Expression mask = Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
-            Expression maskedGradient = (rawGradient.value() * mask).withOutputDType(gradientDataType);
-            PhysicalOutputs maskedOutputs = Expression::outputs({{gradientName, maskedGradient}}).physicalOutputs();
+            PhysicalOutputs maskedOutputs = detail::transformDynamicExpressionOutputsRecursively(
+                rawOutputs,
+                [gradientName, gradientDataType](const std::string& outputName, const Expression& raw) {
+                    if (outputName != gradientName) {
+                        throw std::runtime_error(
+                            "CustomLoss batch validity masking encountered unexpected gradient output '" + outputName + "'.");
+                    }
+                    Expression mask =
+                        Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
+                    return (raw * mask).withOutputDType(gradientDataType);
+                },
+                "CustomLoss batch validity masking");
 
             build.stamp_inputs.emplace(Thor::BATCH_VALIDITY_MASK_NAME, maskIt->second);
             return DynamicExpressionBuild{
@@ -231,10 +190,14 @@ std::pair<std::vector<uint64_t>, DataType> CustomLoss::inferExpressionOutputDesc
         throw std::runtime_error("CustomLoss " + what + " expression did not infer output shape for '" + outputName + "'.");
     }
 
-    std::shared_ptr<CompiledOutputs> compiledOutputs =
-        build.equation->compileForInputs(build.stamp_inputs, {}, build.tensor_scalar_inputs);
+    const std::unordered_map<std::string, DataType> outputDTypes =
+        build.equation->getOutputDataTypes(build.stamp_inputs, build.tensor_scalar_inputs);
+    auto dtypeIt = outputDTypes.find(outputName);
+    if (dtypeIt == outputDTypes.end()) {
+        throw std::runtime_error("CustomLoss " + what + " expression did not infer output dtype for '" + outputName + "'.");
+    }
 
-    return {shapeIt->second, findOutputDType(compiledOutputs, outputName)};
+    return {shapeIt->second, dtypeIt->second};
 }
 
 std::optional<Tensor> CustomLoss::createFeatureOutputTensor() {
@@ -282,7 +245,8 @@ void CustomLoss::tryFuseGradientIntoDrivingLayer() {
                                                                                      labelsName,
                                                                                      gradientName,
                                                                                      batchValidityMask,
-                                                                                     Thor::BATCH_VALIDITY_MASK_NAME);
+                                                                                     Thor::BATCH_VALIDITY_MASK_NAME,
+                                                                                     this);
         return;
     }
 

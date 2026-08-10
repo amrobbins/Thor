@@ -693,8 +693,8 @@ void CustomLayer::analyzeSerializableExpression(const SerializationProbe& batchO
         }
         return;
     }
-    if ((batchOneJson.contains("cuda_kernels") && !batchOneJson.at("cuda_kernels").empty()) ||
-        (batchTwoJson.contains("cuda_kernels") && !batchTwoJson.at("cuda_kernels").empty())) {
+    if (batchOne.build.serialized_definition->hasCudaKernelExpressions() ||
+        batchTwo.build.serialized_definition->hasCudaKernelExpressions()) {
         serializationRejectionReason =
             "batch-dependent CUDA-kernel expressions require an explicitly supplied symbolic ExpressionDefinition; "
             "Thor will not rewrite a signed CUDA expression during batch-polymorphism analysis";

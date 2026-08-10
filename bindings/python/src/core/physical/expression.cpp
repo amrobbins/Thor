@@ -479,6 +479,31 @@ kernel launch dynamic shared-memory byte count.
             "block_size"_a = 256,
             "dynamic_shared_bytes"_a = 0,
             nb::rv_policy::reference_internal)
+        .def(
+            "backward",
+            [](CudaKernelExpression::Builder& self,
+               const std::string& forward_output_name,
+               CudaKernelExpression backward_kernel,
+               const std::string& upstream_gradient_input_name,
+               const std::unordered_map<std::string, std::string>& input_gradients) -> CudaKernelExpression::Builder& {
+                return self.backward(
+                    forward_output_name, std::move(backward_kernel), upstream_gradient_input_name, input_gradients);
+            },
+            "forward_output_name"_a,
+            "backward_kernel"_a,
+            "upstream_gradient_input_name"_a,
+            "input_gradients"_a,
+            nb::rv_policy::reference_internal,
+            R"nbdoc(
+Attach an explicit vector-Jacobian-product CUDA kernel for one forward output.
+
+The backward kernel receives the upstream gradient through
+``upstream_gradient_input_name``. Any other backward-kernel inputs must have
+the same names, dtypes, and kinds as forward-kernel inputs; Thor binds those
+forward values automatically. ``input_gradients`` maps backward-kernel output
+names to the corresponding forward-kernel input whose gradient they produce.
+Forward inputs omitted from the mapping receive no gradient contribution.
+)nbdoc")
         .def("build", &CudaKernelExpression::Builder::build);
 
     cuda_kernel_expression.def_static("builder", &CudaKernelExpression::builder, "name"_a)

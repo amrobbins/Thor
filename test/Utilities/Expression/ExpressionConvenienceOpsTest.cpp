@@ -713,7 +713,7 @@ TEST(ExpressionGraphConditionalOps, ConditionalOutputsExposeContractAndRejectMis
     EXPECT_THROW((void)Outputs::conditional(predicate, then_outputs, mismatched_else), std::runtime_error);
 }
 
-TEST(ExpressionGraphConditionalOps, ExpressionDefinitionRoundTripsConditionalAndCompileBackwardRemainsUnsupported) {
+TEST(ExpressionGraphConditionalOps, ExpressionDefinitionRoundTripsConditionalAndCompileBackwardBuildsDeferredTemplate) {
     auto x = Expression::input("x");
     auto predicate = Expression::input("predicate_value").greaterThan(Expression::constantScalar(0.0));
     Outputs conditional = Outputs::conditional(predicate,
@@ -732,7 +732,470 @@ TEST(ExpressionGraphConditionalOps, ExpressionDefinitionRoundTripsConditionalAnd
     EXPECT_EQ(loaded.architectureJson(), payload);
 
     FusedEquation equation = FusedEquation::compile(loaded.outputs, 0);
-    EXPECT_THROW((void)equation.compileBackward({"x"}, "dy"), std::runtime_error);
+    FusedEquation backward = equation.compileBackward({"x"}, "dy");
+    EXPECT_EQ(backward.getOutputNames(), std::vector<std::string>{"x_grad"});
+}
+
+TEST(ExpressionGraphConditionalOps, CompileBackwardSpecializesAndRunsSelectedConditionalBranch) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto predicate_value = Expression::input("predicate_value", DataType::FP32, DataType::FP32);
+    Outputs forward_outputs = Outputs::conditional(
+        predicate_value.greaterThan(Expression::constantScalar(0.0)),
+        Expression::outputs({{"y", x * x}}),
+        Expression::outputs({{"y", x * Expression::constantScalar(3.0)}}));
+
+    FusedEquation forward = FusedEquation::compile(forward_outputs.physicalOutputs(), 0);
+    FusedEquation backward = forward.compileBackward({"x"}, "dy");
+
+    Tensor x_tensor = makeGpuTensor({4}, {-2.0f, -1.0f, 2.0f, 4.0f}, stream);
+    Tensor dy = makeGpuTensor({4}, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
+    Tensor positive = makeGpuTensor({1}, {1.0f}, stream);
+    Tensor negative = makeGpuTensor({1}, {-1.0f}, stream);
+
+    const auto shapes = backward.getOutputShapes(
+        {{"x", x_tensor}, {"predicate_value", positive}, {"dy", dy}});
+    ASSERT_EQ(shapes.size(), 1u);
+    EXPECT_EQ(shapes.at("x_grad"), std::vector<uint64_t>({4}));
+    const auto dtypes = backward.getOutputDataTypes(
+        {{"x", x_tensor}, {"predicate_value", positive}, {"dy", dy}});
+    ASSERT_EQ(dtypes.size(), 1u);
+    EXPECT_EQ(dtypes.at("x_grad"), DataType::FP32);
+
+    StampedExecutionPlan then_plan =
+        backward.stamp({{"x", x_tensor}, {"predicate_value", positive}, {"dy", dy}}, stream);
+    then_plan.run();
+    expectNear(copyToCpuValues(then_plan.output("x_grad"), stream), {-4.0f, -4.0f, 12.0f, 32.0f});
+
+    StampedExecutionPlan else_plan =
+        backward.stamp({{"x", x_tensor}, {"predicate_value", negative}, {"dy", dy}}, stream);
+    else_plan.run();
+    expectNear(copyToCpuValues(else_plan.output("x_grad"), stream), {3.0f, 6.0f, 9.0f, 12.0f});
+
+    // Reuse the same deferred backward equation with a different runtime shape.
+    Tensor x_wide = makeGpuTensor({2}, {6.0f, -3.0f}, stream);
+    Tensor dy_wide = makeGpuTensor({2}, {2.0f, 5.0f}, stream);
+    StampedExecutionPlan reshaped_plan =
+        backward.stamp({{"x", x_wide}, {"predicate_value", positive}, {"dy", dy_wide}}, stream);
+    reshaped_plan.run();
+    expectNear(copyToCpuValues(reshaped_plan.output("x_grad"), stream), {24.0f, -30.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, CompileBackwardSupportsNestedConditionals) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto outer_predicate = Expression::input("outer_predicate", DataType::FP32, DataType::FP32)
+                               .greaterThan(Expression::constantScalar(0.0));
+    auto inner_predicate = Expression::input("inner_predicate", DataType::FP32, DataType::FP32)
+                               .greaterThan(Expression::constantScalar(0.0));
+    Outputs inner = Outputs::conditional(
+        inner_predicate,
+        Expression::outputs({{"y", x * Expression::constantScalar(2.0)}}),
+        Expression::outputs({{"y", x * Expression::constantScalar(3.0)}}));
+    Outputs forward_outputs = Outputs::conditional(
+        outer_predicate,
+        inner,
+        Expression::outputs({{"y", x * Expression::constantScalar(4.0)}}));
+
+    FusedEquation backward =
+        FusedEquation::compile(forward_outputs.physicalOutputs(), 0).compileBackward({"x"}, "dy");
+
+    Tensor x_tensor = makeGpuTensor({2}, {5.0f, 7.0f}, stream);
+    Tensor dy = makeGpuTensor({2}, {1.0f, 2.0f}, stream);
+    Tensor positive = makeGpuTensor({1}, {1.0f}, stream);
+    Tensor negative = makeGpuTensor({1}, {-1.0f}, stream);
+
+    StampedExecutionPlan inner_then = backward.stamp(
+        {{"x", x_tensor}, {"outer_predicate", positive}, {"inner_predicate", positive}, {"dy", dy}}, stream);
+    inner_then.run();
+    expectNear(copyToCpuValues(inner_then.output("x_grad"), stream), {2.0f, 4.0f});
+
+    StampedExecutionPlan inner_else = backward.stamp(
+        {{"x", x_tensor}, {"outer_predicate", positive}, {"inner_predicate", negative}, {"dy", dy}}, stream);
+    inner_else.run();
+    expectNear(copyToCpuValues(inner_else.output("x_grad"), stream), {3.0f, 6.0f});
+
+    StampedExecutionPlan outer_else = backward.stamp(
+        {{"x", x_tensor}, {"outer_predicate", negative}, {"inner_predicate", positive}, {"dy", dy}}, stream);
+    outer_else.run();
+    expectNear(copyToCpuValues(outer_else.output("x_grad"), stream), {4.0f, 8.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, CompileBackwardSupportsConditionalGradientAccumulation) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto z = Expression::input("z", DataType::FP32, DataType::FP32);
+    auto predicate_value = Expression::input("predicate_value", DataType::FP32, DataType::FP32);
+    Outputs forward_outputs = Outputs::conditional(
+        predicate_value.greaterThan(Expression::constantScalar(0.0)),
+        Expression::outputs({{"y", x * Expression::constantScalar(2.0)}}),
+        Expression::outputs({{"y", z * Expression::constantScalar(3.0)}}));
+
+    FusedEquation backward =
+        FusedEquation::compile(forward_outputs.physicalOutputs(), 0).compileBackward({"x"}, "dy", true);
+
+    Tensor x_tensor = makeGpuTensor({2}, {1.0f, 2.0f}, stream);
+    Tensor z_tensor = makeGpuTensor({2}, {5.0f, 6.0f}, stream);
+    Tensor dy = makeGpuTensor({2}, {3.0f, 4.0f}, stream);
+    Tensor positive = makeGpuTensor({1}, {1.0f}, stream);
+    Tensor negative = makeGpuTensor({1}, {-1.0f}, stream);
+
+    Tensor active_grad = makeGpuTensor({2}, {10.0f, 20.0f}, stream);
+    StampedExecutionPlan active_plan = backward.stamp(
+        {{"x", x_tensor}, {"z", z_tensor}, {"predicate_value", positive}, {"dy", dy}},
+        stream,
+        {},
+        {{"x_grad", active_grad}});
+    active_plan.run();
+    expectNear(copyToCpuValues(active_grad, stream), {16.0f, 28.0f});
+
+    Tensor inactive_grad = makeGpuTensor({2}, {10.0f, 20.0f}, stream);
+    StampedExecutionPlan inactive_plan = backward.stamp(
+        {{"x", x_tensor}, {"z", z_tensor}, {"predicate_value", negative}, {"dy", dy}},
+        stream,
+        {},
+        {{"x_grad", inactive_grad}});
+    inactive_plan.run();
+    expectNear(copyToCpuValues(inactive_grad, stream), {10.0f, 20.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, CompileBackwardSupportsNamedSeedsForMultipleConditionalOutputs) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto predicate_value = Expression::input("predicate_value", DataType::FP32, DataType::FP32);
+    Outputs forward_outputs = Outputs::conditional(
+        predicate_value.greaterThan(Expression::constantScalar(0.0)),
+        Expression::outputs({
+            {"a", x * Expression::constantScalar(2.0)},
+            {"b", x * Expression::constantScalar(5.0)},
+        }),
+        Expression::outputs({
+            {"a", x * Expression::constantScalar(3.0)},
+            {"b", x * Expression::constantScalar(7.0)},
+        }));
+
+    FusedEquation backward =
+        FusedEquation::compile(forward_outputs.physicalOutputs(), 0)
+            .compileBackward({"x"}, std::unordered_map<std::string, std::string>{{"a", "da"}, {"b", "db"}});
+
+    Tensor x_tensor = makeGpuTensor({2}, {1.0f, 2.0f}, stream);
+    Tensor da = makeGpuTensor({2}, {1.0f, 2.0f}, stream);
+    Tensor db = makeGpuTensor({2}, {3.0f, 4.0f}, stream);
+    Tensor positive = makeGpuTensor({1}, {1.0f}, stream);
+    Tensor negative = makeGpuTensor({1}, {-1.0f}, stream);
+
+    StampedExecutionPlan then_plan = backward.stamp(
+        {{"x", x_tensor}, {"predicate_value", positive}, {"da", da}, {"db", db}}, stream);
+    then_plan.run();
+    expectNear(copyToCpuValues(then_plan.output("x_grad"), stream), {17.0f, 24.0f});
+
+    StampedExecutionPlan else_plan = backward.stamp(
+        {{"x", x_tensor}, {"predicate_value", negative}, {"da", da}, {"db", db}}, stream);
+    else_plan.run();
+    expectNear(copyToCpuValues(else_plan.output("x_grad"), stream), {24.0f, 34.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, BuildBackwardOutputsRoutesGradientThroughSelectedBranch) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto predicate_value = Expression::input("predicate_value", DataType::FP32, DataType::FP32);
+    auto predicate = predicate_value.greaterThan(Expression::constantScalar(0.0));
+    Outputs forward = Outputs::conditional(
+        predicate,
+        Expression::outputs({{"y", x * x}}),
+        Expression::outputs({{"y", x * Expression::constantScalar(3.0)}}));
+
+    const std::unordered_map<std::string, std::vector<uint64_t>> forward_input_dims = {
+        {"x", {4}},
+        {"predicate_value", {1}},
+    };
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward.physicalOutputs(), {"x"}, std::unordered_map<std::string, std::string>{{"y", "dy"}}, forward_input_dims);
+    ASSERT_TRUE(backward.isConditional());
+    ASSERT_NE(backward.conditional, nullptr);
+    ASSERT_EQ(backward.outputs.size(), 1u);
+    EXPECT_EQ(backward.outputs[0].name, "x_grad");
+
+    FusedEquation backward_equation = FusedEquation::compile(backward, 0);
+    Tensor x_tensor = makeGpuTensor({4}, {-2.0f, -1.0f, 2.0f, 4.0f}, stream);
+    Tensor dy = makeGpuTensor({4}, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
+
+    Tensor true_predicate = makeGpuTensor({1}, {1.0f}, stream);
+    StampedExecutionPlan true_plan = backward_equation.stamp(
+        {{"x", x_tensor}, {"predicate_value", true_predicate}, {"dy", dy}}, stream);
+    true_plan.run();
+    expectNear(copyToCpuValues(true_plan.output("x_grad"), stream), {-4.0f, -4.0f, 12.0f, 32.0f});
+
+    Tensor false_predicate = makeGpuTensor({1}, {-1.0f}, stream);
+    StampedExecutionPlan false_plan = backward_equation.stamp(
+        {{"x", x_tensor}, {"predicate_value", false_predicate}, {"dy", dy}}, stream);
+    false_plan.run();
+    expectNear(copyToCpuValues(false_plan.output("x_grad"), stream), {3.0f, 6.0f, 9.0f, 12.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, BuildBackwardOutputsZerosGradientForInputsUnusedBySelectedBranch) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto z = Expression::input("z", DataType::FP32, DataType::FP32);
+    auto predicate_value = Expression::input("predicate_value", DataType::FP32, DataType::FP32);
+    Outputs forward = Outputs::conditional(
+        predicate_value.greaterThan(Expression::constantScalar(0.0)),
+        Expression::outputs({{"y", x * Expression::constantScalar(2.0)}}),
+        Expression::outputs({{"y", z * Expression::constantScalar(3.0)}}));
+
+    const std::unordered_map<std::string, std::vector<uint64_t>> forward_input_dims = {
+        {"x", {3}},
+        {"z", {3}},
+        {"predicate_value", {1}},
+    };
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward.physicalOutputs(),
+        {"x", "z"},
+        std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        forward_input_dims);
+    ASSERT_TRUE(backward.isConditional());
+    EXPECT_EQ(backward.outputs.size(), 2u);
+    EXPECT_EQ(backward.outputs[0].name, "x_grad");
+    EXPECT_EQ(backward.outputs[1].name, "z_grad");
+
+    FusedEquation backward_equation = FusedEquation::compile(backward, 0);
+    Tensor x_tensor = makeGpuTensor({3}, {1.0f, 2.0f, 3.0f}, stream);
+    Tensor z_tensor = makeGpuTensor({3}, {4.0f, 5.0f, 6.0f}, stream);
+    Tensor dy = makeGpuTensor({3}, {1.0f, 2.0f, 4.0f}, stream);
+
+    Tensor true_predicate = makeGpuTensor({1}, {1.0f}, stream);
+    StampedExecutionPlan true_plan = backward_equation.stamp(
+        {{"x", x_tensor}, {"z", z_tensor}, {"predicate_value", true_predicate}, {"dy", dy}}, stream);
+    true_plan.run();
+    expectNear(copyToCpuValues(true_plan.output("x_grad"), stream), {2.0f, 4.0f, 8.0f});
+    expectNear(copyToCpuValues(true_plan.output("z_grad"), stream), {0.0f, 0.0f, 0.0f});
+
+    Tensor false_predicate = makeGpuTensor({1}, {-1.0f}, stream);
+    StampedExecutionPlan false_plan = backward_equation.stamp(
+        {{"x", x_tensor}, {"z", z_tensor}, {"predicate_value", false_predicate}, {"dy", dy}}, stream);
+    false_plan.run();
+    expectNear(copyToCpuValues(false_plan.output("x_grad"), stream), {0.0f, 0.0f, 0.0f});
+    expectNear(copyToCpuValues(false_plan.output("z_grad"), stream), {3.0f, 6.0f, 12.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, BuildBackwardOutputsPreservesAccumulationAcrossInactiveBranch) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto z = Expression::input("z", DataType::FP32, DataType::FP32);
+    auto predicate_value = Expression::input("predicate_value", DataType::FP32, DataType::FP32);
+    Outputs forward = Outputs::conditional(
+        predicate_value.greaterThan(Expression::constantScalar(0.0)),
+        Expression::outputs({{"y", x * Expression::constantScalar(2.0)}}),
+        Expression::outputs({{"y", z * Expression::constantScalar(3.0)}}));
+
+    const std::unordered_map<std::string, std::vector<uint64_t>> forward_input_dims = {
+        {"x", {2}},
+        {"z", {2}},
+        {"predicate_value", {1}},
+    };
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward.physicalOutputs(),
+        {"x"},
+        std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        forward_input_dims,
+        true);
+    FusedEquation backward_equation = FusedEquation::compile(backward, 0);
+
+    Tensor x_tensor = makeGpuTensor({2}, {1.0f, 2.0f}, stream);
+    Tensor dy = makeGpuTensor({2}, {3.0f, 4.0f}, stream);
+    Tensor positive = makeGpuTensor({1}, {1.0f}, stream);
+    Tensor negative = makeGpuTensor({1}, {-1.0f}, stream);
+
+    Tensor active_grad = makeGpuTensor({2}, {10.0f, 20.0f}, stream);
+    StampedExecutionPlan active_plan = backward_equation.stamp(
+        {{"x", x_tensor}, {"predicate_value", positive}, {"dy", dy}, {"x_grad", active_grad}},
+        stream,
+        {},
+        {{"x_grad", active_grad}});
+    active_plan.run();
+    expectNear(copyToCpuValues(active_grad, stream), {16.0f, 28.0f});
+
+    Tensor inactive_grad = makeGpuTensor({2}, {10.0f, 20.0f}, stream);
+    StampedExecutionPlan inactive_plan = backward_equation.stamp(
+        {{"x", x_tensor}, {"predicate_value", negative}, {"dy", dy}, {"x_grad", inactive_grad}},
+        stream,
+        {},
+        {{"x_grad", inactive_grad}});
+    inactive_plan.run();
+    expectNear(copyToCpuValues(inactive_grad, stream), {10.0f, 20.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, HostRuntimeScalarsUpdatePerQueuedConditionalLaunch) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto threshold = Expression::runtimeScalar("threshold", DataType::FP32, DataType::FP32);
+    auto scale = Expression::runtimeScalar("scale", DataType::FP32, DataType::FP32);
+    auto predicate = x.reduce_sum().greaterThan(threshold);
+    Outputs conditional = Outputs::conditional(
+        predicate,
+        Expression::outputs({{"y", x * scale}}),
+        Expression::outputs({{"y", x + scale}}));
+
+    FusedEquation equation = FusedEquation::compile(conditional.physicalOutputs(), 0);
+    Tensor x_tensor = makeGpuTensor({2}, {2.0f, 3.0f}, stream);
+    StampedExecutionPlan plan = equation.stamp({{"x", x_tensor}}, stream);
+    EXPECT_EQ(plan.runtimeScalarNames(), (std::unordered_set<std::string>{"threshold", "scale"}));
+
+    Tensor first_snapshot(gpuPlacement, TensorDescriptor(DataType::FP32, {2}));
+    Tensor second_snapshot(gpuPlacement, TensorDescriptor(DataType::FP32, {2}));
+    Tensor third_snapshot(gpuPlacement, TensorDescriptor(DataType::FP32, {2}));
+
+    // Queue all launches before synchronizing. Updating the executable graph for a later
+    // launch must not retroactively change scalar arguments already committed by an
+    // earlier cudaGraphLaunch().
+    plan.run({{"threshold", 0.0f}, {"scale", 2.0f}});
+    first_snapshot.copyFromAsync(plan.output("y"), stream);
+    plan.run({{"threshold", 100.0f}, {"scale", 3.0f}});
+    second_snapshot.copyFromAsync(plan.output("y"), stream);
+    plan.run({{"threshold", 0.0f}, {"scale", 4.0f}});
+    third_snapshot.copyFromAsync(plan.output("y"), stream);
+
+    expectNear(copyToCpuValues(first_snapshot, stream), {4.0f, 6.0f});
+    expectNear(copyToCpuValues(second_snapshot, stream), {5.0f, 6.0f});
+    expectNear(copyToCpuValues(third_snapshot, stream), {8.0f, 12.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, HostRuntimeScalarFeedsConditionalDynamicGemmScale) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto lhs = Expression::input("lhs", DataType::FP32, DataType::FP32);
+    auto rhs = Expression::input("rhs", DataType::FP32, DataType::FP32);
+    auto addend = Expression::input("addend", DataType::FP32, DataType::FP32);
+    auto alpha = Expression::runtimeScalar("alpha", DataType::FP32, DataType::FP32);
+    auto beta = Expression::constantScalar(0.0);
+    auto predicate = Expression::input("predicate_value", DataType::FP32, DataType::FP32)
+                         .greaterThan(Expression::constantScalar(0.0));
+    Expression gemm = Expression::gemm(lhs, rhs, addend, alpha, beta, false, false, false, DataType::FP32, DataType::FP32);
+    Outputs conditional = Outputs::conditional(
+        predicate,
+        Expression::outputs({{"y", gemm}}),
+        Expression::outputs({{"y", lhs}}));
+
+    FusedEquation equation = FusedEquation::compile(conditional.physicalOutputs(), 0);
+    Tensor lhs_tensor = makeGpuTensor({2, 2}, {1.0f, 2.0f, 3.0f, 4.0f}, stream);
+    Tensor rhs_tensor = makeGpuTensor({2, 2}, {2.0f, 0.0f, 0.0f, 3.0f}, stream);
+    Tensor addend_tensor = makeGpuTensor({2, 2}, {0.0f, 0.0f, 0.0f, 0.0f}, stream);
+    Tensor positive = makeGpuTensor({1}, {1.0f}, stream);
+
+    StampedExecutionPlan plan = equation.stamp(
+        {{"lhs", lhs_tensor}, {"rhs", rhs_tensor}, {"addend", addend_tensor}, {"predicate_value", positive}}, stream);
+    EXPECT_EQ(plan.runtimeScalarNames(), (std::unordered_set<std::string>{"alpha"}));
+
+    plan.run({{"alpha", 2.0f}});
+    expectNear(copyToCpuValues(plan.output("y"), stream), {4.0f, 12.0f, 12.0f, 24.0f});
+    plan.run({{"alpha", -1.0f}});
+    expectNear(copyToCpuValues(plan.output("y"), stream), {-2.0f, -6.0f, -6.0f, -12.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, NestedConditionalExecutionRunsSelectedBranch) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto outer_predicate = Expression::input("outer_predicate", DataType::FP32, DataType::FP32)
+                               .greaterThan(Expression::constantScalar(0.0));
+    auto inner_predicate = Expression::input("inner_predicate", DataType::FP32, DataType::FP32)
+                               .greaterThan(Expression::constantScalar(0.0));
+    Outputs inner = Outputs::conditional(
+        inner_predicate,
+        Expression::outputs({{"y", x * Expression::constantScalar(2.0)}}),
+        Expression::outputs({{"y", x * Expression::constantScalar(3.0)}}));
+    Outputs forward = Outputs::conditional(
+        outer_predicate,
+        inner,
+        Expression::outputs({{"y", x * Expression::constantScalar(4.0)}}));
+
+    FusedEquation equation = FusedEquation::compile(forward.physicalOutputs(), 0);
+    Tensor x_tensor = makeGpuTensor({2}, {5.0f, 7.0f}, stream);
+    Tensor positive = makeGpuTensor({1}, {1.0f}, stream);
+    Tensor negative = makeGpuTensor({1}, {-1.0f}, stream);
+
+    StampedExecutionPlan inner_then = equation.stamp(
+        {{"x", x_tensor}, {"outer_predicate", positive}, {"inner_predicate", positive}}, stream);
+    inner_then.run();
+    expectNear(copyToCpuValues(inner_then.output("y"), stream), {10.0f, 14.0f});
+
+    StampedExecutionPlan inner_else = equation.stamp(
+        {{"x", x_tensor}, {"outer_predicate", positive}, {"inner_predicate", negative}}, stream);
+    inner_else.run();
+    expectNear(copyToCpuValues(inner_else.output("y"), stream), {15.0f, 21.0f});
+
+    StampedExecutionPlan outer_else = equation.stamp(
+        {{"x", x_tensor}, {"outer_predicate", negative}, {"inner_predicate", positive}}, stream);
+    outer_else.run();
+    expectNear(copyToCpuValues(outer_else.output("y"), stream), {20.0f, 28.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, BuildBackwardOutputsRecursesThroughNestedConditionals) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto outer_predicate = Expression::input("outer_predicate", DataType::FP32, DataType::FP32)
+                               .greaterThan(Expression::constantScalar(0.0));
+    auto inner_predicate = Expression::input("inner_predicate", DataType::FP32, DataType::FP32)
+                               .greaterThan(Expression::constantScalar(0.0));
+    Outputs inner = Outputs::conditional(
+        inner_predicate,
+        Expression::outputs({{"y", x * Expression::constantScalar(2.0)}}),
+        Expression::outputs({{"y", x * Expression::constantScalar(3.0)}}));
+    Outputs forward = Outputs::conditional(
+        outer_predicate,
+        inner,
+        Expression::outputs({{"y", x * Expression::constantScalar(4.0)}}));
+
+    const std::unordered_map<std::string, std::vector<uint64_t>> forward_input_dims = {
+        {"x", {2}},
+        {"outer_predicate", {1}},
+        {"inner_predicate", {1}},
+    };
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward.physicalOutputs(), {"x"}, std::unordered_map<std::string, std::string>{{"y", "dy"}}, forward_input_dims);
+    ASSERT_TRUE(backward.isConditional());
+    ASSERT_TRUE(backward.conditional->then_branch.isConditional());
+
+    FusedEquation backward_equation = FusedEquation::compile(backward, 0);
+    Tensor x_tensor = makeGpuTensor({2}, {5.0f, 7.0f}, stream);
+    Tensor dy = makeGpuTensor({2}, {1.0f, 2.0f}, stream);
+    Tensor positive = makeGpuTensor({1}, {1.0f}, stream);
+    Tensor negative = makeGpuTensor({1}, {-1.0f}, stream);
+
+    StampedExecutionPlan inner_then = backward_equation.stamp(
+        {{"x", x_tensor}, {"outer_predicate", positive}, {"inner_predicate", positive}, {"dy", dy}}, stream);
+    inner_then.run();
+    expectNear(copyToCpuValues(inner_then.output("x_grad"), stream), {2.0f, 4.0f});
+
+    StampedExecutionPlan inner_else = backward_equation.stamp(
+        {{"x", x_tensor}, {"outer_predicate", positive}, {"inner_predicate", negative}, {"dy", dy}}, stream);
+    inner_else.run();
+    expectNear(copyToCpuValues(inner_else.output("x_grad"), stream), {3.0f, 6.0f});
+
+    StampedExecutionPlan outer_else = backward_equation.stamp(
+        {{"x", x_tensor}, {"outer_predicate", negative}, {"inner_predicate", positive}, {"dy", dy}}, stream);
+    outer_else.run();
+    expectNear(copyToCpuValues(outer_else.output("x_grad"), stream), {4.0f, 8.0f});
 }
 
 TEST(ExpressionGraphConditionalOps, NestedConditionalDefinitionRoundTripsAndTamperingIsRejected) {
@@ -776,6 +1239,51 @@ TEST(ExpressionGraphConditionalOps, NestedConditionalDefinitionRoundTripsAndTamp
     nlohmann::json unsupported_cuda = payload;
     unsupported_cuda["conditional"]["then_branch"]["cuda_kernels"] = nlohmann::json::array({nlohmann::json::object()});
     EXPECT_THROW((void)ExpressionDefinition::deserialize(unsupported_cuda), std::runtime_error);
+}
+
+TEST(ExpressionGraphConditionalOps, OutputInferenceRequiresMatchingConditionalBranchShapesAndDTypes) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor x = makeGpuTensor({2, 3}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}, stream);
+
+    auto x_expr = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto predicate = x_expr.reduce_sum().greaterThan(Expression::constantScalar(0.0));
+
+    Outputs compatible = Outputs::conditional(
+        predicate,
+        Expression::outputs({{"y", x_expr + Expression::constantScalar(1.0)}}),
+        Expression::outputs({{"y", x_expr - Expression::constantScalar(1.0)}}));
+    FusedEquation compatible_equation = FusedEquation::compile(compatible.physicalOutputs(), 0);
+    EXPECT_EQ(compatible_equation.getOutputShapes({{"x", x}}).at("y"), (std::vector<uint64_t>{2, 3}));
+    EXPECT_EQ(compatible_equation.getOutputDataTypes({{"x", x}}).at("y"), DataType::FP32);
+
+    Outputs shape_mismatch = Outputs::conditional(
+        predicate,
+        Expression::outputs({{"y", x_expr}}),
+        Expression::outputs({{"y", x_expr.reshape({6})}}));
+    FusedEquation shape_mismatch_equation = FusedEquation::compile(shape_mismatch.physicalOutputs(), 0);
+    EXPECT_THROW((void)shape_mismatch_equation.getOutputShapes({{"x", x}}), std::runtime_error);
+
+    Outputs dtype_mismatch = Outputs::conditional(
+        predicate,
+        Expression::outputs({{"y", x_expr}}),
+        Expression::outputs({{"y", x_expr.cast(DataType::FP16)}}));
+    FusedEquation dtype_mismatch_equation = FusedEquation::compile(dtype_mismatch.physicalOutputs(), 0);
+    EXPECT_THROW((void)dtype_mismatch_equation.getOutputDataTypes({{"x", x}}), std::runtime_error);
+
+    Outputs non_scalar_predicate = Outputs::conditional(
+        x_expr.greaterThan(Expression::constantScalar(0.0)),
+        Expression::outputs({{"y", x_expr}}),
+        Expression::outputs({{"y", x_expr}}));
+    FusedEquation non_scalar_predicate_equation = FusedEquation::compile(non_scalar_predicate.physicalOutputs(), 0);
+    EXPECT_THROW((void)non_scalar_predicate_equation.getOutputShapes({{"x", x}}), std::runtime_error);
+
+    Outputs non_boolean_predicate = Outputs::conditional(
+        x_expr.reduce_sum(),
+        Expression::outputs({{"y", x_expr}}),
+        Expression::outputs({{"y", x_expr}}));
+    FusedEquation non_boolean_predicate_equation = FusedEquation::compile(non_boolean_predicate.physicalOutputs(), 0);
+    EXPECT_THROW((void)non_boolean_predicate_equation.getOutputDataTypes({{"x", x}}), std::runtime_error);
 }
 
 TEST(ExpressionGraphConditionalOps, RunsThenAndElseBranchesWithDeviceScalarPredicate) {

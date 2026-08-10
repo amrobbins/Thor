@@ -1441,6 +1441,37 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 }
                 node_dims[i] = node_dims[node.alpha_node];
                 break;
+            case ExprOp::CUDA_KERNEL_OUTPUT: {
+                if (node.cuda_kernel_spec_index >= expr.cuda_kernel_expressions.size()) {
+                    throw std::runtime_error("CUDA kernel shape inference for GEMM optimization found an invalid kernel spec index.");
+                }
+                const auto& kernel = expr.cuda_kernel_expressions[node.cuda_kernel_spec_index];
+                if (!kernel) {
+                    throw std::runtime_error("CUDA kernel shape inference for GEMM optimization found a null kernel definition.");
+                }
+                const auto& input_specs = kernel->inputs();
+                if (input_specs.size() != node.cuda_kernel_input_nodes.size()) {
+                    throw std::runtime_error("CUDA kernel shape inference for GEMM optimization found an input binding count mismatch.");
+                }
+
+                std::unordered_map<std::string, std::vector<uint64_t>> input_shapes;
+                input_shapes.reserve(input_specs.size());
+                for (size_t input_idx = 0; input_idx < input_specs.size(); ++input_idx) {
+                    const uint32_t input_node_idx = node.cuda_kernel_input_nodes[input_idx];
+                    if (input_node_idx >= node_dims.size() || input_node_idx >= i) {
+                        throw std::runtime_error(
+                            "CUDA kernel shape inference for GEMM optimization found an invalid or forward input node reference.");
+                    }
+                    input_shapes.emplace(input_specs[input_idx].name, node_dims[input_node_idx]);
+                }
+
+                const auto output_shapes = kernel->inferOutputShapesFromInputShapes(input_shapes);
+                if (node.cuda_kernel_output_index >= output_shapes.size()) {
+                    throw std::runtime_error("CUDA kernel shape inference for GEMM optimization found an invalid output index.");
+                }
+                node_dims[i] = output_shapes[node.cuda_kernel_output_index];
+                break;
+            }
             default:
                 throw std::runtime_error("inferExpressionNodeDimsForOptimization encountered unknown ExprOp.");
         }
@@ -2785,24 +2816,41 @@ static std::vector<std::string> inferBackwardWrtNamesFromOutputs(const PhysicalO
 static std::string dimsToString(const std::vector<uint64_t>& dims);
 static void verifyRequestedOutputLayout(const std::vector<uint64_t>& outputDimensions, const std::vector<uint64_t>& expectedDimensions);
 
-static std::optional<DataType> preferredBackwardGradBufferDType(const BackwardEquationConfig& backward_config,
-                                                                const std::string& wrt_name) {
-    if (!backward_config.forward_outputs_template.expr) {
+static std::optional<DataType> preferredBackwardGradBufferDTypeInTree(const PhysicalOutputs& outputs,
+                                                                      const std::string& wrt_name) {
+    if (!outputs.expr) {
         throw std::runtime_error("Backward grad-buffer dtype lookup requires non-null forward expr.");
     }
 
+    if (outputs.isConditional()) {
+        std::optional<DataType> preferred;
+        const PhysicalConditionalOutputs& conditional = *outputs.conditional;
+        for (const PhysicalOutputs* child :
+             {&conditional.predicate, &conditional.then_branch, &conditional.else_branch}) {
+            const std::optional<DataType> child_preferred = preferredBackwardGradBufferDTypeInTree(*child, wrt_name);
+            if (!child_preferred.has_value()) {
+                continue;
+            }
+            if (preferred.has_value() && preferred.value() != child_preferred.value()) {
+                throw std::runtime_error("Conditional branches disagree on the preferred backward dtype for input: " + wrt_name);
+            }
+            preferred = child_preferred;
+        }
+        return preferred;
+    }
+
     uint32_t slot = UINT32_MAX;
-    for (const NamedInput& input : backward_config.forward_outputs_template.expr->inputs) {
+    for (const NamedInput& input : outputs.expr->inputs) {
         if (input.name == wrt_name) {
             slot = input.slot;
             break;
         }
     }
     if (slot == UINT32_MAX) {
-        throw std::runtime_error("Unknown backward grad-buffer input name: " + wrt_name);
+        return std::nullopt;
     }
 
-    for (const ExprNode& node : backward_config.forward_outputs_template.expr->nodes) {
+    for (const ExprNode& node : outputs.expr->nodes) {
         if ((node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR || node.op == ExprOp::TENSOR_RUNTIME_SCALAR) &&
             node.input_slot == slot) {
             if (node.backward_output_dtype.has_value()) {
@@ -2815,7 +2863,22 @@ static std::optional<DataType> preferredBackwardGradBufferDType(const BackwardEq
         }
     }
 
-    throw std::runtime_error("No INPUT node found for backward grad-buffer input: " + wrt_name);
+    return std::nullopt;
+}
+
+static std::optional<DataType> preferredBackwardGradBufferDType(const BackwardEquationConfig& backward_config,
+                                                                const std::string& wrt_name) {
+    if (!backward_config.forward_outputs_template.expr) {
+        throw std::runtime_error("Backward grad-buffer dtype lookup requires non-null forward expr.");
+    }
+    const bool is_known_root_input =
+        std::any_of(backward_config.forward_outputs_template.expr->inputs.begin(),
+                    backward_config.forward_outputs_template.expr->inputs.end(),
+                    [&](const NamedInput& input) { return input.name == wrt_name; });
+    if (!is_known_root_input) {
+        throw std::runtime_error("Unknown backward grad-buffer input name: " + wrt_name);
+    }
+    return preferredBackwardGradBufferDTypeInTree(backward_config.forward_outputs_template, wrt_name);
 }
 
 static std::vector<uint64_t> stripSingletonDimensions(const std::vector<uint64_t>& dims) {
@@ -3168,6 +3231,159 @@ static std::string dimsToString(const std::vector<uint64_t>& dims) {
     }
     oss << "]";
     return oss.str();
+}
+
+static std::unordered_map<std::string, Tensor> filterTensorInputsForOutputs(
+    const PhysicalOutputs& outputs,
+    const std::unordered_map<std::string, Tensor>& inputs) {
+    std::unordered_map<std::string, Tensor> filtered;
+    if (!outputs.expr) {
+        return filtered;
+    }
+    for (const NamedInput& input : outputs.expr->inputs) {
+        if (input.kind != NamedInput::Kind::Tensor) {
+            continue;
+        }
+        auto it = inputs.find(input.name);
+        if (it != inputs.end()) {
+            filtered.emplace(input.name, it->second);
+        }
+    }
+    return filtered;
+}
+
+static std::unordered_map<std::string, TensorScalarBinding> filterTensorScalarInputsForOutputs(
+    const PhysicalOutputs& outputs,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) {
+    std::unordered_map<std::string, TensorScalarBinding> filtered;
+    if (!outputs.expr) {
+        return filtered;
+    }
+    for (const NamedInput& input : outputs.expr->inputs) {
+        if (input.kind != NamedInput::Kind::TensorRuntimeScalar) {
+            continue;
+        }
+        auto it = tensor_scalar_inputs.find(input.name);
+        if (it != tensor_scalar_inputs.end()) {
+            filtered.emplace(input.name, it->second);
+        }
+    }
+    return filtered;
+}
+
+static PhysicalOutputs clonePhysicalOutputsTree(const PhysicalOutputs& outputs) {
+    PhysicalOutputs clone = outputs;
+    if (outputs.expr) {
+        clone.expr = std::make_shared<PhysicalExpression>(*outputs.expr);
+    }
+    if (outputs.conditional) {
+        clone.conditional = std::make_shared<PhysicalConditionalOutputs>();
+        clone.conditional->predicate = clonePhysicalOutputsTree(outputs.conditional->predicate);
+        clone.conditional->then_branch = clonePhysicalOutputsTree(outputs.conditional->then_branch);
+        clone.conditional->else_branch = clonePhysicalOutputsTree(outputs.conditional->else_branch);
+    }
+    return clone;
+}
+
+static std::unordered_map<std::string, RuntimeInputValue> runtimeInputValuesByName(
+    const std::vector<NamedInput>& inputs,
+    const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
+    std::unordered_map<std::string, RuntimeInputValue> values_by_name;
+    values_by_name.reserve(inputs.size());
+    for (const NamedInput& input : inputs) {
+        auto it = root_values.find(input.slot);
+        if (it == root_values.end()) {
+            throw std::runtime_error("Missing runtime value for input while specializing conditional backward: " + input.name);
+        }
+        values_by_name.emplace(input.name, it->second);
+    }
+    return values_by_name;
+}
+
+static std::unordered_map<uint32_t, RuntimeInputValue> runtimeInputValuesForOutputs(
+    const PhysicalOutputs& outputs,
+    const std::unordered_map<std::string, RuntimeInputValue>& values_by_name) {
+    std::unordered_map<uint32_t, RuntimeInputValue> values;
+    if (!outputs.expr) {
+        return values;
+    }
+    values.reserve(outputs.expr->inputs.size());
+    for (const NamedInput& input : outputs.expr->inputs) {
+        auto it = values_by_name.find(input.name);
+        if (it == values_by_name.end()) {
+            throw std::runtime_error("Missing runtime value for conditional child input: " + input.name);
+        }
+        values.emplace(input.slot, it->second);
+    }
+    return values;
+}
+
+static std::vector<DataType> runtimeInputDTypesForOutputs(
+    const PhysicalOutputs& outputs,
+    const std::unordered_map<std::string, RuntimeInputValue>& values_by_name) {
+    if (!outputs.expr) {
+        return {};
+    }
+    std::vector<DataType> dtypes(outputs.expr->numInputs(), DataType::FP32);
+    std::vector<bool> have_dtype(outputs.expr->numInputs(), false);
+    for (const NamedInput& input : outputs.expr->inputs) {
+        auto it = values_by_name.find(input.name);
+        if (it == values_by_name.end()) {
+            throw std::runtime_error("Missing runtime dtype for conditional child input: " + input.name);
+        }
+        if (input.slot >= dtypes.size()) {
+            throw std::runtime_error("Conditional child input slot out of range while resolving dtypes.");
+        }
+        dtypes[input.slot] = runtimeInputDType(it->second);
+        have_dtype[input.slot] = true;
+    }
+    for (size_t slot = 0; slot < have_dtype.size(); ++slot) {
+        if (!have_dtype[slot]) {
+            throw std::runtime_error("Missing runtime dtype for conditional child input slot " + std::to_string(slot) + ".");
+        }
+    }
+    return dtypes;
+}
+
+static void resolvePhysicalOutputsTreeDTypesInPlace(
+    PhysicalOutputs& outputs,
+    const std::unordered_map<std::string, RuntimeInputValue>& values_by_name) {
+    if (!outputs.expr) {
+        throw std::runtime_error("Conditional dtype specialization requires non-null PhysicalOutputs.expr.");
+    }
+    if (!outputs.isConditional()) {
+        resolveOutputsDTypesInPlace(outputs, runtimeInputDTypesForOutputs(outputs, values_by_name));
+        return;
+    }
+
+    resolvePhysicalOutputsTreeDTypesInPlace(outputs.conditional->predicate, values_by_name);
+    resolvePhysicalOutputsTreeDTypesInPlace(outputs.conditional->then_branch, values_by_name);
+    resolvePhysicalOutputsTreeDTypesInPlace(outputs.conditional->else_branch, values_by_name);
+}
+
+static void optimizePhysicalOutputsTreeGemmPatternsInPlace(
+    PhysicalOutputs& outputs,
+    const PhysicalOutputs& dtype_resolved_outputs,
+    const std::unordered_map<std::string, RuntimeInputValue>& values_by_name) {
+    if (outputs.isConditional() != dtype_resolved_outputs.isConditional()) {
+        throw std::runtime_error("Conditional GEMM specialization topology mismatch.");
+    }
+    if (!outputs.isConditional()) {
+        if (!outputs.expr || !dtype_resolved_outputs.expr) {
+            throw std::runtime_error("Conditional GEMM specialization requires non-null branch expressions.");
+        }
+        optimizeExpressionGemmPatternsInPlace(*outputs.expr,
+                                             runtimeInputValuesForOutputs(outputs, values_by_name),
+                                             dtype_resolved_outputs.expr.get());
+        return;
+    }
+
+    optimizePhysicalOutputsTreeGemmPatternsInPlace(
+        outputs.conditional->predicate, dtype_resolved_outputs.conditional->predicate, values_by_name);
+    optimizePhysicalOutputsTreeGemmPatternsInPlace(
+        outputs.conditional->then_branch, dtype_resolved_outputs.conditional->then_branch, values_by_name);
+    optimizePhysicalOutputsTreeGemmPatternsInPlace(
+        outputs.conditional->else_branch, dtype_resolved_outputs.conditional->else_branch, values_by_name);
 }
 
 // static std::vector<uint64_t> applyUnsqueezeDims(const std::vector<uint64_t>& input_dims, const std::vector<uint64_t>& unsqueeze_axes) {
@@ -5566,12 +5782,29 @@ std::vector<std::string> FusedEquation::getOutputNames() const {
 
 std::vector<std::string> FusedEquation::filterTensorInputNamesReachableFromOutputs(
     const std::vector<std::string>& input_names, const std::unordered_set<std::string>& output_names) const {
-    if (!outputs_template.expr) {
-        throw std::runtime_error("FusedEquation reachability query requires non-null PhysicalOutputs.expr.");
-    }
-
     if (output_names.empty() || input_names.empty()) {
         return {};
+    }
+
+    if (outputs_template.isConditional()) {
+        // Parameter/input reachability is only an optimization for reducing the wrt set. A
+        // conditional may use an input in only one runtime branch, so conservatively keep every
+        // requested tensor input and let conditional autodiff emit an exact zero on branches where
+        // it is unreachable. This also avoids treating the predicate as a differentiable path.
+        std::vector<std::string> filtered;
+        filtered.reserve(input_names.size());
+        std::unordered_set<std::string> seen;
+        for (const std::string& input_name : input_names) {
+            if (!seen.insert(input_name).second) {
+                throw std::runtime_error("FusedEquation reachability query received duplicate input name: " + input_name);
+            }
+            filtered.push_back(input_name);
+        }
+        return filtered;
+    }
+
+    if (!outputs_template.expr) {
+        throw std::runtime_error("FusedEquation reachability query requires non-null PhysicalOutputs.expr.");
     }
 
     const PhysicalExpression& expr = *outputs_template.expr;
@@ -5738,11 +5971,61 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
     const std::unordered_map<std::string, Tensor>& inputs,
     const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) const {
     std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputsForCompilation(inputs, {}, tensor_scalar_inputs);
-    std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
-
     if (root_values.empty()) {
         throw std::runtime_error("FusedEquation::getOutputShapes requires at least one bound root input.");
     }
+
+    if (outputs_template.isConditional()) {
+        if (backward_config.has_value()) {
+            std::unordered_map<std::string, std::vector<uint64_t>> output_shapes;
+            output_shapes.reserve(backward_config->wrt_names.size());
+            for (const std::string& wrt_name : backward_config->wrt_names) {
+                auto input_it = inputs.find(wrt_name);
+                if (input_it == inputs.end()) {
+                    throw std::runtime_error(
+                        "Missing forward input required for conditional backward output shape inference: " + wrt_name);
+                }
+                output_shapes.emplace(wrt_name + "_grad", input_it->second.getDimensions());
+            }
+            return output_shapes;
+        }
+        const PhysicalConditionalOutputs& conditional = *outputs_template.conditional;
+        FusedEquation predicate_equation = FusedEquation::compileWithOptions(conditional.predicate, device_num, use_fast_math);
+        FusedEquation then_equation = FusedEquation::compileWithOptions(conditional.then_branch, device_num, use_fast_math);
+        FusedEquation else_equation = FusedEquation::compileWithOptions(conditional.else_branch, device_num, use_fast_math);
+
+        const auto predicate_shapes = predicate_equation.getOutputShapes(
+            filterTensorInputsForOutputs(conditional.predicate, inputs),
+            filterTensorScalarInputsForOutputs(conditional.predicate, tensor_scalar_inputs));
+        if (predicate_shapes.size() != 1 || numelFromDims(predicate_shapes.begin()->second) != 1) {
+            throw std::runtime_error("Conditional output shape inference requires a scalar predicate output.");
+        }
+
+        const auto then_shapes = then_equation.getOutputShapes(
+            filterTensorInputsForOutputs(conditional.then_branch, inputs),
+            filterTensorScalarInputsForOutputs(conditional.then_branch, tensor_scalar_inputs));
+        const auto else_shapes = else_equation.getOutputShapes(
+            filterTensorInputsForOutputs(conditional.else_branch, inputs),
+            filterTensorScalarInputsForOutputs(conditional.else_branch, tensor_scalar_inputs));
+
+        std::unordered_map<std::string, std::vector<uint64_t>> output_shapes;
+        output_shapes.reserve(outputs_template.outputs.size());
+        for (const NamedOutput& output : outputs_template.outputs) {
+            auto then_it = then_shapes.find(output.name);
+            auto else_it = else_shapes.find(output.name);
+            if (then_it == then_shapes.end() || else_it == else_shapes.end()) {
+                throw std::runtime_error("Conditional output shape inference did not produce named output '" + output.name + "' in both branches.");
+            }
+            if (then_it->second != else_it->second) {
+                throw std::runtime_error("Conditional output shape mismatch for '" + output.name + "': then branch inferred " +
+                                         dimsToString(then_it->second) + ", else branch inferred " + dimsToString(else_it->second) + ".");
+            }
+            output_shapes.emplace(output.name, then_it->second);
+        }
+        return output_shapes;
+    }
+
+    std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
 
     std::unordered_map<uint32_t, std::vector<uint64_t>> value_dims;
     value_dims.reserve(root_values.size() + compiled_outputs->stages.size());
@@ -5801,8 +6084,7 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                 throw std::runtime_error("Reduction stage expected exactly one input and one output.");
             }
 
-            value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
-                stage_input_dims[0], stage.reduction->reduction_axes, stage.reduction->squeeze_axes);
+            value_dims[stage.outputs[0].value_id] = resolveOutputDimsForStageOutput(stage, 0, stage_input_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::ArgMinMax) {
             if (!stage.arg_minmax) {
                 throw std::runtime_error("Missing compiled arg-min/max stage.");
@@ -5812,8 +6094,7 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                 throw std::runtime_error("Arg-min/max stage expected exactly one input and one output.");
             }
 
-            value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
-                stage_input_dims[0], stage.arg_minmax->reduction_axes, stage.arg_minmax->squeeze_axes);
+            value_dims[stage.outputs[0].value_id] = resolveOutputDimsForStageOutput(stage, 0, stage_input_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::SegmentedReduction) {
             if (!stage.segmented_reduction) {
                 throw std::runtime_error("Missing compiled segmented-reduction stage.");
@@ -5995,11 +6276,66 @@ std::unordered_map<std::string, DataType> FusedEquation::getOutputDataTypes(
     const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) const {
     std::unordered_map<uint32_t, RuntimeInputValue> root_values =
         bindRootInputsForCompilation(inputs, {}, tensor_scalar_inputs);
-    std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
-
     if (root_values.empty()) {
         throw std::runtime_error("FusedEquation::getOutputDataTypes requires at least one bound root input.");
     }
+
+    if (outputs_template.isConditional()) {
+        if (backward_config.has_value()) {
+            std::unordered_map<std::string, DataType> output_dtypes;
+            output_dtypes.reserve(backward_config->wrt_names.size());
+            for (const std::string& wrt_name : backward_config->wrt_names) {
+                auto input_it = inputs.find(wrt_name);
+                if (input_it == inputs.end()) {
+                    throw std::runtime_error(
+                        "Missing forward input required for conditional backward output dtype inference: " + wrt_name);
+                }
+                const std::optional<DataType> preferred_dtype =
+                    preferredBackwardGradBufferDType(backward_config.value(), wrt_name);
+                output_dtypes.emplace(
+                    wrt_name + "_grad", preferred_dtype.has_value() ? preferred_dtype.value() : input_it->second.getDataType());
+            }
+            return output_dtypes;
+        }
+        const PhysicalConditionalOutputs& conditional = *outputs_template.conditional;
+        FusedEquation predicate_equation = FusedEquation::compileWithOptions(conditional.predicate, device_num, use_fast_math);
+        FusedEquation then_equation = FusedEquation::compileWithOptions(conditional.then_branch, device_num, use_fast_math);
+        FusedEquation else_equation = FusedEquation::compileWithOptions(conditional.else_branch, device_num, use_fast_math);
+
+        const auto predicate_dtypes = predicate_equation.getOutputDataTypes(
+            filterTensorInputsForOutputs(conditional.predicate, inputs),
+            filterTensorScalarInputsForOutputs(conditional.predicate, tensor_scalar_inputs));
+        if (predicate_dtypes.size() != 1 || predicate_dtypes.begin()->second != DataType::BOOLEAN) {
+            throw std::runtime_error("Conditional output dtype inference requires a BOOLEAN predicate output.");
+        }
+
+        const auto then_dtypes = then_equation.getOutputDataTypes(
+            filterTensorInputsForOutputs(conditional.then_branch, inputs),
+            filterTensorScalarInputsForOutputs(conditional.then_branch, tensor_scalar_inputs));
+        const auto else_dtypes = else_equation.getOutputDataTypes(
+            filterTensorInputsForOutputs(conditional.else_branch, inputs),
+            filterTensorScalarInputsForOutputs(conditional.else_branch, tensor_scalar_inputs));
+
+        std::unordered_map<std::string, DataType> output_dtypes;
+        output_dtypes.reserve(outputs_template.outputs.size());
+        for (const NamedOutput& output : outputs_template.outputs) {
+            auto then_it = then_dtypes.find(output.name);
+            auto else_it = else_dtypes.find(output.name);
+            if (then_it == then_dtypes.end() || else_it == else_dtypes.end()) {
+                throw std::runtime_error("Conditional output dtype inference did not produce named output '" + output.name + "' in both branches.");
+            }
+            if (then_it->second != else_it->second) {
+                throw std::runtime_error(
+                    "Conditional output dtype mismatch for '" + output.name + "': then branch inferred " +
+                    TensorDescriptor::getElementTypeName(then_it->second) + ", else branch inferred " +
+                    TensorDescriptor::getElementTypeName(else_it->second) + ".");
+            }
+            output_dtypes.emplace(output.name, then_it->second);
+        }
+        return output_dtypes;
+    }
+
+    std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
 
     std::unordered_map<uint32_t, DataType> value_dtypes;
     value_dtypes.reserve(root_values.size() + compiled_outputs->stages.size());
@@ -6051,6 +6387,55 @@ EquationSignature FusedEquation::buildSignature(uint32_t num_inputs, int device_
 PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) const {
     if (!backward_config.has_value()) {
         return outputs_template;
+    }
+
+    if (backward_config->forward_outputs_template.isConditional()) {
+        const std::unordered_map<std::string, RuntimeInputValue> values_by_name =
+            runtimeInputValuesByName(root_inputs, root_values);
+
+        PhysicalOutputs resolved_forward_outputs = clonePhysicalOutputsTree(backward_config->forward_outputs_template);
+        PhysicalOutputs dtype_resolved_forward_outputs = clonePhysicalOutputsTree(backward_config->forward_outputs_template);
+        resolvePhysicalOutputsTreeDTypesInPlace(dtype_resolved_forward_outputs, values_by_name);
+        optimizePhysicalOutputsTreeGemmPatternsInPlace(
+            resolved_forward_outputs, dtype_resolved_forward_outputs, values_by_name);
+        resolvePhysicalOutputsTreeDTypesInPlace(resolved_forward_outputs, values_by_name);
+
+        std::unordered_map<std::string, std::vector<uint64_t>> forward_input_dims;
+        forward_input_dims.reserve(backward_config->forward_outputs_template.expr->inputs.size());
+        for (const NamedInput& input : backward_config->forward_outputs_template.expr->inputs) {
+            auto value_it = values_by_name.find(input.name);
+            if (value_it == values_by_name.end()) {
+                throw std::runtime_error(
+                    "Backward equation root inputs do not contain required conditional forward input: " + input.name);
+            }
+            forward_input_dims.emplace(input.name, runtimeInputDims(value_it->second));
+        }
+
+        if (backward_config->upstream_input_names_by_output.has_value()) {
+            std::unordered_map<std::string, DataType> upstream_input_dtypes_by_output;
+            upstream_input_dtypes_by_output.reserve(backward_config->upstream_input_names_by_output->size());
+            for (const auto& [output_name, upstream_input_name] : backward_config->upstream_input_names_by_output.value()) {
+                auto value_it = values_by_name.find(upstream_input_name);
+                if (value_it == values_by_name.end()) {
+                    throw std::runtime_error(
+                        "Backward equation root inputs do not contain upstream gradient input: " + upstream_input_name);
+                }
+                upstream_input_dtypes_by_output.emplace(output_name, runtimeInputDType(value_it->second));
+            }
+
+            return buildBackwardOutputs(resolved_forward_outputs,
+                                        backward_config->wrt_names,
+                                        backward_config->upstream_input_names_by_output.value(),
+                                        upstream_input_dtypes_by_output,
+                                        forward_input_dims,
+                                        backward_config->accumulate_grad_outputs);
+        }
+
+        return buildBackwardOutputs(resolved_forward_outputs,
+                                    backward_config->wrt_names,
+                                    std::nullopt,
+                                    forward_input_dims,
+                                    backward_config->accumulate_grad_outputs);
     }
 
     // Resolve the forward template dtypes against the actual runtime forward-input dtypes
@@ -6414,11 +6799,39 @@ FusedEquation FusedEquation::compile(const PhysicalExpression& expr, int device_
     return compileWithOptions(expr, device_num, false);
 }
 
+static void retainConditionalForwardInputsForBackwardSpecialization(PhysicalOutputs& backward_outputs,
+                                                                    const PhysicalOutputs& forward_outputs) {
+    if (!forward_outputs.isConditional()) {
+        return;
+    }
+    if (!backward_outputs.expr || !forward_outputs.expr) {
+        throw std::runtime_error(
+            "Conditional deferred backward specialization requires non-null forward and backward expression metadata.");
+    }
+
+    for (const NamedInput& forward_input : forward_outputs.expr->inputs) {
+        auto existing = std::find_if(backward_outputs.expr->inputs.begin(),
+                                     backward_outputs.expr->inputs.end(),
+                                     [&](const NamedInput& input) { return input.name == forward_input.name; });
+        if (existing != backward_outputs.expr->inputs.end()) {
+            if (existing->kind != forward_input.kind) {
+                throw std::runtime_error(
+                    "Conditional deferred backward input kind mismatch for forward input: " + forward_input.name);
+            }
+            continue;
+        }
+
+        backward_outputs.expr->inputs.push_back(
+            NamedInput{forward_input.name, static_cast<uint32_t>(backward_outputs.expr->inputs.size()), forward_input.kind});
+    }
+}
+
 FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt_names,
                                              const std::optional<std::string>& upstream_input_name,
                                              bool accumulate_grad_outputs) const {
     PhysicalOutputs backward_outputs =
         buildDeferredShapeBackwardOutputsTemplate(outputs_template, wrt_names, upstream_input_name, accumulate_grad_outputs);
+    retainConditionalForwardInputsForBackwardSpecialization(backward_outputs, outputs_template);
     const EquationSignature backward_signature = buildSignature(backward_outputs.expr->numInputs(), device_num, use_fast_math);
     return FusedEquation(backward_outputs,
                          device_num,
@@ -6442,6 +6855,7 @@ FusedEquation FusedEquation::compileBackward(const std::vector<std::string>& wrt
                                              bool accumulate_grad_outputs) const {
     PhysicalOutputs backward_outputs =
         buildDeferredShapeBackwardOutputsTemplate(outputs_template, wrt_names, upstream_input_names_by_output, accumulate_grad_outputs);
+    retainConditionalForwardInputsForBackwardSpecialization(backward_outputs, outputs_template);
     const EquationSignature backward_signature = buildSignature(backward_outputs.expr->numInputs(), device_num, use_fast_math);
     return FusedEquation(backward_outputs,
                          device_num,
@@ -7376,8 +7790,10 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     std::optional<Tensor> beta_device_scratch = std::nullopt;
     std::optional<Tensor> alpha_host_scratch = std::nullopt;
     std::optional<Tensor> beta_host_scratch = std::nullopt;
-    const bool any_tensor_backed_scale = optionalRuntimeInputIsTensorLike(alpha_input) || optionalRuntimeInputIsTensorLike(beta_input);
-    if (any_tensor_backed_scale) {
+    const bool any_device_scale_scratch_required = optionalRuntimeInputIsTensorLike(alpha_input) ||
+                                                  optionalRuntimeInputIsTensorLike(beta_input) ||
+                                                  alpha_runtime_name.has_value() || beta_runtime_name.has_value();
+    if (any_device_scale_scratch_required) {
         TensorDescriptor scalarDescriptor(DataType::FP32, {1});
         alpha_device_scratch = Tensor(lhs.getPlacement(), scalarDescriptor);
         beta_device_scratch = Tensor(lhs.getPlacement(), scalarDescriptor);
@@ -8146,7 +8562,52 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
     if (outputs_template.isConditional()) {
         if (backward_config.has_value()) {
-            throw std::runtime_error("Graph-level conditional Outputs do not currently support compileBackward().");
+            if (accumulatesIntoGradOutputs(backward_config) && preallocated_outputs.empty()) {
+                throw std::runtime_error(
+                    "Backward equations compiled with accumulate_grad_outputs=true require caller-provided gradient output tensors when stamping.");
+            }
+
+            static const std::unordered_map<std::string, float> empty_scalar_inputs;
+            const std::unordered_map<std::string, std::vector<uint64_t>> requested_output_shapes_with_outputs =
+                mergeRequestedOutputShapesWithProvidedOutputs(preallocated_outputs, requestedOutputShapes, backward_config);
+            std::unordered_map<uint32_t, RuntimeInputValue> compile_root_values =
+                accumulatesIntoGradOutputs(backward_config)
+                    ? bindRootInputs(inputs, empty_scalar_inputs, tensor_scalar_inputs, &preallocated_outputs)
+                    : bindRootInputsForCompilation(
+                          inputs, empty_scalar_inputs, tensor_scalar_inputs, requested_output_shapes_with_outputs);
+            const auto effective_requested_output_shapes =
+                defaultBackwardRequestedOutputShapes(
+                    backward_config, root_inputs, compile_root_values, requested_output_shapes_with_outputs);
+
+            if (accumulatesIntoGradOutputs(backward_config)) {
+                validateBackwardAccumulationOutputs(
+                    backward_config, inputs, preallocated_outputs, effective_requested_output_shapes);
+            }
+
+            PhysicalOutputs specialized_outputs = buildShapeSpecializedOutputs(compile_root_values);
+            FusedEquation specialized_equation =
+                FusedEquation::compileWithOptions(specialized_outputs, device_num, use_fast_math);
+
+            std::unordered_map<std::string, Tensor> specialized_inputs =
+                filterTensorInputsForOutputs(specialized_outputs, inputs);
+            if (accumulatesIntoGradOutputs(backward_config)) {
+                for (const auto& [name, tensor] : preallocated_outputs) {
+                    if (std::any_of(specialized_outputs.expr->inputs.begin(),
+                                    specialized_outputs.expr->inputs.end(),
+                                    [&](const NamedInput& input) {
+                                        return input.kind == NamedInput::Kind::Tensor && input.name == name;
+                                    })) {
+                        specialized_inputs[name] = tensor;
+                    }
+                }
+            }
+
+            return specialized_equation.stamp(
+                specialized_inputs,
+                stream,
+                filterTensorScalarInputsForOutputs(specialized_outputs, tensor_scalar_inputs),
+                preallocated_outputs,
+                effective_requested_output_shapes);
         }
         const PhysicalConditionalOutputs& conditional = *outputs_template.conditional;
 
@@ -10060,6 +10521,35 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
     const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
     const std::unordered_map<std::string, std::vector<uint64_t>>& requested_output_shapes) const {
     ParameterFanOverrideMap result;
+    if (parameter_names.empty()) {
+        return result;
+    }
+
+    if (outputs_template.isConditional()) {
+        if (backward_config.has_value()) {
+            throw std::runtime_error("Parameter fan overrides are unavailable for deferred conditional backward equations.");
+        }
+        const PhysicalConditionalOutputs& conditional = *outputs_template.conditional;
+
+        auto merge_equation_hints = [&](const PhysicalOutputs& outputs,
+                                        const std::unordered_map<std::string, std::vector<uint64_t>>& output_shapes) {
+            FusedEquation equation = FusedEquation::compileWithOptions(outputs, device_num, use_fast_math);
+            ParameterFanOverrideMap hints = equation.getParameterFanOverrides(
+                filterTensorInputsForOutputs(outputs, named_inputs),
+                parameter_names,
+                filterTensorScalarInputsForOutputs(outputs, tensor_scalar_inputs),
+                output_shapes);
+            for (const auto& [name, hint] : hints) {
+                (void)name;
+                mergeParameterFanOverride(result, hint);
+            }
+        };
+
+        merge_equation_hints(conditional.predicate, {});
+        merge_equation_hints(conditional.then_branch, requested_output_shapes);
+        merge_equation_hints(conditional.else_branch, requested_output_shapes);
+        return result;
+    }
 
     const auto root_values = bindRootInputsForCompilation(named_inputs, {}, tensor_scalar_inputs, requested_output_shapes);
     const std::shared_ptr<CompiledOutputs> compiled_outputs = compileForRootValues(root_values);
@@ -10156,8 +10646,7 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
                 throw std::runtime_error("Reduction stage expected exactly one input and one output.");
             }
-            value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
-                stage_input_dims[0], stage.reduction->reduction_axes, stage.reduction->squeeze_axes);
+            value_dims[stage.outputs[0].value_id] = resolveOutputDimsForStageOutput(stage, 0, stage_input_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::ArgMinMax) {
             if (!stage.arg_minmax) {
                 throw std::runtime_error("Missing compiled arg-min/max stage.");
@@ -10165,8 +10654,7 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
                 throw std::runtime_error("Arg-min/max stage expected exactly one input and one output.");
             }
-            value_dims[stage.outputs[0].value_id] = StampedEquation::computeReductionOutputDims(
-                stage_input_dims[0], stage.arg_minmax->reduction_axes, stage.arg_minmax->squeeze_axes);
+            value_dims[stage.outputs[0].value_id] = resolveOutputDimsForStageOutput(stage, 0, stage_input_dims);
         } else if (stage.kind == CompiledExecutionStage::Kind::SegmentedReduction) {
             if (!stage.segmented_reduction) {
                 throw std::runtime_error("Missing compiled segmented-reduction stage.");

@@ -89,6 +89,7 @@ class CudaGraphExecutable {
 
     void upload(Stream stream);
     void setKernelNodeParams(cudaGraphNode_t sourceNode, const cudaKernelNodeParams& params);
+    void setDriverKernelNodeParams(CUgraphNode sourceNode, const CUDA_KERNEL_NODE_PARAMS& params);
     void launch(Stream stream) const;
 
    private:

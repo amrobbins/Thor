@@ -633,3 +633,88 @@ def test_graph_conditional_runs_then_and_else_with_device_scalar_predicate():
     false_out = _clone_to_cpu(false_plan.output("y"), stream)
     stream.synchronize()
     np.testing.assert_allclose(false_out.numpy(), np.array([-9.0, -8.0, -7.0, -6.0], dtype=np.float32))
+
+@pytest.mark.cuda
+def test_graph_conditional_compile_backward_runs_selected_branch_from_python():
+    dtype = thor.DataType.fp32
+    stream = Stream(gpu_num=0)
+
+    x = ex.input("x", compute_dtype=dtype, output_dtype=dtype)
+    predicate_value = ex.input("predicate_value", compute_dtype=dtype, output_dtype=dtype)
+    conditional = ex.if_else(
+        predicate_value > ex.constant_scalar(0.0),
+        ex.outputs({"y": x * x}),
+        ex.outputs({"y": x * ex.constant_scalar(3.0)}),
+    )
+    backward = conditional.compile(device_num=0).compile_backward(["x"], error_input_name="dy")
+
+    x_cpu = _cpu_tensor([4], dtype)
+    _fill_cpu_tensor(x_cpu, [-2.0, -1.0, 2.0, 4.0], dtype)
+    dy_cpu = _cpu_tensor([4], dtype)
+    _fill_cpu_tensor(dy_cpu, [1.0, 2.0, 3.0, 4.0], dtype)
+    positive_cpu = _cpu_tensor([1], dtype)
+    _fill_cpu_tensor(positive_cpu, [1.0], dtype)
+    negative_cpu = _cpu_tensor([1], dtype)
+    _fill_cpu_tensor(negative_cpu, [-1.0], dtype)
+
+    x_gpu = _clone_to_gpu(x_cpu, stream)
+    dy_gpu = _clone_to_gpu(dy_cpu, stream)
+    positive_gpu = _clone_to_gpu(positive_cpu, stream)
+    negative_gpu = _clone_to_gpu(negative_cpu, stream)
+    stream.synchronize()
+
+    then_plan = backward.stamp({"x": x_gpu, "predicate_value": positive_gpu, "dy": dy_gpu}, stream)
+    then_plan.run()
+    then_cpu = _clone_to_cpu(then_plan.output("x_grad"), stream)
+
+    else_plan = backward.stamp({"x": x_gpu, "predicate_value": negative_gpu, "dy": dy_gpu}, stream)
+    else_plan.run()
+    else_cpu = _clone_to_cpu(else_plan.output("x_grad"), stream)
+    stream.synchronize()
+
+    np.testing.assert_allclose(
+        then_cpu.numpy(),
+        np.array([-4.0, -4.0, 12.0, 32.0], dtype=np.float32),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        else_cpu.numpy(),
+        np.array([3.0, 6.0, 9.0, 12.0], dtype=np.float32),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
+@pytest.mark.cuda
+def test_graph_conditional_host_runtime_scalar_is_bound_per_queued_launch_from_python():
+    dtype = thor.DataType.fp32
+    stream = Stream(gpu_num=0)
+
+    x = ex.input("x", compute_dtype=dtype, output_dtype=dtype)
+    predicate_value = ex.input("predicate_value", compute_dtype=dtype, output_dtype=dtype)
+    alpha = ex.runtime_scalar("alpha", compute_dtype=dtype, output_dtype=dtype)
+    conditional = ex.if_else(
+        predicate_value > ex.constant_scalar(0.0),
+        ex.outputs({"y": x * alpha}),
+        ex.outputs({"y": x + alpha}),
+    )
+    equation = conditional.compile(device_num=0)
+
+    x_cpu = _cpu_tensor([4], dtype)
+    _fill_cpu_tensor(x_cpu, [1.0, -2.0, 3.0, 4.0], dtype)
+    predicate_cpu = _cpu_tensor([1], dtype)
+    _fill_cpu_tensor(predicate_cpu, [1.0], dtype)
+    x_gpu = _clone_to_gpu(x_cpu, stream)
+    predicate_gpu = _clone_to_gpu(predicate_cpu, stream)
+    stream.synchronize()
+
+    stamped = equation.stamp({"x": x_gpu, "predicate_value": predicate_gpu}, stream)
+    stamped.run({"alpha": 2.0})
+    first_cpu = _clone_to_cpu(stamped.output("y"), stream)
+    stamped.run({"alpha": -3.0})
+    second_cpu = _clone_to_cpu(stamped.output("y"), stream)
+    stream.synchronize()
+
+    np.testing.assert_allclose(first_cpu.numpy(), np.array([2.0, -4.0, 6.0, 8.0], dtype=np.float32), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(second_cpu.numpy(), np.array([-3.0, 6.0, -9.0, -12.0], dtype=np.float32), rtol=1e-6, atol=1e-6)

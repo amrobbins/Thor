@@ -84,7 +84,8 @@ class TensorFanout : public MultiConnectionLayer {
                                                                                                            std::move(labelsName),
                                                                                                            std::move(gradientName),
                                                                                                            batchValidityMask,
-                                                                                                           std::move(batchValidityMaskName));
+                                                                                                           std::move(batchValidityMaskName),
+                                                                                                           ownerLoss);
         if (fusedCustomLossGradientRegisteredWithDrivingLayer) {
             fusedCustomLossGradientPredictions = predictions;
             fusedCustomLossGradientOwner = ownerLoss;

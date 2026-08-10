@@ -460,6 +460,34 @@ bool kernelJsonContainsEncryptedSource(const json& kernel_json) {
     return kernel_json.contains("source_encryption") || kernel_json.contains("encrypted_source");
 }
 
+bool kernelJsonContainsEncryptedSourceRecursive(const json& kernel_json) {
+    if (kernelJsonContainsEncryptedSource(kernel_json)) {
+        return true;
+    }
+    if (kernel_json.contains("backward") && kernel_json.at("backward").is_array()) {
+        for (const json& backward : kernel_json.at("backward")) {
+            if (backward.contains("kernel") && kernelJsonContainsEncryptedSourceRecursive(backward.at("kernel"))) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool kernelJsonContainsPlaintextSourceRecursive(const json& kernel_json) {
+    if (kernel_json.contains("source")) {
+        return true;
+    }
+    if (kernel_json.contains("backward") && kernel_json.at("backward").is_array()) {
+        for (const json& backward : kernel_json.at("backward")) {
+            if (backward.contains("kernel") && kernelJsonContainsPlaintextSourceRecursive(backward.at("kernel"))) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 std::vector<unsigned char> deriveSourceEncryptionNonce(const CudaKernelSourceDecryptionKey& key, size_t kernel_ordinal, const json& kernel_json) {
     constexpr const char* kDomain = "thor.cuda_kernel_expression.source_nonce.v1\n";
     const std::string nonce_context = std::string(kDomain) + std::to_string(kernel_ordinal) + "\n" + kernel_json.dump();
@@ -468,14 +496,8 @@ std::vector<unsigned char> deriveSourceEncryptionNonce(const CudaKernelSourceDec
     return digest;
 }
 
-void encryptCudaKernelSourcesInExpression(json& expression_json, const CudaKernelSourceDecryptionKey& key, size_t& kernel_ordinal) {
-    if (!isExpressionWithCudaKernels(expression_json)) {
-        return;
-    }
-    for (json& kernel_json : expression_json.at("cuda_kernels")) {
-        if (kernelJsonContainsEncryptedSource(kernel_json)) {
-            continue;
-        }
+void encryptCudaKernelJsonRecursive(json& kernel_json, const CudaKernelSourceDecryptionKey& key, size_t& kernel_ordinal) {
+    if (!kernelJsonContainsEncryptedSource(kernel_json)) {
         if (!kernel_json.value("loaded_source_compilation_allowed", false)) {
             throw std::runtime_error(
                 "Refusing to encrypt/sign CudaKernelExpression CUDA source that was loaded from a serialized model without trusted-key "
@@ -491,6 +513,23 @@ void encryptCudaKernelSourcesInExpression(json& expression_json, const CudaKerne
                                                 {"nonce", hexEncode(encrypted.nonce.data(), encrypted.nonce.size())},
                                                 {"tag", hexEncode(encrypted.tag.data(), encrypted.tag.size())}};
         kernel_json.erase("source");
+    }
+    if (kernel_json.contains("backward") && kernel_json.at("backward").is_array()) {
+        for (json& backward : kernel_json.at("backward")) {
+            if (!backward.contains("kernel") || !backward.at("kernel").is_object()) {
+                throw std::runtime_error("CudaKernelExpression serialized backward entry is missing its kernel object.");
+            }
+            encryptCudaKernelJsonRecursive(backward.at("kernel"), key, kernel_ordinal);
+        }
+    }
+}
+
+void encryptCudaKernelSourcesInExpression(json& expression_json, const CudaKernelSourceDecryptionKey& key, size_t& kernel_ordinal) {
+    if (!isExpressionWithCudaKernels(expression_json)) {
+        return;
+    }
+    for (json& kernel_json : expression_json.at("cuda_kernels")) {
+        encryptCudaKernelJsonRecursive(kernel_json, key, kernel_ordinal);
     }
 }
 
@@ -528,6 +567,19 @@ json canonicalKernelJson(const json& kernel_json) {
     kernel["outputs"] = kernel_json.at("outputs");
     kernel["scalars"] = kernel_json.at("scalars");
     kernel["launch"] = kernel_json.at("launch");
+    if (kernel_json.contains("backward")) {
+        kernel["backward"] = json::array();
+        for (const json& backward : kernel_json.at("backward")) {
+            json gradients = json::object();
+            for (auto it = backward.at("input_gradients").begin(); it != backward.at("input_gradients").end(); ++it) {
+                gradients[it.key()] = it.value();
+            }
+            kernel["backward"].push_back(json{{"forward_output_name", backward.at("forward_output_name")},
+                                               {"upstream_gradient_input_name", backward.at("upstream_gradient_input_name")},
+                                               {"input_gradients", std::move(gradients)},
+                                               {"kernel", canonicalKernelJson(backward.at("kernel"))}});
+        }
+    }
     return kernel;
 }
 
@@ -665,7 +717,7 @@ void collectCudaKernelSourceInfoRecursive(const json& j, std::vector<CudaKernelS
             if (sig_it != j.end() && sig_it->is_object()) {
                 signature = &(*sig_it);
             }
-            for (const json& kernel : j.at("cuda_kernels")) {
+            std::function<void(const json&)> append_kernel = [&](const json& kernel) {
                 CudaKernelSourceInspection info;
                 info.name = kernel.value("name", std::string{});
                 info.entrypoint = kernel.value("entry", std::string{});
@@ -688,6 +740,16 @@ void collectCudaKernelSourceInfoRecursive(const json& j, std::vector<CudaKernelS
                     info.signature = signature->value("signature", std::string{});
                 }
                 out.push_back(std::move(info));
+                if (kernel.contains("backward") && kernel.at("backward").is_array()) {
+                    for (const json& backward : kernel.at("backward")) {
+                        if (backward.contains("kernel")) {
+                            append_kernel(backward.at("kernel"));
+                        }
+                    }
+                }
+            };
+            for (const json& kernel : j.at("cuda_kernels")) {
+                append_kernel(kernel);
             }
         }
         for (auto iter = j.begin(); iter != j.end(); ++iter) {
@@ -790,7 +852,7 @@ bool cudaKernelExpressionJsonContainsEncryptedSources(const json& expression_jso
         return false;
     }
     for (const json& kernel : expression_json.at("cuda_kernels")) {
-        if (kernelJsonContainsEncryptedSource(kernel)) {
+        if (kernelJsonContainsEncryptedSourceRecursive(kernel)) {
             return true;
         }
     }
@@ -802,29 +864,15 @@ bool cudaKernelExpressionJsonContainsPlaintextSources(const json& expression_jso
         return false;
     }
     for (const json& kernel : expression_json.at("cuda_kernels")) {
-        if (kernel.contains("source")) {
+        if (kernelJsonContainsPlaintextSourceRecursive(kernel)) {
             return true;
         }
     }
     return false;
 }
 
-json cudaKernelDecryptSerializedCudaSources(const json& expression_json, const std::string& trusted_source_decryption_key) {
-    if (!cudaKernelExpressionJsonContainsEncryptedSources(expression_json)) {
-        return expression_json;
-    }
-    if (trusted_source_decryption_key.empty()) {
-        throw std::runtime_error(
-            "A CudaKernelExpression AES-256-GCM source decryption key is required to load encrypted CUDA source. The key is printed "
-            "out-of-band when the model is saved and is never stored in the model manifest.");
-    }
-
-    CudaKernelSourceDecryptionKey key = sourceDecryptionKeyFromText(trusted_source_decryption_key);
-    json decrypted = expression_json;
-    for (json& kernel : decrypted.at("cuda_kernels")) {
-        if (!kernelJsonContainsEncryptedSource(kernel)) {
-            continue;
-        }
+void decryptCudaKernelJsonRecursive(json& kernel, const CudaKernelSourceDecryptionKey& key) {
+    if (kernelJsonContainsEncryptedSource(kernel)) {
         const json& encryption = kernel.at("source_encryption");
         if (encryption.value("schema_version", 0) != 1 || encryption.value("algorithm", std::string{}) != "aes-256-gcm") {
             throw std::runtime_error("Unsupported CudaKernelExpression source encryption metadata.");
@@ -848,12 +896,34 @@ json cudaKernelDecryptSerializedCudaSources(const json& expression_json, const s
         const std::vector<unsigned char> tag = hexDecodeRaw(encryption.at("tag").get<std::string>());
         const std::vector<unsigned char> ciphertext = hexDecodeRaw(kernel.at("encrypted_source").get<std::string>());
         const std::string source = aes256GcmDecrypt(key.key, nonce, ciphertext, tag);
-        // CudaKernelExpression::deserialize validates compiled_source_hash after
-        // the plaintext source is restored. Keep that check in the expression
-        // implementation so it uses the same stable hash function as saving.
         kernel["source"] = source;
         kernel.erase("encrypted_source");
         kernel.erase("source_encryption");
+    }
+    if (kernel.contains("backward") && kernel.at("backward").is_array()) {
+        for (json& backward : kernel.at("backward")) {
+            if (!backward.contains("kernel")) {
+                throw std::runtime_error("CudaKernelExpression serialized backward entry is missing its kernel object.");
+            }
+            decryptCudaKernelJsonRecursive(backward.at("kernel"), key);
+        }
+    }
+}
+
+json cudaKernelDecryptSerializedCudaSources(const json& expression_json, const std::string& trusted_source_decryption_key) {
+    if (!cudaKernelExpressionJsonContainsEncryptedSources(expression_json)) {
+        return expression_json;
+    }
+    if (trusted_source_decryption_key.empty()) {
+        throw std::runtime_error(
+            "A CudaKernelExpression AES-256-GCM source decryption key is required to load encrypted CUDA source. The key is printed "
+            "out-of-band when the model is saved and is never stored in the model manifest.");
+    }
+
+    CudaKernelSourceDecryptionKey key = sourceDecryptionKeyFromText(trusted_source_decryption_key);
+    json decrypted = expression_json;
+    for (json& kernel : decrypted.at("cuda_kernels")) {
+        decryptCudaKernelJsonRecursive(kernel, key);
     }
     return decrypted;
 }

@@ -532,6 +532,23 @@ CudaKernelExpression::Builder& CudaKernelExpression::Builder::launchGrid1D(DimEx
     return *this;
 }
 
+CudaKernelExpression::Builder& CudaKernelExpression::Builder::backward(
+    std::string forward_output_name,
+    CudaKernelExpression backward_kernel,
+    std::string upstream_gradient_input_name,
+    std::unordered_map<std::string, std::string> input_gradients) {
+    validateName(forward_output_name, "forward output");
+    validateName(upstream_gradient_input_name, "backward upstream-gradient input");
+    if (input_gradients.empty()) {
+        throw std::invalid_argument("CudaKernelExpression backward specification requires at least one input-gradient output mapping.");
+    }
+    backward_specs_.push_back(BackwardSpec{std::move(forward_output_name),
+                                           std::make_shared<CudaKernelExpression>(std::move(backward_kernel)),
+                                           std::move(upstream_gradient_input_name),
+                                           std::move(input_gradients)});
+    return *this;
+}
+
 CudaKernelExpression CudaKernelExpression::Builder::build() const {
     if (source_.empty()) {
         throw std::invalid_argument("CudaKernelExpression requires CUDA source.");
@@ -573,7 +590,107 @@ CudaKernelExpression CudaKernelExpression::Builder::build() const {
     for (const auto& scalar : scalars_)
         insert(scalar.name, "scalar");
 
-    return CudaKernelExpression(name_, source_, entry_, inputs_, outputs_, scalars_, launch_fn_, launch_spec_, true);
+    std::unordered_map<std::string, const TensorParamSpec*> forward_inputs_by_name;
+    forward_inputs_by_name.reserve(inputs_.size());
+    for (const auto& input : inputs_) {
+        forward_inputs_by_name.emplace(input.name, &input);
+    }
+    std::unordered_map<std::string, const OutputParamSpec*> forward_outputs_by_name;
+    forward_outputs_by_name.reserve(outputs_.size());
+    for (const auto& output : outputs_) {
+        forward_outputs_by_name.emplace(output.name, &output);
+    }
+    std::unordered_set<std::string> backward_outputs_seen;
+    for (const BackwardSpec& backward : backward_specs_) {
+        if (!backward.kernel) {
+            throw std::invalid_argument("CudaKernelExpression backward specification contains a null kernel.");
+        }
+        if (!backward_outputs_seen.insert(backward.forward_output_name).second) {
+            throw std::invalid_argument("CudaKernelExpression has more than one backward kernel for forward output '" +
+                                        backward.forward_output_name + "'.");
+        }
+        auto forward_output_it = forward_outputs_by_name.find(backward.forward_output_name);
+        if (forward_output_it == forward_outputs_by_name.end()) {
+            throw std::invalid_argument("CudaKernelExpression backward specification references unknown forward output '" +
+                                        backward.forward_output_name + "'.");
+        }
+        if (!backward.kernel->backwardSpecs().empty()) {
+            throw std::invalid_argument(
+                "CudaKernelExpression backward kernels cannot themselves declare backward kernels. Higher-order custom CUDA derivatives "
+                "are not currently supported.");
+        }
+
+        const TensorParamSpec* upstream_spec = nullptr;
+        for (const TensorParamSpec& backward_input : backward.kernel->inputs()) {
+            if (backward_input.name == backward.upstream_gradient_input_name) {
+                upstream_spec = &backward_input;
+                continue;
+            }
+            auto forward_input_it = forward_inputs_by_name.find(backward_input.name);
+            if (forward_input_it == forward_inputs_by_name.end()) {
+                throw std::invalid_argument("CudaKernelExpression backward kernel '" + backward.kernel->name() + "' input '" +
+                                            backward_input.name +
+                                            "' must either be the configured upstream-gradient input or have the same name as a forward "
+                                            "kernel input.");
+            }
+            const TensorParamSpec& forward_input = *forward_input_it->second;
+            if (backward_input.kind != forward_input.kind || backward_input.dtype != forward_input.dtype) {
+                throw std::invalid_argument("CudaKernelExpression backward kernel input '" + backward_input.name +
+                                            "' must match the corresponding forward input kind and dtype.");
+            }
+        }
+        if (upstream_spec == nullptr) {
+            throw std::invalid_argument("CudaKernelExpression backward kernel '" + backward.kernel->name() +
+                                        "' is missing configured upstream-gradient input '" + backward.upstream_gradient_input_name + "'.");
+        }
+        if (forward_inputs_by_name.contains(backward.upstream_gradient_input_name)) {
+            throw std::invalid_argument("CudaKernelExpression backward upstream-gradient input name '" +
+                                        backward.upstream_gradient_input_name +
+                                        "' must not collide with a forward-kernel input name.");
+        }
+        if (upstream_spec->kind != TensorParamSpec::Kind::Tensor) {
+            throw std::invalid_argument("CudaKernelExpression backward upstream-gradient input must be a tensor input.");
+        }
+        if (upstream_spec->dtype != forward_output_it->second->dtype) {
+            throw std::invalid_argument("CudaKernelExpression backward upstream-gradient input dtype must match forward output '" +
+                                        backward.forward_output_name + "'.");
+        }
+
+        std::unordered_map<std::string, const OutputParamSpec*> backward_outputs_by_name;
+        for (const OutputParamSpec& output : backward.kernel->outputs()) {
+            backward_outputs_by_name.emplace(output.name, &output);
+        }
+        if (backward.input_gradients.size() != backward_outputs_by_name.size()) {
+            throw std::invalid_argument("CudaKernelExpression backward kernel outputs must each be mapped to exactly one forward input gradient.");
+        }
+        std::unordered_set<std::string> gradient_targets;
+        for (const auto& [backward_output_name, forward_input_name] : backward.input_gradients) {
+            auto backward_output_it = backward_outputs_by_name.find(backward_output_name);
+            if (backward_output_it == backward_outputs_by_name.end()) {
+                throw std::invalid_argument("CudaKernelExpression backward gradient mapping references unknown backward output '" +
+                                            backward_output_name + "'.");
+            }
+            auto forward_input_it = forward_inputs_by_name.find(forward_input_name);
+            if (forward_input_it == forward_inputs_by_name.end()) {
+                throw std::invalid_argument("CudaKernelExpression backward gradient mapping references unknown forward input '" +
+                                            forward_input_name + "'.");
+            }
+            if (forward_input_it->second->kind != TensorParamSpec::Kind::Tensor) {
+                throw std::invalid_argument("CudaKernelExpression backward gradients may only target tensor-valued forward inputs: '" +
+                                            forward_input_name + "'.");
+            }
+            if (!gradient_targets.insert(forward_input_name).second) {
+                throw std::invalid_argument("CudaKernelExpression backward kernel maps more than one output to forward input gradient '" +
+                                            forward_input_name + "'.");
+            }
+            if (backward_output_it->second->dtype != forward_input_it->second->dtype) {
+                throw std::invalid_argument("CudaKernelExpression backward output '" + backward_output_name +
+                                            "' dtype must match target forward input '" + forward_input_name + "'.");
+            }
+        }
+    }
+
+    return CudaKernelExpression(name_, source_, entry_, inputs_, outputs_, scalars_, launch_fn_, launch_spec_, backward_specs_, true);
 }
 
 CudaKernelExpression::CudaKernelExpression(std::string name,
@@ -584,6 +701,7 @@ CudaKernelExpression::CudaKernelExpression(std::string name,
                                            std::vector<ScalarParamSpec> scalars,
                                            LaunchFn launch_fn,
                                            std::optional<LaunchSpec> launch_spec,
+                                           std::vector<BackwardSpec> backward_specs,
                                            bool loaded_source_compilation_allowed)
     : name_(std::move(name)),
       source_(std::move(source)),
@@ -593,7 +711,17 @@ CudaKernelExpression::CudaKernelExpression(std::string name,
       scalars_(std::move(scalars)),
       launch_fn_(std::move(launch_fn)),
       launch_spec_(std::move(launch_spec)),
+      backward_specs_(std::move(backward_specs)),
       loaded_source_compilation_allowed_(loaded_source_compilation_allowed) {}
+
+const CudaKernelExpression::BackwardSpec* CudaKernelExpression::backwardSpecForOutput(const std::string& output_name) const {
+    for (const BackwardSpec& spec : backward_specs_) {
+        if (spec.forward_output_name == output_name) {
+            return &spec;
+        }
+    }
+    return nullptr;
+}
 
 std::string CudaKernelExpression::cacheSignature() const {
     std::ostringstream oss;
@@ -648,6 +776,21 @@ CudaKernelExpression::SourceInfo CudaKernelExpression::sourceInfo() const {
     };
 }
 
+std::vector<CudaKernelExpression::SourceInfo> CudaKernelExpression::sourceInfos() const {
+    std::vector<SourceInfo> result;
+    result.push_back(sourceInfo());
+    for (const BackwardSpec& backward : backward_specs_) {
+        if (!backward.kernel) {
+            throw std::runtime_error("CudaKernelExpression '" + name_ + "' contains a null backward kernel.");
+        }
+        std::vector<SourceInfo> nested = backward.kernel->sourceInfos();
+        for (SourceInfo& info : nested) {
+            result.push_back(std::move(info));
+        }
+    }
+    return result;
+}
+
 json CudaKernelExpression::architectureJson() const {
     if (!launch_spec_.has_value()) {
         throw std::runtime_error("CudaKernelExpression '" + name_ +
@@ -656,7 +799,7 @@ json CudaKernelExpression::architectureJson() const {
     }
 
     json j;
-    j["schema_version"] = 1;
+    j["schema_version"] = backward_specs_.empty() ? 1 : 2;
     j["name"] = name_;
     j["source"] = source_;
     j["entry"] = entry_;
@@ -701,12 +844,28 @@ json CudaKernelExpression::architectureJson() const {
     }
 
     j["launch"] = launch_spec_->architectureJson();
+    if (!backward_specs_.empty()) {
+        j["backward"] = json::array();
+        for (const BackwardSpec& backward : backward_specs_) {
+            if (!backward.kernel) {
+                throw std::runtime_error("CudaKernelExpression '" + name_ + "' contains a null backward kernel.");
+            }
+            json input_gradients = json::object();
+            for (const auto& [backward_output_name, forward_input_name] : backward.input_gradients) {
+                input_gradients[backward_output_name] = forward_input_name;
+            }
+            j["backward"].push_back(json{{"forward_output_name", backward.forward_output_name},
+                                         {"upstream_gradient_input_name", backward.upstream_gradient_input_name},
+                                         {"input_gradients", std::move(input_gradients)},
+                                         {"kernel", backward.kernel->architectureJson()}});
+        }
+    }
     return j;
 }
 
 CudaKernelExpression CudaKernelExpression::deserialize(const json& j, bool allow_unsafe_loaded_cuda_source) {
     const int schema_version = j.value("schema_version", 1);
-    if (schema_version != 1) {
+    if (schema_version != 1 && schema_version != 2) {
         throw std::runtime_error("Unsupported CudaKernelExpression schema_version: " + std::to_string(schema_version));
     }
 
@@ -785,6 +944,22 @@ CudaKernelExpression CudaKernelExpression::deserialize(const json& j, bool allow
 
     LaunchSpec launch_spec = LaunchSpec::deserialize(j.at("launch"));
     builder.launchGrid1D(launch_spec.elements, launch_spec.block_size, launch_spec.dynamic_shared_bytes);
+
+    if (schema_version >= 2 && j.contains("backward")) {
+        if (!j.at("backward").is_array()) {
+            throw std::runtime_error("CudaKernelExpression serialized backward field must be an array.");
+        }
+        for (const json& backward_json : j.at("backward")) {
+            std::unordered_map<std::string, std::string> input_gradients;
+            for (auto it = backward_json.at("input_gradients").begin(); it != backward_json.at("input_gradients").end(); ++it) {
+                input_gradients.emplace(it.key(), it.value().get<std::string>());
+            }
+            builder.backward(backward_json.at("forward_output_name").get<std::string>(),
+                             CudaKernelExpression::deserialize(backward_json.at("kernel"), allow_unsafe_loaded_cuda_source),
+                             backward_json.at("upstream_gradient_input_name").get<std::string>(),
+                             std::move(input_gradients));
+        }
+    }
 
     CudaKernelExpression result = builder.build();
     result.loaded_source_compilation_allowed_ = allow_unsafe_loaded_cuda_source;

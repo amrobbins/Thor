@@ -12,7 +12,10 @@ class CudaKernelLayer(CustomLayer):
     This class intentionally does not create a separate serialized layer kind.
     It lowers directly to CustomLayer with ``kernel.as_dynamic_expression()``, so
     the existing CUDA-kernel source inspection and save/load key policy continues
-    to apply without a second security path.
+    to apply without a second security path. For training, attach an explicit
+    backward CUDA kernel to each differentiable forward output with
+    ``CudaKernelExpressionBuilder.backward(...)``; ordinary CustomLayer expressions
+    continue to use Thor's automatic differentiation.
     """
 
     def __init__(

@@ -147,6 +147,66 @@ void py_split_math_kernel(const float* x, float* twice, float* plus_one, int64_t
     np.testing.assert_allclose(plus_one_np, x_np + 1.0, rtol=1e-6, atol=1e-6)
 
 
+
+@pytest.mark.cuda
+def test_cuda_kernel_expression_explicit_backward_matches_analytic_vjp_from_python():
+    backward = (
+        CudaKernelExpression.builder("py_square_backward")
+        .source(
+            r"""
+extern "C" __global__
+void py_square_backward_kernel(const float* x, const float* dy, float* dx, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dx[i] = 2.0f * x[i] * dy[i];
+}
+"""
+        )
+        .entry("py_square_backward_kernel")
+        .input("x", thor.DataType.fp32)
+        .input("dy", thor.DataType.fp32)
+        .output_like("dx", thor.DataType.fp32, "x")
+        .scalar("n", thor.DataType.int64, CudaKernelExpression.numel("dx"))
+        .launch_grid_1d(CudaKernelExpression.numel("dx"), block_size=128)
+        .build()
+    )
+    forward = (
+        CudaKernelExpression.builder("py_square")
+        .source(
+            r"""
+extern "C" __global__
+void py_square_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    y[i] = x[i] * x[i];
+}
+"""
+        )
+        .entry("py_square_kernel")
+        .input("x", thor.DataType.fp32)
+        .output_like("y", thor.DataType.fp32, "x")
+        .scalar("n", thor.DataType.int64, CudaKernelExpression.numel("y"))
+        .launch_grid_1d(CudaKernelExpression.numel("y"), block_size=128)
+        .backward("y", backward, "dy", {"dx": "x"})
+        .build()
+    )
+
+    outputs = forward.apply({"x": ex.input("x", output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32)})
+    fwd_eq = outputs.compile(device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x"], error_input_name="dy")
+
+    stream = Stream(gpu_num=0)
+    x_np = np.array([[1.0, -2.0, 3.0], [4.5, -5.0, 6.0]], dtype=np.float32)
+    dy_np = np.array([[0.5, 1.0, -2.0], [3.0, -0.25, 4.0]], dtype=np.float32)
+    x_gpu = _copy_numpy_to_gpu(x_np, thor.DataType.fp32, stream)
+    dy_gpu = _copy_numpy_to_gpu(dy_np, thor.DataType.fp32, stream)
+
+    stamped = bwd_eq.stamp({"x": x_gpu, "dy": dy_gpu}, stream)
+    stamped.run()
+    dx_np = _copy_gpu_to_numpy(stamped.output("x_grad"), stream)
+    np.testing.assert_allclose(dx_np, 2.0 * x_np * dy_np, rtol=1e-6, atol=1e-6)
+
+
 @pytest.mark.cuda
 def test_cuda_kernel_expression_output_shape_dim_expr_from_python():
     kernel = (
@@ -668,6 +728,88 @@ void py_custom_layer_serializable_scale_kernel(const float* feature_input, float
         trusted_cuda_kernel_source_decryption_key=trusted_source_decryption_key,
     )
     assert definition.has_cuda_kernel_expressions is True
+
+
+@pytest.mark.cuda
+def test_conditional_cuda_kernel_custom_layer_save_load_runs_both_branches(tmp_path):
+    dtype = thor.DataType.fp32
+    batch_size = 2
+    network_name = "py_conditional_cuda_kernel_custom_layer_round_trip"
+    network = thor.Network(network_name)
+    x = thor.layers.NetworkInput(network, "input", [3], dtype).get_feature_output()
+
+    kernel = (
+        CudaKernelExpression.builder("py_conditional_custom_layer_scale")
+        .source(
+            r"""
+extern "C" __global__
+void py_conditional_custom_layer_scale_kernel(const float* feature_input, float* feature_output, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    feature_output[i] = 2.0f * feature_input[i];
+}
+"""
+        )
+        .entry("py_conditional_custom_layer_scale_kernel")
+        .input("feature_input", dtype)
+        .output_like("feature_output", dtype, "feature_input")
+        .scalar("n", thor.DataType.int64, CudaKernelExpression.numel("feature_output"))
+        .launch_grid_1d(CudaKernelExpression.numel("feature_output"), block_size=128)
+        .build()
+    )
+
+    feature_input = ex.input("feature_input", compute_dtype=dtype, output_dtype=dtype)
+    predicate = ex.reduce_sum(feature_input) > ex.constant_scalar(0.0)
+    conditional = thor.physical.Outputs.conditional(
+        predicate,
+        kernel.apply({"feature_input": feature_input}),
+        ex.outputs({"feature_output": feature_input - ex.constant_scalar(5.0)}),
+    )
+    definition = thor.physical.ExpressionDefinition.from_outputs(conditional)
+    dynamic_expression = thor.physical.DynamicExpression.from_expression_definition(definition)
+
+    layer = thor.layers.CustomLayer(network=network, inputs=x, build=dynamic_expression)
+    thor.layers.NetworkOutput(network, "out", layer["feature_output"], dtype)
+
+    architecture = json.loads(network.get_architecture_json())
+    custom_layers = [layer_json for layer_json in architecture["layers"] if layer_json["layer_type"] == "custom_layer"]
+    assert len(custom_layers) == 1
+    expression_json = custom_layers[0]["expression"]
+    assert "conditional" in expression_json
+    then_json = expression_json["conditional"]["then_branch"]
+    assert then_json["cuda_kernels"][0]["name"] == "py_conditional_custom_layer_scale"
+    assert then_json["cuda_kernel_manifest_signature"]["algorithm"] == "ed25519"
+
+    key_path = tmp_path / "conditional_cuda_keys.json"
+    save_dir = tmp_path / "conditional_cuda_model"
+    network.capture_cuda_kernel_save_keys_to_file(str(key_path))
+    network.save(str(save_dir), overwrite=True)
+    captured = json.loads(key_path.read_text())
+    assert captured["status"] == "complete"
+    assert len(captured["keys"]) == 1
+    signing_public_key = captured["keys"][0]["signing_public_key"]
+    source_decryption_key = captured["keys"][0]["source_decryption_key"]
+
+    loaded = thor.Network(network_name)
+    loaded.load(
+        str(save_dir),
+        allow_unsafe_loaded_cuda_kernel_source=True,
+        trusted_cuda_kernel_public_key=signing_public_key,
+        trusted_cuda_kernel_source_decryption_key=source_decryption_key,
+    )
+    placed = loaded.place(batch_size=batch_size, inference_only=True)
+
+    def infer(values: np.ndarray) -> np.ndarray:
+        host = _cpu_tensor(list(values.shape), dtype)
+        host.numpy()[:] = values
+        outputs = placed.infer({"input": host})
+        return np.array(outputs["out"].numpy(), copy=True)
+
+    positive = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+    np.testing.assert_allclose(infer(positive), positive * np.float32(2.0), rtol=0.0, atol=0.0)
+
+    negative = -positive
+    np.testing.assert_allclose(infer(negative), negative - np.float32(5.0), rtol=0.0, atol=0.0)
 
 
 def test_network_cuda_kernel_save_key_capture_is_required_for_training_and_save(tmp_path):

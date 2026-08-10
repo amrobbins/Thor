@@ -12,6 +12,7 @@
 #include <unordered_set>
 
 #include "Utilities/Expression/BatchedMatmulPlan.h"
+#include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/StampedEquation.h"
 
@@ -157,7 +158,8 @@ static std::vector<uint64_t> resolveReductionAxesForAutodiff(const std::vector<u
 uint32_t cloneForwardSubtree(const PhysicalExpression& src,
                              uint32_t src_node_index,
                              PhysicalExpression& dst,
-                             std::unordered_map<uint32_t, uint32_t>& old_to_new) {
+                             std::unordered_map<uint32_t, uint32_t>& old_to_new,
+                             std::unordered_map<uint32_t, uint32_t>& old_cuda_to_new) {
     auto it = old_to_new.find(src_node_index);
     if (it != old_to_new.end()) {
         return it->second;
@@ -179,60 +181,80 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
         if (src_node.lhs == UINT32_MAX) {
             throw std::runtime_error("Malformed forward expression: unary node missing lhs.");
         }
-        new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new);
+        new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new, old_cuda_to_new);
         new_node.rhs = UINT32_MAX;
         new_node.aux = UINT32_MAX;
     } else if (Expression::isBinaryOp(src_node.op)) {
         if (src_node.lhs == UINT32_MAX || src_node.rhs == UINT32_MAX) {
             throw std::runtime_error("Malformed forward expression: binary node missing child.");
         }
-        new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new);
-        new_node.rhs = cloneForwardSubtree(src, src_node.rhs, dst, old_to_new);
+        new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new, old_cuda_to_new);
+        new_node.rhs = cloneForwardSubtree(src, src_node.rhs, dst, old_to_new, old_cuda_to_new);
         new_node.aux = UINT32_MAX;
     } else if (Expression::isTernaryOp(src_node.op)) {
         if (src_node.lhs == UINT32_MAX || src_node.rhs == UINT32_MAX || src_node.aux == UINT32_MAX) {
             throw std::runtime_error("Malformed forward expression: ternary node missing child.");
         }
-        new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new);
-        new_node.rhs = cloneForwardSubtree(src, src_node.rhs, dst, old_to_new);
-        new_node.aux = cloneForwardSubtree(src, src_node.aux, dst, old_to_new);
+        new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new, old_cuda_to_new);
+        new_node.rhs = cloneForwardSubtree(src, src_node.rhs, dst, old_to_new, old_cuda_to_new);
+        new_node.aux = cloneForwardSubtree(src, src_node.aux, dst, old_to_new, old_cuda_to_new);
         if (src_node.alpha_node != UINT32_MAX) {
-            new_node.alpha_node = cloneForwardSubtree(src, src_node.alpha_node, dst, old_to_new);
+            new_node.alpha_node = cloneForwardSubtree(src, src_node.alpha_node, dst, old_to_new, old_cuda_to_new);
         }
         if (src_node.beta_node != UINT32_MAX) {
-            new_node.beta_node = cloneForwardSubtree(src, src_node.beta_node, dst, old_to_new);
+            new_node.beta_node = cloneForwardSubtree(src, src_node.beta_node, dst, old_to_new, old_cuda_to_new);
         }
         if (src_node.attention_use_padding_mask) {
             if (src_node.attention_seq_len_q_node == UINT32_MAX || src_node.attention_seq_len_kv_node == UINT32_MAX) {
                 throw std::runtime_error(
                     "Malformed attention expression: missing padding-mask sequence length node while cloning forward subtree for autodiff.");
             }
-            new_node.attention_seq_len_q_node = cloneForwardSubtree(src, src_node.attention_seq_len_q_node, dst, old_to_new);
-            new_node.attention_seq_len_kv_node = cloneForwardSubtree(src, src_node.attention_seq_len_kv_node, dst, old_to_new);
+            new_node.attention_seq_len_q_node = cloneForwardSubtree(src, src_node.attention_seq_len_q_node, dst, old_to_new, old_cuda_to_new);
+            new_node.attention_seq_len_kv_node = cloneForwardSubtree(src, src_node.attention_seq_len_kv_node, dst, old_to_new, old_cuda_to_new);
         }
         if (src_node.attention_use_ragged_offsets) {
             if (src_node.attention_ragged_offset_q_node == UINT32_MAX || src_node.attention_ragged_offset_kv_node == UINT32_MAX) {
                 throw std::runtime_error(
                     "Malformed attention expression: missing ragged offset node while cloning forward subtree for autodiff.");
             }
-            new_node.attention_ragged_offset_q_node = cloneForwardSubtree(src, src_node.attention_ragged_offset_q_node, dst, old_to_new);
-            new_node.attention_ragged_offset_kv_node = cloneForwardSubtree(src, src_node.attention_ragged_offset_kv_node, dst, old_to_new);
+            new_node.attention_ragged_offset_q_node = cloneForwardSubtree(src, src_node.attention_ragged_offset_q_node, dst, old_to_new, old_cuda_to_new);
+            new_node.attention_ragged_offset_kv_node = cloneForwardSubtree(src, src_node.attention_ragged_offset_kv_node, dst, old_to_new, old_cuda_to_new);
         }
         if (src_node.attention_use_paged_kv_cache) {
             if (src_node.attention_page_table_k_node == UINT32_MAX || src_node.attention_page_table_v_node == UINT32_MAX) {
                 throw std::runtime_error(
                     "Malformed attention expression: missing paged KV page-table node while cloning forward subtree for autodiff.");
             }
-            new_node.attention_page_table_k_node = cloneForwardSubtree(src, src_node.attention_page_table_k_node, dst, old_to_new);
-            new_node.attention_page_table_v_node = cloneForwardSubtree(src, src_node.attention_page_table_v_node, dst, old_to_new);
+            new_node.attention_page_table_k_node = cloneForwardSubtree(src, src_node.attention_page_table_k_node, dst, old_to_new, old_cuda_to_new);
+            new_node.attention_page_table_v_node = cloneForwardSubtree(src, src_node.attention_page_table_v_node, dst, old_to_new, old_cuda_to_new);
         }
         if (src_node.attention_dropout_probability > 0.0f) {
             if (src_node.attention_dropout_seed_node == UINT32_MAX || src_node.attention_dropout_offset_node == UINT32_MAX) {
                 throw std::runtime_error(
                     "Malformed attention expression: missing dropout seed/offset node while cloning forward subtree for autodiff.");
             }
-            new_node.attention_dropout_seed_node = cloneForwardSubtree(src, src_node.attention_dropout_seed_node, dst, old_to_new);
-            new_node.attention_dropout_offset_node = cloneForwardSubtree(src, src_node.attention_dropout_offset_node, dst, old_to_new);
+            new_node.attention_dropout_seed_node = cloneForwardSubtree(src, src_node.attention_dropout_seed_node, dst, old_to_new, old_cuda_to_new);
+            new_node.attention_dropout_offset_node = cloneForwardSubtree(src, src_node.attention_dropout_offset_node, dst, old_to_new, old_cuda_to_new);
+        }
+    } else if (src_node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+        if (src_node.cuda_kernel_spec_index >= src.cuda_kernel_expressions.size() ||
+            !src.cuda_kernel_expressions[src_node.cuda_kernel_spec_index]) {
+            throw std::runtime_error("Malformed forward expression: CudaKernelExpression node references an invalid kernel spec.");
+        }
+        new_node.cuda_kernel_input_nodes.clear();
+        new_node.cuda_kernel_input_nodes.reserve(src_node.cuda_kernel_input_nodes.size());
+        for (uint32_t input_node : src_node.cuda_kernel_input_nodes) {
+            new_node.cuda_kernel_input_nodes.push_back(
+                cloneForwardSubtree(src, input_node, dst, old_to_new, old_cuda_to_new));
+        }
+        auto spec_it = old_cuda_to_new.find(src_node.cuda_kernel_spec_index);
+        if (spec_it == old_cuda_to_new.end()) {
+            const uint32_t new_spec_index = static_cast<uint32_t>(dst.cuda_kernel_expressions.size());
+            dst.cuda_kernel_expressions.push_back(src.cuda_kernel_expressions[src_node.cuda_kernel_spec_index]);
+            old_cuda_to_new.emplace(src_node.cuda_kernel_spec_index, new_spec_index);
+            new_node.cuda_kernel_spec_index = new_spec_index;
+        } else {
+            new_node.cuda_kernel_spec_index = spec_it->second;
         }
     } else if (Expression::isLeafOp(src_node.op)) {
         // Nothing to recurse into.
@@ -242,7 +264,7 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
 
     if (src_node.op == ExprOp::ROPE && src_node.rope_effective_sequence_length_node != UINT32_MAX) {
         new_node.rope_effective_sequence_length_node =
-            cloneForwardSubtree(src, src_node.rope_effective_sequence_length_node, dst, old_to_new);
+            cloneForwardSubtree(src, src_node.rope_effective_sequence_length_node, dst, old_to_new, old_cuda_to_new);
     }
 
     const uint32_t new_index = static_cast<uint32_t>(dst.nodes.size());
@@ -438,6 +460,7 @@ static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
         case ExprOp::REDUCE_MAX_BACKWARD:
         case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
         case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
+        case ExprOp::CUDA_KERNEL_OUTPUT:
             return true;
         default:
             return false;
@@ -640,6 +663,17 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                              (node.attention_dropout_probability > 0.0f && node.attention_dropout_seed_node != UINT32_MAX && reaches.at(node.attention_dropout_seed_node)) ||
                              (node.attention_dropout_probability > 0.0f && node.attention_dropout_offset_node != UINT32_MAX && reaches.at(node.attention_dropout_offset_node));
                 break;
+            case ExprOp::CUDA_KERNEL_OUTPUT: {
+                bool any = false;
+                for (uint32_t input_node : node.cuda_kernel_input_nodes) {
+                    if (input_node >= reaches.size()) {
+                        throw std::runtime_error("CudaKernelExpression reverse relevance encountered an invalid input node.");
+                    }
+                    any = any || reaches.at(input_node);
+                }
+                reaches[i] = any;
+                break;
+            }
             default:
                 throw std::runtime_error("Unsupported op while computing reverse relevance: " + std::to_string((int)node.op));
         }
@@ -1993,8 +2027,62 @@ class BackwardGraphBuilder {
         return push(std::move(node));
     }
 
+    std::unordered_map<std::string, uint32_t> cudaKernel(
+        const CudaKernelExpression& kernel,
+        const std::unordered_map<std::string, uint32_t>& input_nodes_by_name) {
+        if (input_nodes_by_name.size() != kernel.inputs().size()) {
+            throw std::runtime_error("Autodiff custom CUDA backward kernel input count does not match its declared ABI.");
+        }
+
+        std::vector<uint32_t> ordered_inputs;
+        ordered_inputs.reserve(kernel.inputs().size());
+        for (const auto& input : kernel.inputs()) {
+            auto it = input_nodes_by_name.find(input.name);
+            if (it == input_nodes_by_name.end()) {
+                throw std::runtime_error("Autodiff custom CUDA backward kernel is missing input node '" + input.name + "'.");
+            }
+            if (it->second >= grad_expr.nodes.size()) {
+                throw std::runtime_error("Autodiff custom CUDA backward kernel input node is out of range.");
+            }
+            const ExprNode& input_node = grad_expr.nodes[it->second];
+            if (input.kind == CudaKernelExpression::TensorParamSpec::Kind::TensorRuntimeScalar &&
+                input_node.op != ExprOp::TENSOR_RUNTIME_SCALAR) {
+                throw std::runtime_error("Autodiff custom CUDA backward tensor-runtime-scalar input is wired to the wrong node kind.");
+            }
+            if (input.kind == CudaKernelExpression::TensorParamSpec::Kind::HostRuntimeScalar &&
+                input_node.op != ExprOp::RUNTIME_SCALAR) {
+                throw std::runtime_error("Autodiff custom CUDA backward host-runtime-scalar input is wired to the wrong node kind.");
+            }
+            if (input.kind == CudaKernelExpression::TensorParamSpec::Kind::Tensor &&
+                (input_node.op == ExprOp::TENSOR_RUNTIME_SCALAR || input_node.op == ExprOp::RUNTIME_SCALAR)) {
+                throw std::runtime_error("Autodiff custom CUDA backward tensor input is wired to a runtime scalar node.");
+            }
+            ordered_inputs.push_back(it->second);
+        }
+
+        const uint32_t spec_index = static_cast<uint32_t>(grad_expr.cuda_kernel_expressions.size());
+        grad_expr.cuda_kernel_expressions.push_back(std::make_shared<CudaKernelExpression>(kernel));
+
+        std::unordered_map<std::string, uint32_t> outputs;
+        outputs.reserve(kernel.outputs().size());
+        for (uint32_t output_idx = 0; output_idx < kernel.outputs().size(); ++output_idx) {
+            ExprNode node;
+            node.op = ExprOp::CUDA_KERNEL_OUTPUT;
+            node.cuda_kernel_spec_index = spec_index;
+            node.cuda_kernel_output_index = output_idx;
+            node.cuda_kernel_input_nodes = ordered_inputs;
+            node.output_dtype = kernel.outputs()[output_idx].dtype;
+            node.compute_dtype = kernel.outputs()[output_idx].dtype;
+            node.backward_output_dtype = kernel.outputs()[output_idx].dtype;
+            node.backward_compute_dtype = kernel.outputs()[output_idx].dtype;
+            const uint32_t node_idx = push(std::move(node));
+            outputs.emplace(kernel.outputs()[output_idx].name, node_idx);
+        }
+        return outputs;
+    }
+
     uint32_t cloneForward(uint32_t forward_node_index) {
-        return cloneForwardSubtree(forward_expr, forward_node_index, grad_expr, forward_to_grad_node_map);
+        return cloneForwardSubtree(forward_expr, forward_node_index, grad_expr, forward_to_grad_node_map, forward_to_grad_cuda_kernel_map);
     }
 
     uint32_t buildScaledByGemmFactor(uint32_t maybe_scale_node, double constant_scale, uint32_t value_node) {
@@ -2190,6 +2278,7 @@ class BackwardGraphBuilder {
     const PhysicalExpression& forward_expr;
     PhysicalExpression grad_expr;
     std::unordered_map<uint32_t, uint32_t> forward_to_grad_node_map;
+    std::unordered_map<uint32_t, uint32_t> forward_to_grad_cuda_kernel_map;
     std::vector<std::optional<uint32_t>> node_grads;
 };
 
@@ -3071,6 +3160,27 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::CONV3D_BACKWARD_FILTER:
                 node_dims[i] = inferConvolutionBackwardFilterOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
+            case ExprOp::CUDA_KERNEL_OUTPUT: {
+                if (node.cuda_kernel_spec_index >= forward_expr.cuda_kernel_expressions.size() ||
+                    !forward_expr.cuda_kernel_expressions[node.cuda_kernel_spec_index]) {
+                    throw std::runtime_error("inferForwardNodeDims CudaKernelExpression node references an invalid kernel spec.");
+                }
+                const CudaKernelExpression& kernel = *forward_expr.cuda_kernel_expressions[node.cuda_kernel_spec_index];
+                if (node.cuda_kernel_output_index >= kernel.outputs().size() || node.cuda_kernel_input_nodes.size() != kernel.inputs().size()) {
+                    throw std::runtime_error("inferForwardNodeDims CudaKernelExpression node has invalid ABI metadata.");
+                }
+                std::unordered_map<std::string, std::vector<uint64_t>> input_shapes;
+                for (size_t input_idx = 0; input_idx < kernel.inputs().size(); ++input_idx) {
+                    const uint32_t input_node = node.cuda_kernel_input_nodes[input_idx];
+                    if (input_node >= node_dims.size()) {
+                        throw std::runtime_error("inferForwardNodeDims CudaKernelExpression input node is out of range.");
+                    }
+                    input_shapes.emplace(kernel.inputs()[input_idx].name, node_dims[input_node]);
+                }
+                const auto output_shapes = kernel.inferOutputShapesFromInputShapes(input_shapes);
+                node_dims[i] = output_shapes.at(node.cuda_kernel_output_index);
+                break;
+            }
             default:
                 throw std::runtime_error("inferForwardNodeDims encountered unknown ExprOp.");
         }
@@ -3328,7 +3438,7 @@ static std::string dbgDims(const std::vector<uint64_t>& dims) {
     return oss.str();
 }
 
-PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
+static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                                          const std::vector<std::string>& wrt_names,
                                          const std::optional<std::unordered_map<std::string, std::string>>& upstream_input_names_by_output,
                                          const std::optional<std::unordered_map<std::string, DataType>>& upstream_input_dtypes_by_output,
@@ -3979,6 +4089,92 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
                     // const uint32_t lhs_grad_after_squeeze = builder.gradOf(node.lhs).value();
                     // std::cerr << "[AUTODIFF] SQUEEZE stored lhs grad (no forward dims)"
                     //           << " lhs=" << node.lhs << " lhs_grad_node=" << lhs_grad_after_squeeze << std::endl;
+                }
+                break;
+            }
+
+            case ExprOp::CUDA_KERNEL_OUTPUT: {
+                if (!node_reaches_requested_inputs.at(static_cast<size_t>(node_idx))) {
+                    break;
+                }
+                if (node.cuda_kernel_spec_index >= forward_expr.cuda_kernel_expressions.size() ||
+                    !forward_expr.cuda_kernel_expressions[node.cuda_kernel_spec_index]) {
+                    throw std::runtime_error("CudaKernelExpression autodiff node references an invalid kernel spec.");
+                }
+                const CudaKernelExpression& forward_kernel = *forward_expr.cuda_kernel_expressions[node.cuda_kernel_spec_index];
+                if (node.cuda_kernel_output_index >= forward_kernel.outputs().size() ||
+                    node.cuda_kernel_input_nodes.size() != forward_kernel.inputs().size()) {
+                    throw std::runtime_error("CudaKernelExpression autodiff node has invalid ABI metadata.");
+                }
+                const std::string& forward_output_name = forward_kernel.outputs()[node.cuda_kernel_output_index].name;
+                const CudaKernelExpression::BackwardSpec* backward = forward_kernel.backwardSpecForOutput(forward_output_name);
+                if (backward == nullptr || !backward->kernel) {
+                    throw std::runtime_error("CudaKernelExpression '" + forward_kernel.name() + "' output '" + forward_output_name +
+                                             "' participates in backpropagation but has no explicit backward kernel. Declare one with "
+                                             "CudaKernelExpression::Builder::backward(...).");
+                }
+
+                std::unordered_map<std::string, size_t> forward_input_index_by_name;
+                for (size_t input_idx = 0; input_idx < forward_kernel.inputs().size(); ++input_idx) {
+                    forward_input_index_by_name.emplace(forward_kernel.inputs()[input_idx].name, input_idx);
+                }
+
+                std::unordered_map<std::string, uint32_t> backward_input_nodes;
+                backward_input_nodes.reserve(backward->kernel->inputs().size());
+                std::unordered_map<std::string, std::vector<uint64_t>> backward_input_shapes;
+                for (const auto& backward_input : backward->kernel->inputs()) {
+                    if (backward_input.name == backward->upstream_gradient_input_name) {
+                        backward_input_nodes.emplace(backward_input.name, grad);
+                        if (has_forward_dims) {
+                            backward_input_shapes.emplace(backward_input.name, node_dims);
+                        }
+                        continue;
+                    }
+                    auto forward_input_it = forward_input_index_by_name.find(backward_input.name);
+                    if (forward_input_it == forward_input_index_by_name.end()) {
+                        throw std::runtime_error("CudaKernelExpression backward kernel contains an input that does not bind to a forward "
+                                                 "kernel input: " + backward_input.name);
+                    }
+                    const uint32_t forward_input_node = node.cuda_kernel_input_nodes[forward_input_it->second];
+                    backward_input_nodes.emplace(backward_input.name, builder.cloneForward(forward_input_node));
+                    if (has_forward_dims) {
+                        backward_input_shapes.emplace(backward_input.name, forward_node_dims.at(forward_input_node));
+                    }
+                }
+
+                const std::unordered_map<std::string, uint32_t> backward_outputs =
+                    builder.cudaKernel(*backward->kernel, backward_input_nodes);
+                std::unordered_map<std::string, std::vector<uint64_t>> backward_output_shapes;
+                if (has_forward_dims) {
+                    const auto inferred = backward->kernel->inferOutputShapesFromInputShapes(backward_input_shapes);
+                    for (size_t output_idx = 0; output_idx < backward->kernel->outputs().size(); ++output_idx) {
+                        backward_output_shapes.emplace(backward->kernel->outputs()[output_idx].name, inferred[output_idx]);
+                    }
+                }
+
+                for (const auto& [backward_output_name, forward_input_name] : backward->input_gradients) {
+                    auto forward_input_it = forward_input_index_by_name.find(forward_input_name);
+                    if (forward_input_it == forward_input_index_by_name.end()) {
+                        throw std::runtime_error("CudaKernelExpression backward gradient mapping references unknown forward input: " +
+                                                 forward_input_name);
+                    }
+                    const uint32_t forward_input_node = node.cuda_kernel_input_nodes[forward_input_it->second];
+                    if (!node_reaches_requested_inputs.at(forward_input_node)) {
+                        continue;
+                    }
+                    auto backward_output_it = backward_outputs.find(backward_output_name);
+                    if (backward_output_it == backward_outputs.end()) {
+                        throw std::runtime_error("CudaKernelExpression backward gradient mapping references unknown backward output: " +
+                                                 backward_output_name);
+                    }
+                    if (has_forward_dims) {
+                        const auto shape_it = backward_output_shapes.find(backward_output_name);
+                        if (shape_it == backward_output_shapes.end() || shape_it->second != forward_node_dims.at(forward_input_node)) {
+                            throw std::runtime_error("CudaKernelExpression backward output '" + backward_output_name +
+                                                     "' must have exactly the shape of forward input '" + forward_input_name + "'.");
+                        }
+                    }
+                    builder.addContribution(forward_input_node, backward_output_it->second);
                 }
                 break;
             }
@@ -5190,6 +5386,325 @@ PhysicalOutputs buildBackwardOutputsImpl(const PhysicalOutputs& forward_outputs,
     }
 
     return backward_outputs;
+}
+
+
+static std::optional<DataType> findConditionalInputGradDType(const PhysicalOutputs& outputs, const std::string& input_name) {
+    if (!outputs.expr) {
+        return std::nullopt;
+    }
+
+    for (const ExprNode& node : outputs.expr->nodes) {
+        if (node.op != ExprOp::INPUT || node.input_slot >= outputs.expr->inputs.size()) {
+            continue;
+        }
+        const NamedInput& input = outputs.expr->inputs[node.input_slot];
+        if (input.name == input_name && input.kind == NamedInput::Kind::Tensor) {
+            return preferredGradValueDType(node);
+        }
+    }
+
+    if (!outputs.isConditional() || !outputs.conditional) {
+        return std::nullopt;
+    }
+
+    for (const PhysicalOutputs* child : {&outputs.conditional->predicate,
+                                         &outputs.conditional->then_branch,
+                                         &outputs.conditional->else_branch}) {
+        const auto dtype = findConditionalInputGradDType(*child, input_name);
+        if (dtype.has_value()) {
+            return dtype;
+        }
+    }
+    return std::nullopt;
+}
+
+static std::optional<std::unordered_map<std::string, std::vector<uint64_t>>> filterForwardInputDimsForOutputs(
+    const PhysicalOutputs& outputs,
+    const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims) {
+    if (!forward_input_dims.has_value()) {
+        return std::nullopt;
+    }
+    if (!outputs.expr) {
+        throw std::runtime_error("Conditional autodiff shape filtering requires non-null expression metadata.");
+    }
+
+    std::unordered_map<std::string, std::vector<uint64_t>> filtered;
+    for (const NamedInput& input : outputs.expr->inputs) {
+        if (input.kind != NamedInput::Kind::Tensor) {
+            continue;
+        }
+        auto it = forward_input_dims->find(input.name);
+        if (it != forward_input_dims->end()) {
+            filtered.emplace(it->first, it->second);
+        }
+    }
+    return filtered;
+}
+
+static uint32_t appendBackwardTensorInput(PhysicalExpression& expr,
+                                          const std::string& name,
+                                          std::optional<DataType> dtype = std::nullopt) {
+    uint32_t slot = UINT32_MAX;
+    for (const NamedInput& input : expr.inputs) {
+        if (input.name == name) {
+            if (input.kind != NamedInput::Kind::Tensor) {
+                throw std::runtime_error("Conditional backward tensor input name collides with a non-tensor input: " + name);
+            }
+            slot = input.slot;
+            break;
+        }
+    }
+    if (slot == UINT32_MAX) {
+        slot = static_cast<uint32_t>(expr.inputs.size());
+        expr.inputs.push_back(NamedInput{name, slot, NamedInput::Kind::Tensor});
+    }
+
+    ExprNode input_node{};
+    input_node.op = ExprOp::INPUT;
+    input_node.input_slot = slot;
+    if (dtype.has_value()) {
+        input_node.output_dtype = dtype.value();
+        input_node.backward_output_dtype = dtype.value();
+    }
+    const uint32_t node_idx = static_cast<uint32_t>(expr.nodes.size());
+    expr.nodes.push_back(std::move(input_node));
+    return node_idx;
+}
+
+static uint32_t appendZeroGradientForMissingConditionalInput(PhysicalExpression& expr,
+                                                              const std::string& wrt_name,
+                                                              std::optional<DataType> grad_dtype,
+                                                              bool accumulate_grad_outputs) {
+    const std::string grad_name = wrt_name + "_grad";
+    if (accumulate_grad_outputs) {
+        return appendBackwardTensorInput(expr, grad_name, grad_dtype);
+    }
+
+    const uint32_t input_node = appendBackwardTensorInput(expr, wrt_name, grad_dtype);
+    ExprNode zero_scalar{};
+    zero_scalar.op = ExprOp::SCALAR_FP;
+    zero_scalar.scalar_fp = 0.0;
+    const uint32_t zero_scalar_idx = static_cast<uint32_t>(expr.nodes.size());
+    expr.nodes.push_back(std::move(zero_scalar));
+
+    ExprNode zero_grad{};
+    zero_grad.op = ExprOp::MUL;
+    zero_grad.lhs = input_node;
+    zero_grad.rhs = zero_scalar_idx;
+    if (grad_dtype.has_value()) {
+        zero_grad.output_dtype = grad_dtype.value();
+        zero_grad.backward_output_dtype = grad_dtype.value();
+    }
+    const uint32_t zero_grad_idx = static_cast<uint32_t>(expr.nodes.size());
+    expr.nodes.push_back(std::move(zero_grad));
+    return zero_grad_idx;
+}
+
+static void appendConditionalRootInput(PhysicalExpression& root, const NamedInput& child_input) {
+    for (const NamedInput& existing : root.inputs) {
+        if (existing.name != child_input.name) {
+            continue;
+        }
+        if (existing.kind != child_input.kind) {
+            throw std::runtime_error("Conditional backward input kind mismatch for input: " + child_input.name);
+        }
+        return;
+    }
+    root.inputs.push_back(NamedInput{child_input.name, static_cast<uint32_t>(root.inputs.size()), child_input.kind});
+}
+
+static PhysicalOutputs assembleConditionalBackwardOutputs(const PhysicalOutputs& predicate,
+                                                           PhysicalOutputs then_branch,
+                                                           PhysicalOutputs else_branch,
+                                                           const std::vector<std::string>& desired_wrt) {
+    auto output_names = [](const PhysicalOutputs& outputs) {
+        std::vector<std::string> names;
+        names.reserve(outputs.outputs.size());
+        for (const NamedOutput& output : outputs.outputs) {
+            names.push_back(output.name);
+        }
+        return names;
+    };
+
+    const std::vector<std::string> then_names = output_names(then_branch);
+    const std::vector<std::string> else_names = output_names(else_branch);
+    if (then_names != else_names) {
+        throw std::runtime_error("Conditional backward branches produced different gradient output contracts.");
+    }
+
+    std::vector<std::string> expected_names;
+    expected_names.reserve(desired_wrt.size());
+    for (const std::string& wrt_name : desired_wrt) {
+        expected_names.push_back(wrt_name + "_grad");
+    }
+    if (then_names != expected_names) {
+        throw std::runtime_error("Conditional backward branch gradient outputs do not match the requested wrt order.");
+    }
+
+    PhysicalOutputs result;
+    result.expr = std::make_shared<PhysicalExpression>();
+    const PhysicalOutputs* children[] = {&predicate, &then_branch, &else_branch};
+    for (const PhysicalOutputs* child : children) {
+        if (!child->expr) {
+            throw std::runtime_error("Conditional backward child is missing expression metadata.");
+        }
+        for (const NamedInput& input : child->expr->inputs) {
+            appendConditionalRootInput(*result.expr, input);
+        }
+    }
+
+    result.outputs.reserve(expected_names.size());
+    for (size_t i = 0; i < expected_names.size(); ++i) {
+        result.outputs.push_back(NamedOutput{expected_names[i], static_cast<uint32_t>(i)});
+    }
+
+    result.conditional = std::make_shared<PhysicalConditionalOutputs>();
+    result.conditional->predicate = predicate;
+    result.conditional->then_branch = std::move(then_branch);
+    result.conditional->else_branch = std::move(else_branch);
+    return result;
+}
+
+static PhysicalOutputs buildConditionalTreeBackwardOutputsImpl(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& desired_wrt,
+    const std::optional<std::unordered_map<std::string, std::string>>& upstream_input_names_by_output,
+    const std::optional<std::unordered_map<std::string, DataType>>& upstream_input_dtypes_by_output,
+    const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+    bool accumulate_grad_outputs,
+    bool allow_shape_deferred_placeholders,
+    const std::unordered_map<std::string, std::optional<DataType>>& grad_dtypes) {
+    if (!forward_outputs.expr) {
+        throw std::runtime_error("Conditional autodiff requires non-null expression metadata.");
+    }
+
+    if (forward_outputs.isConditional()) {
+        if (!forward_outputs.conditional) {
+            throw std::runtime_error("Conditional autodiff is missing the conditional payload.");
+        }
+        const PhysicalConditionalOutputs& conditional = *forward_outputs.conditional;
+        PhysicalOutputs then_backward = buildConditionalTreeBackwardOutputsImpl(
+            conditional.then_branch,
+            desired_wrt,
+            upstream_input_names_by_output,
+            upstream_input_dtypes_by_output,
+            filterForwardInputDimsForOutputs(conditional.then_branch, forward_input_dims),
+            accumulate_grad_outputs,
+            allow_shape_deferred_placeholders,
+            grad_dtypes);
+        PhysicalOutputs else_backward = buildConditionalTreeBackwardOutputsImpl(
+            conditional.else_branch,
+            desired_wrt,
+            upstream_input_names_by_output,
+            upstream_input_dtypes_by_output,
+            filterForwardInputDimsForOutputs(conditional.else_branch, forward_input_dims),
+            accumulate_grad_outputs,
+            allow_shape_deferred_placeholders,
+            grad_dtypes);
+        return assembleConditionalBackwardOutputs(conditional.predicate,
+                                                  std::move(then_backward),
+                                                  std::move(else_backward),
+                                                  desired_wrt);
+    }
+
+    std::unordered_set<std::string> tensor_input_names;
+    for (const NamedInput& input : forward_outputs.expr->inputs) {
+        if (input.kind == NamedInput::Kind::Tensor) {
+            tensor_input_names.insert(input.name);
+        }
+    }
+
+    std::vector<std::string> active_wrt;
+    active_wrt.reserve(desired_wrt.size());
+    for (const std::string& wrt_name : desired_wrt) {
+        if (tensor_input_names.contains(wrt_name)) {
+            active_wrt.push_back(wrt_name);
+        }
+    }
+
+    PhysicalOutputs backward;
+    if (!active_wrt.empty()) {
+        backward = buildFlatBackwardOutputsImpl(forward_outputs,
+                                               active_wrt,
+                                               upstream_input_names_by_output,
+                                               upstream_input_dtypes_by_output,
+                                               std::nullopt,
+                                               forward_input_dims,
+                                               accumulate_grad_outputs,
+                                               allow_shape_deferred_placeholders);
+    } else {
+        backward.expr = std::make_shared<PhysicalExpression>();
+    }
+
+    std::unordered_map<std::string, uint32_t> existing_output_nodes;
+    for (const NamedOutput& output : backward.outputs) {
+        existing_output_nodes.emplace(output.name, output.node_idx);
+    }
+
+    std::vector<NamedOutput> ordered_outputs;
+    ordered_outputs.reserve(desired_wrt.size());
+    for (const std::string& wrt_name : desired_wrt) {
+        const std::string grad_name = wrt_name + "_grad";
+        auto existing = existing_output_nodes.find(grad_name);
+        if (existing != existing_output_nodes.end()) {
+            ordered_outputs.push_back(NamedOutput{grad_name, existing->second});
+            continue;
+        }
+        auto dtype_it = grad_dtypes.find(wrt_name);
+        const std::optional<DataType> grad_dtype = dtype_it == grad_dtypes.end() ? std::nullopt : dtype_it->second;
+        const uint32_t zero_node = appendZeroGradientForMissingConditionalInput(
+            *backward.expr, wrt_name, grad_dtype, accumulate_grad_outputs);
+        ordered_outputs.push_back(NamedOutput{grad_name, zero_node});
+    }
+    backward.outputs = std::move(ordered_outputs);
+    if (!backward.outputs.empty()) {
+        backward.expr->output_node = backward.outputs.front().node_idx;
+    }
+    return backward;
+}
+
+static PhysicalOutputs buildBackwardOutputsImpl(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& wrt_names,
+    const std::optional<std::unordered_map<std::string, std::string>>& upstream_input_names_by_output,
+    const std::optional<std::unordered_map<std::string, DataType>>& upstream_input_dtypes_by_output,
+    const std::optional<std::unordered_map<std::string, uint32_t>>& upstream_node_indices_by_output,
+    const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+    bool accumulate_grad_outputs,
+    bool allow_shape_deferred_placeholders = false) {
+    if (!forward_outputs.expr) {
+        throw std::runtime_error("buildBackwardOutputs requires non-null forward_outputs.expr.");
+    }
+    if (!forward_outputs.isConditional()) {
+        return buildFlatBackwardOutputsImpl(forward_outputs,
+                                            wrt_names,
+                                            upstream_input_names_by_output,
+                                            upstream_input_dtypes_by_output,
+                                            upstream_node_indices_by_output,
+                                            forward_input_dims,
+                                            accumulate_grad_outputs,
+                                            allow_shape_deferred_placeholders);
+    }
+    if (upstream_node_indices_by_output.has_value() && !upstream_node_indices_by_output->empty()) {
+        throw std::runtime_error(
+            "Graph-level conditional autodiff does not support upstream seeds by physical node index; use named upstream inputs.");
+    }
+
+    const std::vector<std::string> normalized_wrt = normalizeWrtNames(*forward_outputs.expr, wrt_names);
+    std::unordered_map<std::string, std::optional<DataType>> grad_dtypes;
+    for (const std::string& wrt_name : normalized_wrt) {
+        grad_dtypes.emplace(wrt_name, findConditionalInputGradDType(forward_outputs, wrt_name));
+    }
+
+    return buildConditionalTreeBackwardOutputsImpl(forward_outputs,
+                                                   normalized_wrt,
+                                                   upstream_input_names_by_output,
+                                                   upstream_input_dtypes_by_output,
+                                                   forward_input_dims,
+                                                   accumulate_grad_outputs,
+                                                   allow_shape_deferred_placeholders,
+                                                   grad_dtypes);
 }
 
 PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,

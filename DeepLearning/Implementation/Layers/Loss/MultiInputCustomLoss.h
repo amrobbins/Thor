@@ -96,7 +96,6 @@ class MultiInputCustomLoss : public Loss {
    private:
     static std::string joinNames(const std::set<std::string>& names);
     static std::set<std::string> presentNames(const std::vector<std::optional<std::string>>& names);
-    static DataType findOutputDType(const std::shared_ptr<CompiledOutputs>& compiledOutputs, const std::string& outputName);
     uint32_t requireInputIndexFromConnectionType(int connectionType) const;
     Stream& computeStream();
     const Stream& computeStream() const;

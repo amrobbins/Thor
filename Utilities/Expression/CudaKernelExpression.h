@@ -106,6 +106,15 @@ class CudaKernelExpression {
         bool loaded_source_compilation_allowed = true;
     };
 
+    struct BackwardSpec {
+        std::string forward_output_name;
+        std::shared_ptr<const CudaKernelExpression> kernel;
+        std::string upstream_gradient_input_name;
+        // Maps backward-kernel output name -> forward-kernel input name.
+        // Forward inputs omitted from this map receive no gradient contribution.
+        std::unordered_map<std::string, std::string> input_gradients;
+    };
+
     class Builder {
        public:
         explicit Builder(std::string name);
@@ -120,6 +129,10 @@ class CudaKernelExpression {
         Builder& scalar(std::string name, DataType type, std::variant<int32_t, uint32_t, int64_t, uint64_t, float, double, DimExpr> value);
         Builder& launch(LaunchFn launch_fn);
         Builder& launchGrid1D(DimExpr elements, uint32_t block_size = 256, uint32_t dynamic_shared_bytes = 0);
+        Builder& backward(std::string forward_output_name,
+                          CudaKernelExpression backward_kernel,
+                          std::string upstream_gradient_input_name,
+                          std::unordered_map<std::string, std::string> input_gradients);
 
         [[nodiscard]] CudaKernelExpression build() const;
 
@@ -132,6 +145,7 @@ class CudaKernelExpression {
         std::vector<ScalarParamSpec> scalars_;
         LaunchFn launch_fn_;
         std::optional<LaunchSpec> launch_spec_;
+        std::vector<BackwardSpec> backward_specs_;
     };
 
     [[nodiscard]] static Builder builder(std::string name) { return Builder(std::move(name)); }
@@ -141,10 +155,13 @@ class CudaKernelExpression {
     [[nodiscard]] const std::string& entrypoint() const { return entry_; }
     [[nodiscard]] std::string compiledSource() const;
     [[nodiscard]] SourceInfo sourceInfo() const;
+    [[nodiscard]] std::vector<SourceInfo> sourceInfos() const;
     [[nodiscard]] bool loadedSourceCompilationAllowed() const { return loaded_source_compilation_allowed_; }
     [[nodiscard]] const std::vector<TensorParamSpec>& inputs() const { return inputs_; }
     [[nodiscard]] const std::vector<OutputParamSpec>& outputs() const { return outputs_; }
     [[nodiscard]] const std::vector<ScalarParamSpec>& scalars() const { return scalars_; }
+    [[nodiscard]] const std::vector<BackwardSpec>& backwardSpecs() const { return backward_specs_; }
+    [[nodiscard]] const BackwardSpec* backwardSpecForOutput(const std::string& output_name) const;
     [[nodiscard]] std::string cacheSignature() const;
     [[nodiscard]] std::vector<std::vector<uint64_t>> inferOutputShapesFromInputShapes(
         const std::unordered_map<std::string, std::vector<uint64_t>>& input_shapes) const;
@@ -178,6 +195,7 @@ class CudaKernelExpression {
                          std::vector<ScalarParamSpec> scalars,
                          LaunchFn launch_fn,
                          std::optional<LaunchSpec> launch_spec,
+                         std::vector<BackwardSpec> backward_specs,
                          bool loaded_source_compilation_allowed);
 
     [[nodiscard]] std::unordered_map<std::string, Tensor> allocateAndValidateOutputs(
@@ -197,6 +215,7 @@ class CudaKernelExpression {
     std::vector<ScalarParamSpec> scalars_;
     LaunchFn launch_fn_;
     std::optional<LaunchSpec> launch_spec_;
+    std::vector<BackwardSpec> backward_specs_;
     bool loaded_source_compilation_allowed_ = true;
 };
 

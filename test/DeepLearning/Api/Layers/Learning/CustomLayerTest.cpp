@@ -7,6 +7,7 @@
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
+#include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 
@@ -16,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <set>
@@ -104,6 +106,33 @@ Impl::DynamicExpression makeSerializableAffineExpression() {
     return Impl::DynamicExpression::fromExpressionDefinition(definition);
 }
 
+Impl::DynamicExpression makeSerializableConditionalCudaExpression() {
+    auto kernel = Impl::CudaKernelExpression::builder("custom_layer_conditional_scale")
+                      .source(R"cuda(
+extern "C" __global__
+void custom_layer_conditional_scale_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] = 2.0f * x[i];
+    }
+}
+)cuda")
+                      .entry("custom_layer_conditional_scale_kernel")
+                      .input("x", DataType::FP32)
+                      .outputLike("y", DataType::FP32, "x")
+                      .scalar("n", DataType::INT64, Impl::CudaKernelExpression::DimExpr::numel("y"))
+                      .launchGrid1D(Impl::CudaKernelExpression::DimExpr::numel("y"), 128)
+                      .build();
+
+    Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
+    Impl::Expression predicate = x.reduce_sum().greaterThan(Impl::Expression::constantScalar(0.0));
+    Impl::Outputs cudaBranch = kernel.apply({{"x", x}});
+    Impl::Outputs ordinaryBranch = Impl::Expression::outputs({{"y", x - Impl::Expression::constantScalar(5.0)}});
+    Impl::ExpressionDefinition definition =
+        Impl::ExpressionDefinition::fromOutputs(Impl::Outputs::conditional(predicate, cudaBranch, ordinaryBranch));
+    return Impl::DynamicExpression::fromExpressionDefinition(definition);
+}
+
 Impl::DynamicExpression makeSerializableValidityMaskedExpression() {
     Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
     Impl::Expression validity =
@@ -132,6 +161,57 @@ Impl::DynamicExpression makeRuntimeOnlyAffineExpression() {
                 .requested_output_shapes = {},
                 .pre_forward_hook = {},
                 .serialized_definition = nullptr,
+            };
+        });
+}
+
+Impl::DynamicExpression makeBatchDependentConditionalCudaExpression() {
+    return Impl::DynamicExpression(
+        {"x"},
+        {"y"},
+        [](const Impl::DynamicExpression::TensorMap& inputs,
+           const Impl::DynamicExpression::TensorMap& outputs,
+           Stream& stream) -> Impl::DynamicExpressionBuild {
+            const std::vector<uint64_t> dimensions = inputs.at("x").getDimensions();
+            if (dimensions.size() != 2) {
+                throw std::runtime_error("Batch-dependent conditional CUDA expression expects rank-2 input.");
+            }
+
+            auto kernel = Impl::CudaKernelExpression::builder("batch_dependent_conditional_scale")
+                              .source(R"cuda(
+extern "C" __global__
+void batch_dependent_conditional_scale_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = 2.0f * x[i];
+}
+)cuda")
+                              .entry("batch_dependent_conditional_scale_kernel")
+                              .input("x", DataType::FP32)
+                              .output("y",
+                                      DataType::FP32,
+                                      {Impl::CudaKernelExpression::DimExpr::constant(dimensions[0]),
+                                       Impl::CudaKernelExpression::DimExpr::constant(dimensions[1])})
+                              .scalar("n", DataType::INT64, Impl::CudaKernelExpression::DimExpr::numel("y"))
+                              .launchGrid1D(Impl::CudaKernelExpression::DimExpr::numel("y"), 128)
+                              .build();
+
+            Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
+            Impl::Expression predicate = x.reduce_sum().greaterThan(Impl::Expression::constantScalar(0.0));
+            Impl::Outputs conditional = Impl::Outputs::conditional(
+                predicate,
+                kernel.apply({{"x", x}}),
+                Impl::Expression::outputs({{"y", x}}));
+            Impl::ExpressionDefinition definition = Impl::ExpressionDefinition::fromOutputs(conditional);
+            auto serializedDefinition = std::make_shared<Impl::ExpressionDefinition>(std::move(definition));
+            return Impl::DynamicExpressionBuild{
+                .equation = std::make_shared<Impl::FusedEquation>(
+                    Impl::FusedEquation::compile(serializedDefinition->outputs, stream.getGpuNum())),
+                .stamp_inputs = inputs,
+                .tensor_scalar_inputs = {},
+                .preallocated_outputs = outputs,
+                .requested_output_shapes = {},
+                .pre_forward_hook = {},
+                .serialized_definition = serializedDefinition,
             };
         });
 }
@@ -285,6 +365,31 @@ TEST(CustomLayerApi, RuntimeOnlyExpressionIsRejectedDuringConstruction) {
     EXPECT_EQ(network.getNumLayers(), 1u);
 }
 
+TEST(CustomLayerApi, BatchDependentNestedCudaExpressionIsNotGeneralizedDuringSerializationAnalysis) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "CustomLayer conditional CUDA serialization-analysis test requires a GPU";
+
+    Api::Network network("custom_layer_batch_dependent_nested_cuda_rejected");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({3}).dataType(DataType::FP32).build();
+
+    try {
+        (void)Api::CustomLayer::Builder()
+            .network(network)
+            .expression(makeBatchDependentConditionalCudaExpression())
+            .inputNames({"x"})
+            .outputNames({"y"})
+            .inputInterface({{"x", input.getFeatureOutput().value()}})
+            .build();
+        FAIL() << "Expected batch-dependent nested CUDA expression to require an explicit symbolic definition.";
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("batch-dependent CUDA-kernel expressions require an explicitly supplied symbolic ExpressionDefinition"),
+                  std::string::npos);
+    }
+    EXPECT_EQ(network.getNumLayers(), 1u);
+}
+
 TEST(CustomLayerApi, SerializableExpressionDefinitionSaveLoadRoundTripPreservesExpressionAndRuns) {
     constexpr uint32_t batchSize = 2;
     constexpr uint32_t numFeatures = 3;
@@ -361,6 +466,91 @@ TEST(CustomLayerApi, SerializableExpressionDefinitionSaveLoadRoundTripPreservesE
     std::filesystem::remove_all(archiveDir);
 }
 
+
+TEST(CustomLayerApi, ConditionalCudaExpressionSaveLoadRoundTripRunsBothBranches) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "CustomLayer conditional CUDA round-trip test requires a GPU";
+
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t numFeatures = 3;
+    const DataType dataType = DataType::FP32;
+    const std::string networkName = "custom_layer_conditional_cuda_round_trip";
+    std::filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+    std::filesystem::path keyPath = archiveDir.parent_path() / (archiveDir.filename().string() + "_cuda_keys.json");
+    std::filesystem::remove(keyPath);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input =
+            Api::NetworkInput::Builder().network(network).name("input").dimensions({numFeatures}).dataType(dataType).build();
+        Api::CustomLayer customLayer = Api::CustomLayer::Builder()
+                                           .network(network)
+                                           .expression(makeSerializableConditionalCudaExpression())
+                                           .inputNames({"x"})
+                                           .outputNames({"y"})
+                                           .inputInterface({{"x", input.getFeatureOutput().value()}})
+                                           .build();
+        Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                        .network(network)
+                                        .name("output")
+                                        .inputTensor(customLayer.getOutput("y"))
+                                        .dataType(dataType)
+                                        .build();
+
+        const nlohmann::json beforeSaveJson = customLayer.architectureJson();
+        ASSERT_TRUE(beforeSaveJson.at("expression").contains("conditional"));
+        ASSERT_TRUE(beforeSaveJson.at("expression").at("conditional").at("then_branch").contains("cuda_kernels"));
+        EXPECT_TRUE(network.hasCudaKernelExpressions());
+
+        network.captureCudaKernelSaveKeysToFile(keyPath.string());
+        network.save(archiveDir.string(), true);
+
+        std::ifstream keyFile(keyPath);
+        ASSERT_TRUE(keyFile.good());
+        nlohmann::json capturedKeys;
+        keyFile >> capturedKeys;
+        ASSERT_EQ(capturedKeys.at("status").get<std::string>(), "complete");
+        ASSERT_EQ(capturedKeys.at("keys").size(), 1u);
+        const std::string signingPublicKey = capturedKeys.at("keys").at(0).at("signing_public_key").get<std::string>();
+        const std::string sourceDecryptionKey = capturedKeys.at("keys").at(0).at("source_decryption_key").get<std::string>();
+        ASSERT_FALSE(signingPublicKey.empty());
+        ASSERT_FALSE(sourceDecryptionKey.empty());
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string(), true, signingPublicKey, sourceDecryptionKey);
+
+        std::shared_ptr<Api::NetworkInput> loadedInput = findOnlyLayerOfType<Api::NetworkInput>(loadedNetwork);
+        std::shared_ptr<Api::CustomLayer> loadedCustomLayer = findOnlyLayerOfType<Api::CustomLayer>(loadedNetwork);
+        std::shared_ptr<Api::NetworkOutput> loadedOutput = findOnlyLayerOfType<Api::NetworkOutput>(loadedNetwork);
+        ASSERT_NE(loadedInput, nullptr);
+        ASSERT_NE(loadedCustomLayer, nullptr);
+        ASSERT_NE(loadedOutput, nullptr);
+        EXPECT_TRUE(loadedNetwork.hasCudaKernelExpressions());
+
+        const nlohmann::json loadedJson = loadedCustomLayer->architectureJson();
+        ASSERT_TRUE(loadedJson.at("expression").contains("conditional"));
+        ASSERT_TRUE(loadedJson.at("expression").at("conditional").at("then_branch").contains("cuda_kernels"));
+
+        PlacedCustomLayerFixture fixture =
+            placeSingleCustomLayerNetwork(loadedNetwork, *loadedInput, *loadedOutput, *loadedCustomLayer, batchSize, true);
+
+        Impl::Tensor positiveInput(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numFeatures}));
+        writeCpuTensor(positiveInput, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+        expectAllClose(runForward(*fixture.physicalInput, *fixture.physicalOutput, positiveInput, batchSize),
+                       {2.0f, 4.0f, 6.0f, 8.0f, 10.0f, 12.0f});
+
+        Impl::Tensor negativeInput(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numFeatures}));
+        writeCpuTensor(negativeInput, {-1.0f, -2.0f, -3.0f, -4.0f, -5.0f, -6.0f});
+        expectAllClose(runForward(*fixture.physicalInput, *fixture.physicalOutput, negativeInput, batchSize),
+                       {-6.0f, -7.0f, -8.0f, -9.0f, -10.0f, -11.0f});
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        std::filesystem::remove(keyPath);
+        throw;
+    }
+    std::filesystem::remove_all(archiveDir);
+    std::filesystem::remove(keyPath);
+}
 
 TEST(CustomLayerApi, BatchProductReshapeIsGeneralizedWithInferDimension) {
     constexpr uint32_t batchSize = 4;

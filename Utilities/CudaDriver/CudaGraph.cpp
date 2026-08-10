@@ -196,6 +196,17 @@ void CudaGraphExecutable::setKernelNodeParams(cudaGraphNode_t sourceNode, const 
     CUDA_CHECK(cudaGraphExecKernelNodeSetParams(graphExec_, sourceNode, &params));
 }
 
+void CudaGraphExecutable::setDriverKernelNodeParams(CUgraphNode sourceNode, const CUDA_KERNEL_NODE_PARAMS& params) {
+    if (graphExec_ == nullptr) {
+        throw std::runtime_error("Cannot update an uninitialized CUDA graph executable.");
+    }
+    if (sourceNode == nullptr) {
+        throw std::invalid_argument("Cannot update an uninitialized CUDA graph kernel node.");
+    }
+    ScopedGpu scopedGpu(gpuNum_);
+    CU_CHECK(graphExecKernelNodeSetParams(reinterpret_cast<CUgraphExec>(graphExec_), sourceNode, &params));
+}
+
 void CudaGraphExecutable::launch(Stream stream) const {
     if (graphExec_ == nullptr) {
         throw std::runtime_error("Cannot launch an uninitialized CUDA graph executable.");

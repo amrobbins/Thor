@@ -12,6 +12,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
+#include "DeepLearning/Implementation/Layers/Loss.h"
 #include "Utilities/Expression/AutoDiff.h"
 using namespace std;
 
@@ -678,13 +679,42 @@ void CustomLayer::recordEffectiveParameterBatchSizeForApplication(uint32_t appli
     }
 }
 
+bool CustomLayer::applicationHasConditionalBackwardVariant(uint32_t applicationIndex) const {
+    if (applicationIndex >= applications.size()) {
+        return false;
+    }
+    const ApplicationState& app = applications[applicationIndex];
+    if (app.forwardPrepared == nullptr) {
+        return false;
+    }
+
+    for (DynamicExpressionVariantId variantId : app.forwardPrepared->executionVariantIds()) {
+        if (!app.forwardPrepared->executionVariantSupportsBackward(variantId)) {
+            continue;
+        }
+        if (app.forwardPrepared->equationForVariant(variantId).physicalOutputs().isConditional()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool CustomLayer::canFuseOptimizerUpdatesForApplication(uint32_t applicationIndex) const {
     // Dense optimizer-update fusion is only correct for the simple single-application,
     // single-input CustomLayer surface.  Multi-application and multi-input layers share
     // materialized gradient buffers across applications/ports and need the explicit
     // overwrite-then-accumulate path below so effective batch-size accounting and shared
     // parameter accumulation stay well-defined.
-    return applicationIndex == 0 && applications.size() == 1 && inputNames.size() == 1;
+    if (applicationIndex != 0 || applications.size() != 1 || inputNames.size() != 1) {
+        return false;
+    }
+
+    // The dense optimizer fusion surface consumes one flat gradient Expression. A graph-level
+    // conditional backward is intentionally represented as a conditional PhysicalOutputs tree,
+    // so keep the parameter gradient materialized and use the ordinary optimizer update path.
+    // This is a correctness-preserving fallback; the conditional VJP itself remains fully fused
+    // within each selected branch.
+    return !applicationHasConditionalBackwardVariant(applicationIndex);
 }
 
 bool CustomLayer::applicationHasFusedCustomLossGradient(uint32_t applicationIndex) const {
@@ -702,7 +732,8 @@ bool CustomLayer::registerFusedCustomLossGradient(const Tensor& predictions,
                                                  std::string labelsName,
                                                  std::string gradientName,
                                                  const Tensor& batchValidityMask,
-                                                 std::string batchValidityMaskName) {
+                                                 std::string batchValidityMaskName,
+                                                 Loss* ownerLoss) {
     if (isInferenceOnly()) {
         return false;
     }
@@ -745,7 +776,8 @@ bool CustomLayer::registerFusedCustomLossGradient(const Tensor& predictions,
                                   batchValidityMask,
                                   std::move(batchValidityMaskName),
                                   customLossFusedLabelsInputName(matchedFlatIndex.value()),
-                                  customLossFusedBatchValidityMaskInputName(matchedFlatIndex.value())};
+                                  customLossFusedBatchValidityMaskInputName(matchedFlatIndex.value()),
+                                  ownerLoss};
     fusedCustomLossGradientByOutputFlatIndex.emplace(matchedFlatIndex.value(), std::move(fused));
     return true;
 }
@@ -1293,19 +1325,6 @@ PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs(uint32_t ap
         if (!param->isStorageInitialized()) {
             param->compileStorage(parameterStorageContext);
         }
-        if (param->isTrainable()) {
-            // Must compile optimizer every time to properly toggle parameter trainability.
-            // For the single-application CustomLayer dense-fusion path, the optimizer consumes the
-            // parameter gradient expression directly, so the optimizer-owned dense gradient tensor
-            // would be dead storage.  Compile the optimizer state without that dense gradient buffer.
-            bool materializeDenseGradient = true;
-            if (canFuseOptimizerUpdatesForApplication(applicationIndex) && param->hasOptimizer() &&
-                param->getOptimizer()->supportsDenseUpdateFusion()) {
-                materializeDenseGradient = false;
-            }
-            param->compileOptimizer(gradientUpdateStream, isInferenceOnly(), materializeDenseGradient);
-        }
-
         std::optional<Tensor> paramStorage = param->getStorage();
         THOR_THROW_IF_FALSE(paramStorage.has_value());
         inputs[param->getName()] = paramStorage.value();
@@ -1603,6 +1622,7 @@ void CustomLayer::compileImpl() {
     clearBackwardArrivalBookkeeping();
 
     bool compiledParameterInitializers = false;
+    bool compiledOptimizers = false;
     numBackwardApplications = 0;
 
     for (uint32_t applicationIndex = 0; applicationIndex < applications.size(); ++applicationIndex) {
@@ -1667,6 +1687,23 @@ void CustomLayer::compileImpl() {
             }
         }
 
+        if (!compiledOptimizers) {
+            const bool materializeDenseGradients = !canFuseOptimizerUpdatesForApplication(applicationIndex);
+            for (const auto& parameter : parameters) {
+                if (!parameter->isTrainable()) {
+                    continue;
+                }
+
+                bool materializeDenseGradient = true;
+                if (!materializeDenseGradients && parameter->hasOptimizer() &&
+                    parameter->getOptimizer()->supportsDenseUpdateFusion()) {
+                    materializeDenseGradient = false;
+                }
+                parameter->compileOptimizer(gradientUpdateStream, isInferenceOnly(), materializeDenseGradient);
+            }
+            compiledOptimizers = true;
+        }
+
         if (!compiledParameterInitializers) {
             std::unordered_set<std::string> parameterNames;
             for (const auto& parameter : parameters) {
@@ -1723,6 +1760,23 @@ void CustomLayer::compileImpl() {
             continue;
         }
 
+        // Fused CustomLoss seeding currently inlines the loss-gradient expression into one flat
+        // backward expression. A conditional backward is a PhysicalOutputs tree, and a conditional
+        // CustomLoss gradient likewise cannot be cloned into that flat expression. Keep either case
+        // on the ordinary materialized gradient path; notifying the owning loss before it compiles
+        // makes it stamp its normal gradient expression into the error tensor.
+        const bool allowFusedCustomLossGradient = !applicationHasConditionalBackwardVariant(applicationIndex);
+        auto fusedCustomLossGradientCanInline = [&](const FusedCustomLossGradient& fused) {
+            PreparedDynamicExpression::TensorMap gradientInputs;
+            gradientInputs.emplace(fused.predictionsName, fused.predictionsTensor);
+            gradientInputs.emplace(fused.labelsName, fused.labelsTensor);
+            gradientInputs.emplace(fused.batchValidityMaskName, fused.batchValidityMask);
+
+            DynamicExpressionBuild gradientBuild =
+                fused.gradientExpression.build(gradientInputs, {}, computeStream(applicationIndex));
+            return !gradientBuild.equation->physicalOutputs().isConditional();
+        };
+
         // Snapshot the per-application downstream-gradient pattern at compile time. For a
         // given application, each output gradient either exists every backward pass or never
         // exists, based on the downstream topology observed during compileImpl(). Runtime
@@ -1733,9 +1787,16 @@ void CustomLayer::compileImpl() {
             if (flat < errorInputs.size() && errorInputs[flat].has_value()) {
                 app.expectedBackwardErrorInputTensorIds.insert(errorInputs[flat].value().getTensorId());
                 auto fusedLossIt = fusedCustomLossGradientByOutputFlatIndex.find(flat);
-                if (fusedLossIt != fusedCustomLossGradientByOutputFlatIndex.end()) {
+                const bool canInlineFusedLoss =
+                    fusedLossIt != fusedCustomLossGradientByOutputFlatIndex.end() && allowFusedCustomLossGradient &&
+                    fusedCustomLossGradientCanInline(fusedLossIt->second);
+                if (canInlineFusedLoss) {
                     app.fusedCustomLossGradientsByOutput.emplace(outputNames[outputPort], fusedLossIt->second);
                 } else {
+                    if (fusedLossIt != fusedCustomLossGradientByOutputFlatIndex.end() && fusedLossIt->second.ownerLoss != nullptr) {
+                        fusedLossIt->second.ownerLoss->notifyFusedGradientUnregisteredFromDrivingLayer(
+                            fusedLossIt->second.predictionsTensor);
+                    }
                     app.upstreamInputNamesByOutput[outputNames[outputPort]] = errorInputNameForOutput(outputPort);
                 }
                 app.upstreamOutputNames.insert(outputNames[outputPort]);

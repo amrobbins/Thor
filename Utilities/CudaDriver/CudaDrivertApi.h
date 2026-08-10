@@ -55,6 +55,14 @@ class CudaDriverApi {
         return p_cuLaunchKernelEx(config, function, kernelParams, extra);
     }
 
+    CUresult graphKernelNodeGetParams(CUgraphNode node, CUDA_KERNEL_NODE_PARAMS* params) {
+        return p_cuGraphKernelNodeGetParams_v2(node, params);
+    }
+
+    CUresult graphExecKernelNodeSetParams(CUgraphExec graphExec, CUgraphNode node, const CUDA_KERNEL_NODE_PARAMS* params) {
+        return p_cuGraphExecKernelNodeSetParams_v2(graphExec, node, params);
+    }
+
     CUresult cuGetErrorName(CUresult error, const char** pStr) { return p_cuGetErrorName(error, pStr); }
 
     CUresult cuGetErrorString(CUresult error, const char** pStr) { return p_cuGetErrorString(error, pStr); }
@@ -83,6 +91,8 @@ class CudaDriverApi {
                                           void**,
                                           void**);
     using cuLaunchKernelEx_t = CUresult (*)(const CUlaunchConfig*, CUfunction, void**, void**);
+    using cuGraphKernelNodeGetParams_v2_t = CUresult (*)(CUgraphNode, CUDA_KERNEL_NODE_PARAMS*);
+    using cuGraphExecKernelNodeSetParams_v2_t = CUresult (*)(CUgraphExec, CUgraphNode, const CUDA_KERNEL_NODE_PARAMS*);
     using cuGetErrorName_t = CUresult (*)(CUresult, const char**);
     using cuGetErrorString_t = CUresult (*)(CUresult, const char**);
 
@@ -97,6 +107,8 @@ class CudaDriverApi {
     cuModuleUnload_t p_cuModuleUnload = nullptr;
     cuLaunchKernel_t p_cuLaunchKernel = nullptr;
     cuLaunchKernelEx_t p_cuLaunchKernelEx = nullptr;
+    cuGraphKernelNodeGetParams_v2_t p_cuGraphKernelNodeGetParams_v2 = nullptr;
+    cuGraphExecKernelNodeSetParams_v2_t p_cuGraphExecKernelNodeSetParams_v2 = nullptr;
     cuGetErrorName_t p_cuGetErrorName = nullptr;
     cuGetErrorString_t p_cuGetErrorString = nullptr;
 
@@ -118,6 +130,9 @@ class CudaDriverApi {
         p_cuModuleUnload = load<cuModuleUnload_t>("cuModuleUnload");
         p_cuLaunchKernel = load<cuLaunchKernel_t>("cuLaunchKernel");
         p_cuLaunchKernelEx = load<cuLaunchKernelEx_t>("cuLaunchKernelEx");
+        p_cuGraphKernelNodeGetParams_v2 = load<cuGraphKernelNodeGetParams_v2_t>("cuGraphKernelNodeGetParams_v2");
+        p_cuGraphExecKernelNodeSetParams_v2 =
+            load<cuGraphExecKernelNodeSetParams_v2_t>("cuGraphExecKernelNodeSetParams_v2");
 
         p_cuGetErrorName = load<cuGetErrorName_t>("cuGetErrorName");
         p_cuGetErrorString = load<cuGetErrorString_t>("cuGetErrorString");

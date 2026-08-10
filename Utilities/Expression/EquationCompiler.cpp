@@ -1285,6 +1285,30 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
             return s;
         }
 
+        case ExprOp::CUDA_KERNEL_OUTPUT: {
+            if (node.cuda_kernel_spec_index >= expr.cuda_kernel_expressions.size() ||
+                !expr.cuda_kernel_expressions[node.cuda_kernel_spec_index]) {
+                throw std::runtime_error("fusedRegionSignatureRec CUDA kernel output references missing kernel spec.");
+            }
+
+            std::string s = "CUDA_KERNEL_OUTPUT(kernel=" +
+                            expr.cuda_kernel_expressions[node.cuda_kernel_spec_index]->cacheSignature() +
+                            ";out=" + std::to_string(node.cuda_kernel_output_index) + ";inputs=[";
+            for (size_t i = 0; i < node.cuda_kernel_input_nodes.size(); ++i) {
+                const uint32_t input_node_idx = node.cuda_kernel_input_nodes[i];
+                if (input_node_idx >= expr.nodes.size()) {
+                    throw std::runtime_error("fusedRegionSignatureRec CUDA kernel input node index out of range.");
+                }
+                if (i != 0) {
+                    s += ",";
+                }
+                s += fusedRegionSignatureRec(expr, input_node_idx);
+            }
+            s += "])";
+            appendNodeDTypeSignature(s, node);
+            return s;
+        }
+
         default:
             break;
     }
@@ -3242,6 +3266,12 @@ static bool subgraphContainsLogicalTranspose(const PhysicalExpression& expr, uin
         if (node.op == ExprOp::TRANSPOSE) {
             return true;
         }
+        // CudaKernelExpression outputs are opaque stage boundaries. Their dependencies
+        // are emitted/materialized separately through cuda_kernel_input_nodes rather
+        // than lhs/rhs, so logical-transpose analysis must not descend through them.
+        if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+            continue;
+        }
         if (Expression::isLeafOp(node.op)) {
             continue;
         }
@@ -3279,6 +3309,12 @@ static void collectReachableLogicalTransposeNodes(const PhysicalExpression& expr
     const ExprNode& node = expr.nodes[root_idx];
     if (node.op == ExprOp::TRANSPOSE) {
         transpose_nodes.push_back(root_idx);
+    }
+    // CudaKernelExpression outputs are opaque stage boundaries. Their dependencies
+    // are emitted/materialized separately through cuda_kernel_input_nodes rather
+    // than lhs/rhs, so logical-transpose analysis must not descend through them.
+    if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+        return;
     }
     if (Expression::isLeafOp(node.op)) {
         return;
@@ -3330,6 +3366,12 @@ static void collectUnsupportedLogicalTransposeBoundariesImpl(const PhysicalExpre
         }
     }
 
+    // CudaKernelExpression outputs are opaque stage boundaries. Their dependencies
+    // are emitted/materialized separately through cuda_kernel_input_nodes rather
+    // than lhs/rhs, so logical-transpose analysis must not descend through them.
+    if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+        return;
+    }
     if (Expression::isLeafOp(node.op)) {
         return;
     }

@@ -1,21 +1,22 @@
 #include "DeepLearning/Api/BatchValidity.h"
 #include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
-#include "DeepLearning/Api/Optimizers/Sgd.h"
-#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
-#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.h"
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 #include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Implementation/Layers/Loss/MultiInputCustomLoss.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
+#include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
@@ -38,20 +39,18 @@ using json = nlohmann::json;
 
 namespace {
 
-
 std::filesystem::path makeUniqueCustomLossArchiveDir(const std::string& testName) {
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-    std::filesystem::path dir =
-        std::filesystem::temp_directory_path() / (testName + "_" + std::to_string(now));
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / (testName + "_" + std::to_string(now));
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     return dir;
 }
 
 Impl::DynamicExpression makeSerializableSquaredErrorLossExpression(const std::string& predictionsName = "predictions",
-                                                                    const std::string& labelsName = "labels",
-                                                                    const std::string& lossName = "loss",
-                                                                    DataType lossDataType = DataType::FP32) {
+                                                                   const std::string& labelsName = "labels",
+                                                                   const std::string& lossName = "loss",
+                                                                   DataType lossDataType = DataType::FP32) {
     Impl::Expression predictions = Impl::Expression::input(predictionsName, DataType::FP32, DataType::FP32);
     Impl::Expression labels = Impl::Expression::input(labelsName, DataType::FP32, DataType::FP32);
     Impl::Expression diff = predictions - labels;
@@ -61,13 +60,13 @@ Impl::DynamicExpression makeSerializableSquaredErrorLossExpression(const std::st
 }
 
 Impl::DynamicExpression makeSerializableSquaredErrorGradientExpression(const std::string& predictionsName = "predictions",
-                                                                        const std::string& labelsName = "labels",
-                                                                        const std::string& gradientName = "predictions_grad",
-                                                                        DataType predictionsDataType = DataType::FP32) {
+                                                                       const std::string& labelsName = "labels",
+                                                                       const std::string& gradientName = "predictions_grad",
+                                                                       DataType predictionsDataType = DataType::FP32) {
     Impl::Expression predictions = Impl::Expression::input(predictionsName, DataType::FP32, DataType::FP32);
     Impl::Expression labels = Impl::Expression::input(labelsName, DataType::FP32, DataType::FP32);
-    Impl::Expression gradient = ((predictions - labels) * Impl::Expression(2.0f * Impl::Loss::getLossScalingFactor()))
-                                    .withOutputDType(predictionsDataType);
+    Impl::Expression gradient =
+        ((predictions - labels) * Impl::Expression(2.0f * Impl::Loss::getLossScalingFactor())).withOutputDType(predictionsDataType);
     Impl::ExpressionDefinition definition = Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{gradientName, gradient}}));
     return Impl::DynamicExpression::fromExpressionDefinition(definition);
 }
@@ -75,8 +74,7 @@ Impl::DynamicExpression makeSerializableSquaredErrorGradientExpression(const std
 Impl::DynamicExpression makeSerializableValidityAwareLossExpression() {
     Impl::Expression predictions = Impl::Expression::input("predictions", DataType::FP32, DataType::FP32);
     Impl::Expression labels = Impl::Expression::input("labels", DataType::FP32, DataType::FP32);
-    Impl::Expression validity =
-        Impl::Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
+    Impl::Expression validity = Impl::Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
     Impl::Expression validCount = validity.reduce_sum({0, 1}, {0}, DataType::FP32);
     Impl::Expression diff = predictions - labels;
     Impl::ExpressionDefinition definition =
@@ -87,11 +85,10 @@ Impl::DynamicExpression makeSerializableValidityAwareLossExpression() {
 Impl::DynamicExpression makeSerializableValidityAwareGradientExpression() {
     Impl::Expression predictions = Impl::Expression::input("predictions", DataType::FP32, DataType::FP32);
     Impl::Expression labels = Impl::Expression::input("labels", DataType::FP32, DataType::FP32);
-    Impl::Expression validity =
-        Impl::Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
+    Impl::Expression validity = Impl::Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
     Impl::Expression validCount = validity.reduce_sum({0, 1}, {0}, DataType::FP32);
-    Impl::Expression gradient = ((predictions - labels) * validCount * Impl::Expression(Impl::Loss::getLossScalingFactor()))
-                                    .withOutputDType(DataType::FP32);
+    Impl::Expression gradient =
+        ((predictions - labels) * validCount * Impl::Expression(Impl::Loss::getLossScalingFactor())).withOutputDType(DataType::FP32);
     Impl::ExpressionDefinition definition =
         Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"predictions_grad", gradient}}));
     return Impl::DynamicExpression::fromExpressionDefinition(definition);
@@ -101,18 +98,9 @@ vector<float> runValidityAwareRawLoss(bool multiInput) {
     constexpr uint32_t batchCapacity = 4;
     constexpr uint32_t validExampleCount = 2;
     Network network(multiInput ? "multi_input_validity_aware_loss" : "validity_aware_loss");
-    NetworkInput predictions = NetworkInput::Builder()
-                                   .network(network)
-                                   .name("predictions")
-                                   .dimensions({1})
-                                   .dataType(DataType::FP32)
-                                   .build();
-    NetworkInput labels = NetworkInput::Builder()
-                              .network(network)
-                              .name("labels")
-                              .dimensions({1})
-                              .dataType(DataType::FP32)
-                              .build();
+    NetworkInput predictions =
+        NetworkInput::Builder().network(network).name("predictions").dimensions({1}).dataType(DataType::FP32).build();
+    NetworkInput labels = NetworkInput::Builder().network(network).name("labels").dimensions({1}).dataType(DataType::FP32).build();
 
     Tensor rawLoss;
     if (multiInput) {
@@ -146,12 +134,7 @@ vector<float> runValidityAwareRawLoss(bool multiInput) {
         EXPECT_FALSE(loss.architectureJson().contains("uses_batch_validity_mask"));
         rawLoss = loss.getRawLoss();
     }
-    NetworkOutput::Builder()
-        .network(network)
-        .name("raw_loss")
-        .inputTensor(rawLoss)
-        .dataType(DataType::FP32)
-        .build();
+    NetworkOutput::Builder().network(network).name("raw_loss").inputTensor(rawLoss).dataType(DataType::FP32).build();
 
     vector<Event> initializationDone;
     shared_ptr<PlacedNetwork> placed = network.place(batchCapacity, initializationDone, /*inferenceOnly=*/true);
@@ -192,17 +175,8 @@ float runValidityAwareGradientUpdate(bool multiInput) {
     constexpr float learningRate = 0.1f;
 
     Network network(multiInput ? "multi_input_validity_aware_gradient" : "validity_aware_gradient");
-    NetworkInput features = NetworkInput::Builder()
-                                .network(network)
-                                .name("features")
-                                .dimensions({1})
-                                .dataType(DataType::FP32)
-                                .build();
-    shared_ptr<Sgd> optimizer = Sgd::Builder()
-                                    .initialLearningRate(learningRate)
-                                    .decay(0.0f)
-                                    .momentum(0.0f)
-                                    .build();
+    NetworkInput features = NetworkInput::Builder().network(network).name("features").dimensions({1}).dataType(DataType::FP32).build();
+    shared_ptr<Sgd> optimizer = Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
     FullyConnected prediction = FullyConnected::Builder()
                                     .network(network)
                                     .featureInput(features.getFeatureOutput().value())
@@ -214,12 +188,7 @@ float runValidityAwareGradientUpdate(bool multiInput) {
                                     .weightsOptimizer(optimizer)
                                     .noActivation()
                                     .build();
-    NetworkInput labels = NetworkInput::Builder()
-                              .network(network)
-                              .name("labels")
-                              .dimensions({1})
-                              .dataType(DataType::FP32)
-                              .build();
+    NetworkInput labels = NetworkInput::Builder().network(network).name("labels").dimensions({1}).dataType(DataType::FP32).build();
 
     Tensor reportedLoss;
     if (multiInput) {
@@ -245,12 +214,7 @@ float runValidityAwareGradientUpdate(bool multiInput) {
                               .build();
         reportedLoss = loss.getLoss();
     }
-    NetworkOutput::Builder()
-        .network(network)
-        .name("loss")
-        .inputTensor(reportedLoss)
-        .dataType(DataType::FP32)
-        .build();
+    NetworkOutput::Builder().network(network).name("loss").inputTensor(reportedLoss).dataType(DataType::FP32).build();
 
     vector<Event> initializationDone;
     shared_ptr<PlacedNetwork> placed = network.place(batchCapacity, initializationDone, /*inferenceOnly=*/false);
@@ -260,8 +224,7 @@ float runValidityAwareGradientUpdate(bool multiInput) {
         event.synchronize();
 
     Impl::StampedNetwork& stampedNetwork = placed->getStampedNetwork(0);
-    auto physicalPrediction = dynamic_pointer_cast<Impl::CustomLayer>(
-        stampedNetwork.getPhysicalLayerFromApiLayer(prediction.getId()));
+    auto physicalPrediction = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(prediction.getId()));
     if (physicalPrediction == nullptr)
         throw runtime_error("Validity-aware gradient test could not find the physical prediction layer.");
     shared_ptr<Impl::PhysicalParameter> weightsParameter = physicalPrediction->getParameter("weights");
@@ -299,6 +262,283 @@ float runValidityAwareGradientUpdate(bool multiInput) {
     return weightsCpu.getMemPtr<float>()[0];
 }
 
+Impl::DynamicExpression makeCudaSquaredErrorLossExpression() {
+    auto kernel = Impl::CudaKernelExpression::builder("custom_loss_cuda_squared_error")
+                      .source(R"cuda(
+extern "C" __global__
+void custom_loss_cuda_squared_error_kernel(const float* predictions,
+                                           const float* labels,
+                                           float* loss,
+                                           int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float diff = predictions[i] - labels[i];
+        loss[i] = diff * diff;
+    }
+}
+)cuda")
+                      .entry("custom_loss_cuda_squared_error_kernel")
+                      .input("predictions", DataType::FP32)
+                      .input("labels", DataType::FP32)
+                      .outputLike("loss", DataType::FP32, "predictions")
+                      .scalar("n", DataType::INT64, Impl::CudaKernelExpression::DimExpr::numel("loss"))
+                      .launchGrid1D(Impl::CudaKernelExpression::DimExpr::numel("loss"), 128)
+                      .build();
+    return kernel.asDynamicExpression();
+}
+
+Impl::DynamicExpression makeCudaSquaredErrorGradientExpression() {
+    auto kernel = Impl::CudaKernelExpression::builder("custom_loss_cuda_squared_error_gradient")
+                      .source(R"cuda(
+extern "C" __global__
+void custom_loss_cuda_squared_error_gradient_kernel(const float* predictions,
+                                                    const float* labels,
+                                                    float* predictions_grad,
+                                                    float scale,
+                                                    int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        predictions_grad[i] = scale * (predictions[i] - labels[i]);
+    }
+}
+)cuda")
+                      .entry("custom_loss_cuda_squared_error_gradient_kernel")
+                      .input("predictions", DataType::FP32)
+                      .input("labels", DataType::FP32)
+                      .outputLike("predictions_grad", DataType::FP32, "predictions")
+                      .scalar("scale", DataType::FP32, 2.0f * Impl::Loss::getLossScalingFactor())
+                      .scalar("n", DataType::INT64, Impl::CudaKernelExpression::DimExpr::numel("predictions_grad"))
+                      .launchGrid1D(Impl::CudaKernelExpression::DimExpr::numel("predictions_grad"), 128)
+                      .build();
+    return kernel.asDynamicExpression();
+}
+
+float runCudaCustomLossGradientUpdate() {
+    constexpr uint32_t batchCapacity = 4;
+    constexpr float learningRate = 0.1f;
+
+    const std::filesystem::path keyCaptureDir = makeUniqueCustomLossArchiveDir("cuda_custom_loss_gradient_update_keys");
+    const std::filesystem::path keyCapturePath = keyCaptureDir / "cuda_keys.json";
+
+    Network network("cuda_custom_loss_gradient_update");
+    NetworkInput features = NetworkInput::Builder().network(network).name("features").dimensions({1}).dataType(DataType::FP32).build();
+    shared_ptr<Sgd> optimizer = Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+    FullyConnected prediction = FullyConnected::Builder()
+                                    .network(network)
+                                    .featureInput(features.getFeatureOutput().value())
+                                    .numOutputFeatures(1)
+                                    .hasBias(false)
+                                    .weightsDataType(DataType::FP32)
+                                    .computeDataType(DataType::FP32)
+                                    .outputDataType(DataType::FP32)
+                                    .weightsOptimizer(optimizer)
+                                    .noActivation()
+                                    .build();
+    NetworkInput labels = NetworkInput::Builder().network(network).name("labels").dimensions({1}).dataType(DataType::FP32).build();
+    CustomLoss loss = CustomLoss::Builder()
+                          .network(network)
+                          .lossExpression(makeCudaSquaredErrorLossExpression())
+                          .gradientExpression(makeCudaSquaredErrorGradientExpression())
+                          .predictions(prediction.getFeatureOutput().value())
+                          .labels(labels.getFeatureOutput().value())
+                          .reportsBatchLoss()
+                          .build();
+    NetworkOutput::Builder().network(network).name("loss").inputTensor(loss.getLoss()).dataType(DataType::FP32).build();
+
+    // Training networks containing user CUDA must configure out-of-band key capture before placement.
+    // This test does not need to save the model; configuring the capture target is enough to exercise
+    // the same release-safety contract as a real training run.
+    network.captureCudaKernelSaveKeysToFile(keyCapturePath.string());
+
+    vector<Event> initializationDone;
+    shared_ptr<PlacedNetwork> placed = network.place(batchCapacity, initializationDone, /*inferenceOnly=*/false);
+    if (placed == nullptr)
+        throw runtime_error("CUDA CustomLoss gradient test failed to place the network.");
+    for (Event& event : initializationDone)
+        event.synchronize();
+
+    Impl::StampedNetwork& stampedNetwork = placed->getStampedNetwork(0);
+    auto physicalPrediction = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(prediction.getId()));
+    if (physicalPrediction == nullptr)
+        throw runtime_error("CUDA CustomLoss gradient test could not find the physical prediction layer.");
+    shared_ptr<Impl::PhysicalParameter> weightsParameter = physicalPrediction->getParameter("weights");
+    if (weightsParameter == nullptr || !weightsParameter->getStorage().has_value())
+        throw runtime_error("CUDA CustomLoss gradient test could not access prediction weights.");
+
+    Impl::Tensor weights = weightsParameter->getStorage().value();
+    Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
+    Impl::Tensor weightsCpu = weights.clone(cpuPlacement);
+    weightsCpu.getMemPtr<float>()[0] = 1.0f;
+    Stream parameterStream = physicalPrediction->getStreams().front();
+    weights.copyFromAsync(weightsCpu, parameterStream);
+    parameterStream.synchronize();
+
+    Impl::Tensor featuresCpu(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {batchCapacity, 1}));
+    Impl::Tensor labelsCpu(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {batchCapacity, 1}));
+    std::fill(featuresCpu.getMemPtr<float>(), featuresCpu.getMemPtr<float>() + batchCapacity, 1.0f);
+    std::fill(labelsCpu.getMemPtr<float>(), labelsCpu.getMemPtr<float>() + batchCapacity, 0.0f);
+
+    Batch batch;
+    batch.insert("features", featuresCpu);
+    batch.insert("labels", labelsCpu);
+
+    map<string, Impl::Tensor> outputs;
+    map<string, Event> outputReadyEvents;
+    Event done = placed->submitBatch(0, batch, outputs, outputReadyEvents, /*isInferenceOnly=*/false);
+    done.synchronize();
+    outputReadyEvents.at("loss").synchronize();
+    placed->synchronize();
+
+    Stream downloadStream = Stream::getNextDownloadStream(0);
+    weightsCpu.copyFromAsync(weights, downloadStream);
+    downloadStream.synchronize();
+    const float updatedWeight = weightsCpu.getMemPtr<float>()[0];
+    std::filesystem::remove_all(keyCaptureDir);
+    return updatedWeight;
+}
+
+Impl::DynamicExpression makeSerializableConditionalSquaredErrorLossExpression() {
+    Impl::Expression predictions = Impl::Expression::input("predictions", DataType::FP32, DataType::FP32);
+    Impl::Expression labels = Impl::Expression::input("labels", DataType::FP32, DataType::FP32);
+    Impl::Expression diff = predictions - labels;
+    Impl::Expression rawLoss = (diff * diff).withOutputDType(DataType::FP32);
+    Impl::Expression predicate = labels.reduce_sum().greaterThan(Impl::Expression::constantScalar(0.0));
+    Impl::Outputs thenBranch = Impl::Expression::outputs({{"loss", rawLoss}});
+    Impl::Outputs elseBranch = Impl::Expression::outputs(
+        {{"loss", (rawLoss * Impl::Expression::constantScalar(3.0)).withOutputDType(DataType::FP32)}});
+    Impl::ExpressionDefinition definition =
+        Impl::ExpressionDefinition::fromOutputs(Impl::Outputs::conditional(predicate, thenBranch, elseBranch));
+    return Impl::DynamicExpression::fromExpressionDefinition(definition);
+}
+
+Impl::DynamicExpression makeSerializableConditionalSquaredErrorGradientExpression() {
+    Impl::Expression predictions = Impl::Expression::input("predictions", DataType::FP32, DataType::FP32);
+    Impl::Expression labels = Impl::Expression::input("labels", DataType::FP32, DataType::FP32);
+    Impl::Expression baseGradient =
+        ((predictions - labels) * Impl::Expression(2.0f * Impl::Loss::getLossScalingFactor()))
+            .withOutputDType(DataType::FP32);
+    Impl::Expression predicate = labels.reduce_sum().greaterThan(Impl::Expression::constantScalar(0.0));
+    Impl::Outputs thenBranch = Impl::Expression::outputs({{"predictions_grad", baseGradient}});
+    Impl::Outputs elseBranch = Impl::Expression::outputs(
+        {{"predictions_grad",
+          (baseGradient * Impl::Expression::constantScalar(3.0)).withOutputDType(DataType::FP32)}});
+    Impl::ExpressionDefinition definition =
+        Impl::ExpressionDefinition::fromOutputs(Impl::Outputs::conditional(predicate, thenBranch, elseBranch));
+    return Impl::DynamicExpression::fromExpressionDefinition(definition);
+}
+
+struct ConditionalCustomLossResult {
+    float rawLoss = 0.0f;
+    float updatedWeight = 0.0f;
+};
+
+ConditionalCustomLossResult runConditionalCustomLossTraining(bool multiInput,
+                                                             float labelValue,
+                                                             uint32_t batchCapacity = 1,
+                                                             uint32_t validExampleCount = 0,
+                                                             bool largeInvalidTail = false) {
+    constexpr float learningRate = 0.1f;
+    constexpr float initialWeight = 2.0f;
+
+    Network network(multiInput ? "multi_input_conditional_custom_loss_training" : "conditional_custom_loss_training");
+    NetworkInput features =
+        NetworkInput::Builder().network(network).name("features").dimensions({1}).dataType(DataType::FP32).build();
+    shared_ptr<Sgd> optimizer = Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+    FullyConnected prediction = FullyConnected::Builder()
+                                    .network(network)
+                                    .featureInput(features.getFeatureOutput().value())
+                                    .numOutputFeatures(1)
+                                    .hasBias(false)
+                                    .weightsDataType(DataType::FP32)
+                                    .computeDataType(DataType::FP32)
+                                    .outputDataType(DataType::FP32)
+                                    .weightsOptimizer(optimizer)
+                                    .noActivation()
+                                    .build();
+    NetworkInput labels =
+        NetworkInput::Builder().network(network).name("labels").dimensions({1}).dataType(DataType::FP32).build();
+
+    Tensor rawLoss;
+    if (multiInput) {
+        MultiInputCustomLoss loss = MultiInputCustomLoss::Builder()
+                                        .network(network)
+                                        .lossExpression(makeSerializableConditionalSquaredErrorLossExpression())
+                                        .gradientExpression(makeSerializableConditionalSquaredErrorGradientExpression())
+                                        .input("predictions", prediction.getFeatureOutput().value(), "predictions_grad")
+                                        .auxiliaryInput("labels", labels.getFeatureOutput().value())
+                                        .lossWeight(0.5f)
+                                        .reportsRawLoss()
+                                        .build();
+        rawLoss = loss.getRawLoss();
+    } else {
+        CustomLoss loss = CustomLoss::Builder()
+                              .network(network)
+                              .lossExpression(makeSerializableConditionalSquaredErrorLossExpression())
+                              .gradientExpression(makeSerializableConditionalSquaredErrorGradientExpression())
+                              .predictions(prediction.getFeatureOutput().value())
+                              .labels(labels.getFeatureOutput().value())
+                              .lossWeight(0.5f)
+                              .reportsRawLoss()
+                              .build();
+        rawLoss = loss.getRawLoss();
+    }
+    NetworkOutput::Builder().network(network).name("raw_loss").inputTensor(rawLoss).dataType(DataType::FP32).build();
+
+    vector<Event> initializationDone;
+    shared_ptr<PlacedNetwork> placed = network.place(batchCapacity, initializationDone, /*inferenceOnly=*/false);
+    if (placed == nullptr)
+        throw runtime_error("Conditional CustomLoss training test failed to place the network.");
+    for (Event& event : initializationDone)
+        event.synchronize();
+
+    Impl::StampedNetwork& stampedNetwork = placed->getStampedNetwork(0);
+    auto physicalPrediction = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(prediction.getId()));
+    if (physicalPrediction == nullptr)
+        throw runtime_error("Conditional CustomLoss training test could not find the physical prediction layer.");
+    shared_ptr<Impl::PhysicalParameter> weightsParameter = physicalPrediction->getParameter("weights");
+    if (weightsParameter == nullptr || !weightsParameter->getStorage().has_value())
+        throw runtime_error("Conditional CustomLoss training test could not access prediction weights.");
+
+    Impl::Tensor weights = weightsParameter->getStorage().value();
+    Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
+    Impl::Tensor weightsCpu = weights.clone(cpuPlacement);
+    weightsCpu.getMemPtr<float>()[0] = initialWeight;
+    Stream parameterStream = physicalPrediction->getStreams().front();
+    weights.copyFromAsync(weightsCpu, parameterStream);
+    parameterStream.synchronize();
+
+    Impl::Tensor featuresCpu(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {batchCapacity, 1}));
+    Impl::Tensor labelsCpu(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {batchCapacity, 1}));
+    for (uint32_t i = 0; i < batchCapacity; ++i) {
+        featuresCpu.getMemPtr<float>()[i] =
+            largeInvalidTail && validExampleCount != 0 && i >= validExampleCount ? static_cast<float>(100 * (i + 1)) : 1.0f;
+        labelsCpu.getMemPtr<float>()[i] = labelValue;
+    }
+
+    Batch batch;
+    batch.insert("features", featuresCpu);
+    batch.insert("labels", labelsCpu);
+    if (validExampleCount != 0)
+        batch.setValidExampleCount(validExampleCount);
+
+    map<string, Impl::Tensor> outputs;
+    map<string, Event> outputReadyEvents;
+    Event done = placed->submitBatch(0, batch, outputs, outputReadyEvents, /*isInferenceOnly=*/false);
+    done.synchronize();
+    outputReadyEvents.at("raw_loss").synchronize();
+    placed->synchronize();
+
+    Impl::Tensor lossCpu = outputs.at("raw_loss").clone(cpuPlacement);
+    Stream downloadStream = Stream::getNextDownloadStream(0);
+    lossCpu.copyFromAsync(outputs.at("raw_loss"), downloadStream);
+    weightsCpu.copyFromAsync(weights, downloadStream);
+    downloadStream.synchronize();
+
+    return ConditionalCustomLossResult{
+        .rawLoss = lossCpu.getMemPtr<float>()[0],
+        .updatedWeight = weightsCpu.getMemPtr<float>()[0],
+    };
+}
 
 Impl::DynamicExpression makeNonSerializableSquaredErrorLossExpression() {
     return Impl::DynamicExpression({"predictions", "labels"},
@@ -311,8 +551,8 @@ Impl::DynamicExpression makeNonSerializableSquaredErrorLossExpression() {
                                        auto diff = predictions - labels;
                                        auto expressionOutputs = Impl::Expression::outputs({{"loss", diff * diff}});
                                        return Impl::DynamicExpressionBuild{
-                                           std::make_shared<Impl::FusedEquation>(Impl::FusedEquation::compile(
-                                               expressionOutputs.physicalOutputs(), stream.getGpuNum())),
+                                           std::make_shared<Impl::FusedEquation>(
+                                               Impl::FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum())),
                                            inputs,
                                            {},
                                            outputs,
@@ -321,6 +561,105 @@ Impl::DynamicExpression makeNonSerializableSquaredErrorLossExpression() {
 }
 
 }  // namespace
+
+TEST(CustomLossApi, CudaBackedLossAndGradientExecuteNumerically) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "CUDA CustomLoss numerical test requires a GPU";
+
+    constexpr uint32_t batchCapacity = 4;
+    Network network("cuda_custom_loss_raw_numerical");
+    NetworkInput predictions =
+        NetworkInput::Builder().network(network).name("predictions").dimensions({1}).dataType(DataType::FP32).build();
+    NetworkInput labels = NetworkInput::Builder().network(network).name("labels").dimensions({1}).dataType(DataType::FP32).build();
+    CustomLoss loss = CustomLoss::Builder()
+                          .network(network)
+                          .lossExpression(makeCudaSquaredErrorLossExpression())
+                          .gradientExpression(makeCudaSquaredErrorGradientExpression())
+                          .predictions(predictions.getFeatureOutput().value())
+                          .labels(labels.getFeatureOutput().value())
+                          .reportsRawLoss()
+                          .build();
+    NetworkOutput::Builder().network(network).name("raw_loss").inputTensor(loss.getRawLoss()).dataType(DataType::FP32).build();
+
+    vector<Event> initializationDone;
+    shared_ptr<PlacedNetwork> placed = network.place(batchCapacity, initializationDone, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initializationDone)
+        event.synchronize();
+
+    Impl::TensorPlacement cpu(Impl::TensorPlacement::MemDevices::CPU);
+    Impl::Tensor predictionsCpu(cpu, Impl::TensorDescriptor(DataType::FP32, {batchCapacity, 1}));
+    Impl::Tensor labelsCpu(cpu, Impl::TensorDescriptor(DataType::FP32, {batchCapacity, 1}));
+    const vector<float> predictionValues{1.0f, -2.0f, 3.5f, -4.0f};
+    const vector<float> labelValues{0.5f, 1.0f, -0.5f, -2.0f};
+    std::copy(predictionValues.begin(), predictionValues.end(), predictionsCpu.getMemPtr<float>());
+    std::copy(labelValues.begin(), labelValues.end(), labelsCpu.getMemPtr<float>());
+
+    Batch batch;
+    batch.insert("predictions", predictionsCpu);
+    batch.insert("labels", labelsCpu);
+    map<string, Impl::Tensor> outputs;
+    map<string, Event> outputReadyEvents;
+    Event done = placed->submitBatch(0, batch, outputs, outputReadyEvents, /*isInferenceOnly=*/true);
+    done.synchronize();
+    outputReadyEvents.at("raw_loss").synchronize();
+    placed->synchronize();
+
+    Impl::Tensor outputCpu = outputs.at("raw_loss").clone(cpu);
+    Stream downloadStream = Stream::getNextDownloadStream(0);
+    outputCpu.copyFromAsync(outputs.at("raw_loss"), downloadStream);
+    downloadStream.synchronize();
+    const float* actual = outputCpu.getMemPtr<float>();
+    const vector<float> expected{0.25f, 9.0f, 16.0f, 4.0f};
+    for (size_t i = 0; i < expected.size(); ++i)
+        EXPECT_NEAR(actual[i], expected[i], 1.0e-5f) << "index " << i;
+
+    EXPECT_NEAR(runCudaCustomLossGradientUpdate(), 0.8f, 1.0e-5f);
+}
+
+TEST(CustomLossApi, ConditionalLossAndGradientAreWeightedAndTrainBothBranches) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Conditional CustomLoss training test requires a GPU";
+
+    const ConditionalCustomLossResult thenResult =
+        runConditionalCustomLossTraining(/*multiInput=*/false, /*labelValue=*/1.0f);
+    EXPECT_NEAR(thenResult.rawLoss, 0.5f, 1.0e-5f);
+    EXPECT_NEAR(thenResult.updatedWeight, 1.9f, 1.0e-5f);
+
+    const ConditionalCustomLossResult elseResult =
+        runConditionalCustomLossTraining(/*multiInput=*/false, /*labelValue=*/-1.0f);
+    EXPECT_NEAR(elseResult.rawLoss, 13.5f, 1.0e-5f);
+    EXPECT_NEAR(elseResult.updatedWeight, 1.1f, 1.0e-5f);
+}
+
+TEST(MultiInputCustomLossApi, ConditionalLossAndGradientAreWeightedAndTrainBothBranches) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Conditional MultiInputCustomLoss training test requires a GPU";
+
+    const ConditionalCustomLossResult thenResult =
+        runConditionalCustomLossTraining(/*multiInput=*/true, /*labelValue=*/1.0f);
+    EXPECT_NEAR(thenResult.rawLoss, 0.5f, 1.0e-5f);
+    EXPECT_NEAR(thenResult.updatedWeight, 1.9f, 1.0e-5f);
+
+    const ConditionalCustomLossResult elseResult =
+        runConditionalCustomLossTraining(/*multiInput=*/true, /*labelValue=*/-1.0f);
+    EXPECT_NEAR(elseResult.rawLoss, 13.5f, 1.0e-5f);
+    EXPECT_NEAR(elseResult.updatedWeight, 1.1f, 1.0e-5f);
+}
+
+TEST(CustomLossApi, ConditionalGradientFallbackMasksInvalidPartialBatchTail) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Conditional CustomLoss partial-batch training test requires a GPU";
+
+    const ConditionalCustomLossResult result = runConditionalCustomLossTraining(
+        /*multiInput=*/false,
+        /*labelValue=*/1.0f,
+        /*batchCapacity=*/4,
+        /*validExampleCount=*/2,
+        /*largeInvalidTail=*/true);
+    EXPECT_NEAR(result.rawLoss, 0.5f, 1.0e-5f);
+    EXPECT_NEAR(result.updatedWeight, 1.9f, 1.0e-5f);
+}
 
 TEST(CustomLossApi, BuildsAndSerializesExpressionBackedRawLoss) {
     Network network("custom_loss_builds");
@@ -484,19 +823,12 @@ TEST(BinaryCrossEntropyApi, PublicBuilderBacksRawLossWithCustomLoss) {
     ASSERT_FALSE(foundRawBinaryCrossEntropy);
 }
 
-
 TEST(MAEApi, PublicBuilderBacksRawLossWithCustomLoss) {
     Network network("mae_backed_by_custom_loss");
     Tensor predictions(DataType::FP32, {100});
     Tensor labels(DataType::FP32, {100});
 
-    MAE mae = MAE::Builder()
-                                .network(network)
-                                .predictions(predictions)
-                                .labels(labels)
-                                .reportsRawLoss()
-                                .lossDataType(DataType::FP32)
-                                .build();
+    MAE mae = MAE::Builder().network(network).predictions(predictions).labels(labels).reportsRawLoss().lossDataType(DataType::FP32).build();
 
     ASSERT_TRUE(mae.isInitialized());
     ASSERT_EQ(mae.getLoss().getDataType(), DataType::FP32);
@@ -518,13 +850,7 @@ TEST(MSEApi, PublicBuilderBacksRawLossWithCustomLoss) {
     Tensor predictions(DataType::FP32, {100});
     Tensor labels(DataType::FP32, {100});
 
-    MSE mse = MSE::Builder()
-                              .network(network)
-                              .predictions(predictions)
-                              .labels(labels)
-                              .reportsRawLoss()
-                              .lossDataType(DataType::FP32)
-                              .build();
+    MSE mse = MSE::Builder().network(network).predictions(predictions).labels(labels).reportsRawLoss().lossDataType(DataType::FP32).build();
 
     ASSERT_TRUE(mse.isInitialized());
     ASSERT_EQ(mse.getLoss().getDataType(), DataType::FP32);
@@ -549,19 +875,10 @@ TEST(CustomLossApi, PartialBatchMasksFusedGradientAndNormalizesUpdateByValidExam
     constexpr uint32_t validExampleCount = 2;
     constexpr float learningRate = 0.1f;
 
-    shared_ptr<Sgd> sgd = Sgd::Builder()
-                              .initialLearningRate(learningRate)
-                              .decay(0.0f)
-                              .momentum(0.0f)
-                              .build();
+    shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
 
     Network network("custom_loss_partial_batch_fused_gradient");
-    NetworkInput features = NetworkInput::Builder()
-                                .network(network)
-                                .name("features")
-                                .dimensions({1})
-                                .dataType(DataType::FP32)
-                                .build();
+    NetworkInput features = NetworkInput::Builder().network(network).name("features").dimensions({1}).dataType(DataType::FP32).build();
     FullyConnected fc = FullyConnected::Builder()
                             .network(network)
                             .featureInput(features.getFeatureOutput().value())
@@ -573,12 +890,7 @@ TEST(CustomLossApi, PartialBatchMasksFusedGradientAndNormalizesUpdateByValidExam
                             .weightsOptimizer(sgd)
                             .noActivation()
                             .build();
-    NetworkInput labels = NetworkInput::Builder()
-                              .network(network)
-                              .name("labels")
-                              .dimensions({2})
-                              .dataType(DataType::FP32)
-                              .build();
+    NetworkInput labels = NetworkInput::Builder().network(network).name("labels").dimensions({2}).dataType(DataType::FP32).build();
     MSE mse = MSE::Builder()
                   .network(network)
                   .predictions(fc.getFeatureOutput().value())
@@ -586,12 +898,8 @@ TEST(CustomLossApi, PartialBatchMasksFusedGradientAndNormalizesUpdateByValidExam
                   .lossDataType(DataType::FP32)
                   .reportsBatchLoss()
                   .build();
-    NetworkOutput lossOutput = NetworkOutput::Builder()
-                                   .network(network)
-                                   .name("loss")
-                                   .inputTensor(mse.getLoss())
-                                   .dataType(DataType::FP32)
-                                   .build();
+    NetworkOutput lossOutput =
+        NetworkOutput::Builder().network(network).name("loss").inputTensor(mse.getLoss()).dataType(DataType::FP32).build();
 
     vector<Event> initializationDone;
     shared_ptr<PlacedNetwork> placed = network.place(batchCapacity, initializationDone, /*inferenceOnly=*/false);
@@ -648,7 +956,6 @@ TEST(CustomLossApi, PartialBatchMasksFusedGradientAndNormalizesUpdateByValidExam
     EXPECT_NEAR(weightsCpu.getMemPtr<float>()[1], 1.0f, 1.0e-5f);
 }
 
-
 TEST(CustomLossApi, OptionalValidityMaskIsAvailableInsideLossExpression) {
     if (MachineEvaluator::instance().getNumGpus() == 0)
         GTEST_SKIP() << "CustomLoss validity-mask execution test requires a GPU";
@@ -660,7 +967,6 @@ TEST(MultiInputCustomLossApi, OptionalValidityMaskIsAvailableInsideLossExpressio
         GTEST_SKIP() << "MultiInputCustomLoss validity-mask execution test requires a GPU";
     EXPECT_EQ(runValidityAwareRawLoss(/*multiInput=*/true), (vector<float>{3.0f, 11.0f, 0.0f, 0.0f}));
 }
-
 
 TEST(CustomLossApi, OptionalValidityMaskIsAvailableInsideFusedGradientExpression) {
     if (MachineEvaluator::instance().getNumGpus() == 0)
@@ -812,18 +1118,9 @@ TEST(CustomLossApi, FullBatchRequirementsSurviveNetworkSaveLoad) {
 
     try {
         Network network(networkName);
-        NetworkInput predictions = NetworkInput::Builder()
-                                       .network(network)
-                                       .name("predictions")
-                                       .dimensions({1})
-                                       .dataType(DataType::FP32)
-                                       .build();
-        NetworkInput labels = NetworkInput::Builder()
-                                  .network(network)
-                                  .name("labels")
-                                  .dimensions({1})
-                                  .dataType(DataType::FP32)
-                                  .build();
+        NetworkInput predictions =
+            NetworkInput::Builder().network(network).name("predictions").dimensions({1}).dataType(DataType::FP32).build();
+        NetworkInput labels = NetworkInput::Builder().network(network).name("labels").dimensions({1}).dataType(DataType::FP32).build();
 
         CustomLoss customLoss = CustomLoss::Builder()
                                     .network(network)
@@ -842,16 +1139,14 @@ TEST(CustomLossApi, FullBatchRequirementsSurviveNetworkSaveLoad) {
             .build();
 
         MultiInputCustomLoss multiInputLoss = MultiInputCustomLoss::Builder()
-                                                   .network(network)
-                                                   .lossExpression(makeSerializableSquaredErrorLossExpression())
-                                                   .gradientExpression(makeSerializableSquaredErrorGradientExpression())
-                                                   .input("predictions",
-                                                          predictions.getFeatureOutput().value(),
-                                                          "predictions_grad")
-                                                   .auxiliaryInput("labels", labels.getFeatureOutput().value())
-                                                   .requiresFullBatch()
-                                                   .reportsRawLoss()
-                                                   .build();
+                                                  .network(network)
+                                                  .lossExpression(makeSerializableSquaredErrorLossExpression())
+                                                  .gradientExpression(makeSerializableSquaredErrorGradientExpression())
+                                                  .input("predictions", predictions.getFeatureOutput().value(), "predictions_grad")
+                                                  .auxiliaryInput("labels", labels.getFeatureOutput().value())
+                                                  .requiresFullBatch()
+                                                  .reportsRawLoss()
+                                                  .build();
         NetworkOutput::Builder()
             .network(network)
             .name("multi_input_raw_loss")

@@ -13,9 +13,6 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-using CompiledOutputs = ThorImplementation::CompiledOutputs;
-using CompiledExecutionStage = ThorImplementation::CompiledExecutionStage;
-using CompiledStageOutput = ThorImplementation::CompiledStageOutput;
 
 MultiInputCustomLoss::MultiInputCustomLoss(ThorImplementation::DynamicExpression lossExpression,
                                            ThorImplementation::DynamicExpression gradientExpression,
@@ -123,42 +120,6 @@ Tensor MultiInputCustomLoss::logicalLossTensorFromFakeOutput(const vector<uint64
     return Tensor(dtype, logicalDims);
 }
 
-DataType MultiInputCustomLoss::findOutputDType(const shared_ptr<CompiledOutputs>& compiledOutputs, const string& outputName) {
-    optional<DataType> outputDType;
-    for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-        for (size_t outputIndex = 0; outputIndex < stage.outputs.size(); ++outputIndex) {
-            const CompiledStageOutput& output = stage.outputs[outputIndex];
-            if (output.name == outputName) {
-                outputDType = stage.outputDType(outputIndex);
-                break;
-            }
-        }
-        if (outputDType.has_value())
-            break;
-    }
-
-    if (!outputDType.has_value()) {
-        for (const CompiledStageOutput& finalOutput : compiledOutputs->final_outputs) {
-            if (finalOutput.name != outputName)
-                continue;
-            for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-                for (size_t outputIndex = 0; outputIndex < stage.outputs.size(); ++outputIndex) {
-                    if (stage.outputs[outputIndex].value_id == finalOutput.value_id) {
-                        outputDType = stage.outputDType(outputIndex);
-                        break;
-                    }
-                }
-                if (outputDType.has_value())
-                    break;
-            }
-        }
-    }
-
-    if (!outputDType.has_value())
-        throw runtime_error("MultiInputCustomLoss expression did not infer output dtype for '" + outputName + "'.");
-    return outputDType.value();
-}
-
 void MultiInputCustomLoss::validateInputSpecs() const {
     if (inputs.empty())
         throw runtime_error("MultiInputCustomLoss requires at least one input.");
@@ -243,8 +204,13 @@ Tensor MultiInputCustomLoss::inferExpressionTensor(const ThorImplementation::Dyn
     if (shapeIt == fakeOutputShapes.end())
         throw runtime_error("MultiInputCustomLoss failed to infer output shape for '" + outputName + "'.");
 
-    shared_ptr<CompiledOutputs> compiledOutputs = build.equation->compileForInputs(build.stamp_inputs, {}, build.tensor_scalar_inputs);
-    return logicalLossTensorFromFakeOutput(shapeIt->second, findOutputDType(compiledOutputs, outputName));
+    const unordered_map<string, DataType> outputDTypes =
+        build.equation->getOutputDataTypes(build.stamp_inputs, build.tensor_scalar_inputs);
+    auto dtypeIt = outputDTypes.find(outputName);
+    if (dtypeIt == outputDTypes.end())
+        throw runtime_error("MultiInputCustomLoss failed to infer output dtype for '" + outputName + "'.");
+
+    return logicalLossTensorFromFakeOutput(shapeIt->second, dtypeIt->second);
 }
 
 Tensor MultiInputCustomLoss::inferLossTensor() const { return inferExpressionTensor(lossExpression, lossName, "loss"); }

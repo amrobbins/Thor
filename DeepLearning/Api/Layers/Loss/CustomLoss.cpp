@@ -13,9 +13,6 @@ using json = nlohmann::json;
 
 namespace Thor {
 
-using CompiledOutputs = ThorImplementation::CompiledOutputs;
-using CompiledExecutionStage = ThorImplementation::CompiledExecutionStage;
-using CompiledStageOutput = ThorImplementation::CompiledStageOutput;
 
 CustomLoss::CustomLoss(ThorImplementation::DynamicExpression lossExpression,
                        ThorImplementation::DynamicExpression gradientExpression,
@@ -123,42 +120,6 @@ Tensor CustomLoss::logicalLossTensorFromFakeOutput(const std::vector<uint64_t>& 
     return Tensor(dtype, logicalDims);
 }
 
-DataType CustomLoss::findOutputDType(const std::shared_ptr<CompiledOutputs>& compiledOutputs, const std::string& outputName) {
-    std::optional<DataType> outputDType;
-    for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-        for (size_t outputIndex = 0; outputIndex < stage.outputs.size(); ++outputIndex) {
-            const CompiledStageOutput& output = stage.outputs[outputIndex];
-            if (output.name == outputName) {
-                outputDType = stage.outputDType(outputIndex);
-                break;
-            }
-        }
-        if (outputDType.has_value())
-            break;
-    }
-
-    if (!outputDType.has_value()) {
-        for (const CompiledStageOutput& finalOutput : compiledOutputs->final_outputs) {
-            if (finalOutput.name != outputName)
-                continue;
-            for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-                for (size_t outputIndex = 0; outputIndex < stage.outputs.size(); ++outputIndex) {
-                    if (stage.outputs[outputIndex].value_id == finalOutput.value_id) {
-                        outputDType = stage.outputDType(outputIndex);
-                        break;
-                    }
-                }
-                if (outputDType.has_value())
-                    break;
-            }
-        }
-    }
-
-    if (!outputDType.has_value())
-        throw runtime_error("CustomLoss expression did not infer output dtype for '" + outputName + "'.");
-    return outputDType.value();
-}
-
 void CustomLoss::validateExpressionNames(const ThorImplementation::DynamicExpression& expression,
                                          const std::string& outputName,
                                          const std::string& what) const {
@@ -216,8 +177,13 @@ Tensor CustomLoss::inferExpressionTensor(const ThorImplementation::DynamicExpres
     if (shapeIt == fakeOutputShapes.end())
         throw runtime_error("CustomLoss failed to infer output shape for '" + outputName + "'.");
 
-    std::shared_ptr<CompiledOutputs> compiledOutputs = build.equation->compileForInputs(build.stamp_inputs, {}, build.tensor_scalar_inputs);
-    return logicalLossTensorFromFakeOutput(shapeIt->second, findOutputDType(compiledOutputs, outputName));
+    const std::unordered_map<std::string, DataType> outputDTypes =
+        build.equation->getOutputDataTypes(build.stamp_inputs, build.tensor_scalar_inputs);
+    auto dtypeIt = outputDTypes.find(outputName);
+    if (dtypeIt == outputDTypes.end())
+        throw runtime_error("CustomLoss failed to infer output dtype for '" + outputName + "'.");
+
+    return logicalLossTensorFromFakeOutput(shapeIt->second, dtypeIt->second);
 }
 
 Tensor CustomLoss::inferLossTensor() const { return inferExpressionTensor(lossExpression, lossName, "loss"); }

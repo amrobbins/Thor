@@ -1723,22 +1723,6 @@ static ExpressionDefinition definitionForPhysicalOutputs(const PhysicalOutputs& 
     return definition;
 }
 
-static bool serializedExpressionTreeHasCudaKernels(const json& j) {
-    if (j.contains("cuda_kernels") && !j.at("cuda_kernels").empty()) {
-        return true;
-    }
-    if (!j.contains("conditional")) {
-        return false;
-    }
-    const json& conditional = j.at("conditional");
-    if (!conditional.is_object()) {
-        return false;
-    }
-    return serializedExpressionTreeHasCudaKernels(conditional.at("predicate")) ||
-           serializedExpressionTreeHasCudaKernels(conditional.at("then_branch")) ||
-           serializedExpressionTreeHasCudaKernels(conditional.at("else_branch"));
-}
-
 void ExpressionDefinition::validate() const {
     if (outputs.isConditional()) {
         if (!outputs.expr) {
@@ -1750,9 +1734,10 @@ void ExpressionDefinition::validate() const {
         if (!outputs.expr->nodes.empty()) {
             throw std::runtime_error("Conditional ExpressionDefinition root must not contain executable expression nodes.");
         }
-        if (physicalOutputsTreeHasCudaKernelExpressions(outputs)) {
+        if (!outputs.expr->cuda_kernel_expressions.empty()) {
             throw std::runtime_error(
-                "ExpressionDefinition serialization of graph-level conditionals containing CudaKernelExpression nodes is not supported yet.");
+                "Conditional ExpressionDefinition root must not directly own CudaKernelExpression specs; CUDA kernels belong to "
+                "executable branch expressions.");
         }
         if (outputs.outputs.empty()) {
             throw std::runtime_error("Conditional ExpressionDefinition requires at least one named output.");
@@ -2161,14 +2146,22 @@ json ExpressionDefinition::architectureJsonWithCudaKernelManifestSignature() con
     }
 
     auto sig_it = signed_payload.find("cuda_kernel_manifest_signature");
-    if (sig_it == signed_payload.end() || !sig_it->is_object()) {
-        throw std::runtime_error("ExpressionDefinition CUDA manifest signing did not attach a manifest signature.");
+    if (outputs.expr && !outputs.expr->cuda_kernel_expressions.empty()) {
+        if (sig_it == signed_payload.end() || !sig_it->is_object()) {
+            throw std::runtime_error(
+                "ExpressionDefinition CUDA manifest signing did not attach a manifest signature to the root CUDA expression.");
+        }
+        cuda_kernel_manifest_signature = *sig_it;
+    } else {
+        // Conditional roots do not directly execute custom CUDA code. Their child
+        // expressions are independently signed by the recursive CUDA protection
+        // pass, so there is intentionally no root-level CUDA manifest signature.
+        cuda_kernel_manifest_signature = nullptr;
     }
-    cuda_kernel_manifest_signature = *sig_it;
     return signed_payload;
 }
 
-bool ExpressionDefinition::hasCudaKernelExpressions() const { return outputs.expr && !outputs.expr->cuda_kernel_expressions.empty(); }
+bool ExpressionDefinition::hasCudaKernelExpressions() const { return physicalOutputsTreeHasCudaKernelExpressions(outputs); }
 
 std::vector<std::string> ExpressionDefinition::cudaKernelSigningPublicKeys() const {
     if (!hasCudaKernelExpressions()) {
@@ -2186,32 +2179,44 @@ std::vector<CudaKernelOutOfBandKeys> ExpressionDefinition::cudaKernelOutOfBandKe
     return collectCudaKernelOutOfBandKeys(signed_payload);
 }
 
+static void collectCudaKernelSourceInfoFromPhysicalOutputs(const PhysicalOutputs& outputs,
+                                                           const json* direct_manifest_signature,
+                                                           std::vector<CudaKernelSourceInspection>& result) {
+    if (outputs.expr) {
+        for (const auto& kernel : outputs.expr->cuda_kernel_expressions) {
+            if (!kernel) {
+                throw std::runtime_error("ExpressionDefinition has a null CudaKernelExpression spec.");
+            }
+            for (const auto& info : kernel->sourceInfos()) {
+                CudaKernelSourceInspection entry;
+                entry.name = info.name;
+                entry.entrypoint = info.entrypoint;
+                entry.source = info.source;
+                entry.compiled_source = info.compiled_source;
+                entry.compiled_source_hash = info.source_hash;
+                entry.loaded_source_compilation_allowed = info.loaded_source_compilation_allowed;
+                if (direct_manifest_signature != nullptr && direct_manifest_signature->is_object()) {
+                    entry.signature_algorithm = direct_manifest_signature->value("algorithm", std::string{});
+                    entry.signing_public_key_fingerprint = direct_manifest_signature->value("public_key_fingerprint", std::string{});
+                    entry.signature = direct_manifest_signature->value("signature", std::string{});
+                }
+                result.push_back(std::move(entry));
+            }
+        }
+    }
+
+    if (outputs.isConditional()) {
+        collectCudaKernelSourceInfoFromPhysicalOutputs(outputs.conditional->predicate, nullptr, result);
+        collectCudaKernelSourceInfoFromPhysicalOutputs(outputs.conditional->then_branch, nullptr, result);
+        collectCudaKernelSourceInfoFromPhysicalOutputs(outputs.conditional->else_branch, nullptr, result);
+    }
+}
+
 std::vector<CudaKernelSourceInspection> ExpressionDefinition::cudaKernelSourceInfo() const {
     validate();
     std::vector<CudaKernelSourceInspection> result;
-    if (!outputs.expr) {
-        return result;
-    }
-    result.reserve(outputs.expr->cuda_kernel_expressions.size());
-    for (const auto& kernel : outputs.expr->cuda_kernel_expressions) {
-        if (!kernel) {
-            throw std::runtime_error("ExpressionDefinition has a null CudaKernelExpression spec.");
-        }
-        const auto info = kernel->sourceInfo();
-        CudaKernelSourceInspection entry;
-        entry.name = info.name;
-        entry.entrypoint = info.entrypoint;
-        entry.source = info.source;
-        entry.compiled_source = info.compiled_source;
-        entry.compiled_source_hash = info.source_hash;
-        entry.loaded_source_compilation_allowed = info.loaded_source_compilation_allowed;
-        if (!cuda_kernel_manifest_signature.is_null()) {
-            entry.signature_algorithm = cuda_kernel_manifest_signature.value("algorithm", std::string{});
-            entry.signing_public_key_fingerprint = cuda_kernel_manifest_signature.value("public_key_fingerprint", std::string{});
-            entry.signature = cuda_kernel_manifest_signature.value("signature", std::string{});
-        }
-        result.push_back(std::move(entry));
-    }
+    const json* root_signature = cuda_kernel_manifest_signature.is_object() ? &cuda_kernel_manifest_signature : nullptr;
+    collectCudaKernelSourceInfoFromPhysicalOutputs(outputs, root_signature, result);
     return result;
 }
 
@@ -2237,11 +2242,6 @@ void ExpressionDefinition::allowUnsafeLoadedCudaKernelSourceCompilation(const st
 ExpressionDefinition ExpressionDefinition::fromOutputs(const Outputs& outputs) {
     ExpressionDefinition definition;
     definition.outputs = outputs.physicalOutputs();
-    if (definition.outputs.isConditional() && physicalOutputsTreeHasCudaKernelExpressions(definition.outputs)) {
-        throw std::runtime_error(
-            "ExpressionDefinition serialization of graph-level conditionals containing CudaKernelExpression nodes is not supported yet.");
-    }
-
     for (const NamedInput& input : definition.outputs.expr->inputs) {
         definition.expected_input_names.push_back(input.name);
     }
@@ -2263,11 +2263,6 @@ ExpressionDefinition ExpressionDefinition::deserialize(const json& j,
     const int schema_version = j.at("schema_version").get<int>();
     if (schema_version != 1) {
         throw std::runtime_error("Unsupported thor.expression schema_version: " + std::to_string(schema_version));
-    }
-
-    if (j.contains("conditional") && serializedExpressionTreeHasCudaKernels(j)) {
-        throw std::runtime_error(
-            "ExpressionDefinition deserialization of graph-level conditionals containing CudaKernelExpression nodes is not supported yet.");
     }
 
     json expression_json = j;
