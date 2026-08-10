@@ -4,6 +4,19 @@ cmake_minimum_required(VERSION 3.28)
 option(THOR_PYTHON_TESTS "Enable Python binding tests (pytest)" ON)
 option(THOR_PYTHON_STUBS "Generate typing stubs via nanobind_add_stub()" ON)
 
+# A normal source-tree build can keep the checked-in documentation stub snapshot
+# synchronized automatically. Isolated scikit-build wheel builds deliberately do
+# not mutate the source tree; the wheel itself still receives the generated stubs.
+set(_thor_python_sync_docs_stubs_default OFF)
+if (NOT DEFINED SKBUILD_PROJECT_NAME AND EXISTS "${CMAKE_SOURCE_DIR}/tools/docs/sync_api_stubs.py")
+    set(_thor_python_sync_docs_stubs_default ON)
+endif ()
+option(THOR_PYTHON_SYNC_DOC_STUBS
+        "Keep docs/_api_stubs/thor-stubs synchronized with generated Python stubs during source-tree builds"
+        ${_thor_python_sync_docs_stubs_default}
+)
+unset(_thor_python_sync_docs_stubs_default)
+
 # If ON (and not building under scikit-build-core), `cmake --build .` will also copy into the venv.
 option(THOR_PYTHON_AUTO_INSTALL "Auto-install bindings into the project venv as part of the default build" ON)
 
@@ -299,6 +312,51 @@ if (THOR_PYTHON_STUBS)
             ${_thor_public_stub_targets}
             ${_thor_public_nested_stub_targets}
     )
+
+    # Export the exact nanobind-generated public stub tree into the checked-in
+    # documentation metadata snapshot. This target never imports Thor itself; it
+    # runs only after nanobind has already generated every public .pyi file.
+    set(THOR_DOCS_API_STUB_SYNC_SCRIPT "${CMAKE_SOURCE_DIR}/tools/docs/sync_api_stubs.py")
+    set(THOR_DOCS_API_REFERENCE_GENERATOR "${CMAKE_SOURCE_DIR}/tools/docs/generate_api_reference.py")
+    if (EXISTS "${THOR_DOCS_API_STUB_SYNC_SCRIPT}" AND EXISTS "${THOR_DOCS_API_REFERENCE_GENERATOR}")
+        add_custom_target(thor_docs_api_stub_snapshot
+                COMMAND "${Python_EXECUTABLE}"
+                "${THOR_DOCS_API_STUB_SYNC_SCRIPT}"
+                "${THOR_PY_PKG_BUILD_DIR}"
+                COMMAND "${Python_EXECUTABLE}"
+                "${THOR_DOCS_API_REFERENCE_GENERATOR}"
+                DEPENDS thor_py_stubs_all
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                COMMENT "Thor: synchronizing generated Python stubs into the documentation API snapshot"
+                VERBATIM
+        )
+
+        add_custom_target(thor_docs_api_stub_snapshot_check
+                COMMAND "${Python_EXECUTABLE}"
+                "${THOR_DOCS_API_STUB_SYNC_SCRIPT}"
+                "${THOR_PY_PKG_BUILD_DIR}"
+                --check
+                COMMAND "${Python_EXECUTABLE}"
+                "${THOR_DOCS_API_REFERENCE_GENERATOR}"
+                --check
+                DEPENDS thor_py_stubs_all
+                WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                COMMENT "Thor: verifying documentation API stub snapshot"
+                VERBATIM
+        )
+
+        if (THOR_PYTHON_SYNC_DOC_STUBS)
+            # Keep source-tree docs current on an ordinary `cmake --build` without
+            # making the documentation-only CI job compile Thor or require CUDA.
+            add_custom_target(thor_docs_api_stub_snapshot_build ALL
+                    DEPENDS thor_docs_api_stub_snapshot
+            )
+        endif ()
+    elseif (THOR_PYTHON_SYNC_DOC_STUBS)
+        message(FATAL_ERROR
+                "THOR_PYTHON_SYNC_DOC_STUBS=ON but documentation API generation tooling is missing. "
+                "Expected ${THOR_DOCS_API_STUB_SYNC_SCRIPT} and ${THOR_DOCS_API_REFERENCE_GENERATOR}")
+    endif ()
 
     # IMPORTANT: for wheel builds, ensure stubs are generated as part of the default build
     if (DEFINED SKBUILD_PROJECT_NAME)

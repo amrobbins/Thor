@@ -2,11 +2,8 @@
 
 Thor's public API reference is Python-only for the initial release.
 
-Reference pages are rendered with mkdocstrings and Griffe from Thor's public Python API metadata. Griffe is configured for static analysis only: documentation builds must never import `thor._thor`, initialize CUDA, or compile Thor.
+The [Python API](generated/) is generated from the curated public `thor` package surface on every documentation build. No list of classes, functions, or public namespaces is copied by hand into the reference.
 
-The first reference pages intentionally prove that pipeline on public objects whose definitions live in Python source. Native-backed objects such as `thor.Tensor` and `thor.Network` will join the same reference surface once their generated `.pyi` metadata is made available to the docs build. Their signatures will not be copied by hand into Markdown.
+Generation uses Python source and Griffe static analysis without importing `thor`, loading `_thor.so`, initializing CUDA, or compiling Thor. Pure-Python definitions and re-exports are documented immediately. Native-backed namespaces automatically expand when nanobind-generated `.pyi` metadata is available under `docs/_api_stubs/thor-stubs`.
 
-- [Core API](core.md) currently documents the Python-defined `thor.einsum` convenience function.
-- [Ensembles](ensembles.md) exercises class, method, property, and type-annotation rendering from Thor's Python package.
-
-As the reference expands, the curated `thor` namespaces remain the public boundary. C++ implementation APIs are not part of the initial documentation surface.
+This means API-reference structure follows the shipped Python surface while narrative documentation remains intentionally hand-authored. C++ implementation APIs are not part of the initial public documentation surface.

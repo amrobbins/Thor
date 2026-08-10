@@ -34,6 +34,9 @@ jobs:
       - name: Install documentation dependencies
         run: python -m pip install -r requirements/docs.txt
 
+      - name: Generate Python API reference
+        run: python tools/docs/generate_api_reference.py
+
       - name: Check public API documentation inventory
         run: python tools/docs/check_public_api.py
 

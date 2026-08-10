@@ -63,21 +63,41 @@ Do not hand-maintain a native signature in Markdown as a substitute for generate
 
 ### Native stub metadata
 
-After a normal Thor Python build has generated its stubs, synchronize them into the documentation metadata snapshot with:
+Normal source-tree CMake builds keep the documentation stub snapshot synchronized automatically. Once nanobind has generated the root and public namespace `.pyi` files, the `thor_docs_api_stub_snapshot` target copies that exact tree into `docs/_api_stubs/thor-stubs` and regenerates `docs/reference/generated/`. The default source-tree build depends on this target when `THOR_PYTHON_SYNC_DOC_STUBS=ON`, which is the default when the documentation tooling is present.
+
+This does **not** make documentation CI a native build. The CUDA-free docs jobs only consume the checked-in snapshot. Isolated scikit-build wheel builds default `THOR_PYTHON_SYNC_DOC_STUBS` to `OFF` so packaging cannot modify the source checkout; those builds still generate and install the same `.pyi` files into the wheel.
+
+To force a snapshot refresh from an existing build tree:
 
 ```bash
-python tools/docs/sync_api_stubs.py build/bindings/python/thor
+cmake --build build --target thor_docs_api_stub_snapshot
 ```
 
-Pass the actual generated `thor` package directory if your build directory has a different name. The source directory must contain both `__init__.pyi` and `_thor.pyi`. The sync tool copies only `.pyi` files and never imports Thor.
-
-To verify a checked-in snapshot against a generated stub tree without modifying files, use:
+To verify that both the checked-in snapshot and generated API-reference Markdown exactly match the current native bindings without modifying either:
 
 ```bash
-python tools/docs/sync_api_stubs.py build/bindings/python/thor --check
+cmake --build build --target thor_docs_api_stub_snapshot_check
 ```
 
-The docs configuration also enables Griffe's stub-package lookup and includes `docs/_api_stubs` on its search path. Once a generated `thor-stubs` snapshot is present, native-backed public symbols can be rendered from that metadata while `allow_inspection = false` continues to prevent `_thor` from being imported.
+If a source-tree build must not update documentation metadata, configure it with `-DTHOR_PYTHON_SYNC_DOC_STUBS=OFF`. The lower-level `tools/docs/sync_api_stubs.py` command remains available for unusual build-directory layouts, but routine development should not need to invoke it directly.
+
+The docs configuration enables Griffe's stub-package lookup and includes `docs/_api_stubs` on its search path. Once the generated `thor-stubs` snapshot is checked in, native-backed public symbols are rendered from that metadata while `allow_inspection = false` continues to prevent `_thor` from being imported.
+
+## Generated Python API reference
+
+The namespace reference under `docs/reference/generated/` is generated. Do not hand-edit those files. Regenerate it from the repository root with:
+
+```bash
+python tools/docs/generate_api_reference.py
+```
+
+The generator reads Thor's curated Python package surface without importing `thor`. It documents statically resolvable Python objects immediately and uses the checked-in nanobind `.pyi` snapshot when one is present. Native-backed pages therefore fill in automatically when stub metadata becomes available.
+
+Both documentation GitHub Actions workflows run the generator before validating and building the site, so the published GitHub Pages reference always reflects the API metadata available in that commit. The generated files are also kept in the repository so `zensical serve` works immediately after checkout. To verify that the checked-in generated files are current, run:
+
+```bash
+python tools/docs/generate_api_reference.py --check
+```
 
 ## Public API documentation inventory
 

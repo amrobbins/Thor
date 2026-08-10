@@ -16,8 +16,7 @@ nav = [
   { "Concepts" = "concepts/index.md" },
   { "API Reference" = [
     { "Overview" = "reference/index.md" },
-    { "Core" = "reference/core.md" },
-    { "Ensembles" = "reference/ensembles.md" },
+    { "Python API" = "reference/generated/index.md" },
   ] },
   { "Contributing" = [{ "Documentation" = "contributing/documentation.md" }] },
 ]
