@@ -1,6 +1,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/function.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/unordered_map.h>
@@ -2155,7 +2156,19 @@ Only the selected branch is executed at runtime; both branches must expose ident
             &Outputs::ifElse,
             "predicate"_a,
             "then_outputs"_a,
-            "else_outputs"_a);
+            "else_outputs"_a)
+        .def_static(
+            "if_elif_else",
+            &Outputs::ifElifElse,
+            "predicate"_a,
+            "then_outputs"_a,
+            "elif_branches"_a,
+            "else_outputs"_a,
+            R"nbdoc(
+Create graph-level conditional outputs with one or more ordered elif branches.
+Each elif branch is a (predicate, outputs) pair. Predicates are evaluated in order and
+only the first matching branch executes; all branches must expose identical output names.
+)nbdoc");
 
     auto expression_definition_type = nb::class_<ExpressionDefinition>(physical, "ExpressionDefinition");
     expression_definition_type.attr("__module__") = "thor.physical";
@@ -2233,6 +2246,20 @@ Returns:
         "else_outputs"_a,
         R"nbdoc(
 Create graph-level conditional outputs from a scalar BOOLEAN predicate and two branch Outputs objects.
+)nbdoc");
+
+    expr.def_static(
+        "if_elif_else",
+        &Outputs::ifElifElse,
+        "predicate"_a,
+        "then_outputs"_a,
+        "elif_branches"_a,
+        "else_outputs"_a,
+        R"nbdoc(
+Create graph-level conditional outputs with ordered elif branches.
+
+Each item in elif_branches is a (predicate, outputs) pair. Predicates are evaluated in
+order and only the first matching branch executes.
 )nbdoc");
 
     expr.def_static(

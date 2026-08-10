@@ -451,6 +451,10 @@ class Outputs {
     [[nodiscard]] static Outputs ifElse(const Expression& predicate, const Outputs& then_outputs, const Outputs& else_outputs) {
         return conditional(predicate, then_outputs, else_outputs);
     }
+    [[nodiscard]] static Outputs ifElifElse(const Expression& predicate,
+                                            const Outputs& then_outputs,
+                                            const std::vector<std::pair<Expression, Outputs>>& elif_branches,
+                                            const Outputs& else_outputs);
 
    private:
     std::shared_ptr<PhysicalExpression> expr;

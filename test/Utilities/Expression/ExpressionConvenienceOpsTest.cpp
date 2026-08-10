@@ -713,6 +713,97 @@ TEST(ExpressionGraphConditionalOps, ConditionalOutputsExposeContractAndRejectMis
     EXPECT_THROW((void)Outputs::conditional(predicate, then_outputs, mismatched_else), std::runtime_error);
 }
 
+TEST(ExpressionGraphConditionalOps, IfElifElseBuildsOrderedNestedElseChainAndRoundTrips) {
+    auto x = Expression::input("x");
+    auto selector = Expression::input("selector");
+
+    Outputs then_outputs = Expression::outputs({{"y", x + Expression::constantScalar(10.0)}});
+    Outputs first_elif_outputs = Expression::outputs({{"y", x + Expression::constantScalar(20.0)}});
+    Outputs second_elif_outputs = Expression::outputs({{"y", x + Expression::constantScalar(30.0)}});
+    Outputs else_outputs = Expression::outputs({{"y", x + Expression::constantScalar(40.0)}});
+
+    Outputs chained = Outputs::ifElifElse(
+        selector.greaterThan(Expression::constantScalar(2.0)),
+        then_outputs,
+        {{selector.greaterThan(Expression::constantScalar(1.0)), first_elif_outputs},
+         {selector.greaterThan(Expression::constantScalar(0.0)), second_elif_outputs}},
+        else_outputs);
+
+    PhysicalOutputs physical = chained.physicalOutputs();
+    ASSERT_TRUE(physical.isConditional());
+    ASSERT_TRUE(physical.conditional->else_branch.isConditional());
+    ASSERT_TRUE(physical.conditional->else_branch.conditional->else_branch.isConditional());
+    EXPECT_FALSE(physical.conditional->else_branch.conditional->else_branch.conditional->else_branch.isConditional());
+
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(chained);
+    nlohmann::json payload = definition.architectureJson();
+    ASSERT_TRUE(payload.at("conditional").at("else_branch").contains("conditional"));
+    ASSERT_TRUE(payload.at("conditional").at("else_branch").at("conditional").at("else_branch").contains("conditional"));
+
+    ExpressionDefinition loaded = ExpressionDefinition::deserialize(payload);
+    EXPECT_EQ(loaded.architectureJson(), payload);
+    EXPECT_EQ(loaded.canonical_hash, definition.canonical_hash);
+
+    EXPECT_THROW(
+        (void)Outputs::ifElifElse(
+            selector.greaterThan(Expression::constantScalar(2.0)), then_outputs, {}, else_outputs),
+        std::runtime_error);
+
+    Outputs mismatched = Expression::outputs({{"z", x}});
+    EXPECT_THROW(
+        (void)Outputs::ifElifElse(
+            selector.greaterThan(Expression::constantScalar(2.0)),
+            then_outputs,
+            {{selector.greaterThan(Expression::constantScalar(1.0)), mismatched}},
+            else_outputs),
+        std::runtime_error);
+}
+
+TEST(ExpressionGraphConditionalOps, IfElifElseExecutesFirstMatchingBranch) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto selector = Expression::input("selector", DataType::FP32, DataType::FP32);
+    Outputs chained = Outputs::ifElifElse(
+        selector.greaterThan(Expression::constantScalar(2.0)),
+        Expression::outputs({{"y", x * Expression::constantScalar(10.0)}}),
+        {{selector.greaterThan(Expression::constantScalar(1.0)),
+          Expression::outputs({{"y", x * Expression::constantScalar(20.0)}})},
+         {selector.greaterThan(Expression::constantScalar(0.0)),
+          Expression::outputs({{"y", x * Expression::constantScalar(30.0)}})}},
+        Expression::outputs({{"y", x * Expression::constantScalar(40.0)}}));
+
+    FusedEquation equation = FusedEquation::compile(chained.physicalOutputs(), 0);
+    Tensor x_tensor = makeGpuTensor({2}, {2.0f, 3.0f}, stream);
+
+    const auto run_selector = [&](float selector_value, const std::vector<float>& expected) {
+        Tensor selector_tensor = makeGpuTensor({1}, {selector_value}, stream);
+        StampedExecutionPlan plan = equation.stamp({{"x", x_tensor}, {"selector", selector_tensor}}, stream);
+        plan.run();
+        expectNear(copyToCpuValues(plan.output("y"), stream), expected);
+    };
+
+    run_selector(3.0f, {20.0f, 30.0f});
+    run_selector(2.0f, {40.0f, 60.0f});
+    run_selector(1.0f, {60.0f, 90.0f});
+    run_selector(-1.0f, {80.0f, 120.0f});
+
+    FusedEquation backward = equation.compileBackward({"x"}, "dy");
+    Tensor dy = makeGpuTensor({2}, {1.0f, 2.0f}, stream);
+    const auto run_backward_selector = [&](float selector_value, const std::vector<float>& expected) {
+        Tensor selector_tensor = makeGpuTensor({1}, {selector_value}, stream);
+        StampedExecutionPlan plan = backward.stamp({{"x", x_tensor}, {"selector", selector_tensor}, {"dy", dy}}, stream);
+        plan.run();
+        expectNear(copyToCpuValues(plan.output("x_grad"), stream), expected);
+    };
+
+    run_backward_selector(3.0f, {10.0f, 20.0f});
+    run_backward_selector(2.0f, {20.0f, 40.0f});
+    run_backward_selector(1.0f, {30.0f, 60.0f});
+    run_backward_selector(-1.0f, {40.0f, 80.0f});
+}
+
 TEST(ExpressionGraphConditionalOps, ExpressionDefinitionRoundTripsConditionalAndCompileBackwardBuildsDeferredTemplate) {
     auto x = Expression::input("x");
     auto predicate = Expression::input("predicate_value").greaterThan(Expression::constantScalar(0.0));

@@ -5214,4 +5214,19 @@ Outputs Outputs::conditional(const Expression& predicate, const Outputs& then_ou
     return Outputs(std::move(root_expr), std::move(outputs), std::move(conditional));
 }
 
+Outputs Outputs::ifElifElse(const Expression& predicate,
+                            const Outputs& then_outputs,
+                            const std::vector<std::pair<Expression, Outputs>>& elif_branches,
+                            const Outputs& else_outputs) {
+    if (elif_branches.empty()) {
+        throw std::runtime_error("Outputs::ifElifElse requires at least one elif branch.");
+    }
+
+    Outputs chained_else = else_outputs;
+    for (auto it = elif_branches.rbegin(); it != elif_branches.rend(); ++it) {
+        chained_else = conditional(it->first, it->second, chained_else);
+    }
+    return conditional(predicate, then_outputs, chained_else);
+}
+
 }  // namespace ThorImplementation

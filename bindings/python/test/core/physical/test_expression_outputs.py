@@ -594,6 +594,73 @@ def test_graph_conditional_output_contract_and_branch_name_validation():
     assert restored.output_names() == ["y"]
 
 
+def test_graph_if_elif_else_requires_an_elif_branch_and_round_trips():
+    x = ex.input("x")
+    selector = ex.input("selector")
+    then_outputs = ex.outputs({"y": x + ex.constant_scalar(10.0)})
+    else_outputs = ex.outputs({"y": x + ex.constant_scalar(40.0)})
+
+    with pytest.raises(RuntimeError):
+        ex.if_elif_else(
+            selector > ex.constant_scalar(2.0),
+            then_outputs,
+            [],
+            else_outputs,
+        )
+
+    conditional = ex.if_elif_else(
+        selector > ex.constant_scalar(2.0),
+        then_outputs,
+        [
+            (selector > ex.constant_scalar(1.0), ex.outputs({"y": x + ex.constant_scalar(20.0)})),
+            (selector > ex.constant_scalar(0.0), ex.outputs({"y": x + ex.constant_scalar(30.0)})),
+        ],
+        else_outputs,
+    )
+    restored = thor.physical.Outputs.from_json(conditional.to_json())
+    assert restored.output_names() == ["y"]
+
+
+@pytest.mark.cuda
+def test_graph_if_elif_else_runs_first_matching_branch_from_python():
+    dtype = thor.DataType.fp32
+    stream = Stream(gpu_num=0)
+
+    x = ex.input("x", compute_dtype=dtype, output_dtype=dtype)
+    selector = ex.input("selector", compute_dtype=dtype, output_dtype=dtype)
+    conditional = ex.if_elif_else(
+        selector > ex.constant_scalar(2.0),
+        ex.outputs({"y": x * ex.constant_scalar(10.0)}),
+        [
+            (selector > ex.constant_scalar(1.0), ex.outputs({"y": x * ex.constant_scalar(20.0)})),
+            (selector > ex.constant_scalar(0.0), ex.outputs({"y": x * ex.constant_scalar(30.0)})),
+        ],
+        ex.outputs({"y": x * ex.constant_scalar(40.0)}),
+    )
+    eq = conditional.compile(device_num=0)
+
+    x_cpu = _cpu_tensor([2], dtype)
+    _fill_cpu_tensor(x_cpu, [1.0, 2.0], dtype)
+    x_gpu = _clone_to_gpu(x_cpu, stream)
+
+    for selector_value, expected in [
+        (3.0, [10.0, 20.0]),
+        (2.0, [20.0, 40.0]),
+        (1.0, [30.0, 60.0]),
+        (-1.0, [40.0, 80.0]),
+    ]:
+        selector_cpu = _cpu_tensor([1], dtype)
+        _fill_cpu_tensor(selector_cpu, [selector_value], dtype)
+        selector_gpu = _clone_to_gpu(selector_cpu, stream)
+        stream.synchronize()
+
+        plan = eq.stamp({"x": x_gpu, "selector": selector_gpu}, stream)
+        plan.run()
+        output_cpu = _clone_to_cpu(plan.output("y"), stream)
+        stream.synchronize()
+        np.testing.assert_allclose(output_cpu.numpy(), np.array(expected, dtype=np.float32), rtol=1e-6, atol=1e-6)
+
+
 @pytest.mark.cuda
 def test_graph_conditional_runs_then_and_else_with_device_scalar_predicate():
     dtype = thor.DataType.fp32

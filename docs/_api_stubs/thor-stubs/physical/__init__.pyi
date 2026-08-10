@@ -1532,6 +1532,15 @@ class Expression:
         Create graph-level conditional outputs from a scalar BOOLEAN predicate and two branch Outputs objects.
         """
 
+    @staticmethod
+    def if_elif_else(predicate: Expression, then_outputs: Outputs, elif_branches: Sequence[tuple[Expression, Outputs]], else_outputs: Outputs) -> Outputs:
+        """
+        Create graph-level conditional outputs with ordered elif branches.
+
+        Each item in elif_branches is a (predicate, outputs) pair. Predicates are evaluated in
+        order and only the first matching branch executes.
+        """
+
     @overload
     @staticmethod
     def compile(expr: Expression, device_num: int = 0) -> FusedEquation:
@@ -1574,6 +1583,14 @@ class Outputs:
 
     @staticmethod
     def if_else(predicate: Expression, then_outputs: Outputs, else_outputs: Outputs) -> Outputs: ...
+
+    @staticmethod
+    def if_elif_else(predicate: Expression, then_outputs: Outputs, elif_branches: Sequence[tuple[Expression, Outputs]], else_outputs: Outputs) -> Outputs:
+        """
+        Create graph-level conditional outputs with one or more ordered elif branches.
+        Each elif branch is a (predicate, outputs) pair. Predicates are evaluated in order and
+        only the first matching branch executes; all branches must expose identical output names.
+        """
 
 class ExpressionDefinition:
     @staticmethod
