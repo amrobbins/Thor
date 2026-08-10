@@ -4,6 +4,9 @@
 
 Public API metadata source: **python __all__**.
 
+!!! info "Native signature metadata pending"
+    1 public symbol is known from the Python namespace but cannot yet be rendered without generated native `.pyi` metadata. The page will expand automatically when that snapshot is present.
+
 ::: thor.BATCH_VALIDITY_MASK_NAME
 
 ::: thor.METRIC_AGGREGATION_DENOMINATOR_NAME
@@ -23,7 +26,5 @@ Public API metadata source: **python __all__**.
 ::: thor.Tensor
 
 ::: thor.__git_version__
-
-::: thor.__version__
 
 ::: thor.einsum

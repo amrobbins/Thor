@@ -115,6 +115,39 @@ def _stub_public_names(stub_file: Path) -> tuple[str, ...] | None:
     return tuple(dict.fromkeys(names)) or None
 
 
+def _stub_renderable_names(stub_file: Path) -> set[str] | None:
+    """Return names that are materially declared by a generated stub.
+
+    ``__all__`` describes the public namespace, but nanobind's stub generator can
+    intentionally omit module metadata such as ``__version__``. Treating every
+    ``__all__`` entry as renderable makes Griffe fall back to the Python-source
+    alias (for example ``thor._thor.__version__``), which cannot be resolved in a
+    static documentation build.
+    """
+    if not stub_file.is_file():
+        return None
+
+    tree = ast.parse(stub_file.read_text(encoding="utf-8"), filename=str(stub_file))
+    names: set[str] = set()
+    for statement in tree.body:
+        if isinstance(statement, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(statement.name)
+        elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+            names.add(statement.target.id)
+        elif isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif isinstance(statement, ast.ImportFrom):
+            for alias in statement.names:
+                if alias.name != "*":
+                    names.add(alias.asname or alias.name)
+        elif isinstance(statement, ast.Import):
+            for alias in statement.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+    return names
+
+
 def _source_renderable_names(tree: ast.Module) -> set[str]:
     """Return names Griffe can collect from source without following thor._thor."""
     names: set[str] = set()
@@ -149,7 +182,9 @@ def _surface_for_module(
 ) -> ModuleSurface:
     tree = ast.parse(init_file.read_text(encoding="utf-8"), filename=str(init_file))
     source_public = _literal_public_names(tree)
-    stub_public = _stub_public_names(_stub_file(stub_root, module))
+    stub_file = _stub_file(stub_root, module)
+    stub_public = _stub_public_names(stub_file)
+    stub_renderable = _stub_renderable_names(stub_file)
 
     if source_public is not None:
         public_names = source_public
@@ -168,7 +203,10 @@ def _surface_for_module(
         enumeration_complete = False
 
     if stub_public is not None:
-        renderable = set(public_names)
+        # A public name is renderable from native metadata only when the stub
+        # actually declares/re-exports it. ``__all__`` membership alone is not
+        # sufficient for Griffe alias resolution.
+        renderable = stub_renderable if stub_renderable is not None else set()
     else:
         renderable = _source_renderable_names(tree)
 

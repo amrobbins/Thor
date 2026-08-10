@@ -6,7 +6,7 @@ This index is generated from Thor's curated public Python package surface. The d
 
 Native-backed namespaces automatically gain full signatures when the generated `.pyi` snapshot is available.
 
-- [`thor`](thor.md)
+- [`thor`](thor.md) — 1 native symbol awaiting stub metadata
 - [`thor.activations`](thor-activations.md)
 - [`thor.constraints`](thor-constraints.md)
 - [`thor.data`](thor-data.md) — 25 native symbols awaiting stub metadata
