@@ -26,6 +26,13 @@ namespace Thor {
 
 using InferenceOutputValue = std::variant<ThorImplementation::Tensor, ThorImplementation::RaggedTensor>;
 
+/**
+ * A placed network owns one or more independent physical stamps. Submission methods do
+ * not serialize host access to a stamp: callers must not submit concurrently to the same
+ * stampIndex from multiple host threads. Each submission may use multiple asynchronous
+ * CUDA streams internally. Different stamps may be scheduled independently, while
+ * placement-wide operations document their stronger coordination requirements separately.
+ */
 class PlacedNetwork {
    public:
     // Deep-copy the network; steal stamps from caller's lvalue vector

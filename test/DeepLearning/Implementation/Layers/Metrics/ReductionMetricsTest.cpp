@@ -1,5 +1,6 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
+#include "test/DeepLearning/Implementation/Layers/LayerSynchronizationTestKernels.h"
 
 #include "DeepLearning/Implementation/Layers/Metric.h"
 #include "DeepLearning/Implementation/Layers/Metrics/ReductionMetrics.h"
@@ -339,6 +340,60 @@ TEST(ReductionMetrics, WeightedMeanRetainsNumeratorWhenDenominatorIsZero) {
     valuesInput->getStream().synchronize();
     EXPECT_FLOAT_EQ(*resultCpu.getMemPtr<float>(), 0.0f);
     expectRatioStatistics(metric, 0, -2.0f, 0.0f);
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+TEST(ReductionMetrics, WeightedMeanFencesLabelsStreamUntilMetricConsumesWeights) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {2, 1});
+
+    Tensor firstValuesCpu(cpuPlacement, descriptor);
+    Tensor firstWeightsCpu(cpuPlacement, descriptor);
+    Tensor replacementWeightsCpu(cpuPlacement, descriptor);
+    Tensor valuesGpu(gpuPlacement, descriptor);
+    Tensor weightsGpu(gpuPlacement, descriptor);
+
+    const vector<float> firstValues = {2.0f, 4.0f};
+    const vector<float> firstWeights = {1.0f, 2.0f};
+    const vector<float> replacementWeights = {100.0f, 1.0f};
+    std::copy(firstValues.begin(), firstValues.end(), firstValuesCpu.getMemPtr<float>());
+    std::copy(firstWeights.begin(), firstWeights.end(), firstWeightsCpu.getMemPtr<float>());
+    std::copy(replacementWeights.begin(), replacementWeights.end(), replacementWeightsCpu.getMemPtr<float>());
+
+    auto valuesInput = make_shared<NetworkInput>(valuesGpu);
+    auto weightsInput = make_shared<NetworkInput>(weightsGpu);
+    auto metric = make_shared<WeightedMean>();
+    auto output = make_shared<NetworkOutput>(gpuPlacement);
+    vector<shared_ptr<Layer>> layers{valuesInput, weightsInput, metric, output};
+    LayerTestHelper::connectTwoLayers(valuesInput, metric, 0, static_cast<int>(Metric::ConnectionType::FORWARD));
+    LayerTestHelper::connectTwoLayers(weightsInput, metric, 0, static_cast<int>(Metric::ConnectionType::LABELS));
+    LayerTestHelper::connectTwoLayers(metric, output, static_cast<int>(Metric::ConnectionType::METRIC));
+    LayerTestHelper::initializeNetwork(layers);
+
+    // Hold the values/metric stream before the first batch. The first weights copy
+    // can complete on the labels stream, but the metric cannot consume it yet.
+    // Immediately queue another weights copy without another values input. Without
+    // the reverse metric->labels stream fence, that second copy can overwrite the
+    // statically connected labels tensor before the first weighted mean reads it.
+    ThorImplementation::Test::DeviceStreamGate valuesGate(0);
+    valuesGate.enqueue(valuesInput->getStream());
+
+    valuesInput->forward(firstValuesCpu, false);
+    weightsInput->forward(firstWeightsCpu, false);
+    weightsInput->forward(replacementWeightsCpu, false);
+
+    valuesGate.release();
+    valuesInput->getStream().synchronize();
+    weightsInput->getStream().synchronize();
+
+    Tensor resultCpu = output->getFeatureOutput().value().clone(cpuPlacement);
+    resultCpu.copyFromAsync(output->getFeatureOutput().value(), valuesInput->getStream());
+    valuesInput->getStream().synchronize();
+
+    EXPECT_NEAR(*resultCpu.getMemPtr<float>(), 10.0f / 3.0f, 1e-6f);
+    expectRatioStatistics(metric, 0, 10.0f, 3.0f);
 
     LayerTestHelper::tearDownNetwork(layers);
 }

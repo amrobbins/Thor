@@ -317,6 +317,23 @@ class Layer {
     virtual Stream getStream() { return stream; }
 
     /**
+     * Returns the CUDA streams whose previously submitted work may still access
+     * this stamp's statically connected graph tensors. StampedNetwork joins these
+     * streams before publishing a batch's processingFinished event, so a later
+     * batch may safely reuse those tensor addresses.
+     *
+     * This deliberately excludes auxiliary streams that operate only on slot-local
+     * staging/output buffers after graph-tensor consumption has completed (for
+     * example NetworkInput upload streams and NetworkOutput download streams).
+     * Layers with additional graph-processing streams must override this method.
+     */
+    virtual std::vector<Stream> getProcessingStreams() {
+        if (!stream.isInitialized())
+            return {};
+        return {stream};
+    }
+
+    /**
      * Records one host-waitable event on every distinct stream on which this layer may
      * have enqueued work. Synchronizing every returned event guarantees that all work
      * enqueued by this layer before this call has completed.
@@ -455,8 +472,6 @@ class Layer {
     bool compiled;
 
     std::string name;
-
-    std::mutex mtx;
 
    private:
     bool inferenceOnly;

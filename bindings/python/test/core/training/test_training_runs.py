@@ -747,7 +747,7 @@ def _build_two_loss_regressor(name: str):
     return network
 
 
-def _zero_initialized_regression_head(network: thor.Network, features: thor.Tensor):
+def _constant_initialized_regression_head(network: thor.Network, features: thor.Tensor, bias: float):
     return thor.layers.FullyConnected(
         network,
         features,
@@ -755,18 +755,25 @@ def _zero_initialized_regression_head(network: thor.Network, features: thor.Tens
         True,
         activation=None,
         weights_initializer=thor.initializers.UniformRandom(0.0, 0.0),
-        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+        biases_initializer=thor.initializers.UniformRandom(bias, bias),
     )
 
 
-def _build_mae_low_high_quantile_regressor(name: str):
+def _build_mae_low_high_quantile_regressor(
+    name: str,
+    *,
+    initial_forecasts: tuple[float, float, float] = (0.0, 0.0, 0.0),
+):
     network = thor.Network(name)
     examples = thor.layers.NetworkInput(network, "examples", [2], thor.DataType.fp32)
     demand = thor.layers.NetworkInput(network, "demand", [1], thor.DataType.fp32)
 
-    point_forecast = _zero_initialized_regression_head(network, examples.get_feature_output())
-    low_quantile_forecast = _zero_initialized_regression_head(network, examples.get_feature_output())
-    high_quantile_forecast = _zero_initialized_regression_head(network, examples.get_feature_output())
+    point_forecast = _constant_initialized_regression_head(
+        network, examples.get_feature_output(), initial_forecasts[0])
+    low_quantile_forecast = _constant_initialized_regression_head(
+        network, examples.get_feature_output(), initial_forecasts[1])
+    high_quantile_forecast = _constant_initialized_regression_head(
+        network, examples.get_feature_output(), initial_forecasts[2])
 
     mae = thor.losses.MAE(
         network,
@@ -1411,9 +1418,10 @@ def _make_mae_low_high_quantile_regression_trainer(
     *,
     save_model_dir=None,
     save_model_overwrite=False,
+    initial_forecasts: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ):
     return thor.training.Trainer(
-        _build_mae_low_high_quantile_regressor(name),
+        _build_mae_low_high_quantile_regressor(name, initial_forecasts=initial_forecasts),
         data=_mae_quantile_regression_one_batch_data(),
         optimizer=thor.optimizers.Sgd(initial_learning_rate=1.0e-12, momentum=0.0),
         stats_interval_s=0.0,
@@ -2927,6 +2935,121 @@ def test_training_runs_reports_mae_plus_low_high_quantile_losses(capfd, tmp_path
         "examples": _cpu_tensor(x, thor.DataType.fp32)
     })
     assert set(ensemble_outputs) == {"forecast", "forecast_p10", "forecast_p90"}
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_training_runs_multi_output_weighted_ensemble_matches_explicit_member_reference_before_and_after_save(
+    capfd,
+    tmp_path,
+):
+    reported_losses = ["mae_loss", "quantile_low_loss", "quantile_high_loss"]
+    member_specs = [
+        (
+            "fold_0",
+            (1.0, 0.5, 1.5),
+            1.0,
+        ),
+        (
+            "fold_1",
+            (7.0, 6.0, 8.0),
+            2.0,
+        ),
+    ]
+    runs = thor.training.TrainingRuns(
+        [
+            (
+                run_name,
+                _make_mae_low_high_quantile_regression_trainer(
+                    f"training_runs_multi_output_weighted_{run_name}",
+                    save_model_dir=tmp_path / f"{run_name}_model",
+                    save_model_overwrite=True,
+                    initial_forecasts=initial_forecasts,
+                ),
+                "multi_output_weighted_ensemble",
+                weight,
+            )
+            for run_name, initial_forecasts, weight in member_specs
+        ],
+    )
+
+    results, _ = _fit_runs_and_capture_text(
+        runs,
+        capfd,
+        epochs=1,
+        test_data=_mae_quantile_regression_one_batch_data(),
+        reports={"multi_output_weighted_ensemble": reported_losses},
+    )
+
+    assert results.all_completed()
+    ensemble = results.ensemble("multi_output_weighted_ensemble")
+    assert ensemble.all_completed()
+    assert ensemble.total_weight == pytest.approx(3.0)
+
+    x, demand = _mae_quantile_regression_arrays(dtype=np.float32)
+    prediction_names = ("forecast", "forecast_p10", "forecast_p90")
+    member_outputs = []
+    for run_name, _, _ in member_specs:
+        result = results[run_name]
+        loaded = thor.Network(result.saved_model_network_name)
+        loaded.load(str(_training_artifact_selected_dir(tmp_path / f"{run_name}_model")))
+        placed = loaded.place(4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+        outputs = placed.infer({"examples": _cpu_tensor(x, thor.DataType.fp32)})
+        assert set(outputs) == set(prediction_names)
+        member_outputs.append({
+            name: np.array(outputs[name].numpy(), copy=True)
+            for name in prediction_names
+        })
+
+    for name in prediction_names:
+        assert not np.allclose(member_outputs[0][name], member_outputs[1][name], rtol=1e-5, atol=1e-5)
+
+    expected_outputs = {
+        name: (member_outputs[0][name] + 2.0 * member_outputs[1][name]) / 3.0
+        for name in prediction_names
+    }
+
+    # TrainingRuns evaluates the composed ensemble before save_ensemble() is called.
+    # Its public result surface exposes the numerical losses rather than the raw
+    # composed predictions, so compare those losses to the explicit NumPy ensemble.
+    point_error = demand - expected_outputs["forecast"]
+    low_error = demand - expected_outputs["forecast_p10"]
+    high_error = demand - expected_outputs["forecast_p90"]
+    expected_losses = {
+        "mae_loss": float(np.mean(np.abs(point_error))),
+        "quantile_low_loss": float(np.mean(np.maximum(0.1 * low_error, -0.9 * low_error))),
+        "quantile_high_loss": float(np.mean(np.maximum(0.9 * high_error, -0.1 * high_error))),
+    }
+    actual_losses = {metric.name: metric.test_value for metric in ensemble.named_metrics}
+    assert set(actual_losses) == set(expected_losses)
+    for name, expected in expected_losses.items():
+        assert actual_losses[name] == pytest.approx(expected, rel=1e-5, abs=1e-6)
+    assert ensemble.ensemble_test_loss == pytest.approx(
+        sum(expected_losses.values()), rel=1e-5, abs=1e-6)
+
+    ensemble_artifact_dir = tmp_path / "multi_output_weighted_ensemble_artifact"
+    assert results.save_ensemble(
+        "multi_output_weighted_ensemble", ensemble_artifact_dir
+    ) == str(ensemble_artifact_dir)
+    loaded_ensemble = thor.Network.load(
+        str(ensemble_artifact_dir), network_name="ensemble_multi_output_weighted_ensemble")
+    placed_ensemble = loaded_ensemble.place(
+        4, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    ensemble_outputs = placed_ensemble.infer({
+        "examples": _cpu_tensor(x, thor.DataType.fp32)
+    })
+    assert set(ensemble_outputs) == set(prediction_names)
+    for name in prediction_names:
+        actual = np.array(ensemble_outputs[name].numpy(), copy=True)
+        assert actual.shape == expected_outputs[name].shape
+        np.testing.assert_allclose(actual, expected_outputs[name], rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.cuda

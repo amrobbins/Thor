@@ -1,4 +1,6 @@
 #include "DeepLearning/Api/Layers/Utility/AdaptiveLayerNorm.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 #include "gtest/gtest.h"
@@ -24,6 +26,56 @@ TEST(UtilityApiLayers, AdaptiveLayerNormConstructsDefaultLastDimAndOutputPreserv
     ASSERT_TRUE(output.has_value());
     EXPECT_EQ(output.value().getDimensions(), input.getDimensions());
     EXPECT_EQ(output.value().getDataType(), input.getDataType());
+}
+
+
+TEST(UtilityApiLayers, AdaptiveLayerNormInferencePlacementAcceptsConnectionOwnedStreams) {
+    constexpr uint32_t batchSize = 2;
+
+    Network network("adaptive_layer_norm_connection_owned_streams");
+    NetworkInput data = NetworkInput::Builder()
+                            .network(network)
+                            .name("x")
+                            .dimensions({4, 32})
+                            .dataType(DataType::FP16)
+                            .build();
+    NetworkInput scale = NetworkInput::Builder()
+                             .network(network)
+                             .name("scale")
+                             .dimensions({32})
+                             .dataType(DataType::FP32)
+                             .build();
+    NetworkInput bias = NetworkInput::Builder()
+                            .network(network)
+                            .name("bias")
+                            .dimensions({32})
+                            .dataType(DataType::FP32)
+                            .build();
+
+    AdaptiveLayerNorm layer = AdaptiveLayerNorm::Builder()
+                                  .network(network)
+                                  .featureInput(data.getFeatureOutput().value())
+                                  .scaleInput(scale.getFeatureOutput().value())
+                                  .biasInput(bias.getFeatureOutput().value())
+                                  .build();
+    NetworkOutput::Builder()
+        .network(network)
+        .name("output")
+        .inputTensor(layer.getFeatureOutput().value())
+        .dataType(DataType::FP16)
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(
+                        batchSize,
+                        initDoneEvents,
+                        /*inferenceOnly=*/true,
+                        vector<int32_t>{0},
+                        /*forcedNumStampsPerGpu=*/1));
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents)
+        event.synchronize();
 }
 
 TEST(UtilityApiLayers, AdaptiveLayerNormAcceptsExplicitTrailingNormalizedShape) {

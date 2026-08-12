@@ -39,6 +39,15 @@ class Metric : public Layer {
    public:
     Metric() {}
 
+    std::vector<Stream> getProcessingStreams() override {
+        std::vector<Stream> processingStreams;
+        if (stream.isInitialized())
+            processingStreams.push_back(stream);
+        if (labelsStream.isInitialized())
+            processingStreams.push_back(labelsStream);
+        return processingStreams;
+    }
+
     std::vector<Event> getSynchronizeEvents() override {
         std::vector<Event> events;
         std::set<uint64_t> synchronizedStreamIds;
@@ -240,9 +249,14 @@ class Metric : public Layer {
 
         THOR_THROW_IF_FALSE(batchCardinalitySet);
         if (requiresLabelsInput()) {
-            // DataStream waits for labels to arrive,
+            // The metric stream must wait until this batch's labels/weights have
+            // arrived, and the labels stream must in turn wait until the metric has
+            // finished consuming them before it may overwrite the statically
+            // connected labels tensor for a later queued batch. Loss layers use the
+            // same two-way stream handshake.
             stream.waitEvent(labelsStream.putEvent());
             computeMetric(labelsInput.value(), featureInput.value(), featureOutput.value(), stream, currentValidExampleCount);
+            labelsStream.waitEvent(stream.putEvent());
             labelsReceived = false;
         } else {
             computeMetric(featureInput.value(), featureInput.value(), featureOutput.value(), stream, currentValidExampleCount);

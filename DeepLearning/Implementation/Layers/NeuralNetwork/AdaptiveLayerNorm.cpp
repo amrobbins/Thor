@@ -192,6 +192,15 @@ const Stream& AdaptiveLayerNorm::computeStream() const {
     return adaptiveStreams[DATA].value();
 }
 
+vector<Stream> AdaptiveLayerNorm::getProcessingStreams() {
+    vector<Stream> processingStreams;
+    for (const optional<Stream>& adaptiveStream : adaptiveStreams) {
+        if (adaptiveStream.has_value())
+            processingStreams.push_back(adaptiveStream.value());
+    }
+    return processingStreams;
+}
+
 vector<Event> AdaptiveLayerNorm::getSynchronizeEvents() {
     vector<Event> events;
     set<uint64_t> synchronizedStreamIds;

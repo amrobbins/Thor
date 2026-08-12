@@ -893,6 +893,8 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
             implementationLayer->initialize();
         }
 
+        stampedNetwork.initializeProcessingDataStreamJoin();
+
     } catch (const GpuOutOfMemoryError&) {
         // A failed stamp may already own tensors, CUDA handles, and auxiliary
         // allocations whose release lives in Layer::cleanup(), not solely in

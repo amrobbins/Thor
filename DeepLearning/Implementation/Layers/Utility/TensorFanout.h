@@ -292,19 +292,12 @@ class TensorFanout : public MultiConnectionLayer {
             // a copy into the original reducer output tensor.
         }
 
-        if (errorInput.has_value()) {
-            // Locked section
-            std::unique_lock<std::mutex> lck(mtx);
+        THOR_THROW_IF_FALSE(stillWaitingForErrorInputTensors.count(errorInput.value().getTensorId()) == 1);
+        stillWaitingForErrorInputTensors.erase(errorInput.value().getTensorId());
+        if (!stillWaitingForErrorInputTensors.empty())
+            return;
 
-            if (errorInput.has_value()) {
-                THOR_THROW_IF_FALSE(stillWaitingForErrorInputTensors.count(errorInput.value().getTensorId()) == 1);
-                stillWaitingForErrorInputTensors.erase(errorInput.value().getTensorId());
-            }
-            if (!stillWaitingForErrorInputTensors.empty())
-                return;
-
-            stillWaitingForErrorInputTensors = allErrorInputTensorIds;
-        }
+        stillWaitingForErrorInputTensors = allErrorInputTensorIds;
 
         for (unsigned int i = 1; i < errorInputs.size(); ++i)
             streams[0].waitEvent(streams[i].putEvent());

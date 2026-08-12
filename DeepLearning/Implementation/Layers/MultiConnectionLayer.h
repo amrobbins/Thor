@@ -280,6 +280,7 @@ class MultiConnectionLayer : public Layer {
     virtual std::vector<std::optional<Tensor>> getErrorOutputs() { return errorOutputs; }
     virtual std::vector<std::optional<Layer *>> getNextLayers() { return nextLayers; }
     virtual std::vector<Stream> getStreams() { return streams; }
+    std::vector<Stream> getProcessingStreams() override { return streams; }
 
     std::vector<Event> getSynchronizeEvents() override {
         std::vector<Event> events;

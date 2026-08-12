@@ -77,6 +77,12 @@ inline void accumulateBatchSubmissionTiming(BatchSubmissionTiming& dst, const Ba
     dst.activeObjectiveRootCount += src.activeObjectiveRootCount;
 }
 
+/**
+ * One physical network stamp. Host submission into a stamp is serialized: callers
+ * must not submit two batches to the same StampedNetwork concurrently from different
+ * host threads. A submission may enqueue asynchronous work on many CUDA streams; the
+ * single-host-thread contract does not imply single-stream GPU execution.
+ */
 class StampedNetwork {
    private:
     struct LayerComparatorShared {
@@ -287,8 +293,20 @@ class StampedNetwork {
     uint64_t floatingPointOperationsPerExampleBackward;
 
    private:
+    void initializeProcessingDataStreamJoin();
+    void joinProcessingDataStreams(const Stream& processingStream);
     void clearImpl(bool propagateCleanupFailure);
     void clearNoThrow() noexcept;
+
+    // A placed stamp owns one statically connected activation tensor per graph
+    // edge. Native queued execution may stage several batches concurrently, but
+    // a later batch must not reuse those tensors until every stream reported by
+    // Layer::getProcessingStreams() has finished consuming the current batch.
+    // These cached streams/events form
+    // the per-batch GPU processing barrier without pulling auxiliary D2H/output
+    // streams into the critical path.
+    std::vector<Stream> processingDataStreams;
+    std::vector<Event> processingDataStreamEvents;
 
     friend class Thor::Network;
     friend class Thor::PlacedNetwork;

@@ -226,13 +226,8 @@ class Split : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(streams.size() == errorInputs.size());
 
         if (errorInputs.size() > 1) {
-            // Locked section
-            std::unique_lock<std::mutex> lck(mtx);
-
-            if (errorInput.has_value()) {
-                THOR_THROW_IF_FALSE(stillWaitingForErrorInputTensors.count(errorInput.value().getTensorId()) == 1);
-                stillWaitingForErrorInputTensors.erase(errorInput.value().getTensorId());
-            }
+            THOR_THROW_IF_FALSE(stillWaitingForErrorInputTensors.count(errorInput.value().getTensorId()) == 1);
+            stillWaitingForErrorInputTensors.erase(errorInput.value().getTensorId());
             if (!stillWaitingForErrorInputTensors.empty())
                 return;
 

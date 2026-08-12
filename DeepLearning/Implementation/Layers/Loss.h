@@ -126,6 +126,15 @@ class Loss : public Layer {
 
     ~Loss() override {}
 
+    std::vector<Stream> getProcessingStreams() override {
+        std::vector<Stream> processingStreams;
+        if (stream.isInitialized())
+            processingStreams.push_back(stream);
+        if (labelsStream.isInitialized())
+            processingStreams.push_back(labelsStream);
+        return processingStreams;
+    }
+
     std::vector<Event> getSynchronizeEvents() override {
         std::vector<Event> events;
         std::set<uint64_t> synchronizedStreamIds;

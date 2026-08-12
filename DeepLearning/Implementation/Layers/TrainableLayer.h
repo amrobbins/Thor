@@ -335,6 +335,17 @@ class TrainableLayer : public MultiConnectionLayer, public Parameterizable {
         attachGradientUpdateStream();
     }
 
+    std::vector<Stream> getProcessingStreams() override {
+        // Parameter-gradient accumulation/update work may continue after the
+        // ordinary data streams advance, and it can still read feature/error
+        // tensors from the current batch. It therefore participates in the
+        // stamp's processingFinished reuse barrier.
+        std::vector<Stream> processingStreams = MultiConnectionLayer::getProcessingStreams();
+        if (gradientUpdateStream.has_value())
+            processingStreams.push_back(gradientUpdateStream.value());
+        return processingStreams;
+    }
+
     std::vector<Event> getSynchronizeEvents() override {
         std::vector<Event> events;
         std::set<uint64_t> synchronizedStreamIds;

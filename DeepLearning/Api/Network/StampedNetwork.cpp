@@ -47,6 +47,54 @@ constexpr uint64_t elapsedMicros(BatchTimingTimePoint, BatchTimingTimePoint) {
 
 }  // namespace
 
+
+void StampedNetwork::initializeProcessingDataStreamJoin() {
+    THOR_THROW_IF_FALSE(!inputs.empty());
+
+    processingDataStreams.clear();
+    processingDataStreamEvents.clear();
+
+    const Stream processingStream = inputs[0]->getStream();
+    std::set<uint64_t> streamIds;
+    streamIds.insert(processingStream.getId());
+
+    auto appendStream = [&](const Stream& stream) {
+        // getProcessingStreams() may omit unused handles entirely, but tolerate
+        // an uninitialized handle defensively. Distinct layers commonly share
+        // fanout/data/gradient-pool streams, so deduplicate by CUDA stream id.
+        if (!stream.isInitialized())
+            return;
+        THOR_THROW_IF_FALSE(stream.getGpuNum() == processingStream.getGpuNum());
+        if (!streamIds.insert(stream.getId()).second)
+            return;
+        processingDataStreams.push_back(stream);
+        processingDataStreamEvents.emplace_back(stream.getGpuNum(), false, false);
+    };
+
+    auto appendLayerStreams = [&](Layer* layer) {
+        THOR_THROW_IF_FALSE(layer != nullptr);
+        for (const Stream& stream : layer->getProcessingStreams())
+            appendStream(stream);
+    };
+
+    for (NetworkInput* input : inputs)
+        appendLayerStreams(input);
+    for (NetworkOutput* output : outputs)
+        appendLayerStreams(output);
+    for (TrainableLayer* trainableLayer : trainableLayers)
+        appendLayerStreams(trainableLayer);
+    for (Layer* layer : otherLayers)
+        appendLayerStreams(layer);
+}
+
+void StampedNetwork::joinProcessingDataStreams(const Stream& processingStream) {
+    THOR_THROW_IF_FALSE(processingDataStreams.size() == processingDataStreamEvents.size());
+    for (size_t i = 0; i < processingDataStreams.size(); ++i) {
+        processingDataStreams[i].putEvent(processingDataStreamEvents[i], false, false);
+        processingStream.waitEvent(processingDataStreamEvents[i]);
+    }
+}
+
 void StampedNetwork::setActiveTrainingLossRoots(const std::vector<Thor::Tensor>& activeRawLossRoots) {
     for (const Thor::Tensor& rawLossRoot : activeRawLossRoots) {
         THOR_THROW_IF_FALSE(rawLossRoot.isInitialized());
@@ -551,14 +599,19 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
     }
     const auto outputWaitFinish = timingNow(submitTiming);
 
-    // Processing is finished when the stream from input 0 is ready.  The native queued
-    // trainer deliberately does not fold CPU output/stat readiness back into this stream;
-    // it waits for outputReadyEvents on a side stream so the single stamp can queue
-    // future input work while host stat extraction catches up.
-    // The native queued trainer passes a per-in-flight reusable event here so the
-    // hot training path does not allocate/destroy a CUDA event for every batch.
+    // A stamp uses statically connected activation tensors. Before advertising that
+    // the batch's GPU processing is complete, join every stream declared by the
+    // layers' getProcessingStreams() contract back onto input 0's stream. This
+    // includes secondary fanout consumers and trainable gradient/update streams,
+    // both of which may still read current-batch graph tensors after the primary
+    // data stream has advanced. This is especially important for fanout branches whose
+    // consumer cannot enqueue work until another NetworkInput arrives (for example a
+    // weighted metric waiting for its weights): the fanout's producer stream alone
+    // does not cover that deferred branch. Auxiliary output/download streams remain
+    // outside this barrier and are waited independently through outputReadyEvents.
     Event processingFinishedEvent;
     const auto processingEventStart = timingNow(submitTiming);
+    joinProcessingDataStreams(inputs[0]->getStream());
     if (reusableProcessingFinishedEvent != nullptr) {
         inputs[0]->getStream().putEvent(*reusableProcessingFinishedEvent, true, true);
         processingFinishedEvent = *reusableProcessingFinishedEvent;
@@ -589,6 +642,9 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
 }
 
 void StampedNetwork::clearImpl(bool propagateCleanupFailure) {
+    processingDataStreamEvents.clear();
+    processingDataStreams.clear();
+
     std::exception_ptr firstCleanupFailure;
     auto cleanupLayers = [&](auto& layers) {
         for (auto* layer : layers) {

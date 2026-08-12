@@ -343,6 +343,13 @@ void SparseCategoricalCrossEntropyWithLogits::launchForCurrentTypes() {
 
 string SparseCategoricalCrossEntropyWithLogits::getType() { return "SparseCategoricalCrossEntropyWithLogits"; }
 
+vector<Stream> SparseCategoricalCrossEntropyWithLogits::getProcessingStreams() {
+    vector<Stream> processingStreams = Loss::getProcessingStreams();
+    if (maskStream.isInitialized())
+        processingStreams.push_back(maskStream);
+    return processingStreams;
+}
+
 vector<Event> SparseCategoricalCrossEntropyWithLogits::getSynchronizeEvents() {
     vector<Event> events;
     set<uint64_t> synchronizedStreamIds;

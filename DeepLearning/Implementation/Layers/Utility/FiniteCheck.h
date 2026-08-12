@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/FiniteCheckKernel.h"
 
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -53,6 +54,10 @@ class FiniteCheck : public Layer {
     bool failOnNonFinite;
     uint32_t maxReportedIndices;
     FiniteCheckResult *gpuResult = nullptr;
+
+    // Normal execution serializes host submission per stamp. Keep the diagnostic
+    // workspace/result one-at-a-time defensively without imposing a mutex on every Layer.
+    std::mutex checkMutex;
 };
 
 }  // namespace ThorImplementation

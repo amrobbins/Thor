@@ -403,6 +403,15 @@ void CtcLoss::ensureNoDeviceCrossing() {
 
 string CtcLoss::getType() { return "CtcLoss"; }
 
+vector<Stream> CtcLoss::getProcessingStreams() {
+    vector<Stream> processingStreams = Loss::getProcessingStreams();
+    if (labelOffsetsStream.isInitialized())
+        processingStreams.push_back(labelOffsetsStream);
+    if (inputLengthsStream.isInitialized())
+        processingStreams.push_back(inputLengthsStream);
+    return processingStreams;
+}
+
 vector<Event> CtcLoss::getSynchronizeEvents() {
     vector<Event> events;
     set<uint64_t> synchronizedStreamIds;

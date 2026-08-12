@@ -200,9 +200,9 @@ void FiniteCheck::checkTensor(const Tensor &tensor, const char *direction, const
     if (TensorDescriptor::isIntegralType(tensor.getDataType()) || tensor.getTotalNumElements() == 0)
         return;
 
-    // A placed network may be submitted from more than one host thread. The
-    // diagnostic workspace and host result are intentionally one-at-a-time.
-    std::unique_lock<std::mutex> checkLock(mtx);
+    // Per-stamp host submission is serialized by contract. FiniteCheck is a
+    // debugging barrier, so defensively serialize its private diagnostic workspace too.
+    std::lock_guard<std::mutex> checkLock(checkMutex);
     if (!tensor.isDenseContiguous()) {
         throw std::runtime_error("FiniteCheck requires a dense contiguous tensor. label=\"" +
                                  (tensorLabel.empty() ? std::string("<unnamed>") : tensorLabel) + "\" direction=" + direction +

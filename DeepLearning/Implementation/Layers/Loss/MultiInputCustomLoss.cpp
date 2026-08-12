@@ -90,6 +90,8 @@ const Stream& MultiInputCustomLoss::computeStream() const {
 
 Stream MultiInputCustomLoss::getStream() { return computeStream(); }
 
+vector<Stream> MultiInputCustomLoss::getProcessingStreams() { return inputStreams; }
+
 vector<Event> MultiInputCustomLoss::getSynchronizeEvents() {
     vector<Event> events;
     set<uint64_t> synchronizedStreamIds;

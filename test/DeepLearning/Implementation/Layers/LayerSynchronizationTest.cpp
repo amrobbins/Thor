@@ -5,6 +5,9 @@
 #include "test/DeepLearning/Implementation/Layers/LayerSynchronizationTestKernels.h"
 
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
+#include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
+#include "DeepLearning/Api/Layers/Metrics/Mean.h"
+#include "DeepLearning/Api/Layers/Metrics/WeightedMean.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -13,12 +16,12 @@
 
 #include <chrono>
 #include <condition_variable>
-#include <future>
 #include <filesystem>
+#include <future>
 #include <map>
 #include <memory>
-#include <optional>
 #include <mutex>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -120,56 +123,47 @@ struct PlacedGradientStreamTarget {
     vector<Stream> gradientUpdateStreams;
 };
 
-PlacedGradientStreamTarget makePlacedGradientStreamTarget(const string& networkName, uint32_t numTrainableLayers) {
+PlacedGradientStreamTarget makePlacedGradientStreamTarget(const string &networkName, uint32_t numTrainableLayers) {
     THOR_THROW_IF_FALSE(numTrainableLayers >= 1);
 
     Thor::Network network(networkName);
-    Thor::NetworkInput input = Thor::NetworkInput::Builder()
-                                   .network(network)
-                                   .name("input")
-                                   .dimensions({4})
-                                   .dataType(DataType::FP32)
-                                   .build();
+    Thor::NetworkInput input =
+        Thor::NetworkInput::Builder().network(network).name("input").dimensions({4}).dataType(DataType::FP32).build();
 
     Thor::Tensor latest = input.getFeatureOutput().value();
     vector<uint64_t> fullyConnectedLayerIds;
     fullyConnectedLayerIds.reserve(numTrainableLayers);
     for (uint32_t i = 0; i < numTrainableLayers; ++i) {
         Thor::FullyConnected fullyConnected = Thor::FullyConnected::Builder()
-                                                   .network(network)
-                                                   .featureInput(latest)
-                                                   .numOutputFeatures(4)
-                                                   .hasBias(false)
-                                                   .computeDataType(DataType::FP32)
-                                                   .outputDataType(DataType::FP32)
-                                                   .noActivation()
-                                                   .build();
+                                                  .network(network)
+                                                  .featureInput(latest)
+                                                  .numOutputFeatures(4)
+                                                  .hasBias(false)
+                                                  .computeDataType(DataType::FP32)
+                                                  .outputDataType(DataType::FP32)
+                                                  .noActivation()
+                                                  .build();
         latest = fullyConnected.getFeatureOutput().value();
         fullyConnectedLayerIds.push_back(fullyConnected.getId());
     }
 
-    Thor::NetworkOutput::Builder()
-        .network(network)
-        .name("output")
-        .inputTensor(latest)
-        .dataType(DataType::FP32)
-        .build();
+    Thor::NetworkOutput::Builder().network(network).name("output").inputTensor(latest).dataType(DataType::FP32).build();
     Thor::Sgd::Builder().network(network).initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
 
     vector<Event> initDoneEvents;
     shared_ptr<Thor::PlacedNetwork> placedNetwork = network.place(2,
-                                                                   initDoneEvents,
-                                                                   /*inferenceOnly=*/false,
-                                                                   vector<int32_t>{0},
-                                                                   /*forcedNumStampsPerGpu=*/1);
-    for (Event& event : initDoneEvents)
+                                                                  initDoneEvents,
+                                                                  /*inferenceOnly=*/false,
+                                                                  vector<int32_t>{0},
+                                                                  /*forcedNumStampsPerGpu=*/1);
+    for (Event &event : initDoneEvents)
         event.synchronize();
 
     vector<Stream> gradientUpdateStreams;
     gradientUpdateStreams.reserve(fullyConnectedLayerIds.size());
     for (uint64_t fullyConnectedLayerId : fullyConnectedLayerIds) {
-        shared_ptr<TrainableLayer> physicalLayer = dynamic_pointer_cast<TrainableLayer>(
-            placedNetwork->getStampedNetwork(0).getPhysicalLayerFromApiLayer(fullyConnectedLayerId));
+        shared_ptr<TrainableLayer> physicalLayer =
+            dynamic_pointer_cast<TrainableLayer>(placedNetwork->getStampedNetwork(0).getPhysicalLayerFromApiLayer(fullyConnectedLayerId));
         THOR_THROW_IF_FALSE(physicalLayer != nullptr);
         THOR_THROW_IF_FALSE(physicalLayer->getGradientUpdateStream().has_value());
         gradientUpdateStreams.push_back(physicalLayer->getGradientUpdateStream().value());
@@ -180,21 +174,17 @@ PlacedGradientStreamTarget makePlacedGradientStreamTarget(const string& networkN
 
 PlacedSynchronizationTarget makePlacedSynchronizationTarget(const string &networkName) {
     Thor::Network network(networkName);
-    Thor::NetworkInput input = Thor::NetworkInput::Builder()
-                                   .network(network)
-                                   .name("input")
-                                   .dimensions({4})
-                                   .dataType(DataType::FP32)
-                                   .build();
+    Thor::NetworkInput input =
+        Thor::NetworkInput::Builder().network(network).name("input").dimensions({4}).dataType(DataType::FP32).build();
     Thor::FullyConnected fullyConnected = Thor::FullyConnected::Builder()
-                                               .network(network)
-                                               .featureInput(input.getFeatureOutput().value())
-                                               .numOutputFeatures(3)
-                                               .hasBias(false)
-                                               .computeDataType(DataType::FP32)
-                                               .outputDataType(DataType::FP32)
-                                               .noActivation()
-                                               .build();
+                                              .network(network)
+                                              .featureInput(input.getFeatureOutput().value())
+                                              .numOutputFeatures(3)
+                                              .hasBias(false)
+                                              .computeDataType(DataType::FP32)
+                                              .outputDataType(DataType::FP32)
+                                              .noActivation()
+                                              .build();
     Thor::NetworkOutput::Builder()
         .network(network)
         .name("output")
@@ -205,15 +195,15 @@ PlacedSynchronizationTarget makePlacedSynchronizationTarget(const string &networ
 
     vector<Event> initDoneEvents;
     shared_ptr<Thor::PlacedNetwork> placedNetwork = network.place(2,
-                                                                   initDoneEvents,
-                                                                   /*inferenceOnly=*/false,
-                                                                   vector<int32_t>{0},
-                                                                   /*forcedNumStampsPerGpu=*/1);
+                                                                  initDoneEvents,
+                                                                  /*inferenceOnly=*/false,
+                                                                  vector<int32_t>{0},
+                                                                  /*forcedNumStampsPerGpu=*/1);
     for (Event &event : initDoneEvents)
         event.synchronize();
 
-    shared_ptr<TrainableLayer> physicalFullyConnected = dynamic_pointer_cast<TrainableLayer>(
-        placedNetwork->getStampedNetwork(0).getPhysicalLayerFromApiLayer(fullyConnected.getId()));
+    shared_ptr<TrainableLayer> physicalFullyConnected =
+        dynamic_pointer_cast<TrainableLayer>(placedNetwork->getStampedNetwork(0).getPhysicalLayerFromApiLayer(fullyConnected.getId()));
     THOR_THROW_IF_FALSE(physicalFullyConnected != nullptr);
     THOR_THROW_IF_FALSE(physicalFullyConnected->getGradientUpdateStream().has_value());
     return {placedNetwork, physicalFullyConnected->getGradientUpdateStream().value()};
@@ -292,6 +282,19 @@ TEST(LayerSynchronization, TrainableLayerAlsoCoversGradientUpdateStream) {
     layer.setDataStreams({dataStream0, dataStream1});
     layer.setGradientStream(gradientUpdateStream);
 
+    // This is the TrainableLayer half of the processingFinished contract:
+    // StampedNetwork joins every stream returned by getProcessingStreams(), and
+    // ProcessingFinishedEventJoinsDeferredSecondaryMetricStream below exercises
+    // that join with a deliberately blocked secondary stream. Keep the gradient
+    // stream in this list so trainable parameter-gradient/update work is covered
+    // by the same batch-reuse barrier without having to gate a real optimizer
+    // stream during host submission.
+    vector<Stream> processingStreams = layer.getProcessingStreams();
+    ASSERT_EQ(processingStreams.size(), 3u);
+    EXPECT_EQ(processingStreams[0].getId(), dataStream0.getId());
+    EXPECT_EQ(processingStreams[1].getId(), dataStream1.getId());
+    EXPECT_EQ(processingStreams[2].getId(), gradientUpdateStream.getId());
+
     expectSynchronizationEventsCoverStreams(layer, {dataStream0, dataStream1, gradientUpdateStream}, 3);
 }
 
@@ -305,7 +308,7 @@ TEST(LayerSynchronization, PlacedModelsOwnIndependentThreeStreamGradientUpdatePo
     ASSERT_EQ(firstModel.gradientUpdateStreams.size(), 5u);
     ASSERT_EQ(secondModel.gradientUpdateStreams.size(), 5u);
 
-    for (const vector<Stream>* modelStreams : {&firstModel.gradientUpdateStreams, &secondModel.gradientUpdateStreams}) {
+    for (const vector<Stream> *modelStreams : {&firstModel.gradientUpdateStreams, &secondModel.gradientUpdateStreams}) {
         EXPECT_NE((*modelStreams)[0].getId(), (*modelStreams)[1].getId());
         EXPECT_NE((*modelStreams)[0].getId(), (*modelStreams)[2].getId());
         EXPECT_NE((*modelStreams)[1].getId(), (*modelStreams)[2].getId());
@@ -315,8 +318,7 @@ TEST(LayerSynchronization, PlacedModelsOwnIndependentThreeStreamGradientUpdatePo
 
     for (uint32_t firstIndex = 0; firstIndex < GradientUpdateStreamPool::MAX_STREAMS; ++firstIndex) {
         for (uint32_t secondIndex = 0; secondIndex < GradientUpdateStreamPool::MAX_STREAMS; ++secondIndex) {
-            EXPECT_NE(firstModel.gradientUpdateStreams[firstIndex].getId(),
-                      secondModel.gradientUpdateStreams[secondIndex].getId());
+            EXPECT_NE(firstModel.gradientUpdateStreams[firstIndex].getId(), secondModel.gradientUpdateStreams[secondIndex].getId());
         }
     }
 }
@@ -349,6 +351,11 @@ TEST(LayerSynchronization, NetworkInputIncludesItsUploadStream) {
 
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     NetworkInput input(gpuPlacement, DataType::FP32, vector<unsigned long>{4});
+
+    vector<Stream> processingStreams = input.getProcessingStreams();
+    ASSERT_EQ(processingStreams.size(), 1u)
+        << "NetworkInput upload staging is slot-local and must stay outside the graph-processing barrier";
+    EXPECT_EQ(processingStreams.front().getId(), input.getStream().getId());
 
     vector<Event> synchronizeEvents = input.getSynchronizeEvents();
     EXPECT_EQ(synchronizeEvents.size(), 2u);
@@ -390,12 +397,114 @@ TEST(LayerSynchronization, PlacedNetworkSynchronizeWaitsForModelStreamsWithoutDr
     }
     EXPECT_NO_THROW(synchronizeFuture.get());
 
-    EXPECT_FALSE(unrelatedGate.isComplete())
-        << "the unrelated GPU-side gate must still be pending after placed-network synchronization";
+    EXPECT_FALSE(unrelatedGate.isComplete()) << "the unrelated GPU-side gate must still be pending after placed-network synchronization";
     unrelatedGate.release();
     unrelatedStream.synchronize();
 }
 
+TEST(LayerSynchronization, ProcessingFinishedEventJoinsDeferredSecondaryMetricStream) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "Processing-finished stream-join regression requires a GPU";
+    }
+
+    constexpr uint32_t batchSize = 2;
+    Thor::Network network("LayerSynchronizationProcessingJoinNetwork");
+    Thor::NetworkInput values =
+        Thor::NetworkInput::Builder().network(network).name("values").dimensions({1}).dataType(DataType::FP32).build();
+    Thor::NetworkInput weights =
+        Thor::NetworkInput::Builder().network(network).name("weights").dimensions({1}).dataType(DataType::FP32).build();
+
+    // Mean is deliberately connected first so the shared values tensor receives
+    // a TensorFanout and WeightedMean runs on a secondary fanout stream. The
+    // weighted metric cannot enqueue its read of values until the independent
+    // weights NetworkInput arrives later in StampedNetwork::sendPhysicalBatch().
+    Thor::Mean mean = Thor::Mean::Builder().network(network).values(values.getFeatureOutput().value()).build();
+    Thor::NetworkOutput::Builder().network(network).name("mean").inputTensor(mean.getMetric()).dataType(DataType::FP32).build();
+
+    Thor::WeightedMean weightedMean = Thor::WeightedMean::Builder()
+                                          .network(network)
+                                          .values(values.getFeatureOutput().value())
+                                          .weights(weights.getFeatureOutput().value())
+                                          .build();
+    Thor::NetworkOutput::Builder()
+        .network(network)
+        .name("weighted_mean")
+        .inputTensor(weightedMean.getMetric())
+        .dataType(DataType::FP32)
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Thor::PlacedNetwork> placedNetwork = network.place(batchSize,
+                                                                  initDoneEvents,
+                                                                  /*inferenceOnly=*/true,
+                                                                  vector<int32_t>{0},
+                                                                  /*forcedNumStampsPerGpu=*/1);
+    ASSERT_NE(placedNetwork, nullptr);
+    for (Event &event : initDoneEvents)
+        event.synchronize();
+
+    placedNetwork->preallocateInputSlots(1);
+    placedNetwork->preallocateOutputSlots(1);
+    placedNetwork->synchronize();
+
+    ThorImplementation::StampedNetwork &stamp = placedNetwork->getStampedNetwork(0);
+    shared_ptr<ThorImplementation::Metric> physicalWeightedMean =
+        dynamic_pointer_cast<ThorImplementation::Metric>(stamp.getPhysicalLayerFromApiLayer(weightedMean.getId()));
+    shared_ptr<ThorImplementation::NetworkInput> physicalValues = stamp.getNamedInput("values");
+    ASSERT_NE(physicalWeightedMean, nullptr);
+    ASSERT_NE(physicalValues, nullptr);
+    ASSERT_NE(physicalWeightedMean->getStream().getId(), physicalValues->getStream().getId())
+        << "WeightedMean must be on the secondary TensorFanout stream for this regression.";
+
+    ThorImplementation::Test::DeviceStreamGate weightedMetricGate(0);
+    weightedMetricGate.enqueue(physicalWeightedMean->getStream());
+
+    const TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor valuesCpu(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, 1}));
+    Tensor weightsCpu(cpuPlacement, TensorDescriptor(DataType::FP32, {batchSize, 1}));
+    valuesCpu.getMemPtr<float>()[0] = 2.0f;
+    valuesCpu.getMemPtr<float>()[1] = 4.0f;
+    weightsCpu.getMemPtr<float>()[0] = 1.0f;
+    weightsCpu.getMemPtr<float>()[1] = 2.0f;
+
+    Batch batch;
+    batch.insert("values", valuesCpu);
+    batch.insert("weights", weightsCpu);
+
+    map<string, Tensor> outputs;
+    map<string, Event> outputReadyEvents;
+    Event processingFinished = placedNetwork->submitBatch(0,
+                                                          batch,
+                                                          outputs,
+                                                          outputReadyEvents,
+                                                          /*isInferenceOnly=*/true,
+                                                          /*reusableProcessingFinishedEvent=*/nullptr,
+                                                          /*waitForOutputsOnProcessingStream=*/false,
+                                                          /*submitTiming=*/nullptr,
+                                                          /*outputSlotIndex=*/0);
+
+    auto processingWait = async(launch::async, [processingFinished]() mutable { processingFinished.synchronize(); });
+
+    // The processing-finished boundary must include every secondary stream
+    // declared by Layer::getProcessingStreams(). WeightedMean gives us a safe,
+    // deterministic secondary-stream gate for that generic StampedNetwork
+    // contract. TrainableLayerAlsoCoversGradientUpdateStream separately verifies
+    // that a trainable layer declares its gradient/update stream, so the two tests
+    // compose to cover gradient-stream participation without blocking a real
+    // optimizer stream before host submission. Before the processing-stream fix,
+    // this event was recorded on input 0 immediately, allowing the next queued
+    // batch to overwrite statically connected values while a secondary consumer
+    // was still waiting behind this gate.
+    EXPECT_EQ(processingWait.wait_for(chrono::milliseconds(100)), future_status::timeout);
+
+    weightedMetricGate.release();
+    ASSERT_EQ(processingWait.wait_for(chrono::seconds(5)), future_status::ready);
+    processingWait.get();
+    outputReadyEvents.at("weighted_mean").synchronize();
+
+    ASSERT_EQ(outputs.at("weighted_mean").getPlacement().getMemDevice(), TensorPlacement::MemDevices::CPU);
+    EXPECT_NEAR(*outputs.at("weighted_mean").getMemPtr<float>(), 10.0f / 3.0f, 1e-6f);
+}
 
 TEST(LayerSynchronization, PlacedNetworkSaveWaitsForModelStreams) {
     if (MachineEvaluator::instance().getNumGpus() == 0)
@@ -407,13 +516,11 @@ TEST(LayerSynchronization, PlacedNetworkSaveWaitsForModelStreams) {
     target.modelStream.enqueueHostFunction(&waitForHostGate, make_unique<WaitForHostGateArgs>(modelGate));
 
     const auto uniqueSuffix = chrono::steady_clock::now().time_since_epoch().count();
-    const filesystem::path archiveDirectory =
-        filesystem::temp_directory_path() / ("thor_layer_sync_save_" + to_string(uniqueSuffix));
+    const filesystem::path archiveDirectory = filesystem::temp_directory_path() / ("thor_layer_sync_save_" + to_string(uniqueSuffix));
     filesystem::remove_all(archiveDirectory);
 
-    auto saveFuture = async(launch::async, [&] {
-        target.placedNetwork->save(archiveDirectory.string(), /*overwrite=*/true, /*saveOptimizerState=*/true);
-    });
+    auto saveFuture = async(
+        launch::async, [&] { target.placedNetwork->save(archiveDirectory.string(), /*overwrite=*/true, /*saveOptimizerState=*/true); });
     vector<shared_ptr<HostGate>> gates{modelGate};
     ReleaseAllGates releaseAll(gates);
 
