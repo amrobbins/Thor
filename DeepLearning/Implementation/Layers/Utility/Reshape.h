@@ -31,6 +31,42 @@ class Reshape : public Layer {
         fuseBackwardAliasThroughMetadataOnlyReshape();
     }
 
+    void replaceErrorInput(std::optional<Tensor> oldErrorInput, std::optional<Tensor> newErrorInput) override {
+        THOR_THROW_IF_FALSE(oldErrorInput.has_value());
+        if (errorInput.has_value()) {
+            THOR_THROW_IF_FALSE(oldErrorInput.value() == errorInput.value());
+        }
+
+        // Metadata-only reshape/flatten layers must preserve the original input
+        // descriptor on the gradient passed upstream. TensorFanout may replace
+        // this layer's downstream error tensor during compile after the initial
+        // backward alias has already been fused. Re-applying the generic Layer
+        // replacement would forward the downstream (reshaped) descriptor upstream
+        // and make expression-backed activations stamp backward with the wrong
+        // physical rank.
+        if (!newErrorInput.has_value()) {
+            if (errorOutput.has_value() && previousLayer.has_value()) {
+                previousLayer.value()->replaceErrorInput(errorOutput, std::nullopt);
+            }
+            errorInput.reset();
+            errorOutput.reset();
+            return;
+        }
+
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        THOR_THROW_IF_FALSE(newErrorInput.value().getDescriptor() == featureOutput.value().getDescriptor());
+
+        Tensor reshapedErrorOutput = newErrorInput.value();
+        reshapedErrorOutput.reshape(featureInput.value().getDimensions());
+
+        if (errorOutput.has_value() && previousLayer.has_value()) {
+            previousLayer.value()->replaceErrorInput(errorOutput, reshapedErrorOutput);
+        }
+        errorInput = newErrorInput;
+        errorOutput = reshapedErrorOutput;
+    }
+
     void postCompile() override {
         // Backward alias fusion must happen during connection, before upstream
         // CustomLayer compileImpl() snapshots its expected incoming error tensor

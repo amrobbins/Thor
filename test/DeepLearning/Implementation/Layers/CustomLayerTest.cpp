@@ -454,6 +454,59 @@ DynamicExpression buildTailSliceExpression(const TensorPlacement& placement) {
         });
 }
 
+DynamicExpression buildPreForwardOnlyInputExpression(const TensorPlacement& placement) {
+    return DynamicExpression(
+        {"x", "control"},
+        {"y"},
+        [placement](const DynamicExpression::TensorMap& inputs,
+                    const DynamicExpression::TensorMap& outputs,
+                    Stream& stream) -> DynamicExpressionBuild {
+            (void)stream;
+            auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+            auto expressionOutputs = Expression::outputs({{"y", x + 1.0f}});
+            DynamicExpressionBuild build{
+                .equation = std::make_shared<FusedEquation>(
+                    FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+                .stamp_inputs = {{"x", inputs.at("x")}},
+                .tensor_scalar_inputs = {},
+                .preallocated_outputs = outputs,
+                .requested_output_shapes = {},
+                .pre_forward_hook = [control = inputs.at("control")](Stream& runStream) {
+                    // The hook dependency is intentionally not an equation root. Merely
+                    // retaining it here models operations such as ragged Attention RoPE,
+                    // where the hook consumes one public input to populate a separate
+                    // internal equation input before execution.
+                    (void)control;
+                    (void)runStream;
+                },
+            };
+            build.pre_forward_only_inputs.emplace("control", inputs.at("control"));
+            return build;
+        });
+}
+
+DynamicExpression buildBf16BroadcastContextExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        // Deliberately leave feature-input dtype annotations unspecified.  Python
+        // CustomLayerBuildContext.input() has this same contract, and CustomLayer
+        // must specialize the forward graph from the concrete runtime tensors before
+        // asking AutoDiff to choose gradient materialization dtypes.
+        auto futureTokens = Expression::input("future_tokens");
+        auto seriesContext = Expression::input("series_context");
+        auto broadcastContext = seriesContext.unsqueeze({1});
+        auto expressionOutputs = Expression::outputs({{"feature_output", futureTokens + broadcastContext}});
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+    });
+}
+
 DynamicExpression buildTwoInputTwoOutputExpression(const TensorPlacement& placement) {
     return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
                                          const DynamicExpression::TensorMap& outputs,
@@ -1874,6 +1927,37 @@ TEST(CustomLayer, MultipleApplicationsDoNotUseSingleApplicationOptimizerFusion) 
     cleanupLayers({&inputA, &inputB, &gradientRivetA, &gradientRivetB, &bridgeA, &bridgeB, &custom, &sinkA, &sinkB});
 }
 
+TEST(CustomLayer, PreForwardOnlyDeclaredInputIsNotForwardedToFusedEquation) {
+    const uint64_t batchSize = 2;
+    const uint64_t features = 3;
+
+    TensorDescriptor descriptor(DataType::FP32, {batchSize, features});
+    Tensor x_h(cpuPlacement, descriptor);
+    Tensor control_h(cpuPlacement, descriptor);
+    writeCpuTensor(x_h, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    writeCpuTensor(control_h, {10.0f, 20.0f, 30.0f, 40.0f, 50.0f, 60.0f});
+
+    NetworkInput xIn(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    NetworkInput controlIn(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    CustomLayer custom(buildPreForwardOnlyInputExpression(gpuPlacement), {"x", "control"}, {"y"}, gpuPlacement, {}, true);
+    CountingPassthrough sink;
+
+    xIn.connectToNextLayer(&custom, 0, 0);
+    controlIn.connectToNextLayer(&custom, 0, 1);
+    custom.connectToNextLayer(&sink);
+    compileAndInitialize({&xIn, &controlIn, &custom, &sink});
+
+    xIn.forward(x_h, false, batchSize);
+    EXPECT_EQ(sink.forwardCalls, 0);
+    controlIn.forward(control_h, false, batchSize);
+    ASSERT_EQ(sink.forwardCalls, 1);
+
+    Tensor result_h = copyTensorToCpu(sink.getFeatureInput().value(), custom.getStreams()[0]);
+    expectAllClose(readCpuTensor(result_h), {2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f});
+
+    cleanupLayers({&xIn, &controlIn, &custom, &sink});
+}
+
 TEST(CustomLayer, MultiInputMultiOutputWaitsForAllInputsAndRoutesByPortIndex) {
     const uint64_t batchSize = 2;
     const uint64_t features = 3;
@@ -1974,6 +2058,51 @@ TEST(CustomLayer, MultiInputInferenceOnlyForwardCycleResetsStateWithoutBackward)
     runPass(lhsPass2_h, rhsPass2_h, {4.0f, 2.0f, 0.0f, 6.0f, 5.0f, 4.0f}, {-6.0f, -6.0f, -6.0f, 10.0f, 13.0f, 16.0f}, 2);
 
     cleanupLayers({&lhsIn, &rhsIn, &lhsBridge, &rhsBridge, &custom, &sumSink, &diffSink});
+}
+
+TEST(CustomLayer, Bf16BroadcastBackwardSpecializesReductionOutputToPreallocatedGradientDType) {
+    const uint64_t batchSize = 2;
+    const uint64_t forecastDays = 3;
+    const uint64_t width = 4;
+
+    NetworkInput futureIn(
+        gpuPlacement, DataType::BF16, std::vector<unsigned long>{batchSize, forecastDays, width});
+    NetworkInput contextIn(gpuPlacement, DataType::BF16, std::vector<unsigned long>{batchSize, width});
+    GradientRivet futureGradientRivet;
+    GradientRivet contextGradientRivet;
+    CountingPassthrough futureBridge;
+    CountingPassthrough contextBridge;
+    CustomLayer custom(buildBf16BroadcastContextExpression(gpuPlacement),
+                       {"future_tokens", "series_context"},
+                       {"feature_output"},
+                       gpuPlacement,
+                       {},
+                       false);
+    CountingPassthrough sink;
+
+    futureIn.connectToNextLayer(&futureGradientRivet);
+    futureGradientRivet.connectToNextLayer(&futureBridge);
+    contextIn.connectToNextLayer(&contextGradientRivet);
+    contextGradientRivet.connectToNextLayer(&contextBridge);
+    futureBridge.connectToNextLayer(&custom, 0, 0);
+    contextBridge.connectToNextLayer(&custom, 0, 1);
+    custom.connectToNextLayer(&sink);
+
+    // Compilation/initialization stamps the CustomLayer backward plan into the
+    // graph-level BF16 input-gradient buffers.  Before runtime dtype specialization,
+    // AutoDiff defaulted the broadcast REDUCE_SUM output to FP32 and this step threw
+    // "Preallocated reduction output tensor dtype does not match...".
+    EXPECT_NO_THROW(compileAndInitialize(
+        {&futureIn, &contextIn, &futureGradientRivet, &contextGradientRivet, &futureBridge, &contextBridge, &custom, &sink}));
+
+    ASSERT_EQ(custom.getErrorOutputs().size(), 2u);
+    ASSERT_TRUE(custom.getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(custom.getErrorOutputs()[1].has_value());
+    EXPECT_EQ(custom.getErrorOutputs()[0]->getDataType(), DataType::BF16);
+    EXPECT_EQ(custom.getErrorOutputs()[1]->getDataType(), DataType::BF16);
+
+    cleanupLayers(
+        {&futureIn, &contextIn, &futureGradientRivet, &contextGradientRivet, &futureBridge, &contextBridge, &custom, &sink});
 }
 
 TEST(CustomLayer, MultiInputMultiOutputBackwardWaitsForAllOutputGradients) {

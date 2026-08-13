@@ -763,11 +763,16 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         if (node.op == ExprOp::REDUCE_ARGMIN || node.op == ExprOp::REDUCE_ARGMAX)
             return DataType::UINT32;
 
-        // Dense floating-point reduction stages have a fixed contract: compute and
-        // materialize in FP32.  Do not reinterpret an explicitly requested low-precision
-        // node output as part of the reduction itself.  Callers that want FP16/BF16/FP8
-        // storage must add an explicit cast after the reduction boundary.
-        return DataType::FP32;
+        // Dense value reductions accumulate/finalize in FP32, but the CUB backend
+        // converts that FP32 aggregate directly when storing the final result.  Keep
+        // output storage dtype independent from compute dtype so callers can request
+        // BF16/FP16/FP8 materialization without an intermediate FP32 tensor + cast.
+        const DataType output_dtype = node.output_dtype.value_or(DataType::FP32);
+        if (!isSupportedFusionFloatingType(output_dtype)) {
+            throw std::runtime_error("Dense floating-point reduction requested unsupported output dtype: " +
+                                     TensorDescriptor::getElementTypeName(output_dtype));
+        }
+        return output_dtype;
     }
 
     std::vector<DataType> tensor_parent_dtypes;

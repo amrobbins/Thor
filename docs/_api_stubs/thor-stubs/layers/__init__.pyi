@@ -218,7 +218,7 @@ class AdaptiveLayerNorm(MultiConnectionLayer):
     def get_scale_bias_data_type(self) -> thor.DataType: ...
 
 class Attention(CustomLayer):
-    def __init__(self, network: thor.Network, feature_input: object, num_heads: int, num_key_value_heads: int | None = None, head_dim: int | None = None, value_dim: int | None = None, output_features: int | None = None, has_bias: bool | None = False, mask_kind: str = 'none', diagonal_left_bound: int = 0, diagonal_right_bound: int = 0, use_alibi_mask: bool = False, attention_scale: float | None = None, use_rope: bool | None = False, rope_rotary_dim: int = 0, rope_base: float = 10000.0, rope_position_offset: int = 0, rope_interleaved: bool = False, rope_scaling_kind: str = 'none', rope_scaling_factor: float = 1.0, rope_original_max_position_embeddings: int = 0, rope_attention_factor: float | None = None, rope_yarn_beta_fast: float | None = 32.0, rope_yarn_beta_slow: float = 1.0, rope_llama3_low_freq_factor: float = 1.0, rope_llama3_high_freq_factor: float = 4.0, rope_long_rope_short_factors: Sequence[float] = [], rope_long_rope_long_factors: Sequence[float] = [], weights_data_type: thor.DataType | None = None, compute_data_type: thor.DataType | None = thor.DataType.fp32, output_data_type: thor.DataType | None = None, weights_initializer: thor.initializers.Initializer | None = None, bias_initializer: thor.initializers.Initializer | None = None, optimizer: thor.optimizers.Optimizer | None = None, rope_in_place: bool = False, dropout_probability: float = 0.0, dropout_seed: int = 0, dropout_offset: int = 0, query_sequence_lengths: thor.Tensor | None = None, key_value_sequence_lengths: thor.Tensor | None = None, context_input: object | None = None, score_bias_input: thor.Tensor | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None) -> None:
+    def __init__(self, network: thor.Network, feature_input: object, num_heads: int, num_key_value_heads: int | None = None, head_dim: int | None = None, value_dim: int | None = None, output_features: int | None = None, has_bias: bool | None = False, mask_kind: str = 'none', diagonal_left_bound: int = 0, diagonal_right_bound: int = 0, use_alibi_mask: bool = False, attention_scale: float | None = None, use_rope: bool | None = False, rope_rotary_dim: int = 0, rope_base: float = 10000.0, rope_position_offset: int = 0, rope_interleaved: bool = False, rope_scaling_kind: str = 'none', rope_scaling_factor: float = 1.0, rope_original_max_position_embeddings: int = 0, rope_attention_factor: float | None = None, rope_yarn_beta_fast: float | None = 32.0, rope_yarn_beta_slow: float = 1.0, rope_llama3_low_freq_factor: float = 1.0, rope_llama3_high_freq_factor: float = 4.0, rope_long_rope_short_factors: Sequence[float] = [], rope_long_rope_long_factors: Sequence[float] = [], weights_data_type: thor.DataType | None = None, compute_data_type: thor.DataType | None = thor.DataType.fp32, output_data_type: thor.DataType | None = None, weights_initializer: thor.initializers.Initializer | None = None, bias_initializer: thor.initializers.Initializer | None = None, optimizer: thor.optimizers.Optimizer | None = None, rope_in_place: bool = False, dropout_probability: float = 0.0, dropout_seed: int = 0, dropout_offset: int = 0, query_sequence_lengths: thor.Tensor | None = None, key_value_sequence_lengths: thor.Tensor | None = None, context_input: object | None = None, score_bias_input: thor.Tensor | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, rope_query_position_offset: int | None = None, rope_key_position_offset: int | None = None, rope_query_position_offsets: thor.Tensor | None = None, rope_key_position_offsets: thor.Tensor | None = None) -> None:
         """
         Public transformer attention layer built from learned Q/K/V/O projections and the
         cuDNN scaled-dot-product attention stage.
@@ -243,9 +243,16 @@ class Attention(CustomLayer):
           ``num_key_value_heads``.
         * RoPE with ``none``, ``linear``, ``dynamic_ntk``, ``yarn``, ``longrope``, and
           ``llama3`` scaling parameterizations.
-          Dynamic-NTK and LongRoPE currently require the maximum possible sequence length plus
-          positive position offset, and ``rope_original_max_position_embeddings`` itself, to be
-          at most 16,777,216 so their FP32 sequence-length metadata remains exact.
+          ``rope_position_offset`` is the shared Q/K origin. Cross-attention may override it
+          independently with ``rope_query_position_offset`` and ``rope_key_position_offset``.
+          Ragged attention may instead provide per-row absolute origins through the INT32
+          logical-[1] ``rope_query_position_offsets`` and ``rope_key_position_offsets`` inputs;
+          a supplied per-row input replaces the scalar origin for that side. Q and K still
+          share the same rotary basis/scaling parameters. Dynamic-NTK and LongRoPE use
+          FP32 positional metadata, so absolute positions/extents and
+          ``rope_original_max_position_embeddings`` must remain at most 16,777,216 for exact
+          integer representation. Thor validates this statically for scalar origins; values
+          supplied through per-row origin tensors must obey the same bound at runtime.
         * Masks: ``none``, ``causal_top_left``, ``causal_bottom_right``,
           ``sliding_window_top_left``, and ``sliding_window_bottom_right``.
         * ALiBi only with causal/sliding diagonal masks and ``diagonal_right_bound == 0``;
@@ -264,9 +271,10 @@ class Attention(CustomLayer):
           together, both int32 logical ``[1]`` tensors.
         * ``feature_input`` and ``context_input`` may be ``thor.RaggedTensor`` values.
           Ragged self-attention preserves the query row partition on output. Ragged
-          cross-attention may use independent Q/KV partitions when RoPE is disabled;
-          with RoPE, Q and KV must share the same row partition because row partitions
-          alone do not define a cross-attention positional coordinate system.
+          cross-attention may use independent Q/KV partitions with or without RoPE. RoPE
+          positions reset at each packed row; scalar origins apply to every row, while the
+          optional per-row origin tensors allow each logical Q/K row pair to occupy its own
+          absolute timeline. Q and K need only have the same logical batch size.
 
         Important combination rules:
 
@@ -305,6 +313,14 @@ class Attention(CustomLayer):
     def get_use_rope(self) -> bool: ...
 
     def get_rope_in_place(self) -> bool: ...
+
+    def get_rope_query_position_offset(self) -> int: ...
+
+    def get_rope_key_position_offset(self) -> int: ...
+
+    def get_rope_query_position_offsets_input(self) -> thor.Tensor | None: ...
+
+    def get_rope_key_position_offsets_input(self) -> thor.Tensor | None: ...
 
     def get_rope_scaling_kind(self) -> str: ...
 

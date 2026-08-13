@@ -318,3 +318,31 @@ TEST(RowPartition, RejectsSignedLengthAndOffsetDTypes) {
 
     EXPECT_THROW(static_cast<void>(prepareRowPartitionLengthsToOffsets(lengths, offsets, 3)), std::invalid_argument);
 }
+
+TEST(RowPartition, OffsetsToRopePositionIdsUsesPerRowOriginsAndClearsUnusedCapacity) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor offsets = makeGpuVector<uint32_t>({0U, 2U, 2U, 5U}, stream);
+    Tensor origins = makeGpuVector<int32_t>({10, 20, 30}, stream);
+    Tensor positions(gpuPlacement, TensorDescriptor(DataType::FP32, {7}));
+    positions.fill(999.0, stream);
+
+    rowPartitionOffsetsToRopePositionIds(offsets, &origins, 123, positions, 3, 7, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<float>(positions, stream), (std::vector<float>{10.0f, 11.0f, 30.0f, 31.0f, 32.0f, 0.0f, 0.0f}));
+}
+
+TEST(RowPartition, OffsetsToRopePositionIdsResetsScalarOriginAtEveryRaggedRow) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor offsets = makeGpuVector<uint64_t>({0ULL, 2ULL, 4ULL}, stream);
+    Tensor positions(gpuPlacement, TensorDescriptor(DataType::FP32, {4}));
+
+    rowPartitionOffsetsToRopePositionIds(offsets, nullptr, 7, positions, 2, 4, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<float>(positions, stream), (std::vector<float>{7.0f, 8.0f, 7.0f, 8.0f}));
+}

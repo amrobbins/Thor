@@ -1,3 +1,4 @@
+#include "Utilities/Expression/AutoDiff.h"
 #include "Utilities/Expression/CudaSourceEmitter.h"
 #include "Utilities/Expression/EquationCompiler.h"
 
@@ -8,6 +9,8 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 using namespace ThorImplementation;
 
@@ -97,6 +100,182 @@ TEST(EquationCompiler, TransitiveSharedInputsBecomeOneFusedStage) {
     ASSERT_EQ(stages.size(), 1);
     ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
     ASSERT_EQ(stages[0].outputs.size(), 3);
+}
+
+TEST(EquationCompiler, DeferredTerminalProducerIsMaterializedBeforeExactNodeMatmulConsumer) {
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto w = Expression::input("w", DataType::FP32, DataType::FP32);
+    auto trunk = x + Expression::constantScalar(1.0);
+    auto y = Expression::matmul(trunk, w, false, false, DataType::FP32, DataType::FP32);
+
+    // Start from one physical graph and expose the matmul's exact lhs node as
+    // an earlier named output.  AutoDiff produces multi-output backward graphs
+    // with this topology: one requested gradient can be a fusable terminal
+    // value while a later requested gradient consumes that same node through a
+    // stage-boundary operation.
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::FP32});
+
+    ASSERT_EQ(physical.outputs.size(), 1U);
+    const uint32_t matmul_idx = physical.outputs.front().node_idx;
+    ASSERT_LT(matmul_idx, physical.expr->nodes.size());
+    ASSERT_EQ(physical.expr->nodes[matmul_idx].op, ExprOp::MATMUL);
+    const uint32_t trunk_idx = physical.expr->nodes[matmul_idx].lhs;
+    ASSERT_LT(trunk_idx, physical.expr->nodes.size());
+    ASSERT_EQ(physical.expr->nodes[trunk_idx].op, ExprOp::ADD);
+
+    physical.outputs.insert(physical.outputs.begin(), NamedOutput{"trunk", trunk_idx});
+
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    ASSERT_EQ(stages.size(), 2U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    ASSERT_EQ(stages[1].kind, PhysicalExecutionStage::Kind::Matmul);
+    ASSERT_FALSE(stages[0].outputs.empty());
+    ASSERT_FALSE(stages[1].input_value_ids.empty());
+
+    const uint32_t trunk_value_id = stages[0].outputs.front().value_id;
+    EXPECT_EQ(stages[1].input_value_ids.front(), trunk_value_id);
+}
+
+TEST(EquationCompiler, DirectInputTerminalOutputReusesRootValueBeforeReductionConsumer) {
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto sum = x.reduce_sum({0}, {});
+
+    // A direct input is both a requested terminal output and the input to a
+    // later reduction.  The passthrough output must reuse the already-available
+    // root input value rather than allocating a deferred copy value that would
+    // shadow the reduction dependency.
+    auto physical = Expression::outputs({
+        {"passthrough", x},
+        {"sum", sum},
+    }).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::Reduction);
+    ASSERT_EQ(stages[0].input_value_ids.size(), 1U);
+    EXPECT_EQ(stages[0].input_value_ids.front(), 0U);
+}
+
+TEST(EquationCompiler, PromotedDirectInputTerminalOutputStillMaterializesBeforeReductionConsumer) {
+    auto x = Expression::input("x", DataType::BF16, DataType::FP32);
+    auto sum = x.reduce_sum({0}, {});
+
+    auto physical = Expression::outputs({
+        {"passthrough", x},
+        {"sum", sum},
+    }).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::BF16});
+
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    ASSERT_EQ(stages.size(), 2U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    ASSERT_EQ(stages[1].kind, PhysicalExecutionStage::Kind::Reduction);
+    ASSERT_EQ(stages[0].outputs.size(), 1U);
+    ASSERT_EQ(stages[1].input_value_ids.size(), 1U);
+    EXPECT_EQ(stages[1].input_value_ids.front(), stages[0].outputs.front().value_id);
+}
+
+TEST(EquationCompiler, BroadcastAddBackwardPassthroughSeedDoesNotShadowBiasReduction) {
+    auto temporal_scores = Expression::input("temporal_scores", DataType::FP32, DataType::FP32);
+    auto series_level_bias = Expression::input("series_level_bias", DataType::FP32, DataType::FP32);
+    auto y = temporal_scores + series_level_bias.unsqueeze({1});
+
+    auto forward = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(forward, {DataType::FP32, DataType::FP32});
+
+    // This matches the ProductTransformerForecaster broadcast-add CustomLayer.
+    // dY passes through unchanged to temporal_scores_grad while the same dY is
+    // reduced over the forecast axis to produce series_level_bias_grad.
+    auto backward = buildBackwardOutputs(
+        forward,
+        {"temporal_scores", "series_level_bias"},
+        std::optional<std::string>{"dy"},
+        std::unordered_map<std::string, std::vector<uint64_t>>{
+            {"temporal_scores", {2, 100, 1}},
+            {"series_level_bias", {2, 1}},
+        });
+    resolveOutputsDTypesInPlace(backward, std::vector<DataType>(backward.expr->inputs.size(), DataType::FP32));
+
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(backward);
+    ASSERT_FALSE(stages.empty());
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::Reduction);
+    ASSERT_EQ(stages[0].input_value_ids.size(), 1U);
+
+    uint32_t dy_slot = UINT32_MAX;
+    for (const NamedInput& input : backward.expr->inputs) {
+        if (input.name == "dy") {
+            dy_slot = input.slot;
+            break;
+        }
+    }
+    ASSERT_NE(dy_slot, UINT32_MAX);
+
+    // The reduction must consume the already-present upstream seed slot, never
+    // a newly allocated deferred value id that merely copies that same input.
+    EXPECT_EQ(stages[0].input_value_ids.front(), dy_slot);
+}
+
+TEST(EquationCompiler, LowPrecisionBroadcastBackwardReducesDirectlyIntoRequestedGradientDtype) {
+    auto temporal_scores = Expression::input("temporal_scores", DataType::BF16, DataType::BF16);
+    auto series_level_bias = Expression::input("series_level_bias", DataType::BF16, DataType::BF16);
+    auto y = temporal_scores + series_level_bias.unsqueeze({1});
+
+    auto forward = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(forward, {DataType::BF16, DataType::BF16});
+
+    auto backward = buildBackwardOutputs(
+        forward,
+        {"temporal_scores", "series_level_bias"},
+        std::optional<std::string>{"dy"},
+        std::unordered_map<std::string, std::vector<uint64_t>>{
+            {"temporal_scores", {2, 100, 64}},
+            {"series_level_bias", {2, 64}},
+        });
+    resolveOutputsDTypesInPlace(backward, std::vector<DataType>(backward.expr->inputs.size(), DataType::BF16));
+
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(backward);
+    ASSERT_FALSE(stages.empty());
+
+    const PhysicalExecutionStage* reduction_stage = nullptr;
+    for (const auto& stage : stages) {
+        if (stage.kind == PhysicalExecutionStage::Kind::Reduction) {
+            reduction_stage = &stage;
+            break;
+        }
+    }
+    ASSERT_NE(reduction_stage, nullptr);
+
+    auto compiled = EquationCompiler::compileReduction(reduction_stage->expr);
+    ASSERT_NE(compiled, nullptr);
+    EXPECT_EQ(compiled->input_dtype, DataType::BF16);
+    EXPECT_EQ(compiled->compute_dtype, DataType::FP32);
+    EXPECT_EQ(compiled->output_dtype, DataType::BF16);
+
+    const NamedOutput* bias_grad_output = nullptr;
+    for (const NamedOutput& output : backward.outputs) {
+        if (output.name == "series_level_bias_grad") {
+            bias_grad_output = &output;
+            break;
+        }
+    }
+    ASSERT_NE(bias_grad_output, nullptr);
+    const ExprNode& bias_grad_terminal = backward.expr->nodes.at(bias_grad_output->node_idx);
+    EXPECT_EQ(bias_grad_terminal.op, ExprOp::REDUCE_SUM);
+    ASSERT_TRUE(bias_grad_terminal.output_dtype.has_value());
+    EXPECT_EQ(bias_grad_terminal.output_dtype.value(), DataType::BF16);
+
+    // The reduction itself must materialize the requested BF16 gradient. No
+    // explicit post-reduction cast stage should be necessary.
+    for (const auto& stage : stages) {
+        if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
+            continue;
+        }
+        for (const auto& node : stage.expr.nodes) {
+            EXPECT_NE(node.op, ExprOp::CAST);
+        }
+    }
 }
 
 TEST(EquationCompiler, ReductionBoundaryStillSplitsStages) {
@@ -212,52 +391,63 @@ TEST(EquationCompiler, RmsNormConsumesPrecedingPointwiseStageWithoutAbsorbingIt)
     EXPECT_EQ(compiled->fused_activation, CudnnRmsNormFusedActivation::NONE);
 }
 
-TEST(ExpressionDTypeResolution, DenseValueReductionAlwaysMaterializesFp32) {
-    auto x = Expression::input("x", DataType::FP16, DataType::FP16);
-    auto sum = x.reduce_sum({1}, {}).withOutputDType(DataType::FP16);
+TEST(ExpressionDTypeResolution, DenseValueReductionHonorsRequestedStorageDtypeWhileComputingFp32) {
+    for (DataType output_dtype : {DataType::FP16, DataType::BF16, DataType::FP32}) {
+        auto x = Expression::input("x", DataType::FP16, DataType::FP16);
+        auto sum = x.reduce_sum({1}, {}).withOutputDType(output_dtype);
+
+        auto physical = Expression::outputs({{"sum", sum}}).physicalOutputs();
+        resolveOutputsDTypesInPlace(physical, {DataType::FP16});
+
+        const ExprNode& reduction = physical.expr->nodes.at(physical.outputs.at(0).node_idx);
+        ASSERT_EQ(reduction.op, ExprOp::REDUCE_SUM);
+        ASSERT_TRUE(reduction.output_dtype.has_value());
+        EXPECT_EQ(reduction.output_dtype.value(), output_dtype);
+        ASSERT_TRUE(reduction.compute_dtype.has_value());
+        EXPECT_EQ(reduction.compute_dtype.value(), DataType::FP32);
+
+        auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+        ASSERT_EQ(stages.size(), 1);
+        ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::Reduction);
+
+        auto compiled = EquationCompiler::compileReduction(stages[0].expr);
+        ASSERT_NE(compiled, nullptr);
+        EXPECT_EQ(compiled->input_dtype, DataType::FP16);
+        EXPECT_EQ(compiled->output_dtype, output_dtype);
+        EXPECT_EQ(compiled->compute_dtype, DataType::FP32);
+    }
+}
+
+TEST(ExpressionDTypeResolution, DenseValueReductionDefaultsToFp32Storage) {
+    auto x = Expression::input("x", DataType::BF16, DataType::BF16);
+    auto sum = x.reduce_sum({1}, {});
 
     auto physical = Expression::outputs({{"sum", sum}}).physicalOutputs();
-    resolveOutputsDTypesInPlace(physical, {DataType::FP16});
+    resolveOutputsDTypesInPlace(physical, {DataType::BF16});
 
     const ExprNode& reduction = physical.expr->nodes.at(physical.outputs.at(0).node_idx);
-    ASSERT_EQ(reduction.op, ExprOp::REDUCE_SUM);
     ASSERT_TRUE(reduction.output_dtype.has_value());
     EXPECT_EQ(reduction.output_dtype.value(), DataType::FP32);
     ASSERT_TRUE(reduction.compute_dtype.has_value());
     EXPECT_EQ(reduction.compute_dtype.value(), DataType::FP32);
+}
 
+TEST(EquationCompiler, LowPrecisionReductionStorageDoesNotRequireExplicitCastStage) {
+    auto x = Expression::input("x", DataType::BF16, DataType::BF16);
+    auto y = x.reduce_sum({1}, {}).withOutputDType(DataType::BF16);
+
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::BF16});
     auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
     ASSERT_EQ(stages.size(), 1);
     ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::Reduction);
 
-    auto compiled = EquationCompiler::compileReduction(stages[0].expr);
-    ASSERT_NE(compiled, nullptr);
-    EXPECT_EQ(compiled->input_dtype, DataType::FP16);
-    EXPECT_EQ(compiled->output_dtype, DataType::FP32);
-    EXPECT_EQ(compiled->compute_dtype, DataType::FP32);
-}
-
-TEST(EquationCompiler, ExplicitCastAfterReductionControlsLowPrecisionStorage) {
-    auto x = Expression::input("x", DataType::FP16, DataType::FP16);
-    auto y = x.reduce_sum({1}, {}).cast(DataType::FP16);
-
-    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
-    resolveOutputsDTypesInPlace(physical, {DataType::FP16});
-    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
-
-    ASSERT_EQ(stages.size(), 2);
-    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::Reduction);
-    ASSERT_EQ(stages[1].kind, PhysicalExecutionStage::Kind::FusedKernel);
-
     auto compiled_reduction = EquationCompiler::compileReduction(stages[0].expr);
     ASSERT_NE(compiled_reduction, nullptr);
-    EXPECT_EQ(compiled_reduction->output_dtype, DataType::FP32);
-
-    ASSERT_EQ(stages[1].outputs.size(), 1);
-    const ExprNode& cast_output = stages[1].expr.nodes.at(stages[1].outputs[0].local_node_idx);
-    EXPECT_EQ(cast_output.op, ExprOp::CAST);
-    ASSERT_TRUE(cast_output.output_dtype.has_value());
-    EXPECT_EQ(cast_output.output_dtype.value(), DataType::FP16);
+    EXPECT_EQ(compiled_reduction->input_dtype, DataType::BF16);
+    EXPECT_EQ(compiled_reduction->compute_dtype, DataType::FP32);
+    EXPECT_EQ(compiled_reduction->output_dtype, DataType::BF16);
 }
 
 TEST(ExpressionDTypeResolution, CanonicalUnsignedMetadataSubtractionPreservesIntegerDType) {

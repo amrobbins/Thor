@@ -23,6 +23,9 @@ std::exception_ptr makeExceptionPtr(ExceptionT exception) {
 
 TEST(TrainingRunStatus, HasStableUserFacingNames) {
     EXPECT_STREQ(trainingRunStatusName(TrainingRunStatus::NOT_STARTED), "not_started");
+    EXPECT_STREQ(trainingRunStatusName(TrainingRunStatus::STARTING), "starting");
+    EXPECT_STREQ(trainingRunStatusName(TrainingRunStatus::WAITING_TO_START), "waiting_to_start");
+    EXPECT_STREQ(trainingRunStatusName(TrainingRunStatus::WAITING_FOR_MEMORY), "waiting_for_memory");
     EXPECT_STREQ(trainingRunStatusName(TrainingRunStatus::RUNNING), "running");
     EXPECT_STREQ(trainingRunStatusName(TrainingRunStatus::COMPLETED), "completed");
     EXPECT_STREQ(trainingRunStatusName(TrainingRunStatus::FAILED), "failed");

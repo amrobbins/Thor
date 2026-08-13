@@ -87,6 +87,7 @@ DynamicExpression applyBatchValidityMaskToGradient(const DynamicExpression& expr
                 .preallocated_outputs = outputs,
                 .requested_output_shapes = std::move(build.requested_output_shapes),
                 .pre_forward_hook = std::move(build.pre_forward_hook),
+                .pre_forward_only_inputs = std::move(build.pre_forward_only_inputs),
             };
         });
 }

@@ -38,6 +38,7 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
 
     void configureRun(std::string runName, RunConfig config);
     void markRunStarting(const std::string& runName);
+    void markRunStatus(const std::string& runName, TrainingRunStatus status);
     void markRunFinished(const TrainingRunResult& result);
     void emitFinalReport(const std::vector<TrainingRunResult>& results);
     void emitEnsembleReport(const std::vector<TrainingEnsembleResult>& ensembles);
@@ -46,12 +47,24 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
     void close() override;
 
    private:
-    enum class DisplayStatus { NOT_STARTED, STARTING, RUNNING, COMPLETED, FAILED, CANCELLED, INTERRUPTED, OUT_OF_MEMORY };
-    enum class ReporterEventType { RUN_STARTING, RUN_STATS, RUN_FINISHED };
+    enum class DisplayStatus {
+        NOT_STARTED,
+        STARTING,
+        WAITING_TO_START,
+        WAITING_FOR_MEMORY,
+        RUNNING,
+        COMPLETED,
+        FAILED,
+        CANCELLED,
+        INTERRUPTED,
+        OUT_OF_MEMORY
+    };
+    enum class ReporterEventType { RUN_STATUS, RUN_STATS, RUN_FINISHED };
 
     struct ReporterEvent {
         ReporterEventType type = ReporterEventType::RUN_STATS;
         std::string runName{};
+        TrainingRunStatus status = TrainingRunStatus::NOT_STARTED;
         TrainingStatsEvent stats{};
         TrainingRunResult result{};
     };

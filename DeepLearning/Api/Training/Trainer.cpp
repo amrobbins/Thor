@@ -770,7 +770,8 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
                           const TrainingCancellationToken& cancellationToken,
                           const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
                           const std::set<std::string>& additionalScalarTensorsToReport,
-                          const InitialDeviceStartupSequencer& initialDeviceStartupSequencer) {
+                          const InitialDeviceStartupSequencer& initialDeviceStartupSequencer,
+                          const TrainingRunStatusCallback& statusCallback) {
     validateFitOptions(options);
     std::vector<TrainingEarlyCompletionPolicy> combinedEarlyCompletionPolicies = options.earlyCompletionPolicies;
     combinedEarlyCompletionPolicies.insert(combinedEarlyCompletionPolicies.end(),
@@ -833,6 +834,7 @@ void Trainer::fitInternal(const TrainerFitOptions& options,
     request.earlyCompletionPolicies = std::move(combinedEarlyCompletionPolicies);
     request.cancellationToken = cancellationToken;
     request.initialDeviceStartupSequencer = initialDeviceStartupSequencer;
+    request.statusCallback = statusCallback;
     request.executionMode = TrainingRunExecutionMode::FIT;
 
     if (lastCompletedArtifactDirectory.has_value() && lastCompletedArtifactNetworkName.has_value()) {
@@ -880,7 +882,8 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
                                        const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
                                        const std::string& runNameForMessages,
                                        const std::set<std::string>& additionalScalarTensorsToReport,
-                                       const InitialDeviceStartupSequencer& initialDeviceStartupSequencer) {
+                                       const InitialDeviceStartupSequencer& initialDeviceStartupSequencer,
+                                       const TrainingRunStatusCallback& statusCallback) {
     validateFitOptions(options);
     const std::shared_ptr<const TrainingData> fitTrainingData =
         trainingDataForFit(trainingData);
@@ -911,7 +914,8 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
                     cancellationToken,
                     additionalEarlyCompletionPolicies,
                     additionalScalarTensorsToReport,
-                    initialDeviceStartupSequencer);
+                    initialDeviceStartupSequencer,
+                    statusCallback);
         return;
     }
 
@@ -989,7 +993,8 @@ void Trainer::fitWithRestartConditions(const TrainerFitOptions& options,
                                        cancellationToken,
                                        additionalEarlyCompletionPolicies,
                                        additionalScalarTensorsToReport,
-                                       startupSequencerForAttempt);
+                                       startupSequencerForAttempt,
+                                       statusCallback);
             placedNetworkAfterLastFit = attemptTrainer.placedNetworkAfterLastFit;
             lastCompletedArtifactDirectory = attemptTrainer.lastCompletedArtifactDirectory;
             lastCompletedArtifactNetworkName = attemptTrainer.lastCompletedArtifactNetworkName;
@@ -1068,7 +1073,8 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
                                           const std::vector<TrainingRestartCondition>& additionalRestartConditions,
                                           const std::vector<TrainingEarlyCompletionPolicy>& additionalEarlyCompletionPolicies,
                                           const std::set<std::string>& additionalScalarTensorsToReport,
-                                          const InitialDeviceStartupSequencer& initialDeviceStartupSequencer) {
+                                          const InitialDeviceStartupSequencer& initialDeviceStartupSequencer,
+                                          const TrainingRunStatusCallback& statusCallback) {
     ResultCapturingTrainingObserver capturingObserver(observer);
     try {
         fitWithRestartConditions(options,
@@ -1078,7 +1084,8 @@ TrainingRunResult Trainer::fitTrainingRun(std::string runName,
                                  additionalEarlyCompletionPolicies,
                                  runName,
                                  additionalScalarTensorsToReport,
-                                 initialDeviceStartupSequencer);
+                                 initialDeviceStartupSequencer,
+                                 statusCallback);
         capturingObserver.flush();
         return TrainingRunResult::completedResult(std::move(runName),
                                                   capturingObserver.finalTrainingStats,

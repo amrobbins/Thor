@@ -32,7 +32,7 @@ AIRFOIL_QUANTILE_STATS_INTERVAL_S = float(os.environ.get("THOR_AIRFOIL_QUANTILE_
 AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND = float(os.environ.get("THOR_AIRFOIL_QUANTILE_SUMMARY_LOGS_PER_SECOND", "2.0"))
 _ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _RUN_STATUS_RE = re.compile(
-    r"INFO runs\[(?P<run>[^\]|]+)(?:\|[^\]]+)?\]:.*\bstatus=(?P<status>completed|failed|cancelled|interrupted|oom|running|starting|not_started)\b"
+    r"INFO runs\[(?P<run>[^\]|]+)(?:\|[^\]]+)?\]:.*\bstatus=(?P<status>completed|failed|cancelled|interrupted|oom|running|waiting_for_memory|waiting_to_start|starting|not_started)\b"
 )
 
 
@@ -2101,6 +2101,9 @@ def test_training_runs_model_selection_score_callback_cycle_is_collectable():
 
 
 def test_training_runs_result_status_names_are_exposed():
+    assert thor.training.TrainingRunStatus.starting.name == "starting"
+    assert thor.training.TrainingRunStatus.waiting_to_start.name == "waiting_to_start"
+    assert thor.training.TrainingRunStatus.waiting_for_memory.name == "waiting_for_memory"
     assert thor.training.TrainingRunStatus.completed.name == "completed"
     assert thor.training.TrainingRunCompletionReason.early_completed.name == "early_completed"
     assert thor.training.TrainingRunsFailurePolicy.cancel_siblings.name == "cancel_siblings"

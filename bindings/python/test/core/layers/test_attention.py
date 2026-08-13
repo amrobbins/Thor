@@ -92,17 +92,143 @@ def test_attention_accepts_and_returns_canonical_ragged_tensor():
     assert "key_value_ragged_offsets_input" not in arch
 
 
-def test_attention_ragged_cross_attention_rope_requires_shared_partition():
+def test_attention_ragged_cross_attention_rope_allows_independent_partitions():
     n = _net("test_attention_ragged_cross_attention_rope_partition_policy")
+    query = thor.layers.RaggedNetworkInput(
+        n,
+        "query",
+        thor.DataType.fp16,
+        [32],
+        max_total_values=9,
+        batch_size=2,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    context = thor.layers.RaggedNetworkInput(
+        n,
+        "context",
+        thor.DataType.fp16,
+        [32],
+        max_total_values=12,
+        batch_size=2,
+        offsets_data_type=thor.DataType.uint64,
+    )
+
+    attention = thor.layers.Attention(
+        n,
+        query,
+        4,
+        head_dim=8,
+        context_input=context,
+        use_rope=True,
+        rope_rotary_dim=8,
+    )
+
+    assert attention.get_feature_output().offsets == query.offsets
+    assert attention.get_context_input() == context
+
+
+def test_attention_ragged_cross_attention_accepts_per_row_rope_origins():
+    n = _net("test_attention_ragged_cross_attention_per_row_rope_origins")
     query = thor.layers.RaggedNetworkInput(
         n, "query", thor.DataType.fp16, [32], max_total_values=9, batch_size=2
     )
     context = thor.layers.RaggedNetworkInput(
         n, "context", thor.DataType.fp16, [32], max_total_values=12, batch_size=2
     )
+    query_origins = _input_tensor(n, "query_origins", [1], thor.DataType.int32)
+    key_origins = _input_tensor(n, "key_origins", [1], thor.DataType.int32)
 
-    with pytest.raises((RuntimeError, ValueError), match="RoPE|row partition|partition"):
-        thor.layers.Attention(n, query, 4, head_dim=8, context_input=context, use_rope=True)
+    attention = thor.layers.Attention(
+        n,
+        query,
+        4,
+        head_dim=8,
+        context_input=context,
+        use_rope=True,
+        rope_rotary_dim=8,
+        rope_query_position_offsets=query_origins,
+        rope_key_position_offsets=key_origins,
+    )
+
+    assert attention.get_rope_query_position_offsets_input() == query_origins
+    assert attention.get_rope_key_position_offsets_input() == key_origins
+    arch = _only_layer_architecture(n, "attention")
+    assert arch["use_query_rope_position_offsets"] is True
+    assert arch["use_key_rope_position_offsets"] is True
+    assert arch["query_rope_position_offsets_input"]["dimensions"] == [1]
+    assert arch["key_rope_position_offsets_input"]["dimensions"] == [1]
+
+
+def test_attention_per_row_rope_origins_require_rope_and_ragged_inputs():
+    n = _net("test_attention_per_row_rope_origins_require_rope_and_ragged")
+    dense = _input_tensor(n, "dense", [4, 32], thor.DataType.fp16)
+    origins = _input_tensor(n, "origins", [1], thor.DataType.int32)
+
+    with pytest.raises((RuntimeError, ValueError), match="require use_rope=True"):
+        thor.layers.Attention(n, dense, 4, head_dim=8, rope_query_position_offsets=origins)
+
+    with pytest.raises((RuntimeError, ValueError), match="Ragged|ragged|per-row"):
+        thor.layers.Attention(
+            n,
+            dense,
+            4,
+            head_dim=8,
+            use_rope=True,
+            rope_rotary_dim=8,
+            rope_query_position_offsets=origins,
+        )
+
+
+def test_attention_cross_attention_exposes_independent_rope_query_key_offsets():
+    n = _net("test_attention_cross_attention_independent_rope_offsets")
+    query = _input_tensor(n, "query", [3, 32], thor.DataType.fp16)
+    context = _input_tensor(n, "context", [5, 32], thor.DataType.fp16)
+
+    attention = thor.layers.Attention(
+        n,
+        query,
+        4,
+        context_input=context,
+        head_dim=8,
+        use_rope=True,
+        rope_rotary_dim=8,
+        rope_position_offset=7,
+        rope_query_position_offset=100,
+        rope_key_position_offset=0,
+    )
+
+    assert attention.get_rope_query_position_offset() == 100
+    assert attention.get_rope_key_position_offset() == 0
+    arch = _only_layer_architecture(n, "attention")
+    assert arch["rope_options"]["position_offset"] == 7
+    assert arch["rope_query_position_offset"] == 100
+    assert arch["rope_key_position_offset"] == 0
+
+
+def test_attention_shared_rope_position_offset_remains_query_key_default():
+    n = _net("test_attention_shared_rope_offset_default")
+    x = _input_tensor(n, "tokens", [4, 32], thor.DataType.fp16)
+
+    attention = thor.layers.Attention(
+        n,
+        x,
+        4,
+        head_dim=8,
+        use_rope=True,
+        rope_rotary_dim=8,
+        rope_position_offset=13,
+    )
+
+    assert attention.get_rope_query_position_offset() == 13
+    assert attention.get_rope_key_position_offset() == 13
+
+
+def test_attention_independent_rope_offsets_require_rope_enabled():
+    n = _net("test_attention_independent_rope_offsets_require_rope")
+    x = _input_tensor(n, "tokens", [4, 32], thor.DataType.fp16)
+
+    with pytest.raises((RuntimeError, ValueError), match="require use_rope=True"):
+        thor.layers.Attention(n, x, 4, head_dim=8, rope_query_position_offset=4)
 
 
 def _assert_parameter_shape(arch, name: str, shape):

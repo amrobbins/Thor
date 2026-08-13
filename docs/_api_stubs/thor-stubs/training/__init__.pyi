@@ -546,6 +546,12 @@ class TrainingRunsResult:
 class TrainingRunStatus(enum.Enum):
     not_started = 0
 
+    starting = 7
+
+    waiting_to_start = 8
+
+    waiting_for_memory = 9
+
     running = 1
 
     completed = 2

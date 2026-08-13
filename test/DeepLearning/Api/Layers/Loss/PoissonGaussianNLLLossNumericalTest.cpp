@@ -293,6 +293,115 @@ PoissonNLLRunResult runRawPoissonNLLLossNetwork(const vector<float>& predictions
     return PoissonNLLRunResult{outputLoss, predictionGradient};
 }
 
+PoissonNLLRunResult runRawWeightedPoissonNLLLossNetwork(const vector<float>& predictions,
+                                                        const vector<float>& labels,
+                                                        const vector<float>& exampleWeights,
+                                                        bool logInput,
+                                                        bool full,
+                                                        float eps) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t numFeatures = 4;
+    THOR_THROW_IF_FALSE(predictions.size() == static_cast<size_t>(batchSize * numFeatures));
+    THOR_THROW_IF_FALSE(labels.size() == predictions.size());
+    THOR_THROW_IF_FALSE(exampleWeights.size() == batchSize);
+
+    Api::Network network("weighted_poisson_nll_numerical");
+    Api::NetworkInput predictionsInput = Api::NetworkInput::Builder()
+                                             .network(network)
+                                             .name("predictions")
+                                             .dimensions({numFeatures})
+                                             .dataType(Api::DataType::FP32)
+                                             .build();
+    Api::NetworkInput labelsInput = Api::NetworkInput::Builder()
+                                        .network(network)
+                                        .name("labels")
+                                        .dimensions({numFeatures})
+                                        .dataType(Api::DataType::FP32)
+                                        .build();
+    Api::NetworkInput weightsInput = Api::NetworkInput::Builder()
+                                         .network(network)
+                                         .name("example_weights")
+                                         .dimensions({1})
+                                         .dataType(Api::DataType::FP32)
+                                         .build();
+
+    Api::GradientRivet predictionsRivet = Api::GradientRivet::Builder()
+                                             .network(network)
+                                             .tensor(predictionsInput.getFeatureOutput().value())
+                                             .build();
+
+    Api::PoissonNLLLoss loss = Api::PoissonNLLLoss::Builder()
+                                   .network(network)
+                                   .predictions(predictionsRivet.getFeatureOutput().value())
+                                   .labels(labelsInput.getFeatureOutput().value())
+                                   .exampleWeights(weightsInput.getFeatureOutput().value())
+                                   .logInput(logInput)
+                                   .full(full)
+                                   .eps(eps)
+                                   .lossDataType(Api::DataType::FP32)
+                                   .reportsRawLoss()
+                                   .build();
+    shared_ptr<Api::MultiInputCustomLoss> rawCustomLoss = findRawMultiInputCustomLoss(network);
+    THOR_THROW_IF_FALSE(rawCustomLoss != nullptr);
+
+    Api::NetworkOutput lossOutput = Api::NetworkOutput::Builder()
+                                        .network(network)
+                                        .name("loss")
+                                        .inputTensor(loss.getLoss())
+                                        .dataType(Api::DataType::FP32)
+                                        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, false, {0}, 1);
+    THOR_THROW_IF_FALSE(placedNetwork != nullptr);
+    Stream stream(0);
+    for (Event& event : initDoneEvents)
+        stream.waitEvent(event);
+    stream.synchronize();
+    initDoneEvents.clear();
+
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    shared_ptr<Impl::NetworkInput> physicalPredictionsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(predictionsInput.getId()));
+    shared_ptr<Impl::NetworkInput> physicalLabelsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(labelsInput.getId()));
+    shared_ptr<Impl::NetworkInput> physicalWeightsInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(weightsInput.getId()));
+    shared_ptr<Impl::NetworkOutput> physicalLossOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(lossOutput.getId()));
+    shared_ptr<Impl::MultiInputCustomLoss> physicalRawLoss =
+        dynamic_pointer_cast<Impl::MultiInputCustomLoss>(stampedNetwork.getPhysicalLayerFromApiLayer(rawCustomLoss->getId()));
+    THOR_THROW_IF_FALSE(physicalPredictionsInput != nullptr);
+    THOR_THROW_IF_FALSE(physicalLabelsInput != nullptr);
+    THOR_THROW_IF_FALSE(physicalWeightsInput != nullptr);
+    THOR_THROW_IF_FALSE(physicalLossOutput != nullptr);
+    THOR_THROW_IF_FALSE(physicalRawLoss != nullptr);
+
+    Impl::Tensor predictionsCpu = makeCpuTensor(predictions, batchSize, numFeatures);
+    Impl::Tensor labelsCpu = makeCpuTensor(labels, batchSize, numFeatures);
+    Impl::Tensor weightsCpu = makeCpuTensor(exampleWeights, batchSize, 1);
+
+    physicalPredictionsInput->forward(predictionsCpu, false, batchSize);
+    physicalLabelsInput->forward(labelsCpu, false, batchSize);
+    physicalWeightsInput->forward(weightsCpu, false, batchSize);
+
+    Stream weightsStream = physicalWeightsInput->getStream();
+    weightsStream.waitEvent(physicalLossOutput->getOutputReadyEvent());
+    weightsStream.synchronize();
+
+    Impl::Tensor outputLossCpu = physicalLossOutput->getFeatureOutput().value();
+    THOR_THROW_IF_FALSE(outputLossCpu.getPlacement().getMemDevice() == Impl::TensorPlacement::MemDevices::CPU);
+    vector<float> outputLoss(static_cast<float*>(outputLossCpu.getMemPtr()),
+                             static_cast<float*>(outputLossCpu.getMemPtr()) + predictions.size());
+
+    Stream rawLossStream = physicalRawLoss->getStream();
+    vector<float> predictionGradient = copyGpuTensorToVector(physicalRawLoss->getErrorOutput(0).value(), rawLossStream);
+    THOR_THROW_IF_FALSE(!physicalRawLoss->getErrorOutput(1).has_value());
+    THOR_THROW_IF_FALSE(!physicalRawLoss->getErrorOutput(2).has_value());
+
+    return PoissonNLLRunResult{outputLoss, predictionGradient};
+}
+
 struct GaussianNLLRunResult {
     vector<float> loss;
     vector<float> meanGradient;
@@ -414,6 +523,26 @@ void expectClose(const vector<float>& actual, const vector<float>& expected, flo
 
 }  // namespace
 
+TEST(PoissonNLLLossApi, ConstructsWithPerExampleWeightsAndSerializesTensor) {
+    Api::Network network("poisson_nll_example_weights_api");
+    Api::Tensor predictions(Api::DataType::FP32, {4});
+    Api::Tensor labels(Api::DataType::FP32, {4});
+    Api::Tensor exampleWeights(Api::DataType::FP32, {1});
+
+    Api::PoissonNLLLoss loss = Api::PoissonNLLLoss::Builder()
+                                   .network(network)
+                                   .predictions(predictions)
+                                   .labels(labels)
+                                   .exampleWeights(exampleWeights)
+                                   .logInput(false)
+                                   .reportsRawLoss()
+                                   .build();
+
+    ASSERT_TRUE(loss.getExampleWeights().has_value());
+    EXPECT_EQ(loss.getExampleWeights().value(), exampleWeights);
+    EXPECT_TRUE(loss.architectureJson().contains("example_weights_tensor"));
+}
+
 TEST(PoissonNLLLossApi, NumericalRawLossAndBackwardGradientMatchReferenceForLogInput) {
     constexpr bool logInput = true;
     constexpr bool full = true;
@@ -448,6 +577,29 @@ TEST(PoissonNLLLossApi, NumericalRawLossAndBackwardGradientMatchReferenceForRate
 
     expectClose(actual.loss, referenceLoss, 2.0e-5f);
     expectClose(actual.predictionGradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(5.0e-3f));
+}
+
+TEST(PoissonNLLLossApi, PerExampleWeightsScaleRawLossAndBackwardGradient) {
+    constexpr bool logInput = false;
+    constexpr bool full = true;
+    constexpr float eps = 1.0e-5f;
+    vector<float> predictions{0.5f, 1.25f, 3.5f, 0.75f, 2.0f, 0.25f, 1.5f, 4.0f};
+    vector<float> labels{0.0f, 1.0f, 2.0f, 4.0f, 3.0f, 0.0f, 5.0f, 1.0f};
+    vector<float> exampleWeights{0.25f, 2.0f};
+
+    vector<float> referenceLoss = referencePoissonNLLRawLoss(predictions, labels, logInput, full, eps);
+    vector<float> referenceGradient = numericalPoissonNLLPredictionGradient(predictions, labels, logInput, full, eps);
+    constexpr size_t numFeatures = 4;
+    for (size_t i = 0; i < predictions.size(); ++i) {
+        const float weight = exampleWeights[i / numFeatures];
+        referenceLoss[i] *= weight;
+        referenceGradient[i] *= weight * Impl::Loss::getLossScalingFactor();
+    }
+
+    PoissonNLLRunResult actual =
+        runRawWeightedPoissonNLLLossNetwork(predictions, labels, exampleWeights, logInput, full, eps);
+    expectClose(actual.loss, referenceLoss, 2.0e-5f);
+    expectClose(actual.predictionGradient, referenceGradient, ThorTest::lossScaleAwareGradientTolerance(1.0e-2f));
 }
 
 TEST(GaussianNLLLossApi, NumericalRawLossAndBackwardGradientsMatchReference) {

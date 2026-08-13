@@ -73,6 +73,18 @@ void rowPartitionOffsetsToRowIds(const Tensor& offsets,
                                  uint64_t max_total_values,
                                  Stream& stream);
 
+// Materializes one FP32 absolute RoPE position per packed ragged value. Each logical row starts at
+// row_position_offsets[row] when provided, otherwise scalar_position_offset, and advances by one per value.
+// Unused packed capacity after offsets[batch_size] is zeroed. row_position_offsets is structural INT32 metadata
+// with one value per logical row.
+void rowPartitionOffsetsToRopePositionIds(const Tensor& offsets,
+                                          const Tensor* row_position_offsets,
+                                          int64_t scalar_position_offset,
+                                          Tensor& position_ids,
+                                          uint64_t batch_size,
+                                          uint64_t max_total_values,
+                                          Stream& stream);
+
 void rowPartitionValidateOffsetsDebug(const Tensor& offsets,
                                       Tensor& validation_error_bits,
                                       uint64_t batch_size,

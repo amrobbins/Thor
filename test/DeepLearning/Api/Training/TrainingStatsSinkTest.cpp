@@ -216,6 +216,29 @@ TEST(TrainingRunsStatsReporter, EmitsConfiguredRunSummaryWithoutDependingOnColum
     EXPECT_TRUE(hasLineWithAll(output, {"INFO runs[fold_1]:", "status=not_started"})) << output;
 }
 
+TEST(TrainingRunsStatsReporter, ReportsStartupWaitStates) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0});
+
+    reporter.markRunStarting("fold_0");
+    reporter.flush();
+    reporter.markRunStatus("fold_0", TrainingRunStatus::WAITING_TO_START);
+    reporter.flush();
+    reporter.markRunStatus("fold_0", TrainingRunStatus::STARTING);
+    reporter.flush();
+    reporter.markRunStatus("fold_0", TrainingRunStatus::WAITING_FOR_MEMORY);
+    reporter.flush();
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    EXPECT_TRUE(hasLineWithAll(output, {"INFO runs[fold_0]:", "status=starting"})) << output;
+    EXPECT_TRUE(hasLineWithAll(output, {"INFO runs[fold_0]:", "status=waiting_to_start"})) << output;
+    EXPECT_TRUE(hasLineWithAll(output, {"INFO runs[fold_0]:", "status=waiting_for_memory"})) << output;
+    EXPECT_TRUE(hasLineWithAll(output, {"INFO runs summary:", "waiting_to_start=1"})) << output;
+    EXPECT_TRUE(hasLineWithAll(output, {"INFO runs summary:", "waiting_for_memory=1"})) << output;
+}
+
 TEST(TrainingRunsStatsReporter, ValidationStatsUpdateValidationLossWithoutReplacingTrainingProgress) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);

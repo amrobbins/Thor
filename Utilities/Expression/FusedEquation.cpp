@@ -1134,6 +1134,24 @@ static void validateRopeEffectiveSequenceLengthDims(const ExprNode& node,
     }
 }
 
+static void validateRopePositionIdsDims(const ExprNode& node,
+                                        const std::vector<std::vector<uint64_t>>& node_dims) {
+    if (node.rope_position_ids_node == UINT32_MAX) {
+        return;
+    }
+    if (node.lhs >= node_dims.size() || node.rope_position_ids_node >= node_dims.size()) {
+        throw std::runtime_error("RoPE position ids node index is out of range.");
+    }
+    const std::vector<uint64_t>& input_dims = node_dims[node.lhs];
+    if (node.rope_sequence_axis >= input_dims.size()) {
+        throw std::runtime_error("RoPE sequence axis is out of range while validating position ids.");
+    }
+    const std::vector<uint64_t>& position_dims = node_dims[node.rope_position_ids_node];
+    if (position_dims != std::vector<uint64_t>{input_dims[node.rope_sequence_axis]}) {
+        throw std::runtime_error("RoPE explicit position ids must have shape [sequence_axis_extent].");
+    }
+}
+
 static std::vector<uint64_t> inferRaggedValuewiseExtentDims(const ExprNode& node,
                                                                const std::vector<uint64_t>& values_dims,
                                                                const std::vector<uint64_t>& offsets_dims) {
@@ -1285,6 +1303,7 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::ROPE: {
                 node_dims[i] = node_dims[node.lhs];
                 validateRopeEffectiveSequenceLengthDims(node, node_dims);
+                validateRopePositionIdsDims(node, node_dims);
                 const std::vector<uint64_t>& dims = node_dims[i];
                 if (dims.empty()) {
                     throw std::runtime_error("RoPE requires a tensor input.");
@@ -3069,6 +3088,9 @@ static void collectReferencedLocalInputSlots(const PhysicalExpression& expr, uin
     if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
         collectReferencedLocalInputSlots(expr, node.rope_effective_sequence_length_node, slots);
     }
+    if (node.op == ExprOp::ROPE && node.rope_position_ids_node != UINT32_MAX) {
+        collectReferencedLocalInputSlots(expr, node.rope_position_ids_node, slots);
+    }
 
     if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         collectReferencedLocalInputSlots(expr, node.rhs, slots);
@@ -3132,6 +3154,9 @@ static void collectReachableLocalNodes(const PhysicalExpression& expr, uint32_t 
     collectReachableLocalNodes(expr, node.lhs, nodes);
     if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
         collectReachableLocalNodes(expr, node.rope_effective_sequence_length_node, nodes);
+    }
+    if (node.op == ExprOp::ROPE && node.rope_position_ids_node != UINT32_MAX) {
+        collectReachableLocalNodes(expr, node.rope_position_ids_node, nodes);
     }
 
     if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
@@ -3539,6 +3564,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::ROPE: {
                 node_dims[i] = node_dims[node.lhs];
                 validateRopeEffectiveSequenceLengthDims(node, node_dims);
+                validateRopePositionIdsDims(node, node_dims);
                 const std::vector<uint64_t>& dims = node_dims[i];
                 if (dims.empty()) {
                     throw std::runtime_error("RoPE requires a tensor input.");
@@ -3943,6 +3969,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::ROPE: {
                 node_dims[i] = node_dims[node.lhs];
                 validateRopeEffectiveSequenceLengthDims(node, node_dims);
+                validateRopePositionIdsDims(node, node_dims);
                 const std::vector<uint64_t>& dims = node_dims[i];
                 if (dims.empty()) {
                     throw std::runtime_error("RoPE requires a tensor input.");
@@ -5137,6 +5164,10 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
             if (node.rope_effective_sequence_length_node != UINT32_MAX) {
                 auto metadata =
                     collectEffectiveInputDimsForNode(expr, node_dims, node.rope_effective_sequence_length_node);
+                mergeEffectiveInputDimsMaps(result, metadata);
+            }
+            if (node.rope_position_ids_node != UINT32_MAX) {
+                auto metadata = collectEffectiveInputDimsForNode(expr, node_dims, node.rope_position_ids_node);
                 mergeEffectiveInputDimsMaps(result, metadata);
             }
             return result;

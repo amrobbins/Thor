@@ -59,9 +59,13 @@ class PoissonNLLLoss(thor.losses.Loss):
         predictions - labels * log(predictions + eps)
 
     If full is True, the Stirling approximation term for labels > 1 is included.
+
+    example_weights may be a [1] per-example weight tensor or match predictions
+    for elementwise weighting. Weights multiply both the raw loss and the
+    prediction gradient before loss-shape reduction.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, log_input: bool = True, full: bool = False, eps: float = 9.99999993922529e-09, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None) -> None:
+    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, log_input: bool = True, full: bool = False, eps: float = 9.99999993922529e-09, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
         """Construct a Poisson negative log-likelihood loss."""
 
     @property

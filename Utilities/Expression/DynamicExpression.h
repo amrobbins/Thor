@@ -50,6 +50,11 @@ struct DynamicExpressionBuild {
     // zero is reserved for the primary fields above.
     std::unordered_map<DynamicExpressionVariantId, DynamicExpressionVariant> execution_variants;
     std::optional<DynamicExpressionVariantId> evaluation_variant_id;
+
+    // Input tensors consumed by pre_forward_hook but intentionally not bound into the
+    // fused equation. Kept last so existing positional aggregate initializers remain
+    // source-compatible.
+    std::unordered_map<std::string, Tensor> pre_forward_only_inputs;
 };
 
 class PreparedDynamicExpression {
@@ -66,6 +71,18 @@ class PreparedDynamicExpression {
         validateTensorMap(build_.stamp_inputs, stream_, true, "stamp input");
         validateTensorScalarMap(build_.tensor_scalar_inputs, stream_, "tensor scalar input");
         validateTensorMap(build_.preallocated_outputs, stream_, false, "preallocated output");
+        validateTensorMap(build_.pre_forward_only_inputs, stream_, false, "pre-forward-only input");
+        for (const auto& [name, tensor] : build_.pre_forward_only_inputs) {
+            (void)tensor;
+            if (build_.stamp_inputs.contains(name)) {
+                throw std::invalid_argument("PreparedDynamicExpression pre-forward-only input '" + name +
+                                            "' is also present in stamp inputs.");
+            }
+        }
+        if (!build_.pre_forward_only_inputs.empty() && !build_.pre_forward_hook) {
+            throw std::invalid_argument(
+                "PreparedDynamicExpression pre-forward-only inputs require a pre-forward hook.");
+        }
         for (const auto& [variant_id, variant] : build_.execution_variants) {
             if (variant_id == kPrimaryDynamicExpressionVariant) {
                 throw std::invalid_argument("PreparedDynamicExpression execution variant zero is reserved for the primary equation.");
@@ -253,6 +270,8 @@ class PreparedDynamicExpression {
     }
 
     [[nodiscard]] const TensorMap& stampInputs() const { return build_.stamp_inputs; }
+
+    [[nodiscard]] const TensorMap& preForwardOnlyInputs() const { return build_.pre_forward_only_inputs; }
 
     [[nodiscard]] const TensorScalarMap& tensorScalarInputs() const {
         return tensorScalarInputsForVariant(kPrimaryDynamicExpressionVariant);

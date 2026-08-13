@@ -764,6 +764,48 @@ TEST(Flatten, BackwardAliasPreservesInputDescriptor) {
     LayerTestHelper::tearDownNetwork(layers);
 }
 
+TEST(Flatten, BackwardAliasReplacementPreservesInputDescriptor) {
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    Tensor sourceGpu(gpuPlacement, TensorDescriptor(DataType::FP16, {2, 3, 4, 5}));
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
+    layers.push_back(make_shared<NoOpLayer>());
+    layers.push_back(make_shared<Flatten>(2));
+    layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
+
+    LayerTestHelper::connectNetwork(layers);
+
+    auto upstream = dynamic_pointer_cast<NoOpLayer>(layers[1]);
+    auto flatten = dynamic_pointer_cast<Flatten>(layers[2]);
+    ASSERT_NE(upstream, nullptr);
+    ASSERT_NE(flatten, nullptr);
+    ASSERT_TRUE(flatten->getErrorInput().has_value());
+    ASSERT_TRUE(flatten->getErrorOutput().has_value());
+
+    // TensorFanout performs this kind of replacement during compile when only
+    // one downstream consumer carries a gradient. The replacement tensor uses
+    // the flattened/output descriptor; Flatten must re-expose the original
+    // input descriptor before forwarding that storage upstream.
+    Tensor replacement = flatten->getErrorInput().value().clone();
+    const auto oldErrorInput = flatten->getErrorInput();
+    flatten->replaceErrorInput(oldErrorInput, replacement);
+
+    ASSERT_TRUE(flatten->getErrorInput().has_value());
+    ASSERT_TRUE(flatten->getErrorOutput().has_value());
+    ASSERT_TRUE(upstream->getErrorInput().has_value());
+    EXPECT_EQ(flatten->getErrorInput().value().getDimensions(), (vector<unsigned long>{2, 60}));
+    EXPECT_EQ(flatten->getErrorOutput().value().getDimensions(), (vector<unsigned long>{2, 3, 4, 5}));
+    EXPECT_EQ(upstream->getErrorInput().value().getDimensions(), (vector<unsigned long>{2, 3, 4, 5}));
+    EXPECT_EQ(flatten->getErrorInput().value().getMemPtr(), replacement.getMemPtr());
+    EXPECT_EQ(flatten->getErrorOutput().value().getMemPtr(), replacement.getMemPtr());
+    EXPECT_EQ(upstream->getErrorInput().value().getMemPtr(), replacement.getMemPtr());
+
+    LayerTestHelper::initializeNetwork(layers);
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+
 TEST(Reshape, BackwardAliasPreservesInputDescriptor) {
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     TensorDescriptor sourceDescriptor(DataType::FP16, {2, 3, 4, 5});
@@ -814,6 +856,47 @@ TEST(Reshape, BackwardAliasPreservesInputDescriptor) {
 
     LayerTestHelper::tearDownNetwork(layers);
 }
+
+TEST(Reshape, BackwardAliasReplacementPreservesInputDescriptor) {
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    Tensor sourceGpu(gpuPlacement, TensorDescriptor(DataType::FP16, {2, 3, 4, 5}));
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
+    layers.push_back(make_shared<NoOpLayer>());
+    layers.push_back(make_shared<Reshape>(vector<unsigned long>{2, 12, 5}));
+    layers.push_back(make_shared<BackpropDescriptorSinkLayer>());
+
+    LayerTestHelper::connectNetwork(layers);
+
+    auto upstream = dynamic_pointer_cast<NoOpLayer>(layers[1]);
+    auto reshape = dynamic_pointer_cast<Reshape>(layers[2]);
+    ASSERT_NE(upstream, nullptr);
+    ASSERT_NE(reshape, nullptr);
+    ASSERT_TRUE(reshape->getErrorInput().has_value());
+    ASSERT_TRUE(reshape->getErrorOutput().has_value());
+
+    // Reproduce the late replacement performed by TensorFanout::compileImpl().
+    // The downstream replacement has the reshape output descriptor, but the
+    // upstream layer must continue to receive the original input descriptor.
+    Tensor replacement = reshape->getErrorInput().value().clone();
+    const auto oldErrorInput = reshape->getErrorInput();
+    reshape->replaceErrorInput(oldErrorInput, replacement);
+
+    ASSERT_TRUE(reshape->getErrorInput().has_value());
+    ASSERT_TRUE(reshape->getErrorOutput().has_value());
+    ASSERT_TRUE(upstream->getErrorInput().has_value());
+    EXPECT_EQ(reshape->getErrorInput().value().getDimensions(), (vector<unsigned long>{2, 12, 5}));
+    EXPECT_EQ(reshape->getErrorOutput().value().getDimensions(), (vector<unsigned long>{2, 3, 4, 5}));
+    EXPECT_EQ(upstream->getErrorInput().value().getDimensions(), (vector<unsigned long>{2, 3, 4, 5}));
+    EXPECT_EQ(reshape->getErrorInput().value().getMemPtr(), replacement.getMemPtr());
+    EXPECT_EQ(reshape->getErrorOutput().value().getMemPtr(), replacement.getMemPtr());
+    EXPECT_EQ(upstream->getErrorInput().value().getMemPtr(), replacement.getMemPtr());
+
+    LayerTestHelper::initializeNetwork(layers);
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
 
 TEST(Flatten, FlattensCorrectly) {
     srand(time(NULL));

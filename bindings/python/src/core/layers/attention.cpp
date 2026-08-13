@@ -206,7 +206,11 @@ void bind_attention(nb::module_& layers) {
            nb::object context_input,
            std::optional<Tensor> score_bias_input,
            nb::object epilogue,
-           nb::object epilogue_inputs) {
+           nb::object epilogue_inputs,
+           std::optional<int64_t> rope_query_position_offset,
+           std::optional<int64_t> rope_key_position_offset,
+           std::optional<Tensor> rope_query_position_offsets,
+           std::optional<Tensor> rope_key_position_offsets) {
             if (num_heads == 0) {
                 throw nb::value_error("Attention instance: num_heads must be > 0.");
             }
@@ -228,6 +232,11 @@ void bind_attention(nb::module_& layers) {
             if (query_sequence_lengths.has_value() != key_value_sequence_lengths.has_value()) {
                 throw nb::value_error(
                     "Attention instance: query_sequence_lengths and key_value_sequence_lengths must be provided together.");
+            }
+            if (!use_rope && (rope_query_position_offset.has_value() || rope_key_position_offset.has_value() ||
+                              rope_query_position_offsets.has_value() || rope_key_position_offsets.has_value())) {
+                throw nb::value_error(
+                    "Attention instance: RoPE position offsets require use_rope=True.");
             }
             Attention::Builder builder;
             builder.network(network);
@@ -303,6 +312,18 @@ void bind_attention(nb::module_& layers) {
                 rope_options.long_rope_short_factors = std::move(rope_long_rope_short_factors);
                 rope_options.long_rope_long_factors = std::move(rope_long_rope_long_factors);
                 builder.ropeOptions(std::move(rope_options));
+                if (rope_query_position_offset.has_value()) {
+                    builder.queryRopePositionOffset(rope_query_position_offset.value());
+                }
+                if (rope_key_position_offset.has_value()) {
+                    builder.keyRopePositionOffset(rope_key_position_offset.value());
+                }
+                if (rope_query_position_offsets.has_value()) {
+                    builder.queryRopePositionOffsetsInput(rope_query_position_offsets.value());
+                }
+                if (rope_key_position_offsets.has_value()) {
+                    builder.keyRopePositionOffsetsInput(rope_key_position_offsets.value());
+                }
             }
             if (rope_in_place) {
                 builder.ropeInPlace(true);
@@ -370,6 +391,10 @@ void bind_attention(nb::module_& layers) {
         "score_bias_input"_a.none() = nb::none(),
         "epilogue"_a.none() = nb::none(),
         "epilogue_inputs"_a.none() = nb::none(),
+        "rope_query_position_offset"_a.none() = nb::none(),
+        "rope_key_position_offset"_a.none() = nb::none(),
+        "rope_query_position_offsets"_a.none() = nb::none(),
+        "rope_key_position_offsets"_a.none() = nb::none(),
         R"nbdoc(
 Public transformer attention layer built from learned Q/K/V/O projections and the
 cuDNN scaled-dot-product attention stage.
@@ -394,9 +419,16 @@ Supported features for FP16/BF16:
   ``num_key_value_heads``.
 * RoPE with ``none``, ``linear``, ``dynamic_ntk``, ``yarn``, ``longrope``, and
   ``llama3`` scaling parameterizations.
-  Dynamic-NTK and LongRoPE currently require the maximum possible sequence length plus
-  positive position offset, and ``rope_original_max_position_embeddings`` itself, to be
-  at most 16,777,216 so their FP32 sequence-length metadata remains exact.
+  ``rope_position_offset`` is the shared Q/K origin. Cross-attention may override it
+  independently with ``rope_query_position_offset`` and ``rope_key_position_offset``.
+  Ragged attention may instead provide per-row absolute origins through the INT32
+  logical-[1] ``rope_query_position_offsets`` and ``rope_key_position_offsets`` inputs;
+  a supplied per-row input replaces the scalar origin for that side. Q and K still
+  share the same rotary basis/scaling parameters. Dynamic-NTK and LongRoPE use
+  FP32 positional metadata, so absolute positions/extents and
+  ``rope_original_max_position_embeddings`` must remain at most 16,777,216 for exact
+  integer representation. Thor validates this statically for scalar origins; values
+  supplied through per-row origin tensors must obey the same bound at runtime.
 * Masks: ``none``, ``causal_top_left``, ``causal_bottom_right``,
   ``sliding_window_top_left``, and ``sliding_window_bottom_right``.
 * ALiBi only with causal/sliding diagonal masks and ``diagonal_right_bound == 0``;
@@ -415,9 +447,10 @@ Supported features for FP16/BF16:
   together, both int32 logical ``[1]`` tensors.
 * ``feature_input`` and ``context_input`` may be ``thor.RaggedTensor`` values.
   Ragged self-attention preserves the query row partition on output. Ragged
-  cross-attention may use independent Q/KV partitions when RoPE is disabled;
-  with RoPE, Q and KV must share the same row partition because row partitions
-  alone do not define a cross-attention positional coordinate system.
+  cross-attention may use independent Q/KV partitions with or without RoPE. RoPE
+  positions reset at each packed row; scalar origins apply to every row, while the
+  optional per-row origin tensors allow each logical Q/K row pair to occupy its own
+  absolute timeline. Q and K need only have the same logical batch size.
 
 Important combination rules:
 
@@ -456,6 +489,10 @@ Important combination rules:
     attention.def("get_has_bias", &Attention::getHasBias);
     attention.def("get_use_rope", &Attention::getUseRope);
     attention.def("get_rope_in_place", &Attention::getRopeInPlace);
+    attention.def("get_rope_query_position_offset", &Attention::getQueryRopePositionOffset);
+    attention.def("get_rope_key_position_offset", &Attention::getKeyRopePositionOffset);
+    attention.def("get_rope_query_position_offsets_input", [](Attention& self) { return self.getQueryRopePositionOffsetsInput(); });
+    attention.def("get_rope_key_position_offsets_input", [](Attention& self) { return self.getKeyRopePositionOffsetsInput(); });
     attention.def("get_rope_scaling_kind", [](Attention& self) { return rotaryScalingKindName(self.getRopeOptions().scaling_kind); });
     attention.def("get_rope_scaling_factor", [](Attention& self) { return self.getRopeOptions().scaling_factor; });
     attention.def("get_rope_original_max_position_embeddings",

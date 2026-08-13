@@ -407,10 +407,6 @@ def test_gemm_vector_bias_backward_reduces_to_bias_shape_numerical(dtype: thor.D
     # to [out], not broadcast a [out] zero tensor up to [batch, out]. This guards the
     # preallocated-output shape failure seen in the FC optimizer tests.
     expected_stage_kinds = ["Reduction"]
-    if dtype == thor.DataType.fp16:
-        # Reductions materialize FP32 by contract. Preserve the public FP16
-        # gradient dtype with an explicit terminal conversion stage.
-        expected_stage_kinds.append("FusedKernel")
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == expected_stage_kinds
 
     stamped = bwd_eq.stamp(inputs_gpu, stream)
@@ -628,9 +624,7 @@ def test_fused_gelu_matmul_bias_backward_exposes_bias_grad_from_same_matmul_stag
 
     stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
     assert any(
-        kind.startswith("Matmul") and "backward_epilogue=dgelu" in kind and "bgrad=1" in kind
-        for kind in stage_kinds
-    )
+        kind.startswith("Matmul") and "backward_epilogue=dgelu" in kind and "bgrad=1" in kind for kind in stage_kinds)
     assert "Reduction" not in stage_kinds
 
     pre_np = x_np @ w1_np + b1_np

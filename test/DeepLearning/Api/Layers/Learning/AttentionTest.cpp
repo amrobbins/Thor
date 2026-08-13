@@ -327,6 +327,8 @@ struct AttentionReferenceCase {
     bool hasBias = false;
     bool useRope = false;
     Impl::RotaryPositionEmbeddingOptions ropeOptions;
+    optional<int64_t> queryRopePositionOffset;
+    optional<int64_t> keyRopePositionOffset;
     Impl::AttentionMaskKind maskKind = Impl::AttentionMaskKind::None;
     int64_t diagonalLeftBound = 0;
     int64_t diagonalRightBound = 0;
@@ -578,8 +580,13 @@ vector<float> projectToBhsd(const vector<float>& featureInput,
     return out;
 }
 
-void applyRopeInPlace(vector<float>& bhsd, const AttentionReferenceCase& c, uint32_t heads, uint32_t dim) {
+void applyRopeInPlace(vector<float>& bhsd,
+                      const AttentionReferenceCase& c,
+                      uint32_t heads,
+                      uint32_t dim,
+                      int64_t positionOffset) {
     Impl::RotaryPositionEmbeddingOptions opts = c.ropeOptions;
+    opts.position_offset = positionOffset;
     const uint64_t rotaryDim = opts.rotary_dim == 0 ? dim : opts.rotary_dim;
     ASSERT_TRUE(rotaryDim > 0 && rotaryDim <= dim && (rotaryDim % 2) == 0);
 
@@ -596,9 +603,13 @@ void applyRopeInPlace(vector<float>& bhsd, const AttentionReferenceCase& c, uint
                     c.sequenceLengths.empty()
                         ? c.sequenceLength
                         : static_cast<uint32_t>(*std::max_element(c.sequenceLengths.begin(), c.sequenceLengths.end()));
+                const int64_t queryOffset = c.queryRopePositionOffset.value_or(c.ropeOptions.position_offset);
+                const int64_t keyOffset = c.keyRopePositionOffset.value_or(c.ropeOptions.position_offset);
                 const float ropeSeqLen = std::max(
-                    static_cast<float>(logicalBatchMaxSequenceLength) +
-                        static_cast<float>(std::max<int64_t>(0, opts.position_offset)),
+                    std::max(static_cast<float>(logicalBatchMaxSequenceLength) +
+                                 static_cast<float>(std::max<int64_t>(0, queryOffset)),
+                             static_cast<float>(logicalBatchMaxSequenceLength) +
+                                 static_cast<float>(std::max<int64_t>(0, keyOffset))),
                     1.0f);
                 if (opts.scaling_kind == Impl::RotaryScalingKind::DynamicNTK) {
                     const float ropeOriginalMax = static_cast<float>(opts.original_max_position_embeddings);
@@ -862,8 +873,8 @@ vector<float> attentionLayerReference(const AttentionReferenceInputs& inputs, co
                                     c.valueDim,
                                     c.dataType);
     if (c.useRope) {
-        applyRopeInPlace(q, c, c.numHeads, c.headDim);
-        applyRopeInPlace(k, c, c.numKeyValueHeads, c.headDim);
+        applyRopeInPlace(q, c, c.numHeads, c.headDim, c.queryRopePositionOffset.value_or(c.ropeOptions.position_offset));
+        applyRopeInPlace(k, c, c.numKeyValueHeads, c.headDim, c.keyRopePositionOffset.value_or(c.ropeOptions.position_offset));
     }
     return outputProjectionReference(mergeBhsdToBsd(sdpaReference(q, k, v, c), c), inputs, c);
 }
@@ -901,8 +912,8 @@ vector<float> attentionLayerReferenceWithRopeAppliedAfterBadBshdReinterpret(cons
     // generic dense op after BSHD projection storage has been reinterpreted as dense [B,H,S,D] metadata.
     // The subsequent SDPA call still reads the buffer through BSHD strides, so the sequence/head positions
     // seen by RoPE and attention disagree.
-    applyRopeInPlace(qStorage, c, c.numHeads, c.headDim);
-    applyRopeInPlace(kStorage, c, c.numKeyValueHeads, c.headDim);
+    applyRopeInPlace(qStorage, c, c.numHeads, c.headDim, c.queryRopePositionOffset.value_or(c.ropeOptions.position_offset));
+    applyRopeInPlace(kStorage, c, c.numKeyValueHeads, c.headDim, c.keyRopePositionOffset.value_or(c.ropeOptions.position_offset));
 
     q = bshdStorageToBhsdSemantic(qStorage, c.batchSize, c.sequenceLength, c.numHeads, c.headDim);
     k = bshdStorageToBhsdSemantic(kStorage, c.batchSize, c.sequenceLength, c.numKeyValueHeads, c.headDim);
@@ -965,6 +976,12 @@ void runAttentionApiReferenceCaseWithInputs(const std::string& networkName,
         .attentionScale(c.attentionScale);
     if (c.useRope) {
         builder.ropeOptions(c.ropeOptions);
+        if (c.queryRopePositionOffset.has_value()) {
+            builder.queryRopePositionOffset(c.queryRopePositionOffset.value());
+        }
+        if (c.keyRopePositionOffset.has_value()) {
+            builder.keyRopePositionOffset(c.keyRopePositionOffset.value());
+        }
     }
     Api::Attention attention = builder.build();
     Api::NetworkOutput output = Api::NetworkOutput::Builder()
@@ -1685,6 +1702,25 @@ TEST(AttentionApi, DynamicNtkRejectsSequenceLengthMetadataBeyondFp32ExactInteger
                       .ropeOptions(rope)
                       .build()),
                  std::invalid_argument);
+
+    Api::Network independentOverflowNetwork("attention_api_dynamic_ntk_independent_query_offset_fp32_overflow");
+    Api::NetworkInput independentOverflowInput = Api::NetworkInput::Builder()
+                                                     .network(independentOverflowNetwork)
+                                                     .name("tokens")
+                                                     .dimensions({64, 8})
+                                                     .dataType(DataType::BF16)
+                                                     .build();
+    rope.position_offset = 0;
+    EXPECT_THROW((Api::Attention::Builder()
+                      .network(independentOverflowNetwork)
+                      .featureInput(independentOverflowInput.getFeatureOutput().value())
+                      .numHeads(1)
+                      .headDim(8)
+                      .ropeOptions(rope)
+                      .queryRopePositionOffset(static_cast<int64_t>(maxExactFp32Integer - 63))
+                      .keyRopePositionOffset(0)
+                      .build()),
+                 std::invalid_argument);
 }
 
 TEST(AttentionApi, RaggedDynamicNtkRejectsCapacityBeyondFp32ExactIntegerRange) {
@@ -1811,6 +1847,68 @@ TEST(AttentionApi, BuildsComposedGqaAttentionWithExplicitDimsBiasAndRope) {
     EXPECT_EQ(attention.getDropoutOffset(), 987654321LL);
 }
 
+TEST(AttentionApi, RopePositionOffsetsSupportSharedConvenienceAndIndependentQueryKeyOrigins) {
+    Api::Network network("attention_api_independent_rope_position_offsets");
+    Api::NetworkInput query =
+        Api::NetworkInput::Builder().network(network).name("query").dimensions({3, 32}).dataType(DataType::BF16).build();
+    Api::NetworkInput context =
+        Api::NetworkInput::Builder().network(network).name("context").dimensions({5, 32}).dataType(DataType::BF16).build();
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = 8;
+    rope.position_offset = 7;
+    rope.output_dtype = DataType::BF16;
+    rope.compute_dtype = DataType::FP32;
+
+    Api::Attention legacyShared = Api::Attention::Builder()
+                                      .network(network)
+                                      .featureInput(query.getFeatureOutput().value())
+                                      .contextInput(context.getFeatureOutput().value())
+                                      .numHeads(4)
+                                      .headDim(8)
+                                      .ropeOptions(rope)
+                                      .build();
+    EXPECT_EQ(legacyShared.getQueryRopePositionOffset(), 7);
+    EXPECT_EQ(legacyShared.getKeyRopePositionOffset(), 7);
+
+    Api::Attention explicitShared = Api::Attention::Builder()
+                                        .network(network)
+                                        .featureInput(query.getFeatureOutput().value())
+                                        .contextInput(context.getFeatureOutput().value())
+                                        .numHeads(4)
+                                        .headDim(8)
+                                        .ropeOptions(rope)
+                                        .ropePositionOffset(11)
+                                        .build();
+    EXPECT_EQ(explicitShared.getQueryRopePositionOffset(), 11);
+    EXPECT_EQ(explicitShared.getKeyRopePositionOffset(), 11);
+    EXPECT_EQ(explicitShared.architectureJson().at("rope_options").at("position_offset").get<int64_t>(), 11);
+
+    Api::Attention independent = Api::Attention::Builder()
+                                     .network(network)
+                                     .featureInput(query.getFeatureOutput().value())
+                                     .contextInput(context.getFeatureOutput().value())
+                                     .numHeads(4)
+                                     .headDim(8)
+                                     .ropeOptions(rope)
+                                     .queryRopePositionOffset(100)
+                                     .keyRopePositionOffset(0)
+                                     .build();
+    EXPECT_EQ(independent.getQueryRopePositionOffset(), 100);
+    EXPECT_EQ(independent.getKeyRopePositionOffset(), 0);
+    const nlohmann::json arch = independent.architectureJson();
+    EXPECT_EQ(arch.at("rope_query_position_offset").get<int64_t>(), 100);
+    EXPECT_EQ(arch.at("rope_key_position_offset").get<int64_t>(), 0);
+
+    const uint32_t beforeRestoreCount = network.getNumTrainableLayers();
+    shared_ptr<thor_file::TarReader> archiveReader;
+    Api::Attention::deserialize(archiveReader, arch, &network);
+    auto restored = dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(beforeRestoreCount));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_EQ(restored->getQueryRopePositionOffset(), 100);
+    EXPECT_EQ(restored->getKeyRopePositionOffset(), 0);
+}
+
 
 TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveReleaseCriticalOptions) {
     Api::Network network("attention_api_architecture_json_and_deserialize_preserve_release_critical_options");
@@ -1862,6 +1960,8 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveReleaseCriticalOptions)
     EXPECT_TRUE(arch.at("has_bias").get<bool>());
     EXPECT_TRUE(arch.at("use_rope").get<bool>());
     EXPECT_FALSE(arch.at("rope_in_place").get<bool>());
+    EXPECT_EQ(arch.at("rope_query_position_offset").get<int64_t>(), 7);
+    EXPECT_EQ(arch.at("rope_key_position_offset").get<int64_t>(), 7);
     EXPECT_EQ(arch.at("mask_kind").get<string>(), "sliding_window_top_left");
     EXPECT_EQ(arch.at("diagonal_left_bound").get<int64_t>(), 3);
     EXPECT_TRUE(arch.at("use_alibi_mask").get<bool>());
@@ -1901,6 +2001,8 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveReleaseCriticalOptions)
     EXPECT_EQ(restored->getOutputFeatures(), attention.getOutputFeatures());
     EXPECT_EQ(restored->getHasBias(), attention.getHasBias());
     EXPECT_EQ(restored->getUseRope(), attention.getUseRope());
+    EXPECT_EQ(restored->getQueryRopePositionOffset(), 7);
+    EXPECT_EQ(restored->getKeyRopePositionOffset(), 7);
     EXPECT_EQ(restored->getMaskKind(), attention.getMaskKind());
     EXPECT_EQ(restored->getDiagonalLeftBound(), attention.getDiagonalLeftBound());
     EXPECT_EQ(restored->getDiagonalRightBound(), attention.getDiagonalRightBound());
@@ -1923,6 +2025,16 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveReleaseCriticalOptions)
     EXPECT_DOUBLE_EQ(restoredRope.attention_factor.value(), rope.attention_factor.value());
     EXPECT_EQ(restoredRope.long_rope_short_factors, rope.long_rope_short_factors);
     EXPECT_EQ(restoredRope.long_rope_long_factors, rope.long_rope_long_factors);
+
+    nlohmann::json legacyArch = arch;
+    legacyArch.erase("rope_query_position_offset");
+    legacyArch.erase("rope_key_position_offset");
+    const uint32_t beforeLegacyRestoreCount = network.getNumTrainableLayers();
+    Api::Attention::deserialize(archiveReader, legacyArch, &network);
+    auto legacyRestored = dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(beforeLegacyRestoreCount));
+    ASSERT_NE(legacyRestored, nullptr);
+    EXPECT_EQ(legacyRestored->getQueryRopePositionOffset(), rope.position_offset);
+    EXPECT_EQ(legacyRestored->getKeyRopePositionOffset(), rope.position_offset);
 }
 
 TEST(AttentionApi, RejectsProjectionStorageDtypeMismatchInsteadOfDeferringToExpressionCompilation) {
@@ -2172,7 +2284,7 @@ TEST(AttentionApi, BuildsRaggedCrossAttentionWithIndependentPartitionsWithoutRop
               (std::vector<std::string>{"feature_input", "context_input", "query_row_partition", "key_value_row_partition"}));
 }
 
-TEST(AttentionApi, RaggedRopeAllowsSelfAttentionAndRejectsIndependentCrossPartitions) {
+TEST(AttentionApi, RaggedRopeAllowsSelfAttentionAndIndependentCrossPartitions) {
     Impl::RotaryPositionEmbeddingOptions rope;
     rope.rotary_dim = 16;
     rope.base = 10000.0;
@@ -2198,11 +2310,12 @@ TEST(AttentionApi, RaggedRopeAllowsSelfAttentionAndRejectsIndependentCrossPartit
     }
 
     {
-        Api::Network network("attention_api_ragged_rope_rejects_independent_cross_partitions");
+        Api::Network network("attention_api_ragged_rope_allows_independent_cross_partitions");
         Api::RaggedTensor query = Api::RaggedNetworkInput::Builder()
                                       .network(network)
                                       .name("query")
                                       .valuesDataType(DataType::FP16)
+                                      .offsetsDataType(DataType::UINT32)
                                       .trailingDimensions({64})
                                       .maxTotalValues(8)
                                       .batchSize(2)
@@ -2211,20 +2324,343 @@ TEST(AttentionApi, RaggedRopeAllowsSelfAttentionAndRejectsIndependentCrossPartit
                                         .network(network)
                                         .name("context")
                                         .valuesDataType(DataType::FP16)
+                                        .offsetsDataType(DataType::UINT64)
                                         .trailingDimensions({64})
                                         .maxTotalValues(10)
                                         .batchSize(2)
                                         .build();
+        Api::Attention attention = Api::Attention::Builder()
+                                       .network(network)
+                                       .featureInput(query)
+                                       .contextInput(context)
+                                       .numHeads(4)
+                                       .headDim(16)
+                                       .ropeOptions(rope)
+                                       .build();
+        EXPECT_EQ(attention.getInputNames(),
+                  (std::vector<std::string>{"feature_input",
+                                            "context_input",
+                                            "query_row_partition",
+                                            "key_value_row_partition"}));
+        EXPECT_EQ(attention.getRaggedFeatureInput()->getOffsetsDataType(), DataType::UINT32);
+        EXPECT_EQ(attention.getRaggedContextInput()->getOffsetsDataType(), DataType::UINT64);
+    }
+}
+
+TEST(AttentionApi, RaggedRopePerRowOriginsArePublicInputsAndRoundTripThroughArchitectureJson) {
+    Api::Network network("attention_api_ragged_rope_per_row_origins_round_trip");
+    Api::RaggedTensor query = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("query")
+                                  .valuesDataType(DataType::FP16)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({32})
+                                  .maxTotalValues(5)
+                                  .batchSize(2)
+                                  .build();
+    Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("context")
+                                    .valuesDataType(DataType::FP16)
+                                    .offsetsDataType(DataType::UINT64)
+                                    .trailingDimensions({32})
+                                    .maxTotalValues(7)
+                                    .batchSize(2)
+                                    .build();
+    Api::NetworkInput queryOrigins =
+        Api::NetworkInput::Builder().network(network).name("query_origins").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput keyOrigins =
+        Api::NetworkInput::Builder().network(network).name("key_origins").dimensions({1}).dataType(DataType::INT32).build();
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = 8;
+    rope.base = 10000.0;
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(query)
+                                   .contextInput(context)
+                                   .numHeads(4)
+                                   .headDim(8)
+                                   .ropeOptions(rope)
+                                   .queryRopePositionOffsetsInput(queryOrigins.getFeatureOutput().value())
+                                   .keyRopePositionOffsetsInput(keyOrigins.getFeatureOutput().value())
+                                   .build();
+
+    ASSERT_TRUE(attention.getQueryRopePositionOffsetsInput().has_value());
+    ASSERT_TRUE(attention.getKeyRopePositionOffsetsInput().has_value());
+    EXPECT_EQ(attention.getQueryRopePositionOffsetsInput().value(), queryOrigins.getFeatureOutput().value());
+    EXPECT_EQ(attention.getKeyRopePositionOffsetsInput().value(), keyOrigins.getFeatureOutput().value());
+    EXPECT_EQ(attention.getInputNames(),
+              (std::vector<std::string>{"feature_input",
+                                        "context_input",
+                                        "query_row_partition",
+                                        "key_value_row_partition",
+                                        "query_rope_position_offsets",
+                                        "key_rope_position_offsets"}));
+
+    const nlohmann::json arch = attention.architectureJson();
+    EXPECT_TRUE(arch.at("use_query_rope_position_offsets").get<bool>());
+    EXPECT_TRUE(arch.at("use_key_rope_position_offsets").get<bool>());
+    EXPECT_EQ(arch.at("query_rope_position_offsets_input").at("id").get<uint64_t>(),
+              queryOrigins.getFeatureOutput()->getOriginalId());
+    EXPECT_EQ(arch.at("key_rope_position_offsets_input").at("id").get<uint64_t>(),
+              keyOrigins.getFeatureOutput()->getOriginalId());
+
+    const uint32_t beforeRestoreCount = network.getNumTrainableLayers();
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    Api::Attention::deserialize(archiveReader, arch, &network);
+    auto restored = std::dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(beforeRestoreCount));
+    ASSERT_NE(restored, nullptr);
+    ASSERT_TRUE(restored->getQueryRopePositionOffsetsInput().has_value());
+    ASSERT_TRUE(restored->getKeyRopePositionOffsetsInput().has_value());
+    EXPECT_EQ(restored->getQueryRopePositionOffsetsInput().value(), queryOrigins.getFeatureOutput().value());
+    EXPECT_EQ(restored->getKeyRopePositionOffsetsInput().value(), keyOrigins.getFeatureOutput().value());
+    EXPECT_EQ(restored->getRaggedFeatureInput()->getOffsetsDataType(), DataType::UINT32);
+    EXPECT_EQ(restored->getRaggedContextInput()->getOffsetsDataType(), DataType::UINT64);
+}
+
+TEST(AttentionApi, RaggedRopePerRowOriginsRejectInvalidInputsAndDenseMode) {
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = 8;
+
+    {
+        Api::Network network("attention_api_dense_rejects_per_row_rope_origins");
+        Api::NetworkInput tokens =
+            Api::NetworkInput::Builder().network(network).name("tokens").dimensions({4, 32}).dataType(DataType::FP16).build();
+        Api::NetworkInput origins =
+            Api::NetworkInput::Builder().network(network).name("origins").dimensions({1}).dataType(DataType::INT32).build();
+        EXPECT_THROW(Api::Attention::Builder()
+                         .network(network)
+                         .featureInput(tokens.getFeatureOutput().value())
+                         .numHeads(4)
+                         .headDim(8)
+                         .ropeOptions(rope)
+                         .queryRopePositionOffsetsInput(origins.getFeatureOutput().value())
+                         .build(),
+                     std::invalid_argument);
+    }
+
+    {
+        Api::Network network("attention_api_ragged_rejects_invalid_per_row_rope_origins");
+        Api::RaggedTensor tokens = Api::RaggedNetworkInput::Builder()
+                                       .network(network)
+                                       .name("tokens")
+                                       .valuesDataType(DataType::FP16)
+                                       .trailingDimensions({32})
+                                       .maxTotalValues(6)
+                                       .batchSize(2)
+                                       .build();
+        Api::NetworkInput badDtype =
+            Api::NetworkInput::Builder().network(network).name("bad_dtype").dimensions({1}).dataType(DataType::FP16).build();
+        Api::NetworkInput badShape =
+            Api::NetworkInput::Builder().network(network).name("bad_shape").dimensions({2}).dataType(DataType::INT32).build();
+
+        EXPECT_THROW(Api::Attention::Builder()
+                         .network(network)
+                         .featureInput(tokens)
+                         .numHeads(4)
+                         .headDim(8)
+                         .ropeOptions(rope)
+                         .queryRopePositionOffsetsInput(badDtype.getFeatureOutput().value())
+                         .build(),
+                     std::invalid_argument);
+        EXPECT_THROW(Api::Attention::Builder()
+                         .network(network)
+                         .featureInput(tokens)
+                         .numHeads(4)
+                         .headDim(8)
+                         .ropeOptions(rope)
+                         .queryRopePositionOffsetsInput(badShape.getFeatureOutput().value())
+                         .build(),
+                     std::invalid_argument);
+    }
+
+    {
+        Api::Network network("attention_api_ragged_rope_requires_matching_logical_row_counts");
+        Api::RaggedTensor query = Api::RaggedNetworkInput::Builder()
+                                      .network(network)
+                                      .name("query")
+                                      .valuesDataType(DataType::FP16)
+                                      .trailingDimensions({32})
+                                      .maxTotalValues(6)
+                                      .batchSize(2)
+                                      .build();
+        Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
+                                        .network(network)
+                                        .name("context")
+                                        .valuesDataType(DataType::FP16)
+                                        .trailingDimensions({32})
+                                        .maxTotalValues(9)
+                                        .batchSize(3)
+                                        .build();
+
         EXPECT_THROW(Api::Attention::Builder()
                          .network(network)
                          .featureInput(query)
                          .contextInput(context)
                          .numHeads(4)
-                         .headDim(16)
+                         .headDim(8)
                          .ropeOptions(rope)
                          .build(),
                      std::invalid_argument);
     }
+}
+
+TEST(AttentionApi, RaggedCrossAttentionRopePerRowOriginsExecuteWithIndependentPartitions) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t features = 16;
+    constexpr uint64_t queryCapacity = 3;
+    constexpr uint64_t keyCapacity = 6;
+
+    Api::Network network("attention_api_ragged_cross_attention_rope_per_row_origins_execute");
+    Api::RaggedTensor query = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("query")
+                                  .valuesDataType(DataType::FP16)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({features})
+                                  .maxTotalValues(queryCapacity)
+                                  .batchSize(batchSize)
+                                  .build();
+    Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("context")
+                                    .valuesDataType(DataType::FP16)
+                                    .offsetsDataType(DataType::UINT64)
+                                    .trailingDimensions({features})
+                                    .maxTotalValues(keyCapacity)
+                                    .batchSize(batchSize)
+                                    .build();
+    Api::NetworkInput queryOrigins =
+        Api::NetworkInput::Builder().network(network).name("query_origins").dimensions({1}).dataType(DataType::INT32).build();
+    Api::NetworkInput keyOrigins =
+        Api::NetworkInput::Builder().network(network).name("key_origins").dimensions({1}).dataType(DataType::INT32).build();
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = features;
+    rope.base = 10000.0;
+    rope.output_dtype = DataType::FP16;
+    rope.compute_dtype = DataType::FP32;
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(query)
+                                   .contextInput(context)
+                                   .numHeads(1)
+                                   .headDim(features)
+                                   .valueDim(features)
+                                   .outputFeatures(features)
+                                   .hasBias(false)
+                                   .ropeOptions(rope)
+                                   .queryRopePositionOffsetsInput(queryOrigins.getFeatureOutput().value())
+                                   .keyRopePositionOffsetsInput(keyOrigins.getFeatureOutput().value())
+                                   .attentionScale(2.0)
+                                   .weightsDataType(DataType::FP16)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::FP16)
+                                   .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(attention.getRaggedFeatureOutput()->getValues())
+                                    .dataType(DataType::FP16)
+                                    .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, true);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+
+    auto physicalAttention =
+        std::dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
+    auto physicalOutput =
+        std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
+    auto queryValuesInput = stamped.getNamedInput("query.values");
+    auto queryOffsetsInput = stamped.getNamedInput("query.offsets");
+    auto contextValuesInput = stamped.getNamedInput("context.values");
+    auto contextOffsetsInput = stamped.getNamedInput("context.offsets");
+    auto queryOriginsInput = stamped.getNamedInput("query_origins");
+    auto keyOriginsInput = stamped.getNamedInput("key_origins");
+    ASSERT_NE(physicalAttention, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(queryValuesInput, nullptr);
+    ASSERT_NE(queryOffsetsInput, nullptr);
+    ASSERT_NE(contextValuesInput, nullptr);
+    ASSERT_NE(contextOffsetsInput, nullptr);
+    ASSERT_NE(queryOriginsInput, nullptr);
+    ASSERT_NE(keyOriginsInput, nullptr);
+
+    Stream stream = physicalAttention->getStreams()[0];
+    const std::vector<float> identity = scaledIdentity(features, 1.0f);
+    setParameterTensor(physicalAttention->getParameter("query_weights"), identity, stream);
+    setParameterTensor(physicalAttention->getParameter("key_weights"), identity, stream);
+    setParameterTensor(physicalAttention->getParameter("value_weights"), identity, stream);
+    setParameterTensor(physicalAttention->getParameter("output_weights"), identity, stream);
+    stream.synchronize();
+
+    std::vector<float> queryValues(queryCapacity * features, 0.0f);
+    // The two logical query rows are intentionally identical. Correct row-local RoPE therefore produces
+    // identical outputs for them when their key/value rows and origins are likewise identical.
+    queryValues[0 * features + 0] = 1.0f;
+    queryValues[1 * features + 0] = 1.0f;
+
+    std::vector<float> contextValues(keyCapacity * features, 0.0f);
+    for (uint64_t row = 0; row < batchSize; ++row) {
+        const uint64_t first = row * 2;
+        const uint64_t second = first + 1;
+        contextValues[first * features + 0] = 1.0f;
+        contextValues[second * features + 0] = 1.0f;
+        // Q has zero in this rotary lane, so this does not affect Q·K. It does make the V mixture
+        // visibly change when the Q origin moves relative to the two key positions.
+        contextValues[second * features + 1] = 4.0f;
+    }
+
+    Impl::Tensor queryValuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {queryCapacity, features}));
+    Impl::Tensor contextValuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {keyCapacity, features}));
+    Impl::Tensor queryOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    Impl::Tensor contextOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT64, {batchSize + 1}));
+    Impl::Tensor queryOriginsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {batchSize, 1}));
+    Impl::Tensor keyOriginsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {batchSize, 1}));
+    writeCpuTensor(queryValuesHost, queryValues);
+    writeCpuTensor(contextValuesHost, contextValues);
+    writeCpuUint32Tensor(queryOffsetsHost, {0U, 1U, 2U});
+    writeCpuUint64Tensor(contextOffsetsHost, {0ULL, 2ULL, 4ULL});
+
+    auto runWithOrigins = [&](const std::vector<int32_t>& queryOriginValues,
+                              const std::vector<int32_t>& keyOriginValues) -> std::vector<float> {
+        writeCpuInt32Tensor(queryOriginsHost, queryOriginValues);
+        writeCpuInt32Tensor(keyOriginsHost, keyOriginValues);
+        queryValuesInput->forward(queryValuesHost, false, batchSize);
+        contextValuesInput->forward(contextValuesHost, false, batchSize);
+        queryOffsetsInput->forward(queryOffsetsHost, false, batchSize);
+        contextOffsetsInput->forward(contextOffsetsHost, false, batchSize);
+        queryOriginsInput->forward(queryOriginsHost, false, batchSize);
+        keyOriginsInput->forward(keyOriginsHost, false, batchSize);
+        Event ready = physicalOutput->getOutputReadyEvent();
+        ready.synchronize();
+        return readCpuTensor(physicalOutput->getFeatureOutput().value());
+    };
+
+    const std::vector<float> zeroOrigins = runWithOrigins({0, 0}, {0, 0});
+    const std::vector<float> commonPerRowShift = runWithOrigins({5, 11}, {5, 11});
+    const std::vector<float> queryShiftedByOne = runWithOrigins({1, 1}, {0, 0});
+
+    ASSERT_GE(zeroOrigins.size(), static_cast<size_t>(2 * features));
+    // Distinct packed starts are Q:[0,1,2] and K:[0,2,4]. If packed indices leaked into RoPE positions,
+    // the otherwise-identical second row would not match the first.
+    for (uint32_t d = 0; d < features; ++d) {
+        EXPECT_NEAR(zeroOrigins[d], zeroOrigins[features + d], 5.0e-2f) << "feature " << d;
+    }
+
+    const std::vector<float> zeroActive(zeroOrigins.begin(), zeroOrigins.begin() + 2 * features);
+    const std::vector<float> commonShiftActive(commonPerRowShift.begin(), commonPerRowShift.begin() + 2 * features);
+    const std::vector<float> queryShiftedActive(queryShiftedByOne.begin(), queryShiftedByOne.begin() + 2 * features);
+    // RoPE depends only on Q/K relative phase, so a common per-row absolute shift must leave attention unchanged.
+    expectAllClose(commonShiftActive, zeroActive, 5.0e-2f, 5.0e-2f);
+    // Moving only Q by one position changes the relative phase and must visibly change the value mixture.
+    expectNotAllClose(queryShiftedActive, zeroActive, 8.0e-2f, 8.0e-2f);
 }
 
 TEST(AttentionApi, RaggedCrossAttentionWithRopeAllowsSharedPartition) {
@@ -2934,6 +3370,36 @@ TEST(AttentionApi, ForwardRopeMhaMatchesFullCpuReference) {
     c.dataType = DataType::FP16;
 
     runAttentionApiReferenceCase("attention_api_forward_rope_mha_matches_full_cpu_reference", c, 1.2e-1f, 1.2e-1f);
+}
+
+TEST(AttentionApi, ForwardRopeIndependentQueryKeyPositionOffsetsMatchFullCpuReference) {
+    AttentionReferenceCase c;
+    c.batchSize = 2;
+    c.sequenceLength = 4;
+    c.numHeads = 2;
+    c.numKeyValueHeads = 2;
+    c.headDim = 16;
+    c.valueDim = 16;
+    c.inputFeatures = 32;
+    c.outputFeatures = 32;
+    c.hasBias = false;
+    c.useRope = true;
+    c.ropeOptions.rotary_dim = 16;
+    c.ropeOptions.base = 37.0;
+    c.ropeOptions.position_offset = 3;
+    c.ropeOptions.scaling_kind = Impl::RotaryScalingKind::DynamicNTK;
+    c.ropeOptions.scaling_factor = 2.0;
+    c.ropeOptions.original_max_position_embeddings = 4;
+    c.ropeOptions.output_dtype = DataType::FP16;
+    c.ropeOptions.compute_dtype = DataType::FP32;
+    c.queryRopePositionOffset = 11;
+    c.keyRopePositionOffset = 0;
+    c.maskKind = Impl::AttentionMaskKind::None;
+    c.attentionScale = 0.25f;
+    c.dataType = DataType::FP16;
+
+    runAttentionApiReferenceCase(
+        "attention_api_forward_rope_independent_query_key_offsets_match_full_cpu_reference", c, 1.2e-1f, 1.2e-1f);
 }
 
 TEST(AttentionApi, ForwardRopeLayoutSentinelMatchesFullCpuReference) {

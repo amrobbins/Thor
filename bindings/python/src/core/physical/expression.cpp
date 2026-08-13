@@ -20,6 +20,7 @@
 #include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/CudaKernelSecurity.h"
 #include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
 #include "bindings/python/src/core/cast.h"
@@ -1881,12 +1882,13 @@ thor.physical.Expression
     };
 
     auto parse_reduction_output_dtype =
-        [](std::string_view op_name, std::optional<DataType> output_dtype) -> std::optional<DataType> {
-        if (output_dtype.has_value() && output_dtype.value() != DataType::FP32) {
+        [](std::string_view op_name, std::optional<DataType> output_dtype) -> DataType {
+        const DataType requested = output_dtype.value_or(DataType::FP32);
+        if (!ThorImplementation::isSupportedFusionFloatingType(requested)) {
             throw std::runtime_error(std::string(op_name) +
-                                     ": reduction outputs are always thor.DataType.fp32; cast the result explicitly afterward");
+                                     ": output_dtype must be a supported floating-point reduction storage dtype");
         }
-        return DataType::FP32;
+        return requested;
     };
 
     auto parse_arg_reduction_output_dtype = [](std::string_view op_name, std::optional<DataType> output_dtype) -> std::optional<DataType> {
@@ -1909,7 +1911,8 @@ Args:
     compute_dtype: thor.DataType: default thor.DataType.fp32
         The data type used during compute. Currently only fp32 is supported for this operation.
     output_dtype: thor.DataType: default thor.DataType.fp32
-        Reduction stages always materialize fp32, regardless of input dtype. Add an explicit cast after the reduction to narrow it.
+        Storage dtype for the materialized reduction result. Accumulation/finalization remain fp32;
+        low-precision outputs are converted directly at the final reduction store.
 )doc";
 
     static constexpr std::string_view kArgReductionDocTemplate = R"doc(
@@ -1937,9 +1940,10 @@ Args:
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
-            parse_reduction_output_dtype("reduce_sum", output_dtype);
+            const DataType resolved_output_dtype = parse_reduction_output_dtype("reduce_sum", output_dtype);
             return expr.reduce_sum(
-                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_sum", compute_dtype));
+                       parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_sum", compute_dtype))
+                .withOutputDType(resolved_output_dtype);
         },
         "expr"_a,
         "axis"_a = nb::none(),
@@ -1957,9 +1961,10 @@ Args:
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
-            parse_reduction_output_dtype("reduce_prod", output_dtype);
+            const DataType resolved_output_dtype = parse_reduction_output_dtype("reduce_prod", output_dtype);
             return expr.reduce_prod(
-                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_prod", compute_dtype));
+                       parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_prod", compute_dtype))
+                .withOutputDType(resolved_output_dtype);
         },
         "expr"_a,
         "axis"_a = nb::none(),
@@ -1977,9 +1982,10 @@ Args:
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
-            parse_reduction_output_dtype("reduce_min", output_dtype);
+            const DataType resolved_output_dtype = parse_reduction_output_dtype("reduce_min", output_dtype);
             return expr.reduce_min(
-                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_min", compute_dtype));
+                       parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_min", compute_dtype))
+                .withOutputDType(resolved_output_dtype);
         },
         "expr"_a,
         "axis"_a = nb::none(),
@@ -1997,9 +2003,10 @@ Args:
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
-            parse_reduction_output_dtype("reduce_max", output_dtype);
+            const DataType resolved_output_dtype = parse_reduction_output_dtype("reduce_max", output_dtype);
             return expr.reduce_max(
-                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_max", compute_dtype));
+                       parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_max", compute_dtype))
+                .withOutputDType(resolved_output_dtype);
         },
         "expr"_a,
         "axis"_a = nb::none(),
@@ -2055,9 +2062,10 @@ Args:
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
-            parse_reduction_output_dtype("reduce_mean", output_dtype);
+            const DataType resolved_output_dtype = parse_reduction_output_dtype("reduce_mean", output_dtype);
             return expr.reduce_mean(
-                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_mean", compute_dtype));
+                       parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_mean", compute_dtype))
+                .withOutputDType(resolved_output_dtype);
         },
         "expr"_a,
         "axis"_a = nb::none(),
@@ -2075,9 +2083,10 @@ Args:
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
-            parse_reduction_output_dtype("reduce_norm1", output_dtype);
+            const DataType resolved_output_dtype = parse_reduction_output_dtype("reduce_norm1", output_dtype);
             return expr.reduce_norm1(
-                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_norm1", compute_dtype));
+                       parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_norm1", compute_dtype))
+                .withOutputDType(resolved_output_dtype);
         },
         "expr"_a,
         "axis"_a = nb::none(),
@@ -2095,9 +2104,10 @@ Args:
             nb::object squeeze,
             std::optional<DataType> compute_dtype,
             std::optional<DataType> output_dtype) {
-            parse_reduction_output_dtype("reduce_norm2", output_dtype);
+            const DataType resolved_output_dtype = parse_reduction_output_dtype("reduce_norm2", output_dtype);
             return expr.reduce_norm2(
-                parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_norm", compute_dtype));
+                       parse_axes(axis), parse_squeeze_axes(squeeze), parse_reduction_compute_dtype("reduce_norm", compute_dtype))
+                .withOutputDType(resolved_output_dtype);
         },
         "expr"_a,
         "axis"_a = nb::none(),

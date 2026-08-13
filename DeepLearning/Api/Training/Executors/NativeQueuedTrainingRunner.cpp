@@ -2999,6 +2999,11 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
     const std::vector<std::string>& aggregateLossTensorNames,
     uint64_t currentEpoch) {
     constexpr int startupDeviceNum = 0;
+    auto notifyStatus = [&](TrainingRunStatus status) {
+        if (request.statusCallback) {
+            request.statusCallback(status);
+        }
+    };
     std::optional<ThorImplementation::DeviceStartupReservation>
         reservedStartupTurn;
     auto reserveStartupTurn = [&]() {
@@ -3010,6 +3015,7 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
         reservedStartupTurn.emplace(
             ThorImplementation::reserveDeviceStartupTurn(startupDeviceNum));
     };
+    notifyStatus(TrainingRunStatus::WAITING_TO_START);
     if (request.initialDeviceStartupSequencer) {
         request.initialDeviceStartupSequencer(reserveStartupTurn);
     } else {
@@ -3025,6 +3031,7 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
     // TrainingRuns declaration-order sequencer has released its mutex.
     ThorImplementation::DeviceStartupGuard startupGuard =
         reservedStartupTurn->acquire();
+    notifyStatus(TrainingRunStatus::STARTING);
     bool emptyDeviceRetryAlreadyUsed = false;
     bool forceSourceSession = false;
     bool deviceDatasetFallbackAlreadyUsed = false;
@@ -3223,6 +3230,7 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
                 startupDeviceNum);
 
             startupGuard.complete(*attempt.placedNetwork);
+            notifyStatus(TrainingRunStatus::RUNNING);
             return attempt;
         } catch (...) {
             startupFailure = std::current_exception();
@@ -3301,11 +3309,13 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
         if (disposition == ThorImplementation::
                                DeviceStartupMemoryFailureDisposition::
                                    WAIT_FOR_MODEL_RELEASE) {
+            notifyStatus(TrainingRunStatus::WAITING_FOR_MEMORY);
             startupGuard.waitForModelRelease(
                 [&]() {
                     request.cancellationToken.throwIfCancellationRequested();
                 },
                 retainedPlacement);
+            notifyStatus(TrainingRunStatus::STARTING);
             reopenSessionIfNeeded();
             // Keep the same FIFO turn and retry from a completely fresh
             // placement and, once batch execution began, a fresh session.

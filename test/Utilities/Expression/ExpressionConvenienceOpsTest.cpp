@@ -3180,6 +3180,42 @@ TEST(ExpressionConvenienceOps, StridedViewBackwardComposesWithBroadcastChildWith
                 0.0f, 0.0f, -0.75f});
 }
 
+TEST(ExpressionConvenienceOps, MultipleStridedViewBackwardNodesSharingBroadcastChildFuseWithoutCodegenNameCollisions) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor upstream = makeGpuTensor({2}, {1.5f, -0.75f}, stream);
+
+    auto dy = Expression::input("dy");
+    auto expanded = dy.unsqueeze({1}) + Expression::fill(0.0, {2, 3}, DataType::FP32);
+    auto diagonal = expanded.stridedViewBackward(
+        /*source_dims=*/{2, 3, 3},
+        /*view_dims=*/{2, 3},
+        /*view_strides_elements=*/{9, 4},
+        /*view_element_offset=*/0);
+    auto first_column = expanded.stridedViewBackward(
+        /*source_dims=*/{2, 3, 3},
+        /*view_dims=*/{2, 3},
+        /*view_strides_elements=*/{9, 3},
+        /*view_element_offset=*/0);
+    auto expressionOutputs = Expression::outputs({{"dx", diagonal + first_column}});
+    FusedEquation equation = FusedEquation::compile(expressionOutputs.physicalOutputs(), 0);
+
+    auto plan = equation.prepareConvenienceRunPlanForInputs({{"dy", upstream}});
+    ASSERT_EQ(plan->stages.size(), 1u);
+
+    Tensor gradient(gpuPlacement, TensorDescriptor(DataType::FP32, {2, 3, 3}));
+    ASSERT_NO_THROW(equation.run({{"dy", upstream}}, gradient, stream));
+
+    expectNear(copyToCpuValues(gradient, stream),
+               {3.0f, 0.0f, 0.0f,
+                1.5f, 1.5f, 0.0f,
+                1.5f, 0.0f, 1.5f,
+                -1.5f, 0.0f, 0.0f,
+                -0.75f, -0.75f, 0.0f,
+                -0.75f, 0.0f, -0.75f});
+}
+
 TEST(ExpressionConvenienceOps, StridedViewBackwardBroadcastChildHonorsRuntimeStridedInputLayout) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -3514,4 +3550,80 @@ TEST(ExpressionConvenienceOps, RuntimeEffectiveSequenceLengthMustBeScalarMetadat
         {{"y", Expression::input("x").rotaryPositionEmbeddingWithEffectiveSequenceLength(Expression::input("lengths"), options)}});
     FusedEquation equation = FusedEquation::compile(outputs.physicalOutputs(), 0);
     EXPECT_THROW((void)equation.stamp({{"x", x}, {"lengths", lengths}}, stream), std::runtime_error);
+}
+
+TEST(ExpressionConvenienceOps, RopeExplicitPositionIdsMatchRowLocalScalarOffsetForwardAndBackward) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    std::vector<float> xValues(16);
+    std::vector<float> dyValues(16);
+    for (uint64_t i = 0; i < xValues.size(); ++i) {
+        xValues[i] = 0.07f * static_cast<float>(i + 1);
+        dyValues[i] = 0.03f * static_cast<float>((i % 5) + 1);
+    }
+    Tensor packed = makeGpuTensor({4, 1, 4}, xValues, stream);
+    Tensor denseRows = makeGpuTensor({2, 2, 1, 4}, xValues, stream);
+    Tensor positions = makeGpuTensor({4}, {7.0f, 8.0f, 7.0f, 8.0f}, stream);
+    Tensor packedDy = makeGpuTensor({4, 1, 4}, dyValues, stream);
+    Tensor denseDy = makeGpuTensor({2, 2, 1, 4}, dyValues, stream);
+
+    RotaryPositionEmbeddingOptions packedOptions;
+    packedOptions.sequence_axis = 0;
+    packedOptions.head_dim_axis = 2;
+    packedOptions.rotary_dim = 4;
+    packedOptions.output_dtype = DataType::FP32;
+    packedOptions.compute_dtype = DataType::FP32;
+
+    RotaryPositionEmbeddingOptions denseOptions = packedOptions;
+    denseOptions.sequence_axis = 1;
+    denseOptions.head_dim_axis = 3;
+    denseOptions.position_offset = 7;
+
+    Outputs packedOutputs = Expression::outputs({{
+        "y", Expression::input("x").rotaryPositionEmbeddingWithPositionIds(Expression::input("positions"), packedOptions)}});
+    Outputs denseOutputs = Expression::outputs({{"y", Expression::input("x").rotaryPositionEmbedding(denseOptions)}});
+
+    const auto packedValues =
+        copyToCpuValues(runExpressionOutput(packedOutputs, {{"x", packed}, {"positions", positions}}, "y", stream), stream);
+    const auto denseValues = copyToCpuValues(runExpressionOutput(denseOutputs, {{"x", denseRows}}, "y", stream), stream);
+    expectNear(packedValues, denseValues, 2.0e-5f);
+
+    const auto packedGradients =
+        runBackwardValues(packedOutputs, {{"x", packed}, {"positions", positions}, {"dy", packedDy}}, {"x"}, "dy", stream);
+    const auto denseGradients = runBackwardValues(denseOutputs, {{"x", denseRows}, {"dy", denseDy}}, {"x"}, "dy", stream);
+    expectNear(packedGradients.at("x_grad"), denseGradients.at("x_grad"), 2.0e-5f);
+}
+
+TEST(ExpressionConvenienceOps, RopeExplicitPositionIdsRoundTripExpressionDefinition) {
+    RotaryPositionEmbeddingOptions options;
+    options.sequence_axis = 0;
+    options.head_dim_axis = 2;
+    options.rotary_dim = 4;
+    options.output_dtype = DataType::FP32;
+    options.compute_dtype = DataType::FP32;
+
+    Outputs outputs = Expression::outputs(
+        {{"y", Expression::input("x").rotaryPositionEmbeddingWithPositionIds(Expression::input("positions"), options)}});
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(outputs);
+    const nlohmann::json payload = definition.architectureJson();
+    ExpressionDefinition loaded = ExpressionDefinition::deserialize(payload);
+
+    EXPECT_EQ(loaded.architectureJson(), payload);
+    EXPECT_EQ(loaded.canonical_hash, definition.canonical_hash);
+    bool foundExplicitPositions = false;
+    for (const ExprNode& node : loaded.outputs.expr->nodes) {
+        if (node.op == ExprOp::ROPE) {
+            EXPECT_NE(node.rope_position_ids_node, UINT32_MAX);
+            foundExplicitPositions = true;
+        }
+    }
+    EXPECT_TRUE(foundExplicitPositions);
+}
+
+TEST(ExpressionConvenienceOps, RopeExplicitPositionIdsRejectNonzeroScalarOffset) {
+    RotaryPositionEmbeddingOptions options;
+    options.position_offset = 3;
+    EXPECT_THROW((void)Expression::input("x").rotaryPositionEmbeddingWithPositionIds(Expression::input("positions"), options),
+                 std::runtime_error);
 }

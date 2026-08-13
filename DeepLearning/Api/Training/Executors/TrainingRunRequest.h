@@ -7,6 +7,7 @@
 #include "DeepLearning/Api/Training/ModelSelectionScore.h"
 #include "DeepLearning/Api/Training/Observers/LineStatsReporter.h"
 #include "DeepLearning/Api/Training/Cancellation/TrainingCancellation.h"
+#include "DeepLearning/Api/Training/Results/TrainingRunResult.h"
 
 #include <cstdint>
 #include <functional>
@@ -43,6 +44,8 @@ struct TrainingRuntimeConfig {
 // only after the run-order sequencer has released its own mutex.
 using InitialDeviceStartupSequencer =
     std::function<void(const std::function<void()>& reserveStartupTurn)>;
+
+using TrainingRunStatusCallback = std::function<void(TrainingRunStatus)>;
 
 struct NamedValidationSession {
     std::string name{};
@@ -123,6 +126,12 @@ struct TrainingRunRequest {
     // immediately before obtaining the device startup guard. Standalone fits and
     // non-native executors leave this empty.
     InitialDeviceStartupSequencer initialDeviceStartupSequencer{};
+
+    // TrainingRuns supplies this callback so native startup can expose the
+    // distinction between actively starting, waiting for the serialized startup
+    // turn, and waiting for resident GPU memory to be released. Standalone fits
+    // leave it empty.
+    TrainingRunStatusCallback statusCallback{};
 
     // FIT preserves the normal train+validate epoch sequence.  EVALUATE reuses the
     // same placed-network/native-queued machinery for one or more forward-only

@@ -278,10 +278,12 @@ DomainLossFixture addAllNewDomainLosses(Network& network) {
     {
         auto mean = fp32Input(network, "poisson_mean", {3});
         auto target = fp32Input(network, "poisson_target", {3});
+        auto exampleWeights = fp32Input(network, "poisson_example_weights", {1});
         PoissonNLLLoss loss = PoissonNLLLoss::Builder()
                                   .network(network)
                                   .predictions(mean.getFeatureOutput().value())
                                   .labels(target.getFeatureOutput().value())
+                                  .exampleWeights(exampleWeights.getFeatureOutput().value())
                                   .logInput(false)
                                   .full(true)
                                   .eps(3.0e-4f)

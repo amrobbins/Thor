@@ -2271,6 +2271,7 @@ def test_attention_ragged_offsets_require_canonical_dtype_and_batch_plus_one_sha
     with pytest.raises(RuntimeError, match=r"ragged q_offsets shape must be \[B \+ 1\]"):
         eq.stamp(bad_shape, stream)
 
+
 @pytest.mark.cuda
 def test_attention_ragged_offsets_reject_unsupported_combinations_early():
     dtype = thor.DataType.fp16
@@ -2370,6 +2371,7 @@ def test_attention_ragged_offsets_reject_unsupported_combinations_early():
         output_dtype=dtype,
         compute_dtype=thor.DataType.fp32,
     )
+
 
 @pytest.mark.cuda
 def test_attention_ragged_offsets_feeds_fused_epilogue_and_multi_output_reuses_stage():
@@ -2951,8 +2953,7 @@ def test_attention_ragged_offsets_support_distinct_value_head_dim():
     )
     q_lengths = np.asarray([4, 3], dtype=np.int32)
     kv_lengths = np.asarray([4, 2], dtype=np.int32)
-    expected = _attention_reference(
-        q_np, k_np, v_np, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
+    expected = _attention_reference(q_np, k_np, v_np, scale=scale, q_seq_len=q_lengths, kv_seq_len=kv_lengths)
     expected_storage = _pack_bshd_ragged_storage(_cast_reference_to_storage_dtype(expected, dtype), q_lengths)
 
     stream = Stream(gpu_num=0)
@@ -2969,6 +2970,7 @@ def test_attention_ragged_offsets_support_distinct_value_head_dim():
     stamped.run()
     got_storage = _copy_to_host(stamped.output(), dtype, stream)
     _assert_packed_bshd_ragged_close(got_storage, expected_storage, q_lengths)
+
 
 @pytest.mark.cuda
 def test_attention_invalid_gqa_head_ratio_raises_before_execution():
@@ -5040,20 +5042,13 @@ def test_attention_experimental_cudnn_ragged_additive_bias_backward_surface(
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
-        "q":
-            _host_to_gpu(q_storage, dtype, stream),
-        "k":
-            _host_to_gpu(k_storage, dtype, stream),
-        "v":
-            _host_to_gpu(v_storage, dtype, stream),
-        "bias":
-            _host_to_gpu(bias_np, thor.DataType.fp32, stream),
-        "q_offsets":
-            _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
-        "kv_offsets":
-            _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
-        upstream_name:
-            _host_to_gpu(dO_storage, dtype, stream),
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_storage, dtype, stream),
+        "v": _host_to_gpu(v_storage, dtype, stream),
+        "bias": _host_to_gpu(bias_np, thor.DataType.fp32, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
+        upstream_name: _host_to_gpu(dO_storage, dtype, stream),
     }
 
     try:
@@ -5708,22 +5703,15 @@ def test_attention_experimental_cudnn_ragged_paged_kv_forward_support_surface(mo
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
-        "q":
-            _host_to_gpu(q_storage, dtype, stream),
-        "k":
-            _host_to_gpu(k_container_bshd, dtype, stream),
-        "v":
-            _host_to_gpu(v_container_bshd, dtype, stream),
-        "q_offsets":
-            _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
+        "q": _host_to_gpu(q_storage, dtype, stream),
+        "k": _host_to_gpu(k_container_bshd, dtype, stream),
+        "v": _host_to_gpu(v_container_bshd, dtype, stream),
+        "q_offsets": _host_to_gpu(_canonical_row_offsets(q_lengths, np.uint32), thor.DataType.uint32, stream),
         # If cuDNN eventually supports this combination, both row partitions remain canonical token offsets while
         # the page tables identify physical K/V blocks.
-        "kv_offsets":
-            _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
-        "page_table_k":
-            _host_to_gpu(page_table, thor.DataType.int32, stream),
-        "page_table_v":
-            _host_to_gpu(page_table, thor.DataType.int32, stream),
+        "kv_offsets": _host_to_gpu(_canonical_row_offsets(kv_lengths, np.uint64), thor.DataType.uint64, stream),
+        "page_table_k": _host_to_gpu(page_table, thor.DataType.int32, stream),
+        "page_table_v": _host_to_gpu(page_table, thor.DataType.int32, stream),
     }
 
     try:
@@ -6495,10 +6483,7 @@ def test_attention_compile_backward_dbias_with_broadcast_additive_bias_shapes_ma
         "bias_grad": list(bias_shape)
     }
     expected_stage_kinds = (
-        ["AttentionBackward"]
-        if bias_shape == (2, 4, 64, 64)
-        else ["AttentionBackward", "Reduction", "FusedKernel"]
-    )
+        ["AttentionBackward"] if bias_shape == (2, 4, 64, 64) else ["AttentionBackward", "Reduction"])
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == expected_stage_kinds
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()
@@ -6560,10 +6545,7 @@ def test_attention_compile_backward_qkv_and_dbias_with_broadcast_additive_bias_s
         "bias_grad": list(bias_shape),
     }
     expected_stage_kinds = (
-        ["AttentionBackward"]
-        if bias_shape == (2, 4, 64, 64)
-        else ["AttentionBackward", "Reduction", "FusedKernel"]
-    )
+        ["AttentionBackward"] if bias_shape == (2, 4, 64, 64) else ["AttentionBackward", "Reduction"])
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == expected_stage_kinds
     stamped = bwd_eq.stamp(inputs_gpu, stream)
     stamped.run()

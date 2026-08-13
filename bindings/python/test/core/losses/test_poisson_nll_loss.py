@@ -138,6 +138,48 @@ def test_poisson_nll_loss_rejects_mismatched_labels():
         thor.losses.distribution.PoissonNLLLoss(n, preds, labels)
 
 
+
+
+def test_poisson_nll_loss_constructs_with_per_example_weights():
+    n = _net()
+    preds = _tensor_1d(4)
+    labels = _tensor_1d(4)
+    weights = _tensor_1d(1, thor.DataType.fp32)
+
+    loss = thor.losses.distribution.PoissonNLLLoss(n, preds, labels, example_weights=weights)
+    assert loss.example_weights == weights
+    assert loss.get_example_weights() == weights
+
+
+def test_poisson_nll_loss_constructs_with_elementwise_weights():
+    n = _net()
+    preds = _tensor_1d(4)
+    labels = _tensor_1d(4)
+    weights = _tensor_1d(4, thor.DataType.fp16)
+
+    loss = thor.losses.distribution.PoissonNLLLoss(n, preds, labels, example_weights=weights)
+    assert loss.example_weights == weights
+
+
+def test_poisson_nll_loss_rejects_bad_example_weights():
+    n = _net()
+    preds = _tensor_1d(4)
+    labels = _tensor_1d(4)
+
+    with pytest.raises(ValueError, match=r"example_weights must be distinct"):
+        thor.losses.distribution.PoissonNLLLoss(n, preds, labels, example_weights=labels)
+
+    with pytest.raises(ValueError, match=r"example_weights must use fp16 or fp32 dtype"):
+        thor.losses.distribution.PoissonNLLLoss(
+            n, preds, labels, example_weights=_tensor_1d(1, thor.DataType.uint32)
+        )
+
+    with pytest.raises(ValueError, match=r"example_weights dimensions must be \[1\]"):
+        thor.losses.distribution.PoissonNLLLoss(
+            n, preds, labels, example_weights=_tensor_1d(3, thor.DataType.fp32)
+        )
+
+
 def test_poisson_nll_loss_accepts_multidimensional_predictions():
     n = _net()
     preds = thor.Tensor([2, 3, 4], thor.DataType.fp32)

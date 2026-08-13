@@ -14,6 +14,7 @@
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "Utilities/Expression/AutoDiff.h"
+#include "Utilities/Expression/ExpressionDTypeResolution.h"
 using namespace std;
 
 namespace ThorImplementation {
@@ -96,6 +97,90 @@ PreparedDynamicExpression::TensorMap filterTensorInputsForPhysicalOutputs(
         filteredInputs.emplace(input.name, it->second);
     }
     return filteredInputs;
+}
+
+PhysicalOutputs clonePhysicalOutputsTreeForBackwardDTypeResolution(const PhysicalOutputs& outputs) {
+    PhysicalOutputs cloned;
+    if (outputs.expr != nullptr) {
+        cloned.expr = std::make_shared<PhysicalExpression>(*outputs.expr);
+    }
+    cloned.outputs = outputs.outputs;
+    if (outputs.conditional != nullptr) {
+        cloned.conditional = std::make_shared<PhysicalConditionalOutputs>();
+        cloned.conditional->predicate = clonePhysicalOutputsTreeForBackwardDTypeResolution(outputs.conditional->predicate);
+        cloned.conditional->then_branch = clonePhysicalOutputsTreeForBackwardDTypeResolution(outputs.conditional->then_branch);
+        cloned.conditional->else_branch = clonePhysicalOutputsTreeForBackwardDTypeResolution(outputs.conditional->else_branch);
+    }
+    return cloned;
+}
+
+std::vector<DataType> customLayerRuntimeInputDTypesForOutputs(
+    const PhysicalOutputs& outputs,
+    const PreparedDynamicExpression::TensorMap& tensorInputs,
+    const PreparedDynamicExpression::TensorScalarMap& tensorScalarInputs) {
+    if (outputs.expr == nullptr) {
+        return {};
+    }
+
+    std::vector<DataType> dtypes(outputs.expr->numInputs(), DataType::FP32);
+    std::vector<bool> haveDtype(outputs.expr->numInputs(), false);
+    for (const NamedInput& input : outputs.expr->inputs) {
+        if (input.slot >= dtypes.size()) {
+            throw runtime_error("CustomLayer backward dtype specialization found input slot out of range for '" + input.name + "'.");
+        }
+
+        DataType dtype = DataType::FP32;
+        switch (input.kind) {
+            case NamedInput::Kind::Tensor: {
+                auto it = tensorInputs.find(input.name);
+                if (it == tensorInputs.end()) {
+                    throw runtime_error("CustomLayer backward dtype specialization is missing tensor input '" + input.name + "'.");
+                }
+                dtype = it->second.getDataType();
+                break;
+            }
+            case NamedInput::Kind::RuntimeScalarFp32:
+                dtype = DataType::FP32;
+                break;
+            case NamedInput::Kind::TensorRuntimeScalar: {
+                auto it = tensorScalarInputs.find(input.name);
+                if (it == tensorScalarInputs.end()) {
+                    throw runtime_error("CustomLayer backward dtype specialization is missing tensor-runtime-scalar input '" +
+                                        input.name + "'.");
+                }
+                dtype = it->second.sourceDType;
+                break;
+            }
+        }
+
+        dtypes[input.slot] = dtype;
+        haveDtype[input.slot] = true;
+    }
+
+    for (size_t slot = 0; slot < haveDtype.size(); ++slot) {
+        if (!haveDtype[slot]) {
+            throw runtime_error("CustomLayer backward dtype specialization is missing runtime dtype for input slot " +
+                                std::to_string(slot) + ".");
+        }
+    }
+    return dtypes;
+}
+
+void resolveCustomLayerForwardDTypesInPlace(
+    PhysicalOutputs& outputs,
+    const PreparedDynamicExpression::TensorMap& tensorInputs,
+    const PreparedDynamicExpression::TensorScalarMap& tensorScalarInputs) {
+    if (outputs.expr == nullptr) {
+        throw runtime_error("CustomLayer backward dtype specialization requires non-null PhysicalOutputs.expr.");
+    }
+    if (!outputs.isConditional()) {
+        resolveOutputsDTypesInPlace(outputs, customLayerRuntimeInputDTypesForOutputs(outputs, tensorInputs, tensorScalarInputs));
+        return;
+    }
+
+    resolveCustomLayerForwardDTypesInPlace(outputs.conditional->predicate, tensorInputs, tensorScalarInputs);
+    resolveCustomLayerForwardDTypesInPlace(outputs.conditional->then_branch, tensorInputs, tensorScalarInputs);
+    resolveCustomLayerForwardDTypesInPlace(outputs.conditional->else_branch, tensorInputs, tensorScalarInputs);
 }
 
 std::unordered_map<uint32_t, NamedInput> inputBySlot(const PhysicalExpression& expr) {
@@ -836,8 +921,20 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
         upstreamInputDTypesByOutput.emplace(outputName, fused.predictionsTensor.getDataType());
     }
 
+    // DynamicExpression feature inputs are intentionally allowed to omit dtype annotations so one
+    // expression definition can be reused across runtime dtypes.  AutoDiff, however, must see the
+    // concrete input storage dtypes before it chooses gradient materialization dtypes.  In
+    // particular, a BF16 broadcast gradient should request a BF16-output reduction (with FP32
+    // accumulation) when the graph-level input-gradient buffer is BF16.  Differentiate a private,
+    // runtime-dtype-specialized clone so the cached forward expression remains reusable.
+    PhysicalOutputs forwardOutputs =
+        clonePhysicalOutputsTreeForBackwardDTypeResolution(app.forwardPrepared->equationForVariant(variantId).physicalOutputs());
+    resolveCustomLayerForwardDTypesInPlace(forwardOutputs,
+                                           app.forwardPrepared->stampInputs(),
+                                           app.forwardPrepared->tensorScalarInputsForVariant(variantId));
+
     if (app.fusedCustomLossGradientsByOutput.empty()) {
-        return buildBackwardOutputs(app.forwardPrepared->equationForVariant(variantId).physicalOutputs(),
+        return buildBackwardOutputs(forwardOutputs,
                                     wrtNames,
                                     app.upstreamInputNamesByOutput,
                                     upstreamInputDTypesByOutput,
@@ -845,7 +942,6 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
                                     accumulateGradOutputs);
     }
 
-    const PhysicalOutputs& forwardOutputs = app.forwardPrepared->equationForVariant(variantId).physicalOutputs();
     if (!forwardOutputs.expr) {
         throw runtime_error("CustomLayer fused CustomLoss backward requires non-null forward expression.");
     }
@@ -1477,6 +1573,14 @@ void CustomLayer::validatePreparedExpressionInputs(const PreparedDynamicExpressi
 
     std::set<std::string> actualInputNames;
     for (const auto& [name, _] : prepared.stampInputs()) {
+        actualInputNames.insert(name);
+    }
+    // DynamicExpression may legitimately consume a declared CustomLayer input only
+    // in its pre-forward hook (for example Attention's ragged RoPE row origins),
+    // while the fused equation consumes a hook-generated internal tensor instead.
+    // Such dependencies are still real layer inputs even though they must not be
+    // forwarded to FusedEquation::stamp().
+    for (const auto& [name, _] : prepared.preForwardOnlyInputs()) {
         actualInputNames.insert(name);
     }
 

@@ -19,7 +19,18 @@
 
 namespace Thor {
 
-enum class TrainingRunStatus { NOT_STARTED, RUNNING, COMPLETED, FAILED, CANCELLED, INTERRUPTED, OUT_OF_MEMORY };
+enum class TrainingRunStatus {
+    NOT_STARTED,
+    RUNNING,
+    COMPLETED,
+    FAILED,
+    CANCELLED,
+    INTERRUPTED,
+    OUT_OF_MEMORY,
+    STARTING,
+    WAITING_TO_START,
+    WAITING_FOR_MEMORY
+};
 
 enum class TrainingRunCompletionReason { COMPLETED, EARLY_COMPLETED };
 
@@ -38,6 +49,12 @@ enum class TrainingRunCompletionReason { COMPLETED, EARLY_COMPLETED };
     switch (status) {
         case TrainingRunStatus::NOT_STARTED:
             return "not_started";
+        case TrainingRunStatus::STARTING:
+            return "starting";
+        case TrainingRunStatus::WAITING_TO_START:
+            return "waiting_to_start";
+        case TrainingRunStatus::WAITING_FOR_MEMORY:
+            return "waiting_for_memory";
         case TrainingRunStatus::RUNNING:
             return "running";
         case TrainingRunStatus::COMPLETED:

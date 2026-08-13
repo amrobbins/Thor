@@ -266,6 +266,10 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
         new_node.rope_effective_sequence_length_node =
             cloneForwardSubtree(src, src_node.rope_effective_sequence_length_node, dst, old_to_new, old_cuda_to_new);
     }
+    if (src_node.op == ExprOp::ROPE && src_node.rope_position_ids_node != UINT32_MAX) {
+        new_node.rope_position_ids_node =
+            cloneForwardSubtree(src, src_node.rope_position_ids_node, dst, old_to_new, old_cuda_to_new);
+    }
 
     const uint32_t new_index = static_cast<uint32_t>(dst.nodes.size());
     dst.nodes.push_back(std::move(new_node));
@@ -472,14 +476,10 @@ static bool stageBoundaryMaterializesRequestedDType(const ExprNode& node, DataTy
         return false;
     }
 
-    if (isValueReductionOp(node.op)) {
-        // Floating reduction nodes may still carry the caller's pre-resolution
-        // output_dtype request in the autodiff graph, but dtype resolution and the
-        // compiled reduction stage deliberately materialize FP32.  A low-precision
-        // public gradient therefore needs the explicit terminal conversion below.
-        return requested_dtype == DataType::FP32;
-    }
-
+    // Dense value reductions accumulate/finalize in FP32 but can materialize the
+    // requested storage dtype directly through the CUB runtime output iterator.
+    // Treat them like every other stage boundary: if the node already declares the
+    // requested public dtype, no trailing pointwise materialization is necessary.
     return node.output_dtype.has_value() && node.output_dtype.value() == requested_dtype;
 }
 
@@ -1566,6 +1566,7 @@ class BackwardGraphBuilder {
                                     const ExprNode& forward_rope,
                                     bool inverse,
                                     uint32_t effective_sequence_length_node = UINT32_MAX,
+                                    uint32_t position_ids_node = UINT32_MAX,
                                     std::optional<DataType> output_dtype = std::nullopt,
                                     std::optional<DataType> compute_dtype = std::nullopt) {
         ExprNode node{};
@@ -1589,6 +1590,7 @@ class BackwardGraphBuilder {
         node.rope_long_rope_short_factors = forward_rope.rope_long_rope_short_factors;
         node.rope_long_rope_long_factors = forward_rope.rope_long_rope_long_factors;
         node.rope_effective_sequence_length_node = effective_sequence_length_node;
+        node.rope_position_ids_node = position_ids_node;
         node.rope_allow_in_place_materialization = false;
         if (output_dtype.has_value()) {
             node.output_dtype = output_dtype.value();
@@ -2018,6 +2020,29 @@ class BackwardGraphBuilder {
         const ExprNode& value_node = grad_expr.nodes.at(value);
         if (value_node.op == ExprOp::UNSQUEEZE && axesEqualNormalized(value_node.unsqueeze_axes, normalized_axes)) {
             return value_node.lhs;
+        }
+
+        // A dense reduction with keepdims followed immediately by squeezing only
+        // reduced axes can express the same shape directly through the reduction's
+        // native squeeze_axes contract.  Clone the node instead of mutating it so
+        // any other consumer of the keepdims reduction remains unchanged.  This is
+        // especially important for low-precision broadcast gradients: CUB can then
+        // accumulate in FP32 and store the requested BF16/FP16 result directly,
+        // without a trailing shape/materialization kernel.
+        if (isValueReductionOp(value_node.op) && value_node.squeeze_axes.empty() && !value_node.reduction_axes.empty()) {
+            bool squeezes_only_reduced_axes = true;
+            for (uint64_t axis : normalized_axes) {
+                if (std::find(value_node.reduction_axes.begin(), value_node.reduction_axes.end(), axis) ==
+                    value_node.reduction_axes.end()) {
+                    squeezes_only_reduced_axes = false;
+                    break;
+                }
+            }
+            if (squeezes_only_reduced_axes) {
+                ExprNode folded_reduction = value_node;
+                folded_reduction.squeeze_axes = normalized_axes;
+                return push(std::move(folded_reduction));
+            }
         }
 
         ExprNode node{};
@@ -4284,11 +4309,16 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         node.rope_effective_sequence_length_node == UINT32_MAX
                             ? UINT32_MAX
                             : builder.cloneForward(node.rope_effective_sequence_length_node);
+                    const uint32_t position_ids =
+                        node.rope_position_ids_node == UINT32_MAX
+                            ? UINT32_MAX
+                            : builder.cloneForward(node.rope_position_ids_node);
                     const uint32_t lhs_grad = builder.rotaryPositionEmbedding(
                         grad,
                         node,
                         !node.rope_inverse,
                         effective_sequence_length,
+                        position_ids,
                         preferredGradValueDType(forward_expr.nodes.at(node.lhs)),
                         node.compute_dtype);
                     addContributionToChild(node.lhs, lhs_grad, node_dims);

@@ -4,6 +4,7 @@
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/Expression/BatchedMatmulPlan.h"
 #include "Utilities/Expression/EquationRunner.h"
+#include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/MatmulScalarKernel.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
@@ -4574,8 +4575,8 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
                                                                 ReductionResultKind result_kind,
                                                                 const Tensor& input,
                                                                 int device_num) {
-    if (output_dtype != DataType::FP32) {
-        throw std::runtime_error("Thor reduction stages require FP32 value output.");
+    if (result_kind == ReductionResultKind::Value && !isSupportedFusionFloatingType(output_dtype)) {
+        throw std::runtime_error("Thor reduction stage requested unsupported floating-point output dtype.");
     }
     if (compute_dtype != DataType::FP32) {
         throw std::runtime_error("Thor reduction stages require FP32 compute.");

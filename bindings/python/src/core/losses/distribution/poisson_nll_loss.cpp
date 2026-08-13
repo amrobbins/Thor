@@ -1,6 +1,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <optional>
+#include <vector>
 
 #include "DeepLearning/Api/Layers/Loss/PoissonNLLLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -81,6 +82,28 @@ void validatePoissonNLLLossArguments(const string &loss_name,
     }
     validateReportedLossShape(reported_loss_shape, loss_name);
 }
+
+void maybeSetPoissonExampleWeights(PoissonNLLLoss::Builder &builder,
+                                   Tensor predictions,
+                                   Tensor labels,
+                                   std::optional<Tensor> example_weights) {
+    if (!example_weights.has_value())
+        return;
+    if (example_weights.value() == predictions || example_weights.value() == labels)
+        throw nb::value_error("PoissonNLLLoss instance: example_weights must be distinct from predictions and labels.");
+    if (!isFloatingDType(example_weights.value().getDataType()))
+        throw nb::value_error("PoissonNLLLoss instance: example_weights must use fp16 or fp32 dtype.");
+    const std::vector<uint64_t>& dims = example_weights.value().getDimensions();
+    if (dims != std::vector<uint64_t>{1} && dims != predictions.getDimensions()) {
+        string error_message =
+            "PoissonNLLLoss instance: example_weights dimensions must be [1] for per-example weights or match predictions. "
+            "example_weights tensor is " +
+            example_weights.value().getDescriptorString() + "; predictions tensor is " + predictions.getDescriptorString() + ".";
+        throw nb::value_error(error_message.c_str());
+    }
+    builder.exampleWeights(example_weights.value());
+}
+
 }  // namespace
 
 void bind_poisson_nll_loss(nb::module_ &losses) {
@@ -98,7 +121,8 @@ void bind_poisson_nll_loss(nb::module_ &losses) {
            float eps,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
-           std::optional<float> loss_weight) {
+           std::optional<float> loss_weight,
+           std::optional<Tensor> example_weights) {
             const string loss_name = "PoissonNLLLoss instance";
             validatePoissonNLLLossArguments(loss_name, predictions, labels, loss_data_type, reported_loss_shape, eps);
 
@@ -112,6 +136,7 @@ void bind_poisson_nll_loss(nb::module_ &losses) {
                 .eps(eps)
                 .lossDataType(effectiveLossDataType)
                 .lossWeight(loss_weight.value_or(1.0f));
+            maybeSetPoissonExampleWeights(builder, predictions, labels, example_weights);
             setReportedLossShape(builder, reported_loss_shape);
             PoissonNLLLoss built = builder.build();
 
@@ -127,6 +152,7 @@ void bind_poisson_nll_loss(nb::module_ &losses) {
         "reported_loss_shape"_a = LossShape::BATCH,
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
+        "example_weights"_a.none() = nb::none(),
         R"nbdoc(Construct a Poisson negative log-likelihood loss.)nbdoc");
 
     poisson_nll_loss.def_prop_ro("log_input", &PoissonNLLLoss::getLogInput);
@@ -145,5 +171,9 @@ When log_input is False, predictions are rates and the raw loss is:
     predictions - labels * log(predictions + eps)
 
 If full is True, the Stirling approximation term for labels > 1 is included.
+
+example_weights may be a [1] per-example weight tensor or match predictions
+for elementwise weighting. Weights multiply both the raw loss and the
+prediction gradient before loss-shape reduction.
 )nbdoc";
 }

@@ -505,9 +505,15 @@ void TrainingRunsStatsReporter::configureRun(std::string runName, RunConfig conf
 }
 
 void TrainingRunsStatsReporter::markRunStarting(const std::string& runName) {
+    markRunStatus(runName, TrainingRunStatus::STARTING);
+}
+
+void TrainingRunsStatsReporter::markRunStatus(const std::string& runName,
+                                              TrainingRunStatus status) {
     ReporterEvent event;
-    event.type = ReporterEventType::RUN_STARTING;
+    event.type = ReporterEventType::RUN_STATUS;
     event.runName = runName;
+    event.status = status;
     enqueueEvent(std::move(event));
 }
 
@@ -533,11 +539,23 @@ void TrainingRunsStatsReporter::emitFinalReport(const std::vector<TrainingRunRes
     size_t interrupted = 0;
     size_t oom = 0;
     size_t notStarted = 0;
+    size_t starting = 0;
+    size_t waitingToStart = 0;
+    size_t waitingForMemory = 0;
     size_t running = 0;
     for (const TrainingRunResult& result : results) {
         switch (result.status) {
             case TrainingRunStatus::NOT_STARTED:
                 ++notStarted;
+                break;
+            case TrainingRunStatus::STARTING:
+                ++starting;
+                break;
+            case TrainingRunStatus::WAITING_TO_START:
+                ++waitingToStart;
+                break;
+            case TrainingRunStatus::WAITING_FOR_MEMORY:
+                ++waitingForMemory;
                 break;
             case TrainingRunStatus::RUNNING:
                 ++running;
@@ -568,6 +586,9 @@ void TrainingRunsStatsReporter::emitFinalReport(const std::vector<TrainingRunRes
     std::string line = "INFO runs final:";
     line += " total=" + std::to_string(results.size());
     line += " not_started=" + std::to_string(notStarted);
+    line += " waiting_to_start=" + std::to_string(waitingToStart);
+    line += " starting=" + std::to_string(starting);
+    line += " waiting_for_memory=" + std::to_string(waitingForMemory);
     line += " running=" + std::to_string(running);
     line += " completed=" + std::to_string(completed);
     line += " failed=" + std::to_string(failed);
@@ -704,10 +725,8 @@ void TrainingRunsStatsReporter::processEvent(const ReporterEvent& event) {
     RunState& state = stateForRun(event.runName);
 
     switch (event.type) {
-        case ReporterEventType::RUN_STARTING:
-            if (state.status == DisplayStatus::NOT_STARTED) {
-                state.status = DisplayStatus::STARTING;
-            }
+        case ReporterEventType::RUN_STATUS:
+            state.status = displayStatusFromRunStatus(event.status);
             state.dirty = true;
             dirty = true;
             break;
@@ -744,7 +763,10 @@ void TrainingRunsStatsReporter::processEvent(const ReporterEvent& event) {
                 default:
                     break;
             }
-            if (state.status == DisplayStatus::NOT_STARTED || state.status == DisplayStatus::STARTING) {
+            if (state.status == DisplayStatus::NOT_STARTED ||
+                state.status == DisplayStatus::STARTING ||
+                state.status == DisplayStatus::WAITING_TO_START ||
+                state.status == DisplayStatus::WAITING_FOR_MEMORY) {
                 state.status = DisplayStatus::RUNNING;
             }
             state.dirty = true;
@@ -943,6 +965,8 @@ void TrainingRunsStatsReporter::emitSummaryLocked(std::chrono::steady_clock::tim
 void TrainingRunsStatsReporter::writeSummaryHeaderLocked(std::string_view label) {
     size_t notStarted = 0;
     size_t starting = 0;
+    size_t waitingToStart = 0;
+    size_t waitingForMemory = 0;
     size_t running = 0;
     size_t completed = 0;
     size_t failed = 0;
@@ -959,6 +983,12 @@ void TrainingRunsStatsReporter::writeSummaryHeaderLocked(std::string_view label)
                 break;
             case DisplayStatus::STARTING:
                 ++starting;
+                break;
+            case DisplayStatus::WAITING_TO_START:
+                ++waitingToStart;
+                break;
+            case DisplayStatus::WAITING_FOR_MEMORY:
+                ++waitingForMemory;
                 break;
             case DisplayStatus::RUNNING:
                 ++running;
@@ -986,7 +1016,9 @@ void TrainingRunsStatsReporter::writeSummaryHeaderLocked(std::string_view label)
     std::string line = "INFO runs " + std::string(label) + ":";
     line += " total=" + std::to_string(enabledRuns);
     line += " not_started=" + std::to_string(notStarted);
+    line += " waiting_to_start=" + std::to_string(waitingToStart);
     line += " starting=" + std::to_string(starting);
+    line += " waiting_for_memory=" + std::to_string(waitingForMemory);
     line += " running=" + std::to_string(running);
     line += " completed=" + std::to_string(completed);
     line += " failed=" + std::to_string(failed);
@@ -1418,6 +1450,9 @@ const char* TrainingRunsStatsReporter::statusColorStyle(TrainingRunStatus status
             return FinalReportAnsi::interrupted;
         case TrainingRunStatus::OUT_OF_MEMORY:
             return FinalReportAnsi::outOfMemory;
+        case TrainingRunStatus::STARTING:
+        case TrainingRunStatus::WAITING_TO_START:
+        case TrainingRunStatus::WAITING_FOR_MEMORY:
         case TrainingRunStatus::RUNNING:
             return FinalReportAnsi::running;
         case TrainingRunStatus::NOT_STARTED:
@@ -1501,6 +1536,12 @@ TrainingRunsStatsReporter::DisplayStatus TrainingRunsStatsReporter::displayStatu
     switch (status) {
         case TrainingRunStatus::NOT_STARTED:
             return DisplayStatus::NOT_STARTED;
+        case TrainingRunStatus::STARTING:
+            return DisplayStatus::STARTING;
+        case TrainingRunStatus::WAITING_TO_START:
+            return DisplayStatus::WAITING_TO_START;
+        case TrainingRunStatus::WAITING_FOR_MEMORY:
+            return DisplayStatus::WAITING_FOR_MEMORY;
         case TrainingRunStatus::RUNNING:
             return DisplayStatus::RUNNING;
         case TrainingRunStatus::COMPLETED:
@@ -1524,6 +1565,10 @@ const char* TrainingRunsStatsReporter::displayStatusName(DisplayStatus status) {
             return "not_started";
         case DisplayStatus::STARTING:
             return "starting";
+        case DisplayStatus::WAITING_TO_START:
+            return "waiting_to_start";
+        case DisplayStatus::WAITING_FOR_MEMORY:
+            return "waiting_for_memory";
         case DisplayStatus::RUNNING:
             return "running";
         case DisplayStatus::COMPLETED:

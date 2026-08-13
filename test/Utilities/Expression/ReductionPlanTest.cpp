@@ -114,7 +114,31 @@ TEST(ExpressionReductionPlan, EveryDenseValueReductionBuildsACachedPlan) {
     }
 }
 
-TEST(ExpressionReductionPlan, ValueReductionPreservesBf16InputStorageAndFp32OutputContract) {
+TEST(ExpressionReductionPlan, EveryDenseValueReductionBuildsWithBf16OutputStorage) {
+    REQUIRE_CUDA_DEVICE();
+
+    TensorPlacement gpu_placement(TensorPlacement::MemDevices::GPU, 0);
+    Tensor input(gpu_placement, TensorDescriptor(DataType::BF16, {2, 3, 4}));
+
+    for (const ReductionCase& test_case : valueReductionCases) {
+        auto compiled = std::make_shared<CompiledReduction>(test_case.expression_op,
+                                                            std::vector<uint64_t>{1},
+                                                            std::vector<uint64_t>{},
+                                                            DataType::BF16,
+                                                            DataType::BF16,
+                                                            DataType::FP32);
+
+        std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(compiled, input, 0);
+        ASSERT_NE(built, nullptr);
+        EXPECT_EQ(built->key.input_dtype, DataType::BF16);
+        EXPECT_EQ(built->key.compute_dtype, DataType::FP32);
+        EXPECT_EQ(built->key.output_dtype, DataType::BF16);
+        ASSERT_TRUE(built->value_op.has_value());
+        EXPECT_EQ(built->value_op.value(), test_case.cub_op);
+    }
+}
+
+TEST(ExpressionReductionPlan, ValueReductionPreservesBf16InputStorageAndRequestedBf16Output) {
     REQUIRE_CUDA_DEVICE();
 
     TensorPlacement gpu_placement(TensorPlacement::MemDevices::GPU, 0);
@@ -123,7 +147,7 @@ TEST(ExpressionReductionPlan, ValueReductionPreservesBf16InputStorageAndFp32Outp
                                                         std::vector<uint64_t>{1},
                                                         std::vector<uint64_t>{1},
                                                         DataType::BF16,
-                                                        DataType::FP32,
+                                                        DataType::BF16,
                                                         DataType::FP32);
 
     std::shared_ptr<BuiltReduction> built = StampedEquation::buildReduction(compiled, input, 0);
@@ -131,7 +155,7 @@ TEST(ExpressionReductionPlan, ValueReductionPreservesBf16InputStorageAndFp32Outp
     EXPECT_EQ(built->key.result_kind, ReductionResultKind::Value);
     EXPECT_EQ(built->key.input_dtype, DataType::BF16);
     EXPECT_EQ(built->key.compute_dtype, DataType::FP32);
-    EXPECT_EQ(built->key.output_dtype, DataType::FP32);
+    EXPECT_EQ(built->key.output_dtype, DataType::BF16);
     ASSERT_TRUE(built->geometry.has_value());
     EXPECT_EQ(built->geometry->output_dimensions, (std::vector<uint64_t>{3, 1}));
 }

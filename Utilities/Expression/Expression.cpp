@@ -691,6 +691,7 @@ json exprNodeToJson(const ExprNode& node) {
     j["rope_long_rope_short_factors"] = node.rope_long_rope_short_factors;
     j["rope_long_rope_long_factors"] = node.rope_long_rope_long_factors;
     j["rope_effective_sequence_length_node"] = node.rope_effective_sequence_length_node;
+    j["rope_position_ids_node"] = node.rope_position_ids_node;
     j["rope_allow_in_place_materialization"] = node.rope_allow_in_place_materialization;
     j["rms_norm_normalized_feature_count"] = node.rms_norm_normalized_feature_count;
     j["rms_norm_epsilon"] = node.rms_norm_epsilon;
@@ -805,6 +806,7 @@ ExprNode exprNodeFromJson(const json& j) {
     node.rope_long_rope_short_factors = j.value("rope_long_rope_short_factors", std::vector<double>{});
     node.rope_long_rope_long_factors = j.value("rope_long_rope_long_factors", std::vector<double>{});
     node.rope_effective_sequence_length_node = j.value("rope_effective_sequence_length_node", UINT32_MAX);
+    node.rope_position_ids_node = j.value("rope_position_ids_node", UINT32_MAX);
     node.rope_allow_in_place_materialization = j.value("rope_allow_in_place_materialization", false);
     node.rms_norm_normalized_feature_count = j.value("rms_norm_normalized_feature_count", uint64_t{0});
     node.rms_norm_epsilon = j.value("rms_norm_epsilon", 1.0e-5);
@@ -1236,6 +1238,9 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                   (n.rope_effective_sequence_length_node == UINT32_MAX
                        ? std::string{}
                        : ";effectiveSeqLen=" + canonicalizeNode(expr, n.rope_effective_sequence_length_node, memo, memoReady)) +
+                  (n.rope_position_ids_node == UINT32_MAX
+                       ? std::string{}
+                       : ";positionIds=" + canonicalizeNode(expr, n.rope_position_ids_node, memo, memoReady)) +
                   ")";
             break;
         case ExprOp::SOFTMAX:
@@ -1906,6 +1911,12 @@ void ExpressionDefinition::validate() const {
             validateNodeIndex(node.rope_effective_sequence_length_node, "RoPE effective sequence length");
             if (node.rope_effective_sequence_length_node >= node_index_u32) {
                 throw std::runtime_error("ExpressionDefinition RoPE effective sequence length must reference an earlier node.");
+            }
+        }
+        if (node.op == ExprOp::ROPE && node.rope_position_ids_node != UINT32_MAX) {
+            validateNodeIndex(node.rope_position_ids_node, "RoPE position ids");
+            if (node.rope_position_ids_node >= node_index_u32) {
+                throw std::runtime_error("ExpressionDefinition RoPE position ids must reference an earlier node.");
             }
         }
         if (Expression::isBinaryOp(node.op)) {
@@ -2634,6 +2645,10 @@ uint32_t cloneSubtreeImpl(const PhysicalExpression& src,
         newNode.rope_effective_sequence_length_node =
             cloneSubtreeImpl(src, srcNode.rope_effective_sequence_length_node, dst, oldToNew, cudaSpecRemap);
     }
+    if (srcNode.op == ExprOp::ROPE && srcNode.rope_position_ids_node != UINT32_MAX) {
+        newNode.rope_position_ids_node =
+            cloneSubtreeImpl(src, srcNode.rope_position_ids_node, dst, oldToNew, cudaSpecRemap);
+    }
 
     uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());
     dst.nodes.push_back(newNode);
@@ -2805,6 +2820,10 @@ uint32_t cloneSubtreeWithMergedInputsImpl(const PhysicalExpression& src,
         newNode.rope_effective_sequence_length_node = cloneSubtreeWithMergedInputsImpl(
             src, srcNode.rope_effective_sequence_length_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
     }
+    if (srcNode.op == ExprOp::ROPE && srcNode.rope_position_ids_node != UINT32_MAX) {
+        newNode.rope_position_ids_node = cloneSubtreeWithMergedInputsImpl(
+            src, srcNode.rope_position_ids_node, dst, oldToNew, dstInputSlotsByName, cudaSpecRemap);
+    }
 
     uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());
     dst.nodes.push_back(std::move(newNode));
@@ -2961,6 +2980,10 @@ uint32_t cloneSubtreeWithInputSubstitution(const PhysicalExpression& src,
     if (srcNode.op == ExprOp::ROPE && srcNode.rope_effective_sequence_length_node != UINT32_MAX) {
         newNode.rope_effective_sequence_length_node = cloneSubtreeWithInputSubstitution(
             src, srcNode.rope_effective_sequence_length_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
+    }
+    if (srcNode.op == ExprOp::ROPE && srcNode.rope_position_ids_node != UINT32_MAX) {
+        newNode.rope_position_ids_node = cloneSubtreeWithInputSubstitution(
+            src, srcNode.rope_position_ids_node, substituteInputName, substituteNodeIndex, dst, oldToNew);
     }
 
     const uint32_t newIndex = static_cast<uint32_t>(dst.nodes.size());
@@ -4344,6 +4367,64 @@ Expression Expression::rotaryPositionEmbeddingWithEffectiveSequenceLength(
         cloneSubtreeIntoMergedExpression(normalized_effective_sequence_length, *merged, length_old_to_new, merged_by_name);
     const uint32_t rope_root =
         cloneSubtreeIntoMergedExpression(rope_expr, *merged, rope_old_to_new, merged_by_name);
+    merged->nodes.at(rope_root).rope_effective_sequence_length_node = length_root;
+    merged->output_node = rope_root;
+    return Expression(merged, rope_root);
+}
+
+Expression Expression::rotaryPositionEmbeddingWithPositionIds(
+    const Expression& position_ids, RotaryPositionEmbeddingOptions options) const {
+    if (!position_ids.expr) {
+        throw std::runtime_error("RoPE position ids cannot be an empty expression.");
+    }
+    if (options.position_offset != 0) {
+        throw std::runtime_error("RoPE explicit position ids require position_offset == 0 because the ids are absolute positions.");
+    }
+
+    Expression normalized_position_ids = position_ids.cast(DataType::FP32);
+    Expression rope_expr = rotaryPositionEmbedding(std::move(options));
+
+    auto merged = std::make_shared<PhysicalExpression>();
+    std::unordered_map<std::string, uint32_t> merged_by_name;
+    std::unordered_map<uint32_t, uint32_t> positions_old_to_new;
+    std::unordered_map<uint32_t, uint32_t> rope_old_to_new;
+    const uint32_t positions_root =
+        cloneSubtreeIntoMergedExpression(normalized_position_ids, *merged, positions_old_to_new, merged_by_name);
+    const uint32_t rope_root = cloneSubtreeIntoMergedExpression(rope_expr, *merged, rope_old_to_new, merged_by_name);
+    merged->nodes.at(rope_root).rope_position_ids_node = positions_root;
+    merged->output_node = rope_root;
+    return Expression(merged, rope_root);
+}
+
+Expression Expression::rotaryPositionEmbeddingWithPositionIdsAndEffectiveSequenceLength(
+    const Expression& position_ids,
+    const Expression& effective_sequence_length,
+    RotaryPositionEmbeddingOptions options) const {
+    if (!position_ids.expr) {
+        throw std::runtime_error("RoPE position ids cannot be an empty expression.");
+    }
+    if (!effective_sequence_length.expr) {
+        throw std::runtime_error("RoPE effective sequence length cannot be an empty expression.");
+    }
+    if (options.position_offset != 0) {
+        throw std::runtime_error("RoPE explicit position ids require position_offset == 0 because the ids are absolute positions.");
+    }
+
+    Expression normalized_position_ids = position_ids.cast(DataType::FP32);
+    Expression normalized_effective_sequence_length = effective_sequence_length.cast(DataType::FP32);
+    Expression rope_expr = rotaryPositionEmbedding(std::move(options));
+
+    auto merged = std::make_shared<PhysicalExpression>();
+    std::unordered_map<std::string, uint32_t> merged_by_name;
+    std::unordered_map<uint32_t, uint32_t> positions_old_to_new;
+    std::unordered_map<uint32_t, uint32_t> length_old_to_new;
+    std::unordered_map<uint32_t, uint32_t> rope_old_to_new;
+    const uint32_t positions_root =
+        cloneSubtreeIntoMergedExpression(normalized_position_ids, *merged, positions_old_to_new, merged_by_name);
+    const uint32_t length_root = cloneSubtreeIntoMergedExpression(
+        normalized_effective_sequence_length, *merged, length_old_to_new, merged_by_name);
+    const uint32_t rope_root = cloneSubtreeIntoMergedExpression(rope_expr, *merged, rope_old_to_new, merged_by_name);
+    merged->nodes.at(rope_root).rope_position_ids_node = positions_root;
     merged->nodes.at(rope_root).rope_effective_sequence_length_node = length_root;
     merged->output_node = rope_root;
     return Expression(merged, rope_root);

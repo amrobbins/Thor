@@ -1442,13 +1442,22 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
             result.runName = runs[i].runName;
             result.ensembleGroup = runs[i].ensembleGroup;
             result.ensembleWeight = runs[i].ensembleWeight;
-            result.status = TrainingRunStatus::RUNNING;
+            result.status = TrainingRunStatus::STARTING;
 
             {
                 std::lock_guard<std::mutex> lock(resultMutex);
                 results[i] = result;
             }
             statsReporter->markRunStarting(runs[i].runName);
+
+            const TrainingRunStatusCallback statusCallback =
+                [&results, &resultMutex, statsReporter, i, this](TrainingRunStatus status) {
+                    {
+                        std::lock_guard<std::mutex> lock(resultMutex);
+                        results[i].status = status;
+                    }
+                    statsReporter->markRunStatus(runs[i].runName, status);
+                };
 
             try {
                 // The reporter is shared by every active run. A per-run Trainer
@@ -1475,7 +1484,8 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
                                                           restartConditionsForRun(runs[i]),
                                                           earlyCompletionPoliciesForRun(runs[i]),
                                                           additionalScalarTensorsToReport,
-                                                          startupSequencer);
+                                                          startupSequencer,
+                                                          statusCallback);
             } catch (...) {
                 result = TrainingRunResult::fromException(runs[i].runName, std::current_exception());
             }
@@ -1956,7 +1966,8 @@ bool TrainingRuns::failedRunShouldTriggerCancellation(size_t runIndex, const std
         }
         const TrainingRunStatus status = results[i].status;
         if (status == TrainingRunStatus::COMPLETED || status == TrainingRunStatus::RUNNING ||
-            status == TrainingRunStatus::NOT_STARTED) {
+            status == TrainingRunStatus::STARTING || status == TrainingRunStatus::WAITING_TO_START ||
+            status == TrainingRunStatus::WAITING_FOR_MEMORY || status == TrainingRunStatus::NOT_STARTED) {
             possibleSuccesses += 1;
         }
     }

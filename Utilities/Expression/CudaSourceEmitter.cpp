@@ -229,6 +229,9 @@ static void collectRequiredNodes(const PhysicalExpression& expr, uint32_t node_i
     if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
         collectRequiredNodes(expr, node.rope_effective_sequence_length_node, required);
     }
+    if (node.op == ExprOp::ROPE && node.rope_position_ids_node != UINT32_MAX) {
+        collectRequiredNodes(expr, node.rope_position_ids_node, required);
+    }
     if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
         collectRequiredNodes(expr, node.rhs, required);
     }
@@ -1015,7 +1018,7 @@ static bool nodeDependsOnRaggedExtent(const PhysicalExpression& expr,
     bool depends = parent_depends(node.lhs) || parent_depends(node.rhs) || parent_depends(node.aux) ||
                    parent_depends(node.alpha_node) || parent_depends(node.beta_node) ||
                    parent_depends(node.matmul_epilogue_aux) || parent_depends(node.rope_effective_sequence_length_node) ||
-                   parent_depends(node.attention_seq_len_q_node) ||
+                   parent_depends(node.rope_position_ids_node) || parent_depends(node.attention_seq_len_q_node) ||
                    parent_depends(node.attention_seq_len_kv_node) || parent_depends(node.attention_ragged_offset_q_node) ||
                    parent_depends(node.attention_ragged_offset_kv_node) || parent_depends(node.attention_page_table_k_node) ||
                    parent_depends(node.attention_page_table_v_node) || parent_depends(node.attention_dropout_seed_node) ||
@@ -1064,7 +1067,7 @@ static void validateRaggedExtentStageIsolation(const PhysicalExecutionStage& sta
                                       references_offsets(node.alpha_node) || references_offsets(node.beta_node) ||
                                       references_offsets(node.matmul_epilogue_aux) ||
                                       references_offsets(node.rope_effective_sequence_length_node) ||
-                                      references_offsets(node.attention_seq_len_q_node) ||
+                                      references_offsets(node.rope_position_ids_node) || references_offsets(node.attention_seq_len_q_node) ||
                                       references_offsets(node.attention_seq_len_kv_node) || references_offsets(node.attention_ragged_offset_q_node) ||
                                       references_offsets(node.attention_ragged_offset_kv_node) || references_offsets(node.attention_page_table_k_node) ||
                                       references_offsets(node.attention_page_table_v_node) || references_offsets(node.attention_dropout_seed_node) ||
@@ -2048,24 +2051,29 @@ static std::unordered_set<uint32_t> collectIndexAwareInputNodesToSkipForFlatOutp
     std::unordered_set<uint32_t> index_aware_required;
     for (uint32_t node_idx : reachable) {
         const ExprNode& node = expr.nodes.at(node_idx);
-        if (node.op != ExprOp::STRIDED_VIEW_BACKWARD) {
+        if (node.op == ExprOp::STRIDED_VIEW_BACKWARD) {
+            if (node.lhs >= expr.nodes.size()) {
+                throw runtime_error("strided_view_backward node has invalid lhs while collecting index-aware input skips.");
+            }
+            collectRequiredNodes(expr, node.lhs, index_aware_required);
             continue;
         }
-        if (node.lhs >= expr.nodes.size()) {
-            throw runtime_error("strided_view_backward node has invalid lhs while collecting index-aware input skips.");
+        if (node.op == ExprOp::ROPE && node.rope_position_ids_node != UINT32_MAX) {
+            if (node.rope_position_ids_node >= expr.nodes.size()) {
+                throw runtime_error("RoPE node has invalid position ids while collecting index-aware input skips.");
+            }
+            collectRequiredNodes(expr, node.rope_position_ids_node, index_aware_required);
         }
-        collectRequiredNodes(expr, node.lhs, index_aware_required);
     }
 
     std::unordered_set<uint32_t> skip;
     for (uint32_t node_idx : index_aware_required) {
         if (!ordinary_required.contains(node_idx)) {
-            // STRIDED_VIEW_BACKWARD derives a view-gradient index from the dense
-            // source-gradient output idx and evaluates its gradient source in
-            // that view domain. Nodes that are only reachable through that
-            // index-aware child must be emitted by the strided-view-backward
-            // emitter with the derived index, not by the ordinary flat emitter
-            // with the output idx.
+            // STRIDED_VIEW_BACKWARD and explicit-position RoPE both consume one
+            // dependency in a derived index domain rather than the ordinary
+            // output-flat-index domain. Nodes reachable only through one of
+            // those structural children must be emitted by that op's
+            // index-aware emitter, not by the ordinary flat emitter.
             skip.insert(node_idx);
         }
     }
@@ -2102,8 +2110,12 @@ static std::vector<uint64_t> packedStrides(const std::vector<uint64_t>& dims) {
     return strides;
 }
 
+static std::string nextIndexMappedSuffix(uint32_t node_idx, const std::string& emission_scope, uint32_t& counter) {
+    return emission_scope + "_im" + std::to_string(node_idx) + "_" + std::to_string(counter++);
+}
+
 static std::string nextIndexMappedSuffix(uint32_t node_idx, uint32_t& counter) {
-    return "_im" + std::to_string(node_idx) + "_" + std::to_string(counter++);
+    return nextIndexMappedSuffix(node_idx, "", counter);
 }
 
 static void emitBroadcastOffsetForDomain(std::ostringstream& ss,
@@ -2292,6 +2304,7 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
                                               const std::vector<uint64_t>& domain_dims,
                                               const std::string& indent,
                                               bool use_uint32_index_math,
+                                              const std::string& emission_scope,
                                               uint32_t& counter) {
     if (node_idx >= expr.nodes.size() || node_idx >= group.node_dims.size()) {
         throw runtime_error("Index-mapped fused emitter node index out of range.");
@@ -2300,7 +2313,10 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
     const ExprNode& n = expr.nodes[node_idx];
     const DataType emitted_dtype = emittedScalarNodeValueDType(n);
     const std::string output_type = scalarStorageType(emitted_dtype);
-    const std::string suffix = nextIndexMappedSuffix(node_idx, counter);
+    // A physical child can be evaluated from multiple index-aware roots in the
+    // same generated CUDA scope (for example, sibling strided-view backward
+    // scatters). Namespace temporaries by that root as well as by node/counter.
+    const std::string suffix = nextIndexMappedSuffix(node_idx, emission_scope, counter);
     const std::string var = "t" + std::to_string(node_idx) + suffix;
 
     double folded_constant = 0.0;
@@ -2360,7 +2376,7 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
         const std::string source_idx = "idx" + suffix;
         emitTransposeSourceIndexForDomain(ss, domain_dims, idx_expr, source_idx, indent, use_uint32_index_math);
         const std::string value =
-            emitIndexMappedScalarValue(ss, expr, group, n.lhs, source_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, counter);
+            emitIndexMappedScalarValue(ss, expr, group, n.lhs, source_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, emission_scope, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
     }
 
@@ -2368,12 +2384,12 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
         const std::string take_idx = "take_eval_idx" + suffix;
         emitBroadcastOffsetForDomain(ss, group.node_dims[node_idx], domain_dims, idx_expr, take_idx, indent, use_uint32_index_math);
         const std::string selected_value =
-            emitIndexMappedScalarValue(ss, expr, group, n.rhs, take_idx, group.node_dims[n.rhs], indent, use_uint32_index_math, counter);
+            emitIndexMappedScalarValue(ss, expr, group, n.rhs, take_idx, group.node_dims[n.rhs], indent, use_uint32_index_math, emission_scope, counter);
         const std::string source_idx = "take_source_idx" + suffix;
         emitTakeAlongAxisSourceIndexForDomain(
             ss, n, group.node_dims[n.lhs], group.node_dims[n.rhs], take_idx, selected_value, source_idx, indent, use_uint32_index_math);
         const std::string value = emitIndexMappedScalarValue(
-            ss, expr, group, n.lhs, source_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, counter);
+            ss, expr, group, n.lhs, source_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, emission_scope, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
     }
 
@@ -2409,7 +2425,7 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
         }
 
         const std::string value = emitIndexMappedScalarValue(
-            ss, expr, group, n.lhs, source_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, counter);
+            ss, expr, group, n.lhs, source_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, emission_scope, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
     }
 
@@ -2427,14 +2443,14 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
                 ss, group.node_dims[node_idx], domain_dims, idx_expr, alias_idx, indent, use_uint32_index_math);
         }
         const std::string value = emitIndexMappedScalarValue(
-            ss, expr, group, n.lhs, alias_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, counter);
+            ss, expr, group, n.lhs, alias_idx, group.node_dims[n.lhs], indent, use_uint32_index_math, emission_scope, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
     }
 
     const DataType compute_dtype = requireNodeComputeDType(n);
     auto emit_child = [&](uint32_t child_idx, const std::vector<uint64_t>& child_domain_dims) -> std::string {
         const std::string value =
-            emitIndexMappedScalarValue(ss, expr, group, child_idx, idx_expr, child_domain_dims, indent, use_uint32_index_math, counter);
+            emitIndexMappedScalarValue(ss, expr, group, child_idx, idx_expr, child_domain_dims, indent, use_uint32_index_math, emission_scope, counter);
         return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[child_idx]), compute_dtype);
     };
 
@@ -2442,7 +2458,7 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
     if (n.op == ExprOp::WHERE) {
         auto emit_child_as = [&](uint32_t child_idx, const std::vector<uint64_t>& child_domain_dims, DataType target_dtype) -> std::string {
             const std::string value =
-                emitIndexMappedScalarValue(ss, expr, group, child_idx, idx_expr, child_domain_dims, indent, use_uint32_index_math, counter);
+                emitIndexMappedScalarValue(ss, expr, group, child_idx, idx_expr, child_domain_dims, indent, use_uint32_index_math, emission_scope, counter);
             return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[child_idx]), target_dtype);
         };
         compute_expr = emitWhereComputeExpr(emit_child_as(n.lhs, domain_dims, DataType::BOOLEAN),
@@ -3191,6 +3207,7 @@ static void emitScalarStridedViewBackwardNode(std::ostringstream& ss,
                                                 n.view_dims,
                                                 indent,
                                                 /*use_uint32_index_math=*/false,
+                                                stridedViewBackwardSafeSuffix(node_idx),
                                                 counter);
     } else {
         std::unordered_set<std::string> emitted;
@@ -3320,8 +3337,24 @@ static void emitScalarNode(std::ostringstream& ss,
             emitScalarNodeSuffixed(ss, expr, dep_idx, "rope_peer_idx", suffix, indent + "    ", "", 0, {});
         }
 
-        ss << indent << "    float rope_position = static_cast<float>(" << seq_coord << ") + "
-           << emitScalarFpLiteral(static_cast<double>(n.rope_position_offset)) << ";\n";
+        if (n.rope_position_ids_node != UINT32_MAX) {
+            std::unordered_set<std::string> position_emitted;
+            const std::string position_value = emitScalarValueAtIndex(
+                ss,
+                expr,
+                n.rope_position_ids_node,
+                seq_coord,
+                "_rope_position_" + std::to_string(node_idx),
+                indent + "    ",
+                position_emitted,
+                group);
+            const DataType position_dtype = emittedScalarNodeValueDType(expr.nodes.at(n.rope_position_ids_node));
+            ss << indent << "    float rope_position = "
+               << castScalarExpr(position_value, position_dtype, DataType::FP32) << ";\n";
+        } else {
+            ss << indent << "    float rope_position = static_cast<float>(" << seq_coord << ") + "
+               << emitScalarFpLiteral(static_cast<double>(n.rope_position_offset)) << ";\n";
+        }
         if (n.rope_scaling_kind == RotaryScalingKind::Linear) {
             ss << indent << "    rope_position = rope_position / " << emitScalarFpLiteral(n.rope_scaling_factor) << ";\n";
         }
@@ -7201,6 +7234,7 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
                                                                         group.node_dims[frontier_source_idx],
                                                                         indent + "    ",
                                                                         use_uint32_index_math,
+                                                                        "_ltf" + std::to_string(frontier_idx),
                                                                         counter);
             ss << indent << "    packed_word = thor_set_transpose_pack_lane<LOGICAL_TRANSPOSE_SLOT_BYTES, " << frontier_type << ">"
                << "(packed_word, lane, "
@@ -7454,8 +7488,16 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             }
             const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
             uint32_t counter = 0;
-            const std::string value = emitIndexMappedScalarValue(
-                ss, stage.expr, group, output.local_node_idx, "idx", group.output_dims, "    ", use_uint32_index_math, counter);
+            const std::string value = emitIndexMappedScalarValue(ss,
+                                                                  stage.expr,
+                                                                  group,
+                                                                  output.local_node_idx,
+                                                                  "idx",
+                                                                  group.output_dims,
+                                                                  "    ",
+                                                                  use_uint32_index_math,
+                                                                  "_g" + std::to_string(g) + "_o" + std::to_string(out_idx),
+                                                                  counter);
             ss << "    out" << out_idx
                << "[idx] = " << castScalarExpr(value, emittedScalarNodeValueDType(stage.expr.nodes[output.local_node_idx]), output_dtype)
                << ";\n";

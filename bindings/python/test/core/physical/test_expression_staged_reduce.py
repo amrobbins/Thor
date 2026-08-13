@@ -124,11 +124,21 @@ def _run_staged_expr(
     return out_host.numpy().copy()
 
 
-def test_reduce_sum_rejects_low_precision_output_dtype():
+@pytest.mark.cuda
+@pytest.mark.parametrize("output_dtype", [thor.DataType.fp16, thor.DataType.bf16, thor.DataType.fp32])
+def test_reduce_sum_materializes_requested_output_dtype_directly(output_dtype: thor.DataType):
     x = ex.input("x")
+    expr = ex.reduce_sum(x, axis=1, squeeze=True, output_dtype=output_dtype)
 
-    with pytest.raises(RuntimeError, match="reduction outputs are always thor.DataType.fp32"):
-        ex.reduce_sum(x, axis=0, output_dtype=thor.DataType.fp16)
+    x_np = np.array(
+        [[1.25, 2.5, 3.75], [4.0, 5.25, 6.5]],
+        dtype=np.float32,
+    ).astype(_numpy_storage_dtype(output_dtype))
+    expected = np.sum(x_np.astype(np.float32), axis=1).astype(_numpy_storage_dtype(output_dtype))
+
+    got = _run_staged_expr(expr, ["x"], x_np, dtype=output_dtype)
+    assert got.dtype == _numpy_storage_dtype(output_dtype)
+    _assert_close(got, expected, output_dtype)
 
 
 @pytest.mark.cuda

@@ -2707,6 +2707,9 @@ Multiple windowed fields may reference the same persisted sequence.
 
     auto training_run_status = nb::enum_<TrainingRunStatus>(training, "TrainingRunStatus")
                                    .value("not_started", TrainingRunStatus::NOT_STARTED)
+                                   .value("starting", TrainingRunStatus::STARTING)
+                                   .value("waiting_to_start", TrainingRunStatus::WAITING_TO_START)
+                                   .value("waiting_for_memory", TrainingRunStatus::WAITING_FOR_MEMORY)
                                    .value("running", TrainingRunStatus::RUNNING)
                                    .value("completed", TrainingRunStatus::COMPLETED)
                                    .value("failed", TrainingRunStatus::FAILED)

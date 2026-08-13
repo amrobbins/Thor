@@ -274,6 +274,7 @@ struct StageNodeKey {
     std::vector<uint64_t> rope_long_rope_short_factor_bits;
     std::vector<uint64_t> rope_long_rope_long_factor_bits;
     uint32_t rope_effective_sequence_length_node = UINT32_MAX;
+    uint32_t rope_position_ids_node = UINT32_MAX;
     bool rope_allow_in_place_materialization = false;
     bool attention_use_bias = false;
     uint64_t attention_dropout_probability_bits = 0;
@@ -340,6 +341,7 @@ struct StageNodeKeyHash {
         for (uint64_t factor_bits : k.rope_long_rope_long_factor_bits)
             hashCombine(h, std::hash<uint64_t>{}(factor_bits));
         hashCombine(h, std::hash<uint32_t>{}(k.rope_effective_sequence_length_node));
+        hashCombine(h, std::hash<uint32_t>{}(k.rope_position_ids_node));
         hashCombine(h, std::hash<bool>{}(k.rope_allow_in_place_materialization));
         hashCombine(h, std::hash<bool>{}(k.attention_use_bias));
         hashCombine(h, std::hash<uint64_t>{}(k.attention_dropout_probability_bits));
@@ -438,6 +440,7 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     for (double factor : n.rope_long_rope_long_factors)
         key.rope_long_rope_long_factor_bits.push_back(scalarBits(factor));
     key.rope_effective_sequence_length_node = n.rope_effective_sequence_length_node;
+    key.rope_position_ids_node = n.rope_position_ids_node;
     key.rope_allow_in_place_materialization = n.rope_allow_in_place_materialization;
     key.attention_use_bias = n.attention_use_bias;
     key.attention_dropout_probability_bits = scalarBits(n.attention_dropout_probability);
@@ -523,6 +526,9 @@ static void deduplicateFusedStageExpr(PhysicalExpression& stage_expr, std::vecto
         }
         if (n.op == ExprOp::ROPE && n.rope_effective_sequence_length_node != UINT32_MAX) {
             n.rope_effective_sequence_length_node = remapNode(n.rope_effective_sequence_length_node);
+        }
+        if (n.op == ExprOp::ROPE && n.rope_position_ids_node != UINT32_MAX) {
+            n.rope_position_ids_node = remapNode(n.rope_position_ids_node);
         }
         if (Expression::isTernaryOp(n.op)) {
             n.rhs = remapNode(n.rhs);
@@ -748,6 +754,7 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
         merge_parent(node.beta_node);
         merge_parent(node.matmul_epilogue_aux);
         merge_parent(node.rope_effective_sequence_length_node);
+        merge_parent(node.rope_position_ids_node);
         merge_parent(node.attention_seq_len_q_node);
         merge_parent(node.attention_seq_len_kv_node);
         merge_parent(node.attention_ragged_offset_q_node);
@@ -867,6 +874,9 @@ static void collectExternalValueIds(const PhysicalExpression& expr,
         addExternalValue(node.lhs);
         if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
             addExternalValue(node.rope_effective_sequence_length_node);
+        }
+        if (node.op == ExprOp::ROPE && node.rope_position_ids_node != UINT32_MAX) {
+            addExternalValue(node.rope_position_ids_node);
         }
 
         if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
@@ -1502,6 +1512,9 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 (node.rope_effective_sequence_length_node == UINT32_MAX
                      ? std::string{}
                      : ",effectiveSeqLen=" + fusedRegionSignatureRec(expr, node.rope_effective_sequence_length_node)) +
+                (node.rope_position_ids_node == UINT32_MAX
+                     ? std::string{}
+                     : ",positionIds=" + fusedRegionSignatureRec(expr, node.rope_position_ids_node)) +
                 ",allowInPlace=" + std::to_string(node.rope_allow_in_place_materialization ? 1 : 0) + ")";
         } else {
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ")";
@@ -1823,8 +1836,8 @@ shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalE
     if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Reduction node missing resolved output_dtype.");
     }
-    if (node.output_dtype.value() != DataType::FP32) {
-        throw std::runtime_error("Floating-point reduction stages must materialize FP32 output; add an explicit cast afterward.");
+    if (!isSupportedFusionFloatingType(node.output_dtype.value())) {
+        throw std::runtime_error("Floating-point reduction stage requested unsupported output dtype.");
     }
     if (!node.compute_dtype.has_value() || node.compute_dtype.value() != DataType::FP32) {
         throw std::runtime_error("Floating-point reduction stages must compute in FP32.");
@@ -3216,6 +3229,15 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
                 stack.push_back(effective_idx);
             }
         }
+        if (node.op == ExprOp::ROPE && node.rope_position_ids_node != UINT32_MAX) {
+            const uint32_t position_ids_idx = node.rope_position_ids_node;
+            if (position_ids_idx >= expr.nodes.size()) {
+                throw std::runtime_error("Invalid RoPE position ids node index in expression.");
+            }
+            if (!isStageBoundaryOp(expr.nodes[position_ids_idx].op) && !forced_boundary_nodes.count(position_ids_idx)) {
+                stack.push_back(position_ids_idx);
+            }
+        }
 
         if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
             uint32_t rhs_idx = node.rhs;
@@ -3426,6 +3448,15 @@ static void collectBoundaryDependencies(const PhysicalExpression& expr,
                 boundary_nodes.insert(effective_idx);
             }
         }
+        if (node.op == ExprOp::ROPE && node.rope_position_ids_node != UINT32_MAX) {
+            const uint32_t position_ids_idx = node.rope_position_ids_node;
+            if (position_ids_idx >= expr.nodes.size()) {
+                throw std::runtime_error("Invalid RoPE position ids node index in expression.");
+            }
+            if (!region_nodes.count(position_ids_idx) && isStageBoundaryOp(expr.nodes[position_ids_idx].op)) {
+                boundary_nodes.insert(position_ids_idx);
+            }
+        }
 
         if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
             uint32_t rhs_idx = node.rhs;
@@ -3538,6 +3569,9 @@ static PhysicalExecutionStage buildFusedStage(const PhysicalExpression& expr,
             if (new_node.op == ExprOp::ROPE && new_node.rope_effective_sequence_length_node != UINT32_MAX) {
                 new_node.rope_effective_sequence_length_node =
                     remapParent(new_node.rope_effective_sequence_length_node, "RoPE effective sequence length");
+            }
+            if (new_node.op == ExprOp::ROPE && new_node.rope_position_ids_node != UINT32_MAX) {
+                new_node.rope_position_ids_node = remapParent(new_node.rope_position_ids_node, "RoPE position ids");
             }
 
             if (Expression::isBinaryOp(new_node.op) || Expression::isTernaryOp(new_node.op)) {
@@ -5829,6 +5863,7 @@ static std::vector<uint32_t> computeNodeUseCounts(const PhysicalExpression& expr
         bump(node.beta_node);
         bump(node.matmul_epilogue_aux);
         bump(node.rope_effective_sequence_length_node);
+        bump(node.rope_position_ids_node);
         bump(node.attention_seq_len_q_node);
         bump(node.attention_seq_len_kv_node);
         bump(node.attention_ragged_offset_q_node);
@@ -5856,7 +5891,8 @@ static std::optional<InPlaceRopeMaterializationCandidate> classifySplitProjectio
     if (rope.op != ExprOp::ROPE || rope.lhs == UINT32_MAX || rope.lhs >= expr.nodes.size()) {
         return std::nullopt;
     }
-    if (!rope.rope_allow_in_place_materialization || rope.rope_effective_sequence_length_node != UINT32_MAX) {
+    if (!rope.rope_allow_in_place_materialization || rope.rope_effective_sequence_length_node != UINT32_MAX ||
+        rope.rope_position_ids_node != UINT32_MAX) {
         return std::nullopt;
     }
     if (!rope.output_dtype.has_value()) {
@@ -6387,7 +6423,20 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     };
 
     emitForDependency = [&](uint32_t root_idx) {
-        if (node_output_value_id.find(root_idx) != node_output_value_id.end()) {
+        auto existing_value_it = node_output_value_id.find(root_idx);
+        if (existing_value_it != node_output_value_id.end()) {
+            // A terminal fused output receives its value id as soon as it is
+            // registered so that overlapping terminal regions can merge.  That
+            // does not mean the producer stage has been emitted yet.  If a
+            // later stage-boundary output consumes that exact node, materialize
+            // the pending terminal group before returning; otherwise the
+            // consumer can be scheduled ahead of its producer and stamping the
+            // execution plan will fail because the input value does not exist.
+            const std::string region_sig = fusedRegionSignature(expr, root_idx);
+            auto pending_it = pending_terminal_region_to_group.find(region_sig);
+            if (pending_it != pending_terminal_region_to_group.end()) {
+                materializeTerminalGroup(pending_it->second);
+            }
             return;
         }
 
@@ -6525,6 +6574,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
             if (root.op == ExprOp::ROPE && root.rope_effective_sequence_length_node != UINT32_MAX) {
                 ensureBoundaryParentEmitted(root.rope_effective_sequence_length_node, "RoPE effective sequence length");
+            }
+            if (root.op == ExprOp::ROPE && root.rope_position_ids_node != UINT32_MAX) {
+                ensureBoundaryParentEmitted(root.rope_position_ids_node, "RoPE position ids");
             }
             if (root.op == ExprOp::GEMM) {
                 ensureBoundaryParentEmitted(root.aux, "aux");
@@ -6709,6 +6761,23 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
     for (const NamedOutput& named_output : outputs.outputs) {
         const ExprNode& root = expr.nodes[named_output.node_idx];
+
+        // A terminal output that is already a directly-available tensor input
+        // does not need a fused copy stage or a new value id.  Reuse the root
+        // input slot.  This is also important for multi-output autodiff graphs:
+        // an upstream seed can be both a passthrough gradient output and the
+        // input to a reduction for another gradient.  Assigning a deferred copy
+        // value here would shadow the available root slot and let the reduction
+        // consume a value whose producer has not run yet.
+        if (root.op == ExprOp::INPUT && !inputRequiresMaterialization(root)) {
+            node_output_value_id[named_output.node_idx] = root.input_slot;
+            planned.final_outputs.push_back(CompiledStageOutput{
+                .name = named_output.name,
+                .local_node_idx = UINT32_MAX,
+                .value_id = root.input_slot,
+            });
+            continue;
+        }
 
         auto existing_value_it = node_output_value_id.find(named_output.node_idx);
         if (existing_value_it != node_output_value_id.end()) {
@@ -6910,6 +6979,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             if (root.op == ExprOp::ROPE && root.rope_effective_sequence_length_node != UINT32_MAX) {
                 ensureBoundaryParentEmitted(root.rope_effective_sequence_length_node, "RoPE effective sequence length");
             }
+            if (root.op == ExprOp::ROPE && root.rope_position_ids_node != UINT32_MAX) {
+                ensureBoundaryParentEmitted(root.rope_position_ids_node, "RoPE position ids");
+            }
             if (root.op == ExprOp::GEMM) {
                 ensureBoundaryParentEmitted(root.aux, "aux");
                 ensureScaleDependencyEmitted(root.alpha_node, "alpha");
@@ -7093,6 +7165,57 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     }
 
     mergeAttentionBackwardStages(planned.stages);
+
+    // Planner invariant: every staged input must be either a root input, an
+    // alias of an already-available value, or an output of an earlier stage.
+    // Enforce this at compile/planning time so an ordering bug cannot escape as
+    // the much less actionable runtime error "Missing input value for staged
+    // execution plan."
+    std::unordered_set<uint32_t> available_value_ids;
+    available_value_ids.reserve(expr.numInputs() + planned.value_aliases.size() + planned.stages.size() * 2u);
+    for (uint32_t input_slot = 0; input_slot < expr.numInputs(); ++input_slot) {
+        available_value_ids.insert(input_slot);
+    }
+
+    auto makeAvailableAliases = [&]() {
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (const CompiledValueAlias& alias : planned.value_aliases) {
+                if (available_value_ids.contains(alias.value_id) || !available_value_ids.contains(alias.source_value_id)) {
+                    continue;
+                }
+                available_value_ids.insert(alias.value_id);
+                changed = true;
+            }
+        }
+    };
+
+    makeAvailableAliases();
+    for (size_t stage_idx = 0; stage_idx < planned.stages.size(); ++stage_idx) {
+        const PhysicalExecutionStage& stage = planned.stages[stage_idx];
+        makeAvailableAliases();
+        for (uint32_t input_value_id : stage.input_value_ids) {
+            if (!available_value_ids.contains(input_value_id)) {
+                throw std::runtime_error(
+                    "Internal error: staged execution plan is not topologically ordered. stage_idx=" +
+                    std::to_string(stage_idx) + " stage_kind=" + std::to_string(static_cast<int>(stage.kind)) +
+                    " missing_value_id=" + std::to_string(input_value_id));
+            }
+        }
+        for (const CompiledStageOutput& output : stage.outputs) {
+            available_value_ids.insert(output.value_id);
+        }
+    }
+    makeAvailableAliases();
+    for (const CompiledStageOutput& output : planned.final_outputs) {
+        if (!available_value_ids.contains(output.value_id)) {
+            throw std::runtime_error(
+                "Internal error: staged execution plan final output is unavailable. output=" + output.name +
+                " value_id=" + std::to_string(output.value_id));
+        }
+    }
+
     return planned;
 }
 

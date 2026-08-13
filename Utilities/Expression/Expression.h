@@ -297,6 +297,10 @@ struct ExprNode {
     // sequence-length-dependent scaling (Dynamic-NTK/LongRoPE). UINT32_MAX means use the
     // physical sequence-axis extent. This dependency is structural metadata and is not differentiable.
     uint32_t rope_effective_sequence_length_node = UINT32_MAX;
+    // Optional rank-1 tensor containing one absolute position per element along rope_sequence_axis.
+    // This is structural, non-differentiable metadata. When present, it replaces sequence-coordinate +
+    // rope_position_offset for angle generation; rope_position_offset must be zero.
+    uint32_t rope_position_ids_node = UINT32_MAX;
     bool rope_allow_in_place_materialization = false;
 
     uint64_t rms_norm_normalized_feature_count = 0;
@@ -619,6 +623,12 @@ class Expression {
     [[nodiscard]] Expression rotaryPositionEmbedding(RotaryPositionEmbeddingOptions options = {}) const;
     [[nodiscard]] Expression rotaryPositionEmbeddingWithEffectiveSequenceLength(
         const Expression& effective_sequence_length, RotaryPositionEmbeddingOptions options) const;
+    [[nodiscard]] Expression rotaryPositionEmbeddingWithPositionIds(
+        const Expression& position_ids, RotaryPositionEmbeddingOptions options = {}) const;
+    [[nodiscard]] Expression rotaryPositionEmbeddingWithPositionIdsAndEffectiveSequenceLength(
+        const Expression& position_ids,
+        const Expression& effective_sequence_length,
+        RotaryPositionEmbeddingOptions options) const;
     [[nodiscard]] Expression rope(RotaryPositionEmbeddingOptions options = {}) const { return rotaryPositionEmbedding(std::move(options)); }
     [[nodiscard]] static Expression rotaryPositionEmbedding(const Expression& input, RotaryPositionEmbeddingOptions options = {}) {
         return input.rotaryPositionEmbedding(std::move(options));

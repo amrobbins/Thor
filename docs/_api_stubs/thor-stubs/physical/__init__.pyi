@@ -1365,7 +1365,8 @@ class Expression:
             compute_dtype: thor.DataType: default thor.DataType.fp32
                 The data type used during compute. Currently only fp32 is supported for this operation.
             output_dtype: thor.DataType: default thor.DataType.fp32
-                Reduction stages always materialize fp32, regardless of input dtype. Add an explicit cast after the reduction to narrow it.
+                Storage dtype for the materialized reduction result. Accumulation/finalization remain fp32;
+                low-precision outputs are converted directly at the final reduction store.
         """
 
     @staticmethod
@@ -1383,7 +1384,8 @@ class Expression:
             compute_dtype: thor.DataType: default thor.DataType.fp32
                 The data type used during compute. Currently only fp32 is supported for this operation.
             output_dtype: thor.DataType: default thor.DataType.fp32
-                Reduction stages always materialize fp32, regardless of input dtype. Add an explicit cast after the reduction to narrow it.
+                Storage dtype for the materialized reduction result. Accumulation/finalization remain fp32;
+                low-precision outputs are converted directly at the final reduction store.
         """
 
     @staticmethod
@@ -1401,7 +1403,8 @@ class Expression:
             compute_dtype: thor.DataType: default thor.DataType.fp32
                 The data type used during compute. Currently only fp32 is supported for this operation.
             output_dtype: thor.DataType: default thor.DataType.fp32
-                Reduction stages always materialize fp32, regardless of input dtype. Add an explicit cast after the reduction to narrow it.
+                Storage dtype for the materialized reduction result. Accumulation/finalization remain fp32;
+                low-precision outputs are converted directly at the final reduction store.
         """
 
     @staticmethod
@@ -1419,7 +1422,8 @@ class Expression:
             compute_dtype: thor.DataType: default thor.DataType.fp32
                 The data type used during compute. Currently only fp32 is supported for this operation.
             output_dtype: thor.DataType: default thor.DataType.fp32
-                Reduction stages always materialize fp32, regardless of input dtype. Add an explicit cast after the reduction to narrow it.
+                Storage dtype for the materialized reduction result. Accumulation/finalization remain fp32;
+                low-precision outputs are converted directly at the final reduction store.
         """
 
     @staticmethod
@@ -1473,7 +1477,8 @@ class Expression:
             compute_dtype: thor.DataType: default thor.DataType.fp32
                 The data type used during compute. Currently only fp32 is supported for this operation.
             output_dtype: thor.DataType: default thor.DataType.fp32
-                Reduction stages always materialize fp32, regardless of input dtype. Add an explicit cast after the reduction to narrow it.
+                Storage dtype for the materialized reduction result. Accumulation/finalization remain fp32;
+                low-precision outputs are converted directly at the final reduction store.
         """
 
     @staticmethod
@@ -1491,7 +1496,8 @@ class Expression:
             compute_dtype: thor.DataType: default thor.DataType.fp32
                 The data type used during compute. Currently only fp32 is supported for this operation.
             output_dtype: thor.DataType: default thor.DataType.fp32
-                Reduction stages always materialize fp32, regardless of input dtype. Add an explicit cast after the reduction to narrow it.
+                Storage dtype for the materialized reduction result. Accumulation/finalization remain fp32;
+                low-precision outputs are converted directly at the final reduction store.
         """
 
     @staticmethod
@@ -1509,7 +1515,8 @@ class Expression:
             compute_dtype: thor.DataType: default thor.DataType.fp32
                 The data type used during compute. Currently only fp32 is supported for this operation.
             output_dtype: thor.DataType: default thor.DataType.fp32
-                Reduction stages always materialize fp32, regardless of input dtype. Add an explicit cast after the reduction to narrow it.
+                Storage dtype for the materialized reduction result. Accumulation/finalization remain fp32;
+                low-precision outputs are converted directly at the final reduction store.
         """
 
     @staticmethod

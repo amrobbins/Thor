@@ -1,6 +1,7 @@
 
 #include "DeepLearning/Api/Layers/Learning/Attention.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Attention.h"
+#include "Utilities/TensorOperations/Ragged/RowPartition.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include "DeepLearning/Api/Initializers/Glorot.h"
@@ -29,6 +30,10 @@ constexpr const char* kAttentionQuerySequenceLengthsInputName = "query_sequence_
 constexpr const char* kAttentionKeyValueSequenceLengthsInputName = "key_value_sequence_lengths";
 constexpr const char* kAttentionQueryRowPartitionInputName = "query_row_partition";
 constexpr const char* kAttentionKeyValueRowPartitionInputName = "key_value_row_partition";
+constexpr const char* kAttentionQueryRopePositionOffsetsInputName = "query_rope_position_offsets";
+constexpr const char* kAttentionKeyRopePositionOffsetsInputName = "key_rope_position_offsets";
+constexpr const char* kAttentionQueryRopePositionIdsInputName = "__attention_query_rope_position_ids";
+constexpr const char* kAttentionKeyRopePositionIdsInputName = "__attention_key_rope_position_ids";
 constexpr const char* kAttentionDropoutSeedInputName = "__attention_dropout_seed";
 constexpr const char* kAttentionDropoutOffsetInputName = "__attention_dropout_offset";
 constexpr ThorImplementation::DynamicExpressionVariantId kAttentionEvaluationVariant = 1;
@@ -68,7 +73,12 @@ bool ropeScalingUsesSequenceLength(ThorImplementation::RotaryScalingKind scaling
 }
 
 std::optional<std::string> ropeFp32SequenceLengthValidationError(
-    bool useRope, const ThorImplementation::RotaryPositionEmbeddingOptions& options, uint64_t maximumPossibleSequenceLength) {
+    bool useRope,
+    const ThorImplementation::RotaryPositionEmbeddingOptions& options,
+    int64_t queryPositionOffset,
+    int64_t keyPositionOffset,
+    uint64_t maximumPossibleQuerySequenceLength,
+    uint64_t maximumPossibleKeySequenceLength) {
     if (!useRope || !ropeScalingUsesSequenceLength(options.scaling_kind)) {
         return std::nullopt;
     }
@@ -78,15 +88,24 @@ std::optional<std::string> ropeFp32SequenceLengthValidationError(
                "because RoPE sequence-length scaling uses FP32 metadata.";
     }
 
-    const uint64_t positivePositionOffset =
-        options.position_offset > 0 ? static_cast<uint64_t>(options.position_offset) : uint64_t{0};
-    if (positivePositionOffset > kMaxExactlyRepresentableFp32Integer ||
-        maximumPossibleSequenceLength > kMaxExactlyRepresentableFp32Integer - positivePositionOffset) {
+    const uint64_t positiveQueryPositionOffset =
+        queryPositionOffset > 0 ? static_cast<uint64_t>(queryPositionOffset) : uint64_t{0};
+    const uint64_t positiveKeyPositionOffset =
+        keyPositionOffset > 0 ? static_cast<uint64_t>(keyPositionOffset) : uint64_t{0};
+    const bool queryExtentTooLarge =
+        positiveQueryPositionOffset > kMaxExactlyRepresentableFp32Integer ||
+        maximumPossibleQuerySequenceLength > kMaxExactlyRepresentableFp32Integer - positiveQueryPositionOffset;
+    const bool keyExtentTooLarge =
+        positiveKeyPositionOffset > kMaxExactlyRepresentableFp32Integer ||
+        maximumPossibleKeySequenceLength > kMaxExactlyRepresentableFp32Integer - positiveKeyPositionOffset;
+    if (queryExtentTooLarge || keyExtentTooLarge) {
         return "Attention Dynamic-NTK/LongRoPE currently requires maximum possible sequence length plus positive "
-               "position_offset <= 16777216 because RoPE sequence-length scaling uses FP32 metadata. "
-               "maximum_possible_sequence_length=" +
-               std::to_string(maximumPossibleSequenceLength) + ", positive_position_offset=" +
-               std::to_string(positivePositionOffset) + ".";
+               "Q/K position offset <= 16777216 because RoPE sequence-length scaling uses FP32 metadata. "
+               "maximum_possible_query_sequence_length=" +
+               std::to_string(maximumPossibleQuerySequenceLength) + ", positive_query_position_offset=" +
+               std::to_string(positiveQueryPositionOffset) + ", maximum_possible_key_sequence_length=" +
+               std::to_string(maximumPossibleKeySequenceLength) + ", positive_key_position_offset=" +
+               std::to_string(positiveKeyPositionOffset) + ".";
     }
 
     return std::nullopt;
@@ -115,6 +134,19 @@ void requireSequenceLengthsInput(const Thor::Tensor& tensor, const char* inputNa
     }
     if (tensor.getDimensions() != std::vector<uint64_t>{1}) {
         throw std::invalid_argument(std::string("Attention ") + inputName + " must have logical shape [1].");
+    }
+}
+
+void requireRopePositionOffsetsInput(const Thor::Tensor& tensor, const char* inputName) {
+    if (!tensor.isInitialized()) {
+        throw std::invalid_argument(std::string("Attention ") + inputName + " tensor is not initialized.");
+    }
+    if (tensor.getDataType() != DataType::INT32) {
+        throw std::invalid_argument(std::string("Attention ") + inputName + " must have dtype int32.");
+    }
+    if (tensor.getDimensions() != std::vector<uint64_t>{1}) {
+        throw std::invalid_argument(std::string("Attention ") + inputName +
+                                    " must have logical shape [1] (one origin per batch row at runtime).");
     }
 }
 
@@ -158,6 +190,8 @@ std::vector<std::string> publicAttentionInputNames(bool useContextInput,
                                                    bool useScoreBias,
                                                    bool useSequenceLengths,
                                                    bool useRagged,
+                                                   bool useQueryRopePositionOffsets,
+                                                   bool useKeyRopePositionOffsets,
                                                    const std::vector<std::string>& epilogueAuxInputNames) {
     std::vector<std::string> names{kAttentionFeatureInputName};
     if (useContextInput) {
@@ -174,6 +208,12 @@ std::vector<std::string> publicAttentionInputNames(bool useContextInput,
         names.push_back(kAttentionQueryRowPartitionInputName);
         names.push_back(kAttentionKeyValueRowPartitionInputName);
     }
+    if (useQueryRopePositionOffsets) {
+        names.push_back(kAttentionQueryRopePositionOffsetsInputName);
+    }
+    if (useKeyRopePositionOffsets) {
+        names.push_back(kAttentionKeyRopePositionOffsetsInputName);
+    }
     names.insert(names.end(), epilogueAuxInputNames.begin(), epilogueAuxInputNames.end());
     return names;
 }
@@ -183,6 +223,8 @@ Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& f
                                                            const std::optional<Thor::Tensor>& scoreBiasInput,
                                                            const std::optional<Thor::Tensor>& querySequenceLengthsInput,
                                                            const std::optional<Thor::Tensor>& keyValueSequenceLengthsInput,
+                                                           const std::optional<Thor::Tensor>& queryRopePositionOffsetsInput,
+                                                           const std::optional<Thor::Tensor>& keyRopePositionOffsetsInput,
                                                            const std::optional<Thor::RaggedTensor>& raggedFeatureInput,
                                                            const std::optional<Thor::RaggedTensor>& raggedContextInput,
                                                            const std::vector<std::pair<std::string, Thor::Tensor>>& epilogueInputBindings) {
@@ -201,6 +243,12 @@ Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& f
         inputInterface[kAttentionQueryRowPartitionInputName] = raggedFeatureInput->getOffsets();
         inputInterface[kAttentionKeyValueRowPartitionInputName] =
             raggedContextInput.has_value() ? raggedContextInput->getOffsets() : raggedFeatureInput->getOffsets();
+    }
+    if (queryRopePositionOffsetsInput.has_value()) {
+        inputInterface[kAttentionQueryRopePositionOffsetsInputName] = queryRopePositionOffsetsInput.value();
+    }
+    if (keyRopePositionOffsetsInput.has_value()) {
+        inputInterface[kAttentionKeyRopePositionOffsetsInputName] = keyRopePositionOffsetsInput.value();
     }
     for (const auto& [name, tensor] : epilogueInputBindings) {
         inputInterface[name] = tensor;
@@ -486,6 +534,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                                                               bool useRope,
                                                               bool ropeInPlace,
                                                               ThorImplementation::RotaryPositionEmbeddingOptions ropeOptions,
+                                                              int64_t queryRopePositionOffset,
+                                                              int64_t keyRopePositionOffset,
                                                               ThorImplementation::AttentionMaskKind maskKind,
                                                               int64_t diagonalLeftBound,
                                                               int64_t diagonalRightBound,
@@ -498,6 +548,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                                                               bool useScoreBias,
                                                               bool useSequenceLengths,
                                                               bool useRagged,
+                                                              bool useQueryRopePositionOffsets,
+                                                              bool useKeyRopePositionOffsets,
                                                               uint64_t raggedBatchSize,
                                                               DataType queryRowPartitionDType,
                                                               DataType keyValueRowPartitionDType,
@@ -535,6 +587,12 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             expectedInputs.push_back(kAttentionQueryRowPartitionInputName);
             expectedInputs.push_back(kAttentionKeyValueRowPartitionInputName);
         }
+        if (useQueryRopePositionOffsets) {
+            expectedInputs.push_back(kAttentionQueryRopePositionOffsetsInputName);
+        }
+        if (useKeyRopePositionOffsets) {
+            expectedInputs.push_back(kAttentionKeyRopePositionOffsetsInputName);
+        }
         expectedInputs.push_back("qkv_weights");
         expectedInputs.push_back("output_weights");
         if (hasBias) {
@@ -556,6 +614,12 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
         if (useRagged) {
             expectedInputs.push_back(kAttentionQueryRowPartitionInputName);
             expectedInputs.push_back(kAttentionKeyValueRowPartitionInputName);
+        }
+        if (useQueryRopePositionOffsets) {
+            expectedInputs.push_back(kAttentionQueryRopePositionOffsetsInputName);
+        }
+        if (useKeyRopePositionOffsets) {
+            expectedInputs.push_back(kAttentionKeyRopePositionOffsetsInputName);
         }
         expectedInputs.push_back("query_weights");
         expectedInputs.push_back("key_weights");
@@ -587,6 +651,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
          useRope,
          ropeInPlace,
          ropeOptions,
+         queryRopePositionOffset,
+         keyRopePositionOffset,
          maskKind,
          diagonalLeftBound,
          diagonalRightBound,
@@ -599,6 +665,8 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
          useScoreBias,
          useSequenceLengths,
          useRagged,
+         useQueryRopePositionOffsets,
+         useKeyRopePositionOffsets,
          raggedBatchSize,
          queryRowPartitionDType,
          keyValueRowPartitionDType,
@@ -777,6 +845,38 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                     normalizeRaggedOffsets(kAttentionKeyValueRowPartitionInputName, keyValueRowPartitionDType);
             }
 
+            auto normalizeRopePositionOffsets = [&](const char* inputName) -> Tensor {
+                Tensor origins = inputs.at(inputName);
+                if (origins.getDataType() != DataType::INT32) {
+                    throw std::runtime_error(std::string("Attention ") + inputName + " dtype must be INT32.");
+                }
+                const auto dims = origins.getDimensions();
+                if (dims == std::vector<uint64_t>{batch, 1}) {
+                    origins.reshape({batch});
+                } else if (dims != std::vector<uint64_t>{batch}) {
+                    throw std::runtime_error(std::string("Attention ") + inputName + " shape must be [batch] or [batch, 1].");
+                }
+                return origins;
+            };
+
+            std::optional<Tensor> queryRopePositionOffsets;
+            std::optional<Tensor> keyRopePositionOffsets;
+            if (useQueryRopePositionOffsets) {
+                queryRopePositionOffsets = normalizeRopePositionOffsets(kAttentionQueryRopePositionOffsetsInputName);
+            }
+            if (useKeyRopePositionOffsets) {
+                keyRopePositionOffsets = normalizeRopePositionOffsets(kAttentionKeyRopePositionOffsetsInputName);
+            }
+
+            std::optional<Tensor> queryRopePositionIds;
+            std::optional<Tensor> keyRopePositionIds;
+            if (useRagged && useRope) {
+                queryRopePositionIds.emplace(
+                    featureInput.getPlacement(), ThorImplementation::TensorDescriptor(DataType::FP32, {querySequenceLength}));
+                keyRopePositionIds.emplace(
+                    featureInput.getPlacement(), ThorImplementation::TensorDescriptor(DataType::FP32, {keyValueSequenceLength}));
+            }
+
             Expression x = Expression::input(kAttentionFeatureInputName, inputDType, inputDType);
             if (!useRagged) {
                 x = x.reshape({batch * querySequenceLength, queryInputFeatures});
@@ -866,50 +966,94 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             Expression v = std::move(projected.v);
 
             if (useRope) {
-                ThorImplementation::RotaryPositionEmbeddingOptions opts = ropeOptions;
-                opts.sequence_axis = useRagged ? 0 : 1;
-                opts.head_dim_axis = useRagged ? 2 : 3;
-                opts.allow_in_place_materialization = ropeInPlace;
-                if (!opts.compute_dtype.has_value()) {
-                    opts.compute_dtype = computeDType;
+                ThorImplementation::RotaryPositionEmbeddingOptions queryOpts = ropeOptions;
+                ThorImplementation::RotaryPositionEmbeddingOptions keyOpts = ropeOptions;
+                queryOpts.position_offset = useRagged ? 0 : queryRopePositionOffset;
+                keyOpts.position_offset = useRagged ? 0 : keyRopePositionOffset;
+                queryOpts.sequence_axis = keyOpts.sequence_axis = useRagged ? 0 : 1;
+                queryOpts.head_dim_axis = keyOpts.head_dim_axis = useRagged ? 2 : 3;
+                // Explicit packed-ragged positions are index-aware metadata, so the specialized in-place RoPE
+                // materialization is intentionally kept to the dense scalar-origin path.
+                queryOpts.allow_in_place_materialization = keyOpts.allow_in_place_materialization = useRagged ? false : ropeInPlace;
+                if (!queryOpts.compute_dtype.has_value()) {
+                    queryOpts.compute_dtype = computeDType;
                 }
-                if (!opts.output_dtype.has_value()) {
-                    opts.output_dtype = outputDType;
+                if (!keyOpts.compute_dtype.has_value()) {
+                    keyOpts.compute_dtype = computeDType;
+                }
+                if (!queryOpts.output_dtype.has_value()) {
+                    queryOpts.output_dtype = outputDType;
+                }
+                if (!keyOpts.output_dtype.has_value()) {
+                    keyOpts.output_dtype = outputDType;
                 }
 
                 const bool scalingNeedsLogicalSequenceLength =
-                    opts.scaling_kind == ThorImplementation::RotaryScalingKind::DynamicNTK ||
-                    opts.scaling_kind == ThorImplementation::RotaryScalingKind::LongRope;
-                std::optional<Expression> effectiveSequenceLength;
-                if (scalingNeedsLogicalSequenceLength && useRagged) {
-                    // Packed ragged storage uses maxTotalValues as its physical sequence-axis capacity. Dynamic-NTK
-                    // and LongRoPE instead require the longest logical sequence in the batch. Derive max(diff(offsets))
-                    // entirely on-device; the row partition remains structural, non-differentiable metadata.
-                    Expression offsets = Expression::input(
-                        kAttentionQueryRowPartitionInputName, queryRowPartitionDType, queryRowPartitionDType);
-                    Expression starts = offsets.stridedView({batch}, {1}, 0);
-                    Expression ends = offsets.stridedView({batch}, {1}, 1);
-                    // Subtract while offsets are still exact UINT32/UINT64 metadata. Only the resulting row lengths are
-                    // converted to FP32, which is the numeric domain used by the RoPE scaling formulas themselves.
-                    effectiveSequenceLength = (ends - starts).cast(DataType::FP32).reduce_max({0}, {});
-                } else if (scalingNeedsLogicalSequenceLength && useSequenceLengths) {
-                    // Dense variable-length attention must likewise use active logical lengths rather than padded S.
-                    // Q/K share one RoPE frequency basis, so cross-attention uses the larger active maximum.
-                    Expression qLengths = Expression::input(
-                        kAttentionQuerySequenceLengthsInputName, DataType::INT32, DataType::INT32);
-                    Expression kvLengths = Expression::input(
-                        kAttentionKeyValueSequenceLengthsInputName, DataType::INT32, DataType::INT32);
-                    effectiveSequenceLength = qLengths.cast(DataType::FP32)
-                                                  .reduce_max({0}, {})
-                                                  .max(kvLengths.cast(DataType::FP32).reduce_max({0}, {}));
-                }
+                    ropeOptions.scaling_kind == ThorImplementation::RotaryScalingKind::DynamicNTK ||
+                    ropeOptions.scaling_kind == ThorImplementation::RotaryScalingKind::LongRope;
 
-                if (effectiveSequenceLength.has_value()) {
-                    q = q.rotaryPositionEmbeddingWithEffectiveSequenceLength(effectiveSequenceLength.value(), opts);
-                    k = k.rotaryPositionEmbeddingWithEffectiveSequenceLength(effectiveSequenceLength.value(), opts);
+                if (useRagged) {
+                    // Packed THD storage has no sequence reset in its physical token index. Materialized absolute
+                    // position IDs restore row-local coordinates and permit Q/K to use distinct row partitions.
+                    Expression queryPositions = Expression::input(kAttentionQueryRopePositionIdsInputName, DataType::FP32, DataType::FP32);
+                    Expression keyPositions = Expression::input(kAttentionKeyRopePositionIdsInputName, DataType::FP32, DataType::FP32);
+                    if (scalingNeedsLogicalSequenceLength) {
+                        // Dynamic-NTK/LongRoPE must use one shared rotary frequency basis across Q and K. The highest
+                        // occupied absolute position (plus one) gives the joint positional extent regardless of how
+                        // the two ragged partitions are packed. Unused capacity is zero-filled by the pre-forward hook.
+                        Expression queryExtent = queryPositions.reduce_max({0}, {}) + Expression::constantScalar(1.0);
+                        Expression keyExtent = keyPositions.reduce_max({0}, {}) + Expression::constantScalar(1.0);
+                        Expression absoluteExtent = queryExtent.max(keyExtent).max(Expression::constantScalar(1.0));
+                        q = q.rotaryPositionEmbeddingWithPositionIdsAndEffectiveSequenceLength(
+                            queryPositions, absoluteExtent, queryOpts);
+                        k = k.rotaryPositionEmbeddingWithPositionIdsAndEffectiveSequenceLength(
+                            keyPositions, absoluteExtent, keyOpts);
+                    } else {
+                        q = q.rotaryPositionEmbeddingWithPositionIds(queryPositions, queryOpts);
+                        k = k.rotaryPositionEmbeddingWithPositionIds(keyPositions, keyOpts);
+                    }
                 } else {
-                    q = q.rotaryPositionEmbedding(opts);
-                    k = k.rotaryPositionEmbedding(opts);
+                    std::optional<Expression> queryEffectiveSequenceLength;
+                    std::optional<Expression> keyEffectiveSequenceLength;
+                    const double positiveQueryOffset = static_cast<double>(std::max<int64_t>(0, queryRopePositionOffset));
+                    const double positiveKeyOffset = static_cast<double>(std::max<int64_t>(0, keyRopePositionOffset));
+                    if (scalingNeedsLogicalSequenceLength && useSequenceLengths) {
+                        // Dense variable-length attention must likewise use active logical lengths rather than padded S.
+                        // Q/K share one RoPE frequency basis.
+                        Expression qLengths = Expression::input(
+                            kAttentionQuerySequenceLengthsInputName, DataType::INT32, DataType::INT32);
+                        Expression kvLengths = Expression::input(
+                            kAttentionKeyValueSequenceLengthsInputName, DataType::INT32, DataType::INT32);
+                        Expression qMax = qLengths.cast(DataType::FP32).reduce_max({0}, {});
+                        Expression kvMax = kvLengths.cast(DataType::FP32).reduce_max({0}, {});
+                        Expression absoluteExtent = (qMax + Expression::constantScalar(positiveQueryOffset))
+                                                        .max(kvMax + Expression::constantScalar(positiveKeyOffset));
+                        queryEffectiveSequenceLength = absoluteExtent - Expression::constantScalar(positiveQueryOffset);
+                        keyEffectiveSequenceLength = absoluteExtent - Expression::constantScalar(positiveKeyOffset);
+                    } else if (scalingNeedsLogicalSequenceLength) {
+                        const double queryAbsoluteExtent = static_cast<double>(querySequenceLength) + positiveQueryOffset;
+                        const double keyAbsoluteExtent = static_cast<double>(keyValueSequenceLength) + positiveKeyOffset;
+                        if (queryAbsoluteExtent != keyAbsoluteExtent) {
+                            const double absoluteExtent = std::max(queryAbsoluteExtent, keyAbsoluteExtent);
+                            if (queryAbsoluteExtent != absoluteExtent) {
+                                queryEffectiveSequenceLength = Expression::constantScalar(absoluteExtent - positiveQueryOffset);
+                            }
+                            if (keyAbsoluteExtent != absoluteExtent) {
+                                keyEffectiveSequenceLength = Expression::constantScalar(absoluteExtent - positiveKeyOffset);
+                            }
+                        }
+                    }
+
+                    if (queryEffectiveSequenceLength.has_value()) {
+                        q = q.rotaryPositionEmbeddingWithEffectiveSequenceLength(queryEffectiveSequenceLength.value(), queryOpts);
+                    } else {
+                        q = q.rotaryPositionEmbedding(queryOpts);
+                    }
+                    if (keyEffectiveSequenceLength.has_value()) {
+                        k = k.rotaryPositionEmbeddingWithEffectiveSequenceLength(keyEffectiveSequenceLength.value(), keyOpts);
+                    } else {
+                        k = k.rotaryPositionEmbedding(keyOpts);
+                    }
                 }
             }
 
@@ -1077,6 +1221,17 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             }
 
             DynamicExpression::TensorMap stampInputs = inputs;
+            // Per-row RoPE origins are consumed by the pre-forward hook that materializes the
+            // explicit position-id tensors below. They are public DynamicExpression inputs so
+            // the hook can observe the current batch values, but they are not roots of the
+            // fused attention equation itself. Do not forward hook-only inputs to FusedEquation,
+            // which intentionally rejects named inputs that its compiled expression does not use.
+            if (useQueryRopePositionOffsets) {
+                stampInputs.erase(kAttentionQueryRopePositionOffsetsInputName);
+            }
+            if (useKeyRopePositionOffsets) {
+                stampInputs.erase(kAttentionKeyRopePositionOffsetsInputName);
+            }
             if (useScoreBias) {
                 stampInputs[kAttentionScoreBiasInputName] = scoreBiasInput.value();
             }
@@ -1088,14 +1243,61 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 stampInputs[kAttentionQueryRowPartitionInputName] = queryRaggedOffsets.value();
                 stampInputs[kAttentionKeyValueRowPartitionInputName] = keyValueRaggedOffsets.value();
             }
+
+            std::function<void(Stream&)> ropePreForwardHook;
+            if (useRagged && useRope) {
+                stampInputs[kAttentionQueryRopePositionIdsInputName] = queryRopePositionIds.value();
+                stampInputs[kAttentionKeyRopePositionIdsInputName] = keyRopePositionIds.value();
+                Tensor queryOffsets = queryRaggedOffsets.value();
+                Tensor keyOffsets = keyValueRaggedOffsets.value();
+                Tensor queryPositions = queryRopePositionIds.value();
+                Tensor keyPositions = keyRopePositionIds.value();
+                std::optional<Tensor> queryOrigins = queryRopePositionOffsets;
+                std::optional<Tensor> keyOrigins = keyRopePositionOffsets;
+                ropePreForwardHook = [queryOffsets,
+                                      keyOffsets,
+                                      queryOrigins,
+                                      keyOrigins,
+                                      queryPositions,
+                                      keyPositions,
+                                      queryRopePositionOffset,
+                                      keyRopePositionOffset,
+                                      batch,
+                                      querySequenceLength,
+                                      keyValueSequenceLength](Stream& runStream) mutable {
+                    ThorImplementation::rowPartitionOffsetsToRopePositionIds(
+                        queryOffsets,
+                        queryOrigins.has_value() ? &queryOrigins.value() : nullptr,
+                        queryRopePositionOffset,
+                        queryPositions,
+                        batch,
+                        querySequenceLength,
+                        runStream);
+                    ThorImplementation::rowPartitionOffsetsToRopePositionIds(
+                        keyOffsets,
+                        keyOrigins.has_value() ? &keyOrigins.value() : nullptr,
+                        keyRopePositionOffset,
+                        keyPositions,
+                        batch,
+                        keyValueSequenceLength,
+                        runStream);
+                };
+            }
+
             std::unordered_map<std::string, TensorScalarBinding> tensorScalarInputs;
-            std::function<void(Stream&)> preForwardHook;
+            std::function<void(Stream&)> preForwardHook = ropePreForwardHook;
             if (dropoutProbability > 0.0f) {
                 auto dropoutState = std::make_shared<AttentionDropoutRuntimeState>(dropoutSeed, dropoutOffset);
                 dropoutState->setOffsetAdvance(checkedDropoutOffsetAdvance(batch, numHeads, querySequenceLength, keyValueSequenceLength));
                 tensorScalarInputs[kAttentionDropoutSeedInputName] = dropoutState->seedBinding(featureInput.getPlacement());
                 tensorScalarInputs[kAttentionDropoutOffsetInputName] = dropoutState->offsetBinding(featureInput.getPlacement());
-                preForwardHook = [dropoutState](Stream& runStream) { dropoutState->uploadForForward(runStream); };
+                const std::function<void(Stream&)> ropeHook = ropePreForwardHook;
+                preForwardHook = [ropeHook, dropoutState](Stream& runStream) {
+                    if (ropeHook) {
+                        ropeHook(runStream);
+                    }
+                    dropoutState->uploadForForward(runStream);
+                };
             }
 
             auto equation = std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum()));
@@ -1124,13 +1326,25 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 {},
                 std::move(preForwardHook),
             };
+            // These tensors drive the ragged RoPE position-id generator in the
+            // pre-forward hook. They are declared Attention/CustomLayer inputs, but
+            // are intentionally not roots of the fused equation; the equation reads
+            // the generated __attention_*_rope_position_ids tensors instead.
+            if (useQueryRopePositionOffsets) {
+                build.pre_forward_only_inputs.emplace(
+                    kAttentionQueryRopePositionOffsetsInputName, queryRopePositionOffsets.value());
+            }
+            if (useKeyRopePositionOffsets) {
+                build.pre_forward_only_inputs.emplace(
+                    kAttentionKeyRopePositionOffsetsInputName, keyRopePositionOffsets.value());
+            }
             if (evaluationEquation) {
                 build.execution_variants.emplace(
                     kAttentionEvaluationVariant,
                     DynamicExpressionVariant{
                         .equation = std::move(evaluationEquation),
                         .tensor_scalar_inputs = {},
-                        .pre_forward_hook = {},
+                        .pre_forward_hook = ropePreForwardHook,
                         .supports_backward = true,
                     });
                 build.evaluation_variant_id = kAttentionEvaluationVariant;
@@ -1252,6 +1466,8 @@ void Attention::validateEpilogueAuxInputName(const std::string& inputName) {
         kAttentionKeyValueSequenceLengthsInputName,
         kAttentionQueryRowPartitionInputName,
         kAttentionKeyValueRowPartitionInputName,
+        kAttentionQueryRopePositionOffsetsInputName,
+        kAttentionKeyRopePositionOffsetsInputName,
         "feature_output",
         "qkv_weights",
         "query_weights",
@@ -1321,20 +1537,33 @@ void Attention::Builder::verifyConfig() const {
             "Attention RaggedTensor inputs already define sequence lengths through their row partitions; "
             "querySequenceLengthsInput/keyValueSequenceLengthsInput are not allowed in ragged mode.");
     }
-    if (useRagged && _useRope.value_or(false) && _raggedContextInput.has_value() &&
-        _raggedFeatureInput->getOffsets() != _raggedContextInput->getOffsets()) {
-        throw std::invalid_argument(
-            "Attention ragged cross-attention with RoPE requires query and key/value to share the same row partition. "
-            "Independent ragged partitions need explicit positional semantics, which Attention does not infer.");
+    if (_queryRopePositionOffsetsInput.has_value()) {
+        requireRopePositionOffsetsInput(_queryRopePositionOffsetsInput.value(), "queryRopePositionOffsetsInput");
     }
-    const uint64_t maximumPossibleRopeSequenceLength =
+    if (_keyRopePositionOffsetsInput.has_value()) {
+        requireRopePositionOffsetsInput(_keyRopePositionOffsetsInput.value(), "keyRopePositionOffsetsInput");
+    }
+    if (!useRagged && (_queryRopePositionOffsetsInput.has_value() || _keyRopePositionOffsetsInput.has_value())) {
+        throw std::invalid_argument(
+            "Attention per-row RoPE position-offset inputs are supported only with RaggedTensor feature input.");
+    }
+    const uint64_t maximumPossibleQuerySequenceLength =
+        useRagged ? _raggedFeatureInput->getMaxTotalValues() : _featureInput->getDimensions().at(0);
+    const uint64_t maximumPossibleKeySequenceLength =
         useRagged
-            ? _raggedFeatureInput->getMaxTotalValues()
-            : std::max(_featureInput->getDimensions().at(0),
-                       _contextInput.has_value() ? _contextInput->getDimensions().at(0) : _featureInput->getDimensions().at(0));
+            ? (_raggedContextInput.has_value() ? _raggedContextInput->getMaxTotalValues() : _raggedFeatureInput->getMaxTotalValues())
+            : (_contextInput.has_value() ? _contextInput->getDimensions().at(0) : _featureInput->getDimensions().at(0));
+    const ThorImplementation::RotaryPositionEmbeddingOptions resolvedRopeOptions =
+        _ropeOptions.value_or(ThorImplementation::RotaryPositionEmbeddingOptions{});
+    const int64_t queryRopePositionOffset = _queryRopePositionOffset.value_or(resolvedRopeOptions.position_offset);
+    const int64_t keyRopePositionOffset = _keyRopePositionOffset.value_or(resolvedRopeOptions.position_offset);
     if (const std::optional<std::string> error = ropeFp32SequenceLengthValidationError(
-            _useRope.value_or(false), _ropeOptions.value_or(ThorImplementation::RotaryPositionEmbeddingOptions{}),
-            maximumPossibleRopeSequenceLength);
+            _useRope.value_or(false),
+            resolvedRopeOptions,
+            _queryRopePositionOffsetsInput.has_value() ? 0 : queryRopePositionOffset,
+            _keyRopePositionOffsetsInput.has_value() ? 0 : keyRopePositionOffset,
+            maximumPossibleQuerySequenceLength,
+            maximumPossibleKeySequenceLength);
         error.has_value()) {
         throw std::invalid_argument(error.value());
     }
@@ -1523,6 +1752,12 @@ Attention Attention::Builder::build() {
     if (!_ropeOptions.has_value()) {
         _ropeOptions = ThorImplementation::RotaryPositionEmbeddingOptions{};
     }
+    if (!_queryRopePositionOffset.has_value()) {
+        _queryRopePositionOffset = _ropeOptions->position_offset;
+    }
+    if (!_keyRopePositionOffset.has_value()) {
+        _keyRopePositionOffset = _ropeOptions->position_offset;
+    }
     if (!_weightsDataType.has_value() && _featureInput.has_value()) {
         _weightsDataType = _featureInput->getDataType();
     }
@@ -1556,6 +1791,8 @@ Attention Attention::Builder::build() {
     const bool useScoreBias = _scoreBiasInput.has_value();
     const bool useSequenceLengths = _querySequenceLengthsInput.has_value();
     const bool useRagged = _raggedFeatureInput.has_value();
+    const bool useQueryRopePositionOffsets = _queryRopePositionOffsetsInput.has_value();
+    const bool useKeyRopePositionOffsets = _keyRopePositionOffsetsInput.has_value();
     const bool usePackedQkvProjection = !useRagged && usePackedQkvProjectionForLayer(_useRope.value(), _contextInput.has_value());
     const std::vector<std::string> epilogueAuxNames = epilogueAuxInputNames();
 
@@ -1599,6 +1836,8 @@ Attention Attention::Builder::build() {
                                             _useRope.value(),
                                             _ropeInPlace.value(),
                                             _ropeOptions.value(),
+                                            _queryRopePositionOffset.value(),
+                                            _keyRopePositionOffset.value(),
                                             _maskKind.value(),
                                             _diagonalLeftBound.value(),
                                             _diagonalRightBound.value(),
@@ -1611,6 +1850,8 @@ Attention Attention::Builder::build() {
                                             useScoreBias,
                                             useSequenceLengths,
                                             useRagged,
+                                            useQueryRopePositionOffsets,
+                                            useKeyRopePositionOffsets,
                                             useRagged ? _raggedFeatureInput->getBatchSize() : 0,
                                             useRagged ? _raggedFeatureInput->getOffsetsDataType()
                                                       : ThorImplementation::kDefaultRowPartitionOffsetDataType,
@@ -1624,13 +1865,20 @@ Attention Attention::Builder::build() {
                                             _outputDataType.value(),
                                             _epilogue,
                                             epilogueAuxNames),
-                    publicAttentionInputNames(
-                        _contextInput.has_value(), useScoreBias, useSequenceLengths, useRagged, epilogueAuxNames),
+                    publicAttentionInputNames(_contextInput.has_value(),
+                                              useScoreBias,
+                                              useSequenceLengths,
+                                              useRagged,
+                                              useQueryRopePositionOffsets,
+                                              useKeyRopePositionOffsets,
+                                              epilogueAuxNames),
                     {publicAttentionInputInterface(_featureInput.value(),
                                                    _contextInput,
                                                    _scoreBiasInput,
                                                    _querySequenceLengthsInput,
                                                    _keyValueSequenceLengthsInput,
+                                                   _queryRopePositionOffsetsInput,
+                                                   _keyRopePositionOffsetsInput,
                                                    _raggedFeatureInput,
                                                    _raggedContextInput,
                                                    _epilogueInputBindings)},
@@ -1647,6 +1895,8 @@ Attention Attention::Builder::build() {
                     _useRope.value(),
                     _ropeInPlace.value(),
                     _ropeOptions.value(),
+                    _queryRopePositionOffset.value(),
+                    _keyRopePositionOffset.value(),
                     _maskKind.value(),
                     _diagonalLeftBound.value(),
                     _diagonalRightBound.value(),
@@ -1659,6 +1909,8 @@ Attention Attention::Builder::build() {
                     _scoreBiasInput,
                     _querySequenceLengthsInput,
                     _keyValueSequenceLengthsInput,
+                    _queryRopePositionOffsetsInput,
+                    _keyRopePositionOffsetsInput,
                     _raggedFeatureInput,
                     _raggedContextInput,
                     _weightsDataType.value(),
@@ -1685,7 +1937,15 @@ json Attention::architectureJson() const {
     j["has_bias"] = hasBias;
     j["use_rope"] = useRope;
     j["rope_in_place"] = ropeInPlace;
-    j["rope_options"] = ropeOptionsToJson(ropeOptions);
+    ThorImplementation::RotaryPositionEmbeddingOptions serializedRopeOptions = ropeOptions;
+    if (queryRopePositionOffset == keyRopePositionOffset) {
+        // Keep archives that use the shared-offset convenience readable by older Thor versions that only know the
+        // legacy rope_options.position_offset field. Independent Q/K origins require the explicit fields below.
+        serializedRopeOptions.position_offset = queryRopePositionOffset;
+    }
+    j["rope_options"] = ropeOptionsToJson(serializedRopeOptions);
+    j["rope_query_position_offset"] = queryRopePositionOffset;
+    j["rope_key_position_offset"] = keyRopePositionOffset;
     j["mask_kind"] = attentionMaskKindToString(maskKind);
     j["diagonal_left_bound"] = diagonalLeftBound;
     j["diagonal_right_bound"] = diagonalRightBound;
@@ -1697,6 +1957,8 @@ json Attention::architectureJson() const {
     j["use_cross_attention"] = contextInput.has_value();
     j["use_score_bias"] = scoreBiasInput.has_value();
     j["use_sequence_lengths"] = querySequenceLengthsInput.has_value();
+    j["use_query_rope_position_offsets"] = queryRopePositionOffsetsInput.has_value();
+    j["use_key_rope_position_offsets"] = keyRopePositionOffsetsInput.has_value();
     j["use_ragged"] = raggedFeatureInput.has_value();
     j["weights_data_type"] = weightsDataType;
     j["compute_data_type"] = computeDataType;
@@ -1737,6 +1999,12 @@ json Attention::architectureJson() const {
     if (querySequenceLengthsInput.has_value()) {
         j["query_sequence_lengths_input"] = querySequenceLengthsInput.value().architectureJson();
         j["key_value_sequence_lengths_input"] = keyValueSequenceLengthsInput.value().architectureJson();
+    }
+    if (queryRopePositionOffsetsInput.has_value()) {
+        j["query_rope_position_offsets_input"] = queryRopePositionOffsetsInput.value().architectureJson();
+    }
+    if (keyRopePositionOffsetsInput.has_value()) {
+        j["key_rope_position_offsets_input"] = keyRopePositionOffsetsInput.value().architectureJson();
     }
     if (raggedFeatureInput.has_value()) {
         j["ragged_feature_input"] = raggedFeatureInput->architectureJson();
@@ -1849,6 +2117,23 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
             network->getApiTensorByOriginalId(j.at("key_value_sequence_lengths_input").at("id").get<uint64_t>());
     }
 
+    std::optional<Tensor> queryRopePositionOffsetsInput = std::nullopt;
+    std::optional<Tensor> keyRopePositionOffsetsInput = std::nullopt;
+    if (j.value("use_query_rope_position_offsets", false) || j.contains("query_rope_position_offsets_input")) {
+        if (!j.contains("query_rope_position_offsets_input")) {
+            throw std::runtime_error("Attention deserialize missing query_rope_position_offsets_input.");
+        }
+        queryRopePositionOffsetsInput =
+            network->getApiTensorByOriginalId(j.at("query_rope_position_offsets_input").at("id").get<uint64_t>());
+    }
+    if (j.value("use_key_rope_position_offsets", false) || j.contains("key_rope_position_offsets_input")) {
+        if (!j.contains("key_rope_position_offsets_input")) {
+            throw std::runtime_error("Attention deserialize missing key_rope_position_offsets_input.");
+        }
+        keyRopePositionOffsetsInput =
+            network->getApiTensorByOriginalId(j.at("key_rope_position_offsets_input").at("id").get<uint64_t>());
+    }
+
     auto raggedFromNetworkMetadata = [&](const json& raggedJson, const char* fieldName) -> RaggedTensor {
         if (!raggedJson.is_object() || !raggedJson.contains("values") || !raggedJson.contains("offsets") ||
             !raggedJson.contains("batch_size") || !raggedJson.contains("max_total_values")) {
@@ -1915,6 +2200,8 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     const bool useRope = j.at("use_rope").get<bool>();
     const bool ropeInPlace = j.value("rope_in_place", false);
     ThorImplementation::RotaryPositionEmbeddingOptions ropeOptions = ropeOptionsFromJson(j.at("rope_options"));
+    const int64_t queryRopePositionOffset = j.value("rope_query_position_offset", ropeOptions.position_offset);
+    const int64_t keyRopePositionOffset = j.value("rope_key_position_offset", ropeOptions.position_offset);
     const ThorImplementation::AttentionMaskKind maskKind = attentionMaskKindFromString(j.value("mask_kind", std::string("none")));
     const int64_t diagonalLeftBound = j.value("diagonal_left_bound", int64_t{0});
     const int64_t diagonalRightBound = j.value("diagonal_right_bound", int64_t{0});
@@ -1929,11 +2216,19 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     const DataType weightsDataType = j.at("weights_data_type").get<DataType>();
     const DataType computeDataType = j.at("compute_data_type").get<DataType>();
     const DataType outputDataType = j.at("output_data_type").get<DataType>();
-    const uint64_t maximumPossibleRopeSequenceLength =
-        raggedFeatureInput.has_value() ? raggedFeatureInput->getMaxTotalValues()
-                                       : std::max(querySequenceLength, keyValueSequenceLength);
+    const uint64_t maximumPossibleQuerySequenceLength =
+        raggedFeatureInput.has_value() ? raggedFeatureInput->getMaxTotalValues() : querySequenceLength;
+    const uint64_t maximumPossibleKeySequenceLength =
+        raggedContextInput.has_value()
+            ? raggedContextInput->getMaxTotalValues()
+            : (raggedFeatureInput.has_value() ? raggedFeatureInput->getMaxTotalValues() : keyValueSequenceLength);
     if (const std::optional<std::string> error =
-            ropeFp32SequenceLengthValidationError(useRope, ropeOptions, maximumPossibleRopeSequenceLength);
+            ropeFp32SequenceLengthValidationError(useRope,
+                                                   ropeOptions,
+                                                   queryRopePositionOffsetsInput.has_value() ? 0 : queryRopePositionOffset,
+                                                   keyRopePositionOffsetsInput.has_value() ? 0 : keyRopePositionOffset,
+                                                   maximumPossibleQuerySequenceLength,
+                                                   maximumPossibleKeySequenceLength);
         error.has_value()) {
         throw std::runtime_error(error.value());
     }
@@ -1988,16 +2283,25 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
         requireSequenceLengthsInput(querySequenceLengthsInput.value(), "querySequenceLengthsInput");
         requireSequenceLengthsInput(keyValueSequenceLengthsInput.value(), "keyValueSequenceLengthsInput");
     }
+    if (queryRopePositionOffsetsInput.has_value()) {
+        requireRopePositionOffsetsInput(queryRopePositionOffsetsInput.value(), "queryRopePositionOffsetsInput");
+    }
+    if (keyRopePositionOffsetsInput.has_value()) {
+        requireRopePositionOffsetsInput(keyRopePositionOffsetsInput.value(), "keyRopePositionOffsetsInput");
+    }
+    if ((queryRopePositionOffsetsInput.has_value() || keyRopePositionOffsetsInput.has_value()) && !useRope) {
+        throw std::runtime_error("Attention serialized per-row RoPE position offsets require use_rope=true.");
+    }
+    if (!raggedFeatureInput.has_value() &&
+        (queryRopePositionOffsetsInput.has_value() || keyRopePositionOffsetsInput.has_value())) {
+        throw std::runtime_error("Attention serialized per-row RoPE position offsets require ragged inputs.");
+    }
     if (raggedFeatureInput.has_value()) {
         requireRaggedFeatureInput(raggedFeatureInput.value(), "ragged_feature_input");
         if (raggedContextInput.has_value()) {
             requireRaggedFeatureInput(raggedContextInput.value(), "ragged_context_input");
             if (raggedContextInput->getBatchSize() != raggedFeatureInput->getBatchSize()) {
                 throw std::runtime_error("Attention serialized ragged query and key/value inputs must have the same batch size.");
-            }
-            if (useRope && raggedContextInput->getOffsets() != raggedFeatureInput->getOffsets()) {
-                throw std::runtime_error(
-                    "Attention serialized ragged cross-attention with RoPE requires query and key/value to share one row partition.");
             }
         }
         const json& raggedOutputJson = j.at("ragged_feature_output");
@@ -2051,6 +2355,8 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     const bool useScoreBias = scoreBiasInput.has_value();
     const bool useSequenceLengths = querySequenceLengthsInput.has_value();
     const bool useRagged = raggedFeatureInput.has_value();
+    const bool useQueryRopePositionOffsets = queryRopePositionOffsetsInput.has_value();
+    const bool useKeyRopePositionOffsets = keyRopePositionOffsetsInput.has_value();
 
     Attention layer(makeAttentionExpression(querySequenceLength,
                                             keyValueSequenceLength,
@@ -2065,6 +2371,8 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                                             useRope,
                                             ropeInPlace,
                                             ropeOptions,
+                                            queryRopePositionOffset,
+                                            keyRopePositionOffset,
                                             maskKind,
                                             diagonalLeftBound,
                                             diagonalRightBound,
@@ -2077,6 +2385,8 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                                             useScoreBias,
                                             useSequenceLengths,
                                             useRagged,
+                                            useQueryRopePositionOffsets,
+                                            useKeyRopePositionOffsets,
                                             useRagged ? raggedFeatureInput->getBatchSize() : 0,
                                             useRagged ? raggedFeatureInput->getOffsetsDataType()
                                                       : ThorImplementation::kDefaultRowPartitionOffsetDataType,
@@ -2090,13 +2400,20 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                                             outputDataType,
                                             epilogue,
                                             epilogueAuxInputNames),
-                    publicAttentionInputNames(
-                        contextInput.has_value(), useScoreBias, useSequenceLengths, useRagged, epilogueAuxInputNames),
+                    publicAttentionInputNames(contextInput.has_value(),
+                                              useScoreBias,
+                                              useSequenceLengths,
+                                              useRagged,
+                                              useQueryRopePositionOffsets,
+                                              useKeyRopePositionOffsets,
+                                              epilogueAuxInputNames),
                     {publicAttentionInputInterface(featureInput,
                                                    contextInput,
                                                    scoreBiasInput,
                                                    querySequenceLengthsInput,
                                                    keyValueSequenceLengthsInput,
+                                                   queryRopePositionOffsetsInput,
+                                                   keyRopePositionOffsetsInput,
                                                    raggedFeatureInput,
                                                    raggedContextInput,
                                                    epilogueInputBindings)},
@@ -2113,6 +2430,8 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                     useRope,
                     ropeInPlace,
                     std::move(ropeOptions),
+                    queryRopePositionOffset,
+                    keyRopePositionOffset,
                     maskKind,
                     diagonalLeftBound,
                     diagonalRightBound,
@@ -2125,6 +2444,8 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                     scoreBiasInput,
                     querySequenceLengthsInput,
                     keyValueSequenceLengthsInput,
+                    queryRopePositionOffsetsInput,
+                    keyRopePositionOffsetsInput,
                     raggedFeatureInput,
                     raggedContextInput,
                     weightsDataType,

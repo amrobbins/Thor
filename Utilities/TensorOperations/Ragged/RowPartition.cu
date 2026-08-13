@@ -133,6 +133,37 @@ __global__ void offsetsToRowIdsKernel(const OffsetT* offsets, RowIdT* row_ids, u
 }
 
 template <typename OffsetT>
+__global__ void offsetsToRopePositionIdsKernel(const OffsetT* offsets,
+                                               const int32_t* row_position_offsets,
+                                               int64_t scalar_position_offset,
+                                               float* position_ids,
+                                               uint64_t batch_size,
+                                               uint64_t max_total_values) {
+    const uint64_t row = static_cast<uint64_t>(blockIdx.x);
+    if (row < batch_size) {
+        const uint64_t begin = static_cast<uint64_t>(offsets[row]);
+        const uint64_t end = static_cast<uint64_t>(offsets[row + 1]);
+        const uint64_t bounded_begin = begin < max_total_values ? begin : max_total_values;
+        const uint64_t bounded_end = end < max_total_values ? end : max_total_values;
+        const int64_t origin = row_position_offsets == nullptr ? scalar_position_offset
+                                                               : static_cast<int64_t>(row_position_offsets[row]);
+        for (uint64_t idx = bounded_begin + threadIdx.x; idx < bounded_end; idx += blockDim.x) {
+            position_ids[idx] = static_cast<float>(origin + static_cast<int64_t>(idx - begin));
+        }
+        return;
+    }
+
+    // One extra block clears unused packed capacity so stale positions can never leak into a later shorter batch.
+    if (row == batch_size) {
+        const uint64_t used = static_cast<uint64_t>(offsets[batch_size]);
+        const uint64_t bounded_used = used < max_total_values ? used : max_total_values;
+        for (uint64_t idx = bounded_used + threadIdx.x; idx < max_total_values; idx += blockDim.x) {
+            position_ids[idx] = 0.0f;
+        }
+    }
+}
+
+template <typename OffsetT>
 __global__ void validateOffsetsKernel(const OffsetT* offsets,
                                       uint32_t* validation_error_bits,
                                       uint64_t batch_size,
@@ -235,6 +266,30 @@ void validateOffsetsAndRowIds(const Tensor& offsets, const Tensor& row_ids, uint
     requireRowPartitionOffsetDType(row_ids.getDataType(), "row partition row_ids");
     if (row_ids.getDataType() == DataType::UINT32 && batch_size > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
         throw std::invalid_argument("row partition row_ids UINT32 output cannot represent batch_size.");
+    }
+}
+
+void validateOffsetsAndRopePositionIds(const Tensor& offsets,
+                                       const Tensor* row_position_offsets,
+                                       const Tensor& position_ids,
+                                       uint64_t batch_size,
+                                       uint64_t max_total_values) {
+    requireRowPartitionVectorGpuTensor(offsets, "row partition offsets");
+    requireRowPartitionVectorGpuTensor(position_ids, "ragged RoPE position ids");
+    requireSameGpuPlacement(offsets, position_ids, "row partition offsets", "ragged RoPE position ids");
+    requireStorageForNumItems(offsets, "row partition offsets", checkedOffsetsElements(batch_size));
+    requireStorageForNumItems(position_ids, "ragged RoPE position ids", max_total_values);
+    requireRowPartitionOffsetDType(offsets.getDataType(), "row partition offsets");
+    if (position_ids.getDataType() != DataType::FP32) {
+        throw std::invalid_argument("ragged RoPE position ids output dtype must be FP32.");
+    }
+    if (row_position_offsets != nullptr) {
+        requireRowPartitionVectorGpuTensor(*row_position_offsets, "ragged RoPE row position offsets");
+        requireSameGpuPlacement(offsets, *row_position_offsets, "row partition offsets", "ragged RoPE row position offsets");
+        requireStorageForNumItems(*row_position_offsets, "ragged RoPE row position offsets", batch_size);
+        if (row_position_offsets->getDataType() != DataType::INT32) {
+            throw std::invalid_argument("ragged RoPE row position offsets dtype must be INT32.");
+        }
     }
 }
 
@@ -393,6 +448,36 @@ struct OffsetsToRowIdsOffsetFn {
     }
 };
 
+struct OffsetsToRopePositionIdsFn {
+    const Tensor& offsets;
+    const Tensor* row_position_offsets;
+    int64_t scalar_position_offset;
+    Tensor& position_ids;
+    uint64_t batch_size;
+    uint64_t max_total_values;
+    Stream& stream;
+
+    template <typename OffsetT>
+    void operator()() const {
+        if (max_total_values == 0) {
+            return;
+        }
+        if (batch_size >= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+            throw std::invalid_argument("ragged RoPE position-id grid exceeds CUDA 1D grid limit.");
+        }
+        constexpr uint32_t threads = 256;
+        const int32_t* row_origins = row_position_offsets == nullptr ? nullptr : row_position_offsets->getMemPtr<int32_t>();
+        offsetsToRopePositionIdsKernel<OffsetT><<<static_cast<uint32_t>(batch_size + 1), threads, 0, stream.getStream()>>>(
+            offsets.getMemPtr<OffsetT>(),
+            row_origins,
+            scalar_position_offset,
+            position_ids.getMemPtr<float>(),
+            batch_size,
+            max_total_values);
+        CUDA_CHECK(cudaGetLastError());
+    }
+};
+
 struct ValidateOffsetsFn {
     const Tensor& offsets;
     Tensor& validation_error_bits;
@@ -494,6 +579,19 @@ void rowPartitionOffsetsToRowIds(const Tensor& offsets,
                                  Stream& stream) {
     validateOffsetsAndRowIds(offsets, row_ids, batch_size, max_total_values);
     dispatchOffsetDType(offsets.getDataType(), OffsetsToRowIdsOffsetFn{offsets, row_ids, batch_size, max_total_values, stream});
+}
+
+void rowPartitionOffsetsToRopePositionIds(const Tensor& offsets,
+                                          const Tensor* row_position_offsets,
+                                          int64_t scalar_position_offset,
+                                          Tensor& position_ids,
+                                          uint64_t batch_size,
+                                          uint64_t max_total_values,
+                                          Stream& stream) {
+    validateOffsetsAndRopePositionIds(offsets, row_position_offsets, position_ids, batch_size, max_total_values);
+    dispatchOffsetDType(
+        offsets.getDataType(),
+        OffsetsToRopePositionIdsFn{offsets, row_position_offsets, scalar_position_offset, position_ids, batch_size, max_total_values, stream});
 }
 
 void rowPartitionValidateOffsetsDebug(const Tensor& offsets,

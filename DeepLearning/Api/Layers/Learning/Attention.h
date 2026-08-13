@@ -54,6 +54,8 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
               bool useRope,
               bool ropeInPlace,
               ThorImplementation::RotaryPositionEmbeddingOptions ropeOptions,
+              int64_t queryRopePositionOffset,
+              int64_t keyRopePositionOffset,
               ThorImplementation::AttentionMaskKind maskKind,
               int64_t diagonalLeftBound,
               int64_t diagonalRightBound,
@@ -66,6 +68,8 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
               std::optional<Tensor> scoreBiasInput,
               std::optional<Tensor> querySequenceLengthsInput,
               std::optional<Tensor> keyValueSequenceLengthsInput,
+              std::optional<Tensor> queryRopePositionOffsetsInput,
+              std::optional<Tensor> keyRopePositionOffsetsInput,
               std::optional<RaggedTensor> raggedFeatureInput,
               std::optional<RaggedTensor> raggedContextInput,
               DataType weightsDataType,
@@ -104,6 +108,8 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
           useRope(useRope),
           ropeInPlace(ropeInPlace),
           ropeOptions(ropeOptions),
+          queryRopePositionOffset(queryRopePositionOffset),
+          keyRopePositionOffset(keyRopePositionOffset),
           maskKind(maskKind),
           diagonalLeftBound(diagonalLeftBound),
           diagonalRightBound(diagonalRightBound),
@@ -118,6 +124,8 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
           scoreBiasInput(std::move(scoreBiasInput)),
           querySequenceLengthsInput(std::move(querySequenceLengthsInput)),
           keyValueSequenceLengthsInput(std::move(keyValueSequenceLengthsInput)),
+          queryRopePositionOffsetsInput(std::move(queryRopePositionOffsetsInput)),
+          keyRopePositionOffsetsInput(std::move(keyRopePositionOffsetsInput)),
           raggedFeatureInput(std::move(raggedFeatureInput)),
           raggedContextInput(std::move(raggedContextInput)),
           weightsDataType(weightsDataType),
@@ -209,7 +217,11 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
     // When true, private split Q/K projection outputs may be rotated in-place to reduce peak memory.
     // Defaults false because the out-of-place fused RoPE path has benchmarked faster.
     bool getRopeInPlace() const { return ropeInPlace; }
+    // Shared RoPE basis/scaling configuration. position_offset remains the legacy/shared default captured from
+    // ropeOptions(); the effective Q/K origins are always reported by the dedicated getters below.
     const ThorImplementation::RotaryPositionEmbeddingOptions& getRopeOptions() const { return ropeOptions; }
+    int64_t getQueryRopePositionOffset() const { return queryRopePositionOffset; }
+    int64_t getKeyRopePositionOffset() const { return keyRopePositionOffset; }
     ThorImplementation::AttentionMaskKind getMaskKind() const { return maskKind; }
     int64_t getDiagonalLeftBound() const { return diagonalLeftBound; }
     int64_t getDiagonalRightBound() const { return diagonalRightBound; }
@@ -226,6 +238,10 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
     std::optional<Tensor> getQuerySequenceLengthsInput() const { return querySequenceLengthsInput; }
     std::optional<Tensor> getKeyValueSequenceLengthsInput() const { return keyValueSequenceLengthsInput; }
     bool getUseSequenceLengths() const { return querySequenceLengthsInput.has_value(); }
+    // Optional ragged-only per-row absolute RoPE origins. When present, they replace the scalar origin for that side.
+    // API shape is [1]; at runtime the normal batch dimension yields one INT32 origin per logical ragged row.
+    std::optional<Tensor> getQueryRopePositionOffsetsInput() const { return queryRopePositionOffsetsInput; }
+    std::optional<Tensor> getKeyRopePositionOffsetsInput() const { return keyRopePositionOffsetsInput; }
     bool getUseRagged() const { return raggedFeatureInput.has_value(); }
     std::optional<RaggedTensor> getRaggedFeatureInput() const { return raggedFeatureInput; }
     std::optional<RaggedTensor> getRaggedContextInput() const { return raggedContextInput; }
@@ -261,6 +277,8 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
     bool useRope;
     bool ropeInPlace;
     ThorImplementation::RotaryPositionEmbeddingOptions ropeOptions;
+    int64_t queryRopePositionOffset;
+    int64_t keyRopePositionOffset;
     ThorImplementation::AttentionMaskKind maskKind;
     int64_t diagonalLeftBound;
     int64_t diagonalRightBound;
@@ -276,6 +294,8 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
     std::optional<Tensor> scoreBiasInput;
     std::optional<Tensor> querySequenceLengthsInput;
     std::optional<Tensor> keyValueSequenceLengthsInput;
+    std::optional<Tensor> queryRopePositionOffsetsInput;
+    std::optional<Tensor> keyRopePositionOffsetsInput;
     std::optional<RaggedTensor> raggedFeatureInput;
     std::optional<RaggedTensor> raggedContextInput;
     std::optional<RaggedTensor> raggedFeatureOutput;
@@ -459,6 +479,47 @@ class Attention::Builder {
         return *this;
     }
 
+    // Convenience for the common self-attention case: use one positional origin for Q and K.
+    virtual Attention::Builder& ropePositionOffset(int64_t value) {
+        THOR_THROW_IF_FALSE(!this->_queryRopePositionOffset.has_value());
+        THOR_THROW_IF_FALSE(!this->_keyRopePositionOffset.has_value());
+        this->_queryRopePositionOffset = value;
+        this->_keyRopePositionOffset = value;
+        this->_useRope = true;
+        return *this;
+    }
+
+    // Cross-attention may place Q and K on different absolute timelines while sharing the same RoPE basis/scaling.
+    virtual Attention::Builder& queryRopePositionOffset(int64_t value) {
+        THOR_THROW_IF_FALSE(!this->_queryRopePositionOffset.has_value());
+        this->_queryRopePositionOffset = value;
+        this->_useRope = true;
+        return *this;
+    }
+
+    virtual Attention::Builder& keyRopePositionOffset(int64_t value) {
+        THOR_THROW_IF_FALSE(!this->_keyRopePositionOffset.has_value());
+        this->_keyRopePositionOffset = value;
+        this->_useRope = true;
+        return *this;
+    }
+
+    // Ragged-only per-row absolute positional origins. The logical API tensor shape is [1], producing one
+    // INT32 origin per batch row at runtime. A supplied per-row origin replaces the scalar origin for that side.
+    virtual Attention::Builder& queryRopePositionOffsetsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_queryRopePositionOffsetsInput.has_value());
+        this->_queryRopePositionOffsetsInput = input;
+        this->_useRope = true;
+        return *this;
+    }
+
+    virtual Attention::Builder& keyRopePositionOffsetsInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_keyRopePositionOffsetsInput.has_value());
+        this->_keyRopePositionOffsetsInput = input;
+        this->_useRope = true;
+        return *this;
+    }
+
     virtual Attention::Builder& weightsDataType(DataType value) {
         THOR_THROW_IF_FALSE(!this->_weightsDataType.has_value());
         this->_weightsDataType = value;
@@ -546,6 +607,10 @@ class Attention::Builder {
     std::optional<bool> _useRope;
     std::optional<bool> _ropeInPlace;
     std::optional<ThorImplementation::RotaryPositionEmbeddingOptions> _ropeOptions;
+    std::optional<int64_t> _queryRopePositionOffset;
+    std::optional<int64_t> _keyRopePositionOffset;
+    std::optional<Tensor> _queryRopePositionOffsetsInput;
+    std::optional<Tensor> _keyRopePositionOffsetsInput;
     std::optional<DataType> _weightsDataType;
     std::optional<DataType> _computeDataType;
     std::optional<DataType> _outputDataType;
