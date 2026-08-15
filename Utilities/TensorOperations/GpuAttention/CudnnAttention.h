@@ -140,10 +140,14 @@ struct CudnnAttentionForwardArgs {
     std::optional<Tensor> bias;
     std::optional<Tensor> seqLenQ;
     std::optional<Tensor> seqLenKv;
-    // Canonical Thor token row partitions for ragged Q/O and K/V. UINT32 or UINT64.
+    // Canonical Thor token row partitions for the sides that are physically ragged.
+    // Fully-ragged attention supplies both. Mixed attention supplies only the
+    // partition for its ragged sequence domain; the opposite dense domain is
+    // represented by uniform sequence lengths derived from the descriptor.
+    // Canonical offset dtype is UINT32 or UINT64.
     std::optional<Tensor> qRowPartitionOffsets;
     std::optional<Tensor> kvRowPartitionOffsets;
-    // Preallocated backend metadata scratch. Required only for ragged execution.
+    // Preallocated backend metadata scratch. Required when any side is ragged.
     std::optional<CudnnRaggedAttentionScratch> raggedScratch;
     std::optional<Tensor> dropoutSeed;
     std::optional<Tensor> dropoutOffset;
@@ -178,10 +182,14 @@ struct CudnnAttentionBackwardArgs {
     std::optional<Tensor> dBias;
     std::optional<Tensor> seqLenQ;
     std::optional<Tensor> seqLenKv;
-    // Canonical Thor token row partitions for ragged Q/O and K/V. UINT32 or UINT64.
+    // Canonical Thor token row partitions for the sides that are physically ragged.
+    // Fully-ragged attention supplies both. Mixed attention supplies only the
+    // partition for its ragged sequence domain; the opposite dense domain is
+    // represented by uniform sequence lengths derived from the descriptor.
+    // Canonical offset dtype is UINT32 or UINT64.
     std::optional<Tensor> qRowPartitionOffsets;
     std::optional<Tensor> kvRowPartitionOffsets;
-    // Preallocated backend metadata scratch. Required only for ragged execution.
+    // Preallocated backend metadata scratch. Required when any side is ragged.
     std::optional<CudnnRaggedAttentionScratch> raggedScratch;
     std::optional<Tensor> dropoutSeed;
     std::optional<Tensor> dropoutOffset;

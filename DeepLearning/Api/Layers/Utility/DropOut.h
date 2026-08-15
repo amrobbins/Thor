@@ -4,10 +4,13 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/TrainingDropoutControllable.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/CudnnHelper.h"
+#include <limits>
 #include <optional>
+#include <stdexcept>
 
 namespace Thor {
 
@@ -22,6 +25,16 @@ class DropOut : public Layer, public TrainingDropoutControllable {
 
     std::string getLayerType() const override { return "DropOut"; }
 
+    [[nodiscard]] bool getUseRagged() const { return raggedFeatureInput.has_value(); }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureInput() const { return raggedFeatureInput; }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureOutput() const { return raggedFeatureOutput; }
+
+    [[nodiscard]] uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        if (raggedFeatureInput.has_value()) return featureOutput->getTotalSizeInBytes();
+        return featureOutput->getTotalSizeInBytes() * batchSize;
+    }
+
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
@@ -31,14 +44,29 @@ class DropOut : public Layer, public TrainingDropoutControllable {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
+        (void)drivingLayer;
+        (void)drivingApiLayer;
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value());
 
-        // An inference-only placement never applies dropout.  A zero-rate layer is
+        std::optional<ThorImplementation::DropOut::RaggedConfiguration> raggedConfiguration;
+        if (raggedFeatureInput.has_value()) {
+            uint64_t elementsPerValue = 1;
+            for (uint64_t dim : raggedFeatureInput->getTrailingDimensions()) {
+                THOR_THROW_IF_FALSE(dim > 0);
+                if (elementsPerValue > std::numeric_limits<uint64_t>::max() / dim)
+                    throw std::overflow_error("Ragged DropOut elements-per-value overflow.");
+                elementsPerValue *= dim;
+            }
+            raggedConfiguration = ThorImplementation::DropOut::RaggedConfiguration{
+                raggedFeatureInput->getMaxTotalValues(), elementsPerValue};
+        }
+
+        // An inference-only placement never applies dropout. A zero-rate layer is
         // also stamped as a metadata-only identity so it can remain in the API
         // graph without allocating tensors or launching kernels.
         return std::make_shared<ThorImplementation::DropOut>(
-            dropProportion, !inferenceOnly, isTrainingDropoutEnabled());
+            dropProportion, !inferenceOnly, isTrainingDropoutEnabled(), raggedConfiguration);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
@@ -47,7 +75,7 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         THOR_THROW_IF_FALSE(tensorPlacement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         const ThorImplementation::DataType dataType = featureInput.value().getDataType();
         uint64_t randomStateSize = 0;
-        if (!ThorImplementation::DropOut::usesNativeKernel(dataType)) {
+        if (!raggedFeatureInput.has_value() && !ThorImplementation::DropOut::usesNativeKernel(dataType)) {
             uint32_t gpuNum = tensorPlacement.getDeviceNum();
             cudnnHandle_t cudnnHandle = ThorImplementation::CudnnHelper::getCudnnHandle(gpuNum);
             randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(cudnnHandle);
@@ -55,14 +83,20 @@ class DropOut : public Layer, public TrainingDropoutControllable {
 
         uint64_t featureOutputSize = featureOutput.value().getTotalSizeInBytes();
         uint64_t errorOutputSize = featureInput.value().getTotalSizeInBytes();
+        const uint64_t tensorMultiplier = raggedFeatureInput.has_value() ? 1 : batchSize;
 
-        return randomStateSize + getReservedStateSizeInBytes(batchSize) + batchSize * (featureOutputSize + errorOutputSize);
+        return randomStateSize + getReservedStateSizeInBytes(batchSize) + tensorMultiplier * (featureOutputSize + errorOutputSize);
     }
 
    protected:
     virtual uint64_t getReservedStateSizeInBytes(uint32_t batchSize) const {
         THOR_THROW_IF_FALSE(featureInput.has_value());
         ThorImplementation::DataType dataType = featureInput.value().getDataType();
+        if (raggedFeatureInput.has_value()) {
+            THOR_THROW_IF_FALSE(ThorImplementation::DropOut::nativeKernelSupportsDataType(dataType));
+            return featureInput->getTotalNumElements();
+        }
+
         std::vector<uint64_t> featureInputDimensionsWithBatchSize;
         featureInputDimensionsWithBatchSize.push_back(batchSize);
         for (uint32_t i = 0; i < featureInput.value().getDimensions().size(); ++i)
@@ -74,6 +108,8 @@ class DropOut : public Layer, public TrainingDropoutControllable {
 
    private:
     float dropProportion;
+    std::optional<RaggedTensor> raggedFeatureInput;
+    std::optional<RaggedTensor> raggedFeatureOutput;
 };
 
 class DropOut::Builder {
@@ -83,9 +119,18 @@ class DropOut::Builder {
         THOR_THROW_IF_FALSE(_featureInput.has_value());
         THOR_THROW_IF_FALSE(_dropProportion.has_value());
 
+        if (_raggedFeatureInput.has_value() &&
+            !ThorImplementation::DropOut::nativeKernelSupportsDataType(_featureInput->getDataType())) {
+            throw std::invalid_argument("Ragged DropOut supports FP16, FP32, and BF16 values.");
+        }
+
         DropOut dropOut;
         dropOut.featureInput = _featureInput;
         dropOut.featureOutput = _featureInput.value().clone();
+        if (_raggedFeatureInput.has_value()) {
+            dropOut.raggedFeatureInput = _raggedFeatureInput.value();
+            dropOut.raggedFeatureOutput = RaggedTensor(dropOut.featureOutput.value(), _raggedFeatureInput->getOffsets());
+        }
         dropOut.dropProportion = _dropProportion.value();
         dropOut.initialized = true;
         dropOut.addToNetwork(_network.value());
@@ -100,7 +145,17 @@ class DropOut::Builder {
 
     virtual DropOut::Builder &featureInput(Tensor _featureInput) {
         THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
         this->_featureInput = _featureInput;
+        return *this;
+    }
+
+    virtual DropOut::Builder &featureInput(RaggedTensor _featureInput) {
+        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
+        THOR_THROW_IF_FALSE(_featureInput.isInitialized());
+        this->_raggedFeatureInput = _featureInput;
+        this->_featureInput = _featureInput.getValues();
         return *this;
     }
 
@@ -115,6 +170,7 @@ class DropOut::Builder {
    private:
     std::optional<Network *> _network;
     std::optional<Tensor> _featureInput;
+    std::optional<RaggedTensor> _raggedFeatureInput;
     std::optional<float> _dropProportion;
 };
 

@@ -55,8 +55,8 @@ class SoftPlus : public Activation {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        // feature out and error out
-        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
+        (void)tensorPlacement;
+        return getExpressionBackedActivationMemRequirementInBytes(batchSize);
     }
 };
 
@@ -65,14 +65,11 @@ class SoftPlus::Builder : public Activation::Builder {
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<SoftPlus> softPlus = std::make_shared<SoftPlus>();
         if (_featureInput.has_value()) {
-            // Standalone layer support.
             THOR_THROW_IF_FALSE(_network.has_value());
-            softPlus->featureInput = _featureInput;
-            softPlus->featureOutput = _featureInput.value().clone();
+            applyStandaloneConfiguration(*softPlus);
             softPlus->initialized = true;
             softPlus->addToNetwork(_network.value());
         } else {
-            // Template activation support
             softPlus->initialized = true;
         }
 
@@ -85,6 +82,11 @@ class SoftPlus::Builder : public Activation::Builder {
     }
 
     SoftPlus::Builder &featureInput(Tensor _featureInput) override {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
+    SoftPlus::Builder &featureInput(RaggedTensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

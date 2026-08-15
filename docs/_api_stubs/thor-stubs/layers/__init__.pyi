@@ -269,12 +269,13 @@ class Attention(CustomLayer):
           ``[0, 1)``.  Thor advances the runtime dropout offset by ``B * Hq * Sq * Skv``.
         * Padding masks use ``query_sequence_lengths`` and ``key_value_sequence_lengths``
           together, both int32 logical ``[1]`` tensors.
-        * ``feature_input`` and ``context_input`` may be ``thor.RaggedTensor`` values.
-          Ragged self-attention preserves the query row partition on output. Ragged
-          cross-attention may use independent Q/KV partitions with or without RoPE. RoPE
-          positions reset at each packed row; scalar origins apply to every row, while the
-          optional per-row origin tensors allow each logical Q/K row pair to occupy its own
-          absolute timeline. Q and K need only have the same logical batch size.
+        * ``feature_input`` and ``context_input`` independently accept ``thor.Tensor`` or
+          ``thor.RaggedTensor``. The output domain follows the query: dense Q produces dense O,
+          while ragged Q preserves the query row partition on O. Cross-attention supports all
+          four dense/ragged Q/O and K/V combinations. RoPE positions reset at each packed row;
+          scalar origins apply to a dense side or every row of a ragged side, while the optional
+          per-row origin tensors replace the scalar origin for the corresponding ragged domain.
+          Q and K need only have the same logical batch size.
 
         Important combination rules:
 
@@ -350,6 +351,12 @@ class Attention(CustomLayer):
 
     def get_use_cross_attention(self) -> bool: ...
 
+    def get_use_ragged(self) -> bool: ...
+
+    def get_query_ragged(self) -> bool: ...
+
+    def get_key_value_ragged(self) -> bool: ...
+
     def get_context_input(self) -> object: ...
 
     def get_use_score_bias(self) -> bool: ...
@@ -405,7 +412,7 @@ class BatchNormalization(TrainableLayer):
     def get_epsilon(self) -> float | None: ...
 
 class DropOut(Layer):
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, drop_proportion: float) -> None:
+    def __init__(self, network: thor.Network, feature_input: object, drop_proportion: float) -> None:
         """
         Create and attach a DropOut layer to a Network.
 
@@ -413,14 +420,18 @@ class DropOut(Layer):
         ----------
         network : thor.Network
             Network the layer should be added to.
-        feature_input : thor.Tensor
-            Input feature tensor for this layer.
+        feature_input : thor.Tensor or thor.RaggedTensor
+            Dense or packed-ragged input. Ragged input preserves its row partition and applies dropout only to active packed values.
         drop_proportion : float
             Fraction of units to drop (0.0 <= p <= 1.0).
         """
 
-    def get_feature_output(self) -> thor.Tensor:
-        """Return the output tensor produced by this layer."""
+    def get_feature_output(self) -> object:
+        """
+        Return the logical output. Ragged inputs produce a RaggedTensor with the same row partition.
+        """
+
+    def get_use_ragged(self) -> bool: ...
 
     def get_drop_proportion(self) -> float: ...
 
@@ -707,21 +718,22 @@ class FullyConnected(TrainableLayer):
     ----------
     network : thor.Network
         The network that the layer should be added to.
-    feature_input : thor.Tensor
-        Input feature tensor for this layer.
+    feature_input : thor.Tensor or thor.RaggedTensor
+        Input feature tensor for this layer. Ragged inputs are projected tokenwise over their
+        packed values and preserve the row partition.
     num_output_features : int
         Number of output features (units) produced by this layer.
     has_bias : bool, default True
         Whether to learn an additive bias term.
-    preserve_prefix_dimensions : bool, default False
-        If False, all non-batch input dimensions are flattened into one dense feature vector.
+    preserve_prefix_dimensions : bool or None, default None
+        When omitted, dense inputs default to False and ragged inputs default to True.
+        If False, all non-batch dense input dimensions are flattened into one dense feature vector.
         If True, only the final input dimension is treated as features and preceding logical
-        dimensions are preserved in the output. This is the high-throughput tokenwise projection
-        mode for tensors shaped like [sequence, hidden].
+        dimensions are preserved in the output. Ragged inputs require prefix preservation.
     activation : thor.Activation or None, default thor.activations.Gelu()
-        Activation to apply after the linear transform (and optional
-        batch normalization). Pass ``None`` to not use any activation and
-        keep the layer purely linear.
+        Activation to apply after the linear transform. Pass ``None`` to keep the layer purely
+        linear. Ragged FullyConnected currently requires ``activation=None``; ragged activation
+        composition is provided by the separate ragged tokenwise-operation work.
     weights_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
         Initializer for the weight matrix.
     biases_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
@@ -738,7 +750,7 @@ class FullyConnected(TrainableLayer):
         Build it from ``FullyConnected.epilogue_input()``.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_features: int, has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, weights_optimizer: thor.optimizers.Optimizer | None = None, biases_optimizer: thor.optimizers.Optimizer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, preserve_prefix_dimensions: bool = False, weights_constraints: object | None = None, biases_constraints: object | None = None, weights_data_type: object | None = None, compute_data_type: object | None = None, output_data_type: object | None = None) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: object, num_output_features: int, has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, weights_optimizer: thor.optimizers.Optimizer | None = None, biases_optimizer: thor.optimizers.Optimizer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, preserve_prefix_dimensions: bool | None = None, weights_constraints: object | None = None, biases_constraints: object | None = None, weights_data_type: object | None = None, compute_data_type: object | None = None, output_data_type: object | None = None) -> None: ...
 
     @staticmethod
     def epilogue_input(output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression:
@@ -759,15 +771,18 @@ class FullyConnected(TrainableLayer):
 
     def get_output_data_type(self) -> thor.DataType: ...
 
-    def get_feature_output(self) -> thor.Tensor:
+    def get_feature_output(self) -> object:
         """
-        Return the output tensor produced by this layer.
+        Return the logical output produced by this layer.
 
         Returns
         -------
-        thor.Tensor
-            The feature output tensor handle.
+        thor.Tensor or thor.RaggedTensor
+            The feature output handle. Ragged inputs produce RaggedTensor outputs with the
+            same row partition.
         """
+
+    def get_use_ragged(self) -> bool: ...
 
 class InstanceNorm(TrainableLayer):
     """
@@ -833,8 +848,8 @@ class RMSNorm(TrainableLayer):
     ----------
     network : thor.Network
         Network the layer should be added to.
-    feature_input : thor.Tensor
-        Input feature tensor for this layer.
+    feature_input : thor.Tensor or thor.RaggedTensor
+        Input feature tensor for this layer. Ragged inputs are normalized token-wise over their trailing value dimensions.
     normalized_shape : Sequence[int] or None, default None
         Trailing feature dimensions to normalize over. None normalizes the final feature dimension.
     epsilon : float, default 1e-5
@@ -847,7 +862,7 @@ class RMSNorm(TrainableLayer):
         feature input, output, and scale weights are bf16.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, normalized_shape: object | None = None, epsilon: float = 1e-05, parameter_data_type: object | None = None, weights_initializer: thor.initializers.Initializer | None = None, weights_optimizer: thor.optimizers.Optimizer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: object, normalized_shape: object | None = None, epsilon: float = 1e-05, parameter_data_type: object | None = None, weights_initializer: thor.initializers.Initializer | None = None, weights_optimizer: thor.optimizers.Optimizer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None) -> None: ...
 
     @staticmethod
     def epilogue_input(output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression:
@@ -862,8 +877,12 @@ class RMSNorm(TrainableLayer):
         Bind the same name to a tensor with the ``epilogue_inputs`` constructor argument.
         """
 
-    def get_feature_output(self) -> thor.Tensor:
-        """Return the output tensor produced by this layer."""
+    def get_feature_output(self) -> object:
+        """
+        Return the logical output produced by this layer. Ragged inputs preserve their row partition.
+        """
+
+    def get_use_ragged(self) -> bool: ...
 
     def get_normalized_shape(self) -> list[int]: ...
 
@@ -1015,9 +1034,38 @@ class ScaleGradient(Layer):
     def get_scale(self) -> float:
         """Return the backward gradient scale."""
 
+class SegmentedReduction(MultiConnectionLayer):
+    """
+    Reduce each row of a packed ``thor.RaggedTensor`` independently.
+
+    The row partition supplies the reduction domains. ``sum``, ``mean``, ``min``,
+    and ``max`` preserve every fixed trailing value dimension and return a normal dense
+    ``thor.Tensor`` feature shape. At execution time the physical
+    shape is ``[batch_size, *trailing_dimensions]`` (or ``[batch_size, 1]`` for
+    scalar ragged values). Empty rows follow the existing Thor segmented-reduction semantics.
+    """
+
+    def __init__(self, network: thor.Network, feature_input: thor.RaggedTensor, reduction_type: SegmentedReduction.Type) -> None: ...
+
+    class Type(enum.Enum):
+        sum = 0
+
+        mean = 1
+
+        min = 2
+
+        max = 3
+
+    def get_feature_output(self) -> thor.Tensor: ...
+
+    @property
+    def reduction_type(self) -> SegmentedReduction.Type: ...
+
 class Slice(Layer):
     """
     Slice a contiguous window from one logical tensor axis.
+
+    ``feature_input`` may be a dense ``thor.Tensor`` or packed ``thor.RaggedTensor``. For ragged input, ``axis`` addresses only the fixed trailing value dimensions and the row partition is preserved.
 
     The batch dimension is excluded from ``axis``. Negative ``start`` values are
     resolved relative to the end of the selected logical axis. The operation is
@@ -1026,9 +1074,11 @@ class Slice(Layer):
     saved and reloaded.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, axis: int, start: int, length: int) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: object, axis: int, start: int, length: int) -> None: ...
 
-    def get_feature_output(self) -> thor.Tensor: ...
+    def get_feature_output(self) -> object: ...
+
+    def get_use_ragged(self) -> bool: ...
 
     @property
     def axis(self) -> int: ...

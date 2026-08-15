@@ -109,6 +109,24 @@ TEST(CudnnRaggedAttentionMetadata, ConvertsUint64CanonicalOffsets) {
     convertsCanonicalOffsetsToLengthsAndIndependentElementOffsets<uint64_t>();
 }
 
+TEST(CudnnRaggedAttentionMetadata, BuildsUniformDenseQueryMetadataWithoutCanonicalOffsets) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batchSize = 2;
+    constexpr uint64_t sequenceLength = 3;
+    Tensor sequenceLengths(gpuPlacement, TensorDescriptor(DataType::INT32, {batchSize}));
+    Tensor qElementOffsets(gpuPlacement, TensorDescriptor(DataType::INT32, {batchSize + 1}));
+    Tensor oElementOffsets(gpuPlacement, TensorDescriptor(DataType::INT32, {batchSize + 1}));
+
+    buildUniformCudnnAttentionMetadata(
+        batchSize, sequenceLength, 16, 10, sequenceLengths, qElementOffsets, oElementOffsets, stream);
+
+    EXPECT_EQ(copyGpuTensor<int32_t>(sequenceLengths, stream), (std::vector<int32_t>{3, 3}));
+    EXPECT_EQ(copyGpuTensor<int32_t>(qElementOffsets, stream), (std::vector<int32_t>{0, 48, 96}));
+    EXPECT_EQ(copyGpuTensor<int32_t>(oElementOffsets, stream), (std::vector<int32_t>{0, 30, 60}));
+}
+
 TEST(CudnnRaggedAttentionMetadata, RejectsNonCanonicalOffsetDType) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

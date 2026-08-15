@@ -31,4 +31,18 @@ void convertCanonicalRowPartitionForCudnnAttention(const Tensor& canonicalOffset
                                                     Tensor secondElementOffsets,
                                                     Stream stream);
 
+/**
+ * Builds cuDNN ragged metadata for a logically dense, uniformly sized sequence.
+ * This is used to normalize dense BSHD Q/O into cuDNN's all-ragged backward
+ * representation without copying tensor payloads.
+ */
+void buildUniformCudnnAttentionMetadata(uint64_t batchSize,
+                                        uint64_t sequenceLength,
+                                        uint64_t firstElementsPerToken,
+                                        uint64_t secondElementsPerToken,
+                                        Tensor sequenceLengths,
+                                        Tensor firstElementOffsets,
+                                        Tensor secondElementOffsets,
+                                        Stream stream);
+
 }  // namespace ThorImplementation

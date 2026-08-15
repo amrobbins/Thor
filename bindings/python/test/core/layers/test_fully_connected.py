@@ -278,3 +278,78 @@ def test_fully_connected_accepts_bf16_storage_compute_with_fp32_output():
     assert arch["output_data_type"] == "fp32"
     assert arch["parameters"]["weights"]["dtype"] == "bf16"
     assert arch["parameters"]["biases"]["dtype"] == "fp32"
+
+
+def test_fully_connected_accepts_ragged_input_and_preserves_partition():
+    n = thor.Network("test_net_fully_connected_ragged")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=66,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint64,
+    )
+
+    fc = thor.layers.FullyConnected(
+        n,
+        x,
+        3,
+        True,
+        activation=None,
+    )
+
+    y = fc.get_feature_output()
+    assert fc.get_use_ragged()
+    assert isinstance(y, thor.RaggedTensor)
+    assert y.values.get_dimensions() == [66, 3]
+    assert y.offsets == x.offsets
+
+    arch = _only_layer_architecture(n, "fully_connected")
+    assert arch["use_ragged"] is True
+    assert arch["preserve_input_prefix_dimensions"] is True
+    assert arch["ragged_inputs"][0]["max_total_values"] == 66
+    assert arch["ragged_outputs"][0]["max_total_values"] == 66
+
+
+def test_fully_connected_ragged_uses_regular_default_activation():
+    n = thor.Network("test_net_fully_connected_ragged_activation")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=66,
+        batch_size=3,
+    )
+
+    fc = thor.layers.FullyConnected(n, x, 3, True)
+    y = fc.get_feature_output()
+    assert isinstance(y, thor.RaggedTensor)
+
+    arch = _only_layer_architecture(n, "fully_connected")
+    assert arch["use_ragged"] is True
+    assert arch["activation"] is not None
+
+
+def test_fully_connected_ragged_rejects_disabling_prefix_preservation():
+    n = thor.Network("test_net_fully_connected_ragged_prefix")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=66,
+        batch_size=3,
+    )
+
+    with pytest.raises(ValueError, match="prefix|Ragged|ragged"):
+        thor.layers.FullyConnected(
+            n,
+            x,
+            3,
+            True,
+            activation=None,
+            preserve_prefix_dimensions=False,
+        )

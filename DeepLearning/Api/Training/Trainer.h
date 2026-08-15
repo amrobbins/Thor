@@ -74,6 +74,8 @@ using TrainingRunsRestartConditionSpec = TrainingRestartPolicy;
 struct TrainerFitOptions {
     uint32_t epochs = 1;
     uint32_t checkBestModelEveryEpochs = 0;
+    // 0 means score/save the phase-entry model before its first optimizer update.
+    // Values > 0 retain the phase-local post-update epoch semantics.
     uint64_t firstModelSelectionEpoch = 0;
     std::optional<uint64_t> maxTrainingBatchesPerEpoch{};
     std::vector<TrainingRestartCondition> restartConditions{};

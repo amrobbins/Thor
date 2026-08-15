@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
@@ -9,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -29,6 +31,22 @@ class Slice : public Layer {
     int64_t getStart() const { return start; }
     uint64_t getLength() const { return length; }
 
+    [[nodiscard]] bool getUseRagged() const { return raggedFeatureInput.has_value(); }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureInput() const { return raggedFeatureInput; }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureOutput() const { return raggedFeatureOutput; }
+
+    std::vector<Tensor> getAllInputTensors() const override {
+        if (!raggedFeatureInput.has_value()) return Layer::getAllInputTensors();
+        return {raggedFeatureInput->getValues(), raggedFeatureInput->getOffsets()};
+    }
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
+    bool mustConnectAllInputsToDriveOutput() const override { return raggedFeatureInput.has_value(); }
+    void informThatInputConnectionMade(Tensor inputTensor) override;
+    void resetGraphTraversalState() override;
+    int getConnectionType(Tensor connectingTensor) const override;
+
+    [[nodiscard]] uint64_t getOutputTensorBytes(uint32_t batchSize) const override;
+
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json& j, Network* network);
 
@@ -48,6 +66,10 @@ class Slice : public Layer {
     uint64_t axis = 0;
     int64_t start = 0;
     uint64_t length = 0;
+    std::optional<RaggedTensor> raggedFeatureInput;
+    std::optional<RaggedTensor> raggedFeatureOutput;
+    std::set<uint32_t> connectedInputPortIndices;
+    bool emittedFeatureOutputAfterAllInputsConnected = false;
 
     friend class Builder;
 };
@@ -66,9 +88,19 @@ class Slice::Builder {
     }
 
     virtual Builder& featureInput(Tensor featureInput) {
-        if (_featureInput.has_value())
+        if (_featureInput.has_value() || _raggedFeatureInput.has_value())
             throw std::runtime_error("Slice feature input may only be set once.");
         _featureInput = std::move(featureInput);
+        return *this;
+    }
+
+    virtual Builder& featureInput(RaggedTensor featureInput) {
+        if (_featureInput.has_value() || _raggedFeatureInput.has_value())
+            throw std::runtime_error("Slice feature input may only be set once.");
+        if (!featureInput.isInitialized())
+            throw std::invalid_argument("Slice ragged feature input must be initialized.");
+        _raggedFeatureInput = featureInput;
+        _featureInput = featureInput.getValues();
         return *this;
     }
 
@@ -96,6 +128,7 @@ class Slice::Builder {
    private:
     std::optional<Network*> _network;
     std::optional<Tensor> _featureInput;
+    std::optional<RaggedTensor> _raggedFeatureInput;
     std::optional<uint64_t> _axis;
     std::optional<int64_t> _start;
     std::optional<uint64_t> _length;

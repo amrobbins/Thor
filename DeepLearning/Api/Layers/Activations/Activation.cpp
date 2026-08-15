@@ -1,6 +1,8 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/RaggedExpressionLayer.h"
+#include "Utilities/Expression/RaggedExpression.h"
 #include "Utilities/Expression/DynamicExpression.h"
 
 #include "DeepLearning/Api/Layers/Activations/BilinearGlu.h"
@@ -42,6 +44,11 @@ unordered_map<string, Activation::Deserializer>& Activation::get_registry() {
 
 void Activation::register_layer(string name, Deserializer fn) { get_registry().emplace(std::move(name), std::move(fn)); }
 
+ThorImplementation::RaggedExpression Activation::toRaggedExpression(
+    const ThorImplementation::RaggedExpression& input) const {
+    return input.mapValues([this](const ThorImplementation::Expression& values) { return toExpression(values); });
+}
+
 
 std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActivation(ThorImplementation::TensorPlacement placement,
                                                                                         Thor::Tensor connectingApiTensor,
@@ -51,6 +58,9 @@ std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActi
     THOR_THROW_IF_FALSE(featureOutput.has_value());
 
     bool knownInput = connectingApiTensor == featureInput.value();
+    if (raggedFeatureInput.has_value() && connectingApiTensor == raggedFeatureInput->getOffsets()) {
+        knownInput = true;
+    }
     for (const auto& [name, tensor] : epilogueInputBindings) {
         (void)name;
         if (connectingApiTensor == tensor) {
@@ -64,29 +74,59 @@ std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActi
     using ThorImplementation::Expression;
     using ThorImplementation::ExpressionDefinition;
 
-    // Preserve the public activation input dtype on the expression input node.
-    // This makes the primary activation input behave like activation epilogue
-    // auxiliary inputs, which already carry an explicit dtype at the stage
-    // boundary.
-    const DataType featureInputDType = featureInput.value().getDataType();
-    Expression featureInputExpr = Expression::input("feature_input", std::nullopt, featureInputDType);
-    Expression featureOutputExpr = epilogue.has_value() ? applyEpilogue(featureInputExpr, epilogue.value()) : toExpression(featureInputExpr);
-    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(Expression::outputs({{"feature_output", featureOutputExpr}}));
-
     std::vector<std::string> inputNames = {"feature_input"};
-    inputNames.reserve(inputNames.size() + epilogueInputBindings.size());
+    if (raggedFeatureInput.has_value()) {
+        inputNames.push_back("feature_offsets");
+    }
     for (const auto& [name, tensor] : epilogueInputBindings) {
         (void)tensor;
         inputNames.push_back(name);
     }
 
+    if (raggedFeatureInput.has_value()) {
+        const RaggedTensor& ragged = raggedFeatureInput.value();
+        ThorImplementation::RaggedExpression raggedInput =
+            ThorImplementation::RaggedExpression::input("feature_input", "feature_offsets", ragged.getDescriptor());
+        ThorImplementation::RaggedExpression raggedOutput =
+            epilogue.has_value()
+                ? raggedInput.mapValues([&](const Expression& inputValues) {
+                      return applyEpilogue(inputValues, epilogue.value());
+                  })
+                : toRaggedExpression(raggedInput);
+
+        if (!raggedFeatureOutput.has_value()) {
+            throw std::runtime_error("Ragged activation is missing its logical ragged output.");
+        }
+        if (raggedOutput.getDescriptor() != raggedFeatureOutput->getDescriptor()) {
+            throw std::runtime_error("Ragged activation expression output descriptor does not match its API output.");
+        }
+
+        ExpressionDefinition definition =
+            ExpressionDefinition::fromOutputs(Expression::outputs({{"feature_output", raggedOutput.getValues()}}));
+
+        uint64_t inputElementsPerValue = 1;
+        for (uint64_t dim : ragged.getTrailingDimensions()) {
+            inputElementsPerValue *= dim;
+        }
+        uint64_t outputElementsPerValue = 1;
+        for (uint64_t dim : raggedFeatureOutput->getTrailingDimensions()) {
+            outputElementsPerValue *= dim;
+        }
+        auto physicalActivation = std::make_shared<ThorImplementation::RaggedExpressionLayer>(
+            DynamicExpression::fromExpressionDefinition(definition), inputNames, std::vector<std::string>{"feature_output"},
+            placement, inferenceOnly, ragged.getMaxTotalValues(), inputElementsPerValue, outputElementsPerValue, 0, getId());
+        physicalActivation->setLayerName(getLayerType());
+        return physicalActivation;
+    }
+
+    const DataType featureInputDType = featureInput.value().getDataType();
+    Expression featureInputExpr = Expression::input("feature_input", std::nullopt, featureInputDType);
+    Expression featureOutputExpr = epilogue.has_value() ? applyEpilogue(featureInputExpr, epilogue.value()) : toExpression(featureInputExpr);
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(Expression::outputs({{"feature_output", featureOutputExpr}}));
+
     std::shared_ptr<ThorImplementation::CustomLayer> physicalActivation = std::make_shared<ThorImplementation::CustomLayer>(
-        DynamicExpression::fromExpressionDefinition(definition),
-        inputNames,
-        std::vector<std::string>{"feature_output"},
-        placement,
-        std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>{},
-        inferenceOnly);
+        DynamicExpression::fromExpressionDefinition(definition), inputNames, std::vector<std::string>{"feature_output"}, placement,
+        std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>{}, inferenceOnly);
     physicalActivation->setLayerName(getLayerType());
     return physicalActivation;
 }
@@ -100,6 +140,7 @@ void Activation::validateEpilogueAuxInputName(const std::string& inputName) {
     }
     static const std::set<std::string> reservedNames = {
         "feature_input",
+        "feature_offsets",
         "feature_output",
         epilogueInputName(),
         epilogueOutputName(),
@@ -111,9 +152,8 @@ void Activation::validateEpilogueAuxInputName(const std::string& inputName) {
 
 std::vector<Tensor> Activation::getFeatureInputs() const {
     std::vector<Tensor> inputs;
-    if (featureInput.has_value()) {
-        inputs.push_back(featureInput.value());
-    }
+    if (featureInput.has_value()) inputs.push_back(featureInput.value());
+    if (raggedFeatureInput.has_value()) inputs.push_back(raggedFeatureInput->getOffsets());
     inputs.reserve(inputs.size() + epilogueInputBindings.size());
     for (const auto& [name, tensor] : epilogueInputBindings) {
         (void)name;
@@ -131,14 +171,14 @@ std::vector<Tensor> Activation::getAllOutputTensors() const { return getFeatureO
 
 std::vector<Tensor> Activation::getOutputsFromInput(Tensor inputTensor) {
     (void)getConnectionType(inputTensor);
-    if (epilogueInputBindings.empty()) {
+    if (!raggedFeatureInput.has_value() && epilogueInputBindings.empty()) {
         return {featureOutput.value()};
     }
 
     if (emittedFeatureOutputAfterAllInputsConnected) {
         return {};
     }
-    const uint32_t requiredInputPorts = static_cast<uint32_t>(1 + epilogueInputBindings.size());
+    const uint32_t requiredInputPorts = static_cast<uint32_t>((raggedFeatureInput.has_value() ? 2 : 1) + epilogueInputBindings.size());
     if (connectedInputPortIndices.size() != requiredInputPorts) {
         return {};
     }
@@ -148,9 +188,7 @@ std::vector<Tensor> Activation::getOutputsFromInput(Tensor inputTensor) {
 }
 
 void Activation::informThatInputConnectionMade(Tensor inputTensor) {
-    if (epilogueInputBindings.empty()) {
-        return;
-    }
+    if (!raggedFeatureInput.has_value() && epilogueInputBindings.empty()) return;
     const uint32_t port = static_cast<uint32_t>(getConnectionType(inputTensor));
     connectedInputPortIndices.insert(port);
 }
@@ -164,17 +202,16 @@ void Activation::resetGraphTraversalState() {
 int Activation::getConnectionType(Tensor connectingTensor) const {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
-    if (connectingTensor == featureInput.value()) {
-        return 0;
+    if (connectingTensor == featureInput.value()) return 0;
+    uint32_t nextPort = 1;
+    if (raggedFeatureInput.has_value()) {
+        if (connectingTensor == raggedFeatureInput->getOffsets()) return 1;
+        nextPort = 2;
     }
     for (uint32_t i = 0; i < epilogueInputBindings.size(); ++i) {
-        if (connectingTensor == epilogueInputBindings[i].second) {
-            return static_cast<int>(i + 1);
-        }
+        if (connectingTensor == epilogueInputBindings[i].second) return static_cast<int>(nextPort + i);
     }
-    if (connectingTensor == featureOutput.value()) {
-        return 0;
-    }
+    if (connectingTensor == featureOutput.value()) return 0;
     throw std::runtime_error("Tensor is not connected to this activation layer.");
 }
 
@@ -182,12 +219,15 @@ uint64_t Activation::getExpressionBackedActivationMemRequirementInBytes(uint32_t
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureOutput.has_value());
     uint64_t bytes = featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes();
+    if (raggedFeatureInput.has_value()) bytes += raggedFeatureInput->getOffsets().getTotalSizeInBytes();
     for (const auto& [name, tensor] : epilogueInputBindings) {
         (void)name;
         bytes += tensor.getTotalSizeInBytes();
     }
-    return batchSize * bytes;
+    return raggedFeatureInput.has_value() ? bytes : batchSize * bytes;
 }
+
+Tensor Activation::standaloneOutputTensorForInput(const Tensor& inputTensor) const { return inputTensor.clone(); }
 
 void Activation::initializeStandaloneActivation(Tensor inputTensor,
                                                 std::optional<ThorImplementation::Expression> epilogueExpression,
@@ -217,8 +257,42 @@ void Activation::initializeStandaloneActivation(Tensor inputTensor,
         validateEpilogueExpression(epilogueExpression.value(), auxInputNames);
     }
 
+    raggedFeatureInput.reset();
+    raggedFeatureOutput.reset();
     featureInput = inputTensor;
-    featureOutput = inputTensor.clone();
+    featureOutput = standaloneOutputTensorForInput(inputTensor);
+    epilogue = std::move(epilogueExpression);
+    epilogueInputBindings = std::move(epilogueInputBindingsValue);
+    serializableEpilogue.reset();
+    connectedInputPortIndices.clear();
+    emittedFeatureOutputAfterAllInputsConnected = false;
+    nextInputConnectionCursorByTensorOriginalId.clear();
+}
+
+void Activation::initializeStandaloneActivation(RaggedTensor inputTensor,
+                                                std::optional<ThorImplementation::Expression> epilogueExpression,
+                                                std::vector<std::pair<std::string, Tensor>> epilogueInputBindingsValue) {
+    THOR_THROW_IF_FALSE(inputTensor.isInitialized());
+    if (!supportsRaggedStandalone()) {
+        throw std::invalid_argument(getLayerType() + " does not yet support standalone RaggedTensor input.");
+    }
+    const Tensor values = inputTensor.getValues();
+    if (!epilogueExpression.has_value() && !epilogueInputBindingsValue.empty())
+        throw std::invalid_argument("Activation epilogue inputs were provided without an epilogue expression.");
+    std::vector<std::string> auxInputNames;
+    std::set<std::string> seenNames;
+    for (const auto& [name, tensor] : epilogueInputBindingsValue) {
+        validateEpilogueAuxInputName(name);
+        if (!seenNames.insert(name).second) throw std::invalid_argument("Activation epilogue input name is duplicated: " + name + ".");
+        if (tensor.getDataType() != values.getDataType() || tensor.getDimensions() != values.getDimensions())
+            throw std::invalid_argument("Activation ragged epilogue inputs must match packed values dtype and capacity shape.");
+        auxInputNames.push_back(name);
+    }
+    if (epilogueExpression.has_value()) validateEpilogueExpression(epilogueExpression.value(), auxInputNames);
+    raggedFeatureInput = inputTensor;
+    featureInput = values;
+    featureOutput = standaloneOutputTensorForInput(values);
+    raggedFeatureOutput = RaggedTensor(featureOutput.value(), inputTensor.getOffsets());
     epilogue = std::move(epilogueExpression);
     epilogueInputBindings = std::move(epilogueInputBindingsValue);
     serializableEpilogue.reset();
@@ -228,37 +302,53 @@ void Activation::initializeStandaloneActivation(Tensor inputTensor,
 }
 
 void Activation::deserializeStandaloneFields(const json& j, Network* network) {
-    nlohmann::json input = j.at("feature_input").get<nlohmann::json>();
-    uint64_t originalTensorId = input.at("id").get<uint64_t>();
-    Tensor inputTensor = network->getApiTensorByOriginalId(originalTensorId);
+    const bool useRagged = j.value("use_ragged", false);
+    Tensor inputTensor;
+    std::optional<RaggedTensor> raggedInput;
+    if (useRagged) {
+        const json& raggedJson = j.at("ragged_feature_input");
+        const uint64_t valuesId = raggedJson.at("values").at("id").get<uint64_t>();
+        const uint64_t offsetsId = raggedJson.at("offsets").at("id").get<uint64_t>();
+        inputTensor = network->getApiTensorByOriginalId(valuesId);
+        raggedInput = RaggedTensor(inputTensor, network->getApiTensorByOriginalId(offsetsId));
+        if (raggedInput->getBatchSize() != raggedJson.at("batch_size").get<uint64_t>() ||
+            raggedInput->getMaxTotalValues() != raggedJson.at("max_total_values").get<uint64_t>())
+            throw std::runtime_error("Activation serialized ragged input metadata does not match reconstructed tensors.");
+    } else {
+        inputTensor = network->getApiTensorByOriginalId(j.at("feature_input").at("id").get<uint64_t>());
+    }
 
     std::vector<std::pair<std::string, Tensor>> epilogueBindings;
     if (j.contains("epilogue_inputs")) {
         for (const json& epilogueInputJson : j.at("epilogue_inputs")) {
             std::string inputName = epilogueInputJson.at("name").get<std::string>();
             validateEpilogueAuxInputName(inputName);
-            uint64_t auxOriginalTensorId = epilogueInputJson.at("tensor").at("id").get<uint64_t>();
-            epilogueBindings.emplace_back(inputName, network->getApiTensorByOriginalId(auxOriginalTensorId));
+            epilogueBindings.emplace_back(inputName,
+                network->getApiTensorByOriginalId(epilogueInputJson.at("tensor").at("id").get<uint64_t>()));
         }
     }
     std::vector<std::string> auxInputNames;
-    auxInputNames.reserve(epilogueBindings.size());
-    for (const auto& [name, tensor] : epilogueBindings) {
-        (void)tensor;
-        auxInputNames.push_back(name);
-    }
+    for (const auto& [name, tensor] : epilogueBindings) { (void)tensor; auxInputNames.push_back(name); }
 
     std::optional<ThorImplementation::Expression> epilogueExpression = std::nullopt;
     if (j.contains("epilogue") && !j.at("epilogue").is_null()) {
-        ThorImplementation::ExpressionDefinition epilogueDefinition =
-            ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));
-        epilogueExpression = epilogueExpressionFromDefinition(epilogueDefinition, auxInputNames);
+        ThorImplementation::ExpressionDefinition def = ThorImplementation::ExpressionDefinition::deserialize(j.at("epilogue"));
+        epilogueExpression = epilogueExpressionFromDefinition(def, auxInputNames);
     } else if (!epilogueBindings.empty()) {
         throw std::runtime_error("Activation serialized epilogue_inputs require a non-null epilogue expression.");
     }
 
-    initializeStandaloneActivation(inputTensor, epilogueExpression, epilogueBindings);
-    featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
+    if (raggedInput.has_value()) {
+        initializeStandaloneActivation(raggedInput.value(), epilogueExpression, epilogueBindings);
+        featureOutput = Tensor::deserialize(j.at("feature_output"));
+        raggedFeatureOutput = RaggedTensor(featureOutput.value(), raggedInput->getOffsets());
+        if (j.at("ragged_feature_output").at("offsets").at("id").get<uint64_t>() !=
+            j.at("ragged_feature_input").at("offsets").at("id").get<uint64_t>())
+            throw std::runtime_error("Activation serialized ragged output must preserve the input row partition.");
+    } else {
+        initializeStandaloneActivation(inputTensor, epilogueExpression, epilogueBindings);
+        featureOutput = Tensor::deserialize(j.at("feature_output"));
+    }
     initialized = true;
 }
 
@@ -275,8 +365,12 @@ json Activation::architectureJson() const {
     if (featureInput.has_value()) {
         j["feature_input"] = featureInput.value().architectureJson();
     }
-    if (featureOutput.has_value()) {
-        j["feature_output"] = featureOutput.value().architectureJson();
+    if (featureOutput.has_value()) j["feature_output"] = featureOutput.value().architectureJson();
+    if (raggedFeatureInput.has_value()) {
+        j["use_ragged"] = true;
+        j["ragged_feature_input"] = raggedFeatureInput->architectureJson();
+        THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
+        j["ragged_feature_output"] = raggedFeatureOutput->architectureJson();
     }
     if (epilogue.has_value()) {
         std::vector<std::string> auxInputNames;
@@ -304,6 +398,16 @@ json Activation::architectureJson() const {
 void Activation::deserialize(const json& j, Network* network) {
     THOR_THROW_IF_FALSE(j.at("factory").get<std::string>() == Layer::Factory::Activation);
     std::string type = j.at("layer_type").get<std::string>();
+
+    // Ragged standalone activations share one structural serialization contract.
+    // Instantiate the concrete activation from its template fields, then let the
+    // common Activation path reconnect canonical values/offset tensors.
+    if (j.value("use_ragged", false)) {
+        std::shared_ptr<Activation> activation = deserializeTemplate(j);
+        activation->deserializeStandaloneFields(j, network);
+        activation->addToNetwork(network);
+        return;
+    }
 
     unordered_map<string, Activation::Deserializer>& registry = get_registry();
     auto it = registry.find(type);
@@ -382,6 +486,8 @@ std::shared_ptr<Activation> Activation::deserializeTemplate(const json& j) {
 
 Tensor Activation::addToNetwork(Tensor inputTensor, Network* network) { return addToNetwork(inputTensor, network, std::nullopt, {}); }
 
+RaggedTensor Activation::addToNetwork(RaggedTensor inputTensor, Network* network) { return addToNetwork(inputTensor, network, std::nullopt, {}); }
+
 Tensor Activation::addToNetwork(Tensor inputTensor,
                                 Network* network,
                                 std::optional<ThorImplementation::Expression> epilogueExpression,
@@ -403,6 +509,8 @@ Tensor Activation::addToNetwork(Tensor inputTensor,
 
     std::optional<Tensor> maybeExistingFeatureInput = featureInput;
     std::optional<Tensor> maybeExistingFeatureOutput = featureOutput;
+    std::optional<RaggedTensor> maybeExistingRaggedFeatureInput = raggedFeatureInput;
+    std::optional<RaggedTensor> maybeExistingRaggedFeatureOutput = raggedFeatureOutput;
     std::optional<ThorImplementation::Expression> maybeExistingEpilogue = epilogue;
     std::vector<std::pair<std::string, Tensor>> maybeExistingEpilogueInputBindings = epilogueInputBindings;
     std::optional<ThorImplementation::ExpressionDefinition> maybeExistingSerializableEpilogue = serializableEpilogue;
@@ -413,6 +521,8 @@ Tensor Activation::addToNetwork(Tensor inputTensor,
 
     featureInput = maybeExistingFeatureInput;
     featureOutput = maybeExistingFeatureOutput;
+    raggedFeatureInput = maybeExistingRaggedFeatureInput;
+    raggedFeatureOutput = maybeExistingRaggedFeatureOutput;
     epilogue = maybeExistingEpilogue;
     epilogueInputBindings = maybeExistingEpilogueInputBindings;
     serializableEpilogue = maybeExistingSerializableEpilogue;
@@ -420,6 +530,35 @@ Tensor Activation::addToNetwork(Tensor inputTensor,
     emittedFeatureOutputAfterAllInputsConnected = false;
     nextInputConnectionCursorByTensorOriginalId.clear();
 
+    return activationOutput;
+}
+
+RaggedTensor Activation::addToNetwork(RaggedTensor inputTensor,
+                                      Network* network,
+                                      std::optional<ThorImplementation::Expression> epilogueExpression,
+                                      std::vector<std::pair<std::string, Tensor>> epilogueInputBindingsValue) {
+    std::optional<Tensor> maybeExistingFeatureInput = featureInput;
+    std::optional<Tensor> maybeExistingFeatureOutput = featureOutput;
+    std::optional<RaggedTensor> maybeExistingRaggedFeatureInput = raggedFeatureInput;
+    std::optional<RaggedTensor> maybeExistingRaggedFeatureOutput = raggedFeatureOutput;
+    std::optional<ThorImplementation::Expression> maybeExistingEpilogue = epilogue;
+    auto maybeExistingEpilogueInputBindings = epilogueInputBindings;
+    std::optional<ThorImplementation::ExpressionDefinition> maybeExistingSerializableEpilogue = serializableEpilogue;
+
+    initializeStandaloneActivation(inputTensor, std::move(epilogueExpression), std::move(epilogueInputBindingsValue));
+    RaggedTensor activationOutput = raggedFeatureOutput.value();
+    Layer::addToNetwork(network);
+
+    featureInput = maybeExistingFeatureInput;
+    featureOutput = maybeExistingFeatureOutput;
+    raggedFeatureInput = maybeExistingRaggedFeatureInput;
+    raggedFeatureOutput = maybeExistingRaggedFeatureOutput;
+    epilogue = maybeExistingEpilogue;
+    epilogueInputBindings = maybeExistingEpilogueInputBindings;
+    serializableEpilogue = maybeExistingSerializableEpilogue;
+    connectedInputPortIndices.clear();
+    emittedFeatureOutputAfterAllInputsConnected = false;
+    nextInputConnectionCursorByTensorOriginalId.clear();
     return activationOutput;
 }
 

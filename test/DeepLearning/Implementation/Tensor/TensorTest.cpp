@@ -105,6 +105,41 @@ TEST(Tensor, Copies) {
     }
 }
 
+
+TEST(Tensor, MemsetHonorsAliasViewStorageOffsetOnCpuAndGpu) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    Stream stream(0);
+
+    Tensor host(cpuPlacement, TensorDescriptor(DataType::FP32, {6, 2}));
+    float* hostValues = host.getMemPtr<float>();
+    for (uint64_t i = 0; i < 12; ++i)
+        hostValues[i] = static_cast<float>(i + 1);
+
+    Tensor hostTail = host.aliasView({4}, {1}, 8);
+    hostTail.memsetAsync(stream, 0);
+    stream.synchronize();
+    for (uint64_t i = 0; i < 8; ++i)
+        EXPECT_EQ(hostValues[i], static_cast<float>(i + 1));
+    for (uint64_t i = 8; i < 12; ++i)
+        EXPECT_EQ(hostValues[i], 0.0f);
+
+    for (uint64_t i = 0; i < 12; ++i)
+        hostValues[i] = static_cast<float>(i + 1);
+    Tensor device(gpuPlacement, TensorDescriptor(DataType::FP32, {6, 2}));
+    device.copyFromAsync(host, stream);
+    Tensor deviceTail = device.aliasView({4}, {1}, 8);
+    deviceTail.memsetAsync(stream, 0);
+    host.copyFromAsync(device, stream);
+    stream.synchronize();
+
+    hostValues = host.getMemPtr<float>();
+    for (uint64_t i = 0; i < 8; ++i)
+        EXPECT_EQ(hostValues[i], static_cast<float>(i + 1));
+    for (uint64_t i = 8; i < 12; ++i)
+        EXPECT_EQ(hostValues[i], 0.0f);
+}
+
 TEST(TensorSharedOwnership, CopiesAndAliasesKeepAllocationAliveAfterOriginalReset) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorDescriptor descriptor(DataType::FP32, {8});

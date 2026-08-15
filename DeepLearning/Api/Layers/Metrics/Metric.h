@@ -48,6 +48,13 @@ class Metric : public Layer {
     std::optional<Tensor> getFeatureOutput() const override { return getMetric(); }
     std::vector<Tensor> getAllOutputTensors() const override { return {getFeatureOutput().value()}; }
 
+    [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
+        THOR_THROW_IF_FALSE(outputTensor == getMetric());
+        // Metric outputs are batch reductions. Their API shape is already the complete
+        // physical output shape and placement must not prepend a batch-capacity axis.
+        return true;
+    }
+
     int getConnectionType(Tensor connectingTensor) const override {
         if (connectingTensor == getFeatureInput().value())
             return (int)ThorImplementation::Metric::ConnectionType::FORWARD;

@@ -507,3 +507,179 @@ TEST(DropOut, TrainingDropoutControlUsesIdentityForwardAndBackwardWithoutChangin
 
     LayerTestHelper::tearDownNetwork(layers);
 }
+
+TEST(DropOut, RaggedTrainingUsesOnlyActivePrefixAndBackwardReusesForwardMask) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    constexpr uint64_t fullRows = 64;
+    constexpr uint64_t activeRows = 37;
+    constexpr uint64_t elementsPerValue = 4;
+    constexpr uint64_t totalElements = fullRows * elementsPerValue;
+    constexpr uint64_t activeElements = activeRows * elementsPerValue;
+    TensorDescriptor descriptor(DataType::FP32, {fullRows, elementsPerValue});
+
+    Tensor sourceCpu(cpuPlacement, descriptor);
+    Tensor sourceGpu(gpuPlacement, descriptor);
+    float* source = sourceCpu.getMemPtr<float>();
+    for (uint64_t i = 0; i < activeElements; ++i) source[i] = 1.0f;
+    for (uint64_t i = activeElements; i < totalElements; ++i) source[i] = 1234.0f;
+    sourceCpu.setRaggedActiveRows(activeRows);
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
+    // External NetworkInput intentionally terminates backpropagation. Keep a
+    // test-only upstream gradient edge alive so this test can exercise DropOut
+    // backward, matching the established dense DropOut backward tests above.
+    layers.push_back(make_shared<NoOpLayer>());
+    auto dropOutLayer = make_shared<DropOut>(
+        0.5f, true, true, DropOut::RaggedConfiguration{fullRows, elementsPerValue});
+    dropOutLayer->seed(0x12345678ULL);
+    layers.push_back(dropOutLayer);
+    layers.push_back(make_shared<NoOpLayer>());
+    layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
+
+    Stream stream = layers.front()->getStream();
+    LayerTestHelper::connectAndInitializeNetwork(layers);
+
+    // Bypass NetworkInput's ragged-padding canonicalization so DropOut itself
+    // receives poisoned inactive capacity and must avoid reading it.
+    Tensor packedInput = dropOutLayer->getFeatureInput().value();
+    packedInput.copyFromAsync(sourceCpu, stream);
+    dropOutLayer->forward(packedInput, false);
+    stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
+    Tensor outputCpu(cpuPlacement, descriptor);
+    outputCpu.copyFromAsync(dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput().value(), stream);
+    stream.synchronize();
+
+    const float* output = outputCpu.getMemPtr<float>();
+    uint64_t dropped = 0;
+    uint64_t kept = 0;
+    for (uint64_t i = 0; i < activeElements; ++i) {
+        if (output[i] == 0.0f) {
+            ++dropped;
+        } else {
+            ++kept;
+            EXPECT_FLOAT_EQ(output[i], 2.0f);
+        }
+    }
+    EXPECT_GT(dropped, 0U);
+    EXPECT_GT(kept, 0U);
+    for (uint64_t i = activeElements; i < totalElements; ++i) EXPECT_FLOAT_EQ(output[i], 0.0f);
+
+    Tensor errorInput = dropOutLayer->getErrorInput().value();
+    Tensor errorOutput = dropOutLayer->getErrorOutput().value();
+    Tensor errorInputCpu(cpuPlacement, descriptor);
+    float* errorInputValues = errorInputCpu.getMemPtr<float>();
+    for (uint64_t i = 0; i < activeElements; ++i) errorInputValues[i] = 1.0f;
+    for (uint64_t i = activeElements; i < totalElements; ++i) errorInputValues[i] = -9999.0f;
+    errorInput.copyFromAsync(errorInputCpu, stream);
+    dropOutLayer->backward(errorInput);
+
+    Tensor errorOutputCpu(cpuPlacement, descriptor);
+    errorOutputCpu.copyFromAsync(errorOutput, stream);
+    stream.synchronize();
+    const float* errorOutputValues = errorOutputCpu.getMemPtr<float>();
+    for (uint64_t i = 0; i < activeElements; ++i) {
+        EXPECT_FLOAT_EQ(errorOutputValues[i], output[i] == 0.0f ? 0.0f : 2.0f);
+    }
+    for (uint64_t i = activeElements; i < totalElements; ++i) EXPECT_FLOAT_EQ(errorOutputValues[i], 0.0f);
+    ASSERT_EQ(errorOutput.getRaggedActiveRows(), std::optional<uint64_t>(activeRows));
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+TEST(DropOut, RaggedValidationIsIdentityOverActivePrefixAndCanonicalizesInactiveCapacity) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    constexpr uint64_t fullRows = 8;
+    constexpr uint64_t activeRows = 5;
+    constexpr uint64_t elementsPerValue = 3;
+    constexpr uint64_t totalElements = fullRows * elementsPerValue;
+    constexpr uint64_t activeElements = activeRows * elementsPerValue;
+    TensorDescriptor descriptor(DataType::FP32, {fullRows, elementsPerValue});
+
+    Tensor sourceCpu(cpuPlacement, descriptor);
+    Tensor sourceGpu(gpuPlacement, descriptor);
+    float* source = sourceCpu.getMemPtr<float>();
+    for (uint64_t i = 0; i < activeElements; ++i) source[i] = static_cast<float>(i + 1);
+    for (uint64_t i = activeElements; i < totalElements; ++i) source[i] = 7777.0f;
+    sourceCpu.setRaggedActiveRows(activeRows);
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
+    auto dropOutLayer = make_shared<DropOut>(
+        0.5f, true, true, DropOut::RaggedConfiguration{fullRows, elementsPerValue});
+    layers.push_back(dropOutLayer);
+    layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
+    Stream stream = layers.front()->getStream();
+    LayerTestHelper::connectAndInitializeNetwork(layers);
+
+    Tensor packedInput = dropOutLayer->getFeatureInput().value();
+    packedInput.copyFromAsync(sourceCpu, stream);
+    dropOutLayer->forward(packedInput, true);
+    stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
+    Tensor outputCpu(cpuPlacement, descriptor);
+    outputCpu.copyFromAsync(dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput().value(), stream);
+    stream.synchronize();
+
+    const float* output = outputCpu.getMemPtr<float>();
+    for (uint64_t i = 0; i < activeElements; ++i) EXPECT_FLOAT_EQ(output[i], source[i]);
+    for (uint64_t i = activeElements; i < totalElements; ++i) EXPECT_FLOAT_EQ(output[i], 0.0f);
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
+
+TEST(DropOut, NativeRaggedKernelSeedReproducesTheSameActiveMask) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    constexpr uint64_t fullElements = 256;
+    constexpr uint64_t activeElements = 157;
+    TensorDescriptor descriptor(DataType::FP32, {fullElements});
+    TensorDescriptor maskDescriptor(DataType::UINT8, {fullElements});
+
+    Tensor inputCpu(cpuPlacement, descriptor);
+    for (uint64_t i = 0; i < fullElements; ++i) inputCpu.getMemPtr<float>()[i] = 1.0f;
+    Tensor inputGpu(gpuPlacement, descriptor);
+    Tensor outputA(gpuPlacement, descriptor);
+    Tensor outputB(gpuPlacement, descriptor);
+    Tensor maskA(gpuPlacement, maskDescriptor);
+    Tensor maskB(gpuPlacement, maskDescriptor);
+    Stream stream(0);
+    inputGpu.copyFromAsync(inputCpu, stream);
+
+    constexpr uint64_t seed = 0xabcdef0123456789ULL;
+    constexpr uint64_t sequence = 7;
+    launchDropOutForward(inputGpu.getMemPtr(),
+                         outputA.getMemPtr(),
+                         maskA.getMemPtr<uint8_t>(),
+                         DataType::FP32,
+                         activeElements,
+                         0.5f,
+                         seed,
+                         sequence,
+                         stream);
+    launchDropOutForward(inputGpu.getMemPtr(),
+                         outputB.getMemPtr(),
+                         maskB.getMemPtr<uint8_t>(),
+                         DataType::FP32,
+                         activeElements,
+                         0.5f,
+                         seed,
+                         sequence,
+                         stream);
+
+    Tensor outputACpu(cpuPlacement, descriptor);
+    Tensor outputBCpu(cpuPlacement, descriptor);
+    Tensor maskACpu(cpuPlacement, maskDescriptor);
+    Tensor maskBCpu(cpuPlacement, maskDescriptor);
+    outputACpu.copyFromAsync(outputA, stream);
+    outputBCpu.copyFromAsync(outputB, stream);
+    maskACpu.copyFromAsync(maskA, stream);
+    maskBCpu.copyFromAsync(maskB, stream);
+    stream.synchronize();
+
+    for (uint64_t i = 0; i < activeElements; ++i) {
+        EXPECT_FLOAT_EQ(outputACpu.getMemPtr<float>()[i], outputBCpu.getMemPtr<float>()[i]);
+        EXPECT_EQ(maskACpu.getMemPtr<uint8_t>()[i], maskBCpu.getMemPtr<uint8_t>()[i]);
+    }
+}

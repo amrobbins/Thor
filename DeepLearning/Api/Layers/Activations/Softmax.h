@@ -22,6 +22,8 @@ class Softmax : public Activation {
         return myClone;
     }
 
+    bool supportsRaggedStandalone() const override { return false; }
+
     ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
         return input.softmax();
     }

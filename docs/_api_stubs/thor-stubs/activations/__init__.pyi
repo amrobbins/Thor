@@ -1,3 +1,5 @@
+from typing import overload
+
 import thor
 import thor.physical
 
@@ -20,9 +22,16 @@ class Activation:
         Return a named auxiliary tensor input expression for an activation epilogue.
         """
 
+    @overload
     def add_to_network(self, network: thor.Network, feature_input: thor.Tensor, epilogue: object | None = None, epilogue_inputs: object | None = None) -> thor.Tensor:
         """
         Attach this activation as a standalone expression-backed layer and return its feature output tensor.
+        """
+
+    @overload
+    def add_to_network(self, network: thor.Network, feature_input: thor.RaggedTensor, epilogue: object | None = None, epilogue_inputs: object | None = None) -> thor.RaggedTensor:
+        """
+        Attach this activation to packed ragged values and preserve the input row partition.
         """
 
 class Glu(Activation):

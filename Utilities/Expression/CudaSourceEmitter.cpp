@@ -1035,7 +1035,8 @@ static bool nodeDependsOnRaggedExtent(const PhysicalExpression& expr,
     return depends;
 }
 
-static void validateRaggedExtentStageIsolation(const PhysicalExecutionStage& stage,
+template <typename StageT>
+static void validateRaggedExtentStageIsolation(const StageT& stage,
                                                const RaggedValuewiseExtentEmissionSpec& spec) {
     std::vector<int8_t> memo(stage.expr.nodes.size(), -1);
     for (const CompiledStageOutput& output : stage.outputs) {
@@ -1085,8 +1086,14 @@ static void validateRaggedExtentStageIsolation(const PhysicalExecutionStage& sta
 }
 
 static std::optional<RaggedValuewiseExtentEmissionSpec> findRaggedValuewiseExtentSpec(const PhysicalExpression& expr) {
-    std::optional<RaggedValuewiseExtentEmissionSpec> result = std::nullopt;
-    for (const ExprNode& node : expr.nodes) {
+    struct MarkerSpec {
+        uint32_t node_idx = UINT32_MAX;
+        RaggedValuewiseExtentEmissionSpec spec;
+    };
+
+    std::vector<MarkerSpec> markers;
+    for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+        const ExprNode& node = expr.nodes[node_idx];
         if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
             continue;
         }
@@ -1102,7 +1109,8 @@ static std::optional<RaggedValuewiseExtentEmissionSpec> findRaggedValuewiseExten
         if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
             throw runtime_error("ragged valuewise extent offsets dtype must be UINT32 or UINT64.");
         }
-        if (node.ragged_runtime_max_active_values == 0 || node.ragged_runtime_elements_per_value == 0) {
+        if (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
+            node.ragged_runtime_elements_per_value == 0) {
             throw runtime_error("ragged valuewise extent metadata must be non-zero.");
         }
 
@@ -1113,15 +1121,123 @@ static std::optional<RaggedValuewiseExtentEmissionSpec> findRaggedValuewiseExten
         candidate.batch_size = node.ragged_runtime_batch_size;
         candidate.max_active_values = node.ragged_runtime_max_active_values;
         candidate.elements_per_value = node.ragged_runtime_elements_per_value;
-        if (result.has_value() &&
-            (result->offsets_input_slot != candidate.offsets_input_slot || result->offsets_dtype != candidate.offsets_dtype ||
-             result->batch_size != candidate.batch_size || result->max_active_values != candidate.max_active_values ||
-             result->elements_per_value != candidate.elements_per_value)) {
-            throw runtime_error("one fused kernel cannot combine different ragged runtime extents.");
-        }
-        result = candidate;
+        markers.push_back(MarkerSpec{node_idx, candidate});
     }
+
+    if (markers.empty()) {
+        return std::nullopt;
+    }
+
+    const RaggedValuewiseExtentEmissionSpec partition = markers.front().spec;
+    uint64_t launch_elements_per_value = partition.elements_per_value;
+    for (const MarkerSpec& marker : markers) {
+        const RaggedValuewiseExtentEmissionSpec& candidate = marker.spec;
+        if (partition.offsets_input_slot != candidate.offsets_input_slot || partition.offsets_dtype != candidate.offsets_dtype ||
+            partition.batch_size != candidate.batch_size || partition.max_active_values != candidate.max_active_values) {
+            throw runtime_error("one fused kernel cannot combine different ragged row partitions.");
+        }
+        launch_elements_per_value = std::max(launch_elements_per_value, candidate.elements_per_value);
+    }
+
+    const bool mixed_widths = std::any_of(markers.begin(), markers.end(), [&](const MarkerSpec& marker) {
+        return marker.spec.elements_per_value != launch_elements_per_value;
+    });
+    if (mixed_widths) {
+        // Shape-changing ragged views are represented by ordinary STRIDED_VIEW nodes.
+        // Their backward scatter expands a narrow per-row gradient back into the wider
+        // source-row domain, then RAGGED_VALUEWISE_EXTENT re-wraps the scatter with that
+        // source width.  Permit different widths only for that nested backward pattern.
+        // Every consumer path from a narrower marker must pass through a scatter and then
+        // through a controlling widest marker before reaching a terminal node.  This keeps
+        // the historical rejection for unrelated mixed ragged extents.
+        std::vector<std::vector<uint32_t>> consumers(expr.nodes.size());
+        auto add_consumer = [&](uint32_t parent, uint32_t consumer) {
+            if (parent != UINT32_MAX) {
+                if (parent >= expr.nodes.size()) {
+                    throw runtime_error("ragged extent consumer graph references an out-of-range parent node.");
+                }
+                consumers[parent].push_back(consumer);
+            }
+        };
+        for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
+            const ExprNode& node = expr.nodes[node_idx];
+            add_consumer(node.lhs, node_idx);
+            add_consumer(node.rhs, node_idx);
+            add_consumer(node.aux, node_idx);
+            add_consumer(node.alpha_node, node_idx);
+            add_consumer(node.beta_node, node_idx);
+            add_consumer(node.matmul_epilogue_aux, node_idx);
+            if (node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+                for (uint32_t parent : node.cuda_kernel_input_nodes) add_consumer(parent, node_idx);
+            }
+        }
+
+        auto marker_width = [&](uint32_t node_idx) -> std::optional<uint64_t> {
+            const ExprNode& node = expr.nodes.at(node_idx);
+            if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) return std::nullopt;
+            return node.ragged_runtime_elements_per_value;
+        };
+
+        for (const MarkerSpec& marker : markers) {
+            if (marker.spec.elements_per_value == launch_elements_per_value) {
+                continue;
+            }
+
+            std::unordered_map<uint64_t, bool> memo;
+            std::function<bool(uint32_t, bool, bool)> all_paths_are_shape_expansion =
+                [&](uint32_t node_idx, bool saw_scatter, bool saw_controlling_marker) -> bool {
+                const uint64_t state_key = (static_cast<uint64_t>(node_idx) << 2U) |
+                                           (static_cast<uint64_t>(saw_scatter) << 1U) |
+                                           static_cast<uint64_t>(saw_controlling_marker);
+                auto memo_it = memo.find(state_key);
+                if (memo_it != memo.end()) return memo_it->second;
+
+                const ExprNode& node = expr.nodes.at(node_idx);
+                saw_scatter = saw_scatter || node.op == ExprOp::STRIDED_VIEW_BACKWARD;
+                const std::optional<uint64_t> width = marker_width(node_idx);
+                saw_controlling_marker = saw_controlling_marker ||
+                                         (saw_scatter && width.has_value() && width.value() == launch_elements_per_value);
+
+                if (consumers[node_idx].empty()) {
+                    const bool valid_terminal = saw_scatter && saw_controlling_marker;
+                    memo.emplace(state_key, valid_terminal);
+                    return valid_terminal;
+                }
+                for (uint32_t consumer : consumers[node_idx]) {
+                    if (!all_paths_are_shape_expansion(consumer, saw_scatter, saw_controlling_marker)) {
+                        memo.emplace(state_key, false);
+                        return false;
+                    }
+                }
+                memo.emplace(state_key, true);
+                return true;
+            };
+
+            if (!all_paths_are_shape_expansion(marker.node_idx, false, false)) {
+                throw runtime_error("one fused kernel cannot combine unrelated ragged runtime widths.");
+            }
+        }
+    }
+
+    RaggedValuewiseExtentEmissionSpec result = partition;
+    result.elements_per_value = launch_elements_per_value;
     return result;
+}
+
+static uint64_t specializedRaggedGroupElementsPerValue(const RaggedValuewiseExtentEmissionSpec& extent,
+                                                       const SpecializedBroadcastGroup& group) {
+    if (extent.max_active_values == 0) {
+        throw runtime_error("ragged specialized broadcast requires non-zero max_active_values.");
+    }
+    if ((group.numel % extent.max_active_values) != 0ULL) {
+        throw runtime_error(
+            "ragged specialized broadcast output capacity must be an integer number of elements per packed value.");
+    }
+    const uint64_t elements_per_value = group.numel / extent.max_active_values;
+    if (elements_per_value == 0) {
+        throw runtime_error("ragged specialized broadcast output elements per packed value must be non-zero.");
+    }
+    return elements_per_value;
 }
 
 std::optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const PhysicalExecutionStage& stage) {
@@ -2092,6 +2208,12 @@ static bool expressionHasTakeAlongAxisOp(const PhysicalExpression& expr) {
     return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) { return node.op == ExprOp::TAKE_ALONG_AXIS; });
 }
 
+static bool expressionHasStridedViewOp(const PhysicalExpression& expr) {
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {
+        return node.op == ExprOp::STRIDED_VIEW || node.op == ExprOp::STRIDED_VIEW_BACKWARD;
+    });
+}
+
 static uint64_t productDims(const std::vector<uint64_t>& dims) {
     uint64_t result = 1;
     for (uint64_t dim : dims) {
@@ -2370,6 +2492,79 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
             throw runtime_error("Index-mapped fused transpose emission does not support nested RoPE; materialize one side first.");
         default:
             break;
+    }
+
+    if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+        // RAGGED_VALUEWISE_EXTENT changes launch bounds only. Its rhs offsets
+        // dependency is structural metadata; scalar value evaluation is exactly
+        // the lhs value in the same logical index domain.
+        const std::string value = emitIndexMappedScalarValue(
+            ss, expr, group, n.lhs, idx_expr, domain_dims, indent, use_uint32_index_math, emission_scope, counter);
+        return castScalarExpr(value, emittedScalarNodeValueDType(expr.nodes[n.lhs]), emitted_dtype);
+    }
+
+    if (n.op == ExprOp::STRIDED_VIEW_BACKWARD) {
+        if (n.view_dims.empty() || n.view_dims.size() != n.view_strides.size() || n.fill_dims.empty()) {
+            throw runtime_error("Index-mapped strided_view_backward requires source/view dimensions and strides.");
+        }
+
+        std::string eval_idx = idx_expr;
+        if (group.node_dims[node_idx] != domain_dims) {
+            eval_idx = "svbw_eval_idx" + suffix;
+            emitBroadcastOffsetForDomain(
+                ss, group.node_dims[node_idx], domain_dims, idx_expr, eval_idx, indent, use_uint32_index_math);
+        }
+
+        const std::string in_view = "svbw_in_view" + suffix;
+        const std::string residual = "svbw_residual" + suffix;
+        const std::string view_linear = "svbw_linear" + suffix;
+        ss << indent << "bool " << in_view << " = true;\n";
+        ss << indent << emittedIndexType(use_uint32_index_math) << " " << residual << " = static_cast<"
+           << emittedIndexType(use_uint32_index_math) << ">(" << eval_idx << ");\n";
+        if (n.view_element_offset != 0) {
+            ss << indent << "if (" << residual << " < " << emitUnsignedLiteral(n.view_element_offset, use_uint32_index_math)
+               << ") { " << in_view << " = false; } else { " << residual << " -= "
+               << emitUnsignedLiteral(n.view_element_offset, use_uint32_index_math) << "; }\n";
+        }
+        ss << indent << emittedIndexType(use_uint32_index_math) << " " << view_linear << " = 0;\n";
+        for (size_t axis = 0; axis < n.view_dims.size(); ++axis) {
+            const uint64_t dim = n.view_dims[axis];
+            const uint64_t stride = n.view_strides[axis];
+            if (dim == 0 || stride == 0) {
+                throw runtime_error("Index-mapped strided_view_backward dimensions and strides must be non-zero.");
+            }
+            const std::string coord = "svbw_coord" + suffix + "_" + std::to_string(axis);
+            ss << indent << "if (" << in_view << ") {\n";
+            ss << indent << "  const " << emittedIndexType(use_uint32_index_math) << " " << coord << " = " << residual
+               << " / " << emitUnsignedLiteral(stride, use_uint32_index_math) << ";\n";
+            ss << indent << "  if (" << coord << " >= " << emitUnsignedLiteral(dim, use_uint32_index_math) << ") {\n";
+            ss << indent << "    " << in_view << " = false;\n";
+            ss << indent << "  } else {\n";
+            ss << indent << "    " << residual << " -= " << coord << " * " << emitUnsignedLiteral(stride, use_uint32_index_math)
+               << ";\n";
+            ss << indent << "    " << view_linear << " = " << view_linear << " * "
+               << emitUnsignedLiteral(dim, use_uint32_index_math) << " + " << coord << ";\n";
+            ss << indent << "  }\n";
+            ss << indent << "}\n";
+        }
+        ss << indent << "if (" << residual << " != 0) " << in_view << " = false;\n";
+
+        const std::string grad_value = emitIndexMappedScalarValue(ss,
+                                                                   expr,
+                                                                   group,
+                                                                   n.lhs,
+                                                                   view_linear,
+                                                                   n.view_dims,
+                                                                   indent,
+                                                                   use_uint32_index_math,
+                                                                   emission_scope,
+                                                                   counter);
+        const DataType grad_dtype = emittedScalarNodeValueDType(expr.nodes[n.lhs]);
+        const std::string cast_grad = castScalarExpr(grad_value, grad_dtype, emitted_dtype);
+        const std::string zero = castScalarExpr("0.0f", DataType::FP32, emitted_dtype);
+        ss << indent << "const " << output_type << " " << var << " = " << in_view << " ? " << cast_grad << " : " << zero
+           << ";\n";
+        return var;
     }
 
     if (n.op == ExprOp::TRANSPOSE) {
@@ -3044,8 +3239,55 @@ static std::string emitScalarValueAtIndex(std::ostringstream& ss,
             break;
     }
 
+    if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+        const std::string source_value = emitScalarValueAtIndex(ss, expr, n.lhs, idx_expr, suffix, indent, emitted, group);
+        const DataType source_dtype = emittedScalarNodeValueDType(expr.nodes.at(n.lhs));
+        ss << indent << "const " << output_type << " " << var << " = "
+           << castScalarExpr(source_value, source_dtype, emitted_dtype) << ";\n";
+        mark_emitted();
+        return var;
+    }
     if (n.op == ExprOp::STRIDED_VIEW_BACKWARD) {
-        throw runtime_error("Nested strided_view_backward inside an index-aware scalar source is not supported.");
+        if (n.view_dims.empty() || n.view_dims.size() != n.view_strides.size() || n.fill_dims.empty()) {
+            throw runtime_error("Nested strided_view_backward requires source/view dimensions and strides.");
+        }
+        const std::string in_view = "nested_svbw_in_view_" + std::to_string(node_idx) + suffix;
+        const std::string residual = "nested_svbw_residual_" + std::to_string(node_idx) + suffix;
+        const std::string view_linear = "nested_svbw_linear_" + std::to_string(node_idx) + suffix;
+        ss << indent << "bool " << in_view << " = true;\n";
+        ss << indent << "unsigned long long " << residual << " = static_cast<unsigned long long>(" << idx_expr << ");\n";
+        if (n.view_element_offset != 0) {
+            ss << indent << "if (" << residual << " < " << n.view_element_offset << "ULL) { " << in_view
+               << " = false; } else { " << residual << " -= " << n.view_element_offset << "ULL; }\n";
+        }
+        ss << indent << "unsigned long long " << view_linear << " = 0ULL;\n";
+        for (size_t axis = 0; axis < n.view_dims.size(); ++axis) {
+            const uint64_t dim = n.view_dims[axis];
+            const uint64_t stride = n.view_strides[axis];
+            if (dim == 0 || stride == 0) {
+                throw runtime_error("Nested strided_view_backward dimensions and strides must be non-zero.");
+            }
+            const std::string coord = "nested_svbw_coord_" + std::to_string(node_idx) + "_" + std::to_string(axis) + suffix;
+            ss << indent << "if (" << in_view << ") {\n";
+            ss << indent << "  const unsigned long long " << coord << " = " << residual << " / " << stride << "ULL;\n";
+            ss << indent << "  if (" << coord << " >= " << dim << "ULL) {\n";
+            ss << indent << "    " << in_view << " = false;\n";
+            ss << indent << "  } else {\n";
+            ss << indent << "    " << residual << " -= " << coord << " * " << stride << "ULL;\n";
+            ss << indent << "    " << view_linear << " = " << view_linear << " * " << dim << "ULL + " << coord << ";\n";
+            ss << indent << "  }\n";
+            ss << indent << "}\n";
+        }
+        ss << indent << "if (" << residual << " != 0ULL) " << in_view << " = false;\n";
+        const std::string nested_suffix = suffix + "_svbw" + std::to_string(node_idx);
+        const std::string grad_value = emitScalarValueAtIndex(
+            ss, expr, n.lhs, view_linear, nested_suffix, indent, emitted, group);
+        const DataType grad_dtype = emittedScalarNodeValueDType(expr.nodes.at(n.lhs));
+        const std::string zero = castScalarExpr("0.0f", DataType::FP32, emitted_dtype);
+        ss << indent << "const " << output_type << " " << var << " = " << in_view << " ? "
+           << castScalarExpr(grad_value, grad_dtype, emitted_dtype) << " : " << zero << ";\n";
+        mark_emitted();
+        return var;
     }
     if (n.op == ExprOp::ROPE) {
         throw runtime_error("Nested RoPE inside an index-aware scalar source is not supported; materialize the inner RoPE first.");
@@ -3245,6 +3487,10 @@ static void emitScalarNode(std::ostringstream& ss,
     switch (n.op) {
         case ExprOp::STRIDED_VIEW_BACKWARD:
             emitScalarStridedViewBackwardNode(ss, expr, node_idx, indent, group);
+            return;
+
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
+            emitScalarAliasNode(ss, expr, node_idx, n.lhs, indent);
             return;
 
         case ExprOp::INPUT: {
@@ -3607,6 +3853,10 @@ static void emitScalarNodeSuffixed(std::ostringstream& ss,
     switch (n.op) {
         case ExprOp::STRIDED_VIEW_BACKWARD:
             throw runtime_error("strided_view_backward is index-aware and is only supported by the scalar flat fused emitter.");
+
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
+            emitScalarAliasNodeSuffixed(ss, expr, node_idx, n.lhs, suffix, indent);
+            return;
 
         case ExprOp::INPUT: {
             const DataType input_tensor_dtype = requireNodeInputTensorDType(n);
@@ -7436,6 +7686,11 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
         throw runtime_error("Index-mapped fused transpose emission does not support RoPE in the same fused stage yet.");
     }
 
+    const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
+    if (ragged_extent.has_value()) {
+        validateRaggedExtentStageIsolation(stage, ragged_extent.value());
+    }
+
     const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
     const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
     const bool use_uint32_index_math = groupsSupportUInt32IndexMath(groups);
@@ -7469,7 +7724,18 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
     }
 
     ss << ") {\n";
-    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n\n";
+    if (ragged_extent.has_value()) {
+        const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
+        ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.offsets_input_slot << "["
+           << extent.batch_size << "ULL]);\n";
+        ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
+           << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
+        ss << "  const " << index_type << " thread_idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+        ss << "  const " << index_type << " grid_stride = static_cast<" << index_type
+           << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n\n";
+    } else {
+        ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n\n";
+    }
 
     for (uint32_t g = 0; g < groups.size(); ++g) {
         const SpecializedBroadcastGroup& group = groups[g];
@@ -7477,7 +7743,18 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
             throw runtime_error("Index-mapped specialized broadcast group is missing per-node dimensions.");
         }
 
-        ss << "  if (idx < " << emitUnsignedLiteral(group.numel, use_uint32_index_math) << ") {\n";
+        std::string indent = "    ";
+        if (ragged_extent.has_value()) {
+            const uint64_t group_elements_per_value = specializedRaggedGroupElementsPerValue(ragged_extent.value(), group);
+            ss << "  const unsigned long long runtime_numel_g" << g << "_u64 = active_values * " << group_elements_per_value << "ULL;\n";
+            ss << "  const " << index_type << " runtime_numel_g" << g << " = static_cast<" << index_type
+               << ">(runtime_numel_g" << g << "_u64 < " << emitUnsignedLiteral(group.numel, false)
+               << " ? runtime_numel_g" << g << "_u64 : " << emitUnsignedLiteral(group.numel, false) << ");\n";
+            ss << "  for (" << index_type << " idx = thread_idx; idx < runtime_numel_g" << g << "; idx += grid_stride) {\n";
+        } else {
+            ss << "  if (idx < " << emitUnsignedLiteral(group.numel, use_uint32_index_math) << ") {\n";
+        }
+
         for (uint32_t out_idx : group.output_indices) {
             if (out_idx >= stage.outputs.size()) {
                 throw runtime_error("Index-mapped specialized broadcast output index out of range.");
@@ -7494,11 +7771,11 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
                                                                   output.local_node_idx,
                                                                   "idx",
                                                                   group.output_dims,
-                                                                  "    ",
+                                                                  indent,
                                                                   use_uint32_index_math,
                                                                   "_g" + std::to_string(g) + "_o" + std::to_string(out_idx),
                                                                   counter);
-            ss << "    out" << out_idx
+            ss << indent << "out" << out_idx
                << "[idx] = " << castScalarExpr(value, emittedScalarNodeValueDType(stage.expr.nodes[output.local_node_idx]), output_dtype)
                << ";\n";
         }
@@ -7523,7 +7800,16 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
     if (groups.empty()) {
         throw std::runtime_error("emitSpecializedBroadcast requires at least one group.");
     }
+
+    const std::optional<RaggedValuewiseExtentEmissionSpec> ragged_extent = findRaggedValuewiseExtentSpec(stage.expr);
+    if (ragged_extent.has_value()) {
+        validateRaggedExtentStageIsolation(stage, ragged_extent.value());
+    }
+
     if (stageHasTransposedMaterializedOutput(stage.outputs)) {
+        if (ragged_extent.has_value()) {
+            throw std::runtime_error("ragged runtime extent is not supported with transposed materialized specialized broadcast outputs.");
+        }
         if (expressionHasIndexAwareOps(stage.expr)) {
             throw std::runtime_error("RoPE/index-aware fused stages do not currently support transposed materialized outputs.");
         }
@@ -7531,6 +7817,9 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
     }
 
     if (expressionHasLogicalTransposeOp(stage.expr)) {
+        if (ragged_extent.has_value()) {
+            throw std::runtime_error("ragged runtime extent is not supported with logical-transpose specialized broadcast stages.");
+        }
         if (CudaSourceEmitter::specializedBroadcastUsesTiledLogicalTransposeConsumerLaunch(stage, groups)) {
             return emitTiledLogicalTransposeConsumerSpecializedBroadcast(stage, groups, kernel_name);
         }
@@ -7540,7 +7829,7 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
             "or simplify the transpose chain before fusing.");
     }
 
-    if (expressionHasTakeAlongAxisOp(stage.expr)) {
+    if (expressionHasTakeAlongAxisOp(stage.expr) || expressionHasStridedViewOp(stage.expr)) {
         return emitIndexMappedSpecializedBroadcast(stage, groups, kernel_name);
     }
 
@@ -7582,7 +7871,18 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
     const std::string index_type = emittedIndexType(use_uint32_index_math);
 
     ss << ") {\n";
-    ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n\n";
+    if (ragged_extent.has_value()) {
+        const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
+        ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.offsets_input_slot << "["
+           << extent.batch_size << "ULL]);\n";
+        ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
+           << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
+        ss << "  const " << index_type << " thread_idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
+        ss << "  const " << index_type << " grid_stride = static_cast<" << index_type
+           << ">(blockDim.x) * static_cast<" << index_type << ">(gridDim.x);\n\n";
+    } else {
+        ss << "  " << index_type << " idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n\n";
+    }
 
     for (uint32_t g = 0; g < groups.size(); ++g) {
         const SpecializedBroadcastGroup& group = groups[g];
@@ -7591,35 +7891,49 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
         std::vector<size_t> all_used_indices(group.used_input_slots.size());
         std::iota(all_used_indices.begin(), all_used_indices.end(), 0);
 
-        ss << "  if (idx < " << emitUnsignedLiteral(group.numel, use_uint32_index_math) << ") {\n";
+        const std::string indent = "    ";
+        if (ragged_extent.has_value()) {
+            const uint64_t group_elements_per_value = specializedRaggedGroupElementsPerValue(ragged_extent.value(), group);
+            ss << "  const unsigned long long runtime_numel_g" << g << "_u64 = active_values * " << group_elements_per_value << "ULL;\n";
+            ss << "  const " << index_type << " runtime_numel_g" << g << " = static_cast<" << index_type
+               << ">(runtime_numel_g" << g << "_u64 < " << emitUnsignedLiteral(group.numel, false)
+               << " ? runtime_numel_g" << g << "_u64 : " << emitUnsignedLiteral(group.numel, false) << ");\n";
+            ss << "  for (" << index_type << " idx = thread_idx; idx < runtime_numel_g" << g << "; idx += grid_stride) {\n";
+        } else {
+            ss << "  if (idx < " << emitUnsignedLiteral(group.numel, use_uint32_index_math) << ") {\n";
+        }
+
         for (size_t axis = 0; axis < group.output_dims.size(); ++axis) {
-            ss << "    const " << index_type << " out_dim_" << axis << " = "
+            ss << indent << "const " << index_type << " out_dim_" << axis << " = "
                << emitUnsignedLiteral(group.output_dims[axis], use_uint32_index_math) << ";\n";
         }
 
         for (uint32_t input_slot : group.used_input_slots) {
-            ss << "    " << index_type << " in" << input_slot << "_offset = " << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
+            ss << indent << index_type << " in" << input_slot << "_offset = " << emitUnsignedLiteral(0, use_uint32_index_math) << ";\n";
         }
 
         if (!group.active_axes.empty()) {
             ss << "\n";
-            emitSpecializedBroadcastOffsetMath(ss, group, all_used_indices, "idx", "", "    ", use_uint32_index_math);
+            emitSpecializedBroadcastOffsetMath(ss, group, all_used_indices, "idx", "", indent, use_uint32_index_math);
             ss << "\n";
         }
 
         for (uint32_t node_idx : required_nodes) {
-            if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+            const ExprNode& node = stage.expr.nodes.at(node_idx);
+            const bool is_extent_offsets_input = ragged_extent.has_value() && node.op == ExprOp::INPUT &&
+                                                 node.input_slot == ragged_extent->offsets_input_slot;
+            if (is_extent_offsets_input || !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
                 continue;
             }
-            emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/true, "    ", &group);
+            emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/true, indent, &group);
         }
 
         ss << "\n";
         for (uint32_t out_idx : group.output_indices) {
             const CompiledStageOutput& output = stage.outputs[out_idx];
             const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
-            ss << "    out" << out_idx << "[idx] = " << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype)
-               << ";\n";
+            ss << indent << "out" << out_idx << "[idx] = "
+               << emitResolvedScalarValueExpr(stage.expr, output.local_node_idx, output_dtype) << ";\n";
         }
 
         ss << "  }\n\n";

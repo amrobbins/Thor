@@ -66,7 +66,7 @@ class DeviceResidentNamedDataset {
     [[nodiscard]] const ThorImplementation::Tensor &field(Thor::DatasetFieldId id) const;
     [[nodiscard]] const ThorImplementation::Tensor &tensor(const std::string &name) const;
 
-    void validateCompactRaggedBatchCapacity(
+    [[nodiscard]] uint64_t validateCompactRaggedBatchCapacity(
         const std::string &fieldName,
         const ThorImplementation::Tensor &rowIndicesHost,
         uint64_t logicalRows,
@@ -79,7 +79,7 @@ class DeviceResidentNamedDataset {
         ThorImplementation::RaggedTensor &destination,
         Stream &stream) const;
 
-    void validateSnapshotRaggedBatchCapacity(
+    [[nodiscard]] uint64_t validateSnapshotRaggedBatchCapacity(
         const std::string &fieldName,
         const ThorImplementation::Tensor &rowIndicesHost,
         uint64_t logicalRows,

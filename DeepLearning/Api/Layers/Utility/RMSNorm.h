@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Expression/Expression.h"
@@ -39,6 +40,30 @@ class RMSNorm : public TrainableLayer {
     const std::vector<uint64_t>& getNormalizedShape() const { return normalizedShape; }
     double getEpsilon() const { return epsilon; }
     DataType getParameterDataType() const { return parameterDataType; }
+    [[nodiscard]] bool getUseRagged() const { return !raggedFeatureInputs.empty(); }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureInput(uint32_t index = 0) const {
+        if (index >= raggedFeatureInputs.size()) return std::nullopt;
+        return raggedFeatureInputs[index];
+    }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureOutput(uint32_t index = 0) const {
+        if (index >= raggedFeatureOutputs.size()) return std::nullopt;
+        return raggedFeatureOutputs[index];
+    }
+
+    uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
+        if (raggedFeatureOutputs.empty()) return MultiConnectionLayer::getOutputTensorBytes(batchSize);
+        THOR_THROW_IF_FALSE(!featureOutputs.empty());
+        return featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
+    }
+    uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+                                                      ThorImplementation::TensorPlacement tensorPlacement) const override {
+        if (raggedFeatureOutputs.empty())
+            return TrainableLayer::getNonFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+        (void)batchSize;
+        (void)tensorPlacement;
+        THOR_THROW_IF_FALSE(!featureOutputs.empty());
+        return featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
+    }
     static const char* epilogueInputName() { return "__rms_norm_epilogue_input"; }
     static const char* epilogueOutputName() { return "__rms_norm_epilogue_output"; }
 
@@ -118,6 +143,8 @@ class RMSNorm : public TrainableLayer {
     static void validateNormalizedShapeForInput(const std::vector<uint64_t>& inputDims, const std::vector<uint64_t>& normalizedShape);
 
     std::vector<uint64_t> normalizedShape;
+    std::vector<RaggedTensor> raggedFeatureInputs;
+    std::vector<RaggedTensor> raggedFeatureOutputs;
     double epsilon = 1.0e-5;
     DataType parameterDataType = DataType::FP32;
     std::optional<ThorImplementation::Expression> epilogue;
@@ -149,10 +176,27 @@ class RMSNorm::Builder {
 
     virtual RMSNorm::Builder& featureInput(Tensor featureInput) {
         THOR_THROW_IF_FALSE(featureInput.isInitialized());
+        THOR_THROW_IF_FALSE(this->_raggedFeatureInputs.empty());
         this->_featureInputs.push_back(featureInput);
         if (_featureInputs.size() > 1) {
             THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
             THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+        }
+        return *this;
+    }
+
+    virtual RMSNorm::Builder& featureInput(RaggedTensor featureInput) {
+        THOR_THROW_IF_FALSE(featureInput.isInitialized());
+        THOR_THROW_IF_FALSE(this->_featureInputs.empty() || !this->_raggedFeatureInputs.empty());
+        Tensor values = featureInput.getValues();
+        this->_raggedFeatureInputs.push_back(featureInput);
+        this->_featureInputs.push_back(values);
+        if (_featureInputs.size() > 1) {
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getBatchSize() == _raggedFeatureInputs.front().getBatchSize());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getMaxTotalValues() == _raggedFeatureInputs.front().getMaxTotalValues());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getOffsetsDataType() == _raggedFeatureInputs.front().getOffsetsDataType());
         }
         return *this;
     }
@@ -227,6 +271,7 @@ class RMSNorm::Builder {
 
     std::optional<Network*> _network;
     std::vector<Tensor> _featureInputs;
+    std::vector<RaggedTensor> _raggedFeatureInputs;
     std::vector<uint64_t> _normalizedShape;
     std::optional<double> _epsilon;
     std::optional<DataType> _parameterDataType;

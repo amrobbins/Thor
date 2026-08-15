@@ -55,8 +55,8 @@ class Exponential : public Activation {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        // feature out and error out
-        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
+        (void)tensorPlacement;
+        return getExpressionBackedActivationMemRequirementInBytes(batchSize);
     }
 };
 
@@ -65,14 +65,11 @@ class Exponential::Builder : public Activation::Builder {
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<Exponential> exponential = std::make_shared<Exponential>();
         if (_featureInput.has_value()) {
-            // Standalone layer support.
             THOR_THROW_IF_FALSE(_network.has_value());
-            exponential->featureInput = _featureInput;
-            exponential->featureOutput = _featureInput.value().clone();
+            applyStandaloneConfiguration(*exponential);
             exponential->initialized = true;
             exponential->addToNetwork(_network.value());
         } else {
-            // Template activation support
             exponential->initialized = true;
         }
 
@@ -85,6 +82,11 @@ class Exponential::Builder : public Activation::Builder {
     }
 
     Exponential::Builder &featureInput(Tensor _featureInput) override {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
+    Exponential::Builder &featureInput(RaggedTensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

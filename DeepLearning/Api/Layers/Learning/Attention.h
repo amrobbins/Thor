@@ -84,21 +84,31 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
                       SerializationContract::LAYER_PROVIDES_OWN_ARCHITECTURE,
                       false,
                       false,
-                      raggedFeatureInput.has_value()
-                          ? [&]() {
-                                std::set<std::string> names{"feature_input", "query_row_partition", "key_value_row_partition"};
-                                if (raggedContextInput.has_value()) names.insert("context_input");
-                                for (const auto& [name, tensor] : epilogueInputBindings) {
-                                    (void)tensor;
-                                    names.insert(name);
-                                }
-                                return names;
-                            }()
-                          : std::set<std::string>{},
+                      [&]() {
+                          std::set<std::string> names;
+                          if (raggedFeatureInput.has_value()) {
+                              names.insert("feature_input");
+                              names.insert("query_row_partition");
+                              for (const auto& [name, tensor] : epilogueInputBindings) {
+                                  (void)tensor;
+                                  names.insert(name);
+                              }
+                          }
+                          if (raggedContextInput.has_value()) {
+                              names.insert("context_input");
+                              names.insert("key_value_row_partition");
+                          } else if (raggedFeatureInput.has_value() && !contextInput.has_value()) {
+                              // Ragged self-attention shares the query partition with K/V.
+                              names.insert("key_value_row_partition");
+                          }
+                          return names;
+                      }(),
                       raggedFeatureInput.has_value() ? std::set<std::string>{"feature_output"} : std::set<std::string>{},
                       raggedFeatureInput.has_value()
                           ? std::optional<uint32_t>(static_cast<uint32_t>(raggedFeatureInput->getBatchSize()))
-                          : std::nullopt),
+                          : (raggedContextInput.has_value()
+                                 ? std::optional<uint32_t>(static_cast<uint32_t>(raggedContextInput->getBatchSize()))
+                                 : std::nullopt)),
           numHeads(numHeads),
           numKeyValueHeads(numKeyValueHeads),
           headDim(headDim),
@@ -242,7 +252,11 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
     // API shape is [1]; at runtime the normal batch dimension yields one INT32 origin per logical ragged row.
     std::optional<Tensor> getQueryRopePositionOffsetsInput() const { return queryRopePositionOffsetsInput; }
     std::optional<Tensor> getKeyRopePositionOffsetsInput() const { return keyRopePositionOffsetsInput; }
-    bool getUseRagged() const { return raggedFeatureInput.has_value(); }
+    bool getUseRagged() const { return raggedFeatureInput.has_value() || raggedContextInput.has_value(); }
+    bool getQueryRagged() const { return raggedFeatureInput.has_value(); }
+    bool getKeyValueRagged() const {
+        return raggedContextInput.has_value() || (raggedFeatureInput.has_value() && !contextInput.has_value());
+    }
     std::optional<RaggedTensor> getRaggedFeatureInput() const { return raggedFeatureInput; }
     std::optional<RaggedTensor> getRaggedContextInput() const { return raggedContextInput; }
     std::optional<RaggedTensor> getRaggedFeatureOutput() const { return raggedFeatureOutput; }

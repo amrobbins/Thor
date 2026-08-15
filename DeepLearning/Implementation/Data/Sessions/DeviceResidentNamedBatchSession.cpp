@@ -430,11 +430,12 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
     for (const auto &[fieldId, requirement] : fieldRequirements) {
         if (!requirement.raggedTensorDescriptor.has_value()) continue;
         const Thor::DatasetField &field = dataset->getSchema().getField(fieldId);
-        dataset->validateSnapshotRaggedBatchCapacity(
+        const uint64_t activeRows = dataset->validateSnapshotRaggedBatchCapacity(
             field.name,
             runtime.rowIndicesHost,
             validExampleCount,
             requirement.raggedTensorDescriptor->getMaxTotalValues());
+        storage.raggedTensors.at(field.name).getValues().setRaggedActiveRows(activeRows);
     }
 
     runtime.rowIndicesDevice.copyFromAsync(

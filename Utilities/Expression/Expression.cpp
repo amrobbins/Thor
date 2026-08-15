@@ -632,6 +632,8 @@ json exprNodeToJson(const ExprNode& node) {
     j["matmul_epilogue"] = matmulEpilogueName(node.matmul_epilogue);
     j["matmul_backward_epilogue"] = matmulBackwardEpilogueName(node.matmul_backward_epilogue);
     j["matmul_epilogue_aux"] = node.matmul_epilogue_aux;
+    j["matmul_packed_row_binding"] = static_cast<int>(node.matmul_packed_row_binding);
+    j["matmul_packed_row_capacity"] = node.matmul_packed_row_capacity;
     j["conv_stride_d"] = node.conv_stride_d;
     j["conv_stride_h"] = node.conv_stride_h;
     j["conv_stride_w"] = node.conv_stride_w;
@@ -696,6 +698,7 @@ json exprNodeToJson(const ExprNode& node) {
     j["rms_norm_normalized_feature_count"] = node.rms_norm_normalized_feature_count;
     j["rms_norm_epsilon"] = node.rms_norm_epsilon;
     j["rms_norm_fused_activation"] = toString(node.rms_norm_fused_activation);
+    j["rms_norm_packed_row_capacity"] = node.rms_norm_packed_row_capacity;
     j["embedding_has_padding_index"] = node.embedding_has_padding_index;
     j["embedding_padding_index"] = node.embedding_padding_index;
     j["scan_op"] = scanOpToString(node.scan_op);
@@ -743,6 +746,8 @@ ExprNode exprNodeFromJson(const json& j) {
     node.matmul_epilogue = matmulEpilogueFromName(j.value("matmul_epilogue", std::string("default")));
     node.matmul_backward_epilogue = matmulBackwardEpilogueFromName(j.value("matmul_backward_epilogue", std::string("default")));
     node.matmul_epilogue_aux = j.value("matmul_epilogue_aux", UINT32_MAX);
+    node.matmul_packed_row_binding = static_cast<MatmulPackedRowBinding>(j.value("matmul_packed_row_binding", 0));
+    node.matmul_packed_row_capacity = j.value("matmul_packed_row_capacity", uint64_t{0});
     node.conv_stride_d = j.value("conv_stride_d", 1);
     node.conv_stride_h = j.value("conv_stride_h", 1);
     node.conv_stride_w = j.value("conv_stride_w", 1);
@@ -813,6 +818,7 @@ ExprNode exprNodeFromJson(const json& j) {
     node.rms_norm_fused_activation = j.contains("rms_norm_fused_activation")
                                          ? cudnnRmsNormFusedActivationFromString(j.at("rms_norm_fused_activation").get<std::string>())
                                          : CudnnRmsNormFusedActivation::NONE;
+    node.rms_norm_packed_row_capacity = j.value("rms_norm_packed_row_capacity", uint64_t{0});
     node.embedding_has_padding_index = j.value("embedding_has_padding_index", false);
     node.embedding_padding_index = j.value("embedding_padding_index", uint64_t{0});
     node.scan_op = scanOpFromString(j.value("scan_op", std::string("sum")));
@@ -1300,6 +1306,19 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             break;
         }
 
+        case ExprOp::SEGMENTED_REDUCE_SUM:
+        case ExprOp::SEGMENTED_REDUCE_MIN:
+        case ExprOp::SEGMENTED_REDUCE_MAX:
+        case ExprOp::SEGMENTED_REDUCE_MEAN: {
+            std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
+            out = opName(n.op) + "(" + a + "," + b +
+                  ";batch=" + std::to_string(n.ragged_runtime_batch_size) +
+                  ";maxActive=" + std::to_string(n.ragged_runtime_max_active_values) +
+                  ";elementsPerValue=" + std::to_string(n.ragged_runtime_elements_per_value) + ")";
+            break;
+        }
+
         case ExprOp::REDUCE_MIN_BACKWARD:
         case ExprOp::REDUCE_MAX_BACKWARD: {
             std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
@@ -1314,7 +1333,10 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
             std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
             std::string c = canonicalizeNode(expr, n.aux, memo, memoReady);
-            out = opName(n.op) + "(" + a + "," + b + "," + c + ")";
+            out = opName(n.op) + "(" + a + "," + b + "," + c +
+                  ";batch=" + std::to_string(n.ragged_runtime_batch_size) +
+                  ";maxActive=" + std::to_string(n.ragged_runtime_max_active_values) +
+                  ";elementsPerValue=" + std::to_string(n.ragged_runtime_elements_per_value) + ")";
             break;
         }
 
@@ -1375,6 +1397,8 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 out += ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0);
                 out += ";epilogue=" + std::string(matmulEpilogueName(n.matmul_epilogue));
                 out += ";backwardEpilogue=" + std::string(matmulBackwardEpilogueName(n.matmul_backward_epilogue));
+                out += ";packedRowsBinding=" + std::to_string(static_cast<int>(n.matmul_packed_row_binding));
+                out += ";packedRowsCapacity=" + std::to_string(n.matmul_packed_row_capacity);
                 if (n.matmul_epilogue_aux != UINT32_MAX) {
                     out += ";epilogueAux=" + canonicalizeNode(expr, n.matmul_epilogue_aux, memo, memoReady);
                 }
@@ -1382,6 +1406,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 out += ";hidden=" + std::to_string(n.rms_norm_normalized_feature_count);
                 out += ";epsilon=" + formatFloatCanonical(n.rms_norm_epsilon);
                 out += ";fusedActivation=" + std::string(toString(n.rms_norm_fused_activation));
+                out += ";packedRowsCapacity=" + std::to_string(n.rms_norm_packed_row_capacity);
             } else if (n.op == ExprOp::EMBEDDING_LOOKUP) {
                 out += ";padding=";
                 out += n.embedding_has_padding_index ? std::to_string(n.embedding_padding_index) : std::string("none");
@@ -1939,6 +1964,14 @@ void ExpressionDefinition::validate() const {
         }
         if ((node.op == ExprOp::GEMM) && node.beta_node != UINT32_MAX && node.beta_node >= node_index_u32) {
             throw std::runtime_error("ExpressionDefinition GEMM beta_node must reference an earlier node.");
+        }
+        if (node.matmul_packed_row_binding != MatmulPackedRowBinding::None) {
+            if (node.op != ExprOp::MATMUL || node.matmul_packed_row_capacity == 0) {
+                throw std::runtime_error(
+                    "ExpressionDefinition packed-row matmul annotation requires a MATMUL node and non-zero capacity.");
+            }
+        } else if (node.matmul_packed_row_capacity != 0) {
+            throw std::runtime_error("ExpressionDefinition packed-row capacity requires a packed-row binding.");
         }
         if ((node.op == ExprOp::MATMUL || node.op == ExprOp::GEMM) && node.matmul_backward_epilogue != MatmulBackwardEpilogue::Default) {
             validateNodeIndex(node.matmul_epilogue_aux, "matmul backward epilogue aux");
@@ -4055,7 +4088,8 @@ Expression Expression::matmul(const Expression& lhs,
                               bool transpose_lhs,
                               bool transpose_rhs,
                               std::optional<DataType> compute_dtype,
-                              std::optional<DataType> output_dtype) {
+                              std::optional<DataType> output_dtype,
+                              std::optional<uint64_t> packed_row_capacity) {
     Expression out = binaryOp(lhs, rhs, ExprOp::MATMUL);
     ExprNode& node = out.expr->nodes[out.nodeIndex];
     node.transpose_lhs = transpose_lhs;
@@ -4066,6 +4100,16 @@ Expression Expression::matmul(const Expression& lhs,
     if (output_dtype.has_value()) {
         node.output_dtype = output_dtype.value();
     }
+    if (packed_row_capacity.has_value()) {
+        if (packed_row_capacity.value() == 0) {
+            throw std::invalid_argument("Expression::matmul packed_row_capacity must be non-zero when specified.");
+        }
+        if (transpose_lhs || transpose_rhs) {
+            throw std::invalid_argument("Expression::matmul packed-row capacity currently requires a non-transposed row-major projection.");
+        }
+        node.matmul_packed_row_binding = MatmulPackedRowBinding::RowsA;
+        node.matmul_packed_row_capacity = packed_row_capacity.value();
+    }
     return out;
 }
 
@@ -4074,7 +4118,8 @@ Expression Expression::rmsNorm(const Expression& input,
                                uint64_t normalized_feature_count,
                                double epsilon,
                                std::optional<DataType> compute_dtype,
-                               std::optional<DataType> output_dtype) {
+                               std::optional<DataType> output_dtype,
+                               std::optional<uint64_t> packed_row_capacity) {
     if (normalized_feature_count == 0) {
         throw std::invalid_argument("Expression::rmsNorm normalized_feature_count must be non-zero.");
     }
@@ -4087,6 +4132,12 @@ Expression Expression::rmsNorm(const Expression& input,
     node.rms_norm_normalized_feature_count = normalized_feature_count;
     node.rms_norm_epsilon = epsilon;
     node.rms_norm_fused_activation = CudnnRmsNormFusedActivation::NONE;
+    if (packed_row_capacity.has_value()) {
+        if (packed_row_capacity.value() == 0) {
+            throw std::invalid_argument("Expression::rmsNorm packed_row_capacity must be non-zero when specified.");
+        }
+        node.rms_norm_packed_row_capacity = packed_row_capacity.value();
+    }
     node.compute_dtype = compute_dtype.value_or(DataType::FP32);
     if (output_dtype.has_value()) {
         node.output_dtype = output_dtype.value();

@@ -1,5 +1,7 @@
 #include <optional>
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 
@@ -294,4 +296,68 @@ TEST(UtilityApiLayers, NetworkAndPlacedNetworkControlTrainingDropoutWithoutSeria
     // The API graph remains an independently configurable template for future
     // placements; changing a placed network does not rewrite it.
     ASSERT_FALSE(network.isTrainingDropoutEnabled());
+}
+
+
+TEST(UtilityApiLayers, RaggedDropOutPreservesPartitionAndUsesPackedCapacityForReserveSpace) {
+    Network network("ragged_dropout_builds");
+    const uint64_t batchSize = 3;
+    const uint64_t maxTotalValues = 9;
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("history")
+                             .valuesDataType(DataType::FP32)
+                             .trailingDimensions({4})
+                             .maxTotalValues(maxTotalValues)
+                             .batchSize(batchSize)
+                             .offsetsDataType(DataType::UINT32)
+                             .build();
+
+    DropOut dropOut = DropOut::Builder().network(network).featureInput(input).dropProportion(0.25f).build();
+    ASSERT_TRUE(dropOut.getUseRagged());
+    ASSERT_TRUE(dropOut.getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(dropOut.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(dropOut.getRaggedFeatureInput().value(), input);
+    EXPECT_EQ(dropOut.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
+    EXPECT_EQ(dropOut.getRaggedFeatureOutput()->getValuesDimensions(), input.getValuesDimensions());
+    EXPECT_EQ(dropOut.getOutputTensorBytes(batchSize), input.getValues().getTotalSizeInBytes());
+
+    TestableDropOut testableDropOut(dropOut);
+    EXPECT_EQ(testableDropOut.reservedStateSizeInBytes(batchSize), maxTotalValues * 4);
+
+    const json architecture = dropOut.architectureJson();
+    ASSERT_TRUE(architecture.at("use_ragged").get<bool>());
+    EXPECT_EQ(architecture.at("ragged_feature_input").at("offsets").at("id").get<uint64_t>(),
+              architecture.at("ragged_feature_output").at("offsets").at("id").get<uint64_t>());
+}
+
+TEST(UtilityApiLayers, RaggedDropOutPlacesForInferenceAndPreservesLogicalOutput) {
+    Network network("ragged_dropout_places");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("history")
+                             .valuesDataType(DataType::BF16)
+                             .trailingDimensions({3})
+                             .maxTotalValues(9)
+                             .batchSize(3)
+                             .offsetsDataType(DataType::UINT32)
+                             .build();
+    DropOut dropOut = DropOut::Builder().network(network).featureInput(input).dropProportion(0.5f).build();
+    RaggedNetworkOutput::Builder()
+        .network(network)
+        .name("history_out")
+        .inputTensor(dropOut.getRaggedFeatureOutput().value())
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placed = network.place(3, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    ThorImplementation::StampedNetwork stamped = placed->getStampedNetwork(0);
+    auto physicalDropOut = dynamic_pointer_cast<ThorImplementation::DropOut>(
+        stamped.getPhysicalLayerFromApiLayer(dropOut.getId()));
+    ASSERT_NE(physicalDropOut, nullptr);
+    EXPECT_TRUE(physicalDropOut->isRagged());
+    EXPECT_FALSE(physicalDropOut->isTrainingMode());
 }

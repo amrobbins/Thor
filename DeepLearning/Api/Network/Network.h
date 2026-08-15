@@ -386,6 +386,7 @@ class Network {
     void addToNetwork(Optimizer *optimizer);
 
     [[nodiscard]] std::string logicalExternalInputName(const std::string& physicalInputName) const;
+    void appendRaggedNetworkBoundaryJson(nlohmann::json& modelJson) const;
 
     void setGraphValidationIssue(StatusCode status, std::string summary, std::string detail);
     [[nodiscard]] std::string graphValidationFailureMessage(StatusCode status) const;

@@ -1,11 +1,15 @@
 #include "DeepLearning/Api/Layers/Activations/Swish.h"
 #include "DeepLearning/Api/Layers/Utility/RMSNorm.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/RaggedRMSNorm.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
@@ -15,6 +19,7 @@
 
 #include <cmath>
 #include <memory>
+#include <limits>
 
 using namespace Thor;
 using namespace std;
@@ -404,4 +409,240 @@ TEST(UtilityApiLayers, RMSNormMultiInputEpilogueRunsForwardBackwardResidualAddAn
                       "rmsnorm residual epilogue auxiliary residual error out");
     rmsExpectAllClose(rmsReadCpuTensor(weightsAfterHost), expectedWeightsAfter, 3e-4f, 3e-4f,
                       "rmsnorm residual epilogue weights after");
+}
+
+
+TEST(UtilityApiLayers, RMSNormAcceptsRaggedTensorPreservesPartitionAndUsesPackedCapacityMemoryAccounting) {
+    constexpr uint64_t fullRows = 66;
+    constexpr uint64_t hidden = 4;
+    constexpr uint32_t logicalBatchSize = 2;
+
+    Network network("rms_norm_ragged_build");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({hidden})
+                             .maxTotalValues(fullRows)
+                             .batchSize(logicalBatchSize)
+                             .build();
+
+    RMSNorm layer = RMSNorm::Builder().network(network).featureInput(input).build();
+    ASSERT_TRUE(layer.getUseRagged());
+    ASSERT_TRUE(layer.getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(layer.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(layer.getNormalizedShape(), (vector<uint64_t>{hidden}));
+    EXPECT_EQ(layer.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{fullRows, hidden}));
+    EXPECT_EQ(layer.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
+    EXPECT_EQ(layer.getOutputTensorBytes(logicalBatchSize), layer.getFeatureOutput().value().getTotalSizeInBytes());
+
+    const json architecture = layer.architectureJson();
+    EXPECT_TRUE(architecture.at("use_ragged").get<bool>());
+    ASSERT_EQ(architecture.at("ragged_inputs").size(), 1u);
+    ASSERT_EQ(architecture.at("ragged_outputs").size(), 1u);
+    EXPECT_EQ(architecture.at("ragged_inputs").at(0).at("offsets").at("id").get<uint64_t>(),
+              architecture.at("ragged_outputs").at(0).at("offsets").at("id").get<uint64_t>());
+
+    Network badNetwork("rms_norm_ragged_reject_packed_row_normalization");
+    RaggedTensor badInput = RaggedNetworkInput::Builder()
+                                .network(badNetwork)
+                                .name("tokens")
+                                .valuesDataType(DataType::FP32)
+                                .offsetsDataType(DataType::UINT32)
+                                .trailingDimensions({hidden})
+                                .maxTotalValues(fullRows)
+                                .batchSize(logicalBatchSize)
+                                .build();
+    EXPECT_THROW(RMSNorm::Builder().network(badNetwork).featureInput(badInput).normalizedShape({fullRows, hidden}).build(),
+                 std::invalid_argument);
+}
+
+TEST(UtilityApiLayers, RaggedRMSNormBf16PlacesWithFp32Scale) {
+    constexpr uint32_t logicalBatchSize = 2;
+    Network network("ragged_rms_norm_bf16_places");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::BF16)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({8})
+                             .maxTotalValues(66)
+                             .batchSize(logicalBatchSize)
+                             .build();
+    RMSNorm rmsNorm = RMSNorm::Builder().network(network).featureInput(input).normalizedShape({8}).build();
+    ASSERT_TRUE(rmsNorm.getRaggedFeatureOutput().has_value());
+    (void)RaggedNetworkOutput::Builder()
+        .network(network)
+        .name("output")
+        .inputTensor(rmsNorm.getRaggedFeatureOutput().value())
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placed = network.place(logicalBatchSize, initDoneEvents, /*inferenceOnly=*/true);
+    rmsSynchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    auto physicalRmsNorm = dynamic_pointer_cast<Impl::RaggedRMSNorm>(
+        placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(rmsNorm.getId()));
+    ASSERT_NE(physicalRmsNorm, nullptr);
+    EXPECT_EQ(physicalRmsNorm->selectedCapacityRows(33), 66u);
+}
+
+TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnoresInvalidTail) {
+    constexpr uint32_t logicalBatchSize = 2;
+    constexpr uint64_t fullRows = 66;
+    constexpr uint64_t activeRows = 31;
+    constexpr uint64_t hidden = 4;
+    constexpr float epsilon = 1.0e-5f;
+    constexpr float learningRate = 0.001f;
+    const DataType dataType = DataType::FP32;
+
+    Api::Network network("ragged_rms_norm_forward_backward_bucketed");
+    Api::RaggedTensor networkInput = Api::RaggedNetworkInput::Builder()
+                                         .network(network)
+                                         .name("tokens")
+                                         .valuesDataType(dataType)
+                                         .offsetsDataType(DataType::UINT32)
+                                         .trailingDimensions({hidden})
+                                         .maxTotalValues(fullRows)
+                                         .batchSize(logicalBatchSize)
+                                         .build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(networkInput.getValues()).build();
+    Api::RaggedTensor raggedInput(inputRivet.getFeatureOutput().value(), networkInput.getOffsets());
+    // This implementation-level test drives only the packed values tensor directly.
+    // Consume the structural offsets output so the API graph remains closed without
+    // making offsets a mathematical RMSNorm operand.
+    (void)Api::Stub::Builder().network(network).inputTensor(networkInput.getOffsets()).build();
+
+    shared_ptr<Api::Sgd> weightsSgd = Api::Sgd::Builder()
+                                          .initialLearningRate(learningRate)
+                                          .decay(0.0f)
+                                          .momentum(0.0f)
+                                          .build();
+    Api::RMSNorm rmsNorm = Api::RMSNorm::Builder()
+                               .network(network)
+                               .featureInput(raggedInput)
+                               .normalizedShape({hidden})
+                               .epsilon(epsilon)
+                               .parameterDataType(dataType)
+                               .weightsOptimizer(weightsSgd)
+                               .build();
+    ASSERT_TRUE(rmsNorm.getRaggedFeatureOutput().has_value());
+    Api::GradientRivet outputRivet = Api::GradientRivet::Builder()
+                                         .network(network)
+                                         .tensor(rmsNorm.getRaggedFeatureOutput()->getValues())
+                                         .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(logicalBatchSize, initDoneEvents, /*inferenceOnly=*/false);
+    rmsSynchronizeEvents(initDoneEvents);
+    ASSERT_NE(placedNetwork, nullptr);
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalRmsNorm =
+        dynamic_pointer_cast<Impl::RaggedRMSNorm>(stampedNetwork.getPhysicalLayerFromApiLayer(rmsNorm.getId()));
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalRmsNorm, nullptr);
+    ASSERT_TRUE(physicalRmsNorm->getGradientUpdateStream().has_value());
+
+    EXPECT_EQ(physicalRmsNorm->selectedCapacityRows(7), 8u);
+    EXPECT_EQ(physicalRmsNorm->selectedCapacityRows(9), 16u);
+    EXPECT_EQ(physicalRmsNorm->selectedCapacityRows(31), 32u);
+    EXPECT_EQ(physicalRmsNorm->selectedCapacityRows(33), 66u);
+    EXPECT_EQ(physicalRmsNorm->selectedCapacityRows(66), 66u);
+
+    const vector<float> initialWeights = {1.0f, 0.75f, -0.5f, 1.25f};
+    Stream stream = physicalRmsNorm->getStreams()[0];
+    Stream gradientStream = physicalRmsNorm->getGradientUpdateStream().value();
+    rmsSetParameterTensor(physicalRmsNorm->getParameter("weights"), initialWeights, stream);
+    stream.synchronize();
+
+    vector<float> inputValues(fullRows * hidden, std::numeric_limits<float>::quiet_NaN());
+    for (uint64_t row = 0; row < activeRows; ++row) {
+        for (uint64_t col = 0; col < hidden; ++col) {
+            inputValues[row * hidden + col] =
+                static_cast<float>(static_cast<int>((row + 2 * col) % 11) - 5) * 0.2f + static_cast<float>(col + 1) * 0.075f;
+        }
+    }
+
+    // Bypass RaggedNetworkInput's own invalid-capacity canonicalization and put
+    // poisoned padding directly into the RMSNorm physical input. This verifies
+    // RaggedRMSNorm itself protects both the bucket slack and the full inactive tail.
+    ASSERT_EQ(physicalRmsNorm->getFeatureInputs().size(), 1u);
+    ASSERT_TRUE(physicalRmsNorm->getFeatureInputs()[0].has_value());
+    Impl::Tensor packedInput = physicalRmsNorm->getFeatureInputs()[0].value();
+    Impl::Tensor packedInputHost(rmsCpuPlacement, Impl::TensorDescriptor(dataType, {fullRows, hidden}));
+    rmsWriteCpuTensor(packedInputHost, inputValues);
+    packedInput.copyFromAsync(packedInputHost, stream);
+    packedInput.setRaggedActiveRows(activeRows);
+    physicalRmsNorm->forward(packedInput, false, logicalBatchSize);
+    Event outputReady = physicalOutput->getOutputReadyEvent();
+    outputReady.synchronize();
+
+    const vector<float> actualForward = rmsReadCpuTensor(physicalOutput->getFeatureOutput().value());
+    const vector<float> validInput(inputValues.begin(), inputValues.begin() + activeRows * hidden);
+    const vector<float> zeroResidual(activeRows * hidden, 0.0f);
+    const vector<float> expectedForward =
+        rmsNormForwardReference(validInput, initialWeights, zeroResidual, activeRows, hidden, epsilon);
+    rmsExpectAllClose(vector<float>(actualForward.begin(), actualForward.begin() + activeRows * hidden),
+                      expectedForward,
+                      3e-4f,
+                      3e-4f,
+                      "ragged rmsnorm forward active prefix");
+    for (uint64_t i = activeRows * hidden; i < actualForward.size(); ++i) {
+        EXPECT_EQ(actualForward[i], 0.0f) << "ragged RMSNorm output tail must be canonical zero";
+    }
+
+    ASSERT_EQ(physicalRmsNorm->getErrorInputs().size(), 1u);
+    ASSERT_TRUE(physicalRmsNorm->getErrorInputs()[0].has_value());
+    ASSERT_EQ(physicalRmsNorm->getErrorOutputs().size(), 1u);
+    ASSERT_TRUE(physicalRmsNorm->getErrorOutputs()[0].has_value());
+
+    vector<float> upstream(fullRows * hidden, -9999.0f);
+    for (uint64_t row = 0; row < activeRows; ++row) {
+        for (uint64_t col = 0; col < hidden; ++col) {
+            upstream[row * hidden + col] =
+                static_cast<float>(static_cast<int>((3 * row + col) % 9) - 4) * 0.125f;
+        }
+    }
+    Impl::Tensor errorInput = physicalRmsNorm->getErrorInputs()[0].value();
+    Impl::Tensor errorInputHost = errorInput.clone(rmsCpuPlacement);
+    rmsWriteCpuTensor(errorInputHost, upstream);
+    errorInput.copyFromAsync(errorInputHost, stream);
+    physicalRmsNorm->backward(errorInput, logicalBatchSize);
+    stream.synchronize();
+    gradientStream.synchronize();
+
+    const vector<float> validUpstream(upstream.begin(), upstream.begin() + activeRows * hidden);
+    const vector<float> expectedDX =
+        rmsNormInputGradientReference(validInput, initialWeights, validUpstream, activeRows, hidden, epsilon);
+    const vector<float> expectedDScale =
+        rmsNormWeightGradientReference(validInput, validUpstream, activeRows, hidden, epsilon);
+    const vector<float> expectedWeightsAfter =
+        rmsSgdUpdatedReference(initialWeights, expectedDScale, logicalBatchSize, learningRate);
+
+    const vector<float> actualDX =
+        rmsReadCpuTensor(rmsCopyTensorToCpu(physicalRmsNorm->getErrorOutputs()[0].value(), stream));
+    rmsExpectAllClose(vector<float>(actualDX.begin(), actualDX.begin() + activeRows * hidden),
+                      expectedDX,
+                      4e-4f,
+                      4e-4f,
+                      "ragged rmsnorm dX active prefix");
+    for (uint64_t i = activeRows * hidden; i < actualDX.size(); ++i) {
+        EXPECT_EQ(actualDX[i], 0.0f) << "ragged RMSNorm dX tail must be canonical zero";
+    }
+    const vector<float> actualWeightsAfter = rmsReadCpuTensor(
+        rmsCopyTensorToCpu(physicalRmsNorm->getParameter("weights")->getStorage().value(), gradientStream));
+    rmsExpectAllClose(actualWeightsAfter,
+                      expectedWeightsAfter,
+                      4e-4f,
+                      4e-4f,
+                      "ragged rmsnorm dscale through fused SGD update");
 }

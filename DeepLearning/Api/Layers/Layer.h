@@ -95,6 +95,20 @@ class Layer {
         return std::nullopt;
     }
 
+    // Returns true when the API tensor dimensions already describe the complete physical tensor,
+    // including any batch dimension. Most layer outputs use the normal Thor convention where API
+    // dimensions exclude batch and placement prepends it. Layers whose outputs are already
+    // batch-shaped (for example reduction metrics) override this contract.
+    [[nodiscard]] virtual bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const {
+        (void)outputTensor;
+        return false;
+    }
+
+    virtual std::vector<Tensor> getAllInputTensors() const {
+        std::optional<Tensor> input = getFeatureInput();
+        return input.has_value() ? std::vector<Tensor>{input.value()} : std::vector<Tensor>{};
+    }
+
     virtual std::vector<Tensor> getAllOutputTensors() const { return {getFeatureOutput().value()}; }
 
     virtual std::shared_ptr<Layer> clone() const = 0;

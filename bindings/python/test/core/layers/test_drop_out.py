@@ -85,3 +85,79 @@ def test_dropout_training_control_is_transient_and_network_wide():
     layer.set_training_dropout_enabled(True)
     assert layer.is_training_dropout_enabled() is True
     assert n.is_training_dropout_enabled() is True
+
+
+def _cpu_tensor(values, dtype):
+    import numpy as np
+
+    values = np.asarray(values, dtype=thor.physical.numpy_dtypes.from_thor(dtype), order="C")
+    placement = thor.physical.Placement(thor.physical.DeviceType.cpu, 0)
+    descriptor = thor.physical.PhysicalTensor.Descriptor(dtype, list(values.shape))
+    tensor = thor.physical.PhysicalTensor(placement, descriptor)
+    tensor.numpy()[...] = values
+    return tensor
+
+
+def test_dropout_accepts_ragged_tensor_and_preserves_partition():
+    n = thor.Network("test_ragged_dropout_build")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [3],
+        max_total_values=8,
+        batch_size=2,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    layer = thor.layers.DropOut(n, x, 0.25)
+    y = layer.get_feature_output()
+
+    assert layer.get_use_ragged() is True
+    assert isinstance(y, thor.RaggedTensor)
+    assert y.values.get_dimensions() == [8, 3]
+    assert y.offsets == x.offsets
+
+
+@pytest.mark.cuda
+def test_ragged_dropout_inference_is_identity_on_active_prefix_and_survives_save_load(tmp_path):
+    import numpy as np
+
+    name = "test_ragged_dropout_inference_save_load"
+    n = thor.Network(name)
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [2],
+        max_total_values=6,
+        batch_size=2,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    layer = thor.layers.DropOut(n, x, 0.5)
+    thor.layers.RaggedNetworkOutput(n, "output", layer.get_feature_output())
+
+    values_np = np.array(
+        [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [9999.0, 9999.0], [-9999.0, -9999.0]],
+        dtype=np.float32,
+    )
+    offsets_np = np.array([0, 1, 4], dtype=np.uint32)
+    physical = thor.physical.PhysicalRaggedTensor(
+        _cpu_tensor(values_np, thor.DataType.fp32),
+        _cpu_tensor(offsets_np, thor.DataType.uint32),
+    )
+
+    placed = n.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    result = placed.infer({"tokens": physical})["output"]
+    expected = values_np.copy()
+    expected[4:] = 0.0
+    assert np.array_equal(result.offsets.numpy(), offsets_np)
+    np.testing.assert_allclose(result.values.numpy(), expected, rtol=0, atol=0)
+
+    save_dir = tmp_path / "model"
+    n.save(str(save_dir), overwrite=False)
+    loaded = thor.Network(name)
+    loaded.load(str(save_dir))
+    loaded_placed = loaded.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    reloaded = loaded_placed.infer({"tokens": physical})["output"]
+    assert np.array_equal(reloaded.offsets.numpy(), offsets_np)
+    np.testing.assert_allclose(reloaded.values.numpy(), expected, rtol=0, atol=0)

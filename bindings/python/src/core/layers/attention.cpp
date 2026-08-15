@@ -445,12 +445,13 @@ Supported features for FP16/BF16:
   ``[0, 1)``.  Thor advances the runtime dropout offset by ``B * Hq * Sq * Skv``.
 * Padding masks use ``query_sequence_lengths`` and ``key_value_sequence_lengths``
   together, both int32 logical ``[1]`` tensors.
-* ``feature_input`` and ``context_input`` may be ``thor.RaggedTensor`` values.
-  Ragged self-attention preserves the query row partition on output. Ragged
-  cross-attention may use independent Q/KV partitions with or without RoPE. RoPE
-  positions reset at each packed row; scalar origins apply to every row, while the
-  optional per-row origin tensors allow each logical Q/K row pair to occupy its own
-  absolute timeline. Q and K need only have the same logical batch size.
+* ``feature_input`` and ``context_input`` independently accept ``thor.Tensor`` or
+  ``thor.RaggedTensor``. The output domain follows the query: dense Q produces dense O,
+  while ragged Q preserves the query row partition on O. Cross-attention supports all
+  four dense/ragged Q/O and K/V combinations. RoPE positions reset at each packed row;
+  scalar origins apply to a dense side or every row of a ragged side, while the optional
+  per-row origin tensors replace the scalar origin for the corresponding ragged domain.
+  Q and K need only have the same logical batch size.
 
 Important combination rules:
 
@@ -511,6 +512,9 @@ Important combination rules:
     attention.def("get_dropout_seed", &Attention::getDropoutSeed);
     attention.def("get_dropout_offset", &Attention::getDropoutOffset);
     attention.def("get_use_cross_attention", &Attention::getUseCrossAttention);
+    attention.def("get_use_ragged", &Attention::getUseRagged);
+    attention.def("get_query_ragged", &Attention::getQueryRagged);
+    attention.def("get_key_value_ragged", &Attention::getKeyValueRagged);
     attention.def("get_context_input", [](Attention& self) -> nb::object {
         if (self.getRaggedContextInput().has_value()) {
             return nb::cast(self.getRaggedContextInput().value());

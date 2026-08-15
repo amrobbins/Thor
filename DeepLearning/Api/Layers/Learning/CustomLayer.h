@@ -71,6 +71,8 @@ class CustomLayer : public TrainableLayer {
     [[nodiscard]] std::optional<std::string> getInputPortName(const Tensor& inputTensor) const override;
     [[nodiscard]] std::optional<std::string> getOutputPortName(const Tensor& outputTensor) const override;
 
+    [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override;
+
    protected:
     enum class SerializationContract {
         REQUIRE_EXPRESSION_DEFINITION,

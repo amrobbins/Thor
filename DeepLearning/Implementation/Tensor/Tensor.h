@@ -15,7 +15,9 @@
 #include <atomic>
 #include <deque>
 #include <memory>
+#include <limits>
 #include <mutex>
+#include <optional>
 #include <random>
 #include <set>
 #include <string>
@@ -90,6 +92,24 @@ class Tensor {
     uint64_t getTensorId() const { return isInitialized() ? instanceId : 0; }
 
     void copyFromAsync(Tensor source, Stream stream);
+
+    // Host-side runtime metadata for packed ragged tensors. The value is not part of the
+    // tensor descriptor or device allocation; it accompanies the backing allocation so
+    // NetworkInput copies can carry an already-known active packed-row count without a
+    // device-to-host synchronization. Ordinary dense tensors leave this unset.
+    void setRaggedActiveRows(uint64_t activeRows) {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        backingMemory->raggedActiveRows.store(activeRows, std::memory_order_release);
+    }
+    void clearRaggedActiveRows() {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        backingMemory->raggedActiveRows.store(NO_RAGGED_ACTIVE_ROWS, std::memory_order_release);
+    }
+    [[nodiscard]] std::optional<uint64_t> getRaggedActiveRows() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        const uint64_t value = backingMemory->raggedActiveRows.load(std::memory_order_acquire);
+        return value == NO_RAGGED_ACTIVE_ROWS ? std::nullopt : std::optional<uint64_t>(value);
+    }
 
     void downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
     void uploadSection(Tensor &dest, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
@@ -190,6 +210,8 @@ class Tensor {
     void copyFromAsyncImpl(Tensor source, Stream copyStream);
 
     TensorPlacement placement;
+    static constexpr uint64_t NO_RAGGED_ACTIVE_ROWS = std::numeric_limits<uint64_t>::max();
+
     struct BackingMemory {
         explicit BackingMemory(TensorPlacement placement) : placement(placement) {}
         ~BackingMemory() noexcept;
@@ -199,6 +221,7 @@ class Tensor {
         TensorPlacement placement;
         void *mem = nullptr;
         bool cpuMemPinnedViaCudaHostRegister = false;
+        std::atomic<uint64_t> raggedActiveRows{NO_RAGGED_ACTIVE_ROWS};
     };
 
     std::shared_ptr<BackingMemory> backingMemory;

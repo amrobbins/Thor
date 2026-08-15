@@ -55,8 +55,8 @@ class Swish : public Activation {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        // feature out and error out
-        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
+        (void)tensorPlacement;
+        return getExpressionBackedActivationMemRequirementInBytes(batchSize);
     }
 };
 
@@ -65,14 +65,11 @@ class Swish::Builder : public Activation::Builder {
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<Swish> swish = std::make_shared<Swish>();
         if (_featureInput.has_value()) {
-            // Standalone layer support.
             THOR_THROW_IF_FALSE(_network.has_value());
-            swish->featureInput = _featureInput;
-            swish->featureOutput = _featureInput.value().clone();
+            applyStandaloneConfiguration(*swish);
             swish->initialized = true;
             swish->addToNetwork(_network.value());
         } else {
-            // Template activation support
             swish->initialized = true;
         }
 
@@ -85,6 +82,11 @@ class Swish::Builder : public Activation::Builder {
     }
 
     Swish::Builder &featureInput(Tensor _featureInput) override {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
+    Swish::Builder &featureInput(RaggedTensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <stdexcept>
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
@@ -23,6 +24,11 @@ namespace ThorImplementation {
 
 class DropOut : public Layer, public TrainingDropoutControllable {
    public:
+    struct RaggedConfiguration {
+        uint64_t fullCapacityRows;
+        uint64_t elementsPerValue;
+    };
+
     ~DropOut() override {}
 
     void setTrainingMode(bool training) { this->training = training; }
@@ -51,9 +57,17 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         applyDropoutThisForward = previousApplyDropout;
     }
 
-    DropOut(float probabilityOfDroppingOut, bool training, bool trainingDropoutEnabled = true) {
+    DropOut(float probabilityOfDroppingOut,
+            bool training,
+            bool trainingDropoutEnabled = true,
+            std::optional<RaggedConfiguration> raggedConfiguration = std::nullopt)
+        : raggedConfiguration(raggedConfiguration) {
         THOR_THROW_IF_FALSE(probabilityOfDroppingOut >= 0.0f);
         THOR_THROW_IF_FALSE(probabilityOfDroppingOut <= 1.0f);
+        if (this->raggedConfiguration.has_value()) {
+            THOR_THROW_IF_FALSE(this->raggedConfiguration->fullCapacityRows > 0);
+            THOR_THROW_IF_FALSE(this->raggedConfiguration->elementsPerValue > 0);
+        }
         this->probabilityOfDroppingOut = probabilityOfDroppingOut;
         this->training = training;
         this->trainingDropoutEnabled = trainingDropoutEnabled;
@@ -84,6 +98,10 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     }
 
     static bool usesNativeKernel(DataType dataType) { return dataType == DataType::BF16; }
+    static bool nativeKernelSupportsDataType(DataType dataType) {
+        return dataType == DataType::FP16 || dataType == DataType::FP32 || dataType == DataType::BF16;
+    }
+    [[nodiscard]] bool isRagged() const { return raggedConfiguration.has_value(); }
 
     static size_t getNativeReserveSpaceSizeInBytes(const std::vector<unsigned long> &featureInputDimensions) {
         size_t numElements = 1;
@@ -124,6 +142,13 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         ScopedGpu scopedGpu(featureInput.value().getPlacement().getDeviceNum());
 
         const DataType dataType = featureInput.value().getDescriptor().getDataType();
+        if (raggedConfiguration.has_value()) {
+            THOR_THROW_IF_FALSE(nativeKernelSupportsDataType(dataType));
+            validateRaggedTensorShape(featureInput.value());
+            reserveSpaceBytes = featureInput.value().getTotalNumElements();
+            reserveSpace = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::UINT8, {reserveSpaceBytes}));
+            return;
+        }
         if (usesNativeKernel(dataType)) {
             reserveSpaceBytes =
                 getNativeReserveSpaceSizeInBytes(featureInput.value().getDescriptor().getDimensions());
@@ -167,6 +192,36 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) override {
         THOR_THROW_IF_FALSE(inputTensor.has_value());
         THOR_THROW_IF_FALSE(outputTensor.has_value());
+
+        if (raggedConfiguration.has_value()) {
+            const uint64_t activeRows = requireRaggedActiveRows(inputTensor.value());
+            const uint64_t activeElements = activeRows * raggedConfiguration->elementsPerValue;
+            raggedActiveRowsForBackward = activeRows;
+
+            if (outputTensor.value() != inputTensor.value()) {
+                if (applyDropoutThisForward) {
+                    const uint64_t forwardSequence = nativeForwardSequence++;
+                    if (activeElements > 0) {
+                        THOR_THROW_IF_FALSE(inputTensor.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+                        ScopedGpu scopedGpu(inputTensor.value().getPlacement().getDeviceNum());
+                        launchDropOutForward(inputTensor.value().getMemPtr(),
+                                             outputTensor.value().getMemPtr(),
+                                             static_cast<uint8_t *>(reserveSpace.getMemPtr()),
+                                             inputTensor.value().getDescriptor().getDataType(),
+                                             activeElements,
+                                             probabilityOfDroppingOut,
+                                             randomSeed,
+                                             forwardSequence,
+                                             stream);
+                    }
+                } else {
+                    copyActivePrefix(inputTensor.value(), outputTensor.value(), activeElements, stream);
+                }
+                zeroRaggedInactiveTail(outputTensor.value(), activeElements, stream);
+                outputTensor.value().setRaggedActiveRows(activeRows);
+            }
+            return;
+        }
 
         if (applyDropoutThisForward) {
             THOR_THROW_IF_FALSE(inputTensor.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
@@ -214,6 +269,37 @@ class DropOut : public Layer, public TrainingDropoutControllable {
 
         const bool applyDropout = applyDropoutForBackward;
         applyDropoutForBackward = false;
+
+        if (raggedConfiguration.has_value()) {
+            if (!raggedActiveRowsForBackward.has_value())
+                throw std::runtime_error("Ragged DropOut backward requires a preceding training forward pass.");
+            const uint64_t activeRows = raggedActiveRowsForBackward.value();
+            raggedActiveRowsForBackward.reset();
+            THOR_THROW_IF_FALSE(activeRows <= raggedConfiguration->fullCapacityRows);
+            const uint64_t activeElements = activeRows * raggedConfiguration->elementsPerValue;
+
+            if (applyDropout) {
+                if (activeElements > 0) {
+                    THOR_THROW_IF_FALSE(errorIn.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+                    ScopedGpu scopedGpu(errorIn.value().getPlacement().getDeviceNum());
+                    launchDropOutBackward(errorIn.value().getMemPtr(),
+                                          errorOut.value().getMemPtr(),
+                                          static_cast<const uint8_t *>(reserveSpace.getMemPtr()),
+                                          errorIn.value().getDescriptor().getDataType(),
+                                          activeElements,
+                                          probabilityOfDroppingOut,
+                                          stream);
+                }
+            } else if (errorOut.value() != errorIn.value()) {
+                copyActivePrefix(errorIn.value(), errorOut.value(), activeElements, stream);
+            }
+            if (errorOut.value() != errorIn.value()) {
+                zeroRaggedInactiveTail(errorOut.value(), activeElements, stream);
+                errorOut.value().setRaggedActiveRows(activeRows);
+            }
+            return;
+        }
+
         if (!applyDropout) {
             if (errorOut.value() != errorIn.value()) {
                 errorOut.value().copyFromAsync(errorIn.value(), stream);
@@ -250,6 +336,38 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     float getDropOutRate() const { return probabilityOfDroppingOut; }
 
    private:
+    void validateRaggedTensorShape(const Tensor& tensor) const {
+        THOR_THROW_IF_FALSE(raggedConfiguration.has_value());
+        const uint64_t totalElements = tensor.getTotalNumElements();
+        THOR_THROW_IF_FALSE(totalElements % raggedConfiguration->fullCapacityRows == 0);
+        THOR_THROW_IF_FALSE(totalElements / raggedConfiguration->fullCapacityRows == raggedConfiguration->elementsPerValue);
+    }
+
+    [[nodiscard]] uint64_t requireRaggedActiveRows(const Tensor& tensor) const {
+        validateRaggedTensorShape(tensor);
+        const std::optional<uint64_t> activeRows = tensor.getRaggedActiveRows();
+        if (!activeRows.has_value())
+            throw std::runtime_error("Ragged DropOut requires host-known active-row metadata on packed values.");
+        if (activeRows.value() > raggedConfiguration->fullCapacityRows)
+            throw std::runtime_error("Ragged DropOut active row count exceeds packed capacity.");
+        return activeRows.value();
+    }
+
+    static void copyActivePrefix(const Tensor& source, Tensor destination, uint64_t activeElements, Stream stream) {
+        if (activeElements == 0 || source == destination) return;
+        Tensor sourcePrefix = source.aliasView({activeElements}, {1}, 0);
+        Tensor destinationPrefix = destination.aliasView({activeElements}, {1}, 0);
+        destinationPrefix.copyFromAsync(sourcePrefix, stream);
+    }
+
+    static void zeroRaggedInactiveTail(Tensor tensor, uint64_t activeElements, Stream stream) {
+        THOR_THROW_IF_FALSE(activeElements <= tensor.getTotalNumElements());
+        const uint64_t tailElements = tensor.getTotalNumElements() - activeElements;
+        if (tailElements == 0) return;
+        Tensor tail = tensor.aliasView({tailElements}, {1}, activeElements);
+        tail.memsetAsync(stream, 0);
+    }
+
     void fuseBackwardIdentityAlias() {
         if (!errorInput.has_value() || !errorOutput.has_value())
             return;
@@ -267,6 +385,8 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     static std::mutex mtx;
     uint64_t randomSeed = 0;
     uint64_t nativeForwardSequence = 0;
+    std::optional<RaggedConfiguration> raggedConfiguration;
+    std::optional<uint64_t> raggedActiveRowsForBackward;
 
     Tensor randomState;
     size_t randomStateBytes;

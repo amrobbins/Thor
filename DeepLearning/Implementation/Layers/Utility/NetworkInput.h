@@ -344,6 +344,7 @@ class NetworkInput : public Layer {
                 featureOutput.value().copyFromAsync(slot.outputBuffer.value(), stream);
                 stream.putEvent(slot.outputBufferWritableEvent);
             }
+            canonicalizeRaggedPaddingIfPresent(featureOutput.value(), stream);
         }
         if (!contentDimensions.has_value() && sourceReference.has_value()) {
             sourceReference->recordConsumption(stream);
@@ -421,6 +422,7 @@ class NetworkInput : public Layer {
         slot.deviceBatchReference = deviceBatchReference;
         if (sourceReference.has_value()) sourceReference->waitUntilReady(stream);
         slot.deviceBatchReference.value().enqueueMaterialization(featureOutput.value(), stream);
+        canonicalizeRaggedPaddingIfPresent(featureOutput.value(), stream);
         if (sourceReference.has_value()) sourceReference->recordConsumption(stream);
 
         const uint64_t materializeMicros =
@@ -470,6 +472,24 @@ class NetworkInput : public Layer {
     }
 
    protected:
+    static void canonicalizeRaggedPaddingIfPresent(Tensor &tensor, Stream stream) {
+        const std::optional<uint64_t> activeRows = tensor.getRaggedActiveRows();
+        if (!activeRows.has_value()) return;
+
+        const std::vector<uint64_t> dimensions = tensor.getDimensions();
+        THOR_THROW_IF_FALSE(!dimensions.empty());
+        const uint64_t capacityRows = dimensions.front();
+        THOR_THROW_IF_FALSE(capacityRows > 0);
+        THOR_THROW_IF_FALSE(activeRows.value() <= capacityRows);
+        if (activeRows.value() == capacityRows) return;
+
+        const uint64_t elementsPerRow = tensor.getTotalNumElements() / capacityRows;
+        THOR_THROW_IF_FALSE(elementsPerRow > 0);
+        const uint64_t tailElements = (capacityRows - activeRows.value()) * elementsPerRow;
+        Tensor tail = tensor.aliasView({tailElements}, {1}, activeRows.value() * elementsPerRow);
+        tail.memsetAsync(stream, 0);
+    }
+
     struct InputSlot {
         std::optional<Tensor> outputBuffer;
         std::optional<Thor::DeviceBatchReference> deviceBatchReference;

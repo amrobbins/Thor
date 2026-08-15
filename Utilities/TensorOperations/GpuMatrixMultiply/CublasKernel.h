@@ -464,7 +464,7 @@ class CublasKernel {
         return cublasStatus == CUBLAS_STATUS_SUCCESS;
     }
 
-    CublasKernelRequirement getCublasKernelRequirement() {
+    CublasKernelRequirement getCublasKernelRequirement() const {
         THOR_THROW_IF_FALSE(!uninitialized());
         return state->cublasKernelRequirement;
     }

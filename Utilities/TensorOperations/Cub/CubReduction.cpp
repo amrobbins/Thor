@@ -1044,6 +1044,24 @@ std::shared_ptr<StampedCubSegmentedReduction> CubSegmentedReduction::stamp(
     return stampValidated(input, preallocated_output, segment_offsets, num_segments, stream);
 }
 
+std::shared_ptr<StampedCubSegmentedReduction> CubSegmentedReduction::stampRuntimeOffsets(
+    const Tensor& input,
+    const Tensor& preallocated_output,
+    const Tensor& segment_offsets,
+    const Stream& stream) const {
+    requireDenseContiguousGpuTensor(input, "input");
+    static_cast<void>(segmentedElementsPerValue(input));
+    requireSupportedFloatingStorageDType(input.getDataType(), "segmented input");
+    requireSegmentOffsets(input, segment_offsets, stream);
+    const uint64_t num_segments = segment_offsets.getDimensions()[0] - 1;
+    requireExpectedSegmentedOutput(input,
+                                   preallocated_output,
+                                   segment_offsets,
+                                   resolveOutputDataType(input.getDataType()),
+                                   num_segments);
+    return stampValidated(input, preallocated_output, segment_offsets, num_segments, stream);
+}
+
 std::shared_ptr<StampedCubSegmentedReduction> CubSegmentedReduction::stampValidated(
     const Tensor& input,
     const Tensor& output,
@@ -1157,6 +1175,20 @@ std::shared_ptr<StampedCubSegmentedArgReduction> CubSegmentedArgReduction::stamp
     requireSupportedFloatingStorageDType(input.getDataType(), "segmented arg input");
     requireSegmentOffsets(input, segment_offsets, stream);
     validateSegmentOffsetContentsAtStamp(input, segment_offsets, stream);
+    const uint64_t num_segments = segment_offsets.getDimensions()[0] - 1;
+    requireExpectedSegmentedArgOutput(input, preallocated_index_output, segment_offsets, index_output_dtype, num_segments);
+    return stampValidated(input, preallocated_index_output, segment_offsets, num_segments, stream);
+}
+
+std::shared_ptr<StampedCubSegmentedArgReduction> CubSegmentedArgReduction::stampRuntimeOffsets(
+    const Tensor& input,
+    const Tensor& preallocated_index_output,
+    const Tensor& segment_offsets,
+    const Stream& stream) const {
+    requireDenseContiguousGpuTensor(input, "input");
+    static_cast<void>(segmentedElementsPerValue(input));
+    requireSupportedFloatingStorageDType(input.getDataType(), "segmented arg input");
+    requireSegmentOffsets(input, segment_offsets, stream);
     const uint64_t num_segments = segment_offsets.getDimensions()[0] - 1;
     requireExpectedSegmentedArgOutput(input, preallocated_index_output, segment_offsets, index_output_dtype, num_segments);
     return stampValidated(input, preallocated_index_output, segment_offsets, num_segments, stream);

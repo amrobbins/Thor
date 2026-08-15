@@ -80,6 +80,11 @@ class Relu::Builder : public Activation::Builder {
         return *this;
     }
 
+    Relu::Builder &featureInput(RaggedTensor _featureInput) override {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
     Relu::Builder &epilogue(const ThorImplementation::Expression& expression) override {
         Activation::Builder::epilogue(expression);
         return *this;

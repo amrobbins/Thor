@@ -125,3 +125,30 @@ TEST(GemmLoweringDType, PromotedFp16OptimizerAddendStaysOutsideLowPrecisionGemm)
     REQUIRE_CUDA_DEVICE();
     expectPromotedLowPrecisionOptimizerAddendStaysOutsideLowPrecisionGemm(DataType::FP16);
 }
+
+TEST(GemmLoweringDType, PackedRowMatmulKeepsBiasAndUnsupportedEpilogueInExpressionFusionTail) {
+    REQUIRE_CUDA_DEVICE();
+    TensorPlacement placement(TensorPlacement::MemDevices::GPU, 0);
+    Tensor lhs(placement, TensorDescriptor(DataType::FP32, {66, 3}));
+    Tensor rhs(placement, TensorDescriptor(DataType::FP32, {3, 4}));
+    Tensor bias(placement, TensorDescriptor(DataType::FP32, {4}));
+
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression w = Expression::input("w", DataType::FP32, DataType::FP32);
+    const Expression b = Expression::input("b", DataType::FP32, DataType::FP32);
+    const Expression projected = Expression::matmul(x, w, false, false, DataType::FP32, DataType::FP32, 66);
+    const Expression output = (projected + b).swish();
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"output", output}}).physicalOutputs(), 0);
+    const std::unordered_map<std::string, Tensor> inputs{{"x", lhs}, {"w", rhs}, {"b", bias}};
+    const std::shared_ptr<CompiledOutputs> compiled = equation.compileForInputs(inputs);
+
+    ASSERT_EQ(compiled->stages.size(), 2u);
+    ASSERT_EQ(compiled->stages[0].kind, CompiledExecutionStage::Kind::Matmul);
+    ASSERT_NE(compiled->stages[0].matmul, nullptr);
+    EXPECT_EQ(compiled->stages[0].matmul->op, ExprOp::MATMUL);
+    EXPECT_EQ(compiled->stages[0].matmul->packed_row_binding, MatmulPackedRowBinding::RowsA);
+    EXPECT_EQ(compiled->stages[0].matmul->packed_row_capacity, 66u);
+    EXPECT_EQ(compiled->stages[1].kind, CompiledExecutionStage::Kind::FusedKernel)
+        << "bias + swish should stay in one normal Expression fusion tail after the bucketed matmul stage";
+}

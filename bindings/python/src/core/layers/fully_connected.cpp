@@ -14,6 +14,7 @@
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Parameter/ParameterConstraint.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Expression/Expression.h"
 #include "bindings/python/src/core/cast.h"
@@ -161,7 +162,7 @@ void bind_fully_connected(nb::module_ &m) {
         "__init__",
         [](FullyConnected *self,
            Network &network,
-           Tensor featureInput,
+           nb::object featureInput,
            uint32_t numOutputFeatures,
            bool hasBias,
            nb::object activation,
@@ -171,7 +172,7 @@ void bind_fully_connected(nb::module_ &m) {
            shared_ptr<Optimizer> biases_optimizer,
            nb::object epilogue,
            nb::object epilogue_inputs,
-           bool preserve_prefix_dimensions,
+           std::optional<bool> preserve_prefix_dimensions,
            nb::object weights_constraints,
            nb::object biases_constraints,
            nb::object weights_data_type,
@@ -182,11 +183,18 @@ void bind_fully_connected(nb::module_ &m) {
             }
 
             FullyConnected::Builder builder;
-            builder.network(network)
-                .featureInput(featureInput)
-                .numOutputFeatures(numOutputFeatures)
-                .hasBias(hasBias)
-                .preserveInputPrefixDimensions(preserve_prefix_dimensions);
+            builder.network(network);
+            if (nb::isinstance<RaggedTensor>(featureInput)) {
+                builder.featureInput(nb::cast<RaggedTensor>(featureInput));
+            } else if (nb::isinstance<Tensor>(featureInput)) {
+                builder.featureInput(nb::cast<Tensor>(featureInput));
+            } else {
+                throw nb::type_error("FullyConnected feature_input must be thor.Tensor or thor.RaggedTensor.");
+            }
+            builder.numOutputFeatures(numOutputFeatures).hasBias(hasBias);
+            if (preserve_prefix_dimensions.has_value()) {
+                builder.preserveInputPrefixDimensions(preserve_prefix_dimensions.value());
+            }
 
             applyPythonActivation(builder, activation);
             applyPythonEpilogueInputs(builder, epilogue_inputs);
@@ -226,7 +234,7 @@ void bind_fully_connected(nb::module_ &m) {
         "biases_optimizer"_a.none() = nb::none(),
         "epilogue"_a.none() = nb::none(),
         "epilogue_inputs"_a.none() = nb::none(),
-        "preserve_prefix_dimensions"_a = false,
+        "preserve_prefix_dimensions"_a.none() = nb::none(),
         "weights_constraints"_a.none() = nb::none(),
         "biases_constraints"_a.none() = nb::none(),
         "weights_data_type"_a.none() = nb::none(),
@@ -259,18 +267,23 @@ void bind_fully_connected(nb::module_ &m) {
 
     fully_connected.def(
         "get_feature_output",
-        [](FullyConnected &self) -> Tensor {
-            std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-            return maybeFeatureOutput.value();
+        [](FullyConnected &self) -> nb::object {
+            if (std::optional<RaggedTensor> raggedOutput = self.getRaggedFeatureOutput(); raggedOutput.has_value()) {
+                return nb::cast(raggedOutput.value());
+            }
+            return nb::cast(self.getFeatureOutput().value());
         },
         R"nbdoc(
-            Return the output tensor produced by this layer.
+            Return the logical output produced by this layer.
 
             Returns
             -------
-            thor.Tensor
-                The feature output tensor handle.
+            thor.Tensor or thor.RaggedTensor
+                The feature output handle. Ragged inputs produce RaggedTensor outputs with the
+                same row partition.
             )nbdoc");
+
+    fully_connected.def("get_use_ragged", &FullyConnected::getUseRagged);
 
     fully_connected.attr("__doc__") = R"nbdoc(
         Fully connected (dense) layer.
@@ -290,21 +303,22 @@ void bind_fully_connected(nb::module_ &m) {
         ----------
         network : thor.Network
             The network that the layer should be added to.
-        feature_input : thor.Tensor
-            Input feature tensor for this layer.
+        feature_input : thor.Tensor or thor.RaggedTensor
+            Input feature tensor for this layer. Ragged inputs are projected tokenwise over their
+            packed values and preserve the row partition.
         num_output_features : int
             Number of output features (units) produced by this layer.
         has_bias : bool, default True
             Whether to learn an additive bias term.
-        preserve_prefix_dimensions : bool, default False
-            If False, all non-batch input dimensions are flattened into one dense feature vector.
+        preserve_prefix_dimensions : bool or None, default None
+            When omitted, dense inputs default to False and ragged inputs default to True.
+            If False, all non-batch dense input dimensions are flattened into one dense feature vector.
             If True, only the final input dimension is treated as features and preceding logical
-            dimensions are preserved in the output. This is the high-throughput tokenwise projection
-            mode for tensors shaped like [sequence, hidden].
+            dimensions are preserved in the output. Ragged inputs require prefix preservation.
         activation : thor.Activation or None, default thor.activations.Gelu()
-            Activation to apply after the linear transform (and optional
-            batch normalization). Pass ``None`` to not use any activation and
-            keep the layer purely linear.
+            Activation to apply after the linear transform. Pass ``None`` to keep the layer purely
+            linear. Ragged FullyConnected currently requires ``activation=None``; ragged activation
+            composition is provided by the separate ragged tokenwise-operation work.
         weights_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
             Initializer for the weight matrix.
         biases_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()

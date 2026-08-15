@@ -232,6 +232,78 @@ TEST(CudnnAttentionDescriptor, AllowsPackedRaggedQOAndKVOffsetPairs) {
 }
 
 
+TEST(CudnnAttentionDescriptor, AllowsDenseQueryOutputWithPackedRaggedKeyValue) {
+    CudnnAttentionDescriptor descriptor = makePackedDescriptor();
+    descriptor.k.ragged = true;
+    descriptor.v.ragged = true;
+    descriptor.usePaddingMask = true;
+
+    EXPECT_NO_THROW(descriptor.validateForward());
+    descriptor.generateStats = true;
+    EXPECT_NO_THROW(descriptor.validateBackward());
+}
+
+TEST(CudnnAttentionDescriptor, AllowsBhSdDenseQueryOutputWithPackedRaggedKeyValue) {
+    CudnnAttentionDescriptor descriptor = makeDescriptor();
+    descriptor.k = AttentionTensorSpec::bshd(3, 4, 80, 64, DataType::FP16);
+    descriptor.v = AttentionTensorSpec::bshd(3, 4, 80, 64, DataType::FP16);
+    descriptor.k.ragged = true;
+    descriptor.v.ragged = true;
+    descriptor.usePaddingMask = true;
+
+    EXPECT_NO_THROW(descriptor.validateForward());
+}
+
+TEST(CudnnAttentionDescriptor, MixedBackwardRequiresPackedDenseQueryOutputForUniformThdNormalization) {
+    CudnnAttentionDescriptor descriptor = makeDescriptor();
+    descriptor.k = AttentionTensorSpec::bshd(3, 4, 80, 64, DataType::FP16);
+    descriptor.v = AttentionTensorSpec::bshd(3, 4, 80, 64, DataType::FP16);
+    descriptor.k.ragged = true;
+    descriptor.v.ragged = true;
+    descriptor.usePaddingMask = true;
+
+    // Forward can use ordinary dense Q/O layouts, but mixed backward is
+    // normalized to cuDNN's all-ragged THD path without a payload copy.
+    EXPECT_NO_THROW(descriptor.validateForward());
+    descriptor.generateStats = true;
+    EXPECT_THROW(descriptor.validateBackward(), std::invalid_argument);
+
+    descriptor.q = AttentionTensorSpec::bshd(3, 4, 64, 64, DataType::FP16);
+    descriptor.o = AttentionTensorSpec::bshd(3, 4, 64, 64, DataType::FP16);
+    EXPECT_NO_THROW(descriptor.validateBackward());
+}
+
+TEST(CudnnAttentionDescriptor, AllowsPackedRaggedQueryOutputWithDenseKeyValue) {
+    CudnnAttentionDescriptor descriptor = makePackedDescriptor();
+    descriptor.q.ragged = true;
+    descriptor.o.ragged = true;
+    descriptor.usePaddingMask = true;
+
+    EXPECT_NO_THROW(descriptor.validateForward());
+    descriptor.generateStats = true;
+    EXPECT_NO_THROW(descriptor.validateBackward());
+}
+
+TEST(CudnnAttentionDescriptor, RaggedQueryDenseKvBackwardRequiresPackedDenseKeyValueForUniformThdNormalization) {
+    CudnnAttentionDescriptor descriptor = makePackedDescriptor();
+    descriptor.q.ragged = true;
+    descriptor.o.ragged = true;
+    descriptor.k = AttentionTensorSpec::bhsd(3, 4, 80, 64, DataType::FP16);
+    descriptor.v = AttentionTensorSpec::bhsd(3, 4, 80, 64, DataType::FP16);
+    descriptor.usePaddingMask = true;
+
+    // Forward uses the genuine mixed cuDNN representation and does not need
+    // dense K/V to be token-contiguous. Backward normalizes the dense KV domain
+    // to uniform THD metadata without copying payloads, so it requires BSHD.
+    EXPECT_NO_THROW(descriptor.validateForward());
+    descriptor.generateStats = true;
+    EXPECT_THROW(descriptor.validateBackward(), std::invalid_argument);
+
+    descriptor.k = AttentionTensorSpec::bshd(3, 4, 80, 64, DataType::FP16);
+    descriptor.v = AttentionTensorSpec::bshd(3, 4, 80, 64, DataType::FP16);
+    EXPECT_NO_THROW(descriptor.validateBackward());
+}
+
 TEST(CudnnAttentionDescriptor, AllowsPackedRaggedAttentionWithDistinctValueHeadDimension) {
     CudnnAttentionDescriptor descriptor = makePackedDescriptor();
     descriptor.v = AttentionTensorSpec::bshd(3, 4, 80, 32, DataType::FP16);

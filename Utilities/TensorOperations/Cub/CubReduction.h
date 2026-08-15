@@ -239,9 +239,9 @@ class CubReduction {
  * Segment i is the half-open row range [offsets[i], offsets[i + 1]). Rank-1 input retains the scalar CUB fast path;
  * vector-valued input uses a Thor-owned coalesced CUDA backend under the same centralized API. Inputs are converted to
  * FP32 and all reduction arithmetic is performed in FP32. Empty segments use CubReduction::getFp32EmptyReductionValue().
- * Mean divides by the segment row count and returns zero for an empty segment. Offset contents are validated during
- * stamping; callers that update a stamped offsets tensor must preserve the same zero-based, nondecreasing, in-bounds
- * row-partition contract.
+ * Mean divides by the segment row count and returns zero for an empty segment. The ordinary stamp() API validates
+ * offset contents immediately. stampRuntimeOffsets() is for graph inputs whose contents are populated only after stamping;
+ * callers of that path must preserve the same zero-based, nondecreasing, in-bounds row-partition contract at execution.
  */
 class CubSegmentedReduction {
    public:
@@ -257,6 +257,16 @@ class CubSegmentedReduction {
     [[nodiscard]] std::shared_ptr<StampedCubSegmentedReduction> stamp(
         const Tensor& input, const Tensor& segment_offsets, const Stream& stream) const;
     [[nodiscard]] std::shared_ptr<StampedCubSegmentedReduction> stamp(
+        const Tensor& input,
+        const Tensor& preallocated_output,
+        const Tensor& segment_offsets,
+        const Stream& stream) const;
+
+    // Expression/network offsets are runtime inputs and therefore do not contain
+    // meaningful row-partition data while the physical graph is being stamped.
+    // This path validates tensor shape/type/storage but deliberately defers content
+    // validity to the runtime row-partition producer.
+    [[nodiscard]] std::shared_ptr<StampedCubSegmentedReduction> stampRuntimeOffsets(
         const Tensor& input,
         const Tensor& preallocated_output,
         const Tensor& segment_offsets,
@@ -335,6 +345,13 @@ class CubSegmentedArgReduction {
     [[nodiscard]] std::shared_ptr<StampedCubSegmentedArgReduction> stamp(
         const Tensor& input, const Tensor& segment_offsets, const Stream& stream) const;
     [[nodiscard]] std::shared_ptr<StampedCubSegmentedArgReduction> stamp(
+        const Tensor& input,
+        const Tensor& preallocated_index_output,
+        const Tensor& segment_offsets,
+        const Stream& stream) const;
+
+    // Variant for graph/runtime-populated offsets; see CubSegmentedReduction::stampRuntimeOffsets.
+    [[nodiscard]] std::shared_ptr<StampedCubSegmentedArgReduction> stampRuntimeOffsets(
         const Tensor& input,
         const Tensor& preallocated_index_output,
         const Tensor& segment_offsets,

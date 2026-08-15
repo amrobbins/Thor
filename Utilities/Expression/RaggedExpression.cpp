@@ -4,6 +4,7 @@
 #include <string>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 namespace ThorImplementation {
 namespace {
@@ -120,7 +121,92 @@ RaggedExpression RaggedExpression::withValues(Expression new_values, RaggedTenso
     if (new_descriptor.getRowPartition() != descriptor.getRowPartition()) {
         throw std::invalid_argument("RaggedExpression::withValues requires the row partition to be preserved.");
     }
-    return RaggedExpression(std::move(new_values), offsets, std::move(new_descriptor), runtimeExtent);
+
+    // The number of packed rows is a property of the row partition and therefore remains
+    // identical across a ragged-preserving value transform.  The amount of work per row,
+    // however, belongs to the values descriptor and may change (for example after slicing
+    // [max_values, 2H] down to [max_values, H]).  Preserve the exact active-row-count
+    // expression while rebuilding the launch width from the new trailing shape.
+    RaggedExpressionRuntimeExtent new_runtime_extent = runtimeExtent;
+    new_runtime_extent.elementsPerValue = elementsPerValue(new_descriptor);
+    return RaggedExpression(std::move(new_values), offsets, std::move(new_descriptor), std::move(new_runtime_extent));
+}
+
+RaggedExpression RaggedExpression::mapValues(const std::function<Expression(const Expression&)>& mapper) const {
+    validateInitialized("mapValues");
+    if (!mapper) {
+        throw std::invalid_argument("RaggedExpression::mapValues requires a valid mapper.");
+    }
+    return withValues(mapper(values), descriptor);
+}
+
+RaggedExpression RaggedExpression::sliceTrailingDimension(uint64_t trailing_axis, uint64_t start, uint64_t length) const {
+    validateInitialized("sliceTrailingDimension");
+
+    const std::vector<uint64_t> trailing_dimensions = descriptor.getTrailingDimensions();
+    if (trailing_axis >= trailing_dimensions.size()) {
+        throw std::invalid_argument("RaggedExpression::sliceTrailingDimension trailing axis is out of range.");
+    }
+    if (length == 0) {
+        throw std::invalid_argument("RaggedExpression::sliceTrailingDimension requires a non-zero slice length.");
+    }
+
+    const uint64_t source_axis_size = trailing_dimensions[trailing_axis];
+    if (start >= source_axis_size || length > source_axis_size - start) {
+        throw std::invalid_argument("RaggedExpression::sliceTrailingDimension slice exceeds the source trailing dimension.");
+    }
+
+    std::vector<uint64_t> view_dimensions = descriptor.getValuesDimensions();
+    std::vector<uint64_t> view_strides(view_dimensions.size(), 1);
+    Expression view_source = values;
+    uint64_t base_element_offset = 0;
+
+    // Expression::stridedView strides are storage strides, not strides in the logical
+    // index space of an immediately preceding view.  Consequently, consecutive ragged
+    // trailing slices must be composed before they reach the runtime alias machinery;
+    // otherwise a second view would replace (rather than compose) the first view's row
+    // stride.  Collapse a directly preceding STRIDED_VIEW into the new view by reusing
+    // its storage strides and accumulated storage offset.  This also gives autodiff one
+    // canonical scatter from the final view directly back into the original source.
+    if (values.expr && values.nodeIndex < values.expr->nodes.size() &&
+        values.expr->nodes.at(values.nodeIndex).op == ExprOp::STRIDED_VIEW) {
+        const ExprNode& prior_view = values.expr->nodes.at(values.nodeIndex);
+        if (prior_view.view_dims != view_dimensions || prior_view.view_strides.size() != view_dimensions.size() ||
+            prior_view.lhs == UINT32_MAX || prior_view.lhs >= values.expr->nodes.size()) {
+            throw std::runtime_error("RaggedExpression::sliceTrailingDimension encountered an invalid preceding strided view.");
+        }
+        view_strides = prior_view.view_strides;
+        base_element_offset = prior_view.view_element_offset;
+        view_source = Expression::fromPhysicalNode(values.expr, prior_view.lhs);
+    } else {
+        uint64_t source_stride = 1;
+        for (size_t axis = view_dimensions.size(); axis-- > 0;) {
+            view_strides[axis] = source_stride;
+            source_stride = checkedMul(source_stride, view_dimensions[axis], "ragged trailing slice source stride");
+        }
+    }
+
+    const size_t values_axis = static_cast<size_t>(trailing_axis) + 1;
+    const uint64_t slice_element_offset = checkedMul(start, view_strides[values_axis], "ragged trailing slice element offset");
+    if (base_element_offset > std::numeric_limits<uint64_t>::max() - slice_element_offset) {
+        throw std::invalid_argument("ragged trailing slice element offset overflows uint64_t.");
+    }
+    const uint64_t element_offset = base_element_offset + slice_element_offset;
+    view_dimensions[values_axis] = length;
+
+    const Expression sliced_values = view_source.stridedView(view_dimensions, view_strides, element_offset);
+    const RaggedTensorDescriptor sliced_descriptor(
+        TensorDescriptor(descriptor.getValuesDataType(), view_dimensions), descriptor.getRowPartition(), descriptor.getRaggedRank());
+    return withValues(sliced_values, sliced_descriptor);
+}
+
+RaggedExpression RaggedExpression::sliceLastDimension(uint64_t start, uint64_t length) const {
+    validateInitialized("sliceLastDimension");
+    const std::vector<uint64_t> trailing_dimensions = descriptor.getTrailingDimensions();
+    if (trailing_dimensions.empty()) {
+        throw std::invalid_argument("RaggedExpression::sliceLastDimension requires at least one trailing value dimension.");
+    }
+    return sliceTrailingDimension(trailing_dimensions.size() - 1, start, length);
 }
 
 RaggedExpression RaggedExpression::cast(DataType output_dtype) const {

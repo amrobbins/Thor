@@ -42,11 +42,14 @@ class BilinearGlu : public GatedLinearUnitActivation {
 class BilinearGlu::Builder : public Activation::Builder {
    public:
     std::shared_ptr<Activation> build() override {
+        if (_epilogue.has_value() || !_epilogueInputBindings.empty()) {
+            throw std::invalid_argument(
+                "Standalone gated linear unit activations do not currently support activation epilogues.");
+        }
         std::shared_ptr<BilinearGlu> activation = std::make_shared<BilinearGlu>();
         if (_featureInput.has_value()) {
             THOR_THROW_IF_FALSE(_network.has_value());
-            activation->featureInput = _featureInput;
-            activation->featureOutput = GatedLinearUnitActivation::outputTensorForInput(_featureInput.value());
+            applyStandaloneConfiguration(*activation);
             activation->initialized = true;
             activation->addToNetwork(_network.value());
         } else {
@@ -61,6 +64,11 @@ class BilinearGlu::Builder : public Activation::Builder {
     }
 
     BilinearGlu::Builder& featureInput(Tensor _featureInput) override {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
+    BilinearGlu::Builder& featureInput(RaggedTensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

@@ -63,8 +63,8 @@ class Elu : public Activation {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        // feature out and error out
-        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
+        (void)tensorPlacement;
+        return getExpressionBackedActivationMemRequirementInBytes(batchSize);
     }
 
     const float alpha;
@@ -79,14 +79,11 @@ class Elu::Builder : public Activation::Builder {
 
         std::shared_ptr<Elu> elu = std::make_shared<Elu>(alpha);
         if (_featureInput.has_value()) {
-            // Standalone layer support.
             THOR_THROW_IF_FALSE(_network.has_value());
-            elu->featureInput = _featureInput;
-            elu->featureOutput = _featureInput.value().clone();
+            applyStandaloneConfiguration(*elu);
             elu->initialized = true;
             elu->addToNetwork(_network.value());
         } else {
-            // Template activation support
             elu->initialized = true;
         }
 
@@ -106,6 +103,11 @@ class Elu::Builder : public Activation::Builder {
     }
 
     Elu::Builder &featureInput(Tensor _featureInput) override {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
+    Elu::Builder &featureInput(RaggedTensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

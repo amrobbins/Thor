@@ -242,3 +242,123 @@ def test_rms_norm_rejects_bad_epilogue_type():
 
     with pytest.raises(TypeError, match="epilogue"):
         thor.layers.RMSNorm(n, x, epilogue="swish")
+
+
+def _physical_ragged(values: np.ndarray, offsets: np.ndarray, dtype: thor.DataType = thor.DataType.fp32):
+    return thor.physical.PhysicalRaggedTensor(
+        _cpu_tensor(values, dtype),
+        _cpu_tensor(offsets, thor.DataType.uint32),
+    )
+
+
+def test_rms_norm_accepts_ragged_tensor_and_preserves_partition():
+    n = thor.Network("test_ragged_rms_norm_build")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=66,
+        batch_size=2,
+        offsets_data_type=thor.DataType.uint32,
+    )
+
+    rn = thor.layers.RMSNorm(n, x)
+    y = rn.get_feature_output()
+
+    assert rn.get_use_ragged() is True
+    assert isinstance(y, thor.RaggedTensor)
+    assert y.values.get_dimensions() == [66, 4]
+    assert y.offsets == x.offsets
+    assert rn.get_normalized_shape() == [4]
+
+    arch = _only_layer_architecture(n, "rms_norm")
+    assert arch["use_ragged"] is True
+    assert arch["ragged_inputs"][0]["offsets"]["id"] == arch["ragged_outputs"][0]["offsets"]["id"]
+
+
+def test_rms_norm_rejects_ragged_normalized_shape_that_includes_packed_row_dimension():
+    n = thor.Network("test_ragged_rms_norm_bad_shape")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=66,
+        batch_size=2,
+        offsets_data_type=thor.DataType.uint32,
+    )
+
+    with pytest.raises((RuntimeError, ValueError), match="packed ragged row dimension"):
+        thor.layers.RMSNorm(n, x, normalized_shape=[66, 4])
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("active_rows", [7, 9, 31, 33, 66])
+def test_ragged_rms_norm_matches_dense_prefix_across_capacity_buckets(active_rows):
+    epsilon = 1e-5
+    n = thor.Network(f"test_ragged_rms_norm_bucket_{active_rows}")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=66,
+        batch_size=2,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    rn = thor.layers.RMSNorm(n, x, epsilon=epsilon)
+    thor.layers.RaggedNetworkOutput(n, "output", rn.get_feature_output())
+
+    values = np.full((66, 4), np.float32(9999.0), dtype=np.float32)
+    rows = np.arange(active_rows, dtype=np.float32)[:, None]
+    cols = np.arange(4, dtype=np.float32)[None, :]
+    values[:active_rows] = ((rows % 7.0) - 3.0) * np.float32(0.3) + (cols + 1.0) * np.float32(0.125)
+    offsets = np.array([0, active_rows // 2, active_rows], dtype=np.uint32)
+
+    placed = n.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    result = placed.infer({"tokens": _physical_ragged(values, offsets)})["output"]
+    actual = np.array(result.values.numpy(), copy=True)
+    expected = _rms_norm_reference(values[:active_rows], [4], epsilon)
+
+    assert np.array_equal(result.offsets.numpy(), offsets)
+    np.testing.assert_allclose(actual[:active_rows], expected, rtol=2.5e-5, atol=2.5e-5)
+    np.testing.assert_array_equal(actual[active_rows:], np.zeros_like(actual[active_rows:]))
+
+
+@pytest.mark.cuda
+def test_ragged_rms_norm_save_load_preserves_execution(tmp_path):
+    epsilon = 1e-4
+    name = "test_ragged_rms_norm_save_load"
+    n = thor.Network(name)
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=16,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    rn = thor.layers.RMSNorm(n, x, epsilon=epsilon)
+    thor.layers.RaggedNetworkOutput(n, "output", rn.get_feature_output())
+
+    save_dir = tmp_path / "model"
+    n.save(str(save_dir), overwrite=False)
+    loaded = thor.Network(name)
+    loaded.load(str(save_dir))
+
+    values = np.full((16, 4), np.float32(-7777.0), dtype=np.float32)
+    active_rows = 11
+    values[:active_rows] = (np.arange(active_rows * 4, dtype=np.float32).reshape(active_rows, 4) - 10.0) / 5.0
+    offsets = np.array([0, 3, 3, active_rows], dtype=np.uint32)
+    physical = _physical_ragged(values, offsets)
+
+    placed = loaded.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    result = placed.infer({"tokens": physical})["output"]
+    actual = np.array(result.values.numpy(), copy=True)
+    expected = _rms_norm_reference(values[:active_rows], [4], epsilon)
+
+    assert np.array_equal(result.offsets.numpy(), offsets)
+    np.testing.assert_allclose(actual[:active_rows], expected, rtol=2.5e-5, atol=2.5e-5)
+    np.testing.assert_array_equal(actual[active_rows:], np.zeros_like(actual[active_rows:]))

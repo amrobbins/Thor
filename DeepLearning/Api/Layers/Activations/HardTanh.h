@@ -64,31 +64,12 @@ class HardTanh : public Activation {
                                                      const bool inferenceOnly) const override {
         (void)drivingLayer;
         (void)drivingApiLayer;
-        THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
-
-        using ThorImplementation::DynamicExpression;
-        using ThorImplementation::Expression;
-        using ThorImplementation::ExpressionDefinition;
-
-        Expression featureInputExpr = Expression::input("feature_input");
-        Expression featureOutputExpr = toExpression(featureInputExpr);
-        ExpressionDefinition definition = ExpressionDefinition::fromOutputs(Expression::outputs({{"feature_output", featureOutputExpr}}));
-
-        std::shared_ptr<ThorImplementation::CustomLayer> physicalActivation = std::make_shared<ThorImplementation::CustomLayer>(
-            DynamicExpression::fromExpressionDefinition(definition),
-            std::vector<std::string>{"feature_input"},
-            std::vector<std::string>{"feature_output"},
-            placement,
-            std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>{},
-            inferenceOnly);
-        physicalActivation->setLayerName("HardTanh");
-        return physicalActivation;
+        return stampExpressionBackedActivation(placement, connectingApiTensor, inferenceOnly);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         (void)tensorPlacement;
-        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
+        return getExpressionBackedActivationMemRequirementInBytes(batchSize);
     }
 
     const double minValue;
@@ -113,8 +94,7 @@ class HardTanh::Builder : public Activation::Builder {
         std::shared_ptr<HardTanh> activation = std::make_shared<HardTanh>(_minValue.value_or(-1.0), _maxValue.value_or(1.0));
         if (_featureInput.has_value()) {
             THOR_THROW_IF_FALSE(_network.has_value());
-            activation->featureInput = _featureInput;
-            activation->featureOutput = _featureInput.value().clone();
+            applyStandaloneConfiguration(*activation);
             activation->initialized = true;
             activation->addToNetwork(_network.value());
         } else {
@@ -130,6 +110,11 @@ class HardTanh::Builder : public Activation::Builder {
     }
 
     HardTanh::Builder &featureInput(Tensor _featureInput) override {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
+    HardTanh::Builder &featureInput(RaggedTensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

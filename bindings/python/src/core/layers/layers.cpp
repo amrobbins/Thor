@@ -35,6 +35,7 @@ void bind_layer_norm(nb::module_ &m);
 void bind_rms_norm(nb::module_ &m);
 void bind_scaled_dot_product_attention(nb::module_ &m);
 void bind_scale_gradient(nb::module_ &m);
+void bind_segmented_reduction(nb::module_ &m);
 void bind_slice(nb::module_ &m);
 void bind_stop_gradient(nb::module_ &m);
 void bind_network_input(nb::module_ &m);
@@ -84,6 +85,7 @@ void bind_layers(nb::module_ &layers) {
     bind_rms_norm(layers);
     bind_scaled_dot_product_attention(layers);
     bind_scale_gradient(layers);
+    bind_segmented_reduction(layers);
     bind_slice(layers);
     bind_stop_gradient(layers);
     bind_network_input(layers);

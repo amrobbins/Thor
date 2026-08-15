@@ -1112,29 +1112,7 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
             }
         }
     }
-    if (!raggedNetworkInputs.empty()) {
-        modelJson["ragged_network_inputs"] = json::array();
-        for (const auto& [name, record] : raggedNetworkInputs) {
-            (void)name;
-            modelJson["ragged_network_inputs"].push_back(json{{"version", "1.0.0"},
-                                                             {"name", record.name},
-                                                             {"values_input_name", record.valuesInputName},
-                                                             {"offsets_input_name", record.offsetsInputName},
-                                                             {"ragged_tensor", record.raggedTensor.serialize(archiveWriter)}});
-        }
-    }
-    if (!raggedNetworkOutputs.empty()) {
-        modelJson["ragged_network_outputs"] = json::array();
-        for (const auto& [name, record] : raggedNetworkOutputs) {
-            (void)name;
-            modelJson["ragged_network_outputs"].push_back(json{{"version", "1.0.0"},
-                                                              {"name", record.name},
-                                                              {"values_output_name", record.valuesOutputName},
-                                                              {"offsets_output_name", record.offsetsOutputName},
-                                                              {"values_tensor_id", record.raggedTensor.getValues().getOriginalId()},
-                                                              {"offsets_tensor_id", record.raggedTensor.getOffsets().getOriginalId()}});
-        }
-    }
+    appendRaggedNetworkBoundaryJson(modelJson);
     if (defaultOptimizer != nullptr)
         modelJson["default_optimizer"] = defaultOptimizer->architectureJson();
 
@@ -1241,14 +1219,12 @@ std::vector<std::string> Network::getExternalNetworkOutputNames() const {
     return names;
 }
 
-json Network::architectureJson() const {
-    json modelJson;
-    modelJson["layers"] = json::array();
-    uint32_t layerIndex = 0;
-    for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {
-        modelJson["layers"].push_back(layer->architectureJson());
-        ++layerIndex;
-    }
+void Network::appendRaggedNetworkBoundaryJson(json& modelJson) const {
+    // Ragged network boundaries do not own their component tensors. The backing
+    // NetworkInput/NetworkOutput layers serialize those tensors, so the logical
+    // ragged registry stores only references to the tensor ids emitted in this
+    // same JSON document. Use the live id, not originalId: after load, live ids
+    // are new while Tensor::architectureJson() also emits those new live ids.
     if (!raggedNetworkInputs.empty()) {
         modelJson["ragged_network_inputs"] = json::array();
         for (const auto& [name, record] : raggedNetworkInputs) {
@@ -1257,9 +1233,11 @@ json Network::architectureJson() const {
                                                              {"name", record.name},
                                                              {"values_input_name", record.valuesInputName},
                                                              {"offsets_input_name", record.offsetsInputName},
-                                                             {"ragged_tensor", record.raggedTensor.architectureJson()}});
+                                                             {"values_tensor_id", record.raggedTensor.getValues().getId()},
+                                                             {"offsets_tensor_id", record.raggedTensor.getOffsets().getId()}});
         }
     }
+
     if (!raggedNetworkOutputs.empty()) {
         modelJson["ragged_network_outputs"] = json::array();
         for (const auto& [name, record] : raggedNetworkOutputs) {
@@ -1268,9 +1246,21 @@ json Network::architectureJson() const {
                                                               {"name", record.name},
                                                               {"values_output_name", record.valuesOutputName},
                                                               {"offsets_output_name", record.offsetsOutputName},
-                                                              {"ragged_tensor", record.raggedTensor.architectureJson()}});
+                                                              {"values_tensor_id", record.raggedTensor.getValues().getId()},
+                                                              {"offsets_tensor_id", record.raggedTensor.getOffsets().getId()}});
         }
     }
+}
+
+json Network::architectureJson() const {
+    json modelJson;
+    modelJson["layers"] = json::array();
+    uint32_t layerIndex = 0;
+    for (const shared_ptr<Layer> &layer : allLayersInNetworkList) {
+        modelJson["layers"].push_back(layer->architectureJson());
+        ++layerIndex;
+    }
+    appendRaggedNetworkBoundaryJson(modelJson);
     if (!cloneSourceKeyByLayerId.empty()) {
         modelJson["clone_source_keys"] = json::array();
         for (size_t layerIndex = 0; layerIndex < allLayersInNetworkList.size(); ++layerIndex) {
@@ -1397,8 +1387,11 @@ void Network::load(const string &directory,
             const string name = raggedInputJson.at("name").get<string>();
             const string valuesInputName = raggedInputJson.at("values_input_name").get<string>();
             const string offsetsInputName = raggedInputJson.at("offsets_input_name").get<string>();
-            RaggedTensor raggedTensor = RaggedTensor::deserialize(raggedInputJson.at("ragged_tensor"), archiveReader.get());
-            registerRaggedNetworkInput(name, raggedTensor, valuesInputName, offsetsInputName);
+            const uint64_t valuesTensorId = raggedInputJson.at("values_tensor_id").get<uint64_t>();
+            const uint64_t offsetsTensorId = raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
+            Tensor values = getApiTensorByOriginalId(valuesTensorId);
+            Tensor offsets = getApiTensorByOriginalId(offsetsTensorId);
+            registerRaggedNetworkInput(name, RaggedTensor(values, offsets), valuesInputName, offsetsInputName);
         }
     }
 
@@ -1415,8 +1408,12 @@ void Network::load(const string &directory,
             const string name = raggedOutputJson.at("name").get<string>();
             const string valuesOutputName = raggedOutputJson.at("values_output_name").get<string>();
             const string offsetsOutputName = raggedOutputJson.at("offsets_output_name").get<string>();
-            Tensor values = getApiTensorByOriginalId(raggedOutputJson.at("values_tensor_id").get<uint64_t>());
-            Tensor offsets = getApiTensorByOriginalId(raggedOutputJson.at("offsets_tensor_id").get<uint64_t>());
+
+            const uint64_t valuesTensorId = raggedOutputJson.at("values_tensor_id").get<uint64_t>();
+            const uint64_t offsetsTensorId = raggedOutputJson.at("offsets_tensor_id").get<uint64_t>();
+
+            Tensor values = getApiTensorByOriginalId(valuesTensorId);
+            Tensor offsets = getApiTensorByOriginalId(offsetsTensorId);
             registerRaggedNetworkOutput(name, RaggedTensor(values, offsets), valuesOutputName, offsetsOutputName);
         }
     }
@@ -2596,6 +2593,29 @@ void Network::rebuildApiGraphIndexes(bool inferenceOnly) {
             continue;
         }
 
+        // Direct Layer subclasses can also represent one logical input with multiple
+        // physical/API tensors (for example ragged values + row offsets). Honor the
+        // generic all-input contract instead of requiring every such layer to inherit
+        // MultiConnectionLayer or be special-cased here.
+        if (layer->mustConnectAllInputsToDriveOutput()) {
+            vector<Tensor> inputTensors = layer->getAllInputTensors();
+            vector<Tensor> outputTensors = layer->getAllOutputTensors();
+            THOR_THROW_IF_FALSE(!inputTensors.empty());
+            THOR_THROW_IF_FALSE(!outputTensors.empty());
+            for (const Tensor& inputTensor : inputTensors) {
+                allTensors.insert(inputTensor);
+                apiTensorToApiLoadingLayers[inputTensor].push_back(layer);
+                apiLayerToApiInputTensors[layer].push_back(inputTensor);
+            }
+            for (const Tensor& outputTensor : outputTensors) {
+                allTensors.insert(outputTensor);
+                THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
+                apiTensorToApiDrivingLayer[outputTensor] = layer;
+                apiLayerToApiOutputTensors[layer].push_back(outputTensor);
+            }
+            continue;
+        }
+
         // So it is a base single connection layer
         Tensor inputTensor = layer->getFeatureInput().value();
         Tensor outputTensor = layer->getFeatureOutput().value();
@@ -3148,6 +3168,17 @@ void Network::addLayerToNetwork(const Layer *layer) {
         for (uint32_t i = 0; i < outputTensors.size(); ++i) {
             apiTensorByOriginalId[outputTensors[i].getOriginalId()] = outputTensors[i];
         }
+    } else if (layer->mustConnectAllInputsToDriveOutput()) {
+        vector<Tensor> inputTensors = layer->getAllInputTensors();
+        vector<Tensor> outputTensors = layer->getAllOutputTensors();
+        THOR_THROW_IF_FALSE(!inputTensors.empty());
+        THOR_THROW_IF_FALSE(!outputTensors.empty());
+        for (const Tensor& inputTensor : inputTensors) {
+            apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
+        }
+        for (const Tensor& outputTensor : outputTensors) {
+            apiTensorByOriginalId[outputTensor.getOriginalId()] = outputTensor;
+        }
     } else {
         // base Layer type
         Tensor inputTensor = layer->getFeatureInput().value();
@@ -3473,6 +3504,12 @@ void Network::stampLayer(Tensor inputTensor,
     shared_ptr<Thor::Layer> apiDrivingLayer =
         apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
 
+    // Preserve the semantic API producer for layer stamping even if placement
+    // inserts a physical TensorFanout below. The fanout has no API counterpart,
+    // but downstream layers may need producer contracts that are not encoded in
+    // the physical tensor shape.
+    const shared_ptr<Thor::Layer> semanticApiDrivingLayer = apiDrivingLayer;
+
     // If the api tensor has multiple loads and the physical driving layer is not a fanout,
     // then replace the physical driving layer with a newly stamped fanout
     uint32_t numLoadingLayers = apiTensorToApiLoadingLayers[inputTensor].size();
@@ -3523,7 +3560,7 @@ void Network::stampLayer(Tensor inputTensor,
             fflush(stdout);
         }
     } else {
-        implementationLayer = layer->stamp(placement, physicalDrivingLayer, apiDrivingLayer, inputTensor, inferenceOnly);
+        implementationLayer = layer->stamp(placement, physicalDrivingLayer, semanticApiDrivingLayer, inputTensor, inferenceOnly);
         shared_ptr<ThorImplementation::TrainableLayer> implementationTrainableLayer =
             dynamic_pointer_cast<ThorImplementation::TrainableLayer>(implementationLayer);
         if (implementationTrainableLayer != nullptr) {
@@ -3789,6 +3826,19 @@ Tensor Network::getApiTensorByOriginalId(uint64_t originalId) {
                 }
             }
             continue;
+        }
+
+        if (layer->mustConnectAllInputsToDriveOutput()) {
+            for (const Tensor& tensor : layer->getAllInputTensors()) {
+                if (std::optional<Tensor> found = rememberIfMatches(tensor)) {
+                    return *found;
+                }
+            }
+            for (const Tensor& tensor : layer->getAllOutputTensors()) {
+                if (std::optional<Tensor> found = rememberIfMatches(tensor)) {
+                    return *found;
+                }
+            }
         }
     }
 

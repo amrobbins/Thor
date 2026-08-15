@@ -13,9 +13,11 @@
 #include "DeepLearning/Api/Layers/Activations/SoftSign.h"
 #include "DeepLearning/Api/Layers/Activations/Softmax.h"
 #include "DeepLearning/Api/Layers/Activations/Swish.h"
+#include "DeepLearning/Api/Layers/Activations/Swiglu.h"
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"
 #include "DeepLearning/Api/Layers/Activations/Threshold.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "Utilities/Expression/Expression.h"
 
 #include "gtest/gtest.h"
@@ -97,4 +99,42 @@ TEST(Activations, ToExpressionDispatchesThroughConcreteActivationOverrides) {
 
     Elu elu(0.25f);
     expectActivationExpression(elu, input, input.elu(0.25f));
+}
+
+
+TEST(Activations, ShapePreservingBuildersInferRaggedFromInputAndPreserveOffsets) {
+    Network network("ragged_activation_builders");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({3})
+                             .maxTotalValues(8)
+                             .batchSize(2)
+                             .build();
+
+    auto swish = std::dynamic_pointer_cast<Swish>(Swish::Builder().network(network).featureInput(input).build());
+    ASSERT_NE(swish, nullptr);
+    ASSERT_TRUE(swish->getUseRagged());
+    ASSERT_TRUE(swish->getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(swish->getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(swish->getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
+    EXPECT_EQ(swish->getRaggedFeatureOutput()->getValuesDimensions(), input.getValuesDimensions());
+    EXPECT_EQ(swish->getFeatureInputs().size(), 2U);
+    EXPECT_EQ(swish->getFeatureInputs()[0], input.getValues());
+    EXPECT_EQ(swish->getFeatureInputs()[1], input.getOffsets());
+
+    const json j = swish->architectureJson();
+    EXPECT_TRUE(j.at("use_ragged").get<bool>());
+    EXPECT_EQ(j.at("ragged_feature_input").at("offsets").at("id").get<uint64_t>(), input.getOffsets().getId());
+    EXPECT_EQ(j.at("ragged_feature_output").at("offsets").at("id").get<uint64_t>(), input.getOffsets().getId());
+
+    auto gelu = std::dynamic_pointer_cast<Gelu>(Gelu::Builder().network(network).featureInput(input).build());
+    ASSERT_NE(gelu, nullptr);
+    ASSERT_TRUE(gelu->getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(gelu->getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
+
+    EXPECT_FALSE(Softmax().supportsRaggedStandalone());
+    EXPECT_TRUE(Swiglu().supportsRaggedStandalone());
 }

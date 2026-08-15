@@ -1057,7 +1057,7 @@ const Tensor &DeviceResidentNamedDataset::tensor(const std::string &name) const 
     return field(schema.getField(name).id);
 }
 
-void DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity(
+uint64_t DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity(
     const std::string &fieldName,
     const Tensor &rowIndicesHost,
     uint64_t logicalRows,
@@ -1094,6 +1094,7 @@ void DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity(
         }
         active += count;
     }
+    return active;
 }
 
 void DeviceResidentNamedDataset::enqueueCompactRaggedFieldMaterialization(
@@ -1129,7 +1130,7 @@ void DeviceResidentNamedDataset::enqueueCompactRaggedFieldMaterialization(
         stream);
 }
 
-void DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacity(
+uint64_t DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacity(
     const std::string &fieldName,
     const Tensor &rowIndicesHost,
     uint64_t logicalRows,
@@ -1166,6 +1167,7 @@ void DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacity(
         }
         active += count;
     }
+    return active;
 }
 
 void DeviceResidentNamedDataset::enqueueSnapshotRaggedFieldMaterialization(

@@ -55,8 +55,8 @@ class SoftSign : public Activation {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        // feature out and error out
-        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
+        (void)tensorPlacement;
+        return getExpressionBackedActivationMemRequirementInBytes(batchSize);
     }
 };
 
@@ -65,14 +65,11 @@ class SoftSign::Builder : public Activation::Builder {
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<SoftSign> softSign = std::make_shared<SoftSign>();
         if (_featureInput.has_value()) {
-            // Standalone layer support.
             THOR_THROW_IF_FALSE(_network.has_value());
-            softSign->featureInput = _featureInput;
-            softSign->featureOutput = _featureInput.value().clone();
+            applyStandaloneConfiguration(*softSign);
             softSign->initialized = true;
             softSign->addToNetwork(_network.value());
         } else {
-            // Template activation support
             softSign->initialized = true;
         }
 
@@ -85,6 +82,11 @@ class SoftSign::Builder : public Activation::Builder {
     }
 
     SoftSign::Builder &featureInput(Tensor _featureInput) override {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
+    SoftSign::Builder &featureInput(RaggedTensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

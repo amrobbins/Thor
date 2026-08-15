@@ -12,6 +12,9 @@
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/ExpressionDTypeResolution.h"
+#include "Utilities/Expression/RaggedExpression.h"
+#include "Utilities/Expression/EquationCompiler.h"
 
 #include "gtest/gtest.h"
 
@@ -30,6 +33,41 @@ shared_ptr<ActivationT> buildActivation(Network& network, Tensor input) {
     shared_ptr<ActivationT> activation = dynamic_pointer_cast<ActivationT>(base);
     EXPECT_NE(activation, nullptr);
     return activation;
+}
+
+template <typename ActivationT>
+shared_ptr<ActivationT> buildRaggedActivation(Network& network, RaggedTensor input) {
+    typename ActivationT::Builder builder;
+    shared_ptr<Activation> base = builder.network(network).featureInput(input).build();
+    shared_ptr<ActivationT> activation = dynamic_pointer_cast<ActivationT>(base);
+    EXPECT_NE(activation, nullptr);
+    return activation;
+}
+
+template <typename ActivationT>
+void expectRaggedGatedActivationBuilds(const string& expectedLayerType) {
+    Network network("raggedGatedActivationBuilds");
+    RaggedTensor featureInput(DataType::FP32, {3, 10}, 2, 11, DataType::UINT32);
+
+    shared_ptr<ActivationT> activation = buildRaggedActivation<ActivationT>(network, featureInput);
+    ASSERT_NE(activation, nullptr);
+    ASSERT_TRUE(activation->isInitialized());
+    EXPECT_EQ(activation->getLayerType(), expectedLayerType);
+    EXPECT_TRUE(activation->getUseRagged());
+
+    ASSERT_TRUE(activation->getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(activation->getRaggedFeatureOutput().has_value());
+    const RaggedTensor output = activation->getRaggedFeatureOutput().value();
+    EXPECT_EQ(output.getValuesDataType(), DataType::FP32);
+    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{11, 3, 5}));
+    EXPECT_EQ(output.getOffsets(), featureInput.getOffsets());
+    EXPECT_EQ(output.getMaxTotalValues(), featureInput.getMaxTotalValues());
+    EXPECT_EQ(output.getBatchSize(), featureInput.getBatchSize());
+
+    const auto json = activation->architectureJson();
+    EXPECT_TRUE(json.at("use_ragged").template get<bool>());
+    EXPECT_EQ(json.at("ragged_feature_output").at("offsets").at("id").template get<uint64_t>(),
+              json.at("ragged_feature_input").at("offsets").at("id").template get<uint64_t>());
 }
 
 template <typename ActivationT>
@@ -64,6 +102,42 @@ TEST(GatedLinearUnits, BuildHalvesFinalFeatureDimension) {
     expectGatedActivationBuilds<Geglu>("Geglu", "geglu");
     expectGatedActivationBuilds<Swiglu>("Swiglu", "swiglu");
     expectGatedActivationBuilds<BilinearGlu>("BilinearGlu", "bilinear_glu");
+}
+
+TEST(GatedLinearUnits, RaggedBuildHalvesFinalFeatureDimensionAndPreservesPartition) {
+    expectRaggedGatedActivationBuilds<Glu>("Glu");
+    expectRaggedGatedActivationBuilds<Reglu>("Reglu");
+    expectRaggedGatedActivationBuilds<Geglu>("Geglu");
+    expectRaggedGatedActivationBuilds<Swiglu>("Swiglu");
+    expectRaggedGatedActivationBuilds<BilinearGlu>("BilinearGlu");
+}
+
+TEST(GatedLinearUnits, RaggedSwigluSplitGateAndProductRemainOneExpressionStage) {
+    ThorImplementation::RaggedTensorDescriptor descriptor(
+        DataType::FP32, {6}, 2, 8, DataType::UINT32);
+    ThorImplementation::RaggedExpression input =
+        ThorImplementation::RaggedExpression::input("tokens.values", "tokens.offsets", descriptor);
+
+    Swiglu activation;
+    ThorImplementation::RaggedExpression output = activation.toRaggedExpression(input);
+    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{8, 3}));
+    EXPECT_TRUE(output.getOffsets().isSameLogicalNode(input.getOffsets()));
+
+    ThorImplementation::PhysicalOutputs physicalOutputs =
+        ThorImplementation::Expression::outputs({{"output", output.getValues()}}).physicalOutputs();
+    ThorImplementation::resolveOutputsDTypesInPlace(
+        physicalOutputs, {DataType::FP32, DataType::UINT32});
+    const vector<ThorImplementation::PhysicalExecutionStage> stages =
+        ThorImplementation::EquationCompiler::splitAtReductionBoundaries(physicalOutputs);
+    ASSERT_EQ(stages.size(), 1u);
+}
+
+TEST(GatedLinearUnits, RaggedRejectsOddFinalFeatureDimension) {
+    Network network("raggedRejectOddFinalFeatureDimension");
+    RaggedTensor featureInput(DataType::FP32, {9}, 2, 8, DataType::UINT32);
+
+    Glu::Builder builder;
+    EXPECT_ANY_THROW((void)builder.network(network).featureInput(featureInput).build());
 }
 
 TEST(GatedLinearUnits, RejectOddFinalFeatureDimension) {

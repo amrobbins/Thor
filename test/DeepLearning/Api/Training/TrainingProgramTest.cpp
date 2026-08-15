@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
@@ -269,6 +270,53 @@ TEST(TrainingPhaseApi, SerializesAndDeserializes) {
     nlohmann::json badVersion = j;
     badVersion["version"] = "0.0.0";
     EXPECT_THROW(TrainingPhase::deserialize(badVersion), std::runtime_error);
+}
+
+TEST(TrainingPhaseApi, RaggedBoundaryReferencesRoundTripByCanonicalTensorId) {
+    auto network = std::make_shared<Network>("ragged_phase_network");
+    RaggedTensor tokens = RaggedNetworkInput::Builder()
+                              .network(*network)
+                              .name("tokens")
+                              .valuesDataType(DataType::FP32)
+                              .offsetsDataType(DataType::UINT32)
+                              .trailingDimensions({2})
+                              .batchSize(2)
+                              .maxTotalValues(6)
+                              .build();
+    RaggedNetworkOutput tokensOut =
+        RaggedNetworkOutput::Builder().network(*network).name("tokens_out").inputTensor(tokens).build();
+
+    TrainingPhase phase("ragged_phase", network);
+    const nlohmann::json phaseJson = phase.architectureJson();
+    const nlohmann::json& networkJson = phaseJson.at("network");
+    const nlohmann::json& inputJson = networkJson.at("ragged_network_inputs").at(0);
+    const nlohmann::json& outputJson = networkJson.at("ragged_network_outputs").at(0);
+    EXPECT_FALSE(inputJson.contains("ragged_tensor"));
+    EXPECT_FALSE(outputJson.contains("ragged_tensor"));
+    EXPECT_EQ(inputJson.at("values_tensor_id").get<uint64_t>(), tokens.getValues().getId());
+    EXPECT_EQ(inputJson.at("offsets_tensor_id").get<uint64_t>(), tokens.getOffsets().getId());
+    EXPECT_EQ(outputJson.at("values_tensor_id").get<uint64_t>(), tokensOut.getFeatureOutput().getValues().getId());
+    EXPECT_EQ(outputJson.at("offsets_tensor_id").get<uint64_t>(), tokensOut.getFeatureOutput().getOffsets().getId());
+
+    TrainingPhase restored = TrainingPhase::deserialize(phaseJson);
+    ASSERT_NE(restored.getNetwork(), nullptr);
+    const std::vector<RaggedNetworkInputReference> restoredInputs = restored.getNetwork()->getExternalRaggedNetworkInputs();
+    const std::vector<RaggedNetworkOutputReference> restoredOutputs = restored.getNetwork()->getExternalRaggedNetworkOutputs();
+    ASSERT_EQ(restoredInputs.size(), 1u);
+    ASSERT_EQ(restoredOutputs.size(), 1u);
+    EXPECT_EQ(restoredInputs[0].name, "tokens");
+    EXPECT_EQ(restoredOutputs[0].name, "tokens_out");
+    EXPECT_EQ(restoredInputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{6, 2}));
+    EXPECT_EQ(restoredInputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{3}));
+    EXPECT_EQ(restoredOutputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{6, 2}));
+    EXPECT_EQ(restoredOutputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{3}));
+
+    const nlohmann::json restoredJson = restored.architectureJson();
+    const nlohmann::json& restoredNetworkJson = restoredJson.at("network");
+    EXPECT_EQ(restoredNetworkJson.at("ragged_network_inputs").at(0).at("values_tensor_id").get<uint64_t>(),
+              restoredInputs[0].raggedTensor.getValues().getId());
+    EXPECT_EQ(restoredNetworkJson.at("ragged_network_outputs").at(0).at("values_tensor_id").get<uint64_t>(),
+              restoredOutputs[0].raggedTensor.getValues().getId());
 }
 
 TEST(TrainingPhaseApi, SerializesAndDeserializesEnabledAndDisabledStateAndRejectsUnsupportedVersion) {

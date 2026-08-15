@@ -26,6 +26,32 @@ RaggedTensor::RaggedTensor(Tensor values, Tensor offsets) : values(values), offs
     initialized = true;
 }
 
+
+std::optional<uint64_t> RaggedTensor::getHostActiveValueCountIfAvailable() const {
+    THOR_THROW_IF_FALSE(initialized);
+    if (const std::optional<uint64_t> cached = values.getRaggedActiveRows(); cached.has_value()) {
+        THOR_THROW_IF_FALSE(cached.value() <= getMaxTotalValues());
+        return cached;
+    }
+    if (offsets.getPlacement().getMemDevice() != TensorPlacement::MemDevices::CPU) {
+        return std::nullopt;
+    }
+
+    uint64_t activeRows = 0;
+    switch (offsets.getDataType()) {
+        case DataType::UINT32:
+            activeRows = static_cast<uint64_t>(offsets.getMemPtr<uint32_t>()[getBatchSize()]);
+            break;
+        case DataType::UINT64:
+            activeRows = offsets.getMemPtr<uint64_t>()[getBatchSize()];
+            break;
+        default:
+            THOR_UNREACHABLE();
+    }
+    THOR_THROW_IF_FALSE(activeRows <= getMaxTotalValues());
+    return activeRows;
+}
+
 Tensor RaggedTensor::getActiveValueCount() const {
     THOR_THROW_IF_FALSE(initialized);
     return rowPartitionActiveValueCount(offsets, getBatchSize());

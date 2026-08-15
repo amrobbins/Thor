@@ -52,6 +52,8 @@ Public API metadata source: **generated .pyi**.
 
 ::: thor.layers.ScaleGradient
 
+::: thor.layers.SegmentedReduction
+
 ::: thor.layers.Slice
 
 ::: thor.layers.StopGradient

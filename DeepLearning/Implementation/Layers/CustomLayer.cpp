@@ -264,6 +264,13 @@ uint32_t cloneExpressionNodeWithInputReplacements(const PhysicalExpression& src,
     cloned.alpha_node = cloneRef(srcNode.alpha_node);
     cloned.beta_node = cloneRef(srcNode.beta_node);
     cloned.matmul_epilogue_aux = cloneRef(srcNode.matmul_epilogue_aux);
+    // ROPE carries auxiliary expression dependencies outside lhs/rhs/aux. When the
+    // forward subtree is cloned into a fused CustomLoss backward expression, those
+    // node references must be remapped just like Attention's auxiliary inputs below.
+    // Leaving the source-expression indices in place can make the cloned ROPE node
+    // read an unrelated destination node as its position ids/effective length.
+    cloned.rope_effective_sequence_length_node = cloneRef(srcNode.rope_effective_sequence_length_node);
+    cloned.rope_position_ids_node = cloneRef(srcNode.rope_position_ids_node);
     cloned.attention_seq_len_q_node = cloneRef(srcNode.attention_seq_len_q_node);
     cloned.attention_seq_len_kv_node = cloneRef(srcNode.attention_seq_len_kv_node);
     cloned.attention_ragged_offset_q_node = cloneRef(srcNode.attention_ragged_offset_q_node);
@@ -1210,7 +1217,11 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
     PhysicalOutputs backwardOutputs = buildBackwardOutputsForApplication(applicationIndex, variantId, wrtNames, accumulateGradOutputs);
     FusedEquation backwardEquation = FusedEquation::compile(backwardOutputs, placement.getDeviceNum());
 
-    PreparedDynamicExpression::TensorMap stampInputs = app.forwardInputsByName;
+    // Differentiate the prepared forward equation, not merely the layer's externally connected inputs.
+    // DynamicExpression builders may add internal stamp-time tensors (for example ragged Attention
+    // synthetic row partitions and RoPE position-id buffers) that are real inputs to the physical
+    // expression and therefore remain dependencies of its backward graph.
+    PreparedDynamicExpression::TensorMap stampInputs = app.forwardPrepared->stampInputs();
     for (const auto& [name, tensor] : app.backwardAdditionalInputsByName) {
         stampInputs[name] = tensor;
     }
@@ -1262,7 +1273,9 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
     }
 
     std::vector<std::pair<std::string, Expression>> fusedOutputs;
-    std::unordered_map<std::string, Tensor> stampInputs = app.forwardInputsByName;
+    // The fused optimizer graph contains the same differentiated forward expression, so retain
+    // DynamicExpression-internal stamp inputs here as well.
+    std::unordered_map<std::string, Tensor> stampInputs = app.forwardPrepared->stampInputs();
     for (const auto& [name, tensor] : app.backwardAdditionalInputsByName) {
         stampInputs[name] = tensor;
     }
@@ -1735,8 +1748,8 @@ void CustomLayer::compileImpl() {
         for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
             const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
             if (flat >= featureInputs.size() || !featureInputs[flat].has_value()) {
-                throw runtime_error("CustomLayer missing connected input port '" + inputNames[inputPort] + "' for application " +
-                                    std::to_string(applicationIndex) + ".");
+                throw runtime_error(getLayerType() + " missing connected input port '" + inputNames[inputPort] +
+                                    "' for application " + std::to_string(applicationIndex) + ".");
             }
         }
 
@@ -2310,19 +2323,35 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
             }
             continue;
         }
-        const std::vector<uint64_t> inputDimensions = featureInput.value().getDimensions();
-        THOR_THROW_IF_FALSE(!inputDimensions.empty());
-        uint32_t physicalBatchCapacity = 0;
-        if (fixedBatchCapacity.has_value()) {
-            physicalBatchCapacity = fixedBatchCapacity.value();
-        } else {
-            THOR_THROW_IF_FALSE(inputDimensions.front() >= 1);
-            THOR_THROW_IF_FALSE(inputDimensions.front() <= std::numeric_limits<uint32_t>::max());
-            physicalBatchCapacity = static_cast<uint32_t>(inputDimensions.front());
+        std::optional<uint32_t> physicalBatchCapacity = fixedBatchCapacity;
+        if (!physicalBatchCapacity.has_value()) {
+            bool currentInputHasImplicitBatchDimension = false;
+            for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+                const uint32_t flat = inputFlatIndex(applicationIndex, inputPort);
+                if (flat < featureInputs.size() && featureInputs[flat].has_value() &&
+                    featureInputs[flat].value() == featureInput.value() && !inputDimensionsIncludeBatch[inputPort]) {
+                    currentInputHasImplicitBatchDimension = true;
+                    break;
+                }
+            }
+            if (currentInputHasImplicitBatchDimension) {
+                const std::vector<uint64_t> inputDimensions = featureInput.value().getDimensions();
+                THOR_THROW_IF_FALSE(!inputDimensions.empty());
+                THOR_THROW_IF_FALSE(inputDimensions.front() >= 1);
+                THOR_THROW_IF_FALSE(inputDimensions.front() <= std::numeric_limits<uint32_t>::max());
+                physicalBatchCapacity = static_cast<uint32_t>(inputDimensions.front());
+            }
         }
-        const uint32_t resolvedValidExampleCount = batchSize == 0 ? physicalBatchCapacity : batchSize;
+
+        // Inputs whose dimensions already include the complete physical shape (for example a scalar produced by a
+        // batch reduction) do not expose an implicit leading batch-capacity dimension.  In that case batchSize is
+        // runtime cardinality metadata and must not be bounded by the tensor's first logical dimension.
+        const uint32_t resolvedValidExampleCount =
+            batchSize == 0 ? physicalBatchCapacity.value_or(1U) : batchSize;
         THOR_THROW_IF_FALSE(resolvedValidExampleCount >= 1);
-        THOR_THROW_IF_FALSE(resolvedValidExampleCount <= physicalBatchCapacity);
+        if (physicalBatchCapacity.has_value()) {
+            THOR_THROW_IF_FALSE(resolvedValidExampleCount <= physicalBatchCapacity.value());
+        }
         if (app.batchCardinalitySet) {
             THOR_THROW_IF_FALSE(app.currentValidExampleCount == resolvedValidExampleCount);
         } else {
@@ -2820,6 +2849,7 @@ void CustomLayer::computeFeatureOutForPass(uint32_t connectionNumber, bool valid
     const std::function<void(Stream&)>& preRunHook = variant.preForwardHook;
     StampedExecutionPlan& executionPlan = *variant.forward;
 
+    beforeForwardExpressionRun(connectionNumber, computeStream(decoded.applicationIndex));
     if (preRunHook) {
         const auto preRunStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         preRunHook(computeStream(decoded.applicationIndex));
@@ -2829,6 +2859,7 @@ void CustomLayer::computeFeatureOutForPass(uint32_t connectionNumber, bool valid
     }
     const auto runStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
     executionPlan.run();
+    afterForwardExpressionRun(connectionNumber, computeStream(decoded.applicationIndex));
     if (emitDiagnostics) {
         runMicros = layerSubmitDiagnosticElapsedMicros(runStart, layerSubmitDiagnosticNow());
         emitLayerSubmitDiagnostic("custom_forward_compute",
@@ -2868,6 +2899,7 @@ std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
     }
     const auto runStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
     variant.backwardError->run();
+    afterBackwardErrorExpressionRun(connectionNumber, computeStream(decoded.applicationIndex));
     if (emitDiagnostics) {
         runMicros = layerSubmitDiagnosticElapsedMicros(runStart, layerSubmitDiagnosticNow());
     }

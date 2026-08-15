@@ -4200,7 +4200,7 @@ def test_trainer_custom_model_selection_score_controls_saved_candidate(tmp_path)
         training_loss,
         epoch: float(epoch),
     ).fit(
-        2, check_best_model_every_epochs=1)
+        2, check_best_model_every_epochs=1, first_model_selection_epoch=1)
 
     _make_tiny_regression_trainer(
         "trainer_custom_model_selection_one_epoch_reference",
@@ -4217,7 +4217,7 @@ def test_trainer_custom_model_selection_score_controls_saved_candidate(tmp_path)
         training_loss,
         epoch: -float(epoch),
     ).fit(
-        2, check_best_model_every_epochs=1)
+        2, check_best_model_every_epochs=1, first_model_selection_epoch=1)
 
     selected_prediction = _prediction_from_saved_tiny_regressor(
         first_epoch_dir, "trainer_custom_model_selection_first_epoch")
@@ -4252,7 +4252,12 @@ def test_trainer_fit_returns_result_and_persists_selection_metadata(tmp_path):
         epoch: float(epoch),
     )
 
-    result = trainer.fit(50, check_best_model_every_epochs=1, early_completion_policies=[early_policy])
+    result = trainer.fit(
+        50,
+        check_best_model_every_epochs=1,
+        first_model_selection_epoch=1,
+        early_completion_policies=[early_policy],
+    )
 
     assert isinstance(result, thor.training.TrainingRunResult)
     assert result.status == "completed"
@@ -4277,7 +4282,7 @@ def test_trainer_fit_returns_result_and_persists_selection_metadata(tmp_path):
     assert metadata["completed_epoch"] == 2
     assert metadata["completion_reason"] == "early_completed"
     assert metadata["check_best_model_every_epochs"] == 1
-    assert metadata["first_model_selection_epoch"] == 0
+    assert metadata["first_model_selection_epoch"] == 1
 
 
 @pytest.mark.cuda
@@ -4305,6 +4310,7 @@ def test_trainer_followup_fit_resumes_epoch_counter_from_saved_best_candidate(tm
     first_result = trainer.fit(
         50,
         check_best_model_every_epochs=1,
+        first_model_selection_epoch=1,
         early_completion_policies=[early_policy],
     )
 
@@ -4454,7 +4460,7 @@ def test_trainer_model_selection_score_none_skips_candidate_for_epoch(tmp_path):
         training_loss,
         epoch: None if epoch == 1 else float(epoch),
     ).fit(
-        2, check_best_model_every_epochs=1)
+        2, check_best_model_every_epochs=1, first_model_selection_epoch=1)
 
     _make_tiny_regression_trainer(
         "trainer_custom_model_selection_none_one_epoch_reference",
@@ -4495,6 +4501,101 @@ def test_trainer_model_selection_score_none_skips_candidate_for_epoch(tmp_path):
 
     assert np.allclose(selected_prediction, two_epoch_prediction, atol=1e-6)
     assert not np.allclose(selected_prediction, one_epoch_prediction, atol=1e-7)
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_trainer_first_model_selection_epoch_zero_saves_untrained_phase_entry_candidate(tmp_path):
+    save_dir = tmp_path / "first_model_selection_epoch_zero"
+    score_calls = []
+
+    def score(validation_loss, training_loss, epoch):
+        score_calls.append((validation_loss, training_loss, epoch))
+        return float(epoch)
+
+    trainer = _make_tiny_regression_trainer(
+        "trainer_first_model_selection_epoch_zero",
+        save_model_dir=save_dir,
+        save_model_overwrite=True,
+        model_selection_score=score,
+    )
+
+    result = trainer.fit(
+        2,
+        check_best_model_every_epochs=1,
+        first_model_selection_epoch=0,
+    )
+
+    assert result.status == "completed"
+    assert result.completed_epoch == 2
+    assert result.best_epoch == 0
+    assert result.best_score == pytest.approx(0.0)
+    assert score_calls[0][2] == 0
+    assert score_calls[0][0] is not None
+    assert score_calls[0][1] is None
+    assert _training_artifact_best_dir(save_dir).exists()
+    assert _training_artifact_latest_dir(save_dir).exists()
+
+    best_prediction = _prediction_from_saved_tiny_regressor(
+        save_dir, "trainer_first_model_selection_epoch_zero", artifact="best")
+    latest_prediction = _prediction_from_saved_tiny_regressor(
+        save_dir, "trainer_first_model_selection_epoch_zero", artifact="latest")
+    assert np.allclose(best_prediction, 0.0, atol=1e-7)
+    assert not np.allclose(latest_prediction, best_prediction, atol=1e-7)
+
+    metadata = _training_selection_metadata(save_dir)
+    assert metadata["best_epoch"] == 0
+    assert metadata["best_score"] == pytest.approx(0.0)
+    assert metadata["first_model_selection_epoch"] == 0
+
+
+@pytest.mark.cuda
+@pytest.mark.training_integration
+@pytest.mark.skipif(
+    not RUN_TRAINING_INTEGRATION,
+    reason=integration_skip_reason(
+        "THOR_RUN_TRAINING_INTEGRATION",
+        description="opt-in TrainingRuns CUDA integration tests",
+    ),
+)
+def test_trainer_first_model_selection_epoch_zero_uses_followup_phase_entry_state(tmp_path):
+    save_dir = tmp_path / "first_model_selection_epoch_zero_followup"
+    trainer = _make_tiny_regression_trainer(
+        "trainer_first_model_selection_epoch_zero_followup",
+        save_model_dir=save_dir,
+        save_model_overwrite=True,
+        model_selection_score=lambda validation_loss, training_loss, epoch: float(epoch),
+    )
+
+    first_result = trainer.fit(
+        1,
+        check_best_model_every_epochs=1,
+        first_model_selection_epoch=1,
+    )
+    assert first_result.best_epoch == 1
+    phase_entry_prediction = _prediction_from_saved_tiny_regressor(
+        save_dir, "trainer_first_model_selection_epoch_zero_followup", artifact="best")
+
+    second_result = trainer.fit(
+        2,
+        check_best_model_every_epochs=1,
+        first_model_selection_epoch=0,
+    )
+
+    assert second_result.completed_epoch == 3
+    assert second_result.best_epoch == 1
+    assert second_result.best_score == pytest.approx(1.0)
+    assert trainer.completed_training_epochs == 1
+    selected_prediction = _prediction_from_saved_tiny_regressor(
+        save_dir, "trainer_first_model_selection_epoch_zero_followup", artifact="best")
+    assert np.allclose(selected_prediction, phase_entry_prediction, atol=1e-6)
 
 
 @pytest.mark.cuda
@@ -4784,6 +4885,7 @@ def test_training_runs_early_completion_stops_early_and_saves_best_candidate(cap
         capfd,
         epochs=50,
         check_best_model_every_epochs=1,
+        first_model_selection_epoch=1,
         early_completion_rules=[early_rule],
     )
 

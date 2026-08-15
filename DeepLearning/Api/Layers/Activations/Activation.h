@@ -2,9 +2,11 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Api/Layers/Layer.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "Utilities/Expression/Expression.h"
+#include "Utilities/Expression/RaggedExpression.h"
 
 #include <atomic>
 #include <utility>
@@ -30,14 +32,29 @@ class Activation : public Layer {
     using Layer::addToNetwork;
     // Activation template version.
     virtual Tensor addToNetwork(Tensor inputTensor, Network* network);
+    virtual RaggedTensor addToNetwork(RaggedTensor inputTensor, Network* network);
     virtual Tensor addToNetwork(Tensor inputTensor,
                                 Network* network,
                                 std::optional<ThorImplementation::Expression> epilogue,
                                 std::vector<std::pair<std::string, Tensor>> epilogueInputBindings = {});
+    virtual RaggedTensor addToNetwork(RaggedTensor inputTensor,
+                                      Network* network,
+                                      std::optional<ThorImplementation::Expression> epilogue,
+                                      std::vector<std::pair<std::string, Tensor>> epilogueInputBindings = {});
 
     // Returns an expression equivalent to applying this activation to the input expression.
     // This is used by expression-backed learning layers to fuse the activation into the layer equation.
     virtual ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const = 0;
+    // Ragged standalone activations keep their row partition structural while the
+    // value expression remains available to the normal Expression optimizer. The
+    // default implementation is shape-preserving; shape-changing activation
+    // families such as GLU override this hook.
+    virtual ThorImplementation::RaggedExpression toRaggedExpression(
+        const ThorImplementation::RaggedExpression& input) const;
+    // Ordinary pointwise activations and GLU variants support standalone ragged
+    // values through the Expression hooks above. Reduction-style activations can
+    // override this when their ragged semantics differ.
+    virtual bool supportsRaggedStandalone() const { return true; }
 
     std::string getLayerType() const override = 0;
 
@@ -87,10 +104,13 @@ class Activation : public Layer {
     static void validateEpilogueAuxInputName(const std::string& inputName);
 
     std::vector<Tensor> getFeatureInputs() const;
+    [[nodiscard]] bool getUseRagged() const { return raggedFeatureInput.has_value(); }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureInput() const { return raggedFeatureInput; }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureOutput() const { return raggedFeatureOutput; }
     std::vector<Tensor> getFeatureOutputs() const;
     std::vector<Tensor> getAllOutputTensors() const override;
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
-    bool mustConnectAllInputsToDriveOutput() const override { return !epilogueInputBindings.empty(); }
+    bool mustConnectAllInputsToDriveOutput() const override { return raggedFeatureInput.has_value() || !epilogueInputBindings.empty(); }
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;
     int getConnectionType(Tensor connectingTensor) const override;
@@ -110,11 +130,17 @@ class Activation : public Layer {
                                                                                 bool inferenceOnly) const;
 
     uint64_t getExpressionBackedActivationMemRequirementInBytes(uint32_t batchSize) const;
+    virtual Tensor standaloneOutputTensorForInput(const Tensor& inputTensor) const;
     void initializeStandaloneActivation(Tensor inputTensor,
+                                        std::optional<ThorImplementation::Expression> epilogue = std::nullopt,
+                                        std::vector<std::pair<std::string, Tensor>> epilogueInputBindings = {});
+    void initializeStandaloneActivation(RaggedTensor inputTensor,
                                         std::optional<ThorImplementation::Expression> epilogue = std::nullopt,
                                         std::vector<std::pair<std::string, Tensor>> epilogueInputBindings = {});
     void deserializeStandaloneFields(const nlohmann::json& j, Network* network);
 
+    std::optional<RaggedTensor> raggedFeatureInput;
+    std::optional<RaggedTensor> raggedFeatureOutput;
     std::optional<ThorImplementation::Expression> epilogue;
     std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
@@ -136,8 +162,17 @@ class Activation::Builder {
     }
     virtual Activation::Builder& featureInput(Tensor _featureInput) {
         THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
         THOR_THROW_IF_FALSE(!_featureInput.getDimensions().empty());
         this->_featureInput = _featureInput;
+        return *this;
+    }
+    virtual Activation::Builder& featureInput(RaggedTensor _featureInput) {
+        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
+        THOR_THROW_IF_FALSE(_featureInput.isInitialized());
+        this->_raggedFeatureInput = _featureInput;
+        this->_featureInput = _featureInput.getValues();
         return *this;
     }
 
@@ -178,11 +213,16 @@ class Activation::Builder {
 
     void applyStandaloneConfiguration(Activation& activation) const {
         THOR_THROW_IF_FALSE(_featureInput.has_value());
-        activation.initializeStandaloneActivation(_featureInput.value(), _epilogue, _epilogueInputBindings);
+        if (_raggedFeatureInput.has_value()) {
+            activation.initializeStandaloneActivation(_raggedFeatureInput.value(), _epilogue, _epilogueInputBindings);
+        } else {
+            activation.initializeStandaloneActivation(_featureInput.value(), _epilogue, _epilogueInputBindings);
+        }
     }
 
     std::optional<Network*> _network;
     std::optional<Tensor> _featureInput;
+    std::optional<RaggedTensor> _raggedFeatureInput;
     std::optional<ThorImplementation::Expression> _epilogue;
     std::vector<std::pair<std::string, Tensor>> _epilogueInputBindings;
 };

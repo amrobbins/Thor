@@ -91,10 +91,13 @@ struct TrainingRunRequest {
     // First epoch within this fit request at which model-selection scoring begins.
     // This gate is phase-local: after a previous fit completed N selected epochs,
     // firstModelSelectionEpoch=3 means the next fit first scores at cumulative
-    // epoch N + 3. A value of 0 preserves the cadence-only behavior: the first
-    // selection happens at checkBestModelEveryEpochs epochs into this request.
-    // Model-selection callbacks, early-completion policies, snapshots, and
-    // metadata still receive/report cumulative epoch numbers.
+    // epoch N + 3. A value of 0 evaluates the phase-entry model before any
+    // optimizer update and makes that state the initial best-candidate incumbent.
+    // Post-update candidates then retain the normal checkBestModelEveryEpochs
+    // cadence (N + cadence, N + 2*cadence, ...). Model-selection callbacks,
+    // early-completion policies, snapshots, and metadata still receive/report
+    // cumulative epoch numbers. The phase-entry candidate does not itself invoke
+    // early-completion policies because no training has occurred in the phase yet.
     uint64_t firstModelSelectionEpoch = 0;
 
     // Optional cap for the TRAIN phase only. When unset, a training epoch drains

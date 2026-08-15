@@ -700,6 +700,15 @@ void Tensor::copyFromAsyncImpl(Tensor source, Stream copyStream) {
     THOR_THROW_IF_FALSE(!uninitialized());
     THOR_THROW_IF_FALSE(!source.uninitialized());
 
+    // Runtime ragged metadata follows value copies just like the packed payload. This is
+    // deliberately host-side and does not enqueue any device work. Clear stale metadata
+    // when the source is an ordinary dense tensor.
+    if (const std::optional<uint64_t> activeRows = source.getRaggedActiveRows(); activeRows.has_value()) {
+        setRaggedActiveRows(activeRows.value());
+    } else {
+        clearRaggedActiveRows();
+    }
+
     if (source.getTensorId() == getTensorId() && source.getDescriptor().getDataType() == getDescriptor().getDataType()) {
         return;
     }
@@ -845,7 +854,7 @@ void Tensor::memset(int8_t value, uint64_t numElements) {
     }
 
     // invoke global memset instead of member function memset
-    ::memset(getBaseMemPtr(), value, numBytes);
+    ::memset(getMemPtr<void>(), value, numBytes);
 }
 
 struct IdentityMatrixArgs : HostFunctionArgsBase {
@@ -988,7 +997,7 @@ void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
         }
 
         ScopedGpu scopedGpu(placement.getDeviceNum());
-        CUDA_CHECK(cudaMemsetAsync(getBaseMemPtr(), value, numBytes, stream));
+        CUDA_CHECK(cudaMemsetAsync(getMemPtr<void>(), value, numBytes, stream));
     } else {
         std::unique_ptr<HostFunctionArgsBase> args(new MemsetArgs(*this, value, numElements));
         stream.enqueueHostFunction(callMemsetOnTensor, std::move(args));

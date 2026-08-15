@@ -9,6 +9,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
+#include <filesystem>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -43,6 +45,9 @@ TEST(RaggedNetworkInputApi, BuildsLogicalRaggedInputBackedByPhysicalNetworkInput
     EXPECT_EQ(raggedInput.at("name").get<std::string>(), "labels");
     EXPECT_EQ(raggedInput.at("values_input_name").get<std::string>(), "labels.values");
     EXPECT_EQ(raggedInput.at("offsets_input_name").get<std::string>(), "labels.offsets");
+    EXPECT_EQ(raggedInput.at("values_tensor_id").get<uint64_t>(), labels.getValues().getId());
+    EXPECT_EQ(raggedInput.at("offsets_tensor_id").get<uint64_t>(), labels.getOffsets().getId());
+    EXPECT_FALSE(raggedInput.contains("ragged_tensor"));
 
     ASSERT_TRUE(architecture.contains("layers"));
     ASSERT_EQ(architecture.at("layers").size(), 2u);
@@ -53,6 +58,52 @@ TEST(RaggedNetworkInputApi, BuildsLogicalRaggedInputBackedByPhysicalNetworkInput
         physicalInputNames.insert(layer.at("name").get<std::string>());
     }
     EXPECT_EQ(physicalInputNames, (std::set<std::string>{"labels.values", "labels.offsets"}));
+}
+
+TEST(RaggedNetworkInputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTensorReferences) {
+    const std::string networkName = "ragged_network_input_architecture_round_trip";
+    Network network(networkName);
+    RaggedTensor labels = RaggedNetworkInput::Builder()
+                              .network(network)
+                              .name("labels")
+                              .valuesDataType(DataType::INT32)
+                              .offsetsDataType(DataType::UINT32)
+                              .trailingDimensions({2})
+                              .batchSize(2)
+                              .maxTotalValues(6)
+                              .build();
+
+    const json architecture = network.architectureJson();
+    const json& logicalInput = architecture.at("ragged_network_inputs").at(0);
+    EXPECT_FALSE(logicalInput.contains("ragged_tensor"));
+    EXPECT_EQ(logicalInput.at("values_tensor_id").get<uint64_t>(), labels.getValues().getId());
+    EXPECT_EQ(logicalInput.at("offsets_tensor_id").get<uint64_t>(), labels.getOffsets().getId());
+
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path archiveDir =
+        std::filesystem::temp_directory_path() /
+        (std::string("thor_ragged_network_input_architecture_round_trip_") + std::to_string(now));
+    std::filesystem::remove_all(archiveDir);
+
+    network.save(archiveDir.string(), /*overwrite=*/true);
+
+    Network loaded(networkName);
+    ASSERT_NO_THROW(loaded.load(archiveDir.string()));
+    const std::vector<RaggedNetworkInputReference> loadedInputs = loaded.getExternalRaggedNetworkInputs();
+    ASSERT_EQ(loadedInputs.size(), 1u);
+    EXPECT_EQ(loadedInputs[0].name, "labels");
+    EXPECT_EQ(loadedInputs[0].valuesInputName, "labels.values");
+    EXPECT_EQ(loadedInputs[0].offsetsInputName, "labels.offsets");
+    EXPECT_EQ(loadedInputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{6, 2}));
+    EXPECT_EQ(loadedInputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{3}));
+
+    const json loadedArchitecture = loaded.architectureJson();
+    const json& loadedLogicalInput = loadedArchitecture.at("ragged_network_inputs").at(0);
+    EXPECT_FALSE(loadedLogicalInput.contains("ragged_tensor"));
+    EXPECT_EQ(loadedLogicalInput.at("values_tensor_id").get<uint64_t>(), loadedInputs[0].raggedTensor.getValues().getId());
+    EXPECT_EQ(loadedLogicalInput.at("offsets_tensor_id").get<uint64_t>(), loadedInputs[0].raggedTensor.getOffsets().getId());
+
+    std::filesystem::remove_all(archiveDir);
 }
 
 TEST(RaggedNetworkInputApi, PlacedNetworkExposesLogicalInputName) {

@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -20,7 +21,7 @@ void bind_drop_out(nb::module_ &m) {
     drop_out
         .def(
             "__init__",
-            [](DropOut *self, Network &network, const Tensor &feature_input, float drop_proportion) {
+            [](DropOut *self, Network &network, nb::object feature_input, float drop_proportion) {
                 if (drop_proportion < 0.0f || drop_proportion > 1.0f) {
                     string error_message =
                         "Drop Out instance: you must pass 0 <= drop_proportion <= 1. drop_proportion: " + to_string(drop_proportion);
@@ -28,7 +29,15 @@ void bind_drop_out(nb::module_ &m) {
                 }
 
                 DropOut::Builder builder;
-                DropOut built = builder.network(network).featureInput(feature_input).dropProportion(drop_proportion).build();
+                builder.network(network);
+                if (nb::isinstance<RaggedTensor>(feature_input)) {
+                    builder.featureInput(nb::cast<RaggedTensor>(feature_input));
+                } else if (nb::isinstance<Tensor>(feature_input)) {
+                    builder.featureInput(nb::cast<Tensor>(feature_input));
+                } else {
+                    throw nb::type_error("DropOut feature_input must be thor.Tensor or thor.RaggedTensor.");
+                }
+                DropOut built = builder.dropProportion(drop_proportion).build();
 
                 // Move the dropout layer into the pre-allocated but uninitialized memory at self
                 new (self) DropOut(std::move(built));
@@ -44,20 +53,23 @@ void bind_drop_out(nb::module_ &m) {
             ----------
             network : thor.Network
                 Network the layer should be added to.
-            feature_input : thor.Tensor
-                Input feature tensor for this layer.
+            feature_input : thor.Tensor or thor.RaggedTensor
+                Dense or packed-ragged input. Ragged input preserves its row partition and applies dropout only to active packed values.
             drop_proportion : float
                 Fraction of units to drop (0.0 <= p <= 1.0).
             )nbdoc")
         .def(
             "get_feature_output",
-            [](DropOut &self) -> Tensor {
-                std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-                return maybeFeatureOutput.value();
+            [](DropOut &self) -> nb::object {
+                if (std::optional<RaggedTensor> raggedOutput = self.getRaggedFeatureOutput(); raggedOutput.has_value()) {
+                    return nb::cast(raggedOutput.value());
+                }
+                return nb::cast(self.getFeatureOutput().value());
             },
             R"nbdoc(
-            Return the output tensor produced by this layer.
+            Return the logical output. Ragged inputs produce a RaggedTensor with the same row partition.
             )nbdoc")
+        .def("get_use_ragged", &DropOut::getUseRagged)
         .def("get_drop_proportion", &DropOut::getDropProportion)
         .def("set_training_dropout_enabled",
              [](DropOut& layer, bool enabled) { layer.setTrainingDropoutEnabled(enabled); },

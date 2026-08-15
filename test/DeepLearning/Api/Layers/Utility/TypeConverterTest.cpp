@@ -2,6 +2,8 @@
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
+#include "DeepLearning/Implementation/Layers/CustomLayer.h"
 
 #include "gtest/gtest.h"
 
@@ -160,10 +162,9 @@ TEST(UtilityApiLayers, TypeConverterSerializeDeserialize) {
 
     ASSERT_EQ(newPlacedNetwork->getNumStamps(), 1UL);
     ThorImplementation::StampedNetwork stampedNetwork = newPlacedNetwork->getStampedNetwork(0);
-    vector<shared_ptr<ThorImplementation::Layer>> otherLayers = stampedNetwork.getOtherLayers();
-    ASSERT_EQ(otherLayers.size(), 1U);
-    shared_ptr<ThorImplementation::TypeConversion> stampedTypeConverter =
-        dynamic_pointer_cast<ThorImplementation::TypeConversion>(otherLayers[0]);
+    ASSERT_EQ(stampedNetwork.getNumTrainableLayers(), 1U);
+    shared_ptr<ThorImplementation::CustomLayer> stampedTypeConverter =
+        dynamic_pointer_cast<ThorImplementation::CustomLayer>(stampedNetwork.getTrainableLayer(0));
     ASSERT_NE(stampedTypeConverter, nullptr);
 
     vector<shared_ptr<ThorImplementation::NetworkInput>> inputLayers = stampedNetwork.getInputs();
@@ -189,4 +190,69 @@ TEST(UtilityApiLayers, TypeConverterSerializeDeserialize) {
 
     ASSERT_EQ(stampedTypeConverter->getFeatureInput().value().getDataType(), fromDataType);
     ASSERT_EQ(stampedTypeConverter->getFeatureOutput().value().getDataType(), toDataType);
+}
+
+TEST(UtilityApiLayers, TypeConverterPreservesAlreadyPhysicalBatchDimensions) {
+    Network network("type_converter_batch_included_input");
+
+    NetworkInput input = NetworkInput::Builder()
+                             .network(network)
+                             .name("input")
+                             .dimensions({2, 3})
+                             .dimensionsIncludeBatch(true)
+                             .dataType(DataType::FP32)
+                             .build();
+    TypeConverter converter = TypeConverter::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .newDataType(DataType::FP16)
+                                  .build();
+    NetworkOutput::Builder()
+        .network(network)
+        .name("output")
+        .inputTensor(converter.getFeatureOutput().value())
+        .dataType(DataType::FP16)
+        .build();
+
+    std::vector<Event> initDone;
+    std::shared_ptr<PlacedNetwork> placed = network.place(2, initDone);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDone)
+        event.synchronize();
+
+    ThorImplementation::StampedNetwork stamped = placed->getStampedNetwork(0);
+    ASSERT_EQ(stamped.getNumTrainableLayers(), 1U);
+    auto physicalConverter =
+        dynamic_pointer_cast<ThorImplementation::CustomLayer>(stamped.getTrainableLayer(0));
+    ASSERT_NE(physicalConverter, nullptr);
+    ASSERT_TRUE(physicalConverter->getFeatureInput().has_value());
+    ASSERT_TRUE(physicalConverter->getFeatureOutput().has_value());
+    EXPECT_EQ(physicalConverter->getFeatureInput()->getDimensions(), std::vector<uint64_t>({2, 3}));
+    EXPECT_EQ(physicalConverter->getFeatureOutput()->getDimensions(), std::vector<uint64_t>({2, 3}));
+}
+
+TEST(UtilityApiLayers, TypeConverterRaggedBuildsAndPreservesPartition) {
+    Network network("ragged_type_converter_build");
+    RaggedTensor input(DataType::FP32, {3}, 2, 8, DataType::UINT32);
+
+    TypeConverter typeConverter =
+        TypeConverter::Builder().network(network).featureInput(input).newDataType(DataType::BF16).build();
+
+    ASSERT_TRUE(typeConverter.isInitialized());
+    ASSERT_TRUE(typeConverter.getUseRagged());
+    ASSERT_TRUE(typeConverter.getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(typeConverter.getRaggedFeatureOutput().has_value());
+
+    const RaggedTensor output = typeConverter.getRaggedFeatureOutput().value();
+    EXPECT_EQ(output.getValuesDataType(), DataType::BF16);
+    EXPECT_EQ(output.getValuesDimensions(), std::vector<uint64_t>({8, 3}));
+    EXPECT_EQ(output.getOffsets(), input.getOffsets());
+    EXPECT_EQ(typeConverter.getFeatureInputs().size(), 2U);
+    EXPECT_EQ(typeConverter.getFeatureInputs()[0], input.getValues());
+    EXPECT_EQ(typeConverter.getFeatureInputs()[1], input.getOffsets());
+
+    const json j = typeConverter.architectureJson();
+    EXPECT_TRUE(j.at("use_ragged").get<bool>());
+    EXPECT_EQ(j.at("ragged_feature_input").at("offsets").at("id").get<uint64_t>(), input.getOffsets().getId());
+    EXPECT_EQ(j.at("ragged_feature_output").at("offsets").at("id").get<uint64_t>(), input.getOffsets().getId());
 }

@@ -51,6 +51,7 @@ class MultiConnectionLayer : public Layer {
 
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override { return {getFeatureOutput(inputTensor)}; }
 
+    std::vector<Tensor> getAllInputTensors() const override { return featureInputs; }
     std::vector<Tensor> getAllOutputTensors() const override { return featureOutputs; }
 
     // Inputs and outputs are stored in the vector in the same order as they are added to the builder.

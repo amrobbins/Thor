@@ -10,6 +10,7 @@
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
 #include "Utilities/Expression/SegmentedBroadcastKernel.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/RaggedMatmulCapacityBuckets.h"
 #include "Utilities/TensorOperations/Copy/StridedCopy.h"
 
 #include <cudnn_frontend.h>
@@ -336,26 +337,41 @@ CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
                                                           const Tensor& oTensor,
                                                           uint64_t raggedBatchSize) const {
     CudnnAttentionDescriptor descriptor;
-    if (use_ragged_offsets && qTensor.getDimensions().size() == 3) {
-        descriptor.q = packedRaggedAttentionSpecForTensor(qTensor, q_layout, raggedBatchSize, "q");
-        descriptor.k = packedRaggedAttentionSpecForTensor(kTensor, k_layout, raggedBatchSize, "k");
-        descriptor.v = packedRaggedAttentionSpecForTensor(vTensor, v_layout, raggedBatchSize, "v");
-        descriptor.o = packedRaggedAttentionSpecForTensor(oTensor, o_layout, raggedBatchSize, "o");
-    } else {
-        if (use_ragged_offsets && (kTensor.getDimensions().size() != 4 || vTensor.getDimensions().size() != 4 ||
-                                   oTensor.getDimensions().size() != 4)) {
-            throw std::runtime_error("Ragged attention q/k/v/o must consistently use rank-3 packed THD or rank-4 BSHD storage.");
+    const bool queryPackedRagged = use_ragged_offsets && qTensor.getDimensions().size() == 3;
+    const bool kvPackedRagged = use_ragged_offsets && kTensor.getDimensions().size() == 3;
+    // The original Expression ragged-attention API keeps packed token payloads in
+    // rank-4 [B,S,H,D] storage and uses the supplied row partitions to define the
+    // logical sequence starts/lengths.  High-level mixed Attention, added later,
+    // uses rank-3 [T,H,D] storage for the genuinely ragged domain and a synthetic
+    // row partition for the dense rank-4 domain.  Therefore rank only disambiguates
+    // dense vs ragged when at least one sequence domain is rank 3.  If both domains
+    // are rank 4 and ragged offsets were explicitly supplied, preserve the legacy
+    // Expression contract and mark both domains ragged.
+    const bool legacyRank4FullyRagged = use_ragged_offsets && !queryPackedRagged && !kvPackedRagged;
+    const bool queryRagged = queryPackedRagged || legacyRank4FullyRagged;
+    const bool kvRagged = kvPackedRagged || legacyRank4FullyRagged;
+    if (use_ragged_offsets) {
+        if ((vTensor.getDimensions().size() == 3) != kvPackedRagged ||
+            (oTensor.getDimensions().size() == 3) != queryPackedRagged) {
+            throw std::runtime_error("Attention mixed ragged storage requires Q/O and K/V to agree within each sequence domain.");
         }
+        descriptor.q = queryPackedRagged ? packedRaggedAttentionSpecForTensor(qTensor, q_layout, raggedBatchSize, "q")
+                                         : attentionSpecForTensor(qTensor, q_layout, "q");
+        descriptor.o = queryPackedRagged ? packedRaggedAttentionSpecForTensor(oTensor, o_layout, raggedBatchSize, "o")
+                                         : attentionSpecForTensor(oTensor, o_layout, "o");
+        descriptor.k = kvPackedRagged ? packedRaggedAttentionSpecForTensor(kTensor, k_layout, raggedBatchSize, "k")
+                                      : attentionSpecForTensor(kTensor, k_layout, "k");
+        descriptor.v = kvPackedRagged ? packedRaggedAttentionSpecForTensor(vTensor, v_layout, raggedBatchSize, "v")
+                                      : attentionSpecForTensor(vTensor, v_layout, "v");
+        descriptor.q.ragged = queryRagged;
+        descriptor.o.ragged = queryRagged;
+        descriptor.k.ragged = kvRagged;
+        descriptor.v.ragged = kvRagged;
+    } else {
         descriptor.q = attentionSpecForTensor(qTensor, q_layout, "q");
         descriptor.k = attentionSpecForTensor(kTensor, k_layout, "k");
         descriptor.v = attentionSpecForTensor(vTensor, v_layout, "v");
         descriptor.o = attentionSpecForTensor(oTensor, o_layout, "o");
-        if (use_ragged_offsets) {
-            descriptor.q.ragged = true;
-            descriptor.k.ragged = true;
-            descriptor.v.ragged = true;
-            descriptor.o.ragged = true;
-        }
     }
     descriptor.computeDataType = compute_dtype;
     descriptor.intermediateDataType = DataType::FP32;
@@ -385,26 +401,41 @@ CudnnAttentionDescriptor CompiledAttentionBackward::descriptorFor(const Tensor& 
                                                                   const Tensor& oTensor,
                                                                   uint64_t raggedBatchSize) const {
     CudnnAttentionDescriptor descriptor;
-    if (use_ragged_offsets && qTensor.getDimensions().size() == 3) {
-        descriptor.q = packedRaggedAttentionSpecForTensor(qTensor, q_layout, raggedBatchSize, "q");
-        descriptor.k = packedRaggedAttentionSpecForTensor(kTensor, k_layout, raggedBatchSize, "k");
-        descriptor.v = packedRaggedAttentionSpecForTensor(vTensor, v_layout, raggedBatchSize, "v");
-        descriptor.o = packedRaggedAttentionSpecForTensor(oTensor, o_layout, raggedBatchSize, "o");
-    } else {
-        if (use_ragged_offsets && (kTensor.getDimensions().size() != 4 || vTensor.getDimensions().size() != 4 ||
-                                   oTensor.getDimensions().size() != 4)) {
-            throw std::runtime_error("Ragged attention q/k/v/o must consistently use rank-3 packed THD or rank-4 BSHD storage.");
+    const bool queryPackedRagged = use_ragged_offsets && qTensor.getDimensions().size() == 3;
+    const bool kvPackedRagged = use_ragged_offsets && kTensor.getDimensions().size() == 3;
+    // The original Expression ragged-attention API keeps packed token payloads in
+    // rank-4 [B,S,H,D] storage and uses the supplied row partitions to define the
+    // logical sequence starts/lengths.  High-level mixed Attention, added later,
+    // uses rank-3 [T,H,D] storage for the genuinely ragged domain and a synthetic
+    // row partition for the dense rank-4 domain.  Therefore rank only disambiguates
+    // dense vs ragged when at least one sequence domain is rank 3.  If both domains
+    // are rank 4 and ragged offsets were explicitly supplied, preserve the legacy
+    // Expression contract and mark both domains ragged.
+    const bool legacyRank4FullyRagged = use_ragged_offsets && !queryPackedRagged && !kvPackedRagged;
+    const bool queryRagged = queryPackedRagged || legacyRank4FullyRagged;
+    const bool kvRagged = kvPackedRagged || legacyRank4FullyRagged;
+    if (use_ragged_offsets) {
+        if ((vTensor.getDimensions().size() == 3) != kvPackedRagged ||
+            (oTensor.getDimensions().size() == 3) != queryPackedRagged) {
+            throw std::runtime_error("Attention mixed ragged storage requires Q/O and K/V to agree within each sequence domain.");
         }
+        descriptor.q = queryPackedRagged ? packedRaggedAttentionSpecForTensor(qTensor, q_layout, raggedBatchSize, "q")
+                                         : attentionSpecForTensor(qTensor, q_layout, "q");
+        descriptor.o = queryPackedRagged ? packedRaggedAttentionSpecForTensor(oTensor, o_layout, raggedBatchSize, "o")
+                                         : attentionSpecForTensor(oTensor, o_layout, "o");
+        descriptor.k = kvPackedRagged ? packedRaggedAttentionSpecForTensor(kTensor, k_layout, raggedBatchSize, "k")
+                                      : attentionSpecForTensor(kTensor, k_layout, "k");
+        descriptor.v = kvPackedRagged ? packedRaggedAttentionSpecForTensor(vTensor, v_layout, raggedBatchSize, "v")
+                                      : attentionSpecForTensor(vTensor, v_layout, "v");
+        descriptor.q.ragged = queryRagged;
+        descriptor.o.ragged = queryRagged;
+        descriptor.k.ragged = kvRagged;
+        descriptor.v.ragged = kvRagged;
+    } else {
         descriptor.q = attentionSpecForTensor(qTensor, q_layout, "q");
         descriptor.k = attentionSpecForTensor(kTensor, k_layout, "k");
         descriptor.v = attentionSpecForTensor(vTensor, v_layout, "v");
         descriptor.o = attentionSpecForTensor(oTensor, o_layout, "o");
-        if (use_ragged_offsets) {
-            descriptor.q.ragged = true;
-            descriptor.k.ragged = true;
-            descriptor.v.ragged = true;
-            descriptor.o.ragged = true;
-        }
     }
     descriptor.computeDataType = compute_dtype;
     descriptor.intermediateDataType = DataType::FP32;
@@ -496,11 +527,12 @@ void StampedAttention::runOn(Stream& run_stream) const {
         raggedBatchSize = qOffsetDims[0] - 1;
     }
     CudnnAttentionDescriptor descriptor = compiled_attention->descriptorFor(q, k, v, output, raggedBatchSize);
-    const bool packedRagged = compiled_attention->use_ragged_offsets && q.getDimensions().size() == 3;
-    Tensor cudnnQ = packedRagged ? q : cudnnSemanticTensorView(q, compiled_attention->q_layout, "q");
-    Tensor cudnnK = packedRagged ? k : cudnnSemanticTensorView(k, compiled_attention->k_layout, "k");
-    Tensor cudnnV = packedRagged ? v : cudnnSemanticTensorView(v, compiled_attention->v_layout, "v");
-    Tensor cudnnO = packedRagged ? output : cudnnSemanticTensorView(output, compiled_attention->o_layout, "o");
+    const bool queryPackedRagged = compiled_attention->use_ragged_offsets && q.getDimensions().size() == 3;
+    const bool kvPackedRagged = compiled_attention->use_ragged_offsets && k.getDimensions().size() == 3;
+    Tensor cudnnQ = queryPackedRagged ? q : cudnnSemanticTensorView(q, compiled_attention->q_layout, "q");
+    Tensor cudnnK = kvPackedRagged ? k : cudnnSemanticTensorView(k, compiled_attention->k_layout, "k");
+    Tensor cudnnV = kvPackedRagged ? v : cudnnSemanticTensorView(v, compiled_attention->v_layout, "v");
+    Tensor cudnnO = queryPackedRagged ? output : cudnnSemanticTensorView(output, compiled_attention->o_layout, "o");
     CudnnAttentionForwardArgs args{.q = cudnnQ, .k = cudnnK, .v = cudnnV, .o = cudnnO};
     if (compiled_attention->use_bias) {
         if (!bias.has_value()) {
@@ -708,18 +740,19 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
     CudnnAttentionDescriptor descriptor = compiled_attention_backward->descriptorFor(q, k, v, forwardOutput, raggedBatchSize);
     descriptor.generateStats = true;
 
-    const bool packedRagged = compiled_attention_backward->use_ragged_offsets && q.getDimensions().size() == 3;
-    Tensor cudnnQ = packedRagged ? q : cudnnSemanticTensorView(q, compiled_attention_backward->q_layout, "q");
-    Tensor cudnnK = packedRagged ? k : cudnnSemanticTensorView(k, compiled_attention_backward->k_layout, "k");
-    Tensor cudnnV = packedRagged ? v : cudnnSemanticTensorView(v, compiled_attention_backward->v_layout, "v");
-    Tensor cudnnO = packedRagged ? forwardOutput : cudnnSemanticTensorView(forwardOutput, compiled_attention_backward->o_layout, "o");
-    Tensor cudnnDO = packedRagged ? dO : cudnnSemanticTensorView(dO, compiled_attention_backward->o_layout, "dO");
-    Tensor cudnnDQ = packedRagged ? dQ : cudnnSemanticTensorView(dQ, compiled_attention_backward->q_layout, "dQ");
-    Tensor cudnnDK = packedRagged ? dK : cudnnSemanticTensorView(dK, compiled_attention_backward->k_layout, "dK");
-    Tensor cudnnDV = packedRagged ? dV : cudnnSemanticTensorView(dV, compiled_attention_backward->v_layout, "dV");
+    const bool queryPackedRagged = compiled_attention_backward->use_ragged_offsets && q.getDimensions().size() == 3;
+    const bool kvPackedRagged = compiled_attention_backward->use_ragged_offsets && k.getDimensions().size() == 3;
+    Tensor cudnnQ = queryPackedRagged ? q : cudnnSemanticTensorView(q, compiled_attention_backward->q_layout, "q");
+    Tensor cudnnK = kvPackedRagged ? k : cudnnSemanticTensorView(k, compiled_attention_backward->k_layout, "k");
+    Tensor cudnnV = kvPackedRagged ? v : cudnnSemanticTensorView(v, compiled_attention_backward->v_layout, "v");
+    Tensor cudnnO = queryPackedRagged ? forwardOutput : cudnnSemanticTensorView(forwardOutput, compiled_attention_backward->o_layout, "o");
+    Tensor cudnnDO = queryPackedRagged ? dO : cudnnSemanticTensorView(dO, compiled_attention_backward->o_layout, "dO");
+    Tensor cudnnDQ = queryPackedRagged ? dQ : cudnnSemanticTensorView(dQ, compiled_attention_backward->q_layout, "dQ");
+    Tensor cudnnDK = kvPackedRagged ? dK : cudnnSemanticTensorView(dK, compiled_attention_backward->k_layout, "dK");
+    Tensor cudnnDV = kvPackedRagged ? dV : cudnnSemanticTensorView(dV, compiled_attention_backward->v_layout, "dV");
 
     if (!use_saved_forward) {
-        Tensor cudnnOScratch = packedRagged ? oScratch : cudnnSemanticTensorView(oScratch, compiled_attention_backward->o_layout, "oScratch");
+        Tensor cudnnOScratch = queryPackedRagged ? oScratch : cudnnSemanticTensorView(oScratch, compiled_attention_backward->o_layout, "oScratch");
         CudnnAttentionForwardArgs fwdArgs{.q = cudnnQ, .k = cudnnK, .v = cudnnV, .o = cudnnOScratch, .stats = stats};
         if (compiled_attention_backward->use_bias) {
             if (!bias.has_value()) {
@@ -1225,8 +1258,8 @@ StampedSegmentedReduction::StampedSegmentedReduction(std::shared_ptr<CompiledSeg
         throw std::runtime_error("Segmented-reduction elements-per-value metadata does not match the input tensor shape.");
     }
 
-    cub_segmented_reduction =
-        CubSegmentedReduction(cub_op, output.getDataType()).stamp(input, output, segment_offsets, stream);
+    cub_segmented_reduction = CubSegmentedReduction(cub_op, output.getDataType())
+                                  .stampRuntimeOffsets(input, output, segment_offsets, stream);
     THOR_THROW_IF_FALSE(cub_segmented_reduction->getPath() == CubReductionPath::OffsetSegmented);
 }
 
@@ -1560,17 +1593,94 @@ StampedRmsNorm::StampedRmsNorm(
     if (!compiled_rms_norm) {
         throw std::runtime_error("StampedRmsNorm requires a compiled RMSNorm payload.");
     }
+
+    if (compiled_rms_norm->packed_row_capacity != 0) {
+        const std::vector<uint64_t> input_dims = input.getDimensions();
+        if (input_dims.size() != 2 || input_dims[0] % compiled_rms_norm->packed_row_capacity != 0) {
+            throw std::runtime_error(
+                "Packed-row RMSNorm requires logical [outer, hidden] input whose outer dimension is divisible by packed_row_capacity.");
+        }
+        const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm->packed_row_capacity;
+        if (outer_per_packed_row == 0) {
+            throw std::runtime_error("Packed-row RMSNorm outer samples per packed row must be non-zero.");
+        }
+
+        // Pre-build the same finite row-capacity family used by ragged FC so
+        // runtime active-row changes never force a new cuDNN graph build.
+        for (const uint64_t capacity_rows : makeRaggedMatmulCapacityBuckets(compiled_rms_norm->packed_row_capacity)) {
+            const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
+            Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            Tensor bucket_output = output.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            const CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output);
+            CudnnRmsNorm::instance().warmForward(descriptor, stream.getGpuNum());
+        }
+    }
 }
 
 void StampedRmsNorm::run() { runOn(stream); }
 
 void StampedRmsNorm::runOn(Stream& run_stream) const {
-    const CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(input, scale, output);
+    if (compiled_rms_norm->packed_row_capacity == 0) {
+        const CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(input, scale, output);
+        CudnnRmsNormForwardArgs args;
+        args.x = input;
+        args.scale = scale;
+        args.y = output;
+        CudnnRmsNorm::instance().forward(descriptor, args, run_stream);
+        return;
+    }
+
+    const std::optional<uint64_t> active_rows = input.getRaggedActiveRows();
+    if (!active_rows.has_value()) {
+        throw std::runtime_error("Packed-row RMSNorm requires host-known ragged active-row metadata.");
+    }
+    if (active_rows.value() > compiled_rms_norm->packed_row_capacity) {
+        throw std::runtime_error("Packed-row RMSNorm active row count exceeds packed_row_capacity.");
+    }
+
+    const std::vector<uint64_t> input_dims = input.getDimensions();
+    const uint64_t hidden = input_dims[1];
+    const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm->packed_row_capacity;
+    if (active_rows.value() == 0) {
+        Tensor mutable_output = output;
+        mutable_output.memsetAsync(run_stream, 0);
+        mutable_output.setRaggedActiveRows(0);
+        return;
+    }
+    const std::vector<uint64_t> buckets = makeRaggedMatmulCapacityBuckets(compiled_rms_norm->packed_row_capacity);
+    const uint64_t selected_rows = chooseRaggedMatmulCapacityBucket(active_rows.value(), buckets);
+    const uint64_t selected_outer = selected_rows * outer_per_packed_row;
+    const uint64_t active_outer = active_rows.value() * outer_per_packed_row;
+
+    // Bucket slack and all unused packed capacity are outside the logical ragged
+    // tensor. Canonicalize them before cuDNN so a bucket larger than active_rows
+    // contributes exactly zero, and so RMSNorm autodiff's later dscale reduction
+    // cannot observe poisoned padding.
+    Tensor mutable_input = input;
+    if (active_outer < input_dims[0]) {
+        Tensor input_tail = mutable_input.aliasView({input_dims[0] - active_outer, hidden},
+                                                   {hidden, 1},
+                                                   active_outer * hidden);
+        input_tail.memsetAsync(run_stream, 0);
+    }
+
+    Tensor bucket_input = input.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
+    Tensor bucket_output = output.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
+    const CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output);
     CudnnRmsNormForwardArgs args;
-    args.x = input;
+    args.x = bucket_input;
     args.scale = scale;
-    args.y = output;
+    args.y = bucket_output;
     CudnnRmsNorm::instance().forward(descriptor, args, run_stream);
+
+    Tensor mutable_output = output;
+    if (active_outer < input_dims[0]) {
+        Tensor output_tail = mutable_output.aliasView({input_dims[0] - active_outer, hidden},
+                                                     {hidden, 1},
+                                                     active_outer * hidden);
+        output_tail.memsetAsync(run_stream, 0);
+    }
+    mutable_output.setRaggedActiveRows(active_rows.value());
 }
 
 StampedEmbeddingLookup::StampedEmbeddingLookup(std::shared_ptr<CompiledEmbeddingLookup> compiled,
@@ -1934,6 +2044,60 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
         }
 
         if (compiled_matmul->epilogue == MatmulEpilogue::Default) {
+            if (built_matmul->bucketed_cublas_gemm.has_value()) {
+                std::optional<uint64_t> active_rows;
+                auto consider_active_rows = [&](const Tensor& tensor) {
+                    const std::optional<uint64_t> candidate = tensor.getRaggedActiveRows();
+                    if (!candidate.has_value()) return;
+                    if (candidate.value() > compiled_matmul->packed_row_capacity) {
+                        throw std::runtime_error("Packed-row expression matmul active row count exceeds its full capacity.");
+                    }
+                    if (active_rows.has_value() && active_rows.value() != candidate.value()) {
+                        throw std::runtime_error("Packed-row expression matmul operands disagree on the active row count.");
+                    }
+                    active_rows = candidate.value();
+                };
+                if (compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsA ||
+                    compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB) {
+                    consider_active_rows(lhs);
+                }
+                if (compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsB ||
+                    compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB) {
+                    consider_active_rows(rhs);
+                }
+                // A missing host-side active count is a correctness-safe fallback to the full-capacity
+                // pre-tuned kernel. A zero-row ragged batch likewise executes the full bucket over the
+                // canonical zero tail, avoiding a special zero-sized cuBLASLt geometry.
+                const uint64_t runtime_rows = (!active_rows.has_value() || active_rows.value() == 0)
+                                                  ? compiled_matmul->packed_row_capacity
+                                                  : active_rows.value();
+                const uint64_t selected_rows = built_matmul->bucketed_cublas_gemm->getSelectedCapacityRows(runtime_rows);
+                const float alphaOne = 1.0f;
+                const float betaZero = 0.0f;
+                CHECK_CUBLAS(built_matmul->bucketed_cublas_gemm->launchUncheckedPrevalidated(runtime_rows,
+                                                                                              lhs,
+                                                                                              rhs,
+                                                                                              output,
+                                                                                              output,
+                                                                                              workspace,
+                                                                                              &alphaOne,
+                                                                                              &betaZero,
+                                                                                              run_stream,
+                                                                                              CublasScalarPointerMode::Host));
+                if (output.getDimensions().size() == 2 &&
+                    output.getDimensions()[0] == compiled_matmul->packed_row_capacity) {
+                    if (selected_rows < compiled_matmul->packed_row_capacity) {
+                        const uint64_t row_width = output.getDimensions()[1];
+                        Tensor tail = output.aliasView({compiled_matmul->packed_row_capacity - selected_rows, row_width},
+                                                       {row_width, 1},
+                                                       selected_rows * row_width);
+                        tail.memsetAsync(run_stream, 0);
+                    }
+                    Tensor annotated_output = output;
+                    annotated_output.setRaggedActiveRows(active_rows.value_or(compiled_matmul->packed_row_capacity));
+                }
+                return;
+            }
             if (!built_matmul->cublas_kernel.has_value()) {
                 throw std::runtime_error("Stamped MATMUL runtime missing compile-time cuBLAS kernel artifact.");
             }
@@ -2334,8 +2498,8 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(CubArgReductionOp segme
         throw std::runtime_error(
             "Segmented reduce-min/max backward requires UINT32/UINT64 winner indices shaped like the upstream gradient.");
     }
-    cub_segmented_arg_reduction =
-        CubSegmentedArgReduction(segmented_op, indices.getDataType()).stamp(input, indices, segment_offsets, stream);
+    cub_segmented_arg_reduction = CubSegmentedArgReduction(segmented_op, indices.getDataType())
+                                      .stampRuntimeOffsets(input, indices, segment_offsets, stream);
 }
 
 void StampedReduceMinMaxBackward::run() { runOn(stream); }
@@ -4006,6 +4170,16 @@ static int64_t checkedMatmulInt64(uint64_t value, const char* role) {
     return static_cast<int64_t>(value);
 }
 
+static BucketedCublasGemmRowBinding toBucketedRowBinding(MatmulPackedRowBinding binding) {
+    switch (binding) {
+        case MatmulPackedRowBinding::RowsA: return BucketedCublasGemmRowBinding::RowsA;
+        case MatmulPackedRowBinding::RowsB: return BucketedCublasGemmRowBinding::RowsB;
+        case MatmulPackedRowBinding::RowsAAndRowsB: return BucketedCublasGemmRowBinding::RowsAAndRowsB;
+        case MatmulPackedRowBinding::None: break;
+    }
+    throw std::invalid_argument("Expression packed-row matmul requires a non-empty row binding.");
+}
+
 std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
                                                           const Tensor& lhs,
                                                           const Tensor& rhs,
@@ -4021,6 +4195,10 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     const bool plain_matmul = compiled_matmul->op == ExprOp::MATMUL && compiled_matmul->epilogue == MatmulEpilogue::Default &&
                               compiled_matmul->backward_epilogue == MatmulBackwardEpilogue::Default &&
                               !compiled_matmul->bgrad_output_dtype.has_value();
+    const bool bucketed_packed_rows = compiled_matmul->packed_row_binding != MatmulPackedRowBinding::None;
+    if (bucketed_packed_rows && (!plain_matmul || compiled_matmul->packed_row_capacity == 0)) {
+        throw std::runtime_error("Packed-row bucketed expression matmul currently requires a plain MATMUL with non-zero capacity.");
+    }
     if (plain_matmul) {
         if (lhs.getDimensions().size() < 2 || rhs.getDimensions().size() < 2 || output.getDimensions().size() < 2) {
             throw std::runtime_error("buildMatmul requires rank >= 2 tensors for MATMUL.");
@@ -4117,6 +4295,21 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
         ld_c = addend.has_value() ? (use_bias_epilogue ? ld_d : leadingDimensionForStoredMatrix(addend.value())) : ld_d;
     }
 
+    if (bucketed_packed_rows) {
+        if (batch_config.isBatched()) {
+            throw std::runtime_error("Packed-row bucketed expression matmul does not support strided-batched layouts.");
+        }
+        const int32_t capacity = checkedMatmulInt32(compiled_matmul->packed_row_capacity, "packed row capacity");
+        if ((compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsA ||
+             compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB) && a_rows != capacity) {
+            throw std::runtime_error("Packed-row expression matmul rowsA does not match its declared full capacity.");
+        }
+        if ((compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsB ||
+             compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB) && b_rows != capacity) {
+            throw std::runtime_error("Packed-row expression matmul rowsB does not match its declared full capacity.");
+        }
+    }
+
     const CublasMatrixMultiply::MatmulDataTypes dataTypes{
         lhs.getDescriptor().getDataType(),
         rhs.getDescriptor().getDataType(),
@@ -4178,7 +4371,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                        dataTypes.compute,
                        device_num);
 
-    std::shared_ptr<BuiltMatmul> hit = use_cublaslt_epilogue_wrapper ? nullptr : cacheLookup(key);
+    std::shared_ptr<BuiltMatmul> hit = (use_cublaslt_epilogue_wrapper || bucketed_packed_rows) ? nullptr : cacheLookup(key);
     if (hit) {
         return hit;
     }
@@ -4188,7 +4381,19 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
     const bool print_verbose_matmul_diagnostics = thorMatmulDiagnosticsVerbose();
     const char* diagnostic_path = "unknown";
 
-    if (compiled_matmul->op == ExprOp::MATMUL && !use_cublaslt_epilogue_wrapper) {
+    if (bucketed_packed_rows) {
+        BucketedCublasGemmShape shape{a_rows, a_cols, b_rows, b_cols, ld_a, ld_b, ld_c, ld_d,
+                                      backend_transpose_a, backend_transpose_b, backend_transpose_c};
+        built->bucketed_cublas_gemm = BucketedCublasGemm::build(device_num,
+                                                                 compiled_matmul->packed_row_capacity,
+                                                                 shape,
+                                                                 toBucketedRowBinding(compiled_matmul->packed_row_binding),
+                                                                 dataTypes,
+                                                                 print_verbose_matmul_diagnostics);
+        built->workspace_bytes = built->bucketed_cublas_gemm->getWorkspaceSizeInBytes();
+        kernelWillRunOnGpu = true;
+        diagnostic_path = "packed-row-bucketed-matmul";
+    } else if (compiled_matmul->op == ExprOp::MATMUL && !use_cublaslt_epilogue_wrapper) {
         if (batch_config.isBatched()) {
             if (dataTypes.A == DataType::FP8_E4M3 || dataTypes.A == DataType::FP8_E5M2 || dataTypes.B == DataType::FP8_E4M3 ||
                 dataTypes.B == DataType::FP8_E5M2) {
@@ -4378,7 +4583,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
         }
     }
 
-    if (!use_cublaslt_epilogue_wrapper) {
+    if (!use_cublaslt_epilogue_wrapper && !bucketed_packed_rows) {
         builtMatmulCache.put(key, built);
     }
     return built;

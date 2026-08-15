@@ -45,8 +45,32 @@ std::shared_ptr<Network> deserializePhaseNetwork(const json& networkJson, std::s
             const std::string name = raggedInputJson.at("name").get<std::string>();
             const std::string valuesInputName = raggedInputJson.at("values_input_name").get<std::string>();
             const std::string offsetsInputName = raggedInputJson.at("offsets_input_name").get<std::string>();
-            RaggedTensor raggedTensor = RaggedTensor::deserialize(raggedInputJson.at("ragged_tensor"), archiveReader.get());
-            network->registerRaggedNetworkInput(name, raggedTensor, valuesInputName, offsetsInputName);
+            const uint64_t valuesTensorId = raggedInputJson.at("values_tensor_id").get<uint64_t>();
+            const uint64_t offsetsTensorId = raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
+            Tensor values = network->getApiTensorByOriginalId(valuesTensorId);
+            Tensor offsets = network->getApiTensorByOriginalId(offsetsTensorId);
+            network->registerRaggedNetworkInput(name, RaggedTensor(values, offsets), valuesInputName, offsetsInputName);
+        }
+    }
+
+    if (networkJson.contains("ragged_network_outputs")) {
+        const json& raggedOutputs = networkJson.at("ragged_network_outputs");
+        if (!raggedOutputs.is_array()) {
+            throw std::runtime_error("TrainingPhase network 'ragged_network_outputs' is not a JSON array.");
+        }
+        for (const json& raggedOutputJson : raggedOutputs) {
+            if (raggedOutputJson.at("version").get<std::string>() != "1.0.0") {
+                throw std::runtime_error("Unsupported TrainingPhase network ragged_network_outputs version: " +
+                                         raggedOutputJson.at("version").get<std::string>());
+            }
+            const std::string name = raggedOutputJson.at("name").get<std::string>();
+            const std::string valuesOutputName = raggedOutputJson.at("values_output_name").get<std::string>();
+            const std::string offsetsOutputName = raggedOutputJson.at("offsets_output_name").get<std::string>();
+            const uint64_t valuesTensorId = raggedOutputJson.at("values_tensor_id").get<uint64_t>();
+            const uint64_t offsetsTensorId = raggedOutputJson.at("offsets_tensor_id").get<uint64_t>();
+            Tensor values = network->getApiTensorByOriginalId(valuesTensorId);
+            Tensor offsets = network->getApiTensorByOriginalId(offsetsTensorId);
+            network->registerRaggedNetworkOutput(name, RaggedTensor(values, offsets), valuesOutputName, offsetsOutputName);
         }
     }
 

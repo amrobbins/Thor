@@ -556,11 +556,12 @@ Batch DeviceResidentFileNamedBatchSession::acquireBatch(
                 const Thor::DatasetField &field = datasetDescription.schema.getField(fieldName);
                 const RaggedTensorDescriptor &descriptor =
                     fieldRequirements.at(field.id).raggedTensorDescriptor.value();
-                residentDataset->validateCompactRaggedBatchCapacity(
+                const uint64_t activeRows = residentDataset->validateCompactRaggedBatchCapacity(
                     fieldName,
                     selectionSlot->state->rowIndicesHost,
                     validExampleCount,
                     descriptor.getMaxTotalValues());
+                raggedSlot->raggedTensors.at(fieldName).getValues().setRaggedActiveRows(activeRows);
             }
         }
 

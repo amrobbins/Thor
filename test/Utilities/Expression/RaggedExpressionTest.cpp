@@ -3,6 +3,7 @@
 #include "Utilities/Expression/AutoDiff.h"
 
 #include "Utilities/Expression/EquationCompiler.h"
+#include "Utilities/Expression/CudaSourceEmitter.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
@@ -780,6 +781,128 @@ TEST(RaggedExpression, CastChangesValuesDTypeButPreservesOffsetsMetadataAndExten
     EXPECT_EQ(markedValueNodes(result.getValues()).values.op, ExprOp::CAST);
 }
 
+TEST(RaggedExpression, WithValuesCanChangeTrailingShapeAndRecomputesRuntimeWidth) {
+    const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {8}, 4, 12, DataType::UINT64));
+    const RaggedTensorDescriptor narrowed_descriptor = makeDescriptor(DataType::FP32, {3}, 4, 12, DataType::UINT64);
+
+    const RaggedExpression result = ragged.withValues(Expression::input("narrow.values"), narrowed_descriptor);
+
+    EXPECT_EQ(result.getTrailingDimensions(), std::vector<uint64_t>({3}));
+    EXPECT_TRUE(result.getOffsets().isSameLogicalNode(ragged.getOffsets()));
+    EXPECT_TRUE(result.getRuntimeExtent().activeValueCount.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCount));
+    EXPECT_EQ(result.getRuntimeExtent().maxActiveValues, 12ULL);
+    EXPECT_EQ(result.getRuntimeExtent().elementsPerValue, 3ULL);
+    EXPECT_EQ(result.getRuntimeExtent().maxLaunchElements(), 36ULL);
+    EXPECT_EQ(markedValueNodes(result.getValues()).marker.ragged_runtime_elements_per_value, 3ULL);
+}
+
+TEST(RaggedExpression, TrailingSlicePreservesPartitionAndUsesSourceStrides) {
+    const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {8}, 3, 9));
+
+    const RaggedExpression result = ragged.sliceLastDimension(2, 3);
+
+    EXPECT_EQ(result.getValuesDimensions(), std::vector<uint64_t>({9, 3}));
+    EXPECT_EQ(result.getTrailingDimensions(), std::vector<uint64_t>({3}));
+    EXPECT_TRUE(result.getOffsets().isSameLogicalNode(ragged.getOffsets()));
+    EXPECT_TRUE(result.getRuntimeExtent().activeValueCount.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCount));
+    EXPECT_EQ(result.getRuntimeExtent().elementsPerValue, 3ULL);
+
+    const MarkedValueNodes marked = markedValueNodes(result.getValues());
+    EXPECT_EQ(marked.values.op, ExprOp::STRIDED_VIEW);
+    EXPECT_EQ(marked.values.view_dims, std::vector<uint64_t>({9, 3}));
+    EXPECT_EQ(marked.values.view_strides, std::vector<uint64_t>({8, 1}));
+    EXPECT_EQ(marked.values.view_element_offset, 2ULL);
+    EXPECT_EQ(marked.marker.ragged_runtime_elements_per_value, 3ULL);
+}
+
+TEST(RaggedExpression, TrailingSliceSupportsNonLastTrailingAxis) {
+    const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {4, 6}, 3, 9));
+
+    const RaggedExpression result = ragged.sliceTrailingDimension(0, 1, 2);
+
+    EXPECT_EQ(result.getValuesDimensions(), std::vector<uint64_t>({9, 2, 6}));
+    EXPECT_EQ(result.getTrailingDimensions(), std::vector<uint64_t>({2, 6}));
+    EXPECT_EQ(result.getRuntimeExtent().elementsPerValue, 12ULL);
+
+    const MarkedValueNodes marked = markedValueNodes(result.getValues());
+    EXPECT_EQ(marked.values.op, ExprOp::STRIDED_VIEW);
+    EXPECT_EQ(marked.values.view_dims, std::vector<uint64_t>({9, 2, 6}));
+    EXPECT_EQ(marked.values.view_strides, std::vector<uint64_t>({24, 6, 1}));
+    EXPECT_EQ(marked.values.view_element_offset, 6ULL);
+}
+
+TEST(RaggedExpression, TrailingSliceRejectsInvalidRanges) {
+    const RaggedExpression vector = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {8}, 3, 9));
+    const RaggedExpression scalar = RaggedExpression::input("scalar", makeDescriptor(DataType::FP32, {}, 3, 9));
+
+    EXPECT_THROW((void)vector.sliceTrailingDimension(1, 0, 1), std::invalid_argument);
+    EXPECT_THROW((void)vector.sliceLastDimension(8, 1), std::invalid_argument);
+    EXPECT_THROW((void)vector.sliceLastDimension(7, 2), std::invalid_argument);
+    EXPECT_THROW((void)vector.sliceLastDimension(0, 0), std::invalid_argument);
+    EXPECT_THROW((void)scalar.sliceLastDimension(0, 1), std::invalid_argument);
+}
+
+TEST(RaggedExpression, BinaryCompositionAfterTrailingSlicePreservesNarrowRuntimeExtent) {
+    const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {8}, 3, 9));
+    const RaggedExpression lhs = ragged.sliceLastDimension(0, 4);
+    const RaggedExpression rhs = ragged.sliceLastDimension(4, 4);
+
+    const RaggedExpression result = lhs + rhs;
+
+    EXPECT_EQ(result.getTrailingDimensions(), std::vector<uint64_t>({4}));
+    EXPECT_EQ(result.getRuntimeExtent().elementsPerValue, 4ULL);
+    EXPECT_TRUE(result.getOffsets().isSameLogicalNode(ragged.getOffsets()));
+    EXPECT_EQ(markedValueNodes(result.getValues()).values.op, ExprOp::ADD);
+}
+
+TEST(RaggedExpression, NestedTrailingSlicesCanonicalizeToOriginalStorageStrides) {
+    const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {8}, 3, 9));
+    const RaggedExpression first = ragged.sliceLastDimension(2, 4);
+    const RaggedExpression second = first.sliceLastDimension(1, 2);
+
+    EXPECT_EQ(second.getTrailingDimensions(), std::vector<uint64_t>({2}));
+    EXPECT_EQ(second.getRuntimeExtent().elementsPerValue, 2ULL);
+    const MarkedValueNodes marked = markedValueNodes(second.getValues());
+    EXPECT_EQ(marked.values.op, ExprOp::STRIDED_VIEW);
+    EXPECT_EQ(marked.values.view_dims, std::vector<uint64_t>({9, 2}));
+    EXPECT_EQ(marked.values.view_strides, std::vector<uint64_t>({8, 1}));
+    EXPECT_EQ(marked.values.view_element_offset, 3ULL);
+}
+
+TEST(RaggedExpression, TrailingSliceAutodiffRewrapsScatterWithSourceRowWidth) {
+    const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {6}, 3, 9));
+    const RaggedExpression first_half = ragged.sliceLastDimension(0, 3);
+    const RaggedExpression second_half = ragged.sliceLastDimension(3, 3);
+    const RaggedExpression combined = first_half + second_half;
+
+    const PhysicalOutputs forward = Expression::outputs({{"y", combined.getValues()}}).physicalOutputs();
+    PhysicalOutputs backward = buildBackwardOutputs(forward, {"x.values"});
+    resolveRaggedBackwardTestDTypes(backward, DataType::UINT32);
+
+    bool found_source_width_marker = false;
+    for (const ExprNode& node : backward.expr->nodes) {
+        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT || node.ragged_runtime_elements_per_value != 6ULL) continue;
+        ASSERT_LT(node.lhs, backward.expr->nodes.size());
+        if (backward.expr->nodes.at(node.lhs).op != ExprOp::STRIDED_VIEW_BACKWARD) continue;
+
+        found_source_width_marker = true;
+        EXPECT_EQ(node.ragged_runtime_batch_size, 3ULL);
+        EXPECT_EQ(node.ragged_runtime_max_active_values, 9ULL);
+        ASSERT_NE(node.rhs, UINT32_MAX);
+        ASSERT_LT(node.rhs, backward.expr->nodes.size());
+        const ExprNode& offsets = backward.expr->nodes.at(node.rhs);
+        EXPECT_EQ(offsets.op, ExprOp::INPUT);
+        ASSERT_LT(offsets.input_slot, backward.expr->inputs.size());
+        EXPECT_EQ(backward.expr->inputs.at(offsets.input_slot).name, "x.offsets");
+    }
+    EXPECT_TRUE(found_source_width_marker);
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(backward);
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_trailing_slice_backward");
+    EXPECT_NE(source.find("runtime_numel_u64 = active_values * 6ULL"), std::string::npos);
+}
+
 TEST(RaggedExpression, BinaryOpWithSameOffsetsSucceeds) {
     const RaggedTensorDescriptor descriptor = makeDescriptor();
     const Expression offsets = Expression::input("shared.offsets");
@@ -860,6 +983,35 @@ TEST(RaggedExpression, SegmentReductionsCarryVectorElementsPerValueMetadata) {
     }
     EXPECT_NO_THROW((void)ragged.segment_softmax());
     EXPECT_NO_THROW((void)ragged.segment_log_softmax());
+}
+
+TEST(RaggedExpression, SegmentReductionCanonicalizationSupportsAllOpsAndIncludesRaggedMetadata) {
+    const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {2, 3}, 3, 9));
+
+    for (const Expression& reduction :
+         {ragged.segment_sum(), ragged.segment_min(), ragged.segment_max(), ragged.segment_mean()}) {
+        const std::string canonical = canonicalize(reduction.expression());
+        EXPECT_NE(canonical.find("batch=3"), std::string::npos);
+        EXPECT_NE(canonical.find("maxActive=9"), std::string::npos);
+        EXPECT_NE(canonical.find("elementsPerValue=6"), std::string::npos);
+    }
+
+    const RaggedExpression larger_capacity =
+        RaggedExpression::input("x", makeDescriptor(DataType::FP32, {2, 3}, 3, 12));
+    EXPECT_NE(canonicalize(ragged.segment_sum().expression()), canonicalize(larger_capacity.segment_sum().expression()));
+}
+
+TEST(RaggedExpression, SegmentedMinMaxBackwardCanonicalizationIncludesRaggedMetadata) {
+    const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {2, 3}, 3, 9));
+
+    for (const Expression& reduction : {ragged.segment_min(), ragged.segment_max()}) {
+        const PhysicalOutputs forward = Expression::outputs({{"y", reduction}}).physicalOutputs();
+        const PhysicalOutputs backward = buildBackwardOutputs(forward, {"x.values"});
+        const std::string canonical = canonicalize(backward);
+        EXPECT_NE(canonical.find("batch=3"), std::string::npos);
+        EXPECT_NE(canonical.find("maxActive=9"), std::string::npos);
+        EXPECT_NE(canonical.find("elementsPerValue=6"), std::string::npos);
+    }
 }
 
 TEST(RaggedExpression, SegmentMeanBuildsOneDirectSegmentedReductionForScalarValues) {
@@ -1158,6 +1310,129 @@ TEST(RaggedExpression, ValuewiseAutodiffExecutesOnlyOverActivePackedValues) {
                 777.0F, 777.0F,
                 777.0F, 777.0F,
                 777.0F, 777.0F});
+}
+
+TEST(RaggedExpression, TrailingSlicesComposeAndAutodiffOnlyAcrossActivePackedRows) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 5;
+    constexpr uint64_t source_width = 6;
+    constexpr uint64_t half_width = 3;
+    const RaggedExpression ragged =
+        RaggedExpression::input("x", makeDescriptor(DataType::FP32, {source_width}, batch_size, max_total_values));
+    const RaggedExpression first_half = ragged.sliceLastDimension(0, half_width);
+    const RaggedExpression second_half = ragged.sliceLastDimension(half_width, half_width);
+    const RaggedExpression combined = first_half + second_half;
+
+    Tensor values = makeGpuTensor<float>({max_total_values, source_width},
+                                         {1.0F, 2.0F, 3.0F, 10.0F, 20.0F, 30.0F,
+                                          4.0F, 5.0F, 6.0F, 40.0F, 50.0F, 60.0F,
+                                          7.0F, 8.0F, 9.0F, 70.0F, 80.0F, 90.0F,
+                                          1001.0F, 1002.0F, 1003.0F, 1010.0F, 1020.0F, 1030.0F,
+                                          2001.0F, 2002.0F, 2003.0F, 2010.0F, 2020.0F, 2030.0F},
+                                         stream);
+    Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 1U, 1U, 3U}, stream);
+
+    Tensor forward_output(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, half_width}));
+    forward_output.fill(777.0, stream);
+    const Tensor forward_result = runExpressionOutput(
+        combined.getValues(), {{"x.values", values}, {"x.offsets", offsets}}, "y", stream, forward_output);
+    expectNear(copyToCpuValues(forward_result, stream),
+               {11.0F, 22.0F, 33.0F,
+                44.0F, 55.0F, 66.0F,
+                77.0F, 88.0F, 99.0F,
+                777.0F, 777.0F, 777.0F,
+                777.0F, 777.0F, 777.0F});
+
+    Tensor upstream = makeGpuTensor<float>({max_total_values, half_width},
+                                           {1.0F, 2.0F, 3.0F,
+                                            4.0F, 5.0F, 6.0F,
+                                            7.0F, 8.0F, 9.0F,
+                                            100.0F, 200.0F, 300.0F,
+                                            400.0F, 500.0F, 600.0F},
+                                           stream);
+    Tensor gradient(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, source_width}));
+    gradient.fill(777.0, stream);
+
+    const Tensor backward_result = runBackwardOutput(combined.getValues(),
+                                                     {{"x.values", values}, {"x.offsets", offsets}, {"dy", upstream}},
+                                                     "x.values",
+                                                     "dy",
+                                                     stream,
+                                                     gradient);
+    expectNear(copyToCpuValues(backward_result, stream),
+               {1.0F, 2.0F, 3.0F, 1.0F, 2.0F, 3.0F,
+                4.0F, 5.0F, 6.0F, 4.0F, 5.0F, 6.0F,
+                7.0F, 8.0F, 9.0F, 7.0F, 8.0F, 9.0F,
+                777.0F, 777.0F, 777.0F, 777.0F, 777.0F, 777.0F,
+                777.0F, 777.0F, 777.0F, 777.0F, 777.0F, 777.0F});
+}
+
+TEST(RaggedExpression, NestedTrailingSlicesExecuteAndAutodiffThroughComposedViews) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 4;
+    constexpr uint64_t source_width = 8;
+    const RaggedExpression ragged =
+        RaggedExpression::input("x", makeDescriptor(DataType::FP32, {source_width}, batch_size, max_total_values));
+    const RaggedExpression nested = ragged.sliceLastDimension(2, 4).sliceLastDimension(1, 2);
+
+    // Consecutive ragged slices must collapse to one storage view.  The first slice
+    // selects columns [2, 6) with row stride 8; the second selects [1, 3) within
+    // that view, so the canonical storage view is columns [3, 5) with the original
+    // row stride preserved.
+    const PhysicalExpression nested_physical = nested.getValues().expression();
+    const ExprNode& extent_node = nested_physical.nodes.at(nested_physical.output_node);
+    ASSERT_EQ(extent_node.op, ExprOp::RAGGED_VALUEWISE_EXTENT);
+    const ExprNode& nested_view = nested_physical.nodes.at(extent_node.lhs);
+    ASSERT_EQ(nested_view.op, ExprOp::STRIDED_VIEW);
+    EXPECT_EQ(nested_view.view_dims, (std::vector<uint64_t>{max_total_values, 2}));
+    EXPECT_EQ(nested_view.view_strides, (std::vector<uint64_t>{source_width, 1}));
+    EXPECT_EQ(nested_view.view_element_offset, 3U);
+    ASSERT_LT(nested_view.lhs, nested_physical.nodes.size());
+    EXPECT_NE(nested_physical.nodes.at(nested_view.lhs).op, ExprOp::STRIDED_VIEW);
+
+    Tensor values = makeGpuTensor<float>({max_total_values, source_width},
+                                         {1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F, 7.0F, 8.0F,
+                                          11.0F, 12.0F, 13.0F, 14.0F, 15.0F, 16.0F, 17.0F, 18.0F,
+                                          101.0F, 102.0F, 103.0F, 104.0F, 105.0F, 106.0F, 107.0F, 108.0F,
+                                          201.0F, 202.0F, 203.0F, 204.0F, 205.0F, 206.0F, 207.0F, 208.0F},
+                                         stream);
+    Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 1U, 2U}, stream);
+
+    Tensor forward_output(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, 2}));
+    forward_output.fill(777.0, stream);
+    const Tensor forward_result =
+        runExpressionOutput(nested.getValues(), {{"x.values", values}, {"x.offsets", offsets}}, "y", stream, forward_output);
+    expectNear(copyToCpuValues(forward_result, stream),
+               {4.0F, 5.0F,
+                14.0F, 15.0F,
+                777.0F, 777.0F,
+                777.0F, 777.0F});
+
+    Tensor upstream = makeGpuTensor<float>({max_total_values, 2},
+                                           {2.0F, 3.0F,
+                                            5.0F, 7.0F,
+                                            100.0F, 200.0F,
+                                            300.0F, 400.0F},
+                                           stream);
+    Tensor gradient(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, source_width}));
+    gradient.fill(777.0, stream);
+    const Tensor backward_result = runBackwardOutput(nested.getValues(),
+                                                     {{"x.values", values}, {"x.offsets", offsets}, {"dy", upstream}},
+                                                     "x.values",
+                                                     "dy",
+                                                     stream,
+                                                     gradient);
+    expectNear(copyToCpuValues(backward_result, stream),
+               {0.0F, 0.0F, 0.0F, 2.0F, 3.0F, 0.0F, 0.0F, 0.0F,
+                0.0F, 0.0F, 0.0F, 5.0F, 7.0F, 0.0F, 0.0F, 0.0F,
+                777.0F, 777.0F, 777.0F, 777.0F, 777.0F, 777.0F, 777.0F, 777.0F,
+                777.0F, 777.0F, 777.0F, 777.0F, 777.0F, 777.0F, 777.0F, 777.0F});
 }
 
 TEST(RaggedExpression, SegmentSoftmaxAutodiffMatchesFiniteDifferencesForBothOffsetDTypes) {
@@ -1724,4 +1999,82 @@ TEST(RaggedExpression, VectorSegmentOperationsSupportMultipleTrailingDimensionsA
     for (size_t i = 20; i < 24; ++i) {
         EXPECT_FLOAT_EQ(log_softmax_values[i], -555.0F);
     }
+}
+
+TEST(RaggedExpression, MapValuesWrapsWholePointwiseTailInOneRaggedExtent) {
+    RaggedExpression input = RaggedExpression::input("tokens", makeDescriptor(DataType::FP32, {3}, 2, 8));
+    RaggedExpression mapped = input.mapValues([](const Expression& values) {
+        return (values.swish() + Expression(0.25)).tanh();
+    });
+
+    const PhysicalExpression physical = mapped.getValues().expression();
+    const ExprNode& marker = physical.nodes.at(physical.output_node);
+    ASSERT_EQ(marker.op, ExprOp::RAGGED_VALUEWISE_EXTENT);
+    ASSERT_EQ(marker.ragged_runtime_max_active_values, 8ULL);
+    ASSERT_EQ(marker.ragged_runtime_elements_per_value, 3ULL);
+    EXPECT_EQ(mapped.getOffsets().getInputNames(), (std::set<std::string>{"tokens.offsets"}));
+    EXPECT_EQ(mapped.getDifferentiableInputNames(), (std::set<std::string>{"tokens.values"}));
+
+    const PhysicalOutputs outputs = Expression::outputs({{"y", mapped.getValues()}}).physicalOutputs();
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(outputs);
+    ASSERT_EQ(stages.size(), 1U);
+    EXPECT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+}
+
+TEST(RaggedExpression, MapValuesExecutesAndAutodiffsOnlyAcrossActivePackedRows) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t max_total_values = 6;
+    const RaggedExpression input =
+        RaggedExpression::input("x", makeDescriptor(DataType::FP32, {2}, 3, max_total_values));
+    const RaggedExpression mapped = input.mapValues([](const Expression& values) {
+        return values.max(Expression(0.0)) + Expression(0.5);
+    });
+
+    Tensor values = makeGpuTensor<float>({max_total_values, 2},
+                                         {-2.0F, 1.0F,
+                                          3.0F, -4.0F,
+                                          5.0F, 6.0F,
+                                          101.0F, 102.0F,
+                                          103.0F, 104.0F,
+                                          105.0F, 106.0F},
+                                         stream);
+    Tensor offsets = makeGpuTensor<uint32_t>({4}, {0U, 1U, 1U, 3U}, stream);
+
+    Tensor forward_output(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, 2}));
+    forward_output.fill(777.0, stream);
+    const Tensor forward_result = runExpressionOutput(
+        mapped.getValues(), {{"x.values", values}, {"x.offsets", offsets}}, "y", stream, forward_output);
+    expectNear(copyToCpuValues(forward_result, stream),
+               {0.5F, 1.5F,
+                3.5F, 0.5F,
+                5.5F, 6.5F,
+                777.0F, 777.0F,
+                777.0F, 777.0F,
+                777.0F, 777.0F});
+
+    Tensor upstream = makeGpuTensor<float>({max_total_values, 2},
+                                           {1.0F, 2.0F,
+                                            3.0F, 4.0F,
+                                            5.0F, 6.0F,
+                                            100.0F, 200.0F,
+                                            300.0F, 400.0F,
+                                            500.0F, 600.0F},
+                                           stream);
+    Tensor gradient(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, 2}));
+    gradient.fill(777.0, stream);
+    const Tensor backward_result = runBackwardOutput(mapped.getValues(),
+                                                     {{"x.values", values}, {"x.offsets", offsets}, {"dy", upstream}},
+                                                     "x.values",
+                                                     "dy",
+                                                     stream,
+                                                     gradient);
+    expectNear(copyToCpuValues(backward_result, stream),
+               {0.0F, 2.0F,
+                3.0F, 0.0F,
+                5.0F, 6.0F,
+                777.0F, 777.0F,
+                777.0F, 777.0F,
+                777.0F, 777.0F});
 }

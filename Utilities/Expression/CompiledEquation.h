@@ -427,6 +427,8 @@ struct CompiledMatmul {
     const MatmulEpilogue epilogue;
     const MatmulBackwardEpilogue backward_epilogue;
     const uint32_t epilogue_aux_input_slot;
+    const MatmulPackedRowBinding packed_row_binding;
+    const uint64_t packed_row_capacity;
     const std::optional<DataType> epilogue_aux_dtype;
     const std::optional<DataType> bgrad_output_dtype;
 
@@ -449,6 +451,8 @@ struct CompiledMatmul {
                    MatmulEpilogue epilogue = MatmulEpilogue::Default,
                    MatmulBackwardEpilogue backward_epilogue = MatmulBackwardEpilogue::Default,
                    uint32_t epilogue_aux_input_slot = UINT32_MAX,
+                   MatmulPackedRowBinding packed_row_binding = MatmulPackedRowBinding::None,
+                   uint64_t packed_row_capacity = 0,
                    std::optional<DataType> epilogue_aux_dtype = std::nullopt,
                    std::optional<DataType> bgrad_output_dtype = std::nullopt)
         : op(op),
@@ -468,6 +472,8 @@ struct CompiledMatmul {
           epilogue(epilogue),
           backward_epilogue(backward_epilogue),
           epilogue_aux_input_slot(epilogue_aux_input_slot),
+          packed_row_binding(packed_row_binding),
+          packed_row_capacity(packed_row_capacity),
           epilogue_aux_dtype(epilogue_aux_dtype),
           bgrad_output_dtype(bgrad_output_dtype) {}
 };

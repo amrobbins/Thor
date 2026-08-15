@@ -55,8 +55,8 @@ class Gelu : public Activation {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        // feature out and error out
-        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
+        (void)tensorPlacement;
+        return getExpressionBackedActivationMemRequirementInBytes(batchSize);
     }
 };
 
@@ -65,14 +65,11 @@ class Gelu::Builder : public Activation::Builder {
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<Gelu> gelu = std::make_shared<Gelu>();
         if (_featureInput.has_value()) {
-            // Standalone layer support.
             THOR_THROW_IF_FALSE(_network.has_value());
-            gelu->featureInput = _featureInput;
-            gelu->featureOutput = _featureInput.value().clone();
+            applyStandaloneConfiguration(*gelu);
             gelu->initialized = true;
             gelu->addToNetwork(_network.value());
         } else {
-            // Template activation support
             gelu->initialized = true;
         }
 
@@ -85,6 +82,11 @@ class Gelu::Builder : public Activation::Builder {
     }
 
     Gelu::Builder &featureInput(Tensor _featureInput) override {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
+    Gelu::Builder &featureInput(RaggedTensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

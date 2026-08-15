@@ -2582,6 +2582,22 @@ TEST(ExpressionAutoDiffShapeSpecialization, RuntimeScalarsDoNotRequireTensorDime
     EXPECT_NO_THROW((void)buildBackwardOutputs(forward, {"x"}, std::nullopt, forwardInputDims));
 }
 
+TEST(ExpressionCastAutoDiff, SameDtypeCastPropagatesIncomingGradientNumerically) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    const std::vector<float> values = {-2.0f, -0.5f, 0.0f, 1.25f, 3.5f};
+    const std::vector<float> upstream = {1.0f, -2.0f, 0.25f, 4.0f, -0.75f};
+    expectUnaryBackwardValues(
+        "cast_fp32_to_fp32",
+        values,
+        upstream,
+        [](const Expression& x) { return x.cast(DataType::FP32); },
+        upstream,
+        1.0e-6f,
+        stream);
+}
+
 TEST(ExpressionGammaFunctionOps, GammaFunctionOpsStayInSingleFusedStage) {
     auto x = Expression::input("x");
     auto y = x.tgamma() + x.lgamma() + x.digamma();

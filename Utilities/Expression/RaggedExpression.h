@@ -4,6 +4,7 @@
 #include "Utilities/Expression/Expression.h"
 
 #include <cstdint>
+#include <functional>
 #include <set>
 #include <string>
 #include <vector>
@@ -48,6 +49,13 @@ class RaggedExpression {
     [[nodiscard]] std::set<std::string> getDifferentiableInputNames() const;
 
     [[nodiscard]] RaggedExpression withValues(Expression new_values, RaggedTensorDescriptor new_descriptor) const;
+    // Apply an arbitrary shape-preserving value expression while keeping the row partition
+    // structural. The mapper receives the unwrapped packed values graph; the returned
+    // RaggedExpression re-applies the device-side runtime-extent marker around the whole
+    // mapped expression so downstream Expression fusion remains available.
+    [[nodiscard]] RaggedExpression mapValues(const std::function<Expression(const Expression&)>& mapper) const;
+    [[nodiscard]] RaggedExpression sliceTrailingDimension(uint64_t trailing_axis, uint64_t start, uint64_t length) const;
+    [[nodiscard]] RaggedExpression sliceLastDimension(uint64_t start, uint64_t length) const;
     [[nodiscard]] RaggedExpression cast(DataType output_dtype) const;
 
     [[nodiscard]] RaggedExpression operator+(const RaggedExpression& other) const;

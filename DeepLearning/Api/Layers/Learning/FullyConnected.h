@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Parameter/ParameterConstraint.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "Utilities/Common/Stream.h"
@@ -107,6 +108,15 @@ class FullyConnected : public TrainableLayer {
     DataType getWeightsDataType() const { return weightsDataType; }
     DataType getComputeDataType() const { return computeDataType; }
     DataType getOutputDataType() const { return outputDataType; }
+    bool getUseRagged() const { return !raggedFeatureInputs.empty(); }
+    std::optional<RaggedTensor> getRaggedFeatureInput(uint32_t index = 0) const {
+        if (index >= raggedFeatureInputs.size()) return std::nullopt;
+        return raggedFeatureInputs[index];
+    }
+    std::optional<RaggedTensor> getRaggedFeatureOutput(uint32_t index = 0) const {
+        if (index >= raggedFeatureOutputs.size()) return std::nullopt;
+        return raggedFeatureOutputs[index];
+    }
 
    protected:
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -126,6 +136,8 @@ class FullyConnected : public TrainableLayer {
     DataType weightsDataType;
     DataType computeDataType;
     DataType outputDataType;
+    std::vector<RaggedTensor> raggedFeatureInputs;
+    std::vector<RaggedTensor> raggedFeatureOutputs;
 
     const std::optional<ThorImplementation::Expression> epilogue;
     std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
@@ -170,10 +182,27 @@ class FullyConnected::Builder {
 
     virtual FullyConnected::Builder &featureInput(Tensor _featureInput) {
         THOR_THROW_IF_FALSE(!_featureInput.getDimensions().empty());
+        THOR_THROW_IF_FALSE(_raggedFeatureInputs.empty());
         this->_featureInputs.push_back(_featureInput);
         if (_featureInputs.size() > 1) {
             THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
             THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+        }
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &featureInput(RaggedTensor _featureInput) {
+        THOR_THROW_IF_FALSE(_featureInput.isInitialized());
+        THOR_THROW_IF_FALSE(_featureInputs.empty() || !_raggedFeatureInputs.empty());
+        Tensor values = _featureInput.getValues();
+        THOR_THROW_IF_FALSE(values.getDimensions().size() == 2);
+        this->_raggedFeatureInputs.push_back(_featureInput);
+        this->_featureInputs.push_back(values);
+        if (_featureInputs.size() > 1) {
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getBatchSize() == _raggedFeatureInputs.front().getBatchSize());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getOffsetsDataType() == _raggedFeatureInputs.front().getOffsetsDataType());
         }
         return *this;
     }
@@ -330,6 +359,7 @@ class FullyConnected::Builder {
 
     std::optional<Network *> _network;
     std::vector<Tensor> _featureInputs;
+    std::vector<RaggedTensor> _raggedFeatureInputs;
     std::optional<uint32_t> _numOutputFeatures;
     std::optional<bool> _hasBias;
     std::optional<bool> _preserveInputPrefixDimensions;

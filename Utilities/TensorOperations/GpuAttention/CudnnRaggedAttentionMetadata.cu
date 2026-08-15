@@ -13,6 +13,26 @@
 namespace ThorImplementation {
 namespace {
 
+__global__ void uniformCudnnAttentionMetadataKernel(int32_t* sequenceLengths,
+                                                       int32_t* firstElementOffsets,
+                                                       int32_t* secondElementOffsets,
+                                                       uint64_t batchSize,
+                                                       uint64_t sequenceLength,
+                                                       uint64_t firstElementsPerToken,
+                                                       uint64_t secondElementsPerToken) {
+    const uint64_t i = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i > batchSize) {
+        return;
+    }
+
+    const uint64_t tokenOffset = i * sequenceLength;
+    firstElementOffsets[i] = static_cast<int32_t>(tokenOffset * firstElementsPerToken);
+    secondElementOffsets[i] = static_cast<int32_t>(tokenOffset * secondElementsPerToken);
+    if (i < batchSize) {
+        sequenceLengths[i] = static_cast<int32_t>(sequenceLength);
+    }
+}
+
 template <typename OffsetT>
 __global__ void canonicalRowPartitionToCudnnAttentionKernel(const OffsetT* offsets,
                                                             int32_t* sequenceLengths,
@@ -119,6 +139,50 @@ void convertCanonicalRowPartitionForCudnnAttention(const Tensor& canonicalOffset
     const cudaError_t launchStatus = cudaGetLastError();
     if (launchStatus != cudaSuccess) {
         throw std::runtime_error(std::string("Failed to launch cuDNN ragged attention metadata conversion: ") +
+                                 cudaGetErrorString(launchStatus));
+    }
+}
+
+void buildUniformCudnnAttentionMetadata(uint64_t batchSize,
+                                        uint64_t sequenceLength,
+                                        uint64_t firstElementsPerToken,
+                                        uint64_t secondElementsPerToken,
+                                        Tensor sequenceLengths,
+                                        Tensor firstElementOffsets,
+                                        Tensor secondElementOffsets,
+                                        Stream stream) {
+    if (batchSize == 0 || batchSize > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::invalid_argument("cuDNN uniform attention batch size must fit INT32 and be non-zero.");
+    }
+    if (sequenceLength == 0 || sequenceLength > static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) {
+        throw std::invalid_argument("cuDNN uniform attention sequence length must fit INT32 and be non-zero.");
+    }
+    if (batchSize > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) / sequenceLength) {
+        throw std::invalid_argument("cuDNN uniform attention total token count must fit INT32.");
+    }
+    const uint64_t totalTokens = batchSize * sequenceLength;
+    requireElementCapacityFitsInt32(totalTokens, firstElementsPerToken, "First cuDNN uniform ragged offset");
+    requireElementCapacityFitsInt32(totalTokens, secondElementsPerToken, "Second cuDNN uniform ragged offset");
+
+    const int gpuNum = stream.getGpuNum();
+    requireInt32Tensor(sequenceLengths, {batchSize}, "sequence_lengths", gpuNum);
+    requireInt32Tensor(firstElementOffsets, {batchSize + 1}, "first_element_offsets", gpuNum);
+    requireInt32Tensor(secondElementOffsets, {batchSize + 1}, "second_element_offsets", gpuNum);
+
+    ScopedGpu scopedGpu(gpuNum);
+    constexpr uint32_t threads = 256;
+    const uint32_t blocks = static_cast<uint32_t>((batchSize + 1 + threads - 1) / threads);
+    uniformCudnnAttentionMetadataKernel<<<blocks, threads, 0, stream.getStream()>>>(
+        sequenceLengths.getMemPtr<int32_t>(),
+        firstElementOffsets.getMemPtr<int32_t>(),
+        secondElementOffsets.getMemPtr<int32_t>(),
+        batchSize,
+        sequenceLength,
+        firstElementsPerToken,
+        secondElementsPerToken);
+    const cudaError_t launchStatus = cudaGetLastError();
+    if (launchStatus != cudaSuccess) {
+        throw std::runtime_error(std::string("Failed to launch uniform cuDNN attention metadata conversion: ") +
                                  cudaGetErrorString(launchStatus));
     }
 }

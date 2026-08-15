@@ -705,3 +705,86 @@ def test_attention_exposes_transient_training_dropout_control():
     architecture = _only_layer_architecture(n, "attention")
     assert architecture["dropout_probability"] == pytest.approx(0.25)
     assert "training_dropout_enabled" not in architecture
+
+
+def test_attention_dense_query_ragged_kv_infers_mixed_mode_and_key_rope_origins():
+    n = _net("test_attention_dense_query_ragged_kv")
+    query = _input_tensor(n, "query", [5, 32], thor.DataType.fp16)
+    context = thor.layers.RaggedNetworkInput(
+        n,
+        "context",
+        thor.DataType.fp16,
+        [32],
+        max_total_values=11,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint64,
+    )
+    key_origins = _input_tensor(n, "key_origins", [1], thor.DataType.int32)
+
+    attention = thor.layers.Attention(
+        n,
+        query,
+        4,
+        head_dim=8,
+        context_input=context,
+        use_rope=True,
+        rope_rotary_dim=8,
+        rope_query_position_offset=371,
+        rope_key_position_offsets=key_origins,
+    )
+
+    assert isinstance(attention.get_feature_output(), thor.Tensor)
+    assert not isinstance(attention.get_feature_output(), thor.RaggedTensor)
+    assert attention.get_feature_output().get_dimensions() == [5, 32]
+    assert attention.get_context_input() == context
+    assert attention.get_rope_key_position_offsets_input() == key_origins
+
+    arch = _only_layer_architecture(n, "attention")
+    assert arch["use_ragged"] is True
+    assert arch["query_ragged"] is False
+    assert arch["key_value_ragged"] is True
+    assert "ragged_feature_input" not in arch
+    assert "ragged_feature_output" not in arch
+    assert "ragged_context_input" in arch
+    assert arch["rope_query_position_offset"] == 371
+
+
+def test_attention_ragged_query_dense_kv_infers_mixed_mode():
+    n = _net("test_attention_ragged_query_dense_kv")
+    query = thor.layers.RaggedNetworkInput(
+        n,
+        "query",
+        thor.DataType.fp16,
+        [32],
+        max_total_values=9,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    context = _input_tensor(n, "context", [7, 32], thor.DataType.fp16)
+    query_origins = _input_tensor(n, "query_origins", [1], thor.DataType.int32)
+
+    attention = thor.layers.Attention(
+        n,
+        query,
+        4,
+        head_dim=8,
+        context_input=context,
+        use_rope=True,
+        rope_rotary_dim=8,
+        rope_query_position_offsets=query_origins,
+        rope_key_position_offset=40,
+    )
+
+    output = attention.get_feature_output()
+    assert isinstance(output, thor.RaggedTensor)
+    assert output.offsets == query.offsets
+    assert output.values.get_dimensions() == [9, 32]
+
+    arch = _only_layer_architecture(n, "attention")
+    assert arch["use_ragged"] is True
+    assert arch["query_ragged"] is True
+    assert arch["key_value_ragged"] is False
+    assert "ragged_feature_input" in arch
+    assert "ragged_feature_output" in arch
+    assert "ragged_context_input" not in arch
+    assert arch["rope_key_position_offset"] == 40

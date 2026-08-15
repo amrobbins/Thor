@@ -430,51 +430,92 @@ void prepareCanonicalRaggedMetadata(const CudnnAttentionDescriptor& descriptor,
                                     const optional<Tensor>& kvRowPartitionOffsets,
                                     const optional<CudnnRaggedAttentionScratch>& scratch,
                                     Stream stream) {
-    const bool anyRagged = descriptor.q.ragged || descriptor.k.ragged || descriptor.v.ragged || descriptor.o.ragged;
-    if (!anyRagged) {
+    const bool queryRagged = descriptor.q.ragged || descriptor.o.ragged;
+    const bool kvRagged = descriptor.k.ragged || descriptor.v.ragged;
+    if (!queryRagged && !kvRagged) {
         return;
     }
-    if (!qRowPartitionOffsets.has_value() || !kvRowPartitionOffsets.has_value() || !scratch.has_value()) {
-        throw invalid_argument(
-            "Ragged cuDNN attention requires canonical q/kv row partitions and preallocated backend metadata scratch.");
+    if (!scratch.has_value()) {
+        throw invalid_argument("Ragged cuDNN attention requires preallocated backend metadata scratch.");
     }
 
     const uint64_t batch = static_cast<uint64_t>(descriptor.batchSize());
-    const auto qDims = qTensor.getDimensions();
-    const auto kDims = kTensor.getDimensions();
-    const uint64_t qCapacity =
-        qDims.size() == 3 ? qDims.at(0)
-                          : checkedAttentionProduct(descriptor.batchSize(), descriptor.queryLength(), "Ragged Q/O token");
-    const uint64_t kvCapacity =
-        kDims.size() == 3 ? kDims.at(0)
-                          : checkedAttentionProduct(descriptor.batchSize(), descriptor.keyValueLength(), "Ragged K/V token");
-    const uint64_t qElementsPerToken =
-        checkedAttentionProduct(descriptor.queryHeads(), descriptor.qkHeadDim(), "Ragged Q element");
-    const uint64_t oElementsPerToken =
-        checkedAttentionProduct(descriptor.queryHeads(), descriptor.vHeadDim(), "Ragged O element");
-    const uint64_t kElementsPerToken =
-        checkedAttentionProduct(descriptor.keyValueHeads(), descriptor.qkHeadDim(), "Ragged K element");
-    const uint64_t vElementsPerToken =
-        checkedAttentionProduct(descriptor.keyValueHeads(), descriptor.vHeadDim(), "Ragged V element");
+    if (queryRagged) {
+        if (!qRowPartitionOffsets.has_value()) {
+            throw invalid_argument("Ragged cuDNN attention Q/O requires a canonical query row partition.");
+        }
+        const auto qDims = qTensor.getDimensions();
+        const uint64_t qCapacity =
+            qDims.size() == 3 ? qDims.at(0)
+                              : checkedAttentionProduct(descriptor.batchSize(), descriptor.queryLength(), "Ragged Q/O token");
+        const uint64_t qElementsPerToken =
+            checkedAttentionProduct(descriptor.queryHeads(), descriptor.qkHeadDim(), "Ragged Q element");
+        const uint64_t oElementsPerToken =
+            checkedAttentionProduct(descriptor.queryHeads(), descriptor.vHeadDim(), "Ragged O element");
+        convertCanonicalRowPartitionForCudnnAttention(qRowPartitionOffsets.value(),
+                                                      batch,
+                                                      qCapacity,
+                                                      qElementsPerToken,
+                                                      oElementsPerToken,
+                                                      scratch->seqLenQ,
+                                                      scratch->qElementOffsets,
+                                                      scratch->oElementOffsets,
+                                                      stream);
+    } else {
+        // Dense BSHD queries are already physically token-contiguous.  Build the
+        // uniform sequence lengths plus synthetic Q/O element offsets up front.
+        // Forward needs only seqLenQ, while mixed backward binds the synthetic
+        // offsets so cuDNN executes through its established all-ragged THD path
+        // without copying the dense Q/O payloads.
+        const uint64_t qElementsPerToken =
+            checkedAttentionProduct(descriptor.queryHeads(), descriptor.qkHeadDim(), "Dense Q element");
+        const uint64_t oElementsPerToken =
+            checkedAttentionProduct(descriptor.queryHeads(), descriptor.vHeadDim(), "Dense O element");
+        buildUniformCudnnAttentionMetadata(batch,
+                                           static_cast<uint64_t>(descriptor.queryLength()),
+                                           qElementsPerToken,
+                                           oElementsPerToken,
+                                           scratch->seqLenQ,
+                                           scratch->qElementOffsets,
+                                           scratch->oElementOffsets,
+                                           stream);
+    }
 
-    convertCanonicalRowPartitionForCudnnAttention(qRowPartitionOffsets.value(),
-                                                  batch,
-                                                  qCapacity,
-                                                  qElementsPerToken,
-                                                  oElementsPerToken,
-                                                  scratch->seqLenQ,
-                                                  scratch->qElementOffsets,
-                                                  scratch->oElementOffsets,
-                                                  stream);
-    convertCanonicalRowPartitionForCudnnAttention(kvRowPartitionOffsets.value(),
-                                                  batch,
-                                                  kvCapacity,
-                                                  kElementsPerToken,
-                                                  vElementsPerToken,
-                                                  scratch->seqLenKv,
-                                                  scratch->kElementOffsets,
-                                                  scratch->vElementOffsets,
-                                                  stream);
+    const uint64_t kElementsPerToken =
+        checkedAttentionProduct(descriptor.keyValueHeads(), descriptor.qkHeadDim(), kvRagged ? "Ragged K element" : "Dense K element");
+    const uint64_t vElementsPerToken =
+        checkedAttentionProduct(descriptor.keyValueHeads(), descriptor.vHeadDim(), kvRagged ? "Ragged V element" : "Dense V element");
+    if (kvRagged) {
+        if (!kvRowPartitionOffsets.has_value()) {
+            throw invalid_argument("Ragged cuDNN attention K/V requires a canonical key/value row partition.");
+        }
+        const auto kDims = kTensor.getDimensions();
+        const uint64_t kvCapacity =
+            kDims.size() == 3 ? kDims.at(0)
+                              : checkedAttentionProduct(descriptor.batchSize(), descriptor.keyValueLength(), "Ragged K/V token");
+        convertCanonicalRowPartitionForCudnnAttention(kvRowPartitionOffsets.value(),
+                                                      batch,
+                                                      kvCapacity,
+                                                      kElementsPerToken,
+                                                      vElementsPerToken,
+                                                      scratch->seqLenKv,
+                                                      scratch->kElementOffsets,
+                                                      scratch->vElementOffsets,
+                                                      stream);
+    } else {
+        // Dense BSHD K/V are also token-contiguous.  The uniform sequence
+        // lengths are consumed by mixed forward; mixed backward additionally
+        // binds the synthetic element offsets so cuDNN can use one all-ragged
+        // THD backend representation without copying the dense payloads.
+        buildUniformCudnnAttentionMetadata(batch,
+                                           static_cast<uint64_t>(descriptor.keyValueLength()),
+                                           kElementsPerToken,
+                                           vElementsPerToken,
+                                           scratch->seqLenKv,
+                                           scratch->kElementOffsets,
+                                           scratch->vElementOffsets,
+                                           stream);
+    }
 }
 
 void requireDropoutScalarMatchesDescriptor(const Tensor& scalar, string_view name) {
@@ -653,7 +694,7 @@ class AttentionGraphCache {
                                                                    const AttentionTensorSpec& spec,
                                                                    shared_ptr<fe::graph::Tensor_attributes> raggedOffsetTensor) {
         auto attr = ioTensor(graph, name, uid, spec.dimensions, spec.strides);
-        if (spec.ragged)
+        if (raggedOffsetTensor != nullptr)
             attr->set_ragged_offset(raggedOffsetTensor);
         return attr;
     }
@@ -909,10 +950,19 @@ class AttentionGraphCache {
             .set_intermediate_data_type(toFrontendDataType(descriptor.intermediateDataType))
             .set_compute_data_type(toFrontendDataType(descriptor.computeDataType));
 
-        auto qRagged = descriptor.q.ragged ? raggedOffset(built.graph, "ragged_offset_q", UID_RAGGED_Q, descriptor.batchSize()) : nullptr;
-        auto kRagged = descriptor.k.ragged ? raggedOffset(built.graph, "ragged_offset_k", UID_RAGGED_K, descriptor.batchSize()) : nullptr;
-        auto vRagged = descriptor.v.ragged ? raggedOffset(built.graph, "ragged_offset_v", UID_RAGGED_V, descriptor.batchSize()) : nullptr;
-        auto oRagged = descriptor.o.ragged ? raggedOffset(built.graph, "ragged_offset_o", UID_RAGGED_O, descriptor.batchSize()) : nullptr;
+        // cuDNN 9.24's partially-ragged backward produced suite-order-sensitive
+        // incorrect gradients for dense-Q/ragged-KV.  Normalize either mixed
+        // sequence-domain combination to the established all-ragged THD backend:
+        // the logically dense BSHD side receives a synthetic uniform partition,
+        // while public/runtime tensors remain dense and no payload is copied.
+        const bool mixedSequenceDomains = descriptor.q.ragged != descriptor.k.ragged;
+        const bool backendQueryRagged = descriptor.q.ragged || mixedSequenceDomains;
+        const bool backendKvRagged = descriptor.k.ragged || mixedSequenceDomains;
+        const bool backendOutputRagged = descriptor.o.ragged || mixedSequenceDomains;
+        auto qRagged = backendQueryRagged ? raggedOffset(built.graph, "ragged_offset_q", UID_RAGGED_Q, descriptor.batchSize()) : nullptr;
+        auto kRagged = backendKvRagged ? raggedOffset(built.graph, "ragged_offset_k", UID_RAGGED_K, descriptor.batchSize()) : nullptr;
+        auto vRagged = backendKvRagged ? raggedOffset(built.graph, "ragged_offset_v", UID_RAGGED_V, descriptor.batchSize()) : nullptr;
+        auto oRagged = backendOutputRagged ? raggedOffset(built.graph, "ragged_offset_o", UID_RAGGED_O, descriptor.batchSize()) : nullptr;
 
         auto q = makeAttentionIoTensor(built.graph, "q", UID_Q, descriptor.q, qRagged);
         auto k = makeAttentionIoTensor(built.graph, "k", UID_K, descriptor.k, kRagged);
@@ -1008,6 +1058,24 @@ class AttentionGraphCache {
                 .set_seq_len_q(seqLen(built.graph, "seq_len_q", UID_SEQ_Q, descriptor.batchSize()))
                 .set_seq_len_kv(seqLen(built.graph, "seq_len_kv", UID_SEQ_KV, descriptor.batchSize()));
         }
+        // cuDNN backward uses these capacities to size THD/ragged workspace.
+        // Thor's genuinely ragged AttentionTensorSpec encodes packed token
+        // capacity in the semantic S dimension.  A logically dense side that is
+        // synthesized as uniform THD for mixed backward instead needs B*S total
+        // tokens. Pass either capacity explicitly rather than relying on cuDNN's
+        // default workspace geometry.
+        if (backendQueryRagged) {
+            const int64_t maxTotalQueryTokens = descriptor.q.ragged
+                                                     ? descriptor.queryLength()
+                                                     : descriptor.batchSize() * descriptor.queryLength();
+            attrs.set_max_total_seq_len_q(maxTotalQueryTokens);
+        }
+        if (backendKvRagged) {
+            const int64_t maxTotalKvTokens = descriptor.k.ragged
+                                                 ? descriptor.keyValueLength()
+                                                 : descriptor.batchSize() * descriptor.keyValueLength();
+            attrs.set_max_total_seq_len_kv(maxTotalKvTokens);
+        }
         if (descriptor.useBias) {
             AttentionTensorSpec fallback;
             const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(descriptor, descriptor.computeDataType, fallback);
@@ -1027,13 +1095,13 @@ class AttentionGraphCache {
 
         auto [dQ, dK, dV] = built.graph->sdpa_backward(q, k, v, o, dO, stats, attrs);
         dQ->set_output(true).set_uid(UID_DQ).set_dim(descriptor.q.dimensions).set_stride(descriptor.q.strides);
-        if (descriptor.q.ragged)
+        if (backendQueryRagged)
             dQ->set_ragged_offset(qRagged);
         dK->set_output(true).set_uid(UID_DK).set_dim(descriptor.k.dimensions).set_stride(descriptor.k.strides);
-        if (descriptor.k.ragged)
+        if (backendKvRagged)
             dK->set_ragged_offset(kRagged);
         dV->set_output(true).set_uid(UID_DV).set_dim(descriptor.v.dimensions).set_stride(descriptor.v.strides);
-        if (descriptor.v.ragged)
+        if (backendKvRagged)
             dV->set_ragged_offset(vRagged);
 
         finalize(built, gpuNum);
@@ -1193,12 +1261,16 @@ void CudnnAttentionDescriptor::validateForward() const {
     if (anyRagged && !usePaddingMask)
         throwInvalidAttention("ragged attention requires usePaddingMask=true so cuDNN consumes the sequence lengths derived from canonical row partitions");
     if (anyRagged) {
-        if (!hasBshdPackedStrides(q) || !hasBshdPackedStrides(k) || !hasBshdPackedStrides(v) || !hasBshdPackedStrides(o))
+        if (q.ragged != o.ragged)
+            throwInvalidAttention("ragged attention requires Q and O to either both be ragged or both be dense");
+        if (k.ragged != v.ragged)
+            throwInvalidAttention("ragged attention requires K and V to either both be ragged or both be dense");
+        if (q.ragged && (!hasBshdPackedStrides(q) || !hasBshdPackedStrides(o)))
             throwInvalidAttention(
-                "ragged attention requires BSHD physical layouts for q/k/v/o because ragged offsets index packed token-contiguous THD storage");
-        if (!(q.ragged && k.ragged && v.ragged && o.ragged))
+                "ragged Q/O attention requires BSHD physical layouts because ragged offsets index packed token-contiguous THD storage");
+        if (k.ragged && (!hasBshdPackedStrides(k) || !hasBshdPackedStrides(v)))
             throwInvalidAttention(
-                "ragged attention requires q/k/v/o to share canonical token row partitions; partial ragged tensor sets are unsupported");
+                "ragged K/V attention requires BSHD physical layouts because ragged offsets index packed token-contiguous THD storage");
         if (usePagedKvCache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
             throwInvalidAttention("ragged attention and paged KV cache are separate variable-length modes and cannot be combined");
         if (useFp8 && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
@@ -1245,6 +1317,14 @@ void CudnnAttentionDescriptor::validateBackward() const {
     if (usePagedKvCache && !experimentalCudnnAttentionSupportSurfaceProbeEnabled())
         throwInvalidAttention("paged KV attention backward is not enabled; the paged KV path is inference-only until training semantics are defined");
     const bool anyRagged = q.ragged || k.ragged || v.ragged || o.ragged;
+    if (!q.ragged && k.ragged && (!hasBshdPackedStrides(q) || !hasBshdPackedStrides(o))) {
+        throwInvalidAttention(
+            "dense-Q/ragged-KV backward requires packed BSHD Q/O so Thor can normalize the dense query domain to uniform THD offsets");
+    }
+    if (q.ragged && !k.ragged && (!hasBshdPackedStrides(k) || !hasBshdPackedStrides(v))) {
+        throwInvalidAttention(
+            "ragged-Q/dense-KV backward requires packed BSHD K/V so Thor can normalize the dense key/value domain to uniform THD offsets");
+    }
     if (useFp8 && !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
         throwInvalidAttention(
             "cuDNN FP8 SDPA backward is not supported on the validated support surface; FP8 attention is forward-only in Thor");
@@ -1379,14 +1459,22 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
         }
     }
     if (ragged) {
-        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->qElementOffsets, runtimeDescriptor, "qElementOffsets");
-        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->kElementOffsets, runtimeDescriptor, "kElementOffsets");
-        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->vElementOffsets, runtimeDescriptor, "vElementOffsets");
-        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->oElementOffsets, runtimeDescriptor, "oElementOffsets");
-        insertTensor(pack, UID_RAGGED_Q, args.raggedScratch->qElementOffsets);
-        insertTensor(pack, UID_RAGGED_K, args.raggedScratch->kElementOffsets);
-        insertTensor(pack, UID_RAGGED_V, args.raggedScratch->vElementOffsets);
-        insertTensor(pack, UID_RAGGED_O, args.raggedScratch->oElementOffsets);
+        if (runtimeDescriptor.q.ragged) {
+            requireRaggedOffsetMatchesDescriptor(args.raggedScratch->qElementOffsets, runtimeDescriptor, "qElementOffsets");
+            insertTensor(pack, UID_RAGGED_Q, args.raggedScratch->qElementOffsets);
+        }
+        if (runtimeDescriptor.k.ragged) {
+            requireRaggedOffsetMatchesDescriptor(args.raggedScratch->kElementOffsets, runtimeDescriptor, "kElementOffsets");
+            insertTensor(pack, UID_RAGGED_K, args.raggedScratch->kElementOffsets);
+        }
+        if (runtimeDescriptor.v.ragged) {
+            requireRaggedOffsetMatchesDescriptor(args.raggedScratch->vElementOffsets, runtimeDescriptor, "vElementOffsets");
+            insertTensor(pack, UID_RAGGED_V, args.raggedScratch->vElementOffsets);
+        }
+        if (runtimeDescriptor.o.ragged) {
+            requireRaggedOffsetMatchesDescriptor(args.raggedScratch->oElementOffsets, runtimeDescriptor, "oElementOffsets");
+            insertTensor(pack, UID_RAGGED_O, args.raggedScratch->oElementOffsets);
+        }
     }
     if (runtimeDescriptor.dropout.probability > 0.0f) {
         if (descriptor.dropout.usePhilox) {
@@ -1501,14 +1589,24 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& de
         }
     }
     if (ragged) {
-        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->qElementOffsets, runtimeDescriptor, "qElementOffsets");
-        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->kElementOffsets, runtimeDescriptor, "kElementOffsets");
-        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->vElementOffsets, runtimeDescriptor, "vElementOffsets");
-        requireRaggedOffsetMatchesDescriptor(args.raggedScratch->oElementOffsets, runtimeDescriptor, "oElementOffsets");
-        insertTensor(pack, UID_RAGGED_Q, args.raggedScratch->qElementOffsets);
-        insertTensor(pack, UID_RAGGED_K, args.raggedScratch->kElementOffsets);
-        insertTensor(pack, UID_RAGGED_V, args.raggedScratch->vElementOffsets);
-        insertTensor(pack, UID_RAGGED_O, args.raggedScratch->oElementOffsets);
+        const bool mixedSequenceDomains = runtimeDescriptor.q.ragged != runtimeDescriptor.k.ragged;
+        const bool backendQueryRagged = runtimeDescriptor.q.ragged || mixedSequenceDomains;
+        const bool backendKvRagged = runtimeDescriptor.k.ragged || mixedSequenceDomains;
+        const bool backendOutputRagged = runtimeDescriptor.o.ragged || mixedSequenceDomains;
+        if (backendQueryRagged) {
+            requireRaggedOffsetMatchesDescriptor(args.raggedScratch->qElementOffsets, runtimeDescriptor, "qElementOffsets");
+            insertTensor(pack, UID_RAGGED_Q, args.raggedScratch->qElementOffsets);
+        }
+        if (backendKvRagged) {
+            requireRaggedOffsetMatchesDescriptor(args.raggedScratch->kElementOffsets, runtimeDescriptor, "kElementOffsets");
+            requireRaggedOffsetMatchesDescriptor(args.raggedScratch->vElementOffsets, runtimeDescriptor, "vElementOffsets");
+            insertTensor(pack, UID_RAGGED_K, args.raggedScratch->kElementOffsets);
+            insertTensor(pack, UID_RAGGED_V, args.raggedScratch->vElementOffsets);
+        }
+        if (backendOutputRagged) {
+            requireRaggedOffsetMatchesDescriptor(args.raggedScratch->oElementOffsets, runtimeDescriptor, "oElementOffsets");
+            insertTensor(pack, UID_RAGGED_O, args.raggedScratch->oElementOffsets);
+        }
     }
     if (descriptor.dropout.probability > 0.0f && descriptor.dropout.usePhilox) {
         requireOptionalGpuTensor(args.dropoutSeed, "dropoutSeed", gpuNum);

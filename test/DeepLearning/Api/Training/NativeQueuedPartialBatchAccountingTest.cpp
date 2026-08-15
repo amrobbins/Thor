@@ -449,25 +449,38 @@ TEST(NativeQueuedPartialBatchAccounting, ExactEpochsReportValidSamplesAndPopulat
     EXPECT_EQ(fieldValues(validate, &TrainingStatsSnapshot::samplesProcessedInEpoch), (std::vector<uint64_t>{4, 6, 4, 6}));
     EXPECT_EQ(fieldValues(validate, &TrainingStatsSnapshot::samplesProcessed), (std::vector<uint64_t>{4, 6, 10, 12}));
 
-    ASSERT_GE(selectionContexts.size(), 2u);
+    ASSERT_GE(selectionContexts.size(), 3u);
+    size_t phaseEntrySelectionContexts = 0;
     for (const TrainingModelSelectionContext& context : selectionContexts) {
-        ASSERT_TRUE(context.train.loss.has_value());
         ASSERT_TRUE(context.validate.loss.has_value());
-        EXPECT_NEAR(context.train.loss.value(), 2.6, 1e-5);
         EXPECT_NEAR(context.validate.loss.value(), 11.0 / 3.0, 1e-5);
-        ASSERT_EQ(context.train.metrics.count("prediction_mean"), 1u);
         ASSERT_EQ(context.validate.metrics.count("prediction_mean"), 1u);
-        EXPECT_NEAR(context.train.metrics.at("prediction_mean"), 1.4, 1e-5);
         EXPECT_NEAR(context.validate.metrics.at("prediction_mean"), 5.0 / 3.0, 1e-5);
-        EXPECT_NEAR(context.train.metrics.at("prediction_sum"), 14.0, 1e-5);
         EXPECT_NEAR(context.validate.metrics.at("prediction_sum"), 10.0, 1e-5);
-        EXPECT_NEAR(context.train.metrics.at("prediction_min"), 1.0, 1e-5);
         EXPECT_NEAR(context.validate.metrics.at("prediction_min"), 1.0, 1e-5);
-        EXPECT_NEAR(context.train.metrics.at("prediction_max"), 3.0, 1e-5);
         EXPECT_NEAR(context.validate.metrics.at("prediction_max"), 3.0, 1e-5);
-        EXPECT_NEAR(context.train.metrics.at("prediction_weighted_mean"), 68.0 / 28.0, 1e-5);
         EXPECT_NEAR(context.validate.metrics.at("prediction_weighted_mean"), 64.0 / 24.0, 1e-5);
+
+        if (!context.train.loss.has_value()) {
+            // firstModelSelectionEpoch defaults to zero, so model selection first
+            // sees the phase-entry state before any optimizer update.  That
+            // context is deliberately validation-only; there is no train loss or
+            // train metric population yet.
+            ++phaseEntrySelectionContexts;
+            EXPECT_EQ(context.epoch, 0u);
+            EXPECT_TRUE(context.train.metrics.empty());
+            continue;
+        }
+
+        EXPECT_NEAR(context.train.loss.value(), 2.6, 1e-5);
+        ASSERT_EQ(context.train.metrics.count("prediction_mean"), 1u);
+        EXPECT_NEAR(context.train.metrics.at("prediction_mean"), 1.4, 1e-5);
+        EXPECT_NEAR(context.train.metrics.at("prediction_sum"), 14.0, 1e-5);
+        EXPECT_NEAR(context.train.metrics.at("prediction_min"), 1.0, 1e-5);
+        EXPECT_NEAR(context.train.metrics.at("prediction_max"), 3.0, 1e-5);
+        EXPECT_NEAR(context.train.metrics.at("prediction_weighted_mean"), 68.0 / 28.0, 1e-5);
     }
+    EXPECT_EQ(phaseEntrySelectionContexts, 1u);
 
     ASSERT_EQ(train.front().metricBatchStats.count("prediction_sum"), 1u);
     EXPECT_EQ(train.front().metricBatchStats.at("prediction_sum").aggregation, MetricAggregation::SUM);

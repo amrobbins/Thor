@@ -10,6 +10,7 @@
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "Utilities/Expression/Expression.h"
 #include "bindings/python/src/core/cast.h"
 
@@ -144,6 +145,22 @@ void bind_activations(nb::module_ &activations) {
         "epilogue"_a.none() = nb::none(),
         "epilogue_inputs"_a.none() = nb::none(),
         R"nbdoc(Attach this activation as a standalone expression-backed layer and return its feature output tensor.)nbdoc");
+
+    activation.def(
+        "add_to_network",
+        [](Activation& self, Network& network, RaggedTensor featureInput, const nb::object& epilogue, const nb::object& epilogueInputs) {
+            std::optional<ThorImplementation::Expression> parsedEpilogue = activationEpilogueFromPython(epilogue);
+            std::vector<std::pair<std::string, Tensor>> parsedEpilogueInputs = activationEpilogueInputsFromPython(epilogueInputs);
+            if (!parsedEpilogue.has_value() && parsedEpilogueInputs.empty()) {
+                return self.addToNetwork(featureInput, &network);
+            }
+            return self.addToNetwork(featureInput, &network, std::move(parsedEpilogue), std::move(parsedEpilogueInputs));
+        },
+        "network"_a,
+        "feature_input"_a,
+        "epilogue"_a.none() = nb::none(),
+        "epilogue_inputs"_a.none() = nb::none(),
+        R"nbdoc(Attach this activation to packed ragged values and preserve the input row partition.)nbdoc");
 
     bind_glu(activations);
     bind_reglu(activations);

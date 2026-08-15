@@ -3618,6 +3618,10 @@ TEST(DeviceResidentFileNamedBatchSessionTest, RaggedResidentBatchesMatchFileBack
             const RaggedTensor &residentLabels = residentLease.get().getRaggedTensor("labels");
             EXPECT_EQ(residentLabels.getPlacement(),
                       TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
+            ASSERT_TRUE(sourceLabels.getHostActiveValueCountIfAvailable().has_value());
+            ASSERT_TRUE(residentLabels.getHostActiveValueCountIfAvailable().has_value());
+            EXPECT_EQ(residentLabels.getHostActiveValueCountIfAvailable().value(),
+                      sourceLabels.getHostActiveValueCountIfAvailable().value());
             expectRaggedInt32Equal(residentLabels, sourceLabels);
         }
 
@@ -3779,6 +3783,8 @@ TEST(DeviceResidentFileNamedBatchSessionTest, RaggedResidentAllEmptyBatchHasZero
     waitForBatchFieldReady(lease.get(), "labels");
     const RaggedTensor &labels = lease.get().getRaggedTensor("labels");
     EXPECT_EQ(raggedOffsetsAsUint64(labels), (vector<uint64_t>{0, 0, 0}));
+    ASSERT_TRUE(labels.getHostActiveValueCountIfAvailable().has_value());
+    EXPECT_EQ(labels.getHostActiveValueCountIfAvailable().value(), 0u);
     EXPECT_TRUE(activeRaggedInt32Values(labels).empty());
     lease.reset();
 

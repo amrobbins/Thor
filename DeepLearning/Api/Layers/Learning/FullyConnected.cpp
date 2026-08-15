@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Layers/Activations/Gelu.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/RaggedFullyConnected.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include <cstdint>
@@ -19,6 +20,10 @@ using json = nlohmann::json;
 namespace Thor {
 
 namespace {
+
+bool supportedRaggedFcStorageType(DataType dataType) {
+    return dataType == DataType::FP16 || dataType == DataType::BF16 || dataType == DataType::FP32;
+}
 
 bool isFullyConnectedFloatingDataType(DataType dataType) {
     switch (dataType) {
@@ -169,6 +174,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                                                                     DataType computeDataType,
                                                                     DataType outputDataType,
                                                                     std::shared_ptr<Thor::Activation> activation,
+                                                                    std::optional<uint64_t> packedRowCapacity,
                                                                     std::optional<ThorImplementation::Expression> epilogue,
                                                                     std::vector<std::string> epilogueAuxInputNames) {
     using ThorImplementation::DynamicExpression;
@@ -203,6 +209,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
          computeDataType,
          outputDataType,
          activation = std::move(activationClone),
+         packedRowCapacity,
          epilogue,
          epilogueAuxInputNames = std::move(epilogueAuxInputNames)](
             const DynamicExpression::TensorMap& inputs,
@@ -310,7 +317,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
             auto w = Expression::input("weights", weightsDataType, weightsDataType);
 
             // [batch, in_features] @ [in_features, out_features]
-            Expression fout = Expression::matmul(fin, w, false, false, computeDataType, outputDataType);
+            Expression fout = Expression::matmul(fin, w, false, false, computeDataType, outputDataType, packedRowCapacity);
 
             if (hasBias) {
                 const Tensor& bTensor = inputs.at("biases");
@@ -605,7 +612,7 @@ FullyConnected FullyConnected::Builder::build() {
     if (!_hasBias.has_value())
         _hasBias = false;
     if (!_preserveInputPrefixDimensions.has_value())
-        _preserveInputPrefixDimensions = false;
+        _preserveInputPrefixDimensions = !_raggedFeatureInputs.empty();
     if (_weightsInitializer == nullptr)
         _weightsInitializer = Glorot::Builder().build();
     if (_biasInitializer == nullptr)
@@ -635,6 +642,7 @@ FullyConnected FullyConnected::Builder::build() {
     FullyConnected fullyConnected(_epilogue, _epilogueInputBindings);
 
     fullyConnected.featureInputs = _featureInputs;
+    fullyConnected.raggedFeatureInputs = _raggedFeatureInputs;
     fullyConnected.numOutputFeatures = _numOutputFeatures.value();
 
     fullyConnected.hasBias = _hasBias.value();
@@ -687,6 +695,9 @@ FullyConnected FullyConnected::Builder::build() {
 
         fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = out;
         fullyConnected.inputTensorFromOutputTensor[out] = fullyConnected.featureInputs[i];
+        if (!fullyConnected.raggedFeatureInputs.empty()) {
+            fullyConnected.raggedFeatureOutputs.emplace_back(out, fullyConnected.raggedFeatureInputs[i].getOffsets());
+        }
     }
     for (const auto& [name, tensor] : fullyConnected.epilogueInputBindings) {
         (void)name;
@@ -729,6 +740,32 @@ void FullyConnected::Builder::verifyConfig() const {
         FullyConnected::validateEpilogueExpression(_epilogue.value(), epilogueAuxInputNames());
     } else if (!_epilogueInputBindings.empty()) {
         throw std::invalid_argument("FullyConnected epilogue_inputs were provided without an epilogue expression.");
+    }
+
+    if (!_raggedFeatureInputs.empty()) {
+        if (_raggedFeatureInputs.size() != _featureInputs.size()) {
+            throw std::invalid_argument("FullyConnected cannot mix dense and ragged feature inputs.");
+        }
+        if (!_preserveInputPrefixDimensions.value()) {
+            throw std::invalid_argument("FullyConnected(RaggedTensor) requires preserveInputPrefixDimensions=true for token-wise packed execution.");
+        }
+        if (_epilogue.has_value() || !_epilogueInputBindings.empty()) {
+            throw std::invalid_argument("FullyConnected(RaggedTensor) does not yet support the dense FullyConnected epilogue surface.");
+        }
+        for (uint32_t i = 0; i < _raggedFeatureInputs.size(); ++i) {
+            const RaggedTensor& ragged = _raggedFeatureInputs[i];
+            if (ragged.getValues().getDimensions().size() != 2 || ragged.getTrailingDimensions().size() != 1) {
+                throw std::invalid_argument("FullyConnected(RaggedTensor) currently requires packed values shaped [max_total_values, features].");
+            }
+            if (ragged.getValues() != _featureInputs[i]) {
+                throw std::invalid_argument("FullyConnected ragged feature input values do not match the primary feature input tensor.");
+            }
+        }
+        if (!supportedRaggedFcStorageType(_featureInputs.front().getDataType()) ||
+            !supportedRaggedFcStorageType(_weightsDataType.value()) ||
+            !supportedRaggedFcStorageType(_outputDataType.value())) {
+            throw std::invalid_argument("FullyConnected(RaggedTensor) currently supports fp16, bf16, and fp32 storage types.");
+        }
     }
 
     const DataType inputDataType = _featureInputs.front().getDataType();
@@ -790,6 +827,35 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
     }
 
     // Note: Network notices when a layer has already been stamped and only adds a connection; it does not re-stamp the layer.
+    if (!raggedFeatureInputs.empty()) {
+        const std::vector<uint64_t> inputDimensions = raggedFeatureInputs.front().getValues().getDimensions();
+        THOR_THROW_IF_FALSE(inputDimensions.size() == 2);
+        auto physicalFullyConnected = std::make_shared<ThorImplementation::RaggedFullyConnected>(
+            buildFullyConnectedExpression(
+                getId(),
+                hasBias,
+                true,
+                placement,
+                weightsDataType,
+                computeDataType,
+                outputDataType,
+                activation,
+                inputDimensions[0],
+                std::nullopt,
+                {}),
+            placement,
+            physicalParameters,
+            inputDimensions[1],
+            numOutputFeatures,
+            inputDimensions[0],
+            raggedFeatureInputs.front().getValuesDataType(),
+            outputDataType,
+            inferenceOnly,
+            getId());
+        physicalFullyConnected->setLayerName(getLayerType() + "#" + std::to_string(getId()));
+        return physicalFullyConnected;
+    }
+
     std::shared_ptr<ThorImplementation::CustomLayer> physicalFullyConnected = std::make_shared<ThorImplementation::CustomLayer>(
         buildFullyConnectedExpression(
             getId(),
@@ -800,6 +866,7 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
             computeDataType,
             outputDataType,
             activation,
+            std::nullopt,
             epilogue,
             epilogueAuxInputNames()),
         [&]() {
@@ -834,6 +901,15 @@ json FullyConnected::architectureJson() const {
     j["weights_data_type"] = weightsDataType;
     j["compute_data_type"] = computeDataType;
     j["output_data_type"] = outputDataType;
+    j["use_ragged"] = !raggedFeatureInputs.empty();
+    if (!raggedFeatureInputs.empty()) {
+        json raggedInputsJson = json::array();
+        json raggedOutputsJson = json::array();
+        for (const RaggedTensor& input : raggedFeatureInputs) raggedInputsJson.push_back(input.architectureJson());
+        for (const RaggedTensor& output : raggedFeatureOutputs) raggedOutputsJson.push_back(output.architectureJson());
+        j["ragged_inputs"] = std::move(raggedInputsJson);
+        j["ragged_outputs"] = std::move(raggedOutputsJson);
+    }
 
     if (activation != nullptr) {
         j["activation"] = activation->architectureJson();
@@ -934,6 +1010,29 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
     }
     if (fullyConnected.featureInputs.size() != fullyConnected.featureOutputs.size()) {
         throw runtime_error("FullyConnected deserialize expected equal numbers of inputs and outputs.");
+    }
+    const bool useRagged = j.value("use_ragged", false);
+    if (useRagged) {
+        if (!j.contains("ragged_inputs") || !j.contains("ragged_outputs") ||
+            j.at("ragged_inputs").size() != fullyConnected.featureInputs.size() ||
+            j.at("ragged_outputs").size() != fullyConnected.featureOutputs.size()) {
+            throw runtime_error("FullyConnected serialized ragged metadata does not match its input/output arity.");
+        }
+        for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
+            const json& raggedInputJson = j.at("ragged_inputs").at(i);
+            const uint64_t inputOffsetsId = raggedInputJson.at("offsets").at("id").get<uint64_t>();
+            RaggedTensor raggedInput(fullyConnected.featureInputs[i], network->getApiTensorByOriginalId(inputOffsetsId));
+            if (raggedInput.getBatchSize() != raggedInputJson.at("batch_size").get<uint64_t>() ||
+                raggedInput.getMaxTotalValues() != raggedInputJson.at("max_total_values").get<uint64_t>()) {
+                throw runtime_error("FullyConnected serialized ragged input metadata does not match reconstructed tensors.");
+            }
+            fullyConnected.raggedFeatureInputs.push_back(raggedInput);
+            fullyConnected.raggedFeatureOutputs.emplace_back(fullyConnected.featureOutputs[i], raggedInput.getOffsets());
+            const json& raggedOutputJson = j.at("ragged_outputs").at(i);
+            if (raggedOutputJson.at("offsets").at("id").get<uint64_t>() != inputOffsetsId) {
+                throw runtime_error("FullyConnected serialized ragged output must preserve the input row partition.");
+            }
+        }
     }
     for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
         fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs[i];

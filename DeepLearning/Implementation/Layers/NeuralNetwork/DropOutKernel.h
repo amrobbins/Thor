@@ -7,6 +7,24 @@
 
 namespace ThorImplementation {
 
+void launchDropOutForward(const void *input,
+                          void *output,
+                          uint8_t *keepMask,
+                          DataType dataType,
+                          uint64_t numElements,
+                          float probabilityOfDroppingOut,
+                          uint64_t randomSeed,
+                          uint64_t forwardSequence,
+                          Stream stream);
+
+void launchDropOutBackward(const void *errorInput,
+                           void *errorOutput,
+                           const uint8_t *keepMask,
+                           DataType dataType,
+                           uint64_t numElements,
+                           float probabilityOfDroppingOut,
+                           Stream stream);
+
 void launchBfloat16DropOutForward(const void *input,
                                   void *output,
                                   uint8_t *keepMask,

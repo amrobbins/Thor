@@ -2284,6 +2284,883 @@ TEST(AttentionApi, BuildsRaggedCrossAttentionWithIndependentPartitionsWithoutRop
               (std::vector<std::string>{"feature_input", "context_input", "query_row_partition", "key_value_row_partition"}));
 }
 
+
+TEST(AttentionApi, DenseQueryRaggedKvInfersMixedModeAndRoundTripsArchitecture) {
+    Api::Network network("attention_api_dense_query_ragged_kv_round_trip");
+    Api::NetworkInput query = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("query")
+                                  .dimensions({5, 32})
+                                  .dataType(DataType::FP16)
+                                  .build();
+    Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("context")
+                                    .valuesDataType(DataType::FP16)
+                                    .offsetsDataType(DataType::UINT64)
+                                    .trailingDimensions({32})
+                                    .maxTotalValues(11)
+                                    .batchSize(3)
+                                    .build();
+    Api::NetworkInput keyOrigins =
+        Api::NetworkInput::Builder().network(network).name("key_origins").dimensions({1}).dataType(DataType::INT32).build();
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = 8;
+    rope.base = 10000.0;
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(query.getFeatureOutput().value())
+                                   .contextInput(context)
+                                   .numHeads(4)
+                                   .headDim(8)
+                                   .ropeOptions(rope)
+                                   .queryRopePositionOffset(371)
+                                   .keyRopePositionOffsetsInput(keyOrigins.getFeatureOutput().value())
+                                   .build();
+
+    EXPECT_TRUE(attention.getUseRagged());
+    EXPECT_FALSE(attention.getQueryRagged());
+    EXPECT_TRUE(attention.getKeyValueRagged());
+    EXPECT_FALSE(attention.getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(attention.getRaggedContextInput().has_value());
+    EXPECT_FALSE(attention.getRaggedFeatureOutput().has_value());
+    ASSERT_TRUE(attention.getFeatureOutput().has_value());
+    EXPECT_EQ(attention.getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{5, 32}));
+    EXPECT_EQ(attention.getInputNames(),
+              (std::vector<std::string>{"feature_input", "context_input", "key_value_row_partition", "key_rope_position_offsets"}));
+
+    const nlohmann::json arch = attention.architectureJson();
+    EXPECT_TRUE(arch.at("use_ragged").get<bool>());
+    EXPECT_FALSE(arch.at("query_ragged").get<bool>());
+    EXPECT_TRUE(arch.at("key_value_ragged").get<bool>());
+    EXPECT_FALSE(arch.contains("ragged_feature_input"));
+    EXPECT_FALSE(arch.contains("ragged_feature_output"));
+    EXPECT_TRUE(arch.contains("ragged_context_input"));
+    EXPECT_EQ(arch.at("rope_query_position_offset").get<int64_t>(), 371);
+
+    const uint32_t beforeRestoreCount = network.getNumTrainableLayers();
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    Api::Attention::deserialize(archiveReader, arch, &network);
+    auto restored = std::dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(beforeRestoreCount));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_FALSE(restored->getQueryRagged());
+    EXPECT_TRUE(restored->getKeyValueRagged());
+    EXPECT_FALSE(restored->getRaggedFeatureOutput().has_value());
+    ASSERT_TRUE(restored->getRaggedContextInput().has_value());
+    EXPECT_EQ(restored->getRaggedContextInput()->getOffsetsDataType(), DataType::UINT64);
+    EXPECT_EQ(restored->getQueryRopePositionOffset(), 371);
+}
+
+TEST(AttentionApi, RaggedQueryDenseKvInfersMixedModeAndRoundTripsArchitecture) {
+    Api::Network network("attention_api_ragged_query_dense_kv_round_trip");
+    Api::RaggedTensor query = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("query")
+                                  .valuesDataType(DataType::FP16)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({32})
+                                  .maxTotalValues(9)
+                                  .batchSize(3)
+                                  .build();
+    Api::NetworkInput context = Api::NetworkInput::Builder()
+                                    .network(network)
+                                    .name("context")
+                                    .dimensions({7, 32})
+                                    .dataType(DataType::FP16)
+                                    .build();
+    Api::NetworkInput queryOrigins =
+        Api::NetworkInput::Builder().network(network).name("query_origins").dimensions({1}).dataType(DataType::INT32).build();
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = 8;
+    rope.base = 10000.0;
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(query)
+                                   .contextInput(context.getFeatureOutput().value())
+                                   .numHeads(4)
+                                   .headDim(8)
+                                   .ropeOptions(rope)
+                                   .queryRopePositionOffsetsInput(queryOrigins.getFeatureOutput().value())
+                                   .keyRopePositionOffset(40)
+                                   .build();
+
+    EXPECT_TRUE(attention.getUseRagged());
+    EXPECT_TRUE(attention.getQueryRagged());
+    EXPECT_FALSE(attention.getKeyValueRagged());
+    ASSERT_TRUE(attention.getRaggedFeatureInput().has_value());
+    EXPECT_FALSE(attention.getRaggedContextInput().has_value());
+    ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), query.getOffsets());
+    EXPECT_EQ(attention.getInputNames(),
+              (std::vector<std::string>{"feature_input", "context_input", "query_row_partition", "query_rope_position_offsets"}));
+
+    const nlohmann::json arch = attention.architectureJson();
+    EXPECT_TRUE(arch.at("query_ragged").get<bool>());
+    EXPECT_FALSE(arch.at("key_value_ragged").get<bool>());
+    EXPECT_TRUE(arch.contains("ragged_feature_input"));
+    EXPECT_TRUE(arch.contains("ragged_feature_output"));
+    EXPECT_FALSE(arch.contains("ragged_context_input"));
+
+    const uint32_t beforeRestoreCount = network.getNumTrainableLayers();
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    Api::Attention::deserialize(archiveReader, arch, &network);
+    auto restored = std::dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(beforeRestoreCount));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_TRUE(restored->getQueryRagged());
+    EXPECT_FALSE(restored->getKeyValueRagged());
+    ASSERT_TRUE(restored->getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(restored->getRaggedFeatureOutput()->getOffsets(), restored->getRaggedFeatureInput()->getOffsets());
+    EXPECT_EQ(restored->getKeyRopePositionOffset(), 40);
+}
+
+
+TEST(AttentionApi, MixedCrossAttentionModesPlaceWithRopeForTraining) {
+    auto placeDenseQueryRaggedKv = []() {
+        Api::Network network("attention_api_dense_query_ragged_kv_places_training");
+        shared_ptr<Api::Sgd> sgd = Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+        Api::NetworkInput query = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("query")
+                                      .dimensions({4, 16})
+                                      .dataType(DataType::FP16)
+                                      .build();
+        Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
+                                        .network(network)
+                                        .name("context")
+                                        .valuesDataType(DataType::FP16)
+                                        .offsetsDataType(DataType::UINT64)
+                                        .trailingDimensions({16})
+                                        .maxTotalValues(7)
+                                        .batchSize(2)
+                                        .build();
+        Api::NetworkInput keyOrigins = Api::NetworkInput::Builder()
+                                           .network(network)
+                                           .name("key_origins")
+                                           .dimensions({1})
+                                           .dataType(DataType::INT32)
+                                           .build();
+        Impl::RotaryPositionEmbeddingOptions rope;
+        rope.rotary_dim = 16;
+        rope.compute_dtype = DataType::FP32;
+        rope.output_dtype = DataType::FP16;
+        Api::Attention attention = Api::Attention::Builder()
+                                       .network(network)
+                                       .featureInput(query.getFeatureOutput().value())
+                                       .contextInput(context)
+                                       .numHeads(1)
+                                       .headDim(16)
+                                       .ropeOptions(rope)
+                                       .queryRopePositionOffset(371)
+                                       .keyRopePositionOffsetsInput(keyOrigins.getFeatureOutput().value())
+                                       .optimizer(sgd)
+                                       .build();
+        Api::GradientRivet rivet =
+            Api::GradientRivet::Builder().network(network).tensor(attention.getFeatureOutput().value()).build();
+        (void)Api::NetworkOutput::Builder()
+            .network(network)
+            .name("output")
+            .inputTensor(rivet.getFeatureOutput().value())
+            .dataType(DataType::FP16)
+            .build();
+        std::vector<Event> initDoneEvents;
+        std::shared_ptr<Api::PlacedNetwork> placed = network.place(2, initDoneEvents, /*inferenceOnly=*/false);
+        synchronizeEvents(initDoneEvents);
+        ASSERT_NE(placed, nullptr);
+    };
+
+    auto placeRaggedQueryDenseKv = []() {
+        Api::Network network("attention_api_ragged_query_dense_kv_places_training");
+        shared_ptr<Api::Sgd> sgd = Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+        Api::RaggedTensor query = Api::RaggedNetworkInput::Builder()
+                                      .network(network)
+                                      .name("query")
+                                      .valuesDataType(DataType::FP16)
+                                      .offsetsDataType(DataType::UINT32)
+                                      .trailingDimensions({16})
+                                      .maxTotalValues(6)
+                                      .batchSize(2)
+                                      .build();
+        Api::NetworkInput context = Api::NetworkInput::Builder()
+                                        .network(network)
+                                        .name("context")
+                                        .dimensions({5, 16})
+                                        .dataType(DataType::FP16)
+                                        .build();
+        Api::NetworkInput queryOrigins = Api::NetworkInput::Builder()
+                                             .network(network)
+                                             .name("query_origins")
+                                             .dimensions({1})
+                                             .dataType(DataType::INT32)
+                                             .build();
+        Impl::RotaryPositionEmbeddingOptions rope;
+        rope.rotary_dim = 16;
+        rope.compute_dtype = DataType::FP32;
+        rope.output_dtype = DataType::FP16;
+        Api::Attention attention = Api::Attention::Builder()
+                                       .network(network)
+                                       .featureInput(query)
+                                       .contextInput(context.getFeatureOutput().value())
+                                       .numHeads(1)
+                                       .headDim(16)
+                                       .ropeOptions(rope)
+                                       .queryRopePositionOffsetsInput(queryOrigins.getFeatureOutput().value())
+                                       .keyRopePositionOffset(40)
+                                       .optimizer(sgd)
+                                       .build();
+        Api::GradientRivet rivet =
+            Api::GradientRivet::Builder().network(network).tensor(attention.getRaggedFeatureOutput()->getValues()).build();
+        (void)Api::NetworkOutput::Builder()
+            .network(network)
+            .name("output")
+            .inputTensor(rivet.getFeatureOutput().value())
+            .dataType(DataType::FP16)
+            .build();
+        std::vector<Event> initDoneEvents;
+        std::shared_ptr<Api::PlacedNetwork> placed = network.place(2, initDoneEvents, /*inferenceOnly=*/false);
+        synchronizeEvents(initDoneEvents);
+        ASSERT_NE(placed, nullptr);
+    };
+
+    placeDenseQueryRaggedKv();
+    placeRaggedQueryDenseKv();
+}
+
+
+TEST(AttentionApi, DenseQueryRaggedKvRopeMatchesUniformRaggedQueryReference) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t features = 16;
+    constexpr uint64_t queryLength = 2;
+    constexpr uint64_t queryCapacity = batchSize * queryLength;
+    constexpr uint64_t contextCapacity = 7;
+    constexpr int64_t historyBoundary = 371;
+
+    Api::Network network("attention_api_dense_query_ragged_kv_rope_matches_uniform_ragged_query");
+    Api::NetworkInput denseQuery = Api::NetworkInput::Builder()
+                                       .network(network)
+                                       .name("dense_query")
+                                       .dimensions({queryLength, features})
+                                       .dataType(DataType::FP16)
+                                       .build();
+    Api::RaggedTensor raggedQuery = Api::RaggedNetworkInput::Builder()
+                                        .network(network)
+                                        .name("ragged_query")
+                                        .valuesDataType(DataType::FP16)
+                                        .offsetsDataType(DataType::UINT32)
+                                        .trailingDimensions({features})
+                                        .maxTotalValues(queryCapacity)
+                                        .batchSize(batchSize)
+                                        .build();
+    Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("context")
+                                    .valuesDataType(DataType::FP16)
+                                    .offsetsDataType(DataType::UINT64)
+                                    .trailingDimensions({features})
+                                    .maxTotalValues(contextCapacity)
+                                    .batchSize(batchSize)
+                                    .build();
+    Api::NetworkInput raggedQueryOrigins = Api::NetworkInput::Builder()
+                                               .network(network)
+                                               .name("ragged_query_origins")
+                                               .dimensions({1})
+                                               .dataType(DataType::INT32)
+                                               .build();
+    Api::NetworkInput keyOrigins = Api::NetworkInput::Builder()
+                                       .network(network)
+                                       .name("key_origins")
+                                       .dimensions({1})
+                                       .dataType(DataType::INT32)
+                                       .build();
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = features;
+    rope.base = 10000.0;
+    rope.compute_dtype = DataType::FP32;
+    rope.output_dtype = DataType::FP16;
+
+    Api::Attention mixed = Api::Attention::Builder()
+                               .network(network)
+                               .featureInput(denseQuery.getFeatureOutput().value())
+                               .contextInput(context)
+                               .numHeads(1)
+                               .headDim(features)
+                               .valueDim(features)
+                               .outputFeatures(features)
+                               .hasBias(false)
+                               .ropeOptions(rope)
+                               .queryRopePositionOffset(historyBoundary)
+                               .keyRopePositionOffsetsInput(keyOrigins.getFeatureOutput().value())
+                               .weightsDataType(DataType::FP16)
+                               .computeDataType(DataType::FP32)
+                               .outputDataType(DataType::FP16)
+                               .build();
+    Api::Attention raggedReference = Api::Attention::Builder()
+                                         .network(network)
+                                         .featureInput(raggedQuery)
+                                         .contextInput(context)
+                                         .numHeads(1)
+                                         .headDim(features)
+                                         .valueDim(features)
+                                         .outputFeatures(features)
+                                         .hasBias(false)
+                                         .ropeOptions(rope)
+                                         .queryRopePositionOffsetsInput(raggedQueryOrigins.getFeatureOutput().value())
+                                         .keyRopePositionOffsetsInput(keyOrigins.getFeatureOutput().value())
+                                         .weightsDataType(DataType::FP16)
+                                         .computeDataType(DataType::FP32)
+                                         .outputDataType(DataType::FP16)
+                                         .build();
+
+    Api::NetworkOutput mixedOutput = Api::NetworkOutput::Builder()
+                                         .network(network)
+                                         .name("mixed_output")
+                                         .inputTensor(mixed.getFeatureOutput().value())
+                                         .dataType(DataType::FP16)
+                                         .build();
+    Api::NetworkOutput raggedOutput = Api::NetworkOutput::Builder()
+                                          .network(network)
+                                          .name("ragged_output")
+                                          .inputTensor(raggedReference.getRaggedFeatureOutput()->getValues())
+                                          .dataType(DataType::FP16)
+                                          .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+
+    auto physicalMixed = std::dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(mixed.getId()));
+    auto physicalReference =
+        std::dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(raggedReference.getId()));
+    auto physicalMixedOutput =
+        std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(mixedOutput.getId()));
+    auto physicalRaggedOutput =
+        std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(raggedOutput.getId()));
+    auto denseQueryInput = stamped.getNamedInput("dense_query");
+    auto raggedQueryValuesInput = stamped.getNamedInput("ragged_query.values");
+    auto raggedQueryOffsetsInput = stamped.getNamedInput("ragged_query.offsets");
+    auto contextValuesInput = stamped.getNamedInput("context.values");
+    auto contextOffsetsInput = stamped.getNamedInput("context.offsets");
+    auto raggedQueryOriginsInput = stamped.getNamedInput("ragged_query_origins");
+    auto keyOriginsInput = stamped.getNamedInput("key_origins");
+    ASSERT_NE(physicalMixed, nullptr);
+    ASSERT_NE(physicalReference, nullptr);
+    ASSERT_NE(physicalMixedOutput, nullptr);
+    ASSERT_NE(physicalRaggedOutput, nullptr);
+    ASSERT_NE(denseQueryInput, nullptr);
+    ASSERT_NE(raggedQueryValuesInput, nullptr);
+    ASSERT_NE(raggedQueryOffsetsInput, nullptr);
+    ASSERT_NE(contextValuesInput, nullptr);
+    ASSERT_NE(contextOffsetsInput, nullptr);
+    ASSERT_NE(raggedQueryOriginsInput, nullptr);
+    ASSERT_NE(keyOriginsInput, nullptr);
+
+    Stream stream = physicalMixed->getStreams()[0];
+    const std::vector<float> identity = scaledIdentity(features, 1.0f);
+    for (const auto& layer : {physicalMixed, physicalReference}) {
+        setParameterTensor(layer->getParameter("query_weights"), identity, stream);
+        setParameterTensor(layer->getParameter("key_weights"), identity, stream);
+        setParameterTensor(layer->getParameter("value_weights"), identity, stream);
+        setParameterTensor(layer->getParameter("output_weights"), identity, stream);
+    }
+    stream.synchronize();
+
+    std::vector<float> queryValues(batchSize * queryLength * features, 0.0f);
+    for (uint32_t b = 0; b < batchSize; ++b) {
+        for (uint64_t q = 0; q < queryLength; ++q) {
+            const uint64_t row = static_cast<uint64_t>(b) * queryLength + q;
+            queryValues[row * features + 0] = 1.0f + static_cast<float>(b);
+            queryValues[row * features + 1] = 0.25f * static_cast<float>(q + 1);
+            queryValues[row * features + 4] = -0.5f + 0.1f * static_cast<float>(row);
+        }
+    }
+    std::vector<float> contextValues(contextCapacity * features, 123.0f);
+    const std::vector<uint64_t> contextLengths{2, 3};
+    uint64_t packedRow = 0;
+    for (uint32_t b = 0; b < batchSize; ++b) {
+        for (uint64_t t = 0; t < contextLengths[b]; ++t, ++packedRow) {
+            std::fill(contextValues.begin() + packedRow * features,
+                      contextValues.begin() + (packedRow + 1) * features,
+                      0.0f);
+            contextValues[packedRow * features + 0] = 0.5f + static_cast<float>(t);
+            contextValues[packedRow * features + 1] = static_cast<float>(b + 1);
+            contextValues[packedRow * features + 4] = 0.2f * static_cast<float>(packedRow + 1);
+        }
+    }
+
+    Impl::Tensor denseQueryHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {batchSize, queryLength, features}));
+    Impl::Tensor raggedQueryValuesHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {queryCapacity, features}));
+    Impl::Tensor raggedQueryOffsetsHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    Impl::Tensor contextValuesHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {contextCapacity, features}));
+    Impl::Tensor contextOffsetsHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::UINT64, {batchSize + 1}));
+    Impl::Tensor raggedQueryOriginsHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {batchSize, 1}));
+    Impl::Tensor keyOriginsHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {batchSize, 1}));
+    writeCpuTensor(denseQueryHost, queryValues);
+    writeCpuTensor(raggedQueryValuesHost, queryValues);
+    writeCpuUint32Tensor(raggedQueryOffsetsHost, {0U, 2U, 4U});
+    writeCpuTensor(contextValuesHost, contextValues);
+    writeCpuUint64Tensor(contextOffsetsHost, {0ULL, 2ULL, 5ULL});
+    writeCpuInt32Tensor(raggedQueryOriginsHost, {historyBoundary, historyBoundary});
+    writeCpuInt32Tensor(keyOriginsHost,
+                        {static_cast<int32_t>(historyBoundary - static_cast<int64_t>(contextLengths[0])),
+                         static_cast<int32_t>(historyBoundary - static_cast<int64_t>(contextLengths[1]))});
+
+    denseQueryInput->forward(denseQueryHost, false, batchSize);
+    raggedQueryValuesInput->forward(raggedQueryValuesHost, false, batchSize);
+    raggedQueryOffsetsInput->forward(raggedQueryOffsetsHost, false, batchSize);
+    contextValuesInput->forward(contextValuesHost, false, batchSize);
+    contextOffsetsInput->forward(contextOffsetsHost, false, batchSize);
+    raggedQueryOriginsInput->forward(raggedQueryOriginsHost, false, batchSize);
+    keyOriginsInput->forward(keyOriginsHost, false, batchSize);
+    physicalMixedOutput->getOutputReadyEvent().synchronize();
+    physicalRaggedOutput->getOutputReadyEvent().synchronize();
+
+    const std::vector<float> mixedValues = readCpuTensor(physicalMixedOutput->getFeatureOutput().value());
+    const std::vector<float> referenceValues = readCpuTensor(physicalRaggedOutput->getFeatureOutput().value());
+    ASSERT_EQ(mixedValues.size(), referenceValues.size());
+    expectAllClose(mixedValues, referenceValues, 5.0e-2f, 5.0e-2f);
+}
+
+
+TEST(AttentionApi, DenseQueryRaggedKvMatchesRightAlignedPaddedMaskedReference) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t features = 16;
+    constexpr uint64_t queryLength = 3;
+    constexpr uint64_t historyExtent = 371;
+    constexpr uint64_t raggedHistoryCapacity = 600;
+    const std::vector<uint64_t> historyLengths{371, 187};
+
+    Api::Network network("attention_api_dense_query_ragged_kv_matches_right_aligned_padded_reference");
+    Api::NetworkInput query = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("query")
+                                  .dimensions({queryLength, features})
+                                  .dataType(DataType::FP16)
+                                  .build();
+    Api::RaggedTensor raggedContext = Api::RaggedNetworkInput::Builder()
+                                          .network(network)
+                                          .name("ragged_context")
+                                          .valuesDataType(DataType::FP16)
+                                          .offsetsDataType(DataType::UINT64)
+                                          .trailingDimensions({features})
+                                          .maxTotalValues(raggedHistoryCapacity)
+                                          .batchSize(batchSize)
+                                          .build();
+    Api::NetworkInput paddedContext = Api::NetworkInput::Builder()
+                                          .network(network)
+                                          .name("padded_context")
+                                          .dimensions({historyExtent, features})
+                                          .dataType(DataType::FP16)
+                                          .build();
+    Api::NetworkInput paddedMask = Api::NetworkInput::Builder()
+                                       .network(network)
+                                       .name("padded_mask")
+                                       .dimensions({1, queryLength, historyExtent})
+                                       .dataType(DataType::FP32)
+                                       .build();
+    Api::NetworkInput keyOrigins = Api::NetworkInput::Builder()
+                                       .network(network)
+                                       .name("key_origins")
+                                       .dimensions({1})
+                                       .dataType(DataType::INT32)
+                                       .build();
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = features;
+    rope.base = 10000.0;
+    rope.compute_dtype = DataType::FP32;
+    rope.output_dtype = DataType::FP16;
+
+    Api::Attention nativeRagged = Api::Attention::Builder()
+                                      .network(network)
+                                      .featureInput(query.getFeatureOutput().value())
+                                      .contextInput(raggedContext)
+                                      .numHeads(1)
+                                      .headDim(features)
+                                      .valueDim(features)
+                                      .outputFeatures(features)
+                                      .hasBias(false)
+                                      .ropeOptions(rope)
+                                      .queryRopePositionOffset(historyExtent)
+                                      .keyRopePositionOffsetsInput(keyOrigins.getFeatureOutput().value())
+                                      .dropoutProbability(0.0f)
+                                      .weightsDataType(DataType::FP16)
+                                      .computeDataType(DataType::FP32)
+                                      .outputDataType(DataType::FP16)
+                                      .build();
+    Api::Attention paddedReference = Api::Attention::Builder()
+                                         .network(network)
+                                         .featureInput(query.getFeatureOutput().value())
+                                         .contextInput(paddedContext.getFeatureOutput().value())
+                                         .scoreBiasInput(paddedMask.getFeatureOutput().value())
+                                         .numHeads(1)
+                                         .headDim(features)
+                                         .valueDim(features)
+                                         .outputFeatures(features)
+                                         .hasBias(false)
+                                         .ropeOptions(rope)
+                                         .queryRopePositionOffset(historyExtent)
+                                         .keyRopePositionOffset(0)
+                                         .dropoutProbability(0.0f)
+                                         .weightsDataType(DataType::FP16)
+                                         .computeDataType(DataType::FP32)
+                                         .outputDataType(DataType::FP16)
+                                         .build();
+
+    Api::NetworkOutput nativeOutput = Api::NetworkOutput::Builder()
+                                          .network(network)
+                                          .name("native_output")
+                                          .inputTensor(nativeRagged.getFeatureOutput().value())
+                                          .dataType(DataType::FP16)
+                                          .build();
+    Api::NetworkOutput referenceOutput = Api::NetworkOutput::Builder()
+                                             .network(network)
+                                             .name("reference_output")
+                                             .inputTensor(paddedReference.getFeatureOutput().value())
+                                             .dataType(DataType::FP16)
+                                             .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+
+    auto physicalNative =
+        std::dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(nativeRagged.getId()));
+    auto physicalReference =
+        std::dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(paddedReference.getId()));
+    auto physicalNativeOutput =
+        std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(nativeOutput.getId()));
+    auto physicalReferenceOutput =
+        std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(referenceOutput.getId()));
+    auto queryInput = stamped.getNamedInput("query");
+    auto raggedContextValuesInput = stamped.getNamedInput("ragged_context.values");
+    auto raggedContextOffsetsInput = stamped.getNamedInput("ragged_context.offsets");
+    auto paddedContextInput = stamped.getNamedInput("padded_context");
+    auto paddedMaskInput = stamped.getNamedInput("padded_mask");
+    auto keyOriginsInput = stamped.getNamedInput("key_origins");
+    ASSERT_NE(physicalNative, nullptr);
+    ASSERT_NE(physicalReference, nullptr);
+    ASSERT_NE(physicalNativeOutput, nullptr);
+    ASSERT_NE(physicalReferenceOutput, nullptr);
+    ASSERT_NE(queryInput, nullptr);
+    ASSERT_NE(raggedContextValuesInput, nullptr);
+    ASSERT_NE(raggedContextOffsetsInput, nullptr);
+    ASSERT_NE(paddedContextInput, nullptr);
+    ASSERT_NE(paddedMaskInput, nullptr);
+    ASSERT_NE(keyOriginsInput, nullptr);
+
+    Stream stream = physicalNative->getStreams()[0];
+    const std::vector<float> identity = scaledIdentity(features, 1.0f);
+    for (const auto& layer : {physicalNative, physicalReference}) {
+        setParameterTensor(layer->getParameter("query_weights"), identity, stream);
+        setParameterTensor(layer->getParameter("key_weights"), identity, stream);
+        setParameterTensor(layer->getParameter("value_weights"), identity, stream);
+        setParameterTensor(layer->getParameter("output_weights"), identity, stream);
+    }
+    stream.synchronize();
+
+    std::vector<float> queryValues(batchSize * queryLength * features, 0.0f);
+    for (uint32_t b = 0; b < batchSize; ++b) {
+        for (uint64_t q = 0; q < queryLength; ++q) {
+            const uint64_t row = static_cast<uint64_t>(b) * queryLength + q;
+            queryValues[row * features + 0] = 0.35f * static_cast<float>(row + 1);
+            queryValues[row * features + 1] = 1.0f + 0.2f * static_cast<float>(b);
+            queryValues[row * features + 4] = -0.3f + 0.1f * static_cast<float>(q);
+        }
+    }
+
+    // The padded reference is the old representation: each history is right-aligned inside
+    // [0, historyExtent), and a dense additive mask excludes the left padding. Padding values
+    // are deliberately large so any mask regression becomes numerically obvious.
+    std::vector<float> paddedContextValues(batchSize * historyExtent * features, 256.0f);
+    std::vector<float> raggedContextValues(raggedHistoryCapacity * features, -512.0f);
+    uint64_t packedRow = 0;
+    for (uint32_t b = 0; b < batchSize; ++b) {
+        const uint64_t firstValid = historyExtent - historyLengths[b];
+        for (uint64_t t = 0; t < historyLengths[b]; ++t, ++packedRow) {
+            const uint64_t denseRow = static_cast<uint64_t>(b) * historyExtent + firstValid + t;
+            for (uint32_t f = 0; f < features; ++f) {
+                paddedContextValues[denseRow * features + f] = 0.0f;
+                raggedContextValues[packedRow * features + f] = 0.0f;
+            }
+            const float token = static_cast<float>(1 + b * 10 + t);
+            paddedContextValues[denseRow * features + 0] = 0.2f * token;
+            paddedContextValues[denseRow * features + 1] = -0.15f * token;
+            paddedContextValues[denseRow * features + 4] = 0.05f * token;
+            raggedContextValues[packedRow * features + 0] = 0.2f * token;
+            raggedContextValues[packedRow * features + 1] = -0.15f * token;
+            raggedContextValues[packedRow * features + 4] = 0.05f * token;
+        }
+    }
+    ASSERT_EQ(packedRow, historyLengths[0] + historyLengths[1]);
+
+    std::vector<float> maskValues(batchSize * queryLength * historyExtent, 0.0f);
+    for (uint32_t b = 0; b < batchSize; ++b) {
+        const uint64_t firstValid = historyExtent - historyLengths[b];
+        for (uint64_t q = 0; q < queryLength; ++q) {
+            for (uint64_t k = 0; k < firstValid; ++k) {
+                const uint64_t index = (static_cast<uint64_t>(b) * queryLength + q) * historyExtent + k;
+                maskValues[index] = -10000.0f;
+            }
+        }
+    }
+
+    Impl::Tensor queryHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {batchSize, queryLength, features}));
+    Impl::Tensor raggedContextHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {raggedHistoryCapacity, features}));
+    Impl::Tensor raggedOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT64, {batchSize + 1}));
+    Impl::Tensor paddedContextHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {batchSize, historyExtent, features}));
+    Impl::Tensor paddedMaskHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {batchSize, 1, queryLength, historyExtent}));
+    Impl::Tensor keyOriginsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {batchSize, 1}));
+    writeCpuTensor(queryHost, queryValues);
+    writeCpuTensor(raggedContextHost, raggedContextValues);
+    writeCpuUint64Tensor(raggedOffsetsHost, {0ULL, historyLengths[0], historyLengths[0] + historyLengths[1]});
+    writeCpuTensor(paddedContextHost, paddedContextValues);
+    writeCpuTensor(paddedMaskHost, maskValues);
+    writeCpuInt32Tensor(keyOriginsHost,
+                        {static_cast<int32_t>(historyExtent - historyLengths[0]),
+                         static_cast<int32_t>(historyExtent - historyLengths[1])});
+
+    queryInput->forward(queryHost, false, batchSize);
+    raggedContextValuesInput->forward(raggedContextHost, false, batchSize);
+    raggedContextOffsetsInput->forward(raggedOffsetsHost, false, batchSize);
+    paddedContextInput->forward(paddedContextHost, false, batchSize);
+    paddedMaskInput->forward(paddedMaskHost, false, batchSize);
+    keyOriginsInput->forward(keyOriginsHost, false, batchSize);
+    physicalNativeOutput->getOutputReadyEvent().synchronize();
+    physicalReferenceOutput->getOutputReadyEvent().synchronize();
+
+    const std::vector<float> nativeValues = readCpuTensor(physicalNativeOutput->getFeatureOutput().value());
+    const std::vector<float> referenceValues = readCpuTensor(physicalReferenceOutput->getFeatureOutput().value());
+    expectAllClose(nativeValues, referenceValues, 6.0e-2f, 6.0e-2f);
+}
+
+TEST(AttentionApi, RaggedQueryDenseKvMatchesRightAlignedPaddedQueryReference) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t features = 16;
+    constexpr uint64_t queryExtent = 371;
+    constexpr uint64_t raggedQueryCapacity = 600;
+    constexpr uint64_t keyValueLength = 3;
+    const std::vector<uint64_t> queryLengths{371, 187};
+
+    Api::Network network("attention_api_ragged_query_dense_kv_matches_right_aligned_padded_reference");
+    Api::RaggedTensor raggedQuery = Api::RaggedNetworkInput::Builder()
+                                        .network(network)
+                                        .name("ragged_query")
+                                        .valuesDataType(DataType::FP16)
+                                        .offsetsDataType(DataType::UINT32)
+                                        .trailingDimensions({features})
+                                        .maxTotalValues(raggedQueryCapacity)
+                                        .batchSize(batchSize)
+                                        .build();
+    Api::NetworkInput paddedQuery = Api::NetworkInput::Builder()
+                                        .network(network)
+                                        .name("padded_query")
+                                        .dimensions({queryExtent, features})
+                                        .dataType(DataType::FP16)
+                                        .build();
+    Api::NetworkInput context = Api::NetworkInput::Builder()
+                                    .network(network)
+                                    .name("context")
+                                    .dimensions({keyValueLength, features})
+                                    .dataType(DataType::FP16)
+                                    .build();
+    Api::NetworkInput queryOrigins = Api::NetworkInput::Builder()
+                                         .network(network)
+                                         .name("query_origins")
+                                         .dimensions({1})
+                                         .dataType(DataType::INT32)
+                                         .build();
+
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = features;
+    rope.base = 10000.0;
+    rope.compute_dtype = DataType::FP32;
+    rope.output_dtype = DataType::FP16;
+
+    Api::Attention nativeRagged = Api::Attention::Builder()
+                                      .network(network)
+                                      .featureInput(raggedQuery)
+                                      .contextInput(context.getFeatureOutput().value())
+                                      .numHeads(1)
+                                      .headDim(features)
+                                      .valueDim(features)
+                                      .outputFeatures(features)
+                                      .hasBias(false)
+                                      .ropeOptions(rope)
+                                      .queryRopePositionOffsetsInput(queryOrigins.getFeatureOutput().value())
+                                      .keyRopePositionOffset(queryExtent)
+                                      .dropoutProbability(0.0f)
+                                      .weightsDataType(DataType::FP16)
+                                      .computeDataType(DataType::FP32)
+                                      .outputDataType(DataType::FP16)
+                                      .build();
+    Api::Attention paddedReference = Api::Attention::Builder()
+                                         .network(network)
+                                         .featureInput(paddedQuery.getFeatureOutput().value())
+                                         .contextInput(context.getFeatureOutput().value())
+                                         .numHeads(1)
+                                         .headDim(features)
+                                         .valueDim(features)
+                                         .outputFeatures(features)
+                                         .hasBias(false)
+                                         .ropeOptions(rope)
+                                         .queryRopePositionOffset(0)
+                                         .keyRopePositionOffset(queryExtent)
+                                         .dropoutProbability(0.0f)
+                                         .weightsDataType(DataType::FP16)
+                                         .computeDataType(DataType::FP32)
+                                         .outputDataType(DataType::FP16)
+                                         .build();
+
+    Api::NetworkOutput nativeOutput = Api::NetworkOutput::Builder()
+                                          .network(network)
+                                          .name("native_output")
+                                          .inputTensor(nativeRagged.getRaggedFeatureOutput()->getValues())
+                                          .dataType(DataType::FP16)
+                                          .build();
+    Api::NetworkOutput referenceOutput = Api::NetworkOutput::Builder()
+                                             .network(network)
+                                             .name("reference_output")
+                                             .inputTensor(paddedReference.getFeatureOutput().value())
+                                             .dataType(DataType::FP16)
+                                             .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+
+    auto physicalNative =
+        std::dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(nativeRagged.getId()));
+    auto physicalReference =
+        std::dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(paddedReference.getId()));
+    auto physicalNativeOutput =
+        std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(nativeOutput.getId()));
+    auto physicalReferenceOutput =
+        std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(referenceOutput.getId()));
+    auto raggedQueryValuesInput = stamped.getNamedInput("ragged_query.values");
+    auto raggedQueryOffsetsInput = stamped.getNamedInput("ragged_query.offsets");
+    auto paddedQueryInput = stamped.getNamedInput("padded_query");
+    auto contextInput = stamped.getNamedInput("context");
+    auto queryOriginsInput = stamped.getNamedInput("query_origins");
+    ASSERT_NE(physicalNative, nullptr);
+    ASSERT_NE(physicalReference, nullptr);
+    ASSERT_NE(physicalNativeOutput, nullptr);
+    ASSERT_NE(physicalReferenceOutput, nullptr);
+    ASSERT_NE(raggedQueryValuesInput, nullptr);
+    ASSERT_NE(raggedQueryOffsetsInput, nullptr);
+    ASSERT_NE(paddedQueryInput, nullptr);
+    ASSERT_NE(contextInput, nullptr);
+    ASSERT_NE(queryOriginsInput, nullptr);
+
+    Stream stream = physicalNative->getStreams()[0];
+    const std::vector<float> identity = scaledIdentity(features, 1.0f);
+    for (const auto& layer : {physicalNative, physicalReference}) {
+        setParameterTensor(layer->getParameter("query_weights"), identity, stream);
+        setParameterTensor(layer->getParameter("key_weights"), identity, stream);
+        setParameterTensor(layer->getParameter("value_weights"), identity, stream);
+        setParameterTensor(layer->getParameter("output_weights"), identity, stream);
+    }
+    stream.synchronize();
+
+    std::vector<float> paddedQueryValues(batchSize * queryExtent * features, 384.0f);
+    std::vector<float> raggedQueryValues(raggedQueryCapacity * features, -640.0f);
+    uint64_t packedRow = 0;
+    for (uint32_t b = 0; b < batchSize; ++b) {
+        const uint64_t firstValid = queryExtent - queryLengths[b];
+        for (uint64_t t = 0; t < queryLengths[b]; ++t, ++packedRow) {
+            const uint64_t denseRow = static_cast<uint64_t>(b) * queryExtent + firstValid + t;
+            std::fill(paddedQueryValues.begin() + denseRow * features,
+                      paddedQueryValues.begin() + (denseRow + 1) * features,
+                      0.0f);
+            std::fill(raggedQueryValues.begin() + packedRow * features,
+                      raggedQueryValues.begin() + (packedRow + 1) * features,
+                      0.0f);
+            const float token = static_cast<float>(1 + b * 10 + t);
+            paddedQueryValues[denseRow * features + 0] = 0.1f * token;
+            paddedQueryValues[denseRow * features + 1] = 0.25f + 0.05f * token;
+            paddedQueryValues[denseRow * features + 4] = -0.08f * token;
+            raggedQueryValues[packedRow * features + 0] = 0.1f * token;
+            raggedQueryValues[packedRow * features + 1] = 0.25f + 0.05f * token;
+            raggedQueryValues[packedRow * features + 4] = -0.08f * token;
+        }
+    }
+    ASSERT_EQ(packedRow, queryLengths[0] + queryLengths[1]);
+
+    std::vector<float> contextValues(batchSize * keyValueLength * features, 0.0f);
+    for (uint32_t b = 0; b < batchSize; ++b) {
+        for (uint64_t k = 0; k < keyValueLength; ++k) {
+            const uint64_t row = static_cast<uint64_t>(b) * keyValueLength + k;
+            const float token = static_cast<float>(1 + b * 7 + k);
+            contextValues[row * features + 0] = 0.2f * token;
+            contextValues[row * features + 1] = -0.1f * token;
+            contextValues[row * features + 4] = 0.07f * token;
+        }
+    }
+
+    Impl::Tensor raggedQueryHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {raggedQueryCapacity, features}));
+    Impl::Tensor raggedOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    Impl::Tensor paddedQueryHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {batchSize, queryExtent, features}));
+    Impl::Tensor contextHost(
+        cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {batchSize, keyValueLength, features}));
+    Impl::Tensor queryOriginsHost(cpuPlacement, Impl::TensorDescriptor(DataType::INT32, {batchSize, 1}));
+    writeCpuTensor(raggedQueryHost, raggedQueryValues);
+    writeCpuUint32Tensor(raggedOffsetsHost, {0U,
+                                             static_cast<uint32_t>(queryLengths[0]),
+                                             static_cast<uint32_t>(queryLengths[0] + queryLengths[1])});
+    writeCpuTensor(paddedQueryHost, paddedQueryValues);
+    writeCpuTensor(contextHost, contextValues);
+    writeCpuInt32Tensor(queryOriginsHost,
+                        {static_cast<int32_t>(queryExtent - queryLengths[0]),
+                         static_cast<int32_t>(queryExtent - queryLengths[1])});
+
+    raggedQueryValuesInput->forward(raggedQueryHost, false, batchSize);
+    raggedQueryOffsetsInput->forward(raggedOffsetsHost, false, batchSize);
+    paddedQueryInput->forward(paddedQueryHost, false, batchSize);
+    contextInput->forward(contextHost, false, batchSize);
+    queryOriginsInput->forward(queryOriginsHost, false, batchSize);
+    physicalNativeOutput->getOutputReadyEvent().synchronize();
+    physicalReferenceOutput->getOutputReadyEvent().synchronize();
+
+    const std::vector<float> nativeValues = readCpuTensor(physicalNativeOutput->getFeatureOutput().value());
+    const std::vector<float> referenceValues = readCpuTensor(physicalReferenceOutput->getFeatureOutput().value());
+    ASSERT_EQ(nativeValues.size(), raggedQueryCapacity * features);
+    ASSERT_EQ(referenceValues.size(), batchSize * queryExtent * features);
+
+    uint64_t logicalRow = 0;
+    for (uint32_t b = 0; b < batchSize; ++b) {
+        const uint64_t firstValid = queryExtent - queryLengths[b];
+        for (uint64_t t = 0; t < queryLengths[b]; ++t, ++logicalRow) {
+            const uint64_t denseRow = static_cast<uint64_t>(b) * queryExtent + firstValid + t;
+            const std::vector<float> nativeRow(nativeValues.begin() + logicalRow * features,
+                                               nativeValues.begin() + (logicalRow + 1) * features);
+            const std::vector<float> referenceRow(referenceValues.begin() + denseRow * features,
+                                                  referenceValues.begin() + (denseRow + 1) * features);
+            expectAllClose(nativeRow, referenceRow, 6.0e-2f, 6.0e-2f);
+        }
+    }
+}
+
 TEST(AttentionApi, RaggedRopeAllowsSelfAttentionAndIndependentCrossPartitions) {
     Impl::RotaryPositionEmbeddingOptions rope;
     rope.rotary_dim = 16;

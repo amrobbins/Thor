@@ -236,6 +236,39 @@ TEST(CubSegmentedArgReduction, VectorStampedReductionReusesOutputAndDynamicOffse
     EXPECT_EQ(winners.getMemPtr<void>(), winner_storage);
 }
 
+TEST(CubSegmentedReduction, RuntimeOffsetsAreNotReadUntilExecution) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor input = makeGpuTensor({1.0f, 2.0f, 3.0f, 4.0f}, {4}, stream);
+    // Deliberately invalid contents model a network-input allocation before the
+    // first runtime row partition has been copied into it. Graph stamping must
+    // inspect only the descriptor, not these transient bytes.
+    Tensor offsets = makeGpuUnsignedTensor({7, 7, 7}, {3}, stream);
+    Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {2}));
+    auto stamped = CubSegmentedReduction(CubReductionOp::Sum, DataType::FP32)
+                       .stampRuntimeOffsets(input, output, offsets, stream);
+
+    overwriteGpuUnsignedTensor(offsets, {0, 2, 4}, stream);
+    stamped->run();
+    stream.synchronize();
+    expectFloatVectorNear(copyGpuTensorAsFloat(output, stream), {3.0f, 7.0f});
+}
+
+TEST(CubSegmentedArgReduction, RuntimeOffsetsAreNotReadUntilExecution) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+    Tensor input = makeGpuTensor({4.0f, 1.0f, 9.0f, 2.0f}, {4}, stream);
+    Tensor offsets = makeGpuUnsignedTensor({9, 9, 9}, {3}, stream);
+    Tensor winners(gpuPlacement, TensorDescriptor(DataType::UINT64, {2}));
+    auto stamped = CubSegmentedArgReduction(CubArgReductionOp::ArgMin, DataType::UINT64)
+                       .stampRuntimeOffsets(input, winners, offsets, stream);
+
+    overwriteGpuUnsignedTensor(offsets, {0, 2, 4}, stream);
+    stamped->run();
+    stream.synchronize();
+    EXPECT_EQ(copyGpuTensorAsUnsigned(winners, stream), (std::vector<uint64_t>{1ULL, 3ULL}));
+}
+
 TEST(CubSegmentedReduction, ReusesOutputWorkspaceAndDynamicOffsetsAcrossExecutions) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);

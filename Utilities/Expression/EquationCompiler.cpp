@@ -1376,7 +1376,8 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",scale=" + rhs +
                 ",hidden=" + std::to_string(node.rms_norm_normalized_feature_count) +
                 ",epsilon=" + std::to_string(scalarBits(node.rms_norm_epsilon)) +
-                ",fused=" + std::string(toString(node.rms_norm_fused_activation)) + ")";
+                ",fused=" + std::string(toString(node.rms_norm_fused_activation)) +
+                ",packedRowsCapacity=" + std::to_string(node.rms_norm_packed_row_capacity) + ")";
         } else if (isMatmulOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
 
@@ -2146,6 +2147,7 @@ shared_ptr<CompiledRmsNorm> EquationCompiler::compileRmsNorm(const PhysicalExpre
 
     auto compiled = make_shared<CompiledRmsNorm>();
     compiled->normalized_feature_count = node.rms_norm_normalized_feature_count;
+    compiled->packed_row_capacity = node.rms_norm_packed_row_capacity;
     compiled->epsilon = node.rms_norm_epsilon;
     compiled->input_dtype = input_dtype;
     compiled->scale_dtype = scale_dtype;
@@ -2545,6 +2547,8 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
                                        node.matmul_epilogue,
                                        node.matmul_backward_epilogue,
                                        epilogue_aux_input_slot,
+                                       node.matmul_packed_row_binding,
+                                       node.matmul_packed_row_capacity,
                                        epilogue_aux_dtype,
                                        bgrad_output_dtype);
 }
@@ -7377,10 +7381,8 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
     if (groups.empty()) {
         throw std::runtime_error("compileSpecializedBroadcastStage requires at least one broadcast group.");
     }
-    if (expressionUsesDeviceRaggedRuntimeExtent(stage.expr)) {
-        throw std::runtime_error(
-            "ragged runtime extent is not supported by specialized broadcast kernels; ragged valuewise operands must have identical capacity shapes.");
-    }
+
+    const bool uses_device_ragged_runtime_extent = expressionUsesDeviceRaggedRuntimeExtent(stage.expr);
 
     ensureCudaContextCurrent(sig.device_num);
 
@@ -7423,6 +7425,7 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
                                                       output_dtypes,
                                                       sig.device_num);
     compiled->uses_uint32_numel_arg = false;
+    compiled->uses_device_runtime_extent = uses_device_ragged_runtime_extent;
 
     if (stageHasTransposedMaterializedOutput(stage.outputs)) {
         compiled->launch_kind = CompiledEquation::LaunchKind::FusedTiledTranspose;

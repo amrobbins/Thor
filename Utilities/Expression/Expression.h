@@ -166,6 +166,16 @@ enum class MatmulBackwardEpilogue : uint8_t {
     DGelu = 2,
 };
 
+// Packed-row capacity annotation for expression matmuls. This keeps ragged
+// tokenwise projections in the normal Expression compute path while allowing
+// the physical matmul stage to select a pre-tuned capacity bucket.
+enum class MatmulPackedRowBinding : uint8_t {
+    None = 0,
+    RowsA = 1,
+    RowsB = 2,
+    RowsAAndRowsB = 3,
+};
+
 enum class ScanOp : uint8_t {
     Sum = 0,
     Min = 1,
@@ -233,6 +243,8 @@ struct ExprNode {
     MatmulEpilogue matmul_epilogue = MatmulEpilogue::Default;
     MatmulBackwardEpilogue matmul_backward_epilogue = MatmulBackwardEpilogue::Default;
     uint32_t matmul_epilogue_aux = UINT32_MAX;
+    MatmulPackedRowBinding matmul_packed_row_binding = MatmulPackedRowBinding::None;
+    uint64_t matmul_packed_row_capacity = 0;
     int32_t conv_stride_d = 1;
     int32_t conv_stride_h = 1;
     int32_t conv_stride_w = 1;
@@ -306,6 +318,10 @@ struct ExprNode {
     uint64_t rms_norm_normalized_feature_count = 0;
     double rms_norm_epsilon = 1.0e-5;
     CudnnRmsNormFusedActivation rms_norm_fused_activation = CudnnRmsNormFusedActivation::NONE;
+    // Non-zero only for packed ragged values. This is the number of packed
+    // ragged rows represented by the flattened RMSNorm outer dimension; runtime
+    // execution selects a cached row-capacity bucket from that domain.
+    uint64_t rms_norm_packed_row_capacity = 0;
 
     bool embedding_has_padding_index = false;
     uint64_t embedding_padding_index = 0;
@@ -724,7 +740,8 @@ class Expression {
                                            bool transpose_lhs = false,
                                            bool transpose_rhs = false,
                                            std::optional<DataType> compute_dtype = std::nullopt,
-                                           std::optional<DataType> output_dtype = std::nullopt);
+                                           std::optional<DataType> output_dtype = std::nullopt,
+                                           std::optional<uint64_t> packed_row_capacity = std::nullopt);
     [[nodiscard]] static Expression gemm(const Expression& lhs,
                                          const Expression& rhs,
                                          const Expression& addend,
@@ -751,13 +768,15 @@ class Expression {
                                             uint64_t normalized_feature_count,
                                             double epsilon = 1.0e-5,
                                             std::optional<DataType> compute_dtype = std::nullopt,
-                                            std::optional<DataType> output_dtype = std::nullopt);
+                                            std::optional<DataType> output_dtype = std::nullopt,
+                                            std::optional<uint64_t> packed_row_capacity = std::nullopt);
     [[nodiscard]] Expression rmsNorm(const Expression& scale,
                                       uint64_t normalized_feature_count,
                                       double epsilon = 1.0e-5,
                                       std::optional<DataType> compute_dtype = std::nullopt,
-                                      std::optional<DataType> output_dtype = std::nullopt) const {
-        return rmsNorm(*this, scale, normalized_feature_count, epsilon, compute_dtype, output_dtype);
+                                      std::optional<DataType> output_dtype = std::nullopt,
+                                      std::optional<uint64_t> packed_row_capacity = std::nullopt) const {
+        return rmsNorm(*this, scale, normalized_feature_count, epsilon, compute_dtype, output_dtype, packed_row_capacity);
     }
 
     [[nodiscard]] static Expression embeddingLookup(const Expression& indices,

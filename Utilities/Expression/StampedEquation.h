@@ -30,6 +30,7 @@
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/BucketedCublasGemm.h"
 
 namespace cudnn_frontend {
 namespace graph {
@@ -239,6 +240,7 @@ struct BuiltMatmul {
     MatmulCacheKey key;
     size_t workspace_bytes = 0;
     std::optional<CublasKernel> cublas_kernel;
+    std::optional<BucketedCublasGemm> bucketed_cublas_gemm;
     std::shared_ptr<CublasMatrixMultiply::LtMatmulPlan> epilogue_plan;
     std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> epilogue_algorithm;
 
@@ -251,6 +253,10 @@ struct BuiltMatmul {
 
 struct CompiledRmsNorm {
     uint64_t normalized_feature_count = 0;
+    // Non-zero for packed ragged values. The flattened outer dimension may
+    // contain multiple RMSNorm samples per packed row; runtime execution selects
+    // a cached row-capacity bucket from this packed-row domain.
+    uint64_t packed_row_capacity = 0;
     double epsilon = 1.0e-5;
     DataType input_dtype = DataType::FP16;
     DataType scale_dtype = DataType::FP32;

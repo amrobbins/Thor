@@ -25,6 +25,7 @@ void launchAdd1dBias(DATA_TYPE *features_d, DATA_TYPE *biases_d, uint32_t batchS
 }
 
 template void launchAdd1dBias<half>(half *features, half *biases_d, uint32_t batchSize, uint64_t numElementsPerBatch, Stream stream);
+template void launchAdd1dBias<__nv_bfloat16>(__nv_bfloat16 *features, __nv_bfloat16 *biases_d, uint32_t batchSize, uint64_t numElementsPerBatch, Stream stream);
 template void launchAdd1dBias<float>(float *features, float *biases_d, uint32_t batchSize, uint64_t numElementsPerBatch, Stream stream);
 template void launchAdd1dBias<double>(double *features, double *biases_d, uint32_t batchSize, uint64_t numElementsPerBatch, Stream stream);
 template void launchAdd1dBias<int8_t>(int8_t *features, int8_t *biases_d, uint32_t batchSize, uint64_t numElementsPerBatch, Stream stream);

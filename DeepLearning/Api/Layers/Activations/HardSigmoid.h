@@ -57,8 +57,8 @@ class HardSigmoid : public Activation {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        // feature out and error out
-        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
+        (void)tensorPlacement;
+        return getExpressionBackedActivationMemRequirementInBytes(batchSize);
     }
 };
 
@@ -67,14 +67,11 @@ class HardSigmoid::Builder : public Activation::Builder {
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<HardSigmoid> hardSigmoid = std::make_shared<HardSigmoid>();
         if (_featureInput.has_value()) {
-            // Standalone layer support.
             THOR_THROW_IF_FALSE(_network.has_value());
-            hardSigmoid->featureInput = _featureInput;
-            hardSigmoid->featureOutput = _featureInput.value().clone();
+            applyStandaloneConfiguration(*hardSigmoid);
             hardSigmoid->initialized = true;
             hardSigmoid->addToNetwork(_network.value());
         } else {
-            // Template activation support
             hardSigmoid->initialized = true;
         }
 
@@ -87,6 +84,11 @@ class HardSigmoid::Builder : public Activation::Builder {
     }
 
     HardSigmoid::Builder &featureInput(Tensor _featureInput) override {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
+    HardSigmoid::Builder &featureInput(RaggedTensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

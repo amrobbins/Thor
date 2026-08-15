@@ -58,7 +58,7 @@ class Sigmoid : public Activation {
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         (void)tensorPlacement;
-        return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
+        return getExpressionBackedActivationMemRequirementInBytes(batchSize);
     }
 };
 
@@ -67,14 +67,11 @@ class Sigmoid::Builder : public Activation::Builder {
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<Sigmoid> sigmoid = std::make_shared<Sigmoid>();
         if (_featureInput.has_value()) {
-            // Standalone layer support.
             THOR_THROW_IF_FALSE(_network.has_value());
-            sigmoid->featureInput = _featureInput;
-            sigmoid->featureOutput = _featureInput.value().clone();
+            applyStandaloneConfiguration(*sigmoid);
             sigmoid->initialized = true;
             sigmoid->addToNetwork(_network.value());
         } else {
-            // Template activation support.
             sigmoid->initialized = true;
         }
         return sigmoid;
@@ -86,6 +83,11 @@ class Sigmoid::Builder : public Activation::Builder {
     }
 
     Sigmoid::Builder &featureInput(Tensor _featureInput) override {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
+    Sigmoid::Builder &featureInput(RaggedTensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

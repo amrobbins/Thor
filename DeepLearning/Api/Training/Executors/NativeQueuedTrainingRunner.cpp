@@ -968,6 +968,13 @@ class TrainingArtifactManager {
 
     [[nodiscard]] bool enabled() const { return saveModelDirectory.has_value(); }
 
+    void clearBestCandidate() {
+        if (bestCandidate.has_value() && bestCandidate->directory.has_value()) {
+            removePathIfExists(bestCandidate->directory.value());
+        }
+        bestCandidate.reset();
+    }
+
     void maybeSnapshotBestCandidate(PlacedNetwork& placedNetwork,
                                     const TrainingModelSelectionContext& context,
                                     std::optional<double> score) {
@@ -2934,6 +2941,7 @@ struct NativeQueuedStartupState {
     std::vector<NamedValidationSession> additionalValidationSessions;
     DeviceDatasetStorageReport deviceDatasetStorageReport;
     std::optional<NativeQueuedEpochExecution> firstEpochExecution;
+    std::optional<double> initialModelSelectionScore{};
 };
 
 void releaseFailedNativeQueuedStartupAttempt(
@@ -2963,6 +2971,108 @@ void releaseFailedNativeQueuedStartupAttempt(
         }
         attempt.placedNetwork.reset();
     }
+}
+
+void validateFullEpochPhaseCompletion(
+    const QueuedEpochPhaseWork& work,
+    const std::shared_ptr<QueuedTrainingState>& state,
+    const std::shared_ptr<BatchSession>& batchSession);
+
+TrainingModelSelectionContext evaluateInitialModelSelectionState(
+    const TrainingRunRequest& request,
+    const std::shared_ptr<PlacedNetwork>& placedNetwork,
+    const std::shared_ptr<BatchSession>& defaultValidationSession,
+    const std::vector<NamedValidationSession>& additionalValidationSessions,
+    const std::shared_ptr<const ExecutableTrainingPlan>& plan,
+    const NativeQueuedTrainingOptions& options,
+    const std::vector<std::string>& scalarTensorNames,
+    const std::vector<std::string>& aggregateLossTensorNames,
+    uint64_t cumulativeEpoch) {
+    EpochLossAccumulator losses;
+    losses.ensureValidationPopulation(request.defaultValidationPopulation);
+    for (const NamedValidationSession& validation : additionalValidationSessions) {
+        losses.ensureValidationPopulation(validation.name);
+    }
+
+    TrainingRunRequest validationRequest = request;
+    validationRequest.evaluationExampleType = ExampleType::VALIDATE;
+    validationRequest.evaluationPhase = TrainingEventPhase::VALIDATE;
+
+    auto evaluatePopulation = [&](const std::string& population,
+                                  const std::shared_ptr<BatchSession>& session) {
+        if (session == nullptr) {
+            throw std::runtime_error(
+                "Initial model-selection validation population '" + population +
+                "' has a null BatchSession.");
+        }
+
+        NativeQueuedEpochExecution execution = launchNativeQueuedEpochExecution(
+            validationRequest,
+            placedNetwork,
+            session,
+            plan,
+            options,
+            scalarTensorNames,
+            aggregateLossTensorNames,
+            cumulativeEpoch,
+            /*evaluateOnly=*/true);
+        const std::shared_ptr<QueuedTrainingState> state = execution.state;
+
+        try {
+            while (true) {
+                if (request.cancellationToken.isCancellationRequested()) {
+                    requestQueuedTrainingCancellation(state);
+                    cancelBatchSession(session);
+                }
+
+                BatchPopResult completedBatch = popBatchData(state);
+                if (!completedBatch.hasBatch) {
+                    break;
+                }
+
+                TrainingStatsSnapshot snapshot;
+                snapshot.phase = TrainingEventPhase::VALIDATE;
+                snapshot.epoch = cumulativeEpoch;
+                snapshot.validationPopulation = population;
+                snapshot.isDefaultValidationPopulation =
+                    population == request.defaultValidationPopulation;
+                snapshot.validExamplesInBatch = completedBatch.validExampleCount;
+                assignScalarStatsToSnapshot(
+                    snapshot,
+                    state->scalarTensorNames,
+                    completedBatch.scalarStats,
+                    state->aggregateLossTensorNames);
+                snapshot.metricBatchStats =
+                    std::move(completedBatch.metricBatchStats);
+                losses.update(snapshot);
+            }
+
+            if (execution.schedulingThread.joinable()) {
+                execution.schedulingThread.join();
+            }
+            throwIfQueuedTrainingStateFailed(state);
+            for (const QueuedEpochPhaseWork& work : execution.phaseWorks) {
+                validateFullEpochPhaseCompletion(work, state, session);
+            }
+        } catch (...) {
+            (void)abortNativeQueuedEpochExecution(
+                execution,
+                session,
+                placedNetwork,
+                std::current_exception(),
+                placedNetwork->getStampedNetwork(0).getGpuNum());
+            throw;
+        }
+    };
+
+    evaluatePopulation(
+        request.defaultValidationPopulation, defaultValidationSession);
+    for (const NamedValidationSession& validation : additionalValidationSessions) {
+        evaluatePopulation(validation.name, validation.batchSession);
+    }
+
+    return losses.modelSelectionContext(
+        cumulativeEpoch, request.defaultValidationPopulation);
 }
 
 std::shared_ptr<BatchSession> reopenNativeQueuedBatchSessionForRetry(
@@ -2997,7 +3107,8 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
     const NativeQueuedTrainingOptions& options,
     const std::vector<std::string>& scalarTensorNames,
     const std::vector<std::string>& aggregateLossTensorNames,
-    uint64_t currentEpoch) {
+    uint64_t currentEpoch,
+    TrainingArtifactManager* initialModelSelectionArtifacts) {
     constexpr int startupDeviceNum = 0;
     auto notifyStatus = [&](TrainingRunStatus status) {
         if (request.statusCallback) {
@@ -3041,6 +3152,12 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
     for (;;) {
         request.cancellationToken.throwIfCancellationRequested();
         ThorImplementation::clearDeviceStartupCudaErrorState(startupDeviceNum);
+        if (initialModelSelectionArtifacts != nullptr) {
+            // A retry creates a fresh placement and may randomly initialize newly
+            // enabled phase parameters differently.  Never retain the epoch-0
+            // candidate from a failed startup attempt.
+            initialModelSelectionArtifacts->clearBestCandidate();
+        }
 
         NativeQueuedStartupState attempt;
         attempt.sourceSession = nextSourceSession;
@@ -3052,6 +3169,7 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
         bool sessionWasConsumed = false;
         bool cleanupDrained = true;
         bool retryWithoutDeviceDataset = false;
+        bool initialModelSelectionEvaluationFailed = false;
         try {
             std::vector<Event> initDoneEvents;
             attempt.placedNetwork = executionGraph.network->place(
@@ -3206,6 +3324,36 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
             ThorImplementation::requireCleanDeviceStartupCudaErrorState(
                 startupDeviceNum);
 
+            if (initialModelSelectionArtifacts != nullptr) {
+                // firstModelSelectionEpoch=0 means the exact model entering this
+                // fit/phase is a candidate.  Evaluate and snapshot it before the
+                // startup warmup can execute the first optimizer update.
+                try {
+                    const TrainingModelSelectionContext initialContext =
+                        evaluateInitialModelSelectionState(
+                            request,
+                            attempt.placedNetwork,
+                            attempt.effectiveSession,
+                            attempt.additionalValidationSessions,
+                            attempt.plan,
+                            options,
+                            scalarTensorNames,
+                            aggregateLossTensorNames,
+                            currentEpoch);
+                    const std::optional<double> initialScore =
+                        request.modelSelectionScore.evaluate(initialContext);
+                    attempt.initialModelSelectionScore = initialScore;
+                    initialModelSelectionArtifacts->maybeSnapshotBestCandidate(
+                        *attempt.placedNetwork, initialContext, initialScore);
+                } catch (...) {
+                    // Validation execution owns BatchSession cancellation on
+                    // failure.  Do not feed those cancelled sessions into the
+                    // normal GPU-memory retry path.
+                    initialModelSelectionEvaluationFailed = true;
+                    throw;
+                }
+            }
+
             // Admission is not complete merely because placement and slot
             // preallocation succeeded. Start the actual first epoch while this
             // FIFO startup turn is still held and wait for one real batch to
@@ -3270,6 +3418,9 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
         // until waitForModelRelease() atomically releases the coordinator mutex.
         releaseFailedNativeQueuedStartupAttempt(attempt);
 
+        if (initialModelSelectionEvaluationFailed) {
+            std::rethrow_exception(startupFailure);
+        }
         if (!ThorImplementation::isDeviceStartupMemoryFailure(startupFailure)) {
             std::rethrow_exception(startupFailure);
         }
@@ -3477,6 +3628,13 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     uint64_t currentEpoch =
         evaluateOnly ? 0 : request.initialCompletedEpochs;
 
+    TrainingArtifactManager trainingArtifacts(
+        request.saveModelDirectory, request.saveModelOverwrite);
+    TrainingArtifactManager* initialModelSelectionArtifacts =
+        modelSelectionEnabled && request.firstModelSelectionEpoch == 0
+            ? &trainingArtifacts
+            : nullptr;
+
     NativeQueuedStartupState startup =
         startNativeQueuedTrainingWithMemoryAdmissionRetry(
             request,
@@ -3486,7 +3644,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
             options,
             scalarTensorNames,
             aggregateLossTensorNames,
-            currentEpoch);
+            currentEpoch,
+            initialModelSelectionArtifacts);
     std::shared_ptr<PlacedNetwork> placedNetwork =
         std::move(startup.placedNetwork);
     std::shared_ptr<const ExecutableTrainingPlan> plan =
@@ -3498,6 +3657,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         std::move(startup.additionalValidationSessions);
     DeviceDatasetStorageReport deviceDatasetStorageReport =
         std::move(startup.deviceDatasetStorageReport);
+    const std::optional<double> initialModelSelectionScore =
+        startup.initialModelSelectionScore;
     std::optional<NativeQueuedEpochExecution> firstEpochExecution =
         std::move(startup.firstEpochExecution);
     TrainingRunRequest namedValidationEvaluationRequest = request;
@@ -3569,12 +3730,16 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         return snapshot;
     };
 
-    TrainingArtifactManager trainingArtifacts(request.saveModelDirectory, request.saveModelOverwrite);
-    const uint64_t firstModelSelectionEpoch =
-        request.firstModelSelectionEpoch == 0 ? request.checkBestModelEveryEpochs : request.firstModelSelectionEpoch;
+    // Epoch zero is handled above as the phase-entry incumbent.  Trained
+    // candidates retain the historical cadence: with firstModelSelectionEpoch=0
+    // the first post-update candidate is still checked at the normal cadence.
+    const uint64_t firstTrainedModelSelectionEpoch =
+        request.firstModelSelectionEpoch == 0
+            ? request.checkBestModelEveryEpochs
+            : request.firstModelSelectionEpoch;
     bool runEarlyCompleted = false;
     std::optional<uint64_t> completedEpoch{};
-    std::optional<double> latestModelSelectionScore{};
+    std::optional<double> latestModelSelectionScore = initialModelSelectionScore;
     std::optional<double> latestTrainingLoss{};
     std::optional<double> latestValidationLoss{};
     TrainingModelSelectionContext latestEpochSelectionContext{};
@@ -3944,8 +4109,8 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
 
         bool earlyCompletionRequested = false;
         const uint64_t phaseLocalEpoch = cumulativeEpoch - request.initialCompletedEpochs;
-        const bool modelSelectionEligible = modelSelectionEnabled && phaseLocalEpoch >= firstModelSelectionEpoch &&
-                                            ((phaseLocalEpoch - firstModelSelectionEpoch) % request.checkBestModelEveryEpochs == 0);
+        const bool modelSelectionEligible = modelSelectionEnabled && phaseLocalEpoch >= firstTrainedModelSelectionEpoch &&
+                                            ((phaseLocalEpoch - firstTrainedModelSelectionEpoch) % request.checkBestModelEveryEpochs == 0);
         if (modelSelectionEligible) {
             const TrainingModelSelectionContext currentSelectionContext =
                 epochLosses.modelSelectionContext(
@@ -3982,7 +4147,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
     const uint64_t finalCompletedEpoch = completedEpoch.value_or(currentEpoch);
     const char* finalCompletionReason = runEarlyCompleted ? "early_completed" : "completed";
     const uint64_t finalCompletedPhaseEpoch = finalCompletedEpoch - request.initialCompletedEpochs;
-    const bool finalModelSelectionEligible = modelSelectionEnabled && finalCompletedPhaseEpoch >= firstModelSelectionEpoch;
+    const bool finalModelSelectionEligible = modelSelectionEnabled && finalCompletedPhaseEpoch >= firstTrainedModelSelectionEpoch;
     if (finalModelSelectionEligible) {
         // The final/latest state is the handoff and deployment boundary. If best
         // candidate tracking is enabled and the fit has reached the model-selection

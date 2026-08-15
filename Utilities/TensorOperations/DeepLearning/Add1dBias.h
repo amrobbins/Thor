@@ -5,11 +5,13 @@
 
 #include <cuda.h>
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 
 template <typename DATA_TYPE>
 void launchAdd1dBias(DATA_TYPE *features_d, DATA_TYPE *biases_d, uint32_t batchSize, uint64_t numElementsPerBatch, Stream stream);
 
 extern template void launchAdd1dBias<half>(half *features, half *biases_d, uint32_t batchSize, uint64_t numElementsPerBatch, Stream stream);
+extern template void launchAdd1dBias<__nv_bfloat16>(__nv_bfloat16 *features, __nv_bfloat16 *biases_d, uint32_t batchSize, uint64_t numElementsPerBatch, Stream stream);
 extern template void launchAdd1dBias<float>(
     float *features, float *biases_d, uint32_t batchSize, uint64_t numElementsPerBatch, Stream stream);
 extern template void launchAdd1dBias<double>(

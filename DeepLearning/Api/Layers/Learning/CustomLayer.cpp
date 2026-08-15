@@ -831,6 +831,17 @@ optional<string> CustomLayer::getOutputPortName(const Tensor& outputTensor) cons
     return nullopt;
 }
 
+bool CustomLayer::outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const {
+    for (const TensorMap& outputInterface : outputInterfaces) {
+        for (const auto& [outputName, tensor] : outputInterface) {
+            if (tensor == outputTensor) {
+                return outputDimensionsIncludeBatch.contains(outputName);
+            }
+        }
+    }
+    throw std::runtime_error("Tensor is not an output of this CustomLayer.");
+}
+
 CustomLayer::TensorMap CustomLayer::getOutputInterface(const TensorMap& inputInterface) const {
     validateInterfaceNames(inputInterface, inputNames, "input");
 

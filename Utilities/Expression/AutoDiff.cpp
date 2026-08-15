@@ -682,6 +682,14 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
     return reaches;
 }
 
+struct RaggedGradientExtent {
+    uint32_t offsetsNode = UINT32_MAX;
+    uint32_t offsetsInputSlot = UINT32_MAX;
+    uint64_t batchSize = 0;
+    uint64_t maxActiveValues = 0;
+    uint64_t elementsPerValue = 0;
+};
+
 class BackwardGraphBuilder {
    public:
     explicit BackwardGraphBuilder(const PhysicalExpression& forward_expr) : forward_expr(forward_expr) {
@@ -736,6 +744,83 @@ class BackwardGraphBuilder {
             throw std::runtime_error("BackwardGraphBuilder node query index out of range.");
         }
         return grad_expr.nodes.at(node_idx);
+    }
+
+    std::optional<RaggedGradientExtent> tryGetFrontierRaggedExtent(uint32_t root) const {
+        if (root >= grad_expr.nodes.size()) {
+            throw std::runtime_error("BackwardGraphBuilder ragged-extent query index out of range.");
+        }
+
+        std::optional<RaggedGradientExtent> result;
+        std::unordered_set<uint32_t> visited;
+
+        auto merge_extent = [&](uint32_t offsets_node_idx, const ExprNode& extent_node) {
+            if (offsets_node_idx == UINT32_MAX || offsets_node_idx >= grad_expr.nodes.size()) {
+                throw std::runtime_error("BackwardGraphBuilder ragged extent is missing its offsets input.");
+            }
+            const ExprNode& offsets_node = grad_expr.nodes.at(offsets_node_idx);
+            if (offsets_node.op != ExprOp::INPUT) {
+                throw std::runtime_error("BackwardGraphBuilder ragged extent requires a direct offsets INPUT node.");
+            }
+            if (extent_node.ragged_runtime_batch_size == 0 || extent_node.ragged_runtime_max_active_values == 0 ||
+                extent_node.ragged_runtime_elements_per_value == 0) {
+                throw std::runtime_error("BackwardGraphBuilder encountered incomplete ragged runtime-extent metadata.");
+            }
+
+            RaggedGradientExtent candidate;
+            candidate.offsetsNode = offsets_node_idx;
+            candidate.offsetsInputSlot = offsets_node.input_slot;
+            candidate.batchSize = extent_node.ragged_runtime_batch_size;
+            candidate.maxActiveValues = extent_node.ragged_runtime_max_active_values;
+            candidate.elementsPerValue = extent_node.ragged_runtime_elements_per_value;
+
+            if (result.has_value()) {
+                if (result->offsetsInputSlot != candidate.offsetsInputSlot || result->batchSize != candidate.batchSize ||
+                    result->maxActiveValues != candidate.maxActiveValues || result->elementsPerValue != candidate.elementsPerValue) {
+                    throw std::runtime_error(
+                        "BackwardGraphBuilder gradient combines incompatible ragged runtime extents before a shape transform.");
+                }
+                return;
+            }
+            result = candidate;
+        };
+
+        std::function<void(uint32_t)> visit = [&](uint32_t node_idx) {
+            if (node_idx == UINT32_MAX || node_idx >= grad_expr.nodes.size() || !visited.insert(node_idx).second) {
+                return;
+            }
+            const ExprNode& n = grad_expr.nodes.at(node_idx);
+            if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+                merge_extent(n.rhs, n);
+                return;
+            }
+
+            auto visit_parent = [&](uint32_t parent) {
+                if (parent != UINT32_MAX) visit(parent);
+            };
+            visit_parent(n.lhs);
+            visit_parent(n.rhs);
+            visit_parent(n.aux);
+            visit_parent(n.alpha_node);
+            visit_parent(n.beta_node);
+            visit_parent(n.matmul_epilogue_aux);
+            visit_parent(n.rope_effective_sequence_length_node);
+            visit_parent(n.rope_position_ids_node);
+            visit_parent(n.attention_seq_len_q_node);
+            visit_parent(n.attention_seq_len_kv_node);
+            visit_parent(n.attention_ragged_offset_q_node);
+            visit_parent(n.attention_ragged_offset_kv_node);
+            visit_parent(n.attention_page_table_k_node);
+            visit_parent(n.attention_page_table_v_node);
+            visit_parent(n.attention_dropout_seed_node);
+            visit_parent(n.attention_dropout_offset_node);
+            if (n.op == ExprOp::CUDA_KERNEL_OUTPUT) {
+                for (uint32_t parent : n.cuda_kernel_input_nodes) visit_parent(parent);
+            }
+        };
+
+        visit(root);
+        return result;
     }
 
     std::optional<DataType> tryInferValueDType(uint32_t node_idx) const {
@@ -1355,6 +1440,8 @@ class BackwardGraphBuilder {
                                      forward_node.output_dtype,
                                      forward_node.compute_dtype);
             ExprNode& result_node = grad_expr.nodes.at(result);
+            result_node.matmul_packed_row_binding = forward_node.matmul_packed_row_binding;
+            result_node.matmul_packed_row_capacity = forward_node.matmul_packed_row_capacity;
             result_node.alpha_fp = forward_node.alpha_fp;
             result_node.beta_fp = forward_node.beta_fp;
             if (forward_node.alpha_node != UINT32_MAX) {
@@ -1388,7 +1475,12 @@ class BackwardGraphBuilder {
         }
         const ExprNode& source = grad_expr.nodes.at(matmul_idx);
         if (!(source.op == ExprOp::MATMUL || source.op == ExprOp::GEMM) || source.matmul_epilogue != MatmulEpilogue::Default ||
-            source.matmul_backward_epilogue != MatmulBackwardEpilogue::Default) {
+            source.matmul_backward_epilogue != MatmulBackwardEpilogue::Default ||
+            source.matmul_packed_row_binding != MatmulPackedRowBinding::None) {
+            // Packed-row matmuls are lowered through the bucketed backend.  Keep
+            // their activation derivative in the ordinary expression tail so
+            // it can be fused there rather than converting the matmul to an Lt
+            // backward epilogue that the bucketed backend does not implement.
             return UINT32_MAX;
         }
         ExprNode fused = source;
@@ -2147,6 +2239,18 @@ class BackwardGraphBuilder {
 
     const std::optional<uint32_t>& gradOf(uint32_t forward_node_index) const { return node_grads.at(forward_node_index); }
 
+    void setPackedRowMatmul(uint32_t node_idx, MatmulPackedRowBinding binding, uint64_t capacity) {
+        if (node_idx >= grad_expr.nodes.size()) {
+            throw std::runtime_error("Autodiff packed-row matmul annotation node index out of range.");
+        }
+        ExprNode& node = grad_expr.nodes.at(node_idx);
+        if (node.op != ExprOp::MATMUL) {
+            throw std::runtime_error("Autodiff packed-row annotation requires a MATMUL node.");
+        }
+        node.matmul_packed_row_binding = binding;
+        node.matmul_packed_row_capacity = capacity;
+    }
+
     PhysicalExpression takeExpression() { return std::move(grad_expr); }
 
    private:
@@ -2674,27 +2778,51 @@ static std::vector<uint64_t> inferAttentionOutputDims(const ExprNode& node,
                                                        const std::vector<uint64_t>& q_dims,
                                                        const std::vector<uint64_t>& k_dims,
                                                        const std::vector<uint64_t>& v_dims) {
-    if (node.attention_use_ragged_offsets && q_dims.size() == 3) {
-        if (node.attention_q_layout != AttentionTensorLayout::BSHD || node.attention_k_layout != AttentionTensorLayout::BSHD ||
-            node.attention_v_layout != AttentionTensorLayout::BSHD || node.attention_o_layout != AttentionTensorLayout::BSHD ||
-            k_dims.size() != 3 || v_dims.size() != 3) {
+    if (node.attention_use_ragged_offsets) {
+        const bool queryRagged = q_dims.size() == 3;
+        const bool keyValueRagged = k_dims.size() == 3;
+        if ((q_dims.size() != 3 && q_dims.size() != 4) || (k_dims.size() != 3 && k_dims.size() != 4) ||
+            (v_dims.size() != 3 && v_dims.size() != 4) || (v_dims.size() == 3) != keyValueRagged) {
             throw std::runtime_error(
-                "Autodiff canonical ragged attention requires packed [T,H,D] BSHD q/k/v storage.");
+                "Autodiff ragged attention requires Q to be packed rank-3 or dense rank-4 and K/V to share the same rank-3/rank-4 domain.");
         }
-        if (q_dims.at(0) == 0 || k_dims.at(0) == 0 || q_dims.at(1) == 0 || k_dims.at(1) == 0 || q_dims.at(2) == 0 ||
-            v_dims.at(2) == 0) {
-            throw std::runtime_error("Autodiff canonical ragged attention q/k/v dimensions must be non-zero.");
+        if (node.attention_q_layout != AttentionTensorLayout::BSHD || node.attention_k_layout != AttentionTensorLayout::BSHD ||
+            node.attention_v_layout != AttentionTensorLayout::BSHD || node.attention_o_layout != AttentionTensorLayout::BSHD) {
+            throw std::runtime_error("Autodiff ragged/mixed attention requires BSHD logical layout.");
         }
-        if (k_dims.at(0) != v_dims.at(0) || k_dims.at(1) != v_dims.at(1)) {
-            throw std::runtime_error("Autodiff canonical ragged attention found mismatched packed K/V dimensions.");
+
+        const uint64_t queryHeads = queryRagged ? q_dims.at(1) : q_dims.at(2);
+        const uint64_t queryHeadDim = q_dims.at(3 - (queryRagged ? 1 : 0));
+        const uint64_t keyValueHeads = keyValueRagged ? k_dims.at(1) : k_dims.at(2);
+        const uint64_t keyHeadDim = k_dims.at(3 - (keyValueRagged ? 1 : 0));
+        const uint64_t valueHeads = keyValueRagged ? v_dims.at(1) : v_dims.at(2);
+        const uint64_t valueDim = v_dims.at(3 - (keyValueRagged ? 1 : 0));
+        const uint64_t keyTokenExtent = keyValueRagged ? k_dims.at(0) : k_dims.at(1);
+        const uint64_t valueTokenExtent = keyValueRagged ? v_dims.at(0) : v_dims.at(1);
+
+        if (queryHeads == 0 || keyValueHeads == 0 || queryHeadDim == 0 || valueDim == 0 || keyTokenExtent == 0 ||
+            valueTokenExtent == 0) {
+            throw std::runtime_error("Autodiff ragged/mixed attention q/k/v dimensions must be non-zero.");
         }
-        if (q_dims.at(1) % k_dims.at(1) != 0) {
+        if (keyValueHeads != valueHeads || keyTokenExtent != valueTokenExtent) {
+            throw std::runtime_error("Autodiff ragged/mixed attention found mismatched K/V dimensions.");
+        }
+        if (queryHeads % keyValueHeads != 0) {
             throw std::runtime_error("Autodiff attention query heads must be an integer multiple of key/value heads.");
         }
-        if (q_dims.at(2) != k_dims.at(2)) {
+        if (queryHeadDim != keyHeadDim) {
             throw std::runtime_error("Autodiff attention q/k head dimensions must match.");
         }
-        return {q_dims.at(0), q_dims.at(1), v_dims.at(2)};
+        if (!queryRagged && !keyValueRagged && q_dims.at(0) != k_dims.at(0)) {
+            throw std::runtime_error("Autodiff attention shape inference found mismatched q/k batch dimensions.");
+        }
+        if (queryRagged) {
+            if (q_dims.at(0) == 0) {
+                throw std::runtime_error("Autodiff ragged attention query packed capacity must be non-zero.");
+            }
+            return {q_dims.at(0), queryHeads, valueDim};
+        }
+        return attentionOutputDimsForAutodiff(node, q_dims.at(0), queryHeads, q_dims.at(1), valueDim);
     }
 
     const AttentionTensorLogicalDims q = logicalAttentionDimsForAutodiff(q_dims, node.attention_q_layout, "q");
@@ -2726,9 +2854,9 @@ static std::vector<uint64_t> inferAttentionOutputDims(const ExprNode& node,
 static std::vector<uint64_t> inferAttentionDenseBiasDims(const ExprNode& node,
                                                           const std::vector<uint64_t>& q_dims,
                                                           const std::vector<uint64_t>& k_dims) {
-    if (node.attention_use_ragged_offsets && q_dims.size() == 3) {
+    if (node.attention_use_ragged_offsets) {
         throw std::runtime_error(
-            "Autodiff ragged attention dBias shape inference is unavailable because production ragged score-bias backward is unsupported.");
+            "Autodiff ragged/mixed attention dBias shape inference is unavailable because production ragged score-bias backward is unsupported.");
     }
     const AttentionTensorLogicalDims q = logicalAttentionDimsForAutodiff(q_dims, node.attention_q_layout, "q");
     const AttentionTensorLogicalDims k = logicalAttentionDimsForAutodiff(k_dims, node.attention_k_layout, "k");
@@ -3824,8 +3952,33 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
             case ExprOp::LOGICAL_AND:
             case ExprOp::LOGICAL_OR:
             case ExprOp::LOGICAL_NOT:
-            case ExprOp::CAST:
                 throw std::runtime_error("Thor expressions autodiff does not support backward for op " + opName(node.op) + ".");
+
+            case ExprOp::CAST: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    // Type conversion is a straight-through operation in Thor's layer semantics:
+                    // TypeConversion::backProp() converts the incoming gradient back into the
+                    // source tensor dtype.  Keep Expression CAST consistent with that behavior so
+                    // graph-level type conversion can use the normal Expression/autodiff engine.
+                    const ExprNode& lhs_node = forward_expr.nodes.at(node.lhs);
+                    const std::optional<DataType> source_dtype = preferredGradValueDType(lhs_node);
+                    if (!source_dtype.has_value()) {
+                        if (allow_shape_deferred_placeholders) {
+                            // FusedEquation::compileBackward builds an initial backward template before
+                            // runtime forward-input dtypes are known.  That template is rebuilt from a
+                            // dtype-resolved forward graph during stamp-time specialization, at which
+                            // point the real cast-back to the source gradient dtype is inserted.  Keep
+                            // the deferred template buildable without guessing a dtype here.
+                            addContributionToChild(node.lhs, grad, node_dims);
+                            break;
+                        }
+                        throw std::runtime_error(
+                            "CAST autodiff requires the source value dtype to be resolved before building backward outputs.");
+                    }
+                    addContributionToChild(node.lhs, builder.cast(grad, source_dtype.value()), node_dims);
+                }
+                break;
+            }
 
             case ExprOp::SIN: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
@@ -4041,14 +4194,50 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         }
                         source_dims = inferred_source_dims.value();
                     }
-                    builder.addContribution(node.lhs,
-                                            builder.stridedViewBackward(grad,
-                                                                        source_dims,
-                                                                        node.view_dims,
-                                                                        node.view_strides,
-                                                                        node.view_element_offset,
-                                                                        preferredGradValueDType(forward_expr.nodes.at(node.lhs)),
-                                                                        preferredGradValueDType(forward_expr.nodes.at(node.lhs))));
+                    uint32_t strided_view_grad =
+                        builder.stridedViewBackward(grad,
+                                                    source_dims,
+                                                    node.view_dims,
+                                                    node.view_strides,
+                                                    node.view_element_offset,
+                                                    preferredGradValueDType(forward_expr.nodes.at(node.lhs)),
+                                                    preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+
+                    // A trailing ragged slice changes the number of elements represented by
+                    // each packed row.  The incoming gradient carries the sliced width, while
+                    // STRIDED_VIEW_BACKWARD scatters into the wider source-row domain.  Re-wrap
+                    // that scatter in the same row partition using the source width so the fused
+                    // kernel launches over active_rows * source_elements_per_value rather than
+                    // accidentally reusing the narrower sliced launch extent.
+                    const std::optional<RaggedGradientExtent> ragged_extent = builder.tryGetFrontierRaggedExtent(grad);
+                    if (ragged_extent.has_value()) {
+                        if (source_dims.empty() || node.view_dims.empty() ||
+                            source_dims.front() != ragged_extent->maxActiveValues ||
+                            node.view_dims.front() != ragged_extent->maxActiveValues) {
+                            throw std::runtime_error(
+                                "AutoDiff ragged strided_view backward requires the packed-row capacity as dimension zero.");
+                        }
+
+                        const std::vector<uint64_t> source_trailing_dims(source_dims.begin() + 1, source_dims.end());
+                        const std::vector<uint64_t> view_trailing_dims(node.view_dims.begin() + 1, node.view_dims.end());
+                        const uint64_t source_elements_per_value =
+                            source_trailing_dims.empty() ? 1 : dynamicDimsNumel(source_trailing_dims, "ragged strided_view source");
+                        const uint64_t view_elements_per_value =
+                            view_trailing_dims.empty() ? 1 : dynamicDimsNumel(view_trailing_dims, "ragged strided_view view");
+                        if (ragged_extent->elementsPerValue != view_elements_per_value) {
+                            throw std::runtime_error(
+                                "AutoDiff ragged strided_view backward received a gradient extent that does not match the view width.");
+                        }
+                        strided_view_grad = builder.raggedValuewiseExtent(
+                            strided_view_grad,
+                            ragged_extent->offsetsNode,
+                            ragged_extent->batchSize,
+                            ragged_extent->maxActiveValues,
+                            source_elements_per_value,
+                            preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                    }
+
+                    builder.addContribution(node.lhs, strided_view_grad);
                 }
                 break;
 
@@ -4649,6 +4838,10 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         lhs_grad = builder.matmul(rhs, matrix_grad_like_output, true, true, lhs_grad_dtype, node.compute_dtype);
                     }
 
+                    if (node.matmul_packed_row_binding == MatmulPackedRowBinding::RowsA &&
+                        node.matmul_packed_row_capacity != 0) {
+                        builder.setPackedRowMatmul(lhs_grad, MatmulPackedRowBinding::RowsA, node.matmul_packed_row_capacity);
+                    }
                     lhs_grad = builder.buildScaledByGemmFactor(node.alpha_node, node.alpha_fp, lhs_grad);
                     const std::vector<uint64_t> lhs_grad_dims =
                         has_forward_dims ? rawBatchedMatmulOperandGradientDims(node_dims, lhs_dims) : lhs_dims;
@@ -4671,6 +4864,10 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         rhs_grad = builder.matmul(matrix_grad_like_output, lhs, true, true, rhs_grad_dtype, node.compute_dtype);
                     }
 
+                    if (node.matmul_packed_row_binding == MatmulPackedRowBinding::RowsA &&
+                        node.matmul_packed_row_capacity != 0) {
+                        builder.setPackedRowMatmul(rhs_grad, MatmulPackedRowBinding::RowsAAndRowsB, node.matmul_packed_row_capacity);
+                    }
                     rhs_grad = builder.buildScaledByGemmFactor(node.alpha_node, node.alpha_fp, rhs_grad);
                     const std::vector<uint64_t> rhs_grad_dims =
                         has_forward_dims ? rawBatchedMatmulOperandGradientDims(node_dims, rhs_dims) : rhs_dims;

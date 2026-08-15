@@ -448,10 +448,14 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
             RaggedTensor raggedTensor = std::get<RaggedTensor>(value);
             THOR_THROW_IF_FALSE(raggedTensor.getDescriptor() == binding.descriptor);
             requireConsistentBatchCapacity(raggedTensor.getBatchSize());
+            Tensor raggedValues = raggedTensor.getValues();
+            if (const std::optional<uint64_t> activeRows = raggedTensor.getHostActiveValueCountIfAvailable(); activeRows.has_value()) {
+                raggedValues.setRaggedActiveRows(activeRows.value());
+            }
             THOR_THROW_IF_FALSE(
                 physicalBatchInputs.emplace(
                     binding.valuesInputName,
-                    PhysicalBatchInput{raggedTensor.getValues(), sourceReference}).second);
+                    PhysicalBatchInput{raggedValues, sourceReference}).second);
             THOR_THROW_IF_FALSE(
                 physicalBatchInputs.emplace(
                     binding.offsetsInputName,

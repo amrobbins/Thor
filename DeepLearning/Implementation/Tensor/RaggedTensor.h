@@ -41,6 +41,7 @@ class RaggedTensor {
     }
 
     Tensor getActiveValueCount() const;
+    [[nodiscard]] std::optional<uint64_t> getHostActiveValueCountIfAvailable() const;
     RaggedRuntimeExtent getRuntimeExtent() const;
     RaggedRuntimeExtent getRuntimeExtent(uint64_t elementsPerValue) const;
 
