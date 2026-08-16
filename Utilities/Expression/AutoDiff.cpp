@@ -4599,7 +4599,15 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 }
 
                 uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
-                const uint32_t x = builder.cloneForward(node.lhs);
+                uint32_t rms_x_forward_node = node.lhs;
+                if (forward_expr.nodes.at(node.lhs).op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+                    // The row-partition marker is consumed by the forward RMSNorm stage.  Its
+                    // backward algebra uses full-capacity reductions over already-zeroed tails;
+                    // keep the marker out of those reductions and let the marker's own derivative
+                    // reattach the partition to dX at the boundary.
+                    rms_x_forward_node = forward_expr.nodes.at(node.lhs).lhs;
+                }
+                const uint32_t x = builder.cloneForward(rms_x_forward_node);
                 const uint32_t scale = builder.cloneForward(node.rhs);
 
                 const uint32_t x_squared = builder.mul(x, x);
@@ -4856,6 +4864,51 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 const auto lhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
                 const auto rhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.rhs));
 
+                auto direct_ragged_marker = [&](uint32_t forward_node_idx) -> const ExprNode* {
+                    if (forward_node_idx >= forward_expr.nodes.size()) return nullptr;
+                    const ExprNode& candidate = forward_expr.nodes.at(forward_node_idx);
+                    if (candidate.op != ExprOp::RAGGED_VALUEWISE_EXTENT) return nullptr;
+                    if (candidate.rhs == UINT32_MAX || candidate.ragged_runtime_batch_size == 0 ||
+                        candidate.ragged_runtime_max_active_values == 0 || candidate.ragged_runtime_elements_per_value == 0) {
+                        throw std::runtime_error("Autodiff found malformed ragged runtime extent on MATMUL operand.");
+                    }
+                    return &candidate;
+                };
+                const ExprNode* lhs_ragged_marker = direct_ragged_marker(node.lhs);
+                auto wrap_with_marker = [&](uint32_t value, const ExprNode& marker, uint64_t elements_per_value) {
+                    return builder.raggedValuewiseExtent(value,
+                                                         builder.cloneForward(marker.rhs),
+                                                         marker.ragged_runtime_batch_size,
+                                                         marker.ragged_runtime_max_active_values,
+                                                         elements_per_value);
+                };
+                auto trailing_elements_per_packed_row = [&](const std::vector<uint64_t>& dims, const ExprNode& marker) {
+                    if (node.matmul_packed_row_capacity == 0) {
+                        throw std::runtime_error("Packed MATMUL autodiff is missing its packed row capacity.");
+                    }
+                    if (dims.empty()) {
+                        if (allow_shape_deferred_placeholders) {
+                            // compileBackward() first builds a shape-deferred template which is
+                            // never executed directly. Keep the row-partition dependency alive in
+                            // that template; buildShapeSpecializedOutputs() will rebuild this graph
+                            // with concrete forward dimensions before compilation/execution.
+                            return marker.ragged_runtime_elements_per_value;
+                        }
+                        throw std::runtime_error("Packed MATMUL autodiff cannot resolve row width without output geometry.");
+                    }
+                    if (dims[0] != node.matmul_packed_row_capacity) {
+                        throw std::runtime_error("Packed MATMUL autodiff output geometry does not match its packed row capacity.");
+                    }
+                    uint64_t elements = 1;
+                    for (size_t axis = 1; axis < dims.size(); ++axis) {
+                        if (dims[axis] == 0 || elements > std::numeric_limits<uint64_t>::max() / dims[axis]) {
+                            throw std::runtime_error("Packed MATMUL autodiff row width overflows uint64_t.");
+                        }
+                        elements *= dims[axis];
+                    }
+                    return elements;
+                };
+
                 if (node_reaches_requested_inputs.at(node.lhs)) {
                     uint32_t rhs = builder.cloneForward(node.rhs);
                     if (low_precision_operand_dtype.has_value()) {
@@ -4865,15 +4918,22 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         // upstream-gradient conversion above.
                         rhs = builder.cast(rhs, low_precision_operand_dtype.value());
                     }
+                    uint32_t row_grad_operand = matrix_grad_like_output;
+                    if (node.matmul_packed_row_binding == MatmulPackedRowBinding::RowsA && lhs_ragged_marker != nullptr) {
+                        row_grad_operand = wrap_with_marker(
+                            row_grad_operand,
+                            *lhs_ragged_marker,
+                            trailing_elements_per_packed_row(node_dims, *lhs_ragged_marker));
+                    }
                     uint32_t lhs_grad = UINT32_MAX;
                     if (!node.transpose_lhs && !node.transpose_rhs) {
-                        lhs_grad = builder.matmul(matrix_grad_like_output, rhs, false, true, lhs_grad_dtype, node.compute_dtype);
+                        lhs_grad = builder.matmul(row_grad_operand, rhs, false, true, lhs_grad_dtype, node.compute_dtype);
                     } else if (!node.transpose_lhs && node.transpose_rhs) {
-                        lhs_grad = builder.matmul(matrix_grad_like_output, rhs, false, false, lhs_grad_dtype, node.compute_dtype);
+                        lhs_grad = builder.matmul(row_grad_operand, rhs, false, false, lhs_grad_dtype, node.compute_dtype);
                     } else if (node.transpose_lhs && !node.transpose_rhs) {
-                        lhs_grad = builder.matmul(rhs, matrix_grad_like_output, false, true, lhs_grad_dtype, node.compute_dtype);
+                        lhs_grad = builder.matmul(rhs, row_grad_operand, false, true, lhs_grad_dtype, node.compute_dtype);
                     } else {
-                        lhs_grad = builder.matmul(rhs, matrix_grad_like_output, true, true, lhs_grad_dtype, node.compute_dtype);
+                        lhs_grad = builder.matmul(rhs, row_grad_operand, true, true, lhs_grad_dtype, node.compute_dtype);
                     }
 
                     if (node.matmul_packed_row_binding == MatmulPackedRowBinding::RowsA &&
@@ -4887,9 +4947,18 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 }
 
                 if (node_reaches_requested_inputs.at(node.rhs)) {
-                    uint32_t lhs = builder.cloneForward(node.lhs);
-                    if (low_precision_operand_dtype.has_value()) {
-                        lhs = builder.cast(lhs, low_precision_operand_dtype.value());
+                    uint32_t lhs = UINT32_MAX;
+                    if (lhs_ragged_marker != nullptr) {
+                        lhs = builder.cloneForward(lhs_ragged_marker->lhs);
+                        if (low_precision_operand_dtype.has_value()) {
+                            lhs = builder.cast(lhs, low_precision_operand_dtype.value());
+                        }
+                        lhs = wrap_with_marker(lhs, *lhs_ragged_marker, lhs_ragged_marker->ragged_runtime_elements_per_value);
+                    } else {
+                        lhs = builder.cloneForward(node.lhs);
+                        if (low_precision_operand_dtype.has_value()) {
+                            lhs = builder.cast(lhs, low_precision_operand_dtype.value());
+                        }
                     }
                     uint32_t rhs_grad = UINT32_MAX;
                     if (!node.transpose_lhs && !node.transpose_rhs) {

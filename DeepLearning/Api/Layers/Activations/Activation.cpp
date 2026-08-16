@@ -114,7 +114,7 @@ std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActi
         }
         auto physicalActivation = std::make_shared<ThorImplementation::RaggedCustomLayer>(
             DynamicExpression::fromExpressionDefinition(definition), inputNames, std::vector<std::string>{"feature_output"},
-            placement, inferenceOnly, ragged.getMaxTotalValues(), inputElementsPerValue, outputElementsPerValue, 0, getId());
+            placement, inferenceOnly, ragged.getMaxTotalValues(), inputElementsPerValue, outputElementsPerValue, 0, 1, getId());
         physicalActivation->setLayerName(getLayerType());
         return physicalActivation;
     }

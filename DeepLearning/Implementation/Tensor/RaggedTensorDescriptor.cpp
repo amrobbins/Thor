@@ -4,13 +4,6 @@
 
 namespace ThorImplementation {
 
-std::string RowPartitionDescriptor::toString() const {
-    std::ostringstream out;
-    out << "RowPartitionDescriptor(batch_size=" << batchSize << ", max_total_values=" << maxTotalValues
-        << ", offsets_data_type=" << TensorDescriptor::getElementTypeName(offsetsDataType) << ")";
-    return out.str();
-}
-
 std::vector<uint64_t> RaggedTensorDescriptor::getTrailingDimensions() const {
     std::vector<uint64_t> valuesDimensions = valuesDescriptor.getDimensions();
     THOR_THROW_IF_FALSE(!valuesDimensions.empty());

@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 
 #include <set>
 #include <stdexcept>
@@ -50,6 +51,7 @@ RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
                                      uint64_t inputElementsPerValue,
                                      uint64_t outputElementsPerValue,
                                      uint32_t valuesInputPort,
+                                     uint32_t offsetsInputPort,
                                      int64_t stampedId)
     : RaggedCustomLayer(std::move(expression),
                         std::move(inputNames),
@@ -61,6 +63,7 @@ RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
                         std::vector<uint64_t>{inputElementsPerValue},
                         std::vector<uint64_t>{outputElementsPerValue},
                         std::vector<uint32_t>{valuesInputPort},
+                        offsetsInputPort,
                         stampedId) {}
 
 RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
@@ -72,6 +75,7 @@ RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
                                      std::vector<uint64_t> inputElementsPerValue,
                                      uint64_t outputElementsPerValue,
                                      std::vector<uint32_t> valuesInputPorts,
+                                     uint32_t offsetsInputPort,
                                      int64_t stampedId)
     : RaggedCustomLayer(std::move(expression),
                         std::move(inputNames),
@@ -83,6 +87,7 @@ RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
                         std::move(inputElementsPerValue),
                         std::vector<uint64_t>{outputElementsPerValue},
                         std::move(valuesInputPorts),
+                        offsetsInputPort,
                         stampedId) {}
 
 RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
@@ -95,6 +100,7 @@ RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
                                      std::vector<uint64_t> inputElementsPerValue,
                                      std::vector<uint64_t> outputElementsPerValue,
                                      std::vector<uint32_t> valuesInputPorts,
+                                     uint32_t offsetsInputPort,
                                      int64_t stampedId,
                                      std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors)
     : CustomLayer(std::move(expression),
@@ -114,6 +120,7 @@ RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
       inputElementsPerValue(std::move(inputElementsPerValue)),
       outputElementsPerValue(std::move(outputElementsPerValue)),
       valuesInputPorts(std::move(valuesInputPorts)),
+      offsetsInputPort(offsetsInputPort),
       inputPortCount(static_cast<uint32_t>(inputNames.size())),
       outputPortCount(static_cast<uint32_t>(outputNames.size())) {
     if (fullCapacityRows == 0) {
@@ -121,7 +128,7 @@ RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
     }
     if (inputPortCount == 0 || outputPortCount == 0 || this->valuesInputPorts.empty() ||
         this->inputElementsPerValue.size() != this->valuesInputPorts.size() ||
-        this->outputElementsPerValue.size() != outputPortCount) {
+        this->outputElementsPerValue.size() != outputPortCount || this->offsetsInputPort >= inputPortCount) {
         throw std::invalid_argument(
             "RaggedCustomLayer requires packed-values metadata for at least one input and every output.");
     }
@@ -131,7 +138,8 @@ RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
         }
     }
     for (size_t i = 0; i < this->valuesInputPorts.size(); ++i) {
-        if (this->valuesInputPorts[i] >= inputPortCount || this->inputElementsPerValue[i] == 0) {
+        if (this->valuesInputPorts[i] >= inputPortCount || this->valuesInputPorts[i] == this->offsetsInputPort ||
+            this->inputElementsPerValue[i] == 0) {
             throw std::invalid_argument("RaggedCustomLayer packed-values input metadata is invalid.");
         }
         for (size_t j = 0; j < i; ++j) {
@@ -147,30 +155,30 @@ uint32_t RaggedCustomLayer::applicationIndexForConnection(uint32_t connectionNum
 }
 
 uint64_t RaggedCustomLayer::requireActiveRows(uint32_t applicationIndex) const {
-    std::optional<uint64_t> commonActiveRows;
-    for (uint32_t valuesInputPort : valuesInputPorts) {
-        const uint32_t flatIndex = applicationIndex * inputPortCount + valuesInputPort;
-        if (flatIndex >= featureInputs.size() || !featureInputs[flatIndex].has_value()) {
-            throw std::runtime_error("RaggedCustomLayer values input is not connected for this application.");
-        }
-        const Tensor values = featureInputs[flatIndex].value();
-        const std::optional<uint64_t> activeRows = values.getRaggedActiveRows();
-        if (!activeRows.has_value()) {
-            throw std::runtime_error("RaggedCustomLayer requires host-known active-row metadata on packed values.");
-        }
-        if (activeRows.value() > fullCapacityRows) {
-            throw std::runtime_error("RaggedCustomLayer active row count exceeds its packed capacity.");
-        }
-        if (commonActiveRows.has_value() && commonActiveRows.value() != activeRows.value()) {
-            throw std::runtime_error(
-                "RaggedCustomLayer packed-values inputs disagree on their authoritative active-row count.");
-        }
-        commonActiveRows = activeRows.value();
+    const uint32_t offsetsFlatIndex = applicationIndex * inputPortCount + offsetsInputPort;
+    if (offsetsFlatIndex >= featureInputs.size() || !featureInputs[offsetsFlatIndex].has_value()) {
+        throw std::runtime_error("RaggedCustomLayer row-partition offsets input is not connected for this application.");
     }
-    if (!commonActiveRows.has_value()) {
-        throw std::runtime_error("RaggedCustomLayer has no packed-values input metadata.");
+
+    const Tensor offsets = featureInputs[offsetsFlatIndex].value();
+    const TensorDescriptor offsetsDescriptor = offsets.getDescriptor();
+    if (offsetsDescriptor.getNumDimensions() != 1 || offsetsDescriptor.getDimensions()[0] == 0 ||
+        !RowPartitionDescriptor::isValidOffsetsDataType(offsetsDescriptor.getDataType())) {
+        throw std::runtime_error("RaggedCustomLayer row-partition offsets input is not canonical.");
     }
-    return commonActiveRows.value();
+
+    const uint64_t batchSize = offsetsDescriptor.getDimensions()[0] - 1;
+    RowPartitionRuntime rowPartition(
+        offsets, RowPartitionDescriptor(batchSize, fullCapacityRows, offsetsDescriptor.getDataType()));
+    const std::optional<uint64_t> activeRows = rowPartition.getHostActiveValueCountIfAvailable();
+    if (!activeRows.has_value()) {
+        throw std::runtime_error(
+            "RaggedCustomLayer requires a host-known active-value count on its row partition for tail canonicalization.");
+    }
+    if (activeRows.value() > fullCapacityRows) {
+        throw std::runtime_error("RaggedCustomLayer active row count exceeds its packed capacity.");
+    }
+    return activeRows.value();
 }
 
 void RaggedCustomLayer::zeroInactiveTail(Tensor tensor, uint64_t activeRows, uint64_t rowWidth, Stream stream) const {
@@ -208,7 +216,6 @@ void RaggedCustomLayer::afterForwardExpressionRun(uint32_t connectionNumber, Str
         }
         Tensor output = featureOutputs[outputFlatIndex].value();
         zeroInactiveTail(output, activeRows, outputElementsPerValue[outputPort], stream);
-        output.setRaggedActiveRows(activeRows);
     }
 }
 
@@ -225,7 +232,6 @@ void RaggedCustomLayer::afterBackwardErrorExpressionRun(uint32_t connectionNumbe
         }
         Tensor dValues = errorOutputs[valuesFlatIndex].value();
         zeroInactiveTail(dValues, activeRows, inputElementsPerValue[i], stream);
-        dValues.setRaggedActiveRows(activeRows);
     }
 }
 

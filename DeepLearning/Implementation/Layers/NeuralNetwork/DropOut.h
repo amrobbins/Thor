@@ -8,12 +8,16 @@
 #include "DeepLearning/Implementation/Layers/TrainingDropoutControllable.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOutKernel.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 
 namespace ThorImplementation {
 
 /**
  * Performs DropOut, and corresponding scaling, during training.
- * Returns the input tensor as the output tensor during inference.
+ * Inference aliases the input tensor as the output tensor for both dense and ragged
+ * execution. A zero-rate training layer is likewise a true identity. Row-partition
+ * state lives on the offsets-owned RowPartitionRuntime, so aliasing packed values does
+ * not require DropOut to copy or mutate ragged metadata.
  *
  * When instantiating a trained network for inference only, this layer should be skipped
  * (not instantiated as part of the network), to save memory and memory bandwidth.
@@ -36,25 +40,48 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     void setTrainingDropoutEnabled(bool enabled) override { trainingDropoutEnabled = enabled; }
     [[nodiscard]] bool isTrainingDropoutEnabled() const override { return trainingDropoutEnabled; }
 
-    void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize = 0) override {
-        // Dropout is active only for gradient-training passes. Validation and
-        // inference must observe the deterministic, unmasked network. Capture
-        // the exact decision for the matching backward pass so a later control
-        // change cannot pair an identity forward with a masked backward.
-        const bool previousApplyDropout = applyDropoutThisForward;
-        const bool applyDropout =
-            training && trainingDropoutEnabled && !validationPass && probabilityOfDroppingOut > 0.0f;
-        applyDropoutThisForward = applyDropout;
-        try {
-            Layer::forward(featureInput, validationPass, batchSize);
-        } catch (...) {
-            applyDropoutThisForward = previousApplyDropout;
-            throw;
+    void forward(std::optional<Tensor> arrivingInput, bool validationPass, uint32_t batchSize = 0) override {
+        if (!raggedConfiguration.has_value()) {
+            forwardValues(arrivingInput, validationPass, batchSize);
+            return;
         }
-        if (training && !validationPass) {
-            applyDropoutForBackward = applyDropout;
+
+        THOR_THROW_IF_FALSE(arrivingInput.has_value());
+        THOR_THROW_IF_FALSE(featureInput.has_value());
+        THOR_THROW_IF_FALSE(rowPartitionInput.has_value());
+        const bool valuesArrival = arrivingInput.value() == featureInput.value();
+        const bool partitionArrival = arrivingInput.value() == rowPartitionInput.value();
+        THOR_THROW_IF_FALSE(valuesArrival || partitionArrival);
+
+        // Inference-only and zero-rate DropOut are physical identities. Preserve the
+        // zero-copy path for ragged values too: the structural offsets edge remains
+        // connected in the graph, but identity execution neither waits for it nor
+        // queries RowPartitionRuntime because no packed rows are read or written.
+        if (!training || probabilityOfDroppingOut == 0.0f) {
+            if (partitionArrival) return;
+            forwardValues(featureInput, validationPass, batchSize);
+            return;
         }
-        applyDropoutThisForward = previousApplyDropout;
+
+        if (!pendingRaggedValidationPass.has_value()) {
+            pendingRaggedValidationPass = validationPass;
+            pendingRaggedBatchSize = batchSize;
+        } else {
+            THOR_THROW_IF_FALSE(pendingRaggedValidationPass.value() == validationPass);
+            THOR_THROW_IF_FALSE(pendingRaggedBatchSize.value() == batchSize);
+        }
+
+        if (valuesArrival) raggedValuesArrived = true;
+        if (partitionArrival) raggedPartitionArrived = true;
+        if (!raggedValuesArrived || !raggedPartitionArrived) return;
+
+        const bool resolvedValidationPass = pendingRaggedValidationPass.value();
+        const uint32_t resolvedBatchSize = pendingRaggedBatchSize.value();
+        raggedValuesArrived = false;
+        raggedPartitionArrived = false;
+        pendingRaggedValidationPass.reset();
+        pendingRaggedBatchSize.reset();
+        forwardValues(featureInput, resolvedValidationPass, resolvedBatchSize);
     }
 
     DropOut(float probabilityOfDroppingOut,
@@ -73,6 +100,37 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         this->trainingDropoutEnabled = trainingDropoutEnabled;
         std::random_device rd;
         randomSeed = Tensor::Tensor::getThreadIdHash64(rd());
+    }
+
+    std::optional<Tensor> connectToPreviousLayer(
+        Layer *previousLayer, std::optional<Tensor> connectedInput, Stream connectedStream, bool backPropagateError, int connectionType = 0) override {
+        if (!raggedConfiguration.has_value()) {
+            THOR_THROW_IF_FALSE(connectionType == 0);
+            return Layer::connectToPreviousLayer(previousLayer, connectedInput, connectedStream, backPropagateError, connectionType);
+        }
+
+        if (connectionType == 0) {
+            std::optional<Tensor> result =
+                Layer::connectToPreviousLayer(previousLayer, connectedInput, connectedStream, backPropagateError, connectionType);
+            if (rowPartitionInput.has_value()) {
+                THOR_THROW_IF_FALSE(featureInput.has_value());
+                THOR_THROW_IF_FALSE(featureInput->getPlacement() == rowPartitionInput->getPlacement());
+            }
+            return result;
+        }
+        if (connectionType != 1) {
+            throw std::runtime_error("Ragged DropOut received an unknown physical input port.");
+        }
+        THOR_THROW_IF_FALSE(!compiled);
+        THOR_THROW_IF_FALSE(connectedInput.has_value());
+        THOR_THROW_IF_FALSE(!rowPartitionInput.has_value());
+        rowPartitionInput = connectedInput.value();
+        if (featureInput.has_value()) {
+            THOR_THROW_IF_FALSE(featureInput->getPlacement() == rowPartitionInput->getPlacement());
+        }
+        // The partition is a forward-only structural dependency. Gradients flow
+        // exclusively through packed values, never through offsets.
+        return std::nullopt;
     }
 
     std::optional<Tensor> createFeatureOutputTensor() override {
@@ -131,24 +189,29 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     void compileImpl() override {
         Layer::compileImpl();
 
-        if (!training || probabilityOfDroppingOut == 0.0f)
-            return;
-
         // The random state or keep mask may not change between a training
         // forward and its matching backward, so a DropOut instance supports one
         // active input/output pair at a time.
         THOR_THROW_IF_FALSE(featureInput.has_value());
 
-        ScopedGpu scopedGpu(featureInput.value().getPlacement().getDeviceNum());
-
         const DataType dataType = featureInput.value().getDescriptor().getDataType();
         if (raggedConfiguration.has_value()) {
             THOR_THROW_IF_FALSE(nativeKernelSupportsDataType(dataType));
+            THOR_THROW_IF_FALSE(rowPartitionInput.has_value());
             validateRaggedTensorShape(featureInput.value());
+            validateRowPartitionTensor(rowPartitionInput.value());
+            if (!training || probabilityOfDroppingOut == 0.0f)
+                return;
+            ScopedGpu scopedGpu(featureInput.value().getPlacement().getDeviceNum());
             reserveSpaceBytes = featureInput.value().getTotalNumElements();
             reserveSpace = Tensor(featureInput.value().getPlacement(), TensorDescriptor(DataType::UINT8, {reserveSpaceBytes}));
             return;
         }
+
+        if (!training || probabilityOfDroppingOut == 0.0f)
+            return;
+
+        ScopedGpu scopedGpu(featureInput.value().getPlacement().getDeviceNum());
         if (usesNativeKernel(dataType)) {
             reserveSpaceBytes =
                 getNativeReserveSpaceSizeInBytes(featureInput.value().getDescriptor().getDimensions());
@@ -194,9 +257,14 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         THOR_THROW_IF_FALSE(outputTensor.has_value());
 
         if (raggedConfiguration.has_value()) {
-            const uint64_t activeRows = requireRaggedActiveRows(inputTensor.value());
+            validateRaggedTensorShape(inputTensor.value());
+            if (outputTensor.value() == inputTensor.value()) {
+                THOR_THROW_IF_FALSE(!applyDropoutThisForward);
+                return;
+            }
+            const uint64_t activeRows = requireRaggedActiveValueCount();
             const uint64_t activeElements = activeRows * raggedConfiguration->elementsPerValue;
-            raggedActiveRowsForBackward = activeRows;
+            raggedActiveValueCountForBackward = activeRows;
 
             if (outputTensor.value() != inputTensor.value()) {
                 if (applyDropoutThisForward) {
@@ -218,7 +286,6 @@ class DropOut : public Layer, public TrainingDropoutControllable {
                     copyActivePrefix(inputTensor.value(), outputTensor.value(), activeElements, stream);
                 }
                 zeroRaggedInactiveTail(outputTensor.value(), activeElements, stream);
-                outputTensor.value().setRaggedActiveRows(activeRows);
             }
             return;
         }
@@ -261,20 +328,19 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         THOR_THROW_IF_FALSE(errorIn.has_value());
         THOR_THROW_IF_FALSE(training);
 
-        if (probabilityOfDroppingOut == 0.0f) {
-            THOR_THROW_IF_FALSE(errorOut.value() == errorIn.value());
-            applyDropoutForBackward = false;
-            return;
-        }
-
         const bool applyDropout = applyDropoutForBackward;
         applyDropoutForBackward = false;
 
         if (raggedConfiguration.has_value()) {
-            if (!raggedActiveRowsForBackward.has_value())
+            if (probabilityOfDroppingOut == 0.0f) {
+                THOR_THROW_IF_FALSE(errorOut.value() == errorIn.value());
+                raggedActiveValueCountForBackward.reset();
+                return;
+            }
+            if (!raggedActiveValueCountForBackward.has_value())
                 throw std::runtime_error("Ragged DropOut backward requires a preceding training forward pass.");
-            const uint64_t activeRows = raggedActiveRowsForBackward.value();
-            raggedActiveRowsForBackward.reset();
+            const uint64_t activeRows = raggedActiveValueCountForBackward.value();
+            raggedActiveValueCountForBackward.reset();
             THOR_THROW_IF_FALSE(activeRows <= raggedConfiguration->fullCapacityRows);
             const uint64_t activeElements = activeRows * raggedConfiguration->elementsPerValue;
 
@@ -295,8 +361,12 @@ class DropOut : public Layer, public TrainingDropoutControllable {
             }
             if (errorOut.value() != errorIn.value()) {
                 zeroRaggedInactiveTail(errorOut.value(), activeElements, stream);
-                errorOut.value().setRaggedActiveRows(activeRows);
             }
+            return;
+        }
+
+        if (probabilityOfDroppingOut == 0.0f) {
+            THOR_THROW_IF_FALSE(errorOut.value() == errorIn.value());
             return;
         }
 
@@ -343,14 +413,50 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         THOR_THROW_IF_FALSE(totalElements / raggedConfiguration->fullCapacityRows == raggedConfiguration->elementsPerValue);
     }
 
-    [[nodiscard]] uint64_t requireRaggedActiveRows(const Tensor& tensor) const {
-        validateRaggedTensorShape(tensor);
-        const std::optional<uint64_t> activeRows = tensor.getRaggedActiveRows();
-        if (!activeRows.has_value())
-            throw std::runtime_error("Ragged DropOut requires host-known active-row metadata on packed values.");
-        if (activeRows.value() > raggedConfiguration->fullCapacityRows)
+    void validateRowPartitionTensor(const Tensor& offsets) const {
+        THOR_THROW_IF_FALSE(raggedConfiguration.has_value());
+        const TensorDescriptor descriptor = offsets.getDescriptor();
+        if (descriptor.getNumDimensions() != 1 || descriptor.getDimensions()[0] == 0 ||
+            !RowPartitionDescriptor::isValidOffsetsDataType(descriptor.getDataType())) {
+            throw std::runtime_error("Ragged DropOut row-partition offsets input is not canonical.");
+        }
+    }
+
+    [[nodiscard]] uint64_t requireRaggedActiveValueCount() const {
+        THOR_THROW_IF_FALSE(raggedConfiguration.has_value());
+        if (!rowPartitionInput.has_value())
+            throw std::runtime_error("Ragged DropOut row-partition offsets input is not connected.");
+        validateRowPartitionTensor(rowPartitionInput.value());
+        const TensorDescriptor descriptor = rowPartitionInput->getDescriptor();
+        const uint64_t batchSize = descriptor.getDimensions()[0] - 1;
+        RowPartitionRuntime rowPartition(
+            rowPartitionInput.value(),
+            RowPartitionDescriptor(batchSize, raggedConfiguration->fullCapacityRows, descriptor.getDataType()));
+        const uint64_t activeRows = rowPartition.requireHostActiveValueCount();
+        if (activeRows > raggedConfiguration->fullCapacityRows)
             throw std::runtime_error("Ragged DropOut active row count exceeds packed capacity.");
-        return activeRows.value();
+        return activeRows;
+    }
+
+    void forwardValues(std::optional<Tensor> valuesInput, bool validationPass, uint32_t batchSize) {
+        // Dropout is active only for gradient-training passes. Validation and
+        // inference must observe the deterministic, unmasked network. Capture
+        // the exact decision for the matching backward pass so a later control
+        // change cannot pair an identity forward with a masked backward.
+        const bool previousApplyDropout = applyDropoutThisForward;
+        const bool applyDropout =
+            training && trainingDropoutEnabled && !validationPass && probabilityOfDroppingOut > 0.0f;
+        applyDropoutThisForward = applyDropout;
+        try {
+            Layer::forward(valuesInput, validationPass, batchSize);
+        } catch (...) {
+            applyDropoutThisForward = previousApplyDropout;
+            throw;
+        }
+        if (training && !validationPass) {
+            applyDropoutForBackward = applyDropout;
+        }
+        applyDropoutThisForward = previousApplyDropout;
     }
 
     static void copyActivePrefix(const Tensor& source, Tensor destination, uint64_t activeElements, Stream stream) {
@@ -386,7 +492,12 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     uint64_t randomSeed = 0;
     uint64_t nativeForwardSequence = 0;
     std::optional<RaggedConfiguration> raggedConfiguration;
-    std::optional<uint64_t> raggedActiveRowsForBackward;
+    std::optional<uint64_t> raggedActiveValueCountForBackward;
+    std::optional<Tensor> rowPartitionInput;
+    bool raggedValuesArrived = false;
+    bool raggedPartitionArrived = false;
+    std::optional<bool> pendingRaggedValidationPass;
+    std::optional<uint32_t> pendingRaggedBatchSize;
 
     Tensor randomState;
     size_t randomStateBytes;

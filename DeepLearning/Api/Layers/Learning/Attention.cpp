@@ -10,6 +10,7 @@
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/TensorOperations/Scalar/SetScalar.h"
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -1476,6 +1477,36 @@ std::shared_ptr<ThorImplementation::CustomLayer> Attention::createPhysicalLayer(
         dropoutProbability > 0.0f
             ? std::optional<ThorImplementation::DynamicExpressionVariantId>(kAttentionEvaluationVariant)
             : std::nullopt;
+
+    std::optional<ThorImplementation::Attention::RaggedQueryMetadata> raggedQueryMetadata;
+    if (raggedFeatureInput.has_value()) {
+        THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
+        const auto featureInputIt =
+            std::find(physicalInputNames.begin(), physicalInputNames.end(), std::string(kAttentionFeatureInputName));
+        const auto queryOffsetsIt =
+            std::find(physicalInputNames.begin(), physicalInputNames.end(), std::string(kAttentionQueryRowPartitionInputName));
+        THOR_THROW_IF_FALSE(featureInputIt != physicalInputNames.end());
+        THOR_THROW_IF_FALSE(queryOffsetsIt != physicalInputNames.end());
+        const uint32_t featureInputPort = static_cast<uint32_t>(
+            std::distance(physicalInputNames.begin(), featureInputIt));
+        const uint32_t queryOffsetsPort = static_cast<uint32_t>(
+            std::distance(physicalInputNames.begin(), queryOffsetsIt));
+        const auto elementsPerValue = [](const std::vector<uint64_t>& dimensions) {
+            uint64_t elements = 1;
+            for (uint64_t dimension : dimensions) {
+                elements = checkedMul(elements, dimension, "ragged elements-per-value");
+            }
+            return elements;
+        };
+        raggedQueryMetadata = ThorImplementation::Attention::RaggedQueryMetadata{
+            .valuesInputPort = featureInputPort,
+            .offsetsInputPort = queryOffsetsPort,
+            .rowPartitionDescriptor = raggedFeatureInput->getDescriptor().getRowPartition(),
+            .inputElementsPerValue = elementsPerValue(raggedFeatureInput->getTrailingDimensions()),
+            .outputElementsPerValue = elementsPerValue(raggedFeatureOutput->getTrailingDimensions()),
+        };
+    }
+
     return std::make_shared<ThorImplementation::Attention>(std::move(expression),
                                                             std::move(physicalInputNames),
                                                             std::move(physicalOutputNames),
@@ -1487,7 +1518,8 @@ std::shared_ptr<ThorImplementation::CustomLayer> Attention::createPhysicalLayer(
                                                             deterministicTrainingVariant,
                                                             isTrainingDropoutEnabled(),
                                                             std::move(inputDimensionsIncludeBatch),
-                                                            fixedBatchCapacity);
+                                                            fixedBatchCapacity,
+                                                            raggedQueryMetadata);
 }
 
 void Attention::validateEpilogueShapePreserving(const ThorImplementation::ExpressionDefinition& definition) {

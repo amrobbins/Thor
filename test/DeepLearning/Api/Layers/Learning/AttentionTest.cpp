@@ -1,10 +1,14 @@
+#include "DeepLearning/Api/Data/Batch.h"
 #include "DeepLearning/Api/Layers/Learning/Attention.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/Add.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
@@ -290,14 +294,51 @@ vector<float> runForwardWithMetadata(Impl::NetworkInput& physicalInput,
     return readCpuTensor(physicalOutput.getFeatureOutput().value());
 }
 
-vector<float> runForwardWithRaggedMetadata(Impl::NetworkInput& physicalInput,
+void forwardPhysicalRowPartitionOffsets(Impl::NetworkInput& physicalRaggedOffsetsInput,
+                                        Impl::Tensor& raggedOffsetsHost,
+                                        uint32_t batchSize,
+                                        uint64_t maxTotalValues,
+                                        uint64_t activeRows) {
+    if (!physicalRaggedOffsetsInput.getFeatureOutput().has_value()) {
+        throw std::runtime_error("Ragged attention direct-physical test requires a placed offsets input.");
+    }
+    Impl::Tensor offsets = physicalRaggedOffsetsInput.getFeatureOutput().value();
+    if (!Impl::RowPartitionDescriptor::isValidOffsetsDataType(offsets.getDataType()) ||
+        raggedOffsetsHost.getDataType() != offsets.getDataType()) {
+        throw std::runtime_error("Ragged attention direct-physical test requires matching canonical UINT32/UINT64 offsets.");
+    }
+    physicalRaggedOffsetsInput.forwardRowPartitionOffsets(
+        raggedOffsetsHost,
+        /*validationPass=*/false,
+        Impl::RowPartitionDescriptor(batchSize, maxTotalValues, offsets.getDataType()),
+        activeRows,
+        batchSize);
+}
+
+vector<float> runForwardWithRaggedRowPartitionRuntime(Impl::NetworkInput& physicalInput,
                                            Impl::NetworkInput& physicalRaggedOffsetsInput,
                                            Impl::NetworkOutput& physicalOutput,
                                            Impl::Tensor& featureInHost,
                                            Impl::Tensor& raggedOffsetsHost,
                                            uint32_t batchSize) {
-    physicalInput.forward(featureInHost, false, batchSize);
-    physicalRaggedOffsetsInput.forward(raggedOffsetsHost, false, batchSize);
+    if (!physicalInput.getFeatureOutput().has_value() || !physicalRaggedOffsetsInput.getFeatureOutput().has_value()) {
+        throw std::runtime_error("Ragged attention direct-physical helper requires placed values and offsets inputs.");
+    }
+
+    uint64_t activeRows = 0;
+    if (raggedOffsetsHost.getDataType() == DataType::UINT32) {
+        activeRows = raggedOffsetsHost.getMemPtr<uint32_t>()[batchSize];
+    } else if (raggedOffsetsHost.getDataType() == DataType::UINT64) {
+        activeRows = raggedOffsetsHost.getMemPtr<uint64_t>()[batchSize];
+    } else {
+        throw std::runtime_error("Ragged attention test requires canonical UINT32/UINT64 offsets.");
+    }
+
+    const uint64_t maxTotalValues = physicalInput.getFeatureOutput()->getDimensions().front();
+
+    physicalInput.forwardRaggedValues(featureInHost, false, activeRows, batchSize);
+    forwardPhysicalRowPartitionOffsets(
+        physicalRaggedOffsetsInput, raggedOffsetsHost, batchSize, maxTotalValues, activeRows);
     Event featureOutReadyEvent = physicalOutput.getOutputReadyEvent();
     featureOutReadyEvent.synchronize();
     return readCpuTensor(physicalOutput.getFeatureOutput().value());
@@ -2717,9 +2758,18 @@ TEST(AttentionApi, DenseQueryRaggedKvRopeMatchesUniformRaggedQueryReference) {
                         {static_cast<int32_t>(historyBoundary - static_cast<int64_t>(contextLengths[0])),
                          static_cast<int32_t>(historyBoundary - static_cast<int64_t>(contextLengths[1]))});
 
+    // This test drives physical NetworkInput layers directly rather than using
+    // PlacedNetwork::infer(). Use the explicit ragged boundaries so the offsets
+    // payload is materialized before its host cache is published.
     denseQueryInput->forward(denseQueryHost, false, batchSize);
-    raggedQueryValuesInput->forward(raggedQueryValuesHost, false, batchSize);
-    raggedQueryOffsetsInput->forward(raggedQueryOffsetsHost, false, batchSize);
+    raggedQueryValuesInput->forwardRaggedValues(
+        raggedQueryValuesHost, false, queryCapacity, batchSize);
+    forwardPhysicalRowPartitionOffsets(
+        *raggedQueryOffsetsInput,
+        raggedQueryOffsetsHost,
+        batchSize,
+        queryCapacity,
+        queryCapacity);
     contextValuesInput->forward(contextValuesHost, false, batchSize);
     contextOffsetsInput->forward(contextOffsetsHost, false, batchSize);
     raggedQueryOriginsInput->forward(raggedQueryOriginsHost, false, batchSize);
@@ -3134,8 +3184,15 @@ TEST(AttentionApi, RaggedQueryDenseKvMatchesRightAlignedPaddedQueryReference) {
                         {static_cast<int32_t>(queryExtent - queryLengths[0]),
                          static_cast<int32_t>(queryExtent - queryLengths[1])});
 
-    raggedQueryValuesInput->forward(raggedQueryHost, false, batchSize);
-    raggedQueryOffsetsInput->forward(raggedOffsetsHost, false, batchSize);
+    const uint64_t activeQueryRows = queryLengths[0] + queryLengths[1];
+    raggedQueryValuesInput->forwardRaggedValues(
+        raggedQueryHost, false, activeQueryRows, batchSize);
+    forwardPhysicalRowPartitionOffsets(
+        *raggedQueryOffsetsInput,
+        raggedOffsetsHost,
+        batchSize,
+        raggedQueryCapacity,
+        activeQueryRows);
     paddedQueryInput->forward(paddedQueryHost, false, batchSize);
     contextInput->forward(contextHost, false, batchSize);
     queryOriginsInput->forward(queryOriginsHost, false, batchSize);
@@ -3509,9 +3566,14 @@ TEST(AttentionApi, RaggedCrossAttentionRopePerRowOriginsExecuteWithIndependentPa
                               const std::vector<int32_t>& keyOriginValues) -> std::vector<float> {
         writeCpuInt32Tensor(queryOriginsHost, queryOriginValues);
         writeCpuInt32Tensor(keyOriginsHost, keyOriginValues);
-        queryValuesInput->forward(queryValuesHost, false, batchSize);
+        queryValuesInput->forwardRaggedValues(queryValuesHost, false, /*activeValueCount=*/2, batchSize);
         contextValuesInput->forward(contextValuesHost, false, batchSize);
-        queryOffsetsInput->forward(queryOffsetsHost, false, batchSize);
+        forwardPhysicalRowPartitionOffsets(
+            *queryOffsetsInput,
+            queryOffsetsHost,
+            batchSize,
+            queryCapacity,
+            /*activeRows=*/2);
         contextOffsetsInput->forward(contextOffsetsHost, false, batchSize);
         queryOriginsInput->forward(queryOriginsHost, false, batchSize);
         keyOriginsInput->forward(keyOriginsHost, false, batchSize);
@@ -3689,21 +3751,145 @@ TEST(AttentionApi, ForwardWithCanonicalRaggedTensorMatchesPackedReference) {
     writeCpuTensor(featureInHost, packedInputs.featureInput);
 
     const vector<uint32_t> offsets = canonicalRaggedRowOffsets(c.sequenceLengths);
+    ASSERT_FALSE(offsets.empty());
     Impl::Tensor raggedOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {c.batchSize + 1}));
     writeCpuUint32Tensor(raggedOffsetsHost, offsets);
 
-    const vector<float> actual = runForwardWithRaggedMetadata(*fixture.physicalInput,
+    const vector<float> actual = runForwardWithRaggedRowPartitionRuntime(*fixture.physicalInput,
                                                              *physicalRaggedOffsetsInput,
                                                              *fixture.physicalOutput,
                                                              featureInHost,
                                                              raggedOffsetsHost,
                                                              c.batchSize);
+    ASSERT_TRUE(fixture.physicalAttention->getFeatureOutput().has_value());
     expectAllClose(packedBsfRaggedValidValues(actual, c.sequenceLengths, c.outputFeatures),
                    packedBsfRaggedValidValues(expectedPacked, c.sequenceLengths, c.outputFeatures),
                    1.2e-1f,
                    1.2e-1f);
 }
 
+
+TEST(AttentionApi, RaggedAttentionResidualAddUsesOffsetsRuntimeWithoutValuesMetadata) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 8;
+    constexpr uint64_t activeRows = 5;
+    constexpr uint32_t features = 32;
+
+    Api::Network network("attention_api_ragged_attention_residual_add_uses_offsets_runtime");
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .valuesDataType(DataType::FP16)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({features})
+                                  .maxTotalValues(maxTotalValues)
+                                  .batchSize(batchSize)
+                                  .build();
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input)
+                                   .numHeads(2)
+                                   .headDim(16)
+                                   .hasBias(false)
+                                   .weightsDataType(DataType::FP16)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::FP16)
+                                   .build();
+    ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
+    Api::Add residual = Api::Add::Builder()
+                            .network(network)
+                            .left(attention.getRaggedFeatureOutput().value())
+                            .right(input)
+                            .build();
+    ASSERT_TRUE(residual.getRaggedFeatureOutput().has_value());
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(residual.getRaggedFeatureOutput()->getValues())
+                                    .dataType(DataType::FP16)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, true);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+
+    auto physicalValuesInput = stamped.getNamedInput("tokens.values");
+    auto physicalOffsetsInput = stamped.getNamedInput("tokens.offsets");
+    auto physicalAttention = dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
+    auto physicalResidual = dynamic_pointer_cast<Impl::RaggedCustomLayer>(stamped.getPhysicalLayerFromApiLayer(residual.getId()));
+    auto physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
+    ASSERT_NE(physicalValuesInput, nullptr);
+    ASSERT_NE(physicalOffsetsInput, nullptr);
+    ASSERT_NE(physicalAttention, nullptr);
+    ASSERT_NE(physicalResidual, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_TRUE(physicalValuesInput->getFeatureOutput().has_value());
+    ASSERT_TRUE(physicalOffsetsInput->getFeatureOutput().has_value());
+
+    vector<float> packed(maxTotalValues * features, 0.0f);
+    for (uint64_t row = 0; row < activeRows; ++row) {
+        for (uint32_t column = 0; column < features; ++column) {
+            packed[row * features + column] = 0.01f * static_cast<float>(1 + row * features + column);
+        }
+    }
+    for (uint64_t row = activeRows; row < maxTotalValues; ++row) {
+        for (uint32_t column = 0; column < features; ++column) {
+            packed[row * features + column] = 4096.0f;
+        }
+    }
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {maxTotalValues, features}));
+    writeCpuTensor(featureInHost, packed);
+
+    Impl::Tensor offsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    writeCpuUint32Tensor(offsetsHost, {0, 2, 5});
+
+    // A normal logical batch owns its runtime cache on the source offsets tensor.
+    // StampedNetwork must explicitly transfer that cache to the statically placed
+    // physical offsets allocation before forwarding the offsets payload.
+    Impl::Tensor logicalValuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {maxTotalValues, features}));
+    writeCpuTensor(logicalValuesHost, packed);
+    Impl::Tensor logicalOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    writeCpuUint32Tensor(logicalOffsetsHost, {0, 2, 5});
+    Impl::RaggedTensor logicalInput(logicalValuesHost, logicalOffsetsHost);
+    logicalInput.getRowPartitionRuntime().setHostActiveValueCount(activeRows);
+    Batch logicalBatch;
+    logicalBatch.insert("tokens", logicalInput);
+    const auto logicalOutputs = placed->infer(logicalBatch);
+    ASSERT_TRUE(logicalOutputs.contains("output"));
+    const std::optional<uint64_t> placedActiveRows =
+        Impl::RowPartitionRuntime(
+            physicalOffsetsInput->getFeatureOutput().value(),
+            Impl::RowPartitionDescriptor(batchSize, maxTotalValues, DataType::UINT32))
+            .getHostActiveValueCountIfAvailable();
+    ASSERT_EQ(placedActiveRows, std::optional<uint64_t>(activeRows));
+
+    // Drive the physical graph directly without any values-owned metadata.
+    // The dedicated ragged NetworkInput boundaries canonicalize the values tail
+    // and publish the offsets-owned host cache only after the offsets payload is
+    // materialized. Attention and the downstream ragged Add must both obtain
+    // their extent solely from that shared row-partition runtime.
+    physicalValuesInput->forwardRaggedValues(featureInHost, false, activeRows, batchSize);
+    forwardPhysicalRowPartitionOffsets(
+        *physicalOffsetsInput,
+        offsetsHost,
+        batchSize,
+        maxTotalValues,
+        activeRows);
+    Event outputReady = physicalOutput->getOutputReadyEvent();
+    outputReady.synchronize();
+
+    ASSERT_TRUE(physicalAttention->getFeatureOutput().has_value());
+    ASSERT_TRUE(physicalResidual->getFeatureOutput().has_value());
+
+    const vector<float> actual = readCpuTensor(physicalOutput->getFeatureOutput().value());
+    ASSERT_EQ(actual.size(), maxTotalValues * features);
+    for (uint64_t i = activeRows * features; i < actual.size(); ++i) {
+        EXPECT_EQ(actual[i], 0.0f) << "inactive packed tail index " << i;
+    }
+}
 
 TEST(AttentionApi, RaggedDynamicNtkUsesLongestLogicalRowNotPackedCapacity) {
     AttentionReferenceCase c;
@@ -3797,7 +3983,7 @@ TEST(AttentionApi, RaggedDynamicNtkUsesLongestLogicalRowNotPackedCapacity) {
     Impl::Tensor raggedOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT64, {c.batchSize + 1}));
     writeCpuUint64Tensor(raggedOffsetsHost, offsets);
 
-    const vector<float> actual = runForwardWithRaggedMetadata(*fixture.physicalInput,
+    const vector<float> actual = runForwardWithRaggedRowPartitionRuntime(*fixture.physicalInput,
                                                              *physicalRaggedOffsetsInput,
                                                              *fixture.physicalOutput,
                                                              featureInHost,

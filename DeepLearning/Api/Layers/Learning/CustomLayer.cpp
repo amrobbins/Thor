@@ -1301,6 +1301,7 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
                                     outputElementsPerValue);
         std::vector<std::string> physicalInputNames = inputNames;
         physicalInputNames.push_back(kRaggedOffsetsInputName);
+        const uint32_t offsetsInputPort = static_cast<uint32_t>(physicalInputNames.size() - 1);
 
         auto physicalLayer = std::make_shared<ThorImplementation::RaggedCustomLayer>(
             ThorImplementation::DynamicExpression::fromExpressionDefinition(raggedDefinition),
@@ -1313,6 +1314,7 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
             std::move(inputElementsPerValue),
             std::move(outputElementsPerValue),
             std::move(valuesInputPorts),
+            offsetsInputPort,
             Layer::getId(),
             std::move(declaredOutputDescriptors));
         physicalLayer->setLayerName(getLayerType());

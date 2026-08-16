@@ -1,8 +1,14 @@
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Data/Batch.h"
+#include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "Utilities/Common/Event.h"
 
 #include "gtest/gtest.h"
@@ -11,6 +17,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -134,6 +141,88 @@ TEST(RaggedNetworkInputApi, PlacedNetworkExposesLogicalInputName) {
 
     std::vector<std::string> networkInputNames = placed->getNetworkInputNames();
     EXPECT_EQ(std::set<std::string>(networkInputNames.begin(), networkInputNames.end()), (std::set<std::string>{"labels"}));
+}
+
+TEST(RaggedNetworkInputApi, FlattenedTensorMapSubmissionIsRejectedButLogicalBatchPublishesRuntimeCache) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 5;
+    constexpr uint64_t inputWidth = 3;
+    constexpr uint64_t outputWidth = 2;
+    Network network("ragged_network_input_flattened_submission_rejected");
+
+    RaggedTensor labels = RaggedNetworkInput::Builder()
+                              .network(network)
+                              .name("labels")
+                              .valuesDataType(DataType::FP32)
+                              .offsetsDataType(DataType::UINT32)
+                              .trailingDimensions({inputWidth})
+                              .batchSize(batchSize)
+                              .maxTotalValues(maxTotalValues)
+                              .build();
+    FullyConnected projection = FullyConnected::Builder()
+                                    .network(network)
+                                    .featureInput(labels)
+                                    .numOutputFeatures(outputWidth)
+                                    .weightsDataType(DataType::FP32)
+                                    .computeDataType(DataType::FP32)
+                                    .outputDataType(DataType::FP32)
+                                    .noActivation()
+                                    .build();
+    ASSERT_TRUE(projection.getRaggedFeatureOutput().has_value());
+
+    NetworkOutput::Builder()
+        .network(network)
+        .name("projected_values")
+        .inputTensor(projection.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+    NetworkOutput::Builder()
+        .network(network)
+        .name("label_offsets")
+        .inputTensor(labels.getOffsets())
+        .dataType(DataType::UINT32)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const ThorImplementation::TensorPlacement cpuPlacement(
+        ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor values(
+        cpuPlacement,
+        ThorImplementation::TensorDescriptor(DataType::FP32, {maxTotalValues, inputWidth}));
+    ThorImplementation::Tensor offsets(
+        cpuPlacement, ThorImplementation::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    float* valuesPtr = values.getMemPtr<float>();
+    for (uint64_t i = 0; i < maxTotalValues * inputWidth; ++i) {
+        valuesPtr[i] = static_cast<float>(i + 1) * 0.1f;
+    }
+    uint32_t* offsetsPtr = offsets.getMemPtr<uint32_t>();
+    offsetsPtr[0] = 0;
+    offsetsPtr[1] = 1;
+    offsetsPtr[2] = 3;
+
+    std::map<std::string, ThorImplementation::Tensor> flattened{
+        {"labels.values", values},
+        {"labels.offsets", offsets},
+    };
+    EXPECT_THROW((void)placed->infer(flattened), std::logic_error);
+
+    // FullyConnected requires the host-known active count to choose its packed-row
+    // capacity bucket. Successful logical inference therefore proves that offsets
+    // materialization republished the cache before downstream host dispatch.
+    Batch logicalBatch;
+    logicalBatch.insert("labels", ThorImplementation::RaggedTensor(values, offsets));
+    std::map<std::string, ThorImplementation::Tensor> logicalOutputs;
+    ASSERT_NO_THROW(logicalOutputs = placed->infer(logicalBatch));
+    ASSERT_TRUE(logicalOutputs.contains("projected_values"));
+    ASSERT_TRUE(logicalOutputs.contains("label_offsets"));
+    EXPECT_EQ(logicalOutputs.at("projected_values").getDescriptor().getDimensions(),
+              (std::vector<uint64_t>{maxTotalValues, outputWidth}));
+    EXPECT_EQ(logicalOutputs.at("label_offsets").getDescriptor().getDimensions(),
+              (std::vector<uint64_t>{batchSize + 1}));
 }
 
 TEST(RaggedNetworkInputApi, RejectsInvalidOffsetDType) {

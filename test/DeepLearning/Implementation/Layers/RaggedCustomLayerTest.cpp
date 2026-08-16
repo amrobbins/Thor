@@ -5,6 +5,7 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/RaggedExpression.h"
@@ -209,8 +210,8 @@ TEST(RaggedCustomLayer, MultiInputMultiOutputPreservesActivePrefixAndCanonicaliz
     Tensor lhs = makeGpuFp32Tensor({fullCapacityRows, inputWidth}, lhsValues, stream);
     Tensor rhs = makeGpuFp32Tensor({fullCapacityRows, inputWidth}, rhsValues, stream);
     Tensor offsets = makeGpuU32Tensor({batchSize + 1}, {0, 3, 3, 5}, stream);
-    lhs.setRaggedActiveRows(activeRows);
-    rhs.setRaggedActiveRows(activeRows);
+    RowPartitionRuntime(offsets, RowPartitionDescriptor(batchSize, fullCapacityRows, DataType::UINT32))
+        .setHostActiveValueCount(activeRows);
 
     RaggedCustomLayer layer(buildTwoInputTwoOutputRaggedExpression(batchSize, fullCapacityRows),
                             {"lhs", "rhs", "offsets"},
@@ -222,6 +223,7 @@ TEST(RaggedCustomLayer, MultiInputMultiOutputPreservesActivePrefixAndCanonicaliz
                             {inputWidth, inputWidth},
                             {inputWidth, narrowWidth},
                             {0, 1},
+                            2,
                             -1,
                             {{DataType::FP32, {inputWidth}, false}, {DataType::FP32, {narrowWidth}, false}});
 
@@ -260,8 +262,6 @@ TEST(RaggedCustomLayer, MultiInputMultiOutputPreservesActivePrefixAndCanonicaliz
     }
     expectNear(wide, expectedWide);
     expectNear(narrow, expectedNarrow);
-    ASSERT_EQ(wideSink.lastForward->getRaggedActiveRows(), std::optional<uint64_t>(activeRows));
-    ASSERT_EQ(narrowSink.lastForward->getRaggedActiveRows(), std::optional<uint64_t>(activeRows));
 
     ASSERT_TRUE(wideSink.getErrorOutput().has_value());
     ASSERT_TRUE(narrowSink.getErrorOutput().has_value());
@@ -288,13 +288,11 @@ TEST(RaggedCustomLayer, MultiInputMultiOutputPreservesActivePrefixAndCanonicaliz
     }
     expectNear(readGpuFp32Tensor(inputGradients[0].value(), stream), expectedInputGradient);
     expectNear(readGpuFp32Tensor(inputGradients[1].value(), stream), expectedInputGradient);
-    ASSERT_EQ(inputGradients[0]->getRaggedActiveRows(), std::optional<uint64_t>(activeRows));
-    ASSERT_EQ(inputGradients[1]->getRaggedActiveRows(), std::optional<uint64_t>(activeRows));
 
     layer.cleanup();
 }
 
-TEST(RaggedCustomLayer, MultiValueInputsRejectDisagreeingActiveRowMetadata) {
+TEST(RaggedCustomLayer, GpuOffsetsRequireHostActiveValueCountOnRowPartition) {
     REQUIRE_CUDA_DEVICE();
 
     constexpr uint64_t batchSize = 3;
@@ -305,8 +303,9 @@ TEST(RaggedCustomLayer, MultiValueInputsRejectDisagreeingActiveRowMetadata) {
     Tensor lhs = makeGpuFp32Tensor({fullCapacityRows, inputWidth}, std::vector<float>(fullCapacityRows * inputWidth, 1.0f), stream);
     Tensor rhs = makeGpuFp32Tensor({fullCapacityRows, inputWidth}, std::vector<float>(fullCapacityRows * inputWidth, 2.0f), stream);
     Tensor offsets = makeGpuU32Tensor({batchSize + 1}, {0, 3, 3, 5}, stream);
-    lhs.setRaggedActiveRows(5);
-    rhs.setRaggedActiveRows(6);
+    ASSERT_FALSE(RowPartitionRuntime(offsets, RowPartitionDescriptor(batchSize, fullCapacityRows, DataType::UINT32))
+                     .getHostActiveValueCountIfAvailable()
+                     .has_value());
 
     RaggedCustomLayer layer(buildTwoInputTwoOutputRaggedExpression(batchSize, fullCapacityRows),
                             {"lhs", "rhs", "offsets"},
@@ -317,7 +316,8 @@ TEST(RaggedCustomLayer, MultiValueInputsRejectDisagreeingActiveRowMetadata) {
                             fullCapacityRows,
                             {inputWidth, inputWidth},
                             {inputWidth, 2},
-                            {0, 1});
+                            {0, 1},
+                            2);
 
     PassiveEndpoint lhsSource;
     PassiveEndpoint rhsSource;
@@ -358,7 +358,8 @@ TEST(RaggedCustomLayer, TrainableParameterGradientAndSgdUpdateIgnoreInactivePack
     }
     Tensor x = makeGpuFp32Tensor({fullCapacityRows, width}, xValues, stream);
     Tensor offsets = makeGpuU32Tensor({batchSize + 1}, {0, 3, 3, 5}, stream);
-    x.setRaggedActiveRows(activeRows);
+    RowPartitionRuntime(offsets, RowPartitionDescriptor(batchSize, fullCapacityRows, DataType::UINT32))
+        .setHostActiveValueCount(activeRows);
 
     const std::vector<float> initialScale{2.0f, -1.0f, 0.5f, 3.0f};
     auto scale = std::make_shared<FixedTrainableVectorParameter>("scale", initialScale);
@@ -375,6 +376,7 @@ TEST(RaggedCustomLayer, TrainableParameterGradientAndSgdUpdateIgnoreInactivePack
                             {width},
                             {width},
                             {0},
+                            1,
                             -1,
                             {{DataType::FP32, {width}, false}});
 

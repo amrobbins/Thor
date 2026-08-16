@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Layers/Activations/Swish.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/RaggedRMSNorm.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
 
@@ -19,6 +20,8 @@ using json = nlohmann::json;
 namespace Thor {
 
 namespace {
+
+constexpr const char* RAGGED_ROW_PARTITION_EXPRESSION_INPUT = "__ragged_row_partition_runtime";
 
 uint64_t checkedProductForRmsNorm(const std::vector<uint64_t>& dims, const std::string& what) {
     uint64_t product = 1;
@@ -48,7 +51,8 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                                                              std::optional<ThorImplementation::Expression> epilogue,
                                                              std::vector<std::string> epilogueAuxInputNames,
                                                              bool inferenceOnly,
-                                                             std::optional<uint64_t> packedRowCapacity = std::nullopt) {
+                                                             std::optional<uint64_t> packedRowCapacity = std::nullopt,
+                                                             std::optional<std::string> rowPartitionInputName = std::nullopt) {
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
     using ThorImplementation::Expression;
@@ -61,6 +65,9 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
 
     std::vector<std::string> expectedInputNames = {"feature_input"};
     expectedInputNames.insert(expectedInputNames.end(), epilogueAuxInputNames.begin(), epilogueAuxInputNames.end());
+    if (rowPartitionInputName.has_value()) {
+        expectedInputNames.push_back(rowPartitionInputName.value());
+    }
     expectedInputNames.push_back("weights");
 
     return DynamicExpression(
@@ -75,13 +82,26 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
          epilogueAuxInputNames = std::move(epilogueAuxInputNames),
          epilogueIsSwish,
          inferenceOnly,
-         packedRowCapacity](
+         packedRowCapacity,
+         rowPartitionInputName = std::move(rowPartitionInputName)](
             const DynamicExpression::TensorMap& inputs,
             const DynamicExpression::TensorMap& outputs,
             Stream& stream) -> DynamicExpressionBuild {
             (void)stream;
 
             Tensor featureInputTensor = inputs.at("feature_input");
+            std::optional<Tensor> rowPartitionTensor;
+            if (rowPartitionInputName.has_value()) {
+                rowPartitionTensor = inputs.at(rowPartitionInputName.value());
+                const ThorImplementation::TensorDescriptor descriptor = rowPartitionTensor->getDescriptor();
+                if (descriptor.getNumDimensions() != 1 || descriptor.getDimensions()[0] == 0 ||
+                    !ThorImplementation::RowPartitionDescriptor::isValidOffsetsDataType(descriptor.getDataType())) {
+                    throw std::runtime_error("Ragged RMSNorm row-partition input must be a canonical offsets tensor.");
+                }
+                if (rowPartitionTensor->getPlacement() != placement) {
+                    throw std::runtime_error("Ragged RMSNorm row-partition input placement does not match the layer placement.");
+                }
+            }
             const Tensor& weightsTensor = inputs.at("weights");
             const std::vector<uint64_t> originalInputDims = featureInputTensor.getDimensions();
             const DataType inputDataType = featureInputTensor.getDataType();
@@ -145,6 +165,24 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
             if (needsFlattenedExpressionView) {
                 fin = fin.reshape(flattenedInputDims);
             }
+            if (rowPartitionTensor.has_value()) {
+                if (!packedRowCapacity.has_value() || originalInputDims.empty() || originalInputDims[0] != packedRowCapacity.value()) {
+                    throw std::runtime_error("Ragged RMSNorm packed capacity does not match its values tensor first dimension.");
+                }
+                const TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
+                const uint64_t raggedBatchSize = offsetsDescriptor.getDimensions()[0] - 1;
+                if (outer % packedRowCapacity.value() != 0) {
+                    throw std::runtime_error("Ragged RMSNorm flattened outer dimension is not divisible by packed capacity.");
+                }
+                const uint64_t elementsPerPackedValue = (outer / packedRowCapacity.value()) * hidden;
+                Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
+                                                       offsetsDescriptor.getDataType(),
+                                                       offsetsDescriptor.getDataType());
+                fin = fin.withRaggedRuntimeExtent(offsets,
+                                                  raggedBatchSize,
+                                                  packedRowCapacity.value(),
+                                                  elementsPerPackedValue);
+            }
             Expression weights = Expression::input("weights", parameterDataType, parameterDataType);
             Expression fout = Expression::rmsNorm(fin,
                                                    weights,
@@ -187,12 +225,30 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
 
             auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
 
+            DynamicExpression::TensorMap stampInputs = inputs;
+            DynamicExpression::TensorMap preForwardOnlyInputs;
+            std::function<void(Stream&)> preForwardHook;
+            if (rowPartitionInputName.has_value()) {
+                const std::string& name = rowPartitionInputName.value();
+                stampInputs.erase(name);
+                stampInputs.emplace(RAGGED_ROW_PARTITION_EXPRESSION_INPUT, rowPartitionTensor.value());
+                preForwardOnlyInputs.emplace(name, rowPartitionTensor.value());
+                // Keep the public offsets port non-differentiable while binding the same
+                // canonical offsets tensor privately into packed Expression execution.
+                preForwardHook = [](Stream&) {};
+            }
+
             return DynamicExpressionBuild{
-                std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
-                inputs,
-                {},
-                outputs,
-                {},
+                .equation = std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+                .stamp_inputs = std::move(stampInputs),
+                .tensor_scalar_inputs = {},
+                .preallocated_outputs = outputs,
+                .requested_output_shapes = {},
+                .pre_forward_hook = std::move(preForwardHook),
+                .serialized_definition = nullptr,
+                .execution_variants = {},
+                .evaluation_variant_id = std::nullopt,
+                .pre_forward_only_inputs = std::move(preForwardOnlyInputs),
             };
         });
 }
@@ -240,6 +296,16 @@ std::vector<std::string> RMSNorm::epilogueAuxInputNames() const {
 }
 
 std::vector<Tensor> RMSNorm::getFeatureInputs() const {
+    if (!raggedFeatureInputs.empty()) {
+        std::vector<Tensor> inputs;
+        inputs.reserve(raggedFeatureInputs.size() * 2);
+        for (const RaggedTensor& ragged : raggedFeatureInputs) {
+            inputs.push_back(ragged.getValues());
+            inputs.push_back(ragged.getOffsets());
+        }
+        return inputs;
+    }
+
     std::vector<Tensor> inputs = featureInputs;
     inputs.reserve(inputs.size() + epilogueInputBindings.size());
     for (const auto& [name, tensor] : epilogueInputBindings) {
@@ -251,6 +317,18 @@ std::vector<Tensor> RMSNorm::getFeatureInputs() const {
 
 std::vector<uint32_t> RMSNorm::inputPortIndicesForTensor(Tensor tensor) const {
     std::vector<uint32_t> ports;
+    if (!raggedFeatureInputs.empty()) {
+        for (uint32_t i = 0; i < raggedFeatureInputs.size(); ++i) {
+            if (tensor.getOriginalId() == raggedFeatureInputs[i].getValues().getOriginalId()) {
+                ports.push_back(i * 2);
+            }
+            if (tensor.getOriginalId() == raggedFeatureInputs[i].getOffsets().getOriginalId()) {
+                ports.push_back(i * 2 + 1);
+            }
+        }
+        return ports;
+    }
+
     if (!featureInputs.empty() && tensor.getOriginalId() == featureInputs[0].getOriginalId()) {
         ports.push_back(0);
     }
@@ -271,6 +349,25 @@ Tensor RMSNorm::getFeatureOutput(Tensor inputTensor) const {
 }
 
 std::vector<Tensor> RMSNorm::getOutputsFromInput(Tensor inputTensor) {
+    if (!raggedFeatureInputs.empty()) {
+        if (inputPortIndicesForTensor(inputTensor).empty()) {
+            throw std::runtime_error("RMSNorm received an unknown ragged input tensor.");
+        }
+        std::vector<Tensor> readyOutputs;
+        for (uint32_t applicationIndex = 0; applicationIndex < raggedFeatureInputs.size(); ++applicationIndex) {
+            const uint32_t valuesPort = applicationIndex * 2;
+            const uint32_t offsetsPort = valuesPort + 1;
+            if (!connectedInputPortIndices.contains(valuesPort) || !connectedInputPortIndices.contains(offsetsPort) ||
+                emittedRaggedOutputApplications.contains(applicationIndex)) {
+                continue;
+            }
+            THOR_THROW_IF_FALSE(applicationIndex < featureOutputs.size());
+            emittedRaggedOutputApplications.insert(applicationIndex);
+            readyOutputs.push_back(featureOutputs[applicationIndex]);
+        }
+        return readyOutputs;
+    }
+
     if (epilogueInputBindings.empty()) {
         return {getFeatureOutput(inputTensor)};
     }
@@ -287,6 +384,17 @@ std::vector<Tensor> RMSNorm::getOutputsFromInput(Tensor inputTensor) {
 }
 
 void RMSNorm::informThatInputConnectionMade(Tensor inputTensor) {
+    if (!raggedFeatureInputs.empty()) {
+        std::vector<uint32_t> ports = inputPortIndicesForTensor(inputTensor);
+        if (ports.empty()) {
+            throw std::runtime_error("RMSNorm informed of connection for unknown ragged input tensor.");
+        }
+        uint32_t& cursor = nextTraversalInputCursorByTensorOriginalId[inputTensor.getOriginalId()];
+        connectedInputPortIndices.insert(ports[cursor % ports.size()]);
+        ++cursor;
+        return;
+    }
+
     if (epilogueInputBindings.empty()) {
         return;
     }
@@ -301,12 +409,14 @@ void RMSNorm::informThatInputConnectionMade(Tensor inputTensor) {
 
 void RMSNorm::resetGraphTraversalState() {
     connectedInputPortIndices.clear();
+    emittedRaggedOutputApplications.clear();
     emittedFeatureOutputAfterAllInputsConnected = false;
     nextInputConnectionCursorByTensorOriginalId.clear();
+    nextTraversalInputCursorByTensorOriginalId.clear();
 }
 
 int RMSNorm::getConnectionType(Tensor connectingTensor) const {
-    if (!epilogueInputBindings.empty()) {
+    if (!raggedFeatureInputs.empty() || !epilogueInputBindings.empty()) {
         std::vector<uint32_t> inputPorts = inputPortIndicesForTensor(connectingTensor);
         if (!inputPorts.empty()) {
             uint32_t& cursor = nextInputConnectionCursorByTensorOriginalId[connectingTensor.getOriginalId()];
@@ -512,7 +622,11 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
     (void)drivingLayer;
     (void)drivingApiLayer;
     THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+    if (!raggedFeatureInputs.empty()) {
+        THOR_THROW_IF_FALSE(!inputPortIndicesForTensor(connectingApiTensor).empty());
+    } else {
+        THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+    }
 
     vector<shared_ptr<ThorImplementation::PhysicalParameter>> physicalParameters;
     for (const auto& parameter : getParameters()) {
@@ -525,23 +639,38 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
     std::vector<std::string> auxNames = epilogueAuxInputNames();
     inputNames.insert(inputNames.end(), auxNames.begin(), auxNames.end());
 
-    std::optional<uint64_t> packedRowCapacity = std::nullopt;
-    const RaggedTensor* connectedRaggedInput = nullptr;
-    for (const RaggedTensor& ragged : raggedFeatureInputs) {
-        if (ragged.getValues() == connectingApiTensor) {
-            connectedRaggedInput = &ragged;
-            packedRowCapacity = ragged.getMaxTotalValues();
-            break;
-        }
+    // A ragged RMSNorm API layer has one physical implementation shared by all of
+    // its values/offsets edges. Stamping may begin from either edge, so do not infer
+    // whether the physical layer is ragged from the particular tensor that happened
+    // to arrive first. Doing so would decode an offsets connection (port 1) as
+    // application 1 on a one-input dense CustomLayer.
+    const RaggedTensor* raggedTemplate = raggedFeatureInputs.empty() ? nullptr : &raggedFeatureInputs.front();
+    const std::optional<uint64_t> packedRowCapacity =
+        raggedTemplate == nullptr ? std::nullopt : std::optional<uint64_t>(raggedTemplate->getMaxTotalValues());
+    const std::optional<std::string> rowPartitionInputName =
+        raggedTemplate == nullptr
+            ? std::nullopt
+            : std::optional<std::string>(ThorImplementation::RaggedRMSNorm::ROW_PARTITION_INPUT_NAME);
+    if (rowPartitionInputName.has_value()) {
+        inputNames.push_back(rowPartitionInputName.value());
     }
 
     ThorImplementation::DynamicExpression expression = buildRmsNormExpression(
-        placement, normalizedShape, hidden, epsilon, parameterDataType, epilogue, auxNames, inferenceOnly, packedRowCapacity);
+        placement,
+        normalizedShape,
+        hidden,
+        epsilon,
+        parameterDataType,
+        epilogue,
+        auxNames,
+        inferenceOnly,
+        packedRowCapacity,
+        rowPartitionInputName);
 
     shared_ptr<ThorImplementation::CustomLayer> physicalRmsNorm;
-    if (connectedRaggedInput != nullptr) {
+    if (raggedTemplate != nullptr) {
         uint64_t elementsPerValue = 1;
-        for (uint64_t dim : connectedRaggedInput->getTrailingDimensions()) {
+        for (uint64_t dim : raggedTemplate->getTrailingDimensions()) {
             if (elementsPerValue > numeric_limits<uint64_t>::max() / dim) {
                 throw overflow_error("RMSNorm ragged elements-per-value overflow.");
             }
@@ -553,7 +682,7 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
             std::vector<std::string>{"feature_output"},
             placement,
             physicalParameters,
-            connectedRaggedInput->getMaxTotalValues(),
+            raggedTemplate->getMaxTotalValues(),
             elementsPerValue,
             inferenceOnly,
             getId());

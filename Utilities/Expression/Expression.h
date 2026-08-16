@@ -332,6 +332,9 @@ struct ExprNode {
     bool scan_reverse = false;
 
     // Ragged runtime-extent metadata. RAGGED_VALUEWISE_EXTENT uses rhs as the canonical offsets tensor; explicit segmented stages carry the same extent for autodiff.
+    // ragged_runtime_offsets_input_slot is compiler-lowered stage metadata for packed
+    // MATMUL/RMSNORM and is UINT32_MAX on ordinary user-authored expression nodes.
+    uint32_t ragged_runtime_offsets_input_slot = UINT32_MAX;
     uint64_t ragged_runtime_batch_size = 0;
     uint64_t ragged_runtime_max_active_values = 0;
     uint64_t ragged_runtime_elements_per_value = 1;

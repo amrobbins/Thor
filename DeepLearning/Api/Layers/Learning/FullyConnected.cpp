@@ -5,9 +5,11 @@
 #include "DeepLearning/Api/Layers/Activations/Gelu.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/RaggedFullyConnected.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <stdexcept>
 #include <optional>
@@ -20,6 +22,8 @@ using json = nlohmann::json;
 namespace Thor {
 
 namespace {
+
+constexpr const char* RAGGED_ROW_PARTITION_EXPRESSION_INPUT = "__ragged_row_partition_runtime";
 
 bool supportedRaggedFcStorageType(DataType dataType) {
     return dataType == DataType::FP16 || dataType == DataType::BF16 || dataType == DataType::FP32;
@@ -175,6 +179,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                                                                     DataType outputDataType,
                                                                     std::shared_ptr<Thor::Activation> activation,
                                                                     std::optional<uint64_t> packedRowCapacity,
+                                                                    std::optional<std::string> rowPartitionInputName,
                                                                     std::optional<ThorImplementation::Expression> epilogue,
                                                                     std::vector<std::string> epilogueAuxInputNames) {
     using ThorImplementation::DynamicExpression;
@@ -184,6 +189,9 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
     using ThorImplementation::Tensor;
 
     std::vector<std::string> expectedInputNames = {"feature_input"};
+    if (rowPartitionInputName.has_value()) {
+        expectedInputNames.push_back(rowPartitionInputName.value());
+    }
     expectedInputNames.insert(expectedInputNames.end(), epilogueAuxInputNames.begin(), epilogueAuxInputNames.end());
     expectedInputNames.push_back("weights");
     if (hasBias) {
@@ -210,6 +218,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
          outputDataType,
          activation = std::move(activationClone),
          packedRowCapacity,
+         rowPartitionInputName = std::move(rowPartitionInputName),
          epilogue,
          epilogueAuxInputNames = std::move(epilogueAuxInputNames)](
             const DynamicExpression::TensorMap& inputs,
@@ -218,6 +227,18 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
             (void)stream;
 
             Tensor featureInputTensor = inputs.at("feature_input");
+            std::optional<Tensor> rowPartitionTensor;
+            if (rowPartitionInputName.has_value()) {
+                rowPartitionTensor = inputs.at(rowPartitionInputName.value());
+                const ThorImplementation::TensorDescriptor descriptor = rowPartitionTensor->getDescriptor();
+                if (descriptor.getNumDimensions() != 1 || descriptor.getDimensions()[0] == 0 ||
+                    !ThorImplementation::RowPartitionDescriptor::isValidOffsetsDataType(descriptor.getDataType())) {
+                    throw std::runtime_error("Ragged FullyConnected row-partition input must be a canonical offsets tensor.");
+                }
+                if (rowPartitionTensor->getPlacement() != placement) {
+                    throw std::runtime_error("Ragged FullyConnected row-partition input placement does not match the layer placement.");
+                }
+            }
             const Tensor& wTensor = inputs.at("weights");
             if (wTensor.getDimensions().size() != 2) {
                 throw std::runtime_error("FullyConnected weights tensor must be rank 2.");
@@ -314,6 +335,20 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
             if (originalFeatureInputDimensions != logicalFeatureInputDimensions) {
                 fin = fin.reshape(logicalFeatureInputDimensions);
             }
+            if (rowPartitionTensor.has_value()) {
+                if (!packedRowCapacity.has_value() || logicalFeatureInputDimensions[0] != packedRowCapacity.value()) {
+                    throw std::runtime_error("Ragged FullyConnected packed capacity does not match its flattened values rows.");
+                }
+                const ThorImplementation::TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
+                const uint64_t raggedBatchSize = offsetsDescriptor.getDimensions()[0] - 1;
+                Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
+                                                       offsetsDescriptor.getDataType(),
+                                                       offsetsDescriptor.getDataType());
+                fin = fin.withRaggedRuntimeExtent(offsets,
+                                                  raggedBatchSize,
+                                                  packedRowCapacity.value(),
+                                                  logicalFeatureInputDimensions[1]);
+            }
             auto w = Expression::input("weights", weightsDataType, weightsDataType);
 
             // [batch, in_features] @ [in_features, out_features]
@@ -389,12 +424,31 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
 
             auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
 
+            DynamicExpression::TensorMap stampInputs = inputs;
+            DynamicExpression::TensorMap preForwardOnlyInputs;
+            std::function<void(Stream&)> preForwardHook;
+            if (rowPartitionInputName.has_value()) {
+                stampInputs.erase(rowPartitionInputName.value());
+                stampInputs.emplace(RAGGED_ROW_PARTITION_EXPRESSION_INPUT, rowPartitionTensor.value());
+                preForwardOnlyInputs.emplace(rowPartitionInputName.value(), rowPartitionTensor.value());
+                // The public offsets port remains a non-differentiable structural dependency of
+                // RaggedFullyConnected.  The private binding gives packed Expression stages direct
+                // access to the same canonical offsets tensor for runtime bucket selection.
+                preForwardHook = [](Stream&) {};
+            }
+
             return DynamicExpressionBuild{
-                std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
-                inputs,
-                {},
-                outputs,
-                {},
+                .equation = std::make_shared<FusedEquation>(
+                    FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+                .stamp_inputs = std::move(stampInputs),
+                .tensor_scalar_inputs = {},
+                .preallocated_outputs = outputs,
+                .requested_output_shapes = {},
+                .pre_forward_hook = std::move(preForwardHook),
+                .serialized_definition = nullptr,
+                .execution_variants = {},
+                .evaluation_variant_id = std::nullopt,
+                .pre_forward_only_inputs = std::move(preForwardOnlyInputs),
             };
         });
 }
@@ -521,6 +575,16 @@ std::vector<std::string> FullyConnected::epilogueAuxInputNames() const {
 }
 
 std::vector<Tensor> FullyConnected::getFeatureInputs() const {
+    if (!raggedFeatureInputs.empty()) {
+        std::vector<Tensor> inputs;
+        inputs.reserve(raggedFeatureInputs.size() * 2);
+        for (const RaggedTensor& ragged : raggedFeatureInputs) {
+            inputs.push_back(ragged.getValues());
+            inputs.push_back(ragged.getOffsets());
+        }
+        return inputs;
+    }
+
     std::vector<Tensor> inputs = featureInputs;
     inputs.reserve(inputs.size() + epilogueInputBindings.size());
     for (const auto& [name, tensor] : epilogueInputBindings) {
@@ -532,6 +596,18 @@ std::vector<Tensor> FullyConnected::getFeatureInputs() const {
 
 std::vector<uint32_t> FullyConnected::inputPortIndicesForTensor(Tensor tensor) const {
     std::vector<uint32_t> ports;
+    if (!raggedFeatureInputs.empty()) {
+        for (uint32_t i = 0; i < raggedFeatureInputs.size(); ++i) {
+            if (tensor.getOriginalId() == raggedFeatureInputs[i].getValues().getOriginalId()) {
+                ports.push_back(i * 2);
+            }
+            if (tensor.getOriginalId() == raggedFeatureInputs[i].getOffsets().getOriginalId()) {
+                ports.push_back(i * 2 + 1);
+            }
+        }
+        return ports;
+    }
+
     if (!featureInputs.empty() && tensor.getOriginalId() == featureInputs[0].getOriginalId()) {
         ports.push_back(0);
     }
@@ -544,6 +620,25 @@ std::vector<uint32_t> FullyConnected::inputPortIndicesForTensor(Tensor tensor) c
 }
 
 std::vector<Tensor> FullyConnected::getOutputsFromInput(Tensor inputTensor) {
+    if (!raggedFeatureInputs.empty()) {
+        if (inputPortIndicesForTensor(inputTensor).empty()) {
+            throw std::runtime_error("FullyConnected received an unknown ragged input tensor.");
+        }
+        std::vector<Tensor> readyOutputs;
+        for (uint32_t applicationIndex = 0; applicationIndex < raggedFeatureInputs.size(); ++applicationIndex) {
+            const uint32_t valuesPort = applicationIndex * 2;
+            const uint32_t offsetsPort = valuesPort + 1;
+            if (!connectedInputPortIndices.contains(valuesPort) || !connectedInputPortIndices.contains(offsetsPort) ||
+                emittedRaggedOutputApplications.contains(applicationIndex)) {
+                continue;
+            }
+            THOR_THROW_IF_FALSE(applicationIndex < featureOutputs.size());
+            emittedRaggedOutputApplications.insert(applicationIndex);
+            readyOutputs.push_back(featureOutputs[applicationIndex]);
+        }
+        return readyOutputs;
+    }
+
     if (epilogueInputBindings.empty()) {
         return {getFeatureOutput(inputTensor)};
     }
@@ -563,6 +658,17 @@ std::vector<Tensor> FullyConnected::getOutputsFromInput(Tensor inputTensor) {
 }
 
 void FullyConnected::informThatInputConnectionMade(Tensor inputTensor) {
+    if (!raggedFeatureInputs.empty()) {
+        std::vector<uint32_t> ports = inputPortIndicesForTensor(inputTensor);
+        if (ports.empty()) {
+            throw std::runtime_error("FullyConnected informed of connection for unknown ragged input tensor.");
+        }
+        uint32_t& cursor = nextTraversalInputCursorByTensorOriginalId[inputTensor.getOriginalId()];
+        connectedInputPortIndices.insert(ports[cursor % ports.size()]);
+        ++cursor;
+        return;
+    }
+
     if (epilogueInputBindings.empty()) {
         return;
     }
@@ -577,12 +683,14 @@ void FullyConnected::informThatInputConnectionMade(Tensor inputTensor) {
 
 void FullyConnected::resetGraphTraversalState() {
     connectedInputPortIndices.clear();
+    emittedRaggedOutputApplications.clear();
     emittedFeatureOutputAfterAllInputsConnected = false;
     nextInputConnectionCursorByTensorOriginalId.clear();
+    nextTraversalInputCursorByTensorOriginalId.clear();
 }
 
 int FullyConnected::getConnectionType(Tensor connectingTensor) const {
-    if (!epilogueInputBindings.empty()) {
+    if (!raggedFeatureInputs.empty() || !epilogueInputBindings.empty()) {
         std::vector<uint32_t> inputPorts = inputPortIndicesForTensor(connectingTensor);
         if (!inputPorts.empty()) {
             uint32_t& cursor = nextInputConnectionCursorByTensorOriginalId[connectingTensor.getOriginalId()];
@@ -818,7 +926,11 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
     (void)drivingApiLayer;
 
     THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+    if (!raggedFeatureInputs.empty()) {
+        THOR_THROW_IF_FALSE(!inputPortIndicesForTensor(connectingApiTensor).empty());
+    } else {
+        THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+    }
 
     std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>> physicalParameters;
     for (const auto& parameter : getParameters()) {
@@ -841,6 +953,7 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
                 outputDataType,
                 activation,
                 inputDimensions[0],
+                std::string(ThorImplementation::RaggedFullyConnected::ROW_PARTITION_INPUT_NAME),
                 std::nullopt,
                 {}),
             placement,
@@ -866,6 +979,7 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
             computeDataType,
             outputDataType,
             activation,
+            std::nullopt,
             std::nullopt,
             epilogue,
             epilogueAuxInputNames()),

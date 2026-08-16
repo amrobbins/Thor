@@ -10,6 +10,7 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 
 namespace ThorImplementation {
 
@@ -286,6 +287,103 @@ class NetworkInput : public Layer {
         bool validationPass,
         uint32_t batchSize,
         std::optional<Thor::BatchSourceReference> sourceReference) {
+        forwardMaterializedInput(
+            featureInput,
+            validationPass,
+            batchSize,
+            std::move(sourceReference),
+            std::nullopt);
+    }
+
+    // Explicit logical-ragged boundary. The active packed-value count comes
+    // from RowPartitionRuntime owned by the matching offsets tensor; it is not
+    // inferred from, stored on, or propagated through the values tensor.
+    virtual void forwardRaggedValues(
+        std::optional<Tensor> featureInput,
+        bool validationPass,
+        uint64_t activeValueCount,
+        uint32_t batchSize,
+        std::optional<Thor::BatchSourceReference> sourceReference = std::nullopt) {
+        forwardMaterializedInput(
+            featureInput,
+            validationPass,
+            batchSize,
+            std::move(sourceReference),
+            activeValueCount);
+    }
+
+    virtual void forwardRaggedValues(
+        std::optional<Tensor> featureInput,
+        bool validationPass,
+        Event copyToSourceTensorFinished,
+        uint64_t activeValueCount,
+        uint32_t batchSize,
+        std::optional<Thor::BatchSourceReference> sourceReference = std::nullopt) {
+        if (isPassThrough() || isDeviceLoad()) {
+            stream.waitEvent(copyToSourceTensorFinished);
+        } else {
+            loadStream.waitEvent(copyToSourceTensorFinished);
+        }
+        forwardRaggedValues(
+            featureInput,
+            validationPass,
+            activeValueCount,
+            batchSize,
+            std::move(sourceReference));
+    }
+
+    // Explicit logical-ragged offsets boundary. Generic Tensor writes invalidate
+    // payload-derived runtime metadata, so publish the offsets-owned host cache
+    // only after the new offsets payload has been enqueued into featureOutput and
+    // before downstream layers are invoked.
+    virtual void forwardRowPartitionOffsets(
+        std::optional<Tensor> featureInput,
+        bool validationPass,
+        RowPartitionDescriptor descriptor,
+        std::optional<uint64_t> hostActiveValueCount,
+        uint32_t batchSize,
+        std::optional<Thor::BatchSourceReference> sourceReference = std::nullopt) {
+        forwardMaterializedInput(
+            featureInput,
+            validationPass,
+            batchSize,
+            std::move(sourceReference),
+            std::nullopt,
+            descriptor,
+            hostActiveValueCount);
+    }
+
+    virtual void forwardRowPartitionOffsets(
+        std::optional<Tensor> featureInput,
+        bool validationPass,
+        Event copyToSourceTensorFinished,
+        RowPartitionDescriptor descriptor,
+        std::optional<uint64_t> hostActiveValueCount,
+        uint32_t batchSize,
+        std::optional<Thor::BatchSourceReference> sourceReference = std::nullopt) {
+        if (isPassThrough() || isDeviceLoad()) {
+            stream.waitEvent(copyToSourceTensorFinished);
+        } else {
+            loadStream.waitEvent(copyToSourceTensorFinished);
+        }
+        forwardRowPartitionOffsets(
+            featureInput,
+            validationPass,
+            descriptor,
+            hostActiveValueCount,
+            batchSize,
+            std::move(sourceReference));
+    }
+
+   protected:
+    void forwardMaterializedInput(
+        std::optional<Tensor> featureInput,
+        bool validationPass,
+        uint32_t batchSize,
+        std::optional<Thor::BatchSourceReference> sourceReference,
+        std::optional<uint64_t> raggedActiveValueCount,
+        std::optional<RowPartitionDescriptor> rowPartitionDescriptor = std::nullopt,
+        std::optional<uint64_t> rowPartitionHostActiveValueCount = std::nullopt) {
         const bool emitDiagnostics = layerSubmitDiagnosticsActive();
         const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         if (isPassThrough()) {
@@ -344,7 +442,30 @@ class NetworkInput : public Layer {
                 featureOutput.value().copyFromAsync(slot.outputBuffer.value(), stream);
                 stream.putEvent(slot.outputBufferWritableEvent);
             }
-            canonicalizeRaggedPaddingIfPresent(featureOutput.value(), stream);
+        }
+        if (raggedActiveValueCount.has_value()) {
+            THOR_THROW_IF_FALSE(contentDimensions.has_value());
+            THOR_THROW_IF_FALSE(!isPassThrough());
+            THOR_THROW_IF_FALSE(featureOutput.has_value());
+            canonicalizeRaggedPadding(featureOutput.value(), raggedActiveValueCount.value(), stream);
+        }
+        if (rowPartitionDescriptor.has_value()) {
+            THOR_THROW_IF_FALSE(contentDimensions.has_value());
+            THOR_THROW_IF_FALSE(!isPassThrough());
+            THOR_THROW_IF_FALSE(featureOutput.has_value());
+            if (featureOutput->getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+                // CPU cache publication is checked against offsets[B]. Ensure the
+                // asynchronous materialization is complete before validating it.
+                stream.synchronize();
+            }
+            RowPartitionRuntime rowPartition(featureOutput.value(), rowPartitionDescriptor.value());
+            if (rowPartitionHostActiveValueCount.has_value()) {
+                rowPartition.setHostActiveValueCount(rowPartitionHostActiveValueCount.value());
+            } else {
+                rowPartition.clearHostActiveValueCount();
+            }
+        } else {
+            THOR_THROW_IF_FALSE(!rowPartitionHostActiveValueCount.has_value());
         }
         if (!contentDimensions.has_value() && sourceReference.has_value()) {
             sourceReference->recordConsumption(stream);
@@ -380,7 +501,7 @@ class NetworkInput : public Layer {
         }
     }
 
-
+   public:
     // Only called for input endpoints configured for reference-valued batch fields.
     // The small reference value is retained in the selected NetworkInput ring slot;
     // its materializer writes directly into the statically connected featureOutput.
@@ -422,7 +543,6 @@ class NetworkInput : public Layer {
         slot.deviceBatchReference = deviceBatchReference;
         if (sourceReference.has_value()) sourceReference->waitUntilReady(stream);
         slot.deviceBatchReference.value().enqueueMaterialization(featureOutput.value(), stream);
-        canonicalizeRaggedPaddingIfPresent(featureOutput.value(), stream);
         if (sourceReference.has_value()) sourceReference->recordConsumption(stream);
 
         const uint64_t materializeMicros =
@@ -472,21 +592,18 @@ class NetworkInput : public Layer {
     }
 
    protected:
-    static void canonicalizeRaggedPaddingIfPresent(Tensor &tensor, Stream stream) {
-        const std::optional<uint64_t> activeRows = tensor.getRaggedActiveRows();
-        if (!activeRows.has_value()) return;
-
+    static void canonicalizeRaggedPadding(Tensor tensor, uint64_t activeValueCount, Stream stream) {
         const std::vector<uint64_t> dimensions = tensor.getDimensions();
         THOR_THROW_IF_FALSE(!dimensions.empty());
-        const uint64_t capacityRows = dimensions.front();
-        THOR_THROW_IF_FALSE(capacityRows > 0);
-        THOR_THROW_IF_FALSE(activeRows.value() <= capacityRows);
-        if (activeRows.value() == capacityRows) return;
+        const uint64_t capacityValues = dimensions.front();
+        THOR_THROW_IF_FALSE(capacityValues > 0);
+        THOR_THROW_IF_FALSE(activeValueCount <= capacityValues);
+        if (activeValueCount == capacityValues) return;
 
-        const uint64_t elementsPerRow = tensor.getTotalNumElements() / capacityRows;
-        THOR_THROW_IF_FALSE(elementsPerRow > 0);
-        const uint64_t tailElements = (capacityRows - activeRows.value()) * elementsPerRow;
-        Tensor tail = tensor.aliasView({tailElements}, {1}, activeRows.value() * elementsPerRow);
+        const uint64_t elementsPerValue = tensor.getTotalNumElements() / capacityValues;
+        THOR_THROW_IF_FALSE(elementsPerValue > 0);
+        const uint64_t tailElements = (capacityValues - activeValueCount) * elementsPerValue;
+        Tensor tail = tensor.aliasView({tailElements}, {1}, activeValueCount * elementsPerValue);
         tail.memsetAsync(stream, 0);
     }
 

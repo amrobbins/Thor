@@ -435,7 +435,9 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
             runtime.rowIndicesHost,
             validExampleCount,
             requirement.raggedTensorDescriptor->getMaxTotalValues());
-        storage.raggedTensors.at(field.name).getValues().setRaggedActiveRows(activeRows);
+        storage.raggedTensors.at(field.name)
+            .getRowPartitionRuntime()
+            .setHostActiveValueCount(activeRows);
     }
 
     runtime.rowIndicesDevice.copyFromAsync(

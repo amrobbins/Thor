@@ -9,13 +9,14 @@ namespace ThorImplementation {
 
 // Expression-backed RMSNorm over packed ragged values.
 //
-// RMSNorm itself remains an ordinary Expression RMSNORM stage. This wrapper owns
-// only the ragged storage/runtime contract that is outside the mathematical
-// expression: host-known active-row metadata and canonical zero padding. The
-// RMSNORM stage uses its packed-row-capacity annotation to select a cached cuDNN
-// row bucket at runtime.
+// The row partition is an explicit structural input.  RowPartitionRuntime owns
+// the host-visible active-row cache; packed values carry no ragged runtime
+// contract. Packed Expression execution consumes the canonical offsets tensor
+// directly as a structural runtime binding.
 class RaggedRMSNorm final : public CustomLayer {
    public:
+    static constexpr const char* ROW_PARTITION_INPUT_NAME = "row_partition";
+
     RaggedRMSNorm(DynamicExpression expression,
                   std::vector<std::string> inputNames,
                   std::vector<std::string> outputNames,
@@ -39,14 +40,20 @@ class RaggedRMSNorm final : public CustomLayer {
     void afterBackwardErrorExpressionRun(uint32_t connectionNumber, Stream& stream) override;
 
    private:
-    [[nodiscard]] uint64_t requireActiveRows(uint32_t connectionNumber) const;
-    [[nodiscard]] uint64_t activeRowsForConnection(uint32_t connectionNumber) const;
+    static constexpr uint32_t VALUES_INPUT_PORT = 0;
+    static constexpr uint32_t ROW_PARTITION_INPUT_PORT = 1;
+    static constexpr uint32_t INPUT_PORT_COUNT = 2;
+
+    [[nodiscard]] uint32_t applicationIndexForConnection(uint32_t connectionNumber) const;
+    [[nodiscard]] Tensor packedValuesForApplication(uint32_t applicationIndex) const;
+    [[nodiscard]] uint64_t requireActiveRows(uint32_t applicationIndex) const;
+    [[nodiscard]] uint64_t activeRowsForApplication(uint32_t applicationIndex) const;
     void validatePackedTensor(const Tensor& tensor, const char* what) const;
     void zeroInactiveTail(Tensor tensor, uint64_t activeRows, Stream stream) const;
 
     uint64_t fullCapacityRows;
     uint64_t elementsPerValue;
-    std::vector<uint64_t> activeRowsByConnection;
+    std::vector<uint64_t> activeRowsByApplication;
 };
 
 }  // namespace ThorImplementation

@@ -4754,8 +4754,9 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
             if (!stage.rms_norm) {
                 throw std::runtime_error("resolveOutputDimsForStageOutput RMSNorm stage missing payload.");
             }
-            if (stage_input_dims.size() != 2) {
-                throw std::runtime_error("resolveOutputDimsForStageOutput RMSNorm stage expected input and scale shapes.");
+            const size_t expected_rms_norm_inputs = stage.rms_norm->ragged_offsets_input_slot == UINT32_MAX ? 2u : 3u;
+            if (stage_input_dims.size() != expected_rms_norm_inputs) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput RMSNorm stage input count does not match its compiled row-partition binding.");
             }
             return inferRmsNormOutputDims(*stage.rms_norm, stage_input_dims[0], stage_input_dims[1]);
         }
@@ -6306,8 +6307,9 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
             if (!stage.rms_norm) {
                 throw std::runtime_error("Missing compiled RMSNorm stage.");
             }
-            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
-                throw std::runtime_error("RMSNorm stage expected exactly two inputs and one output.");
+            const size_t expected_rms_norm_inputs = stage.rms_norm->ragged_offsets_input_slot == UINT32_MAX ? 2u : 3u;
+            if (stage.input_value_ids.size() != expected_rms_norm_inputs || stage.outputs.size() != 1) {
+                throw std::runtime_error("RMSNorm stage input count does not match its compiled row-partition binding.");
             }
             value_dims[stage.outputs[0].value_id] = inferRmsNormOutputDims(*stage.rms_norm, stage_input_dims[0], stage_input_dims[1]);
         } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
@@ -7520,7 +7522,8 @@ std::shared_ptr<StampedRmsNorm> FusedEquation::stampRmsNorm(const std::shared_pt
                                                                Tensor& input,
                                                                Tensor& scale,
                                                                const std::optional<Tensor>& preallocatedOutput,
-                                                               const Stream& stream) const {
+                                                               const Stream& stream,
+                                                               const std::optional<Tensor>& rowPartitionOffsets) const {
     if (!compiledStage) {
         throw std::runtime_error("stampRmsNorm requires non-null compiled stage.");
     }
@@ -7561,7 +7564,7 @@ std::shared_ptr<StampedRmsNorm> FusedEquation::stampRmsNorm(const std::shared_pt
         output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
     }
 
-    return std::make_shared<StampedRmsNorm>(compiledStage, adaptedInput, adaptedScale, output, stream);
+    return std::make_shared<StampedRmsNorm>(compiledStage, adaptedInput, adaptedScale, output, stream, rowPartitionOffsets);
 }
 
 std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::shared_ptr<CompiledConvolution>& compiledStage,
@@ -7677,7 +7680,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                           const std::optional<std::string>& alpha_runtime_name,
                                                           const std::optional<std::string>& beta_runtime_name,
                                                           const std::optional<Tensor>& epilogue_aux,
-                                                          const std::optional<Tensor>& preallocatedBgradOutput) const {
+                                                          const std::optional<Tensor>& preallocatedBgradOutput,
+                                                          const std::optional<Tensor>& rowPartitionOffsets) const {
     if (!compiledStage) {
         throw std::runtime_error("stampMatmul requires non-null compiled stage.");
     }
@@ -7798,7 +7802,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       std::nullopt,
                                       std::nullopt,
                                       epilogue_aux,
-                                      bgrad_output);
+                                      bgrad_output,
+                                      rowPartitionOffsets);
 }
 
 std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
@@ -7812,7 +7817,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                           const std::optional<std::string>& alpha_runtime_name,
                                                           const std::optional<std::string>& beta_runtime_name,
                                                           const std::optional<Tensor>& epilogue_aux,
-                                                          const std::optional<Tensor>& preallocatedBgradOutput) const {
+                                                          const std::optional<Tensor>& preallocatedBgradOutput,
+                                                          const std::optional<Tensor>& rowPartitionOffsets) const {
     if (!compiledStage) {
         throw std::runtime_error("stampMatmul requires non-null compiled stage.");
     }
@@ -7960,7 +7966,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       alpha_host_scratch,
                                       beta_host_scratch,
                                       epilogue_aux,
-                                      bgrad_output);
+                                      bgrad_output,
+                                      rowPartitionOffsets);
 }
 
 static CudnnRaggedAttentionScratch makeRaggedAttentionScratch(const TensorPlacement& placement, uint64_t batchSize) {
@@ -9510,8 +9517,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (!stage.rms_norm) {
                     throw std::runtime_error("RMSNorm stage missing compiled payload.");
                 }
-                if (stageInputs.size() != 2) {
-                    throw std::runtime_error("RMSNorm stage expects exactly two inputs.");
+                const size_t expectedRmsNormInputs = stage.rms_norm->ragged_offsets_input_slot == UINT32_MAX ? 2u : 3u;
+                if (stageInputs.size() != expectedRmsNormInputs) {
+                    throw std::runtime_error("RMSNorm stage input count does not match its compiled row-partition binding.");
                 }
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("RMSNorm stage expects exactly one output.");
@@ -9519,12 +9527,19 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
                 Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
                 Tensor scaleTensor = runtimeInputTensor(stageInputs[1]);
+                std::optional<Tensor> rowPartitionOffsets = std::nullopt;
+                if (stage.rms_norm->ragged_offsets_input_slot != UINT32_MAX) {
+                    if (stage.rms_norm->ragged_offsets_input_slot >= stageInputs.size()) {
+                        throw std::runtime_error("RMSNorm row-partition runtime input slot is out of range.");
+                    }
+                    rowPartitionOffsets = runtimeInputTensor(stageInputs[stage.rms_norm->ragged_offsets_input_slot]);
+                }
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
                 std::optional<Tensor> preallocated = preallocatedForStageOutput(stageOutput, output_dims);
 
                 std::shared_ptr<StampedRmsNorm> stampedRmsNorm =
-                    stampRmsNorm(stage.rms_norm, inputTensor, scaleTensor, preallocated, stream);
+                    stampRmsNorm(stage.rms_norm, inputTensor, scaleTensor, preallocated, stream, rowPartitionOffsets);
                 Tensor outputTensor = stampedRmsNorm->getOutputTensor();
 
                 values[stageOutput.value_id] = outputTensor;
@@ -9602,6 +9617,13 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 std::optional<std::string> alpha_runtime_name = std::nullopt;
                 std::optional<std::string> beta_runtime_name = std::nullopt;
                 std::optional<Tensor> epilogue_aux = std::nullopt;
+                std::optional<Tensor> rowPartitionOffsets = std::nullopt;
+                if (stage.matmul->ragged_offsets_input_slot != UINT32_MAX) {
+                    if (stage.matmul->ragged_offsets_input_slot >= stageInputs.size()) {
+                        throw std::runtime_error("Matmul row-partition runtime input slot is out of range.");
+                    }
+                    rowPartitionOffsets = runtimeInputTensor(stageInputs[stage.matmul->ragged_offsets_input_slot]);
+                }
 
                 auto runtimeScalarNameForStageLocalSlot = [&](uint32_t local_slot) -> std::optional<std::string> {
                     if (local_slot == UINT32_MAX) {
@@ -9731,7 +9753,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                 alpha_runtime_name,
                                                 beta_runtime_name,
                                                 epilogue_aux,
-                                                std::nullopt);
+                                                std::nullopt,
+                                                rowPartitionOffsets);
                                 if (groupMatmul->getOutputTensor().getDimensions() != outputGroup.getDimensions()) {
                                     throw std::runtime_error(
                                         "Grouped MATMUL stamped output dimensions do not match the planned output view.");
@@ -9762,7 +9785,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                 alpha_runtime_name,
                                                 beta_runtime_name,
                                                 epilogue_aux,
-                                                preallocated_bgrad);
+                                                preallocated_bgrad,
+                                                rowPartitionOffsets);
                 } else {
                     if (stageInputs.size() < 3) {
                         throw std::runtime_error("GEMM stage expects at least three inputs.");
@@ -9781,7 +9805,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                 alpha_runtime_name,
                                                 beta_runtime_name,
                                                 epilogue_aux,
-                                                preallocated_bgrad);
+                                                preallocated_bgrad,
+                                                rowPartitionOffsets);
                 }
                 Tensor outputTensor = stampedMatmul->getOutputTensor();
                 if (outputTensor.getDimensions() != output_dims) {
@@ -10870,8 +10895,9 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             if (!stage.rms_norm) {
                 throw std::runtime_error("Missing compiled RMSNorm stage.");
             }
-            if (stage.input_value_ids.size() != 2 || stage.outputs.size() != 1) {
-                throw std::runtime_error("RMSNorm stage expected exactly two inputs and one output.");
+            const size_t expected_rms_norm_inputs = stage.rms_norm->ragged_offsets_input_slot == UINT32_MAX ? 2u : 3u;
+            if (stage.input_value_ids.size() != expected_rms_norm_inputs || stage.outputs.size() != 1) {
+                throw std::runtime_error("RMSNorm stage input count does not match its compiled row-partition binding.");
             }
             value_dims[stage.outputs[0].value_id] = inferRmsNormOutputDims(*stage.rms_norm, stage_input_dims[0], stage_input_dims[1]);
         } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {

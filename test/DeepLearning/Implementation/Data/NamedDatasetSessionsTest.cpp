@@ -1551,6 +1551,7 @@ TEST(IndexedNamedBatchSessionTest, MaterializesLogicalRaggedBatchesForBothCanoni
 
         const RaggedTensor &labels = batch.getRaggedTensor("labels");
         EXPECT_EQ(labels.getDescriptor(), requirements.begin()->second.raggedTensorDescriptor.value());
+        EXPECT_EQ(labels.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(5));
         EXPECT_EQ(raggedOffsetsAsUint64(labels), (vector<uint64_t>{0, 3, 3, 5}));
         EXPECT_EQ(activeRaggedInt32Values(labels), (vector<int32_t>{30, 31, 32, 50, 51}));
         lease.reset();
@@ -1572,21 +1573,29 @@ TEST(IndexedNamedBatchSessionTest, ExactRaggedTailUsesEmptyPhysicalTailRowsAndRe
     uint64_t batchNum = 99;
     BatchLease first = session.leaseBatch(ExampleType::TRAIN, batchNum);
     EXPECT_EQ(batchNum, 0u);
-    EXPECT_EQ(raggedOffsetsAsUint64(first.get().getRaggedTensor("labels")), (vector<uint64_t>{0, 2, 2}));
-    EXPECT_EQ(activeRaggedInt32Values(first.get().getRaggedTensor("labels")), (vector<int32_t>{10, 11}));
+    const RaggedTensor &firstLabels = first.get().getRaggedTensor("labels");
+    EXPECT_EQ(firstLabels.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(2));
+    EXPECT_EQ(raggedOffsetsAsUint64(firstLabels), (vector<uint64_t>{0, 2, 2}));
+    EXPECT_EQ(activeRaggedInt32Values(firstLabels), (vector<int32_t>{10, 11}));
+    // Recycle this queue-depth-one buffer. The next materialization must install
+    // both the next offsets payload and its matching runtime cache.
     first.reset();
 
     BatchLease tail = session.leaseBatch(ExampleType::TRAIN, batchNum);
     EXPECT_EQ(batchNum, 1u);
     ASSERT_TRUE(tail.get().getValidExampleCount().has_value());
     EXPECT_EQ(tail.get().getValidExampleCount().value(), 1u);
-    EXPECT_EQ(raggedOffsetsAsUint64(tail.get().getRaggedTensor("labels")), (vector<uint64_t>{0, 3, 3}));
-    EXPECT_EQ(activeRaggedInt32Values(tail.get().getRaggedTensor("labels")), (vector<int32_t>{30, 31, 32}));
+    const RaggedTensor &tailLabels = tail.get().getRaggedTensor("labels");
+    EXPECT_EQ(tailLabels.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(3));
+    EXPECT_EQ(raggedOffsetsAsUint64(tailLabels), (vector<uint64_t>{0, 3, 3}));
+    EXPECT_EQ(activeRaggedInt32Values(tailLabels), (vector<int32_t>{30, 31, 32}));
     tail.reset();
 
     BatchLease nextEpoch = session.leaseBatch(ExampleType::TRAIN, batchNum);
     EXPECT_EQ(batchNum, 0u);
-    EXPECT_EQ(raggedOffsetsAsUint64(nextEpoch.get().getRaggedTensor("labels")), (vector<uint64_t>{0, 2, 2}));
+    const RaggedTensor &nextEpochLabels = nextEpoch.get().getRaggedTensor("labels");
+    EXPECT_EQ(nextEpochLabels.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(2));
+    EXPECT_EQ(raggedOffsetsAsUint64(nextEpochLabels), (vector<uint64_t>{0, 2, 2}));
     nextEpoch.reset();
 
     std::filesystem::remove_all(datasetPath);
@@ -3622,6 +3631,9 @@ TEST(DeviceResidentFileNamedBatchSessionTest, RaggedResidentBatchesMatchFileBack
             ASSERT_TRUE(residentLabels.getHostActiveValueCountIfAvailable().has_value());
             EXPECT_EQ(residentLabels.getHostActiveValueCountIfAvailable().value(),
                       sourceLabels.getHostActiveValueCountIfAvailable().value());
+            EXPECT_EQ(
+                residentLabels.getRowPartitionRuntime().getHostActiveValueCountIfAvailable(),
+                sourceLabels.getHostActiveValueCountIfAvailable());
             expectRaggedInt32Equal(residentLabels, sourceLabels);
         }
 
@@ -3648,9 +3660,14 @@ TEST(DeviceResidentFileNamedBatchSessionTest, RaggedResidentBatchesMatchFileBack
         ASSERT_TRUE(residentValidation.get().getValidExampleCount().has_value());
         EXPECT_EQ(residentValidation.get().getValidExampleCount().value(), 1u);
         waitForBatchFieldReady(residentValidation.get(), "labels");
-        expectRaggedInt32Equal(
-            residentValidation.get().getRaggedTensor("labels"),
-            sourceValidation.get().getRaggedTensor("labels"));
+        const RaggedTensor &sourceValidationLabels =
+            sourceValidation.get().getRaggedTensor("labels");
+        const RaggedTensor &residentValidationLabels =
+            residentValidation.get().getRaggedTensor("labels");
+        EXPECT_EQ(
+            residentValidationLabels.getRowPartitionRuntime().getHostActiveValueCountIfAvailable(),
+            sourceValidationLabels.getHostActiveValueCountIfAvailable());
+        expectRaggedInt32Equal(residentValidationLabels, sourceValidationLabels);
         sourceValidation.reset();
         residentValidation.reset();
 
@@ -3785,6 +3802,9 @@ TEST(DeviceResidentFileNamedBatchSessionTest, RaggedResidentAllEmptyBatchHasZero
     EXPECT_EQ(raggedOffsetsAsUint64(labels), (vector<uint64_t>{0, 0, 0}));
     ASSERT_TRUE(labels.getHostActiveValueCountIfAvailable().has_value());
     EXPECT_EQ(labels.getHostActiveValueCountIfAvailable().value(), 0u);
+    EXPECT_EQ(
+        labels.getRowPartitionRuntime().getHostActiveValueCountIfAvailable(),
+        std::optional<uint64_t>(0));
     EXPECT_TRUE(activeRaggedInt32Values(labels).empty());
     lease.reset();
 

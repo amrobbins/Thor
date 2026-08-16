@@ -116,7 +116,16 @@ def _build_network(name: str):
         rope_key_position_offsets=history_origins.get_feature_output(),
         **attention_kwargs,
     )
-    history_states = self_attention.get_feature_output()
+    attention_history_states = self_attention.get_feature_output()
+    assert isinstance(attention_history_states, thor.RaggedTensor)
+
+    # Exercise the production transformer pattern where a ragged Attention
+    # update is consumed immediately by a partition-preserving residual Add.
+    # Both outputs share the query's structural row partition; packed values
+    # carry no runtime partition state of their own.
+    history_states = thor.layers.Add(
+        network, encoded, attention_history_states
+    ).get_feature_output()
     assert isinstance(history_states, thor.RaggedTensor)
 
     dense_ragged = thor.layers.Attention(
@@ -176,8 +185,21 @@ def _build_network(name: str):
     return network, layers
 
 
+def _assert_no_ephemeral_row_partition_state_is_serialized(serialized: str):
+    for forbidden in (
+        "ragged" + "ActiveRows",
+        "ragged_" + "active_rows",
+        "hostActiveValueCount",
+        "host_active_value_count",
+        "rowPartitionHostActiveValueCount",
+    ):
+        assert forbidden not in serialized
+
+
 def _assert_rope_and_mixed_modes(network: thor.Network):
-    architecture = json.loads(network.get_architecture_json())
+    architecture_json = network.get_architecture_json()
+    _assert_no_ephemeral_row_partition_state_is_serialized(architecture_json)
+    architecture = json.loads(architecture_json)
     attentions = [layer for layer in architecture["layers"] if layer["layer_type"] == "attention"]
     assert len(attentions) == 3
     assert {(layer["query_ragged"], layer["key_value_ragged"]) for layer in attentions} == {
@@ -196,6 +218,22 @@ def _assert_rope_and_mixed_modes(network: thor.Network):
 
     expected_origins = HISTORY_BOUNDARY - HISTORY_LENGTHS.astype(np.int64)
     np.testing.assert_array_equal(HISTORY_ORIGINS[:, 0], expected_origins.astype(np.int32))
+
+
+def test_ragged_transformer_training_phase_round_trip_preserves_only_structural_partition_state():
+    network, _ = _build_network("pytest_ragged_transformer_training_phase")
+    _assert_rope_and_mixed_modes(network)
+
+    phase = thor.training.TrainingPhase("ragged_transformer_phase", network=network, enabled=True)
+    phase_architecture = phase.get_architecture_json()
+    _assert_no_ephemeral_row_partition_state_is_serialized(phase_architecture)
+
+    restored = thor.training.TrainingPhase.deserialize(phase_architecture)
+    assert restored.name == "ragged_transformer_phase"
+    assert restored.enabled
+    restored_network = restored.get_network()
+    assert restored_network is not None
+    _assert_rope_and_mixed_modes(restored_network)
 
 
 def _inference_batch(poison: float):

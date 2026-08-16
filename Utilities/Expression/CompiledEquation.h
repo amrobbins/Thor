@@ -429,6 +429,8 @@ struct CompiledMatmul {
     const uint32_t epilogue_aux_input_slot;
     const MatmulPackedRowBinding packed_row_binding;
     const uint64_t packed_row_capacity;
+    const uint32_t ragged_offsets_input_slot;
+    const uint64_t ragged_batch_size;
     const std::optional<DataType> epilogue_aux_dtype;
     const std::optional<DataType> bgrad_output_dtype;
 
@@ -453,6 +455,8 @@ struct CompiledMatmul {
                    uint32_t epilogue_aux_input_slot = UINT32_MAX,
                    MatmulPackedRowBinding packed_row_binding = MatmulPackedRowBinding::None,
                    uint64_t packed_row_capacity = 0,
+                   uint32_t ragged_offsets_input_slot = UINT32_MAX,
+                   uint64_t ragged_batch_size = 0,
                    std::optional<DataType> epilogue_aux_dtype = std::nullopt,
                    std::optional<DataType> bgrad_output_dtype = std::nullopt)
         : op(op),
@@ -474,6 +478,8 @@ struct CompiledMatmul {
           epilogue_aux_input_slot(epilogue_aux_input_slot),
           packed_row_binding(packed_row_binding),
           packed_row_capacity(packed_row_capacity),
+          ragged_offsets_input_slot(ragged_offsets_input_slot),
+          ragged_batch_size(ragged_batch_size),
           epilogue_aux_dtype(epilogue_aux_dtype),
           bgrad_output_dtype(bgrad_output_dtype) {}
 };

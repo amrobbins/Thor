@@ -561,7 +561,9 @@ Batch DeviceResidentFileNamedBatchSession::acquireBatch(
                     selectionSlot->state->rowIndicesHost,
                     validExampleCount,
                     descriptor.getMaxTotalValues());
-                raggedSlot->raggedTensors.at(fieldName).getValues().setRaggedActiveRows(activeRows);
+                raggedSlot->raggedTensors.at(fieldName)
+                    .getRowPartitionRuntime()
+                    .setHostActiveValueCount(activeRows);
             }
         }
 

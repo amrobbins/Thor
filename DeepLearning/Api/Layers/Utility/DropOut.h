@@ -10,6 +10,7 @@
 #include "Utilities/Common/CudnnHelper.h"
 #include <limits>
 #include <optional>
+#include <set>
 #include <stdexcept>
 
 namespace Thor {
@@ -29,6 +30,16 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureInput() const { return raggedFeatureInput; }
     [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureOutput() const { return raggedFeatureOutput; }
 
+    std::vector<Tensor> getAllInputTensors() const override {
+        if (!raggedFeatureInput.has_value()) return Layer::getAllInputTensors();
+        return {raggedFeatureInput->getValues(), raggedFeatureInput->getOffsets()};
+    }
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
+    bool mustConnectAllInputsToDriveOutput() const override { return raggedFeatureInput.has_value(); }
+    void informThatInputConnectionMade(Tensor inputTensor) override;
+    void resetGraphTraversalState() override;
+    int getConnectionType(Tensor connectingTensor) const override;
+
     [[nodiscard]] uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
         THOR_THROW_IF_FALSE(featureOutput.has_value());
         if (raggedFeatureInput.has_value()) return featureOutput->getTotalSizeInBytes();
@@ -47,7 +58,9 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         (void)drivingLayer;
         (void)drivingApiLayer;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value());
+        bool knownInput = connectingApiTensor == getFeatureInput().value();
+        if (raggedFeatureInput.has_value() && connectingApiTensor == raggedFeatureInput->getOffsets()) knownInput = true;
+        THOR_THROW_IF_FALSE(knownInput);
 
         std::optional<ThorImplementation::DropOut::RaggedConfiguration> raggedConfiguration;
         if (raggedFeatureInput.has_value()) {
@@ -70,7 +83,7 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        if (dropProportion == 0.0f)
+        if (dropProportion == 0.0f && !raggedFeatureInput.has_value())
             return 0;
         THOR_THROW_IF_FALSE(tensorPlacement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         const ThorImplementation::DataType dataType = featureInput.value().getDataType();
@@ -85,7 +98,8 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         uint64_t errorOutputSize = featureInput.value().getTotalSizeInBytes();
         const uint64_t tensorMultiplier = raggedFeatureInput.has_value() ? 1 : batchSize;
 
-        return randomStateSize + getReservedStateSizeInBytes(batchSize) + tensorMultiplier * (featureOutputSize + errorOutputSize);
+        const uint64_t reserveStateSize = dropProportion == 0.0f ? 0 : getReservedStateSizeInBytes(batchSize);
+        return randomStateSize + reserveStateSize + tensorMultiplier * (featureOutputSize + errorOutputSize);
     }
 
    protected:
@@ -110,6 +124,8 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     float dropProportion;
     std::optional<RaggedTensor> raggedFeatureInput;
     std::optional<RaggedTensor> raggedFeatureOutput;
+    std::set<uint32_t> connectedInputPortIndices;
+    bool emittedFeatureOutputAfterAllInputsConnected = false;
 };
 
 class DropOut::Builder {

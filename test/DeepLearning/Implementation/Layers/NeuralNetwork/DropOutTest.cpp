@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -76,6 +77,57 @@ TEST(DropOut, InferenceWorks) {
             ASSERT_EQ((float)destMem[i], (float)sourceMem[i]);
         }
     }
+}
+
+TEST(DropOut, RaggedInferenceIdentityAliasesValuesAndDoesNotRequireRuntimeExtent) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    constexpr uint64_t fullRows = 8;
+    constexpr uint64_t elementsPerValue = 3;
+    TensorDescriptor descriptor(DataType::FP32, {fullRows, elementsPerValue});
+
+    Tensor sourceCpu(cpuPlacement, descriptor);
+    Tensor sourceGpu(gpuPlacement, descriptor);
+    for (uint64_t i = 0; i < sourceCpu.getTotalNumElements(); ++i) {
+        sourceCpu.getMemPtr<float>()[i] = static_cast<float>(i + 1);
+    }
+
+    vector<shared_ptr<Layer>> layers;
+    layers.push_back(make_shared<NetworkInput>(sourceGpu));
+    auto dropOutLayer = make_shared<DropOut>(
+        0.5f, /*training=*/false, /*trainingDropoutEnabled=*/true,
+        DropOut::RaggedConfiguration{fullRows, elementsPerValue});
+    layers.push_back(dropOutLayer);
+    layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
+
+    Stream stream = layers.front()->getStream();
+    LayerTestHelper::connectNetwork(layers);
+
+    // The structural offsets port is part of the physical graph, but inference
+    // identity must neither wait for it at runtime nor require its host cache.
+    Tensor rowPartitionGpu(gpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
+    dropOutLayer->connectToPreviousLayer(
+        nullptr, rowPartitionGpu, stream, /*backPropagateError=*/false, /*connectionType=*/1);
+    LayerTestHelper::initializeNetwork(layers);
+
+    ASSERT_TRUE(dropOutLayer->getFeatureInput().has_value());
+    ASSERT_TRUE(dropOutLayer->getFeatureOutput().has_value());
+    EXPECT_EQ(dropOutLayer->getFeatureInput().value(), dropOutLayer->getFeatureOutput().value());
+
+    // Drive only the values edge. No offsets contents or RowPartitionRuntime cache
+    // are supplied because a true inference identity does not inspect packed rows.
+    layers.front()->forward(sourceCpu, false);
+    auto networkOutput = dynamic_pointer_cast<NetworkOutput>(layers.back());
+    stream.waitEvent(networkOutput->getOutputReadyEvent());
+    Tensor resultCpu(cpuPlacement, descriptor);
+    resultCpu.copyFromAsync(networkOutput->getFeatureOutput().value(), stream);
+    stream.synchronize();
+
+    for (uint64_t i = 0; i < sourceCpu.getTotalNumElements(); ++i) {
+        EXPECT_FLOAT_EQ(resultCpu.getMemPtr<float>()[i], sourceCpu.getMemPtr<float>()[i]);
+    }
+
+    LayerTestHelper::tearDownNetwork(layers);
 }
 
 TEST(DropOut, TrainingNoDropOut) {
@@ -523,7 +575,6 @@ TEST(DropOut, RaggedTrainingUsesOnlyActivePrefixAndBackwardReusesForwardMask) {
     float* source = sourceCpu.getMemPtr<float>();
     for (uint64_t i = 0; i < activeElements; ++i) source[i] = 1.0f;
     for (uint64_t i = activeElements; i < totalElements; ++i) source[i] = 1234.0f;
-    sourceCpu.setRaggedActiveRows(activeRows);
 
     vector<shared_ptr<Layer>> layers;
     layers.push_back(make_shared<NetworkInput>(sourceGpu));
@@ -539,13 +590,25 @@ TEST(DropOut, RaggedTrainingUsesOnlyActivePrefixAndBackwardReusesForwardMask) {
     layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
 
     Stream stream = layers.front()->getStream();
-    LayerTestHelper::connectAndInitializeNetwork(layers);
+    LayerTestHelper::connectNetwork(layers);
+    Tensor rowPartitionGpu(gpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
+    Tensor rowPartitionCpu(cpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
+    rowPartitionCpu.getMemPtr<uint32_t>()[0] = 0;
+    rowPartitionCpu.getMemPtr<uint32_t>()[1] = static_cast<uint32_t>(activeRows / 2);
+    rowPartitionCpu.getMemPtr<uint32_t>()[2] = static_cast<uint32_t>(activeRows);
+    rowPartitionGpu.copyFromAsync(rowPartitionCpu, stream);
+    RowPartitionRuntime rowPartition(
+        rowPartitionGpu, RowPartitionDescriptor(/*batchSize=*/2, fullRows, DataType::UINT32));
+    rowPartition.setHostActiveValueCount(activeRows);
+    dropOutLayer->connectToPreviousLayer(nullptr, rowPartitionGpu, stream, /*backPropagateError=*/false, /*connectionType=*/1);
+    LayerTestHelper::initializeNetwork(layers);
 
-    // Bypass NetworkInput's ragged-padding canonicalization so DropOut itself
-    // receives poisoned inactive capacity and must avoid reading it.
+    // Drive DropOut directly with poisoned inactive capacity; the layer must
+    // use the row partition and avoid reading rows outside the active prefix.
     Tensor packedInput = dropOutLayer->getFeatureInput().value();
     packedInput.copyFromAsync(sourceCpu, stream);
     dropOutLayer->forward(packedInput, false);
+    dropOutLayer->forward(rowPartitionGpu, false);
     stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
     Tensor outputCpu(cpuPlacement, descriptor);
     outputCpu.copyFromAsync(dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput().value(), stream);
@@ -583,7 +646,6 @@ TEST(DropOut, RaggedTrainingUsesOnlyActivePrefixAndBackwardReusesForwardMask) {
         EXPECT_FLOAT_EQ(errorOutputValues[i], output[i] == 0.0f ? 0.0f : 2.0f);
     }
     for (uint64_t i = activeElements; i < totalElements; ++i) EXPECT_FLOAT_EQ(errorOutputValues[i], 0.0f);
-    ASSERT_EQ(errorOutput.getRaggedActiveRows(), std::optional<uint64_t>(activeRows));
 
     LayerTestHelper::tearDownNetwork(layers);
 }
@@ -603,7 +665,6 @@ TEST(DropOut, RaggedValidationIsIdentityOverActivePrefixAndCanonicalizesInactive
     float* source = sourceCpu.getMemPtr<float>();
     for (uint64_t i = 0; i < activeElements; ++i) source[i] = static_cast<float>(i + 1);
     for (uint64_t i = activeElements; i < totalElements; ++i) source[i] = 7777.0f;
-    sourceCpu.setRaggedActiveRows(activeRows);
 
     vector<shared_ptr<Layer>> layers;
     layers.push_back(make_shared<NetworkInput>(sourceGpu));
@@ -612,10 +673,22 @@ TEST(DropOut, RaggedValidationIsIdentityOverActivePrefixAndCanonicalizesInactive
     layers.push_back(dropOutLayer);
     layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
     Stream stream = layers.front()->getStream();
-    LayerTestHelper::connectAndInitializeNetwork(layers);
+    LayerTestHelper::connectNetwork(layers);
+    Tensor rowPartitionGpu(gpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
+    Tensor rowPartitionCpu(cpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
+    rowPartitionCpu.getMemPtr<uint32_t>()[0] = 0;
+    rowPartitionCpu.getMemPtr<uint32_t>()[1] = static_cast<uint32_t>(activeRows / 2);
+    rowPartitionCpu.getMemPtr<uint32_t>()[2] = static_cast<uint32_t>(activeRows);
+    rowPartitionGpu.copyFromAsync(rowPartitionCpu, stream);
+    RowPartitionRuntime rowPartition(
+        rowPartitionGpu, RowPartitionDescriptor(/*batchSize=*/2, fullRows, DataType::UINT32));
+    rowPartition.setHostActiveValueCount(activeRows);
+    dropOutLayer->connectToPreviousLayer(nullptr, rowPartitionGpu, stream, /*backPropagateError=*/false, /*connectionType=*/1);
+    LayerTestHelper::initializeNetwork(layers);
 
     Tensor packedInput = dropOutLayer->getFeatureInput().value();
     packedInput.copyFromAsync(sourceCpu, stream);
+    dropOutLayer->forward(rowPartitionGpu, true);
     dropOutLayer->forward(packedInput, true);
     stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
     Tensor outputCpu(cpuPlacement, descriptor);

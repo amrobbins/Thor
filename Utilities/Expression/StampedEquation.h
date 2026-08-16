@@ -257,6 +257,8 @@ struct CompiledRmsNorm {
     // contain multiple RMSNorm samples per packed row; runtime execution selects
     // a cached row-capacity bucket from this packed-row domain.
     uint64_t packed_row_capacity = 0;
+    uint32_t ragged_offsets_input_slot = UINT32_MAX;
+    uint64_t ragged_batch_size = 0;
     double epsilon = 1.0e-5;
     DataType input_dtype = DataType::FP16;
     DataType scale_dtype = DataType::FP32;
@@ -695,12 +697,18 @@ class StampedRmsNorm {
 
     Tensor getOutputTensor() const { return output; }
 
-    StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled, const Tensor& input, const Tensor& scale, const Tensor& output, const Stream& stream);
+    StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
+                   const Tensor& input,
+                   const Tensor& scale,
+                   const Tensor& output,
+                   const Stream& stream,
+                   std::optional<Tensor> row_partition_offsets = std::nullopt);
 
    private:
     const std::shared_ptr<CompiledRmsNorm> compiled_rms_norm;
     const Tensor input;
     const Tensor scale;
+    const std::optional<Tensor> row_partition_offsets;
     Tensor output;
     Stream stream;
 };
@@ -760,7 +768,8 @@ class StampedMatmul {
                   std::optional<Tensor> alpha_host_scratch,
                   std::optional<Tensor> beta_host_scratch,
                   std::optional<Tensor> epilogue_aux = std::nullopt,
-                  std::optional<Tensor> bgrad_output = std::nullopt);
+                  std::optional<Tensor> bgrad_output = std::nullopt,
+                  std::optional<Tensor> row_partition_offsets = std::nullopt);
 
     [[nodiscard]] std::optional<std::string> alphaRuntimeName() const { return alpha_runtime_name; }
     [[nodiscard]] std::optional<std::string> betaRuntimeName() const { return beta_runtime_name; }
@@ -778,6 +787,7 @@ class StampedMatmul {
     Tensor output;
     const std::optional<Tensor> epilogue_aux;
     const std::optional<Tensor> bgrad_output;
+    const std::optional<Tensor> row_partition_offsets;
     Stream stream;
     const std::optional<Tensor> workspace;
     const std::optional<RuntimeInputValue> alpha_input;

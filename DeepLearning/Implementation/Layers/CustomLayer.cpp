@@ -833,12 +833,38 @@ bool CustomLayer::applicationHasConditionalBackwardVariant(uint32_t applicationI
 }
 
 bool CustomLayer::canFuseOptimizerUpdatesForApplication(uint32_t applicationIndex) const {
-    // Dense optimizer-update fusion is only correct for the simple single-application,
-    // single-input CustomLayer surface.  Multi-application and multi-input layers share
-    // materialized gradient buffers across applications/ports and need the explicit
-    // overwrite-then-accumulate path below so effective batch-size accounting and shared
-    // parameter accumulation stay well-defined.
-    if (applicationIndex != 0 || applications.size() != 1 || inputNames.size() != 1) {
+    // Dense optimizer-update fusion is only correct for a single application with one
+    // equation-bound feature input. Multi-application layers and expressions with multiple
+    // mathematical feature inputs share materialized gradient buffers across applications/ports
+    // and need the explicit overwrite-then-accumulate path below so effective batch-size
+    // accounting and shared parameter accumulation stay well-defined.
+    //
+    // A declared input that is present only in preForwardOnlyInputs() is different: it is a
+    // structural/runtime dependency, not an input to the differentiable equation. Ragged
+    // specializations use such ports for row-partition offsets. Those ports must not disable
+    // optimizer fusion merely because they make the physical layer interface multi-port.
+    if (applicationIndex != 0 || applications.size() != 1 || applicationIndex >= applications.size()) {
+        return false;
+    }
+
+    const ApplicationState& app = applications[applicationIndex];
+    if (app.forwardPrepared == nullptr) {
+        return false;
+    }
+
+    uint32_t equationBoundFeatureInputs = 0;
+    for (const std::string& inputName : inputNames) {
+        if (app.forwardPrepared->preForwardOnlyInputs().contains(inputName)) {
+            continue;
+        }
+        if (!app.forwardPrepared->stampInputs().contains(inputName)) {
+            // validatePreparedExpressionInputs() should already make this impossible, but
+            // optimizer-fusion eligibility is deliberately conservative.
+            return false;
+        }
+        ++equationBoundFeatureInputs;
+    }
+    if (equationBoundFeatureInputs != 1) {
         return false;
     }
 

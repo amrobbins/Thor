@@ -151,6 +151,7 @@ std::shared_ptr<ThorImplementation::Layer> Add::stamp(
                                   elementsPerValue(raggedRight->getTrailingDimensions())},
             elementsPerValue(raggedOutput->getTrailingDimensions()),
             std::vector<uint32_t>{0, 1},
+            2,
             getId());
         physical->setLayerName(getLayerType());
         return physical;

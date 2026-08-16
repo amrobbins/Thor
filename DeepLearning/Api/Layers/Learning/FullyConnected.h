@@ -103,7 +103,7 @@ class FullyConnected : public TrainableLayer {
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;
-    bool mustConnectAllInputsToDriveOutput() const override { return !epilogueInputBindings.empty(); }
+    bool mustConnectAllInputsToDriveOutput() const override { return !raggedFeatureInputs.empty() || !epilogueInputBindings.empty(); }
 
     DataType getWeightsDataType() const { return weightsDataType; }
     DataType getComputeDataType() const { return computeDataType; }
@@ -147,8 +147,10 @@ class FullyConnected : public TrainableLayer {
     std::vector<uint32_t> inputPortIndicesForTensor(Tensor tensor) const;
 
     std::set<uint32_t> connectedInputPortIndices;
+    std::set<uint32_t> emittedRaggedOutputApplications;
     bool emittedFeatureOutputAfterAllInputsConnected = false;
     mutable std::unordered_map<uint64_t, uint32_t> nextInputConnectionCursorByTensorOriginalId;
+    std::unordered_map<uint64_t, uint32_t> nextTraversalInputCursorByTensorOriginalId;
 
     static bool isFullyConnectedFloatingDataType(DataType dataType);
     static std::string dataTypeName(DataType dataType);

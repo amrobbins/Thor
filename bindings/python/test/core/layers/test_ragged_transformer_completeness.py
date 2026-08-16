@@ -129,14 +129,22 @@ def _build_network(name: str) -> thor.Network:
     return network
 
 
-def _batch_inputs():
-    values = np.full((HISTORY_CAPACITY, FEATURES), np.float16(123.0), dtype=np.float16)
-    active = 5
+def _batch_inputs(offsets=None, *, poison: float = 123.0):
+    if offsets is None:
+        offsets = np.array([0, 2, 5], dtype=np.uint32)
+    offsets = np.ascontiguousarray(offsets, dtype=np.uint32)
+    assert offsets.shape == (BATCH_SIZE + 1,)
+    assert offsets[0] == 0
+    assert np.all(offsets[1:] >= offsets[:-1])
+    active = int(offsets[-1])
+    assert active <= HISTORY_CAPACITY
+
+    values = np.full((HISTORY_CAPACITY, FEATURES), np.float16(poison), dtype=np.float16)
     values[:active] = (
         np.arange(active * FEATURES, dtype=np.float32).reshape(active, FEATURES) / 200.0 - 0.2
     ).astype(np.float16)
-    offsets = np.array([0, 2, 5], dtype=np.uint32)
-    history_origins = np.array([[HISTORY_BOUNDARY - 2], [HISTORY_BOUNDARY - 3]], dtype=np.int32)
+    row_lengths = np.diff(offsets.astype(np.int64))
+    history_origins = (HISTORY_BOUNDARY - row_lengths).astype(np.int32).reshape(BATCH_SIZE, 1)
     future = (
         np.arange(BATCH_SIZE * FUTURE_LENGTH * FEATURES, dtype=np.float32)
         .reshape(BATCH_SIZE, FUTURE_LENGTH, FEATURES)
@@ -150,7 +158,45 @@ def _batch_inputs():
     }, offsets
 
 
+def _assert_no_ephemeral_row_partition_state_is_serialized(network: thor.Network):
+    architecture_json = network.get_architecture_json()
+    for forbidden in (
+        "ragged" + "ActiveRows",
+        "ragged_" + "active_rows",
+        "hostActiveValueCount",
+        "host_active_value_count",
+        "rowPartitionHostActiveValueCount",
+    ):
+        assert forbidden not in architecture_json
+
+
+def _snapshot_outputs(outputs):
+    snapshot = {}
+    for name, value in outputs.items():
+        if isinstance(value, thor.physical.PhysicalRaggedTensor):
+            snapshot[name] = (
+                np.array(value.values.numpy(), copy=True),
+                np.array(value.offsets.numpy(), copy=True),
+            )
+        else:
+            snapshot[name] = np.array(value.numpy(), copy=True)
+    return snapshot
+
+
+def _assert_snapshots_close(lhs, rhs, *, rtol=2e-2, atol=2e-2):
+    assert lhs.keys() == rhs.keys()
+    for name in lhs:
+        if isinstance(lhs[name], tuple):
+            lhs_values, lhs_offsets = lhs[name]
+            rhs_values, rhs_offsets = rhs[name]
+            np.testing.assert_array_equal(lhs_offsets, rhs_offsets)
+            np.testing.assert_allclose(lhs_values, rhs_values, rtol=rtol, atol=atol, err_msg=name)
+        else:
+            np.testing.assert_allclose(lhs[name], rhs[name], rtol=rtol, atol=atol, err_msg=name)
+
+
 def _assert_composed_architecture(network: thor.Network):
+    _assert_no_ephemeral_row_partition_state_is_serialized(network)
     architecture = json.loads(network.get_architecture_json())
     layers = architecture["layers"]
     layer_types = [layer["layer_type"] for layer in layers]
@@ -198,7 +244,10 @@ def test_combined_ragged_transformer_placed_save_load_preserves_numerical_behavi
     assert set(source_outputs) == {"history_mean", "future_output", "mirror_mean", "encoded_history"}
     assert isinstance(source_outputs["encoded_history"], thor.physical.PhysicalRaggedTensor)
     np.testing.assert_array_equal(source_outputs["encoded_history"].offsets.numpy(), expected_offsets)
+    source_snapshot = _snapshot_outputs(source_outputs)
 
+    # Save after a batch has populated the placed offsets runtime cache. The cache
+    # is ephemeral execution state and must not become architecture/model state.
     save_dir = tmp_path / "ragged_transformer"
     placed.save(str(save_dir), overwrite=False, save_optimizer_state=False)
 
@@ -211,24 +260,34 @@ def test_combined_ragged_transformer_placed_save_load_preserves_numerical_behavi
         forced_devices=[0],
         forced_num_stamps_per_gpu=1,
     )
+
     loaded_batch, _ = _batch_inputs()
-    loaded_outputs = loaded_placed.infer(loaded_batch)
+    loaded_snapshot = _snapshot_outputs(loaded_placed.infer(loaded_batch))
+    _assert_snapshots_close(loaded_snapshot, source_snapshot)
 
-    assert set(loaded_outputs) == set(source_outputs)
-    for output_name in ("history_mean", "future_output", "mirror_mean"):
-        np.testing.assert_allclose(
-            np.array(loaded_outputs[output_name].numpy(), copy=True),
-            np.array(source_outputs[output_name].numpy(), copy=True),
-            rtol=2e-2,
-            atol=2e-2,
-        )
+    # The saved source batch used five packed rows. The first batch submitted to
+    # the freshly loaded placement deliberately uses only three. If the old host
+    # cache had been serialized/restored, poisoned rows 3..4 could become active.
+    short_offsets = np.array([0, 1, 3], dtype=np.uint32)
+    short_positive_batch, _ = _batch_inputs(short_offsets, poison=4096.0)
+    short_positive = _snapshot_outputs(loaded_placed.infer(short_positive_batch))
+    short_negative_batch, _ = _batch_inputs(short_offsets, poison=-4096.0)
+    short_negative = _snapshot_outputs(loaded_placed.infer(short_negative_batch))
+    _assert_snapshots_close(short_positive, short_negative)
+    short_values, short_output_offsets = short_positive["encoded_history"]
+    np.testing.assert_array_equal(short_output_offsets, short_offsets)
+    np.testing.assert_allclose(short_values[int(short_offsets[-1]) :], 0.0, rtol=0, atol=0)
 
-    source_history = source_outputs["encoded_history"]
-    loaded_history = loaded_outputs["encoded_history"]
-    np.testing.assert_array_equal(loaded_history.offsets.numpy(), source_history.offsets.numpy())
-    np.testing.assert_allclose(
-        np.array(loaded_history.values.numpy(), copy=True),
-        np.array(source_history.values.numpy(), copy=True),
-        rtol=2e-2,
-        atol=2e-2,
-    )
+    # Reuse the same placed network with a larger partition and then return to the
+    # short partition. This proves per-batch runtime state is refreshed rather than
+    # leaking from the prior physical offsets allocation contents/cache.
+    long_offsets = np.array([0, 3, 6], dtype=np.uint32)
+    long_batch, _ = _batch_inputs(long_offsets, poison=8192.0)
+    long_snapshot = _snapshot_outputs(loaded_placed.infer(long_batch))
+    long_values, long_output_offsets = long_snapshot["encoded_history"]
+    np.testing.assert_array_equal(long_output_offsets, long_offsets)
+    np.testing.assert_allclose(long_values[int(long_offsets[-1]) :], 0.0, rtol=0, atol=0)
+
+    short_again_batch, _ = _batch_inputs(short_offsets, poison=-16384.0)
+    short_again = _snapshot_outputs(loaded_placed.infer(short_again_batch))
+    _assert_snapshots_close(short_positive, short_again)

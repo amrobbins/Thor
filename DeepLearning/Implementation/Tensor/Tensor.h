@@ -15,7 +15,6 @@
 #include <atomic>
 #include <deque>
 #include <memory>
-#include <limits>
 #include <mutex>
 #include <optional>
 #include <random>
@@ -39,6 +38,8 @@
 
 namespace ThorImplementation {
 
+class RowPartitionRuntime;
+
 /**
  * A multidimensional array allocated in either CPU or device memory.
  *
@@ -52,6 +53,7 @@ namespace ThorImplementation {
 
 class Tensor {
     friend class TypeConverter;
+    friend class RowPartitionRuntime;
 
    public:
     Tensor() = default;
@@ -92,24 +94,6 @@ class Tensor {
     uint64_t getTensorId() const { return isInitialized() ? instanceId : 0; }
 
     void copyFromAsync(Tensor source, Stream stream);
-
-    // Host-side runtime metadata for packed ragged tensors. The value is not part of the
-    // tensor descriptor or device allocation; it accompanies the backing allocation so
-    // NetworkInput copies can carry an already-known active packed-row count without a
-    // device-to-host synchronization. Ordinary dense tensors leave this unset.
-    void setRaggedActiveRows(uint64_t activeRows) {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        backingMemory->raggedActiveRows.store(activeRows, std::memory_order_release);
-    }
-    void clearRaggedActiveRows() {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        backingMemory->raggedActiveRows.store(NO_RAGGED_ACTIVE_ROWS, std::memory_order_release);
-    }
-    [[nodiscard]] std::optional<uint64_t> getRaggedActiveRows() const {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        const uint64_t value = backingMemory->raggedActiveRows.load(std::memory_order_acquire);
-        return value == NO_RAGGED_ACTIVE_ROWS ? std::nullopt : std::optional<uint64_t>(value);
-    }
 
     void downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
     void uploadSection(Tensor &dest, Stream &stream, uint64_t sourceOffset, uint64_t destOffset, uint64_t sizeBytes);
@@ -209,9 +193,33 @@ class Tensor {
    private:
     void copyFromAsyncImpl(Tensor source, Stream copyStream);
 
-    TensorPlacement placement;
-    static constexpr uint64_t NO_RAGGED_ACTIVE_ROWS = std::numeric_limits<uint64_t>::max();
+    // BackingMemory may carry host-side caches derived from its payload. Any
+    // generic mutation invalidates those caches; the structural owner (currently
+    // RowPartitionRuntime) republishes them only after the new payload is known.
+    //
+    // This metadata follows the same single-owner host scheduling contract as
+    // mutable tensor payload. It is not a cross-thread synchronization primitive:
+    // producer/consumer transitions must already occur through Thor's synchronized
+    // queue/session handoff before another host thread reads or mutates it.
+    void invalidatePayloadDerivedRuntimeMetadata() {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        backingMemory->rowPartitionHostActiveValueCount.reset();
+    }
 
+    void setRowPartitionHostActiveValueCount(uint64_t activeValueCount) {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        backingMemory->rowPartitionHostActiveValueCount = activeValueCount;
+    }
+    void clearRowPartitionHostActiveValueCount() {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        backingMemory->rowPartitionHostActiveValueCount.reset();
+    }
+    [[nodiscard]] std::optional<uint64_t> getRowPartitionHostActiveValueCount() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        return backingMemory->rowPartitionHostActiveValueCount;
+    }
+
+    TensorPlacement placement;
     struct BackingMemory {
         explicit BackingMemory(TensorPlacement placement) : placement(placement) {}
         ~BackingMemory() noexcept;
@@ -221,7 +229,7 @@ class Tensor {
         TensorPlacement placement;
         void *mem = nullptr;
         bool cpuMemPinnedViaCudaHostRegister = false;
-        std::atomic<uint64_t> raggedActiveRows{NO_RAGGED_ACTIVE_ROWS};
+        std::optional<uint64_t> rowPartitionHostActiveValueCount;
     };
 
     std::shared_ptr<BackingMemory> backingMemory;

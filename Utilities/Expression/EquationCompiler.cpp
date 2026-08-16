@@ -290,6 +290,7 @@ struct StageNodeKey {
     std::vector<uint64_t> view_dims;
     std::vector<uint64_t> view_strides;
     uint64_t view_element_offset = 0;
+    uint32_t ragged_runtime_offsets_input_slot = UINT32_MAX;
     uint64_t ragged_runtime_batch_size = 0;
     uint64_t ragged_runtime_max_active_values = 0;
     uint64_t ragged_runtime_elements_per_value = 1;
@@ -369,9 +370,11 @@ struct StageNodeKeyHash {
         for (uint64_t stride : k.view_strides)
             hashCombine(h, std::hash<uint64_t>{}(stride));
         hashCombine(h, std::hash<uint64_t>{}(k.view_element_offset));
+        hashCombine(h, std::hash<uint32_t>{}(k.ragged_runtime_offsets_input_slot));
         if (k.op == ExprOp::RAGGED_VALUEWISE_EXTENT || k.op == ExprOp::SEGMENTED_BROADCAST ||
             k.op == ExprOp::SEGMENTED_REDUCE_SUM || k.op == ExprOp::SEGMENTED_REDUCE_MIN ||
-            k.op == ExprOp::SEGMENTED_REDUCE_MAX || k.op == ExprOp::SEGMENTED_REDUCE_MEAN) {
+            k.op == ExprOp::SEGMENTED_REDUCE_MAX || k.op == ExprOp::SEGMENTED_REDUCE_MEAN ||
+            k.op == ExprOp::MATMUL || k.op == ExprOp::RMSNORM) {
             hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_batch_size));
             hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_max_active_values));
             hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_elements_per_value));
@@ -444,9 +447,11 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.rope_allow_in_place_materialization = n.rope_allow_in_place_materialization;
     key.attention_use_bias = n.attention_use_bias;
     key.attention_dropout_probability_bits = scalarBits(n.attention_dropout_probability);
+    key.ragged_runtime_offsets_input_slot = n.ragged_runtime_offsets_input_slot;
     if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT || n.op == ExprOp::SEGMENTED_BROADCAST ||
         n.op == ExprOp::SEGMENTED_REDUCE_SUM || n.op == ExprOp::SEGMENTED_REDUCE_MIN ||
-        n.op == ExprOp::SEGMENTED_REDUCE_MAX || n.op == ExprOp::SEGMENTED_REDUCE_MEAN) {
+        n.op == ExprOp::SEGMENTED_REDUCE_MAX || n.op == ExprOp::SEGMENTED_REDUCE_MEAN ||
+        n.op == ExprOp::MATMUL || n.op == ExprOp::RMSNORM) {
         key.ragged_runtime_batch_size = n.ragged_runtime_batch_size;
         key.ragged_runtime_max_active_values = n.ragged_runtime_max_active_values;
         key.ragged_runtime_elements_per_value = n.ragged_runtime_elements_per_value;
@@ -712,6 +717,44 @@ static std::optional<uint32_t> directInputSlot(const PhysicalExpression& expr, u
     return node.input_slot;
 }
 
+struct DirectRaggedRuntimeExtent {
+    uint32_t values_node = UINT32_MAX;
+    uint32_t offsets_node = UINT32_MAX;
+    uint32_t offsets_input_slot = UINT32_MAX;
+    uint64_t batch_size = 0;
+    uint64_t max_active_values = 0;
+    uint64_t elements_per_value = 0;
+};
+
+static std::optional<DirectRaggedRuntimeExtent> directRaggedRuntimeExtent(const PhysicalExpression& expr, uint32_t node_idx) {
+    if (node_idx == UINT32_MAX || node_idx >= expr.nodes.size()) {
+        return std::nullopt;
+    }
+    const ExprNode& marker = expr.nodes[node_idx];
+    if (marker.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
+        return std::nullopt;
+    }
+    if (marker.lhs == UINT32_MAX || marker.lhs >= expr.nodes.size() || marker.rhs == UINT32_MAX || marker.rhs >= expr.nodes.size()) {
+        throw std::runtime_error("RAGGED_VALUEWISE_EXTENT is missing values or offsets input.");
+    }
+    const ExprNode& offsets = expr.nodes[marker.rhs];
+    if (offsets.op != ExprOp::INPUT || offsets.input_slot >= expr.inputs.size()) {
+        throw std::runtime_error("Packed MATMUL/RMSNORM ragged runtime extent requires canonical direct-input offsets.");
+    }
+    if (marker.ragged_runtime_batch_size == 0 || marker.ragged_runtime_max_active_values == 0 ||
+        marker.ragged_runtime_elements_per_value == 0) {
+        throw std::runtime_error("RAGGED_VALUEWISE_EXTENT is missing runtime partition metadata.");
+    }
+    return DirectRaggedRuntimeExtent{
+        .values_node = marker.lhs,
+        .offsets_node = marker.rhs,
+        .offsets_input_slot = offsets.input_slot,
+        .batch_size = marker.ragged_runtime_batch_size,
+        .max_active_values = marker.ragged_runtime_max_active_values,
+        .elements_per_value = marker.ragged_runtime_elements_per_value,
+    };
+}
+
 static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr) {
     std::vector<bool> depends_on_ragged_extent(expr.nodes.size(), false);
     std::vector<std::optional<uint32_t>> ragged_offsets_input_slot(expr.nodes.size(), std::nullopt);
@@ -779,6 +822,65 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
         ragged_offsets_input_slot[node_idx] = dependency_offsets_slot;
         ambiguous_ragged_partition[node_idx] = ambiguous_partition;
         if (!depends) {
+            continue;
+        }
+
+        if (isMatmulOp(node.op)) {
+            if (node.matmul_packed_row_binding == MatmulPackedRowBinding::None || node.matmul_packed_row_capacity == 0) {
+                throw std::runtime_error(
+                    "an expression carrying ragged runtime extent reached a non-packed MATMUL/GEMM stage.");
+            }
+            if (ambiguous_partition || !dependency_offsets_slot.has_value()) {
+                throw std::runtime_error("packed MATMUL received ambiguous ragged row-partition metadata.");
+            }
+
+            const std::optional<DirectRaggedRuntimeExtent> lhs_extent = directRaggedRuntimeExtent(expr, node.lhs);
+            const std::optional<DirectRaggedRuntimeExtent> rhs_extent = directRaggedRuntimeExtent(expr, node.rhs);
+            const bool missing_required_extent =
+                (node.matmul_packed_row_binding == MatmulPackedRowBinding::RowsA && !lhs_extent.has_value()) ||
+                (node.matmul_packed_row_binding == MatmulPackedRowBinding::RowsB && !rhs_extent.has_value()) ||
+                (node.matmul_packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB &&
+                 !lhs_extent.has_value() && !rhs_extent.has_value());
+            if (missing_required_extent) {
+                throw std::runtime_error(
+                    "packed MATMUL must receive its row partition through a direct RAGGED_VALUEWISE_EXTENT operand.");
+            }
+            const DirectRaggedRuntimeExtent& extent = lhs_extent.has_value() ? lhs_extent.value() : rhs_extent.value();
+            if (extent.offsets_input_slot != dependency_offsets_slot.value() ||
+                extent.max_active_values != node.matmul_packed_row_capacity) {
+                throw std::runtime_error("packed MATMUL row-partition metadata does not match its packed row capacity.");
+            }
+            if (lhs_extent.has_value() && rhs_extent.has_value() &&
+                (lhs_extent->offsets_input_slot != rhs_extent->offsets_input_slot ||
+                 lhs_extent->batch_size != rhs_extent->batch_size ||
+                 lhs_extent->max_active_values != rhs_extent->max_active_values)) {
+                throw std::runtime_error("packed MATMUL operands carry different row partitions.");
+            }
+
+            // MATMUL consumes the runtime extent for host bucket dispatch. Its result is
+            // an ordinary dense-capacity tensor unless the caller explicitly re-wraps it.
+            depends_on_ragged_extent[node_idx] = false;
+            ragged_offsets_input_slot[node_idx] = std::nullopt;
+            ambiguous_ragged_partition[node_idx] = false;
+            continue;
+        }
+
+        if (isRmsNormOp(node.op)) {
+            const std::optional<DirectRaggedRuntimeExtent> extent = directRaggedRuntimeExtent(expr, node.lhs);
+            if (!extent.has_value() || ambiguous_partition || !dependency_offsets_slot.has_value() ||
+                extent->offsets_input_slot != dependency_offsets_slot.value()) {
+                throw std::runtime_error(
+                    "packed RMSNorm must receive its row partition through a direct RAGGED_VALUEWISE_EXTENT feature operand.");
+            }
+            if (node.rms_norm_packed_row_capacity == 0 ||
+                extent->max_active_values != node.rms_norm_packed_row_capacity) {
+                throw std::runtime_error("packed RMSNorm row-partition metadata does not match its packed row capacity.");
+            }
+
+            // RMSNorm likewise consumes the runtime extent at this stage boundary.
+            depends_on_ragged_extent[node_idx] = false;
+            ragged_offsets_input_slot[node_idx] = std::nullopt;
+            ambiguous_ragged_partition[node_idx] = false;
             continue;
         }
 
@@ -2120,8 +2222,8 @@ shared_ptr<CompiledSoftmax> EquationCompiler::compileSoftmax(const PhysicalExpre
 }
 
 shared_ptr<CompiledRmsNorm> EquationCompiler::compileRmsNorm(const PhysicalExpression& expr) {
-    if (expr.numInputs() != 2) {
-        throw std::runtime_error("RMSNorm stage must have exactly two inputs: feature input and scale.");
+    if (expr.numInputs() != 2 && expr.numInputs() != 3) {
+        throw std::runtime_error("RMSNorm stage must have feature input and scale, plus optional structural row-partition offsets.");
     }
     if (expr.output_node >= expr.nodes.size()) {
         throw std::runtime_error("RMSNorm stage output_node is out of range.");
@@ -2153,6 +2255,32 @@ shared_ptr<CompiledRmsNorm> EquationCompiler::compileRmsNorm(const PhysicalExpre
         throw std::runtime_error("RMSNorm node epsilon must be > 0.");
     }
 
+    if (node.rms_norm_packed_row_capacity != 0) {
+        if (node.ragged_runtime_offsets_input_slot == UINT32_MAX || node.ragged_runtime_batch_size == 0 ||
+            node.ragged_runtime_max_active_values != node.rms_norm_packed_row_capacity) {
+            throw std::runtime_error("Packed RMSNorm stage is missing its explicit row-partition runtime binding.");
+        }
+        if (node.ragged_runtime_offsets_input_slot >= expr.inputs.size()) {
+            throw std::runtime_error("Packed RMSNorm row-partition input slot is out of range.");
+        }
+        bool found_offsets_input = false;
+        for (const ExprNode& candidate : expr.nodes) {
+            if (candidate.op == ExprOp::INPUT && candidate.input_slot == node.ragged_runtime_offsets_input_slot) {
+                if (!candidate.input_tensor_dtype.has_value() ||
+                    !isCanonicalRowPartitionOffsetDataType(candidate.input_tensor_dtype.value())) {
+                    throw std::runtime_error("Packed RMSNorm row-partition offsets input has unsupported dtype.");
+                }
+                found_offsets_input = true;
+                break;
+            }
+        }
+        if (!found_offsets_input) {
+            throw std::runtime_error("Packed RMSNorm row-partition input slot does not reference a local INPUT node.");
+        }
+    } else if (node.ragged_runtime_offsets_input_slot != UINT32_MAX) {
+        throw std::runtime_error("Dense RMSNorm stage unexpectedly carries a row-partition runtime binding.");
+    }
+
     const DataType input_dtype = input_node.input_tensor_dtype.value();
     const DataType scale_dtype = scale_node.input_tensor_dtype.value();
     const DataType output_dtype = node.output_dtype.value();
@@ -2161,6 +2289,8 @@ shared_ptr<CompiledRmsNorm> EquationCompiler::compileRmsNorm(const PhysicalExpre
     auto compiled = make_shared<CompiledRmsNorm>();
     compiled->normalized_feature_count = node.rms_norm_normalized_feature_count;
     compiled->packed_row_capacity = node.rms_norm_packed_row_capacity;
+    compiled->ragged_offsets_input_slot = node.ragged_runtime_offsets_input_slot;
+    compiled->ragged_batch_size = node.ragged_runtime_batch_size;
     compiled->epsilon = node.rms_norm_epsilon;
     compiled->input_dtype = input_dtype;
     compiled->scale_dtype = scale_dtype;
@@ -2543,6 +2673,32 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
     const uint32_t alpha_input_slot = resolve_dynamic_scale_input_slot(node.alpha_node, "alpha", alpha_scale);
     const uint32_t beta_input_slot = resolve_dynamic_scale_input_slot(node.beta_node, "beta", beta_scale);
 
+    if (node.matmul_packed_row_binding != MatmulPackedRowBinding::None) {
+        if (node.matmul_packed_row_capacity == 0 || node.ragged_runtime_offsets_input_slot == UINT32_MAX ||
+            node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values != node.matmul_packed_row_capacity) {
+            throw std::runtime_error("Packed MATMUL stage is missing its explicit row-partition runtime binding.");
+        }
+        if (node.ragged_runtime_offsets_input_slot >= expr.inputs.size()) {
+            throw std::runtime_error("Packed MATMUL row-partition input slot is out of range.");
+        }
+        bool found_offsets_input = false;
+        for (const ExprNode& candidate : expr.nodes) {
+            if (candidate.op == ExprOp::INPUT && candidate.input_slot == node.ragged_runtime_offsets_input_slot) {
+                if (!candidate.input_tensor_dtype.has_value() ||
+                    !isCanonicalRowPartitionOffsetDataType(candidate.input_tensor_dtype.value())) {
+                    throw std::runtime_error("Packed MATMUL row-partition offsets input has unsupported dtype.");
+                }
+                found_offsets_input = true;
+                break;
+            }
+        }
+        if (!found_offsets_input) {
+            throw std::runtime_error("Packed MATMUL row-partition input slot does not reference a local INPUT node.");
+        }
+    } else if (node.ragged_runtime_offsets_input_slot != UINT32_MAX) {
+        throw std::runtime_error("Dense MATMUL stage unexpectedly carries a row-partition runtime binding.");
+    }
+
     return make_shared<CompiledMatmul>(node.op,
                                        node.transpose_lhs,
                                        node.transpose_rhs,
@@ -2562,6 +2718,8 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
                                        epilogue_aux_input_slot,
                                        node.matmul_packed_row_binding,
                                        node.matmul_packed_row_capacity,
+                                       node.ragged_runtime_offsets_input_slot,
+                                       node.ragged_runtime_batch_size,
                                        epilogue_aux_dtype,
                                        bgrad_output_dtype);
 }
@@ -4252,10 +4410,10 @@ static PhysicalExecutionStage buildRmsNormStage(const PhysicalExpression& expr,
 
     PhysicalExpression stage_expr;
     std::vector<uint32_t> input_value_ids;
-    input_value_ids.reserve(2);
+    input_value_ids.reserve(3);
     auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
 
-    auto add_local_input = [&](uint32_t parent_idx, uint32_t local_slot) {
+    auto add_local_input = [&](uint32_t parent_idx, uint32_t local_slot, bool structural_input = false) {
         const ExprNode& parent = expr.nodes[parent_idx];
         uint32_t value_id = UINT32_MAX;
         std::optional<DataType> actual_input_dtype = std::nullopt;
@@ -4295,26 +4453,45 @@ static PhysicalExecutionStage buildRmsNormStage(const PhysicalExpression& expr,
         input_node.input_slot = local_slot;
         input_node.input_tensor_dtype = actual_input_dtype.value();
         input_node.output_dtype = output_dtype.value();
-        input_node.compute_dtype = compute_dtype.value_or(defaultComputeDType(actual_input_dtype.value(), output_dtype.value()));
-        input_node.backward_output_dtype = backward_output_dtype.value_or(output_dtype.value());
-        input_node.backward_compute_dtype = backward_compute_dtype.value_or(input_node.compute_dtype.value());
+        if (structural_input) {
+            // Canonical row-partition offsets are structural integer metadata, not a
+            // numeric RMSNorm operand. Preserve their exact dtype instead of asking
+            // the floating-point compute-dtype policy to promote UINT32/UINT64.
+            input_node.compute_dtype = actual_input_dtype.value();
+            input_node.backward_output_dtype = actual_input_dtype.value();
+            input_node.backward_compute_dtype = actual_input_dtype.value();
+        } else {
+            input_node.compute_dtype = compute_dtype.value_or(defaultComputeDType(actual_input_dtype.value(), output_dtype.value()));
+            input_node.backward_output_dtype = backward_output_dtype.value_or(output_dtype.value());
+            input_node.backward_compute_dtype = backward_compute_dtype.value_or(input_node.compute_dtype.value());
+        }
         stage_expr.nodes.push_back(std::move(input_node));
     };
 
-    add_local_input(node.lhs, 0);
+    const std::optional<DirectRaggedRuntimeExtent> ragged_extent = directRaggedRuntimeExtent(expr, node.lhs);
+    add_local_input(ragged_extent.has_value() ? ragged_extent->values_node : node.lhs, 0);
     add_local_input(node.rhs, 1);
+    if (ragged_extent.has_value()) {
+        add_local_input(ragged_extent->offsets_node, 2, true);
+    }
 
     ExprNode rms_norm = node;
     rms_norm.lhs = 0;
     rms_norm.rhs = 1;
     rms_norm.aux = UINT32_MAX;
+    if (ragged_extent.has_value()) {
+        rms_norm.ragged_runtime_offsets_input_slot = 2;
+        rms_norm.ragged_runtime_batch_size = ragged_extent->batch_size;
+        rms_norm.ragged_runtime_max_active_values = ragged_extent->max_active_values;
+        rms_norm.ragged_runtime_elements_per_value = ragged_extent->elements_per_value;
+    }
     stage_expr.nodes.push_back(std::move(rms_norm));
-    stage_expr.output_node = 2;
+    stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
 
     std::vector<CompiledStageOutput> stage_outputs;
     stage_outputs.push_back(CompiledStageOutput{
         .name = output_name,
-        .local_node_idx = 2,
+        .local_node_idx = stage_expr.output_node,
         .value_id = output_value_id,
     });
 
@@ -4807,9 +4984,24 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
         effective_rhs_parent = peelExplicitTransposeChain(expr, node.rhs, absorbed_rhs_transpose);
     }
 
-    bind_parent_to_local_tensor_input(effective_lhs_parent, static_cast<uint32_t>(stage_expr.inputs.size()));
+    const std::optional<DirectRaggedRuntimeExtent> lhs_ragged_extent =
+        directRaggedRuntimeExtent(expr, effective_lhs_parent);
+    const std::optional<DirectRaggedRuntimeExtent> rhs_ragged_extent =
+        directRaggedRuntimeExtent(expr, effective_rhs_parent);
+    if (lhs_ragged_extent.has_value() && rhs_ragged_extent.has_value() &&
+        (lhs_ragged_extent->offsets_input_slot != rhs_ragged_extent->offsets_input_slot ||
+         lhs_ragged_extent->batch_size != rhs_ragged_extent->batch_size ||
+         lhs_ragged_extent->max_active_values != rhs_ragged_extent->max_active_values)) {
+        throw std::runtime_error("Packed MATMUL operands carry incompatible row partitions.");
+    }
+
+    bind_parent_to_local_tensor_input(
+        lhs_ragged_extent.has_value() ? lhs_ragged_extent->values_node : effective_lhs_parent,
+        static_cast<uint32_t>(stage_expr.inputs.size()));
     const uint32_t lhs_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
-    bind_parent_to_local_tensor_input(effective_rhs_parent, static_cast<uint32_t>(stage_expr.inputs.size()));
+    bind_parent_to_local_tensor_input(
+        rhs_ragged_extent.has_value() ? rhs_ragged_extent->values_node : effective_rhs_parent,
+        static_cast<uint32_t>(stage_expr.inputs.size()));
     const uint32_t rhs_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
     uint32_t aux_local = UINT32_MAX;
     if (node.op == ExprOp::GEMM) {
@@ -4834,6 +5026,14 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
         epilogue_aux_local = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
     }
 
+    const std::optional<DirectRaggedRuntimeExtent> ragged_extent =
+        lhs_ragged_extent.has_value() ? lhs_ragged_extent : rhs_ragged_extent;
+    uint32_t ragged_offsets_local_slot = UINT32_MAX;
+    if (ragged_extent.has_value()) {
+        ragged_offsets_local_slot = static_cast<uint32_t>(stage_expr.inputs.size());
+        bind_parent_to_local_tensor_input(ragged_extent->offsets_node, ragged_offsets_local_slot);
+    }
+
     ExprNode route = node;
     route.lhs = lhs_local;
     route.rhs = rhs_local;
@@ -4841,6 +5041,12 @@ static PhysicalExecutionStage buildMatmulStage(const PhysicalExpression& expr,
     route.alpha_node = alpha_local;
     route.beta_node = beta_local;
     route.matmul_epilogue_aux = epilogue_aux_local;
+    if (ragged_extent.has_value()) {
+        route.ragged_runtime_offsets_input_slot = ragged_offsets_local_slot;
+        route.ragged_runtime_batch_size = ragged_extent->batch_size;
+        route.ragged_runtime_max_active_values = ragged_extent->max_active_values;
+        route.ragged_runtime_elements_per_value = ragged_extent->elements_per_value;
+    }
     route.transpose_lhs = node.transpose_lhs ^ absorbed_lhs_transpose;
     route.transpose_rhs = node.transpose_rhs ^ absorbed_rhs_transpose;
     stage_expr.nodes.push_back(std::move(route));
@@ -6572,6 +6778,16 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 lhs_dependency_idx = peelExplicitTransposeChain(expr, root.lhs, ignored);
                 rhs_dependency_idx = peelExplicitTransposeChain(expr, root.rhs, ignored);
             }
+            if (isMatmulOp(root.op) || isRmsNormOp(root.op)) {
+                if (const auto extent = directRaggedRuntimeExtent(expr, lhs_dependency_idx); extent.has_value()) {
+                    lhs_dependency_idx = extent->values_node;
+                }
+                if (isMatmulOp(root.op)) {
+                    if (const auto extent = directRaggedRuntimeExtent(expr, rhs_dependency_idx); extent.has_value()) {
+                        rhs_dependency_idx = extent->values_node;
+                    }
+                }
+            }
 
             std::unordered_set<uint32_t> grouped_rope_roots;
             if (root.op == ExprOp::ATTENTION) {
@@ -6993,6 +7209,16 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 bool ignored = false;
                 lhs_dependency_idx = peelExplicitTransposeChain(expr, root.lhs, ignored);
                 rhs_dependency_idx = peelExplicitTransposeChain(expr, root.rhs, ignored);
+            }
+            if (isMatmulOp(root.op) || isRmsNormOp(root.op)) {
+                if (const auto extent = directRaggedRuntimeExtent(expr, lhs_dependency_idx); extent.has_value()) {
+                    lhs_dependency_idx = extent->values_node;
+                }
+                if (isMatmulOp(root.op)) {
+                    if (const auto extent = directRaggedRuntimeExtent(expr, rhs_dependency_idx); extent.has_value()) {
+                        rhs_dependency_idx = extent->values_node;
+                    }
+                }
             }
 
             std::unordered_set<uint32_t> grouped_rope_roots;

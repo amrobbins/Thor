@@ -6,6 +6,7 @@
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/TrainingDropoutControllable.h"
 #include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 
 #include <exception>
 #include <limits>
@@ -366,6 +367,12 @@ Event StampedNetwork::sendBatch(std::map<std::string, Tensor> batchInputs,
                                 bool waitForOutputsOnProcessingStream,
                                 BatchSubmissionTiming* submitTiming,
                                 std::optional<uint32_t> outputSlotIndex) {
+    if (!raggedInputNamed.empty()) {
+        throw std::logic_error(
+            "StampedNetwork::sendBatch(map<string, Tensor>) cannot represent logical RaggedNetworkInput values. "
+            "Submit a Thor::Batch containing RaggedTensor entries instead.");
+    }
+
     std::optional<uint32_t> physicalBatchCapacity;
     const auto unwrapStart = timingNow(submitTiming);
     for (const auto &[inputName, inputTensor] : batchInputs) {
@@ -448,18 +455,19 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
             RaggedTensor raggedTensor = std::get<RaggedTensor>(value);
             THOR_THROW_IF_FALSE(raggedTensor.getDescriptor() == binding.descriptor);
             requireConsistentBatchCapacity(raggedTensor.getBatchSize());
-            Tensor raggedValues = raggedTensor.getValues();
-            if (const std::optional<uint64_t> activeRows = raggedTensor.getHostActiveValueCountIfAvailable(); activeRows.has_value()) {
-                raggedValues.setRaggedActiveRows(activeRows.value());
-            }
+            const std::optional<uint64_t> activeValueCount =
+                raggedTensor.getHostActiveValueCountIfAvailable();
             THOR_THROW_IF_FALSE(
                 physicalBatchInputs.emplace(
                     binding.valuesInputName,
-                    PhysicalBatchInput{raggedValues, sourceReference}).second);
+                    PhysicalBatchInput{raggedTensor.getValues(), sourceReference}).second);
             THOR_THROW_IF_FALSE(
                 physicalBatchInputs.emplace(
                     binding.offsetsInputName,
-                    PhysicalBatchInput{raggedTensor.getOffsets(), sourceReference}).second);
+                    PhysicalBatchInput{raggedTensor.getOffsets(),
+                                       sourceReference,
+                                       raggedTensor.getRowPartitionRuntime().getDescriptor(),
+                                       activeValueCount}).second);
         } else if (std::holds_alternative<Thor::DeviceBatchReference>(value)) {
             Thor::DeviceBatchReference reference = std::get<Thor::DeviceBatchReference>(value);
             requireConsistentBatchCapacity(reference.getBatchCapacity());
@@ -547,13 +555,71 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
     }
 
     const auto inputForwardStart = timingNow(submitTiming);
+
+    // A logical RaggedNetworkInput materializes values and offsets through two
+    // physical NetworkInput ports. Tail canonicalization is a values-copy concern,
+    // but its extent comes exclusively from the matching offsets-owned runtime.
+    // Keep this association transient: no ragged state is stored on values tensors.
+    std::map<std::string, uint64_t> raggedValuesActiveValueCounts;
+    for (const auto& [logicalName, binding] : raggedInputNamed) {
+        (void)logicalName;
+        auto valuesBatchIt = batchInputs.find(binding.valuesInputName);
+        auto offsetsBatchIt = batchInputs.find(binding.offsetsInputName);
+        if (valuesBatchIt == batchInputs.end() || offsetsBatchIt == batchInputs.end()) continue;
+
+        THOR_THROW_IF_FALSE(offsetsBatchIt->second.rowPartitionDescriptor.has_value());
+        THOR_THROW_IF_FALSE(offsetsBatchIt->second.rowPartitionHostActiveValueCount.has_value());
+        const uint64_t activeValueCount = offsetsBatchIt->second.rowPartitionHostActiveValueCount.value();
+        THOR_THROW_IF_FALSE(
+            raggedValuesActiveValueCounts.emplace(binding.valuesInputName, activeValueCount).second);
+    }
+
     for (uint32_t i = 0; i < inputs.size(); ++i) {
         auto it = batchInputs.find(inputs[i]->getName());
         THOR_THROW_IF_FALSE(it != batchInputs.end());
         const auto readyIt = inputReadyEvents.find(inputs[i]->getName());
+        const auto raggedValuesIt = raggedValuesActiveValueCounts.find(inputs[i]->getName());
         if (std::holds_alternative<Tensor>(it->second.value)) {
             Tensor inputTensor = std::get<Tensor>(it->second.value);
-            if (readyIt != inputReadyEvents.end()) {
+            if (it->second.rowPartitionDescriptor.has_value()) {
+                THOR_THROW_IF_FALSE(raggedValuesIt == raggedValuesActiveValueCounts.end());
+                if (readyIt != inputReadyEvents.end()) {
+                    inputs[i]->forwardRowPartitionOffsets(
+                        inputTensor,
+                        isInferenceOnly,
+                        readyIt->second,
+                        it->second.rowPartitionDescriptor.value(),
+                        it->second.rowPartitionHostActiveValueCount,
+                        validExampleCount,
+                        it->second.sourceReference);
+                } else {
+                    inputs[i]->forwardRowPartitionOffsets(
+                        inputTensor,
+                        isInferenceOnly,
+                        it->second.rowPartitionDescriptor.value(),
+                        it->second.rowPartitionHostActiveValueCount,
+                        validExampleCount,
+                        it->second.sourceReference);
+                }
+            } else if (raggedValuesIt != raggedValuesActiveValueCounts.end()) {
+                const uint64_t activeValueCount = raggedValuesIt->second;
+                if (readyIt != inputReadyEvents.end()) {
+                    inputs[i]->forwardRaggedValues(
+                        inputTensor,
+                        isInferenceOnly,
+                        readyIt->second,
+                        activeValueCount,
+                        validExampleCount,
+                        it->second.sourceReference);
+                } else {
+                    inputs[i]->forwardRaggedValues(
+                        inputTensor,
+                        isInferenceOnly,
+                        activeValueCount,
+                        validExampleCount,
+                        it->second.sourceReference);
+                }
+            } else if (readyIt != inputReadyEvents.end()) {
                 inputs[i]->forward(
                     inputTensor,
                     isInferenceOnly,
@@ -569,6 +635,7 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
             }
         } else if (std::holds_alternative<Thor::DeviceBatchReference>(it->second.value)) {
             THOR_THROW_IF_FALSE(readyIt == inputReadyEvents.end());
+            THOR_THROW_IF_FALSE(raggedValuesIt == raggedValuesActiveValueCounts.end());
             inputs[i]->forward(
                 std::get<Thor::DeviceBatchReference>(it->second.value),
                 isInferenceOnly,

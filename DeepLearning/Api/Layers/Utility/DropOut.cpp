@@ -7,6 +7,39 @@ using json = nlohmann::json;
 
 namespace Thor {
 
+std::vector<Tensor> DropOut::getOutputsFromInput(Tensor inputTensor) {
+    (void)getConnectionType(inputTensor);
+    if (!raggedFeatureInput.has_value()) {
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        return {featureOutput.value()};
+    }
+    if (emittedFeatureOutputAfterAllInputsConnected || connectedInputPortIndices.size() != 2) {
+        return {};
+    }
+    emittedFeatureOutputAfterAllInputsConnected = true;
+    THOR_THROW_IF_FALSE(featureOutput.has_value());
+    return {featureOutput.value()};
+}
+
+void DropOut::informThatInputConnectionMade(Tensor inputTensor) {
+    if (!raggedFeatureInput.has_value()) return;
+    connectedInputPortIndices.insert(static_cast<uint32_t>(getConnectionType(inputTensor)));
+}
+
+void DropOut::resetGraphTraversalState() {
+    connectedInputPortIndices.clear();
+    emittedFeatureOutputAfterAllInputsConnected = false;
+}
+
+int DropOut::getConnectionType(Tensor connectingTensor) const {
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    THOR_THROW_IF_FALSE(featureOutput.has_value());
+    if (connectingTensor == featureInput.value()) return 0;
+    if (raggedFeatureInput.has_value() && connectingTensor == raggedFeatureInput->getOffsets()) return 1;
+    if (connectingTensor == featureOutput.value()) return 0;
+    throw std::runtime_error("Tensor is not connected to this DropOut layer.");
+}
+
 json DropOut::architectureJson() const {
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(featureInput.has_value());

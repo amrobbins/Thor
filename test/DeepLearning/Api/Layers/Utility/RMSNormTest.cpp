@@ -13,6 +13,7 @@
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
 
 #include "gtest/gtest.h"
@@ -432,6 +433,9 @@ TEST(UtilityApiLayers, RMSNormAcceptsRaggedTensorPreservesPartitionAndUsesPacked
     ASSERT_TRUE(layer.getUseRagged());
     ASSERT_TRUE(layer.getRaggedFeatureInput().has_value());
     ASSERT_TRUE(layer.getRaggedFeatureOutput().has_value());
+    ASSERT_EQ(layer.getFeatureInputs().size(), 2u);
+    EXPECT_EQ(layer.getFeatureInputs()[0], input.getValues());
+    EXPECT_EQ(layer.getFeatureInputs()[1], input.getOffsets());
     EXPECT_EQ(layer.getNormalizedShape(), (vector<uint64_t>{hidden}));
     EXPECT_EQ(layer.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{fullRows, hidden}));
     EXPECT_EQ(layer.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
@@ -510,10 +514,6 @@ TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnores
     Api::GradientRivet inputRivet =
         Api::GradientRivet::Builder().network(network).tensor(networkInput.getValues()).build();
     Api::RaggedTensor raggedInput(inputRivet.getFeatureOutput().value(), networkInput.getOffsets());
-    // This implementation-level test drives only the packed values tensor directly.
-    // Consume the structural offsets output so the API graph remains closed without
-    // making offsets a mathematical RMSNorm operand.
-    (void)Api::Stub::Builder().network(network).inputTensor(networkInput.getOffsets()).build();
 
     shared_ptr<Api::Sgd> weightsSgd = Api::Sgd::Builder()
                                           .initialLearningRate(learningRate)
@@ -575,14 +575,27 @@ TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnores
     // Bypass RaggedNetworkInput's own invalid-capacity canonicalization and put
     // poisoned padding directly into the RMSNorm physical input. This verifies
     // RaggedRMSNorm itself protects both the bucket slack and the full inactive tail.
-    ASSERT_EQ(physicalRmsNorm->getFeatureInputs().size(), 1u);
+    ASSERT_EQ(physicalRmsNorm->getFeatureInputs().size(), 2u);
     ASSERT_TRUE(physicalRmsNorm->getFeatureInputs()[0].has_value());
+    ASSERT_TRUE(physicalRmsNorm->getFeatureInputs()[1].has_value());
     Impl::Tensor packedInput = physicalRmsNorm->getFeatureInputs()[0].value();
+    Impl::Tensor rowPartitionOffsets = physicalRmsNorm->getFeatureInputs()[1].value();
+    Impl::Tensor rowPartitionOffsetsHost(
+        rmsCpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {logicalBatchSize + 1}));
+    rowPartitionOffsetsHost.getMemPtr<uint32_t>()[0] = 0;
+    rowPartitionOffsetsHost.getMemPtr<uint32_t>()[1] = static_cast<uint32_t>(activeRows / 2);
+    rowPartitionOffsetsHost.getMemPtr<uint32_t>()[2] = static_cast<uint32_t>(activeRows);
+    rowPartitionOffsets.copyFromAsync(rowPartitionOffsetsHost, stream);
+    Impl::RowPartitionRuntime rowPartition(
+        rowPartitionOffsets,
+        Impl::RowPartitionDescriptor(logicalBatchSize, fullRows, rowPartitionOffsets.getDataType()));
+    rowPartition.setHostActiveValueCount(activeRows);
+
     Impl::Tensor packedInputHost(rmsCpuPlacement, Impl::TensorDescriptor(dataType, {fullRows, hidden}));
     rmsWriteCpuTensor(packedInputHost, inputValues);
     packedInput.copyFromAsync(packedInputHost, stream);
-    packedInput.setRaggedActiveRows(activeRows);
     physicalRmsNorm->forward(packedInput, false, logicalBatchSize);
+    physicalRmsNorm->forward(rowPartitionOffsets, false, logicalBatchSize);
     Event outputReady = physicalOutput->getOutputReadyEvent();
     outputReady.synchronize();
 
@@ -602,8 +615,9 @@ TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnores
 
     ASSERT_EQ(physicalRmsNorm->getErrorInputs().size(), 1u);
     ASSERT_TRUE(physicalRmsNorm->getErrorInputs()[0].has_value());
-    ASSERT_EQ(physicalRmsNorm->getErrorOutputs().size(), 1u);
+    ASSERT_EQ(physicalRmsNorm->getErrorOutputs().size(), 2u);
     ASSERT_TRUE(physicalRmsNorm->getErrorOutputs()[0].has_value());
+    EXPECT_FALSE(physicalRmsNorm->getErrorOutputs()[1].has_value());
 
     vector<float> upstream(fullRows * hidden, -9999.0f);
     for (uint64_t row = 0; row < activeRows; ++row) {

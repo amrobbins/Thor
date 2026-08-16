@@ -162,6 +162,7 @@ std::shared_ptr<ThorImplementation::Layer> Slice::stamp(ThorImplementation::Tens
             elementsPerValue(raggedInput.getTrailingDimensions()),
             elementsPerValue(raggedFeatureOutput->getTrailingDimensions()),
             0,
+            1,
             getId());
         physicalSlice->setLayerName("Slice");
         return physicalSlice;

@@ -1,19 +1,19 @@
 #include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
 
-#include "Utilities/TensorOperations/Ragged/RuntimeExtent.h"
-
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace ThorImplementation {
+namespace {
 
-RaggedTensor::RaggedTensor(Tensor values, Tensor offsets) : values(values), offsets(offsets) {
+RowPartitionRuntime makeRowPartitionRuntime(const Tensor &values, const Tensor &offsets) {
     THOR_THROW_IF_FALSE(values.isInitialized());
     THOR_THROW_IF_FALSE(offsets.isInitialized());
     THOR_THROW_IF_FALSE(values.getPlacement() == offsets.getPlacement());
 
-    TensorDescriptor valuesDescriptor = values.getDescriptor();
-    TensorDescriptor offsetsDescriptor = offsets.getDescriptor();
+    const TensorDescriptor valuesDescriptor = values.getDescriptor();
+    const TensorDescriptor offsetsDescriptor = offsets.getDescriptor();
     THOR_THROW_IF_FALSE(valuesDescriptor.getNumDimensions() >= 1);
     THOR_THROW_IF_FALSE(offsetsDescriptor.getNumDimensions() == 1);
     THOR_THROW_IF_FALSE(offsetsDescriptor.getDimensions()[0] >= 1);
@@ -21,58 +21,53 @@ RaggedTensor::RaggedTensor(Tensor values, Tensor offsets) : values(values), offs
 
     const uint64_t batchSize = offsetsDescriptor.getDimensions()[0] - 1;
     const uint64_t maxTotalValues = valuesDescriptor.getDimensions()[0];
-    RowPartitionDescriptor rowPartition(batchSize, maxTotalValues, offsetsDescriptor.getDataType());
-    descriptor = RaggedTensorDescriptor(valuesDescriptor, rowPartition);
+    return RowPartitionRuntime(offsets, RowPartitionDescriptor(batchSize, maxTotalValues, offsetsDescriptor.getDataType()));
+}
+
+}  // namespace
+
+RaggedTensor::RaggedTensor(Tensor values, Tensor offsets)
+    : RaggedTensor(values, makeRowPartitionRuntime(values, offsets)) {}
+
+RaggedTensor::RaggedTensor(Tensor values, RowPartitionRuntime rowPartition)
+    : values(std::move(values)), rowPartition(std::move(rowPartition)) {
+    THOR_THROW_IF_FALSE(this->values.isInitialized());
+    THOR_THROW_IF_FALSE(this->rowPartition.isInitialized());
+    THOR_THROW_IF_FALSE(this->values.getPlacement() == this->rowPartition.getPlacement());
+
+    const TensorDescriptor valuesDescriptor = this->values.getDescriptor();
+    THOR_THROW_IF_FALSE(valuesDescriptor.getNumDimensions() >= 1);
+    THOR_THROW_IF_FALSE(valuesDescriptor.getDimensions()[0] == this->rowPartition.getMaxTotalValues());
+
+    descriptor = RaggedTensorDescriptor(valuesDescriptor, this->rowPartition.getDescriptor());
     initialized = true;
 }
 
-
 std::optional<uint64_t> RaggedTensor::getHostActiveValueCountIfAvailable() const {
     THOR_THROW_IF_FALSE(initialized);
-    if (const std::optional<uint64_t> cached = values.getRaggedActiveRows(); cached.has_value()) {
-        THOR_THROW_IF_FALSE(cached.value() <= getMaxTotalValues());
-        return cached;
-    }
-    if (offsets.getPlacement().getMemDevice() != TensorPlacement::MemDevices::CPU) {
-        return std::nullopt;
-    }
-
-    uint64_t activeRows = 0;
-    switch (offsets.getDataType()) {
-        case DataType::UINT32:
-            activeRows = static_cast<uint64_t>(offsets.getMemPtr<uint32_t>()[getBatchSize()]);
-            break;
-        case DataType::UINT64:
-            activeRows = offsets.getMemPtr<uint64_t>()[getBatchSize()];
-            break;
-        default:
-            THOR_UNREACHABLE();
-    }
-    THOR_THROW_IF_FALSE(activeRows <= getMaxTotalValues());
-    return activeRows;
+    return rowPartition.getHostActiveValueCountIfAvailable();
 }
 
 Tensor RaggedTensor::getActiveValueCount() const {
     THOR_THROW_IF_FALSE(initialized);
-    return rowPartitionActiveValueCount(offsets, getBatchSize());
+    return rowPartition.getActiveValueCount();
 }
-
 
 RaggedRuntimeExtent RaggedTensor::getRuntimeExtent() const {
     THOR_THROW_IF_FALSE(initialized);
-    uint64_t elements_per_value = 1;
+    uint64_t elementsPerValue = 1;
     for (uint64_t dim : descriptor.getTrailingDimensions()) {
-        if (dim != 0 && elements_per_value > std::numeric_limits<uint64_t>::max() / dim) {
+        if (dim != 0 && elementsPerValue > std::numeric_limits<uint64_t>::max() / dim) {
             throw std::overflow_error("RaggedTensor trailing dimensions overflow uint64_t elementsPerValue.");
         }
-        elements_per_value *= dim;
+        elementsPerValue *= dim;
     }
-    return getRuntimeExtent(elements_per_value);
+    return getRuntimeExtent(elementsPerValue);
 }
 
 RaggedRuntimeExtent RaggedTensor::getRuntimeExtent(uint64_t elementsPerValue) const {
     THOR_THROW_IF_FALSE(initialized);
-    return raggedRuntimeExtentFromOffsets(offsets, getBatchSize(), getMaxTotalValues(), elementsPerValue);
+    return rowPartition.getRuntimeExtent(elementsPerValue);
 }
 
 }  // namespace ThorImplementation

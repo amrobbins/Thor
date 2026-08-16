@@ -68,6 +68,18 @@ TEST(RaggedTensorApi, ArchitectureJsonRoundTrips) {
     EXPECT_EQ(copy.getOffsetsDimensions(), original.getOffsetsDimensions());
 }
 
+TEST(RaggedTensorApi, ArchitectureJsonContainsStructureButNoRuntimeCacheState) {
+    RaggedTensor ragged(DataType::FP32, {8}, 4, 13, DataType::UINT64);
+
+    json architecture = ragged.architectureJson();
+
+    EXPECT_EQ(architecture.at("batch_size"), 4u);
+    EXPECT_EQ(architecture.at("max_total_values"), 13u);
+    EXPECT_FALSE(architecture.contains("host_active_value_count"));
+    EXPECT_FALSE(architecture.contains("row_partition_runtime"));
+    EXPECT_FALSE(architecture.contains("runtime_extent"));
+}
+
 TEST(RaggedTensorApi, DeserializeRejectsMetadataMismatch) {
     RaggedTensor original(DataType::FP32, {8}, 4, 13, DataType::UINT32);
     json architecture = original.architectureJson();

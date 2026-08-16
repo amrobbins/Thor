@@ -980,6 +980,12 @@ void IndexedBatchAssembler::materializeRaggedBatch(IndexedDatasetReader::Session
             row = nextRow;
         }
         THOR_THROW_IF_FALSE(destinationValue == activeValueCount);
+
+        // This is the row-partition production boundary for indexed CPU batches.
+        // Offsets remain the semantic source of truth; publish offsets[B] into the
+        // shared runtime cache so downstream host-dispatched ragged operations do
+        // not need to rediscover or attach this state to the packed values tensor.
+        ragged.getRowPartitionRuntime().setHostActiveValueCount(activeValueCount);
     }
 }
 

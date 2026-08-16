@@ -7,6 +7,7 @@
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 
 #include "cuda_runtime.h"
 
@@ -2109,4 +2110,114 @@ TEST(RaggedExpression, MapValuesExecutesAndAutodiffsOnlyAcrossActivePackedRows) 
                 777.0F, 777.0F,
                 777.0F, 777.0F,
                 777.0F, 777.0F});
+}
+
+TEST(RaggedExpression, PackedRmsNormLowersRowPartitionAsStructuralStageInput) {
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression offsets = Expression::input("offsets", DataType::UINT64, DataType::UINT64);
+    const Expression packed = x.withRaggedRuntimeExtent(offsets, 3, 9, 4);
+    const Expression y = Expression::rmsNorm(packed, scale, 4, 1.0e-5, DataType::FP32, DataType::FP32, 9);
+
+    PhysicalOutputs outputs = Expression::outputs({{"y", y}}).physicalOutputs();
+    ASSERT_NE(outputs.expr, nullptr);
+    std::vector<DataType> input_dtypes(outputs.expr->numInputs(), DataType::FP32);
+    for (const NamedInput& input : outputs.expr->inputs) {
+        ASSERT_LT(input.slot, input_dtypes.size());
+        if (input.name == "offsets") {
+            input_dtypes[input.slot] = DataType::UINT64;
+        }
+    }
+    resolveOutputsDTypesInPlace(outputs, input_dtypes);
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(outputs);
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::RmsNorm);
+    ASSERT_EQ(stages[0].input_value_ids.size(), 3U);
+
+    const std::shared_ptr<CompiledRmsNorm> compiled = EquationCompiler::compileRmsNorm(stages[0].expr);
+    ASSERT_NE(compiled, nullptr);
+    EXPECT_EQ(compiled->packed_row_capacity, 9U);
+    EXPECT_EQ(compiled->ragged_offsets_input_slot, 2U);
+    EXPECT_EQ(compiled->ragged_batch_size, 3U);
+}
+
+
+TEST(RaggedExpression, PackedMatmulForwardAndAutodiffUseOffsetsRuntimeWithoutValuesMetadata) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t capacity = 8;
+    constexpr uint64_t active_rows = 3;
+    constexpr uint64_t width = 2;
+
+    Tensor values = makeGpuTensor<float>({capacity, width},
+                                         {1.0F, 2.0F,
+                                          3.0F, 4.0F,
+                                          5.0F, 6.0F,
+                                          0.0F, 0.0F,
+                                          0.0F, 0.0F,
+                                          0.0F, 0.0F,
+                                          0.0F, 0.0F,
+                                          0.0F, 0.0F},
+                                         stream);
+    Tensor weights = makeGpuTensor<float>({width, width},
+                                          {2.0F, 0.0F,
+                                           0.0F, 3.0F},
+                                          stream);
+    Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 1U, 3U}, stream);
+    RowPartitionRuntime(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
+        .setHostActiveValueCount(active_rows);
+
+
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression w = Expression::input("w", DataType::FP32, DataType::FP32);
+    const Expression row_offsets = Expression::input("offsets", DataType::UINT32, DataType::UINT32);
+    const Expression packed_x = x.withRaggedRuntimeExtent(row_offsets, batch_size, capacity, width);
+    const Expression y = Expression::matmul(packed_x,
+                                             w,
+                                             false,
+                                             false,
+                                             DataType::FP32,
+                                             DataType::FP32,
+                                             capacity);
+
+    const std::unordered_map<std::string, Tensor> forward_inputs{{"x", values}, {"w", weights}, {"offsets", offsets}};
+    const Tensor forward = runExpressionOutput(y, forward_inputs, "y", stream);
+    const std::vector<float> forward_values = copyToCpuValues(forward, stream);
+    ASSERT_GE(forward_values.size(), active_rows * width);
+    expectNear(std::vector<float>(forward_values.begin(), forward_values.begin() + active_rows * width),
+               {2.0F, 6.0F,
+                6.0F, 12.0F,
+                10.0F, 18.0F});
+
+    Tensor upstream = makeGpuTensor<float>({capacity, width},
+                                           {1.0F, 2.0F,
+                                            3.0F, 4.0F,
+                                            5.0F, 6.0F,
+                                            0.0F, 0.0F,
+                                            0.0F, 0.0F,
+                                            0.0F, 0.0F,
+                                            0.0F, 0.0F,
+                                            0.0F, 0.0F},
+                                           stream);
+    const std::unordered_map<std::string, Tensor> backward_inputs{
+        {"x", values}, {"w", weights}, {"offsets", offsets}, {"dy", upstream}};
+
+    const Tensor dx = runBackwardOutput(y, backward_inputs, "x", "dy", stream);
+    const std::vector<float> dx_values = copyToCpuValues(dx, stream);
+    ASSERT_GE(dx_values.size(), active_rows * width);
+    expectNear(std::vector<float>(dx_values.begin(), dx_values.begin() + active_rows * width),
+               {2.0F, 6.0F,
+                6.0F, 12.0F,
+                10.0F, 18.0F});
+
+    const Tensor dw = runBackwardOutput(y, backward_inputs, "w", "dy", stream);
+    expectNear(copyToCpuValues(dw, stream),
+               {35.0F, 44.0F,
+                44.0F, 56.0F});
+
+    EXPECT_EQ(RowPartitionRuntime(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
+                  .requireHostActiveValueCount(),
+              active_rows);
 }

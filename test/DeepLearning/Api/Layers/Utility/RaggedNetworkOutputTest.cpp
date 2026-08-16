@@ -1,6 +1,12 @@
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Data/Batch.h"
+#include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
+#include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
+#include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 
 #include "gtest/gtest.h"
 
@@ -8,7 +14,10 @@
 
 #include <chrono>
 #include <filesystem>
+#include <map>
+#include <memory>
 #include <set>
+#include <variant>
 #include <string>
 #include <vector>
 
@@ -127,4 +136,65 @@ TEST(RaggedNetworkOutputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTenso
     EXPECT_EQ(loadedLogicalOutput.at("offsets_tensor_id").get<uint64_t>(), loadedOutputs[0].raggedTensor.getOffsets().getId());
 
     std::filesystem::remove_all(archiveDir);
+}
+
+
+TEST(RaggedNetworkOutputApi, LogicalInputBoundaryCanonicalizesInactiveCapacityBeforeIdentityOutput) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 6;
+    Network network("ragged_network_output_identity_canonical_tail");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({2})
+                             .batchSize(batchSize)
+                             .maxTotalValues(maxTotalValues)
+                             .build();
+    (void)RaggedNetworkOutput::Builder().network(network).name("tokens_out").inputTensor(input).build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed =
+        network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor values(
+        cpuPlacement,
+        ThorImplementation::TensorDescriptor(DataType::FP32, {maxTotalValues, 2}));
+    ThorImplementation::Tensor offsets(
+        cpuPlacement,
+        ThorImplementation::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+
+    float* valuesPtr = values.getMemPtr<float>();
+    for (uint64_t i = 0; i < maxTotalValues * 2; ++i) valuesPtr[i] = static_cast<float>(i + 1);
+    valuesPtr[8] = 9999.0f;
+    valuesPtr[9] = 9999.0f;
+    valuesPtr[10] = -9999.0f;
+    valuesPtr[11] = -9999.0f;
+    uint32_t* offsetsPtr = offsets.getMemPtr<uint32_t>();
+    offsetsPtr[0] = 0;
+    offsetsPtr[1] = 1;
+    offsetsPtr[2] = 4;
+
+    Batch batch;
+    batch.insert("tokens", ThorImplementation::RaggedTensor(values, offsets));
+    std::map<std::string, InferenceOutputValue> outputs = placed->inferLogical(batch);
+    ASSERT_EQ(outputs.size(), 1u);
+    ASSERT_TRUE(outputs.contains("tokens_out"));
+    ASSERT_TRUE(std::holds_alternative<ThorImplementation::RaggedTensor>(outputs.at("tokens_out")));
+
+    ThorImplementation::RaggedTensor result =
+        std::get<ThorImplementation::RaggedTensor>(outputs.at("tokens_out"));
+    EXPECT_EQ(result.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(4));
+    const uint32_t* resultOffsets = result.getOffsets().getMemPtr<uint32_t>();
+    EXPECT_EQ(resultOffsets[0], 0u);
+    EXPECT_EQ(resultOffsets[1], 1u);
+    EXPECT_EQ(resultOffsets[2], 4u);
+
+    const float* resultValues = result.getValues().getMemPtr<float>();
+    for (uint64_t i = 0; i < 8; ++i) EXPECT_EQ(resultValues[i], static_cast<float>(i + 1));
+    for (uint64_t i = 8; i < 12; ++i) EXPECT_EQ(resultValues[i], 0.0f);
 }

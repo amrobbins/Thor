@@ -33,6 +33,12 @@ namespace ThorImplementation {
 struct PhysicalBatchInput {
     std::variant<Tensor, Thor::DeviceBatchReference> value;
     std::optional<Thor::BatchSourceReference> sourceReference;
+
+    // Present only for the physical offsets port of a logical ragged input.
+    // Generic Tensor mutations invalidate payload-derived runtime metadata; the
+    // NetworkInput boundary republishes this cache only after offsets materialization.
+    std::optional<RowPartitionDescriptor> rowPartitionDescriptor;
+    std::optional<uint64_t> rowPartitionHostActiveValueCount;
 };
 
 struct PartialBatchIncompatibility {

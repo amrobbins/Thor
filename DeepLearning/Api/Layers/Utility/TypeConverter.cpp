@@ -162,6 +162,7 @@ shared_ptr<ThorImplementation::Layer> TypeConverter::stamp(ThorImplementation::T
             rowWidth,
             rowWidth,
             0,
+            1,
             getId());
         physicalLayer->setLayerName(getLayerType());
         return physicalLayer;

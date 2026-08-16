@@ -89,10 +89,14 @@ class PlacedNetwork {
     // Training startup/retry cleanup does not use it.
     void synchronizeDevices() const;
 
+    // Dense-only compatibility surface. Networks with logical RaggedNetworkInput
+    // boundaries must use Batch so values and row-partition structure remain atomic.
     std::map<std::string, ThorImplementation::Tensor> infer(std::map<std::string, ThorImplementation::Tensor> batchInputs,
                                                             uint64_t stampIndex = 0);
     std::map<std::string, ThorImplementation::Tensor> infer(const Batch& batchInputs, uint64_t stampIndex = 0);
     std::map<std::string, InferenceOutputValue> inferLogical(const Batch& batchInputs, uint64_t stampIndex = 0);
+    // The Tensor-map submit overloads are dense-only compatibility surfaces.
+    // Use Batch for any network with RaggedNetworkInput boundaries.
     Event submitBatch(uint64_t stampIndex,
                       std::map<std::string, ThorImplementation::Tensor> batchInputs,
                       std::map<std::string, ThorImplementation::Tensor>& batchOutputs,

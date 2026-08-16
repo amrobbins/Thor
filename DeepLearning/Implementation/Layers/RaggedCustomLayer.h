@@ -12,15 +12,17 @@ namespace ThorImplementation {
 // packed ragged values. Input/output trailing value shapes may differ, but the row
 // partition and packed-row capacity are preserved. The expression itself owns all
 // mathematical computation and carries RAGGED_VALUEWISE_EXTENT using a structural
-// offsets input. This class only preserves host-known active-row metadata and
-// canonical zero padding so subsequent ragged physical layers can make host-side
-// launch decisions without synchronizing.
+// offsets input. Runtime packed extent is obtained from that structural row
+// partition, never from metadata attached to values tensors. This class only
+// canonicalizes inactive capacity so subsequent ragged physical layers observe
+// deterministic padding.
 class RaggedCustomLayer final : public CustomLayer {
    public:
     static constexpr const char* RAGGED_OFFSETS_INPUT_NAME = "__thor_ragged_offsets";
 
-    // Backward-compatible single-values-input/single-output form used by the
-    // existing ragged API adapters.
+    // Single-values-input/single-output form used by the existing ragged API
+    // adapters. The structural offsets port is explicit so runtime extent never
+    // has to be inferred from values-owned metadata.
     RaggedCustomLayer(DynamicExpression expression,
                       std::vector<std::string> inputNames,
                       std::vector<std::string> outputNames,
@@ -29,11 +31,13 @@ class RaggedCustomLayer final : public CustomLayer {
                       uint64_t fullCapacityRows,
                       uint64_t inputElementsPerValue,
                       uint64_t outputElementsPerValue,
-                      uint32_t valuesInputPort = 0,
+                      uint32_t valuesInputPort,
+                      uint32_t offsetsInputPort,
                       int64_t stampedId = -1);
 
-    // Backward-compatible multi-values-input/single-output form used by
-    // partition-preserving binary ragged expressions such as residual addition.
+    // Multi-values-input/single-output form used by partition-preserving binary
+    // ragged expressions such as residual addition. Every values port shares the
+    // explicitly identified structural offsets port.
     RaggedCustomLayer(DynamicExpression expression,
                       std::vector<std::string> inputNames,
                       std::vector<std::string> outputNames,
@@ -43,13 +47,14 @@ class RaggedCustomLayer final : public CustomLayer {
                       std::vector<uint64_t> inputElementsPerValue,
                       uint64_t outputElementsPerValue,
                       std::vector<uint32_t> valuesInputPorts,
+                      uint32_t offsetsInputPort,
                       int64_t stampedId = -1);
 
     // General physical CustomLayer form. Every packed-values input listed in
-    // valuesInputPorts must carry the same host-known active-row count. Every
-    // output is a packed ragged-values tensor that preserves that active-row
-    // count, while outputElementsPerValue describes each output's physical row
-    // width so its inactive capacity can be canonicalized independently.
+    // valuesInputPorts shares the single structural offsets input identified by
+    // offsetsInputPort. Every output preserves that row partition, while
+    // outputElementsPerValue describes each output's physical row width so its
+    // inactive capacity can be canonicalized independently.
     RaggedCustomLayer(DynamicExpression expression,
                       std::vector<std::string> inputNames,
                       std::vector<std::string> outputNames,
@@ -60,6 +65,7 @@ class RaggedCustomLayer final : public CustomLayer {
                       std::vector<uint64_t> inputElementsPerValue,
                       std::vector<uint64_t> outputElementsPerValue,
                       std::vector<uint32_t> valuesInputPorts,
+                      uint32_t offsetsInputPort,
                       int64_t stampedId = -1,
                       std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors = {});
 
@@ -80,6 +86,7 @@ class RaggedCustomLayer final : public CustomLayer {
     std::vector<uint64_t> inputElementsPerValue;
     std::vector<uint64_t> outputElementsPerValue;
     std::vector<uint32_t> valuesInputPorts;
+    uint32_t offsetsInputPort;
     uint32_t inputPortCount;
     uint32_t outputPortCount;
     std::vector<uint64_t> activeRowsByApplication;

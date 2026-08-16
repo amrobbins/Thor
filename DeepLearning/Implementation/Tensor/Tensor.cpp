@@ -519,6 +519,7 @@ void Tensor::setElement(std::vector<unsigned long> dimensionIndex, const Element
         THOR_UNREACHABLE();
 #endif
 
+    invalidatePayloadDerivedRuntimeMetadata();
     *getElementPointer<ElementDataType>(dimensionIndex) = value;
 }
 
@@ -653,6 +654,7 @@ void Tensor::downloadSection(Tensor &source, Stream &stream, uint64_t sourceOffs
     THOR_THROW_IF_FALSE(destOffset + sizeBytes <= destArraySizeBytes);
     THOR_THROW_IF_FALSE(sourceOffset + sizeBytes <= sourceArraySizeBytes);
 
+    invalidatePayloadDerivedRuntimeMetadata();
     uint8_t *destMemBytes = static_cast<uint8_t *>(getMemPtr<void>());
     uint8_t *sourceMemBytes = static_cast<uint8_t *>(source.getMemPtr<void>());
     CUDA_CHECK(
@@ -670,6 +672,7 @@ void Tensor::uploadSection(Tensor &dest, Stream &stream, uint64_t sourceOffset, 
     THOR_THROW_IF_FALSE(sourceOffset + sizeBytes <= sourceArraySizeBytes);
     THOR_THROW_IF_FALSE(destOffset + sizeBytes <= destArraySizeBytes);
 
+    dest.invalidatePayloadDerivedRuntimeMetadata();
     uint8_t *sourceMemBytes = static_cast<uint8_t *>(getMemPtr<void>());
     uint8_t *destMemBytes = static_cast<uint8_t *>(dest.getMemPtr<void>());
     CUDA_CHECK(
@@ -700,19 +703,11 @@ void Tensor::copyFromAsyncImpl(Tensor source, Stream copyStream) {
     THOR_THROW_IF_FALSE(!uninitialized());
     THOR_THROW_IF_FALSE(!source.uninitialized());
 
-    // Runtime ragged metadata follows value copies just like the packed payload. This is
-    // deliberately host-side and does not enqueue any device work. Clear stale metadata
-    // when the source is an ordinary dense tensor.
-    if (const std::optional<uint64_t> activeRows = source.getRaggedActiveRows(); activeRows.has_value()) {
-        setRaggedActiveRows(activeRows.value());
-    } else {
-        clearRaggedActiveRows();
-    }
-
     if (source.getTensorId() == getTensorId() && source.getDescriptor().getDataType() == getDescriptor().getDataType()) {
         return;
     }
 
+    invalidatePayloadDerivedRuntimeMetadata();
     THOR_THROW_IF_FALSE(copyStream.isInitialized());
 
     // must have the same number of elements
@@ -845,6 +840,7 @@ void Tensor::memset(int8_t value, uint64_t numElements) {
     // On GPU this would require device synchronization so this is not supported.
     THOR_THROW_IF_FALSE(placement.getMemDevice() != TensorPlacement::MemDevices::GPU);
     THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::CPU);
+    invalidatePayloadDerivedRuntimeMetadata();
 
     uint64_t numBytes;
     if (numElements == 0) {
@@ -988,6 +984,7 @@ void callMemsetOnTensor(void *data) {
 }
 
 void Tensor::memsetAsync(Stream stream, int8_t value, uint64_t numElements) {
+    invalidatePayloadDerivedRuntimeMetadata();
     if (placement.getMemDevice() == TensorPlacement::MemDevices::GPU) {
         uint64_t numBytes;
         if (numElements == 0) {

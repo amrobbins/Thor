@@ -317,6 +317,9 @@ TEST(UtilityApiLayers, RaggedDropOutPreservesPartitionAndUsesPackedCapacityForRe
     ASSERT_TRUE(dropOut.getUseRagged());
     ASSERT_TRUE(dropOut.getRaggedFeatureInput().has_value());
     ASSERT_TRUE(dropOut.getRaggedFeatureOutput().has_value());
+    ASSERT_EQ(dropOut.getAllInputTensors().size(), 2u);
+    EXPECT_EQ(dropOut.getAllInputTensors()[0], input.getValues());
+    EXPECT_EQ(dropOut.getAllInputTensors()[1], input.getOffsets());
     EXPECT_EQ(dropOut.getRaggedFeatureInput().value(), input);
     EXPECT_EQ(dropOut.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
     EXPECT_EQ(dropOut.getRaggedFeatureOutput()->getValuesDimensions(), input.getValuesDimensions());
@@ -360,4 +363,7 @@ TEST(UtilityApiLayers, RaggedDropOutPlacesForInferenceAndPreservesLogicalOutput)
     ASSERT_NE(physicalDropOut, nullptr);
     EXPECT_TRUE(physicalDropOut->isRagged());
     EXPECT_FALSE(physicalDropOut->isTrainingMode());
+    ASSERT_TRUE(physicalDropOut->getFeatureInput().has_value());
+    ASSERT_TRUE(physicalDropOut->getFeatureOutput().has_value());
+    EXPECT_EQ(physicalDropOut->getFeatureInput().value(), physicalDropOut->getFeatureOutput().value());
 }

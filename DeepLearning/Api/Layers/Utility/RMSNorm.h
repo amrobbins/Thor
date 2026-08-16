@@ -121,7 +121,7 @@ class RMSNorm : public TrainableLayer {
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;
-    bool mustConnectAllInputsToDriveOutput() const override { return !epilogueInputBindings.empty(); }
+    bool mustConnectAllInputsToDriveOutput() const override { return !raggedFeatureInputs.empty() || !epilogueInputBindings.empty(); }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
                              Stream stream,
@@ -155,8 +155,10 @@ class RMSNorm : public TrainableLayer {
     std::vector<uint32_t> inputPortIndicesForTensor(Tensor tensor) const;
 
     std::set<uint32_t> connectedInputPortIndices;
+    std::set<uint32_t> emittedRaggedOutputApplications;
     bool emittedFeatureOutputAfterAllInputsConnected = false;
     mutable std::unordered_map<uint64_t, uint32_t> nextInputConnectionCursorByTensorOriginalId;
+    std::unordered_map<uint64_t, uint32_t> nextTraversalInputCursorByTensorOriginalId;
 
     friend class Network;
     friend class Builder;

@@ -12,6 +12,7 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/RaggedMatmulCapacityBuckets.h"
 #include "Utilities/TensorOperations/Copy/StridedCopy.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 
 #include <cudnn_frontend.h>
 
@@ -1587,14 +1588,31 @@ void StampedConvolutionBackward::runOn(Stream& run_stream) const {
     throw std::runtime_error("StampedConvolutionBackward received non-frontend convolution payload unexpectedly.");
 }
 
-StampedRmsNorm::StampedRmsNorm(
-    std::shared_ptr<CompiledRmsNorm> compiled, const Tensor& input, const Tensor& scale, const Tensor& output, const Stream& stream)
-    : compiled_rms_norm(std::move(compiled)), input(input), scale(scale), output(output), stream(stream) {
+StampedRmsNorm::StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
+                               const Tensor& input,
+                               const Tensor& scale,
+                               const Tensor& output,
+                               const Stream& stream,
+                               std::optional<Tensor> row_partition_offsets)
+    : compiled_rms_norm(std::move(compiled)),
+      input(input),
+      scale(scale),
+      row_partition_offsets(std::move(row_partition_offsets)),
+      output(output),
+      stream(stream) {
     if (!compiled_rms_norm) {
         throw std::runtime_error("StampedRmsNorm requires a compiled RMSNorm payload.");
     }
 
     if (compiled_rms_norm->packed_row_capacity != 0) {
+        if (!this->row_partition_offsets.has_value() || compiled_rms_norm->ragged_batch_size == 0) {
+            throw std::runtime_error("Packed-row RMSNorm requires an explicit row-partition runtime binding.");
+        }
+        const TensorDescriptor offsets_descriptor = this->row_partition_offsets->getDescriptor();
+        RowPartitionRuntime(this->row_partition_offsets.value(),
+                            RowPartitionDescriptor(compiled_rms_norm->ragged_batch_size,
+                                                   compiled_rms_norm->packed_row_capacity,
+                                                   offsets_descriptor.getDataType()));
         const std::vector<uint64_t> input_dims = input.getDimensions();
         if (input_dims.size() != 2 || input_dims[0] % compiled_rms_norm->packed_row_capacity != 0) {
             throw std::runtime_error(
@@ -1630,27 +1648,28 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
         return;
     }
 
-    const std::optional<uint64_t> active_rows = input.getRaggedActiveRows();
-    if (!active_rows.has_value()) {
-        throw std::runtime_error("Packed-row RMSNorm requires host-known ragged active-row metadata.");
+    if (!row_partition_offsets.has_value()) {
+        throw std::runtime_error("Packed-row RMSNorm is missing its row-partition runtime binding.");
     }
-    if (active_rows.value() > compiled_rms_norm->packed_row_capacity) {
-        throw std::runtime_error("Packed-row RMSNorm active row count exceeds packed_row_capacity.");
-    }
+    const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
+    RowPartitionRuntime row_partition(row_partition_offsets.value(),
+                                      RowPartitionDescriptor(compiled_rms_norm->ragged_batch_size,
+                                                             compiled_rms_norm->packed_row_capacity,
+                                                             offsets_descriptor.getDataType()));
+    const uint64_t active_rows = row_partition.requireHostActiveValueCount();
 
     const std::vector<uint64_t> input_dims = input.getDimensions();
     const uint64_t hidden = input_dims[1];
     const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm->packed_row_capacity;
-    if (active_rows.value() == 0) {
+    if (active_rows == 0) {
         Tensor mutable_output = output;
         mutable_output.memsetAsync(run_stream, 0);
-        mutable_output.setRaggedActiveRows(0);
         return;
     }
     const std::vector<uint64_t> buckets = makeRaggedMatmulCapacityBuckets(compiled_rms_norm->packed_row_capacity);
-    const uint64_t selected_rows = chooseRaggedMatmulCapacityBucket(active_rows.value(), buckets);
+    const uint64_t selected_rows = chooseRaggedMatmulCapacityBucket(active_rows, buckets);
     const uint64_t selected_outer = selected_rows * outer_per_packed_row;
-    const uint64_t active_outer = active_rows.value() * outer_per_packed_row;
+    const uint64_t active_outer = active_rows * outer_per_packed_row;
 
     // Bucket slack and all unused packed capacity are outside the logical ragged
     // tensor. Canonicalize them before cuDNN so a bucket larger than active_rows
@@ -1680,7 +1699,6 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
                                                      active_outer * hidden);
         output_tail.memsetAsync(run_stream, 0);
     }
-    mutable_output.setRaggedActiveRows(active_rows.value());
 }
 
 StampedEmbeddingLookup::StampedEmbeddingLookup(std::shared_ptr<CompiledEmbeddingLookup> compiled,
@@ -1730,7 +1748,8 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                              std::optional<Tensor> alpha_host_scratch,
                              std::optional<Tensor> beta_host_scratch,
                              std::optional<Tensor> epilogue_aux,
-                             std::optional<Tensor> bgrad_output)
+                             std::optional<Tensor> bgrad_output,
+                             std::optional<Tensor> row_partition_offsets)
     : compiled_matmul(std::move(compiled)),
       built_matmul(std::move(built)),
       lhs(lhs),
@@ -1739,6 +1758,7 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
       output(output),
       epilogue_aux(epilogue_aux),
       bgrad_output(bgrad_output),
+      row_partition_offsets(std::move(row_partition_offsets)),
       stream(stream),
       workspace(workspace),
       alpha_input(alpha_input),
@@ -1763,6 +1783,18 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
     }
     if (bgrad_output.has_value() && !compiled_matmul->bgrad_output_dtype.has_value()) {
         throw std::runtime_error("StampedMatmul received bgrad_output but the compiled matmul does not declare a bgrad output.");
+    }
+    if (compiled_matmul->packed_row_binding != MatmulPackedRowBinding::None) {
+        if (!this->row_partition_offsets.has_value() || compiled_matmul->ragged_batch_size == 0) {
+            throw std::runtime_error("Packed-row MATMUL requires an explicit row-partition runtime binding.");
+        }
+        const TensorDescriptor offsets_descriptor = this->row_partition_offsets->getDescriptor();
+        RowPartitionRuntime(this->row_partition_offsets.value(),
+                            RowPartitionDescriptor(compiled_matmul->ragged_batch_size,
+                                                   compiled_matmul->packed_row_capacity,
+                                                   offsets_descriptor.getDataType()));
+    } else if (this->row_partition_offsets.has_value()) {
+        throw std::runtime_error("Dense MATMUL unexpectedly received a row-partition runtime binding.");
     }
     if (built_matmul->workspace_bytes != 0) {
         if (!workspace.has_value()) {
@@ -2045,32 +2077,18 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
 
         if (compiled_matmul->epilogue == MatmulEpilogue::Default) {
             if (built_matmul->bucketed_cublas_gemm.has_value()) {
-                std::optional<uint64_t> active_rows;
-                auto consider_active_rows = [&](const Tensor& tensor) {
-                    const std::optional<uint64_t> candidate = tensor.getRaggedActiveRows();
-                    if (!candidate.has_value()) return;
-                    if (candidate.value() > compiled_matmul->packed_row_capacity) {
-                        throw std::runtime_error("Packed-row expression matmul active row count exceeds its full capacity.");
-                    }
-                    if (active_rows.has_value() && active_rows.value() != candidate.value()) {
-                        throw std::runtime_error("Packed-row expression matmul operands disagree on the active row count.");
-                    }
-                    active_rows = candidate.value();
-                };
-                if (compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsA ||
-                    compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB) {
-                    consider_active_rows(lhs);
+                if (!row_partition_offsets.has_value()) {
+                    throw std::runtime_error("Packed-row expression MATMUL is missing its row-partition runtime binding.");
                 }
-                if (compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsB ||
-                    compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB) {
-                    consider_active_rows(rhs);
-                }
-                // A missing host-side active count is a correctness-safe fallback to the full-capacity
-                // pre-tuned kernel. A zero-row ragged batch likewise executes the full bucket over the
-                // canonical zero tail, avoiding a special zero-sized cuBLASLt geometry.
-                const uint64_t runtime_rows = (!active_rows.has_value() || active_rows.value() == 0)
-                                                  ? compiled_matmul->packed_row_capacity
-                                                  : active_rows.value();
+                const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
+                RowPartitionRuntime row_partition(row_partition_offsets.value(),
+                                                  RowPartitionDescriptor(compiled_matmul->ragged_batch_size,
+                                                                         compiled_matmul->packed_row_capacity,
+                                                                         offsets_descriptor.getDataType()));
+                const uint64_t active_rows = row_partition.requireHostActiveValueCount();
+                // A zero-row batch executes the full-capacity pre-tuned kernel over the
+                // canonical zero tail because cuBLASLt does not need a zero-sized geometry.
+                const uint64_t runtime_rows = active_rows == 0 ? compiled_matmul->packed_row_capacity : active_rows;
                 const uint64_t selected_rows = built_matmul->bucketed_cublas_gemm->getSelectedCapacityRows(runtime_rows);
                 const float alphaOne = 1.0f;
                 const float betaZero = 0.0f;
@@ -2093,8 +2111,6 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                        selected_rows * row_width);
                         tail.memsetAsync(run_stream, 0);
                     }
-                    Tensor annotated_output = output;
-                    annotated_output.setRaggedActiveRows(active_rows.value_or(compiled_matmul->packed_row_capacity));
                 }
                 return;
             }

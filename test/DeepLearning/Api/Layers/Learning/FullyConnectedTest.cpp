@@ -2,13 +2,13 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
-#include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Adam.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/RaggedFullyConnected.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
@@ -287,6 +287,7 @@ struct PlacedRaggedFullyConnectedFixture {
     shared_ptr<Api::PlacedNetwork> placedNetwork;
     Impl::StampedNetwork* stampedNetwork = nullptr;
     shared_ptr<Impl::NetworkInput> physicalValuesInput;
+    shared_ptr<Impl::NetworkInput> physicalOffsetsInput;
     shared_ptr<Impl::NetworkOutput> physicalOutput;
     shared_ptr<Impl::RaggedFullyConnected> physicalFc;
 };
@@ -304,14 +305,50 @@ PlacedRaggedFullyConnectedFixture placeSingleRaggedFullyConnectedNetwork(Api::Ne
     EXPECT_NE(fixture.placedNetwork, nullptr);
     fixture.stampedNetwork = &fixture.placedNetwork->getStampedNetwork(0);
     fixture.physicalValuesInput = fixture.stampedNetwork->getNamedInput(raggedInputName + ".values");
+    fixture.physicalOffsetsInput = fixture.stampedNetwork->getNamedInput(raggedInputName + ".offsets");
     fixture.physicalOutput =
         dynamic_pointer_cast<Impl::NetworkOutput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiOutput.getId()));
     fixture.physicalFc =
         dynamic_pointer_cast<Impl::RaggedFullyConnected>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiFc.getId()));
     EXPECT_NE(fixture.physicalValuesInput, nullptr);
+    EXPECT_NE(fixture.physicalOffsetsInput, nullptr);
     EXPECT_NE(fixture.physicalOutput, nullptr);
     EXPECT_NE(fixture.physicalFc, nullptr);
     return fixture;
+}
+
+vector<float> runRaggedForward(PlacedRaggedFullyConnectedFixture& fixture,
+                               Impl::Tensor& featureInHost,
+                               uint64_t activeRows,
+                               uint32_t logicalBatchSize,
+                               uint64_t fullCapacityRows,
+                               DataType offsetsDataType) {
+    Impl::Tensor offsetsHost(cpuPlacement, Impl::TensorDescriptor(offsetsDataType, {logicalBatchSize + 1}));
+    if (offsetsDataType == DataType::UINT32) {
+        auto* offsets = offsetsHost.getMemPtr<uint32_t>();
+        for (uint32_t i = 0; i <= logicalBatchSize; ++i) {
+            offsets[i] = static_cast<uint32_t>((activeRows * i) / logicalBatchSize);
+        }
+    } else if (offsetsDataType == DataType::UINT64) {
+        auto* offsets = offsetsHost.getMemPtr<uint64_t>();
+        for (uint32_t i = 0; i <= logicalBatchSize; ++i) {
+            offsets[i] = (activeRows * i) / logicalBatchSize;
+        }
+    } else {
+        ADD_FAILURE() << "Unsupported offsets dtype for ragged FC test.";
+        return {};
+    }
+
+    fixture.physicalOffsetsInput->forward(offsetsHost, false, logicalBatchSize);
+    Impl::Tensor physicalOffsets = fixture.physicalOffsetsInput->getFeatureOutput().value();
+    Impl::RowPartitionRuntime rowPartition(
+        physicalOffsets, Impl::RowPartitionDescriptor(logicalBatchSize, fullCapacityRows, offsetsDataType));
+    rowPartition.setHostActiveValueCount(activeRows);
+
+    fixture.physicalValuesInput->forward(featureInHost, false, logicalBatchSize);
+    Event featureOutReadyEvent = fixture.physicalOutput->getOutputReadyEvent();
+    featureOutReadyEvent.synchronize();
+    return readCpuTensor(fixture.physicalOutput->getFeatureOutput().value());
 }
 
 struct FullyConnectedAdamPassReference {
@@ -491,12 +528,80 @@ TEST(FullyConnectedApi, RaggedBuilderPreservesRowPartitionAndUsesTokenWiseOutput
     EXPECT_EQ(fc.getRaggedFeatureInput()->getValues(), input.getValues());
     EXPECT_EQ(fc.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
     EXPECT_EQ(fc.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{66, 3}));
+    ASSERT_EQ(fc.getFeatureInputs().size(), 2u);
+    EXPECT_EQ(fc.getFeatureInputs()[0], input.getValues());
+    EXPECT_EQ(fc.getFeatureInputs()[1], input.getOffsets());
+    EXPECT_TRUE(fc.mustConnectAllInputsToDriveOutput());
+    EXPECT_EQ(fc.getConnectionType(input.getValues()), 0);
+    EXPECT_EQ(fc.getConnectionType(input.getOffsets()), 1);
+    EXPECT_EQ(fc.getConnectionType(fc.getRaggedFeatureOutput()->getValues()), 0);
+    fc.resetGraphTraversalState();
 
     const auto architecture = fc.architectureJson();
     EXPECT_TRUE(architecture.at("use_ragged").get<bool>());
     ASSERT_EQ(architecture.at("ragged_inputs").size(), 1u);
     ASSERT_EQ(architecture.at("ragged_outputs").size(), 1u);
     EXPECT_EQ(architecture.at("ragged_outputs").at(0).at("offsets").at("id").get<uint64_t>(), input.getOffsets().getId());
+}
+
+TEST(FullyConnectedApi, RaggedMultipleApplicationsExposeIndependentStructuralOffsetsPorts) {
+    Api::Network network("ragged_fc_multiple_structural_ports");
+    Api::RaggedTensor input0 = Api::RaggedNetworkInput::Builder()
+                                   .network(network)
+                                   .name("tokens0")
+                                   .valuesDataType(DataType::FP32)
+                                   .offsetsDataType(DataType::UINT32)
+                                   .trailingDimensions({4})
+                                   .maxTotalValues(66)
+                                   .batchSize(2)
+                                   .build();
+    Api::RaggedTensor input1 = Api::RaggedNetworkInput::Builder()
+                                   .network(network)
+                                   .name("tokens1")
+                                   .valuesDataType(DataType::FP32)
+                                   .offsetsDataType(DataType::UINT32)
+                                   .trailingDimensions({4})
+                                   .maxTotalValues(66)
+                                   .batchSize(2)
+                                   .build();
+
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(input0)
+                                 .featureInput(input1)
+                                 .numOutputFeatures(3)
+                                 .hasBias(false)
+                                 .weightsDataType(DataType::FP32)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(DataType::FP32)
+                                 .noActivation()
+                                 .build();
+
+    ASSERT_EQ(fc.getFeatureInputs().size(), 4u);
+    EXPECT_EQ(fc.getFeatureInputs()[0], input0.getValues());
+    EXPECT_EQ(fc.getFeatureInputs()[1], input0.getOffsets());
+    EXPECT_EQ(fc.getFeatureInputs()[2], input1.getValues());
+    EXPECT_EQ(fc.getFeatureInputs()[3], input1.getOffsets());
+    EXPECT_EQ(fc.getConnectionType(input0.getValues()), 0);
+    EXPECT_EQ(fc.getConnectionType(input0.getOffsets()), 1);
+    EXPECT_EQ(fc.getConnectionType(input1.getValues()), 2);
+    EXPECT_EQ(fc.getConnectionType(input1.getOffsets()), 3);
+    EXPECT_EQ(fc.getConnectionType(fc.getRaggedFeatureOutput(0)->getValues()), 0);
+    EXPECT_EQ(fc.getConnectionType(fc.getRaggedFeatureOutput(1)->getValues()), 1);
+
+    fc.resetGraphTraversalState();
+    fc.informThatInputConnectionMade(input0.getValues());
+    EXPECT_TRUE(fc.getOutputsFromInput(input0.getValues()).empty());
+    fc.informThatInputConnectionMade(input1.getValues());
+    EXPECT_TRUE(fc.getOutputsFromInput(input1.getValues()).empty());
+    fc.informThatInputConnectionMade(input0.getOffsets());
+    const vector<Api::Tensor> firstReady = fc.getOutputsFromInput(input0.getOffsets());
+    ASSERT_EQ(firstReady.size(), 1u);
+    EXPECT_EQ(firstReady[0], fc.getRaggedFeatureOutput(0)->getValues());
+    fc.informThatInputConnectionMade(input1.getOffsets());
+    const vector<Api::Tensor> secondReady = fc.getOutputsFromInput(input1.getOffsets());
+    ASSERT_EQ(secondReady.size(), 1u);
+    EXPECT_EQ(secondReady[0], fc.getRaggedFeatureOutput(1)->getValues());
 }
 
 TEST(FullyConnectedApi, RaggedBuilderUsesRegularDefaultActivationPattern) {
@@ -598,10 +703,6 @@ TEST(FullyConnectedApi, RaggedForwardBackwardUsesCapacityBucketAndIgnoresInvalid
     Api::GradientRivet inputRivet =
         Api::GradientRivet::Builder().network(network).tensor(networkInput.getValues()).build();
     Api::RaggedTensor raggedInput(inputRivet.getFeatureOutput().value(), networkInput.getOffsets());
-    // This test observes only the packed values path. The row partition is intentionally
-    // not exposed as an output, so consume that otherwise-dangling structural tensor explicitly.
-    (void)Api::Stub::Builder().network(network).inputTensor(networkInput.getOffsets()).build();
-
     Api::FullyConnected fc = Api::FullyConnected::Builder()
                                  .network(network)
                                  .featureInput(raggedInput)
@@ -656,10 +757,10 @@ TEST(FullyConnectedApi, RaggedForwardBackwardUsesCapacityBucketAndIgnoresInvalid
     }
     Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {fullRows, inputFeatures}));
     writeCpuTensor(featureInHost, inputValues);
-    featureInHost.setRaggedActiveRows(activeRows);
 
-    const vector<float> actualForward =
-        runForward(*fixture.physicalValuesInput, *fixture.physicalOutput, featureInHost, logicalBatchSize);
+    const vector<float> actualForward = runRaggedForward(
+        fixture, featureInHost, activeRows, logicalBatchSize, fullRows, DataType::UINT32);
+    ASSERT_TRUE(fixture.physicalFc->getFeatureOutputs()[0].has_value());
     vector<float> validInput(inputValues.begin(), inputValues.begin() + activeRows * inputFeatures);
     const vector<float> expectedForward =
         fullyConnectedReference(validInput, weights, biases, activeRows, inputFeatures, outputFeatures, true);
@@ -757,9 +858,8 @@ TEST(FullyConnectedApi, RaggedForwardBackwardUsesCapacityBucketAndIgnoresInvalid
     }
     Impl::Tensor aboveSmallBucketHost(cpuPlacement, Impl::TensorDescriptor(dataType, {fullRows, inputFeatures}));
     writeCpuTensor(aboveSmallBucketHost, aboveSmallBucketInput);
-    aboveSmallBucketHost.setRaggedActiveRows(aboveSmallBucketRows);
-    const vector<float> actualAboveSmallBucket =
-        runForward(*fixture.physicalValuesInput, *fixture.physicalOutput, aboveSmallBucketHost, logicalBatchSize);
+    const vector<float> actualAboveSmallBucket = runRaggedForward(
+        fixture, aboveSmallBucketHost, aboveSmallBucketRows, logicalBatchSize, fullRows, DataType::UINT32);
     vector<float> validAboveSmallBucketInput(
         aboveSmallBucketInput.begin(), aboveSmallBucketInput.begin() + aboveSmallBucketRows * inputFeatures);
     const vector<float> expectedAboveSmallBucket =
