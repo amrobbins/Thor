@@ -1,5 +1,6 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 import enum
+from typing import overload
 
 import thor
 from thor._thor.layers import (
@@ -131,8 +132,9 @@ class CustomLayer(TrainableLayer):
         strided_view are materialized generically into the layer's dense public output tensor.
 
         Convenience forms:
-        - inputs=<thor.Tensor> defaults to {"feature_input": tensor}
+        - inputs=<thor.Tensor or thor.RaggedTensor> defaults to {"feature_input": tensor}
         - output_names omitted defaults to ["feature_output"]
+        - ragged inputs produce partition-preserving thor.RaggedTensor outputs; all named ragged inputs must share one offsets tensor
         - activation=<thor.activations.Activation> stitches that activation onto each returned expression before compilation
         - uses_batch_validity=True declares runtime batch-validity use; Thor currently exposes it as
           ``thor.BATCH_VALIDITY_MASK_NAME`` through ``context.input(...)``
@@ -151,18 +153,23 @@ class CustomLayer(TrainableLayer):
     @property
     def requires_full_batch(self) -> bool: ...
 
-    def get_input_interface(self, interface_index: int = 0) -> dict[str, thor.Tensor]: ...
+    @property
+    def use_ragged(self) -> bool: ...
 
-    def get_output_interface(self, inputs: Mapping[str, thor.Tensor]) -> dict[str, thor.Tensor]: ...
+    def get_use_ragged(self) -> bool: ...
 
-    def get_output_interface_by_index(self, interface_index: int = 0) -> dict[str, thor.Tensor]: ...
+    def get_input_interface(self, interface_index: int = 0) -> object: ...
 
-    def get_output(self, name: str, interface_index: int = 0) -> thor.Tensor: ...
+    def get_output_interface(self, inputs: object) -> object: ...
 
-    def __getitem__(self, name: str) -> thor.Tensor: ...
+    def get_output_interface_by_index(self, interface_index: int = 0) -> object: ...
+
+    def get_output(self, name: str, interface_index: int = 0) -> object: ...
+
+    def __getitem__(self, name: str) -> object: ...
 
     @property
-    def outputs(self) -> dict[str, thor.Tensor]: ...
+    def outputs(self) -> object: ...
 
     def get_input_names(self) -> list[str]: ...
 
@@ -173,6 +180,26 @@ class CustomLayer(TrainableLayer):
     def get_bound_parameter(self, placed_network: thor.runtime.PlacedNetwork, name: str) -> thor.parameters.BoundParameter: ...
 
     def get_bound_parameters(self, placed_network: thor.runtime.PlacedNetwork) -> list[thor.parameters.BoundParameter]: ...
+
+class Add(MultiConnectionLayer):
+    """
+    Elementwise addition for dense tensors or canonical rank-1 ragged tensors.
+
+    Ragged operands must share the exact same row-partition offsets tensor. The
+    result preserves that partition and executes only over the authoritative active
+    packed prefix.
+    """
+
+    @overload
+    def __init__(self, network: thor.Network, left: thor.Tensor, right: thor.Tensor) -> None: ...
+
+    @overload
+    def __init__(self, network: thor.Network, left: thor.RaggedTensor, right: thor.RaggedTensor) -> None: ...
+
+    def get_feature_output(self) -> object: ...
+
+    @property
+    def use_ragged(self) -> bool: ...
 
 class AdaptiveLayerNorm(MultiConnectionLayer):
     """
@@ -1148,6 +1175,18 @@ class NetworkInput(Layer):
     def is_external(self) -> bool: ...
 
     def version(self) -> str: ...
+
+class RaggedRowLengths(Layer):
+    """
+    Materialize canonical ragged row lengths as dense INT32 logical ``[1]`` values.
+
+    For offsets ``[0, 371, 558, 612]`` the physical output is ``[[371], [187], [54]]``.
+    The layer depends only on row-partition offsets, not on packed values.
+    """
+
+    def __init__(self, network: thor.Network, feature_input: thor.RaggedTensor) -> None: ...
+
+    def get_feature_output(self) -> thor.Tensor: ...
 
 class NetworkOutput(Layer):
     """

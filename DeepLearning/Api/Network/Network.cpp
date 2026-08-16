@@ -3749,13 +3749,11 @@ Tensor Network::getApiTensorByOriginalId(uint64_t originalId) {
             continue;
         }
 
-        if (std::optional<Tensor> found = rememberOptionalIfMatches(layer->getFeatureInput())) {
-            return *found;
-        }
-        if (std::optional<Tensor> found = rememberOptionalIfMatches(layer->getFeatureOutput())) {
-            return *found;
-        }
-
+        // Do not call the single-connection accessors until after checking layer
+        // types that expose multiple logical/API tensors. MultiConnectionLayer's
+        // getFeatureInput()/getFeatureOutput() intentionally assert when there is
+        // more than one connection, which is common for ragged layers where
+        // values and offsets are separate API tensors.
         std::shared_ptr<NetworkInput> networkInput = std::dynamic_pointer_cast<NetworkInput>(layer);
         if (networkInput != nullptr && networkInput->hasPassThroughSource()) {
             if (std::optional<Tensor> found = rememberIfMatches(networkInput->getPassThroughSource())) {
@@ -3839,6 +3837,14 @@ Tensor Network::getApiTensorByOriginalId(uint64_t originalId) {
                     return *found;
                 }
             }
+            continue;
+        }
+
+        if (std::optional<Tensor> found = rememberOptionalIfMatches(layer->getFeatureInput())) {
+            return *found;
+        }
+        if (std::optional<Tensor> found = rememberOptionalIfMatches(layer->getFeatureOutput())) {
+            return *found;
         }
     }
 

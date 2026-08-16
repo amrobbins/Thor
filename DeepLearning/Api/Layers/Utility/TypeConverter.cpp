@@ -2,7 +2,7 @@
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
-#include "DeepLearning/Implementation/Layers/RaggedExpressionLayer.h"
+#include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/RaggedExpression.h"
@@ -152,7 +152,7 @@ shared_ptr<ThorImplementation::Layer> TypeConverter::stamp(ThorImplementation::T
         ExpressionDefinition definition =
             ExpressionDefinition::fromOutputs(Expression::outputs({{"feature_output", output.getValues()}}));
         const uint64_t rowWidth = elementsPerValue(raggedInput);
-        auto physicalLayer = make_shared<ThorImplementation::RaggedExpressionLayer>(
+        auto physicalLayer = make_shared<ThorImplementation::RaggedCustomLayer>(
             DynamicExpression::fromExpressionDefinition(definition),
             vector<string>{"feature_input", "feature_offsets"},
             vector<string>{"feature_output"},

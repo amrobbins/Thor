@@ -18,6 +18,7 @@ using namespace std;
 using namespace Thor;
 
 void bind_drop_out(nb::module_ &m);
+void bind_add(nb::module_ &m);
 void bind_adaptive_layer_norm(nb::module_ &m);
 void bind_attention(nb::module_ &m);
 void bind_batch_normalization(nb::module_ &m);
@@ -40,6 +41,7 @@ void bind_slice(nb::module_ &m);
 void bind_stop_gradient(nb::module_ &m);
 void bind_network_input(nb::module_ &m);
 void bind_ragged_network_input(nb::module_ &m);
+void bind_ragged_row_lengths(nb::module_ &m);
 void bind_network_output(nb::module_ &m);
 void bind_ragged_network_output(nb::module_ &m);
 void bind_pooling(nb::module_ &layers);
@@ -68,6 +70,7 @@ void bind_layers(nb::module_ &layers) {
     trainable_layer.def("get_parameter_references", &TrainableLayer::getParameterReferences, "trainable_only"_a = true, "training_enabled_only"_a = true);
 
     bind_custom_layer(layers);
+    bind_add(layers);
     bind_adaptive_layer_norm(layers);
     bind_attention(layers);
     bind_batch_normalization(layers);
@@ -90,6 +93,7 @@ void bind_layers(nb::module_ &layers) {
     bind_stop_gradient(layers);
     bind_network_input(layers);
     bind_ragged_network_input(layers);
+    bind_ragged_row_lengths(layers);
     bind_network_output(layers);
     bind_ragged_network_output(layers);
     bind_pooling(layers);

@@ -1,10 +1,16 @@
 #include "DeepLearning/Api/BatchValidity.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
+#include "DeepLearning/Api/Initializers/UniformRandom.h"
+#include "DeepLearning/Api/Optimizers/Sgd.h"
+#include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Training/PhaseGraphConnector.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "Utilities/Expression/CudaKernelExpression.h"
@@ -65,6 +71,22 @@ vector<float> readCpuTensor(const Impl::Tensor& tensor) {
     for (uint64_t i = 0; i < values.size(); ++i)
         values[i] = ptr[i];
     return values;
+}
+
+void writeDeviceTensor(Impl::Tensor tensor, const vector<float>& values, Stream& stream) {
+    Impl::Tensor host = tensor.clone(cpuPlacement);
+    writeCpuTensor(host, values);
+    tensor.copyFromAsync(host, stream);
+    Event copied = stream.putEvent();
+    copied.synchronize();
+}
+
+vector<float> readDeviceTensor(const Impl::Tensor& tensor, Stream& stream) {
+    Impl::Tensor host = tensor.clone(cpuPlacement);
+    host.copyFromAsync(tensor, stream);
+    Event copied = stream.putEvent();
+    copied.synchronize();
+    return readCpuTensor(host);
 }
 
 void expectAllClose(const vector<float>& actual, const vector<float>& expected, float atol = 1e-5f, float rtol = 1e-5f) {
@@ -339,6 +361,186 @@ vector<float> runForward(Impl::NetworkInput& physicalInput,
     Event featureOutReadyEvent = physicalOutput.getOutputReadyEvent();
     featureOutReadyEvent.synchronize();
     return readCpuTensor(physicalOutput.getFeatureOutput().value());
+}
+
+
+TEST(CustomLayerApi, RaggedMultipleApplicationsSaveLoadPreservesIndependentPartitions) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Ragged CustomLayer persistence test requires a GPU";
+
+    constexpr uint32_t batchSize = 3;
+    constexpr uint64_t capacity = 8;
+    const string networkName = "custom_layer_ragged_multiple_applications_round_trip";
+    const filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::RaggedTensor first = Api::RaggedNetworkInput::Builder()
+                                      .network(network)
+                                      .name("first")
+                                      .valuesDataType(DataType::FP32)
+                                      .offsetsDataType(DataType::UINT32)
+                                      .trailingDimensions({4})
+                                      .maxTotalValues(capacity)
+                                      .batchSize(batchSize)
+                                      .build();
+        Api::RaggedTensor second = Api::RaggedNetworkInput::Builder()
+                                       .network(network)
+                                       .name("second")
+                                       .valuesDataType(DataType::FP32)
+                                       .offsetsDataType(DataType::UINT32)
+                                       .trailingDimensions({4})
+                                       .maxTotalValues(capacity)
+                                       .batchSize(batchSize)
+                                       .build();
+        ASSERT_NE(first.getOffsets(), second.getOffsets());
+
+        Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
+        Impl::ExpressionDefinition definition =
+            Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"y", x.gelu()}}));
+        Api::CustomLayer custom = Api::CustomLayer::Builder()
+                                      .network(network)
+                                      .expression(Impl::DynamicExpression::fromExpressionDefinition(definition))
+                                      .inputNames({"x"})
+                                      .outputNames({"y"})
+                                      .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", first}})
+                                      .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", second}})
+                                      .build();
+        ASSERT_TRUE(custom.getUseRagged());
+        ASSERT_EQ(custom.getRaggedInputInterface(0).at("x").getOffsets(), first.getOffsets());
+        ASSERT_EQ(custom.getRaggedInputInterface(1).at("x").getOffsets(), second.getOffsets());
+        ASSERT_EQ(custom.getRaggedOutput("y", 0).getOffsets(), first.getOffsets());
+        ASSERT_EQ(custom.getRaggedOutput("y", 1).getOffsets(), second.getOffsets());
+
+        (void)Api::RaggedNetworkOutput::Builder()
+            .network(network)
+            .name("first_out")
+            .inputTensor(custom.getRaggedOutput("y", 0))
+            .build();
+        (void)Api::RaggedNetworkOutput::Builder()
+            .network(network)
+            .name("second_out")
+            .inputTensor(custom.getRaggedOutput("y", 1))
+            .build();
+
+        const nlohmann::json beforeSaveJson = custom.architectureJson();
+        EXPECT_EQ(beforeSaveJson.at("layer_type").get<string>(), "custom_layer");
+        EXPECT_TRUE(beforeSaveJson.at("use_ragged").get<bool>());
+        ASSERT_EQ(beforeSaveJson.at("ragged_input_interfaces").size(), 2u);
+        ASSERT_EQ(beforeSaveJson.at("ragged_output_interfaces").size(), 2u);
+        network.save(archiveDir.string(), true);
+
+        Api::Network loaded(networkName);
+        loaded.load(archiveDir.string());
+        std::shared_ptr<Api::CustomLayer> loadedCustom = findOnlyLayerOfType<Api::CustomLayer>(loaded);
+        ASSERT_NE(loadedCustom, nullptr);
+        ASSERT_TRUE(loadedCustom->getUseRagged());
+        ASSERT_EQ(loadedCustom->getRaggedInputInterface(0).at("x").getOffsets(),
+                  loadedCustom->getRaggedOutput("y", 0).getOffsets());
+        ASSERT_EQ(loadedCustom->getRaggedInputInterface(1).at("x").getOffsets(),
+                  loadedCustom->getRaggedOutput("y", 1).getOffsets());
+        EXPECT_NE(loadedCustom->getRaggedInputInterface(0).at("x").getOffsets(),
+                  loadedCustom->getRaggedInputInterface(1).at("x").getOffsets());
+        const nlohmann::json loadedJson = loadedCustom->architectureJson();
+        EXPECT_TRUE(loadedJson.at("use_ragged").get<bool>());
+        ASSERT_EQ(loadedJson.at("ragged_input_interfaces").size(), 2u);
+        ASSERT_EQ(loadedJson.at("ragged_output_interfaces").size(), 2u);
+
+        vector<Event> initDoneEvents;
+        shared_ptr<Api::PlacedNetwork> placed;
+        ASSERT_NO_THROW(placed = loaded.place(batchSize, initDoneEvents, true));
+        synchronizeEvents(initDoneEvents);
+        ASSERT_NE(placed, nullptr);
+    } catch (...) {
+        filesystem::remove_all(archiveDir);
+        throw;
+    }
+    filesystem::remove_all(archiveDir);
+}
+
+TEST(CustomLayerApi, RaggedTrainablePlacedSaveLoadRestoresParameterState) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Ragged CustomLayer state persistence test requires a GPU";
+
+    constexpr uint32_t batchSize = 3;
+    constexpr uint64_t capacity = 8;
+    constexpr uint64_t width = 4;
+    const string networkName = "custom_layer_ragged_parameter_state_round_trip";
+    const filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+    const vector<float> savedScale = {2.0f, 3.0f, 4.0f, 5.0f};
+
+    try {
+        Api::Network network(networkName);
+        Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                      .network(network)
+                                      .name("tokens")
+                                      .valuesDataType(DataType::FP32)
+                                      .offsetsDataType(DataType::UINT32)
+                                      .trailingDimensions({width})
+                                      .maxTotalValues(capacity)
+                                      .batchSize(batchSize)
+                                      .build();
+
+        Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
+        Impl::Expression scale = Impl::Expression::input("scale", DataType::FP32, DataType::FP32);
+        Impl::ExpressionDefinition definition =
+            Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"y", x * scale}}));
+        auto initializer = Api::UniformRandom::Builder().minValue(1.0f).maxValue(1.0f).build();
+        auto scaleParameter = std::make_shared<Api::ParameterSpecification>(
+            Api::ParameterSpecification::Builder()
+                .name("scale")
+                .shape({width})
+                .dtype(DataType::FP32)
+                .initializer(initializer)
+                .trainable(true)
+                .build());
+
+        Api::CustomLayer custom = Api::CustomLayer::Builder()
+                                      .network(network)
+                                      .expression(Impl::DynamicExpression::fromExpressionDefinition(definition))
+                                      .inputNames({"x"})
+                                      .outputNames({"y"})
+                                      .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", input}})
+                                      .parameter(scaleParameter)
+                                      .build();
+        (void)Api::RaggedNetworkOutput::Builder().network(network).name("result").inputTensor(custom.getRaggedOutput("y")).build();
+
+        vector<Event> initDoneEvents;
+        shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, true);
+        synchronizeEvents(initDoneEvents);
+        ASSERT_NE(placed, nullptr);
+        auto physical = std::dynamic_pointer_cast<Impl::RaggedCustomLayer>(
+            placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(custom.getId()));
+        ASSERT_NE(physical, nullptr);
+        ASSERT_NE(physical->getParameter("scale"), nullptr);
+        ASSERT_TRUE(physical->getParameter("scale")->getStorage().has_value());
+        Stream stream = physical->getStreams()[0];
+        writeDeviceTensor(physical->getParameter("scale")->getStorage().value(), savedScale, stream);
+        expectAllClose(readDeviceTensor(physical->getParameter("scale")->getStorage().value(), stream), savedScale);
+
+        placed->save(archiveDir.string(), true, false);
+
+        Api::Network loaded(networkName);
+        loaded.load(archiveDir.string());
+        std::shared_ptr<Api::CustomLayer> loadedCustom = findOnlyLayerOfType<Api::CustomLayer>(loaded);
+        ASSERT_NE(loadedCustom, nullptr);
+        ASSERT_TRUE(loadedCustom->getUseRagged());
+        vector<Event> loadedInitEvents;
+        shared_ptr<Api::PlacedNetwork> loadedPlaced = loaded.place(batchSize, loadedInitEvents, true);
+        synchronizeEvents(loadedInitEvents);
+        ASSERT_NE(loadedPlaced, nullptr);
+        auto loadedPhysical = std::dynamic_pointer_cast<Impl::RaggedCustomLayer>(
+            loadedPlaced->getStampedNetwork(0).getPhysicalLayerFromApiLayer(loadedCustom->getId()));
+        ASSERT_NE(loadedPhysical, nullptr);
+        ASSERT_NE(loadedPhysical->getParameter("scale"), nullptr);
+        ASSERT_TRUE(loadedPhysical->getParameter("scale")->getStorage().has_value());
+        Stream loadedStream = loadedPhysical->getStreams()[0];
+        expectAllClose(readDeviceTensor(loadedPhysical->getParameter("scale")->getStorage().value(), loadedStream), savedScale);
+    } catch (...) {
+        filesystem::remove_all(archiveDir);
+        throw;
+    }
+    filesystem::remove_all(archiveDir);
 }
 
 }  // namespace
@@ -828,4 +1030,255 @@ TEST(CustomLayerApi, BatchValidityAndFullBatchRequirementAreMutuallyExclusive) {
                          .usesBatchValidity()
                          .inputInterface({{"x", input}})
                          .build());
+}
+
+
+TEST(CustomLayerApi, RaggedSingleInputPreservesPartitionAndPlaces) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Ragged CustomLayer placement test requires a GPU";
+
+    constexpr uint32_t batchSize = 3;
+    constexpr uint64_t capacity = 8;
+    Api::Network network("custom_layer_ragged_single_input");
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({4})
+                                  .maxTotalValues(capacity)
+                                  .batchSize(batchSize)
+                                  .build();
+
+    Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
+    Impl::ExpressionDefinition definition =
+        Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"y", x.gelu()}}));
+    Api::CustomLayer custom = Api::CustomLayer::Builder()
+                                  .network(network)
+                                  .expression(Impl::DynamicExpression::fromExpressionDefinition(definition))
+                                  .inputNames({"x"})
+                                  .outputNames({"y"})
+                                  .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", input}})
+                                  .build();
+
+    ASSERT_TRUE(custom.getUseRagged());
+    ASSERT_EQ(custom.getFeatureInputs().size(), 2u);
+    EXPECT_EQ(custom.getFeatureInputs()[0], input.getValues());
+    EXPECT_EQ(custom.getFeatureInputs()[1], input.getOffsets());
+    Api::RaggedTensor output = custom.getRaggedOutput("y");
+    EXPECT_EQ(output.getOffsets(), input.getOffsets());
+    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{capacity, 4}));
+
+    (void)Api::RaggedNetworkOutput::Builder().network(network).name("result").inputTensor(output).build();
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(batchSize, initDoneEvents, true));
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+}
+
+TEST(CustomLayerApi, RaggedCompositePointwiseExpressionStampsAsSingleRaggedCustomLayer) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Ragged CustomLayer placement test requires a GPU";
+
+    constexpr uint32_t batchSize = 3;
+    constexpr uint64_t capacity = 8;
+    Api::Network network("custom_layer_ragged_composite_pointwise");
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({4})
+                                  .maxTotalValues(capacity)
+                                  .batchSize(batchSize)
+                                  .build();
+
+    Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
+    Impl::Expression logged = x.log1p();
+    Impl::Expression activity = -((-logged).expm1());
+    Impl::ExpressionDefinition definition =
+        Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"activity", activity}}));
+    Api::CustomLayer custom = Api::CustomLayer::Builder()
+                                  .network(network)
+                                  .expression(Impl::DynamicExpression::fromExpressionDefinition(definition))
+                                  .inputNames({"x"})
+                                  .outputNames({"activity"})
+                                  .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", input}})
+                                  .build();
+
+    Api::RaggedTensor output = custom.getRaggedOutput("activity");
+    EXPECT_EQ(output.getOffsets(), input.getOffsets());
+    (void)Api::RaggedNetworkOutput::Builder().network(network).name("result").inputTensor(output).build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(batchSize, initDoneEvents, true));
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+
+    auto physical = std::dynamic_pointer_cast<Impl::RaggedCustomLayer>(
+        placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(custom.getId()));
+    ASSERT_NE(physical, nullptr);
+    EXPECT_EQ(physical->getLayerType(), "RaggedCustomLayer");
+}
+
+TEST(CustomLayerApi, RaggedMultiInputMultiOutputCanChangeTrailingShapeWithoutExposingOffsetsToExpression) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Ragged CustomLayer placement test requires a GPU";
+
+    constexpr uint32_t batchSize = 3;
+    constexpr uint64_t capacity = 8;
+    Api::Network network("custom_layer_ragged_multi_io");
+    Api::RaggedTensor lhs = Api::RaggedNetworkInput::Builder()
+                                .network(network)
+                                .name("lhs")
+                                .valuesDataType(DataType::FP32)
+                                .offsetsDataType(DataType::UINT32)
+                                .trailingDimensions({4})
+                                .maxTotalValues(capacity)
+                                .batchSize(batchSize)
+                                .build();
+    Api::NetworkInput rhsValues = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("rhs_values")
+                                      .dimensions({capacity, 4})
+                                      .dataType(DataType::FP32)
+                                      .dimensionsIncludeBatch(true)
+                                      .build();
+    Api::RaggedTensor rhs(rhsValues.getFeatureOutput().value(), lhs.getOffsets());
+
+    Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
+    Impl::Expression y = Impl::Expression::input("y", DataType::FP32, DataType::FP32);
+    Impl::Expression wide = x + y;
+    Impl::Expression narrow = wide.stridedView({capacity, 2}, {4, 1}, 1);
+    Impl::ExpressionDefinition definition = Impl::ExpressionDefinition::fromOutputs(
+        Impl::Expression::outputs({{"wide", wide}, {"narrow", narrow}}));
+
+    Api::CustomLayer custom = Api::CustomLayer::Builder()
+                                  .network(network)
+                                  .expression(Impl::DynamicExpression::fromExpressionDefinition(definition))
+                                  .inputNames({"x", "y"})
+                                  .outputNames({"wide", "narrow"})
+                                  .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", lhs}, {"y", rhs}})
+                                  .build();
+
+    ASSERT_TRUE(custom.getUseRagged());
+    EXPECT_EQ(custom.getFeatureInputs().size(), 3u);
+    Api::RaggedTensor wideOutput = custom.getRaggedOutput("wide");
+    Api::RaggedTensor narrowOutput = custom.getRaggedOutput("narrow");
+    EXPECT_EQ(wideOutput.getOffsets(), lhs.getOffsets());
+    EXPECT_EQ(narrowOutput.getOffsets(), lhs.getOffsets());
+    EXPECT_EQ(wideOutput.getValuesDimensions(), (vector<uint64_t>{capacity, 4}));
+    EXPECT_EQ(narrowOutput.getValuesDimensions(), (vector<uint64_t>{capacity, 2}));
+
+    (void)Api::RaggedNetworkOutput::Builder().network(network).name("wide_out").inputTensor(wideOutput).build();
+    (void)Api::RaggedNetworkOutput::Builder().network(network).name("narrow_out").inputTensor(narrowOutput).build();
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(batchSize, initDoneEvents, true));
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+}
+
+TEST(CustomLayerApi, RaggedInputsMustShareExactPartitionAndDenseRaggedBuildersCannotMix) {
+    Api::Network network("custom_layer_ragged_partition_validation");
+    Api::RaggedTensor lhs = Api::RaggedNetworkInput::Builder()
+                                .network(network)
+                                .name("lhs")
+                                .valuesDataType(DataType::FP32)
+                                .trailingDimensions({4})
+                                .maxTotalValues(8)
+                                .batchSize(3)
+                                .build();
+    Api::RaggedTensor rhs = Api::RaggedNetworkInput::Builder()
+                                .network(network)
+                                .name("rhs")
+                                .valuesDataType(DataType::FP32)
+                                .trailingDimensions({4})
+                                .maxTotalValues(8)
+                                .batchSize(3)
+                                .build();
+    Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
+    Impl::Expression y = Impl::Expression::input("y", DataType::FP32, DataType::FP32);
+    Impl::ExpressionDefinition definition =
+        Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"z", x + y}}));
+
+    EXPECT_THROW((Api::CustomLayer::Builder()
+                      .network(network)
+                      .expression(Impl::DynamicExpression::fromExpressionDefinition(definition))
+                      .inputNames({"x", "y"})
+                      .outputNames({"z"})
+                      .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", lhs}, {"y", rhs}})
+                      .build()),
+                 std::invalid_argument);
+
+    Api::CustomLayer::Builder mixedBuilder;
+    mixedBuilder.network(network)
+        .expression(Impl::DynamicExpression::fromExpressionDefinition(definition))
+        .inputNames({"x", "y"})
+        .outputNames({"z"})
+        .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", lhs}, {"y", lhs}});
+    EXPECT_ANY_THROW(mixedBuilder.inputInterface(Api::CustomLayer::TensorMap{{"x", lhs.getValues()}, {"y", lhs.getValues()}}));
+}
+
+TEST(CustomLayerApi, RaggedTrainableParameterStampsIntoRaggedCustomLayer) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Ragged trainable CustomLayer placement test requires a GPU";
+
+    constexpr uint32_t batchSize = 3;
+    constexpr uint64_t capacity = 8;
+    constexpr uint64_t width = 4;
+    Api::Network network("custom_layer_ragged_trainable_parameter");
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({width})
+                                  .maxTotalValues(capacity)
+                                  .batchSize(batchSize)
+                                  .build();
+
+    Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
+    Impl::Expression scale = Impl::Expression::input("scale", DataType::FP32, DataType::FP32);
+    Impl::ExpressionDefinition definition =
+        Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"y", x * scale}}));
+
+    auto initializer = Api::UniformRandom::Builder().minValue(1.0f).maxValue(1.0f).build();
+    std::shared_ptr<Api::Optimizer> optimizer = Api::Sgd::Builder().initialLearningRate(0.01f).build();
+    auto scaleParameter = std::make_shared<Api::ParameterSpecification>(
+        Api::ParameterSpecification::Builder()
+            .name("scale")
+            .shape({width})
+            .dtype(DataType::FP32)
+            .initializer(initializer)
+            .trainable(true)
+            .optimizer(optimizer)
+            .build());
+
+    Api::CustomLayer custom = Api::CustomLayer::Builder()
+                                  .network(network)
+                                  .expression(Impl::DynamicExpression::fromExpressionDefinition(definition))
+                                  .inputNames({"x"})
+                                  .outputNames({"y"})
+                                  .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", input}})
+                                  .parameter(scaleParameter)
+                                  .build();
+    Api::RaggedTensor output = custom.getRaggedOutput("y");
+    (void)Api::RaggedNetworkOutput::Builder().network(network).name("result").inputTensor(output).build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(batchSize, initDoneEvents, true));
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+
+    auto physical = std::dynamic_pointer_cast<Impl::RaggedCustomLayer>(
+        placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(custom.getId()));
+    ASSERT_NE(physical, nullptr);
+    EXPECT_EQ(physical->listParameters(), (vector<string>{"scale"}));
+    ASSERT_NE(physical->getParameter("scale"), nullptr);
+    ASSERT_TRUE(physical->getParameter("scale")->getStorage().has_value());
+    EXPECT_EQ(physical->getParameter("scale")->getStorage()->getDimensions(), (vector<uint64_t>{width}));
 }

@@ -1,5 +1,7 @@
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
+#include "Utilities/Expression/Expression.h"
 
 #include <algorithm>
 #include <limits>
@@ -21,6 +23,8 @@ using PhysicalTensorMap = std::unordered_map<std::string, PhysicalTensor>;
 
 namespace {
 
+constexpr const char* kRaggedOffsetsInputName = ThorImplementation::RaggedCustomLayer::RAGGED_OFFSETS_INPUT_NAME;
+
 PhysicalTensor makeFakePlacedTensor(const Thor::Tensor& apiTensor, uint64_t batchSize, bool dimensionsIncludeBatch = false) {
     std::vector<uint64_t> fakeDims;
     if (dimensionsIncludeBatch) {
@@ -36,6 +40,80 @@ PhysicalTensor makeFakePlacedTensor(const Thor::Tensor& apiTensor, uint64_t batc
     ThorImplementation::TensorPlacement placement(ThorImplementation::TensorPlacement::MemDevices::CPU, 0);
     ThorImplementation::TensorDescriptor descriptor(apiTensor.getDataType(), fakeDims);
     return PhysicalTensor(placement, descriptor);
+}
+
+uint64_t elementsPerValue(const std::vector<uint64_t>& trailingDimensions) {
+    uint64_t elements = 1;
+    for (uint64_t dimension : trailingDimensions) {
+        if (dimension == 0 || elements > std::numeric_limits<uint64_t>::max() / dimension) {
+            throw std::overflow_error("CustomLayer ragged elements-per-value overflow.");
+        }
+        elements *= dimension;
+    }
+    return elements;
+}
+
+std::set<std::string> nameSet(const std::vector<std::string>& names) {
+    return std::set<std::string>(names.begin(), names.end());
+}
+
+std::vector<Thor::CustomLayer::TensorMap> raggedValuesInterfaces(
+    const std::vector<Thor::CustomLayer::RaggedTensorMap>& interfaces) {
+    std::vector<Thor::CustomLayer::TensorMap> valuesInterfaces;
+    valuesInterfaces.reserve(interfaces.size());
+    for (const auto& interface : interfaces) {
+        Thor::CustomLayer::TensorMap values;
+        for (const auto& [name, ragged] : interface) {
+            if (!ragged.isInitialized()) {
+                throw std::invalid_argument("CustomLayer ragged interface contains an uninitialized tensor for '" + name + "'.");
+            }
+            values.emplace(name, ragged.getValues());
+        }
+        valuesInterfaces.push_back(std::move(values));
+    }
+    return valuesInterfaces;
+}
+
+std::vector<Thor::CustomLayer::TensorMap> raggedInputValuesInterfaces(
+    const std::vector<Thor::CustomLayer::RaggedTensorMap>& interfaces) {
+    return raggedValuesInterfaces(interfaces);
+}
+
+ThorImplementation::ExpressionDefinition addRaggedRuntimeExtents(
+    const ThorImplementation::ExpressionDefinition& definition,
+    const std::string& offsetsName,
+    uint64_t batchSize,
+    uint64_t maxTotalValues,
+    const std::vector<std::string>& outputNames,
+    const std::vector<uint64_t>& outputElementsPerValue) {
+    if (definition.outputs.conditional) {
+        throw std::invalid_argument("Ragged CustomLayer does not yet support conditional expression outputs.");
+    }
+    if (definition.outputs.expr == nullptr || outputNames.size() != outputElementsPerValue.size()) {
+        throw std::invalid_argument("Ragged CustomLayer requires a concrete expression graph and metadata for every output.");
+    }
+
+    std::unordered_map<std::string, uint32_t> outputNodeByName;
+    for (const auto& output : definition.outputs.outputs) {
+        outputNodeByName.emplace(output.name, output.node_idx);
+    }
+
+    ThorImplementation::Expression offsets = ThorImplementation::Expression::input(offsetsName);
+    std::vector<std::pair<std::string, ThorImplementation::Expression>> outputs;
+    outputs.reserve(outputNames.size());
+    for (size_t outputIndex = 0; outputIndex < outputNames.size(); ++outputIndex) {
+        const std::string& outputName = outputNames[outputIndex];
+        auto found = outputNodeByName.find(outputName);
+        if (found == outputNodeByName.end()) {
+            throw std::invalid_argument("Ragged CustomLayer expression is missing output '" + outputName + "'.");
+        }
+        ThorImplementation::Expression value =
+            ThorImplementation::Expression::fromPhysicalNode(definition.outputs.expr, found->second);
+        outputs.emplace_back(outputName,
+                             value.withRaggedRuntimeExtent(
+                                 offsets, batchSize, maxTotalValues, outputElementsPerValue[outputIndex]));
+    }
+    return ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs(outputs));
 }
 
 Thor::Tensor logicalTensorFromFakeOutput(const std::vector<uint64_t>& fakeOutputDims, DataType dtype, uint64_t expectedBatchSize) {
@@ -189,6 +267,37 @@ CustomLayer::CustomLayer(DynamicExpression expr,
 CustomLayer::CustomLayer(DynamicExpression expr,
                          std::vector<std::string> inputNames,
                          std::vector<std::string> outputNames,
+                         const std::vector<RaggedTensorMap>& inputInterfaces,
+                         const std::vector<RaggedTensorMap>& outputInterfaces,
+                         std::vector<std::shared_ptr<ParameterSpecification>> parameters,
+                         bool usesBatchValidity,
+                         bool requiresFullBatch)
+    : CustomLayer(std::move(expr),
+                  inputNames,
+                  outputNames,
+                  raggedInputValuesInterfaces(inputInterfaces),
+                  raggedValuesInterfaces(outputInterfaces),
+                  parameters,
+                  SerializationContract::REQUIRE_EXPRESSION_DEFINITION,
+                  usesBatchValidity,
+                  requiresFullBatch,
+                  nameSet(inputNames),
+                  nameSet(outputNames)) {
+    if (inputInterfaces.empty()) {
+        throw std::invalid_argument("Ragged CustomLayer requires at least one input interface.");
+    }
+    if (usesBatchValidity) {
+        throw std::invalid_argument("Ragged CustomLayer does not yet support usesBatchValidity().");
+    }
+    if (requiresFullBatch) {
+        throw std::invalid_argument("Ragged CustomLayer does not use placement-batch semantics; requiresFullBatch() is unsupported.");
+    }
+    enableRaggedInterfaces(inputInterfaces, outputInterfaces);
+}
+
+CustomLayer::CustomLayer(DynamicExpression expr,
+                         std::vector<std::string> inputNames,
+                         std::vector<std::string> outputNames,
                          const std::vector<TensorMap>& inputInterfaces,
                          const std::vector<TensorMap>& outputInterfaces,
                          std::vector<std::shared_ptr<ParameterSpecification>> parameters,
@@ -332,7 +441,7 @@ std::string CustomLayer::joinNames(const std::set<std::string>& names) {
 }
 
 uint32_t CustomLayer::encodeInputConnection(uint32_t interfaceIndex, uint32_t inputPortIndex) const {
-    return interfaceIndex * static_cast<uint32_t>(inputNames.size()) + inputPortIndex;
+    return interfaceIndex * physicalInputPortCount() + inputPortIndex;
 }
 
 uint32_t CustomLayer::encodeOutputConnection(uint32_t interfaceIndex, uint32_t outputPortIndex) const {
@@ -543,8 +652,15 @@ CustomLayer::TensorMap CustomLayer::inferOutputInterfaceFromInputInterface(const
                                      "' changed between batch-1 and batch-2 shape inference.");
         }
 
-        Thor::Tensor one = logicalTensorFromFakeOutput(shapeOneIt->second, dtypeOneIt->second, 1);
-        Thor::Tensor two = logicalTensorFromFakeOutput(shapeTwoIt->second, dtypeTwoIt->second, 2);
+        Thor::Tensor one;
+        Thor::Tensor two;
+        if (outputDimensionsIncludeBatch.contains(outputName)) {
+            one = Thor::Tensor(dtypeOneIt->second, shapeOneIt->second);
+            two = Thor::Tensor(dtypeTwoIt->second, shapeTwoIt->second);
+        } else {
+            one = logicalTensorFromFakeOutput(shapeOneIt->second, dtypeOneIt->second, 1);
+            two = logicalTensorFromFakeOutput(shapeTwoIt->second, dtypeTwoIt->second, 2);
+        }
         if (one.getDimensions() != two.getDimensions()) {
             throw std::runtime_error("CustomLayer logical output shape for '" + outputName +
                                      "' depends on the synthetic physical batch size. Batch-1 inferred " +
@@ -754,6 +870,108 @@ void CustomLayer::assignOutputInterfaces(const std::vector<TensorMap>& outputInt
     }
 }
 
+uint32_t CustomLayer::physicalInputPortCount() const {
+    return static_cast<uint32_t>(inputNames.size() + (raggedInterfacesEnabled ? 1U : 0U));
+}
+
+void CustomLayer::enableRaggedInterfaces(const std::vector<RaggedTensorMap>& raggedInputs,
+                                         const std::vector<RaggedTensorMap>& raggedOutputs) {
+    if (raggedInputs.size() != inputInterfaces.size()) {
+        throw std::invalid_argument("Ragged CustomLayer input interface metadata does not match values interfaces.");
+    }
+    if (!raggedOutputs.empty() && raggedOutputs.size() != outputInterfaces.size()) {
+        throw std::invalid_argument("Ragged CustomLayer output interface metadata does not match values interfaces.");
+    }
+
+    if (std::find(inputNames.begin(), inputNames.end(), std::string(kRaggedOffsetsInputName)) != inputNames.end()) {
+        throw std::invalid_argument("Ragged CustomLayer input name collides with Thor's reserved offsets input name.");
+    }
+
+    raggedInterfacesEnabled = true;
+    raggedInputInterfaces = raggedInputs;
+    raggedOutputInterfaces.clear();
+
+    featureInputs.clear();
+    inputBindingsByTensorOriginalId.clear();
+    connectedInputPortIndicesByInterface.assign(raggedInputs.size(), {});
+    emittedOutputInterface.assign(raggedInputs.size(), false);
+    nextInputBindingConnectionCursorByTensorOriginalId.clear();
+
+    std::optional<uint64_t> referenceBatchSize;
+    std::optional<uint64_t> referenceMaxTotalValues;
+    std::optional<DataType> referenceOffsetsDataType;
+    for (uint32_t interfaceIndex = 0; interfaceIndex < raggedInputs.size(); ++interfaceIndex) {
+        const RaggedTensorMap& inputInterface = raggedInputs[interfaceIndex];
+        if (inputInterface.size() != inputNames.size()) {
+            throw std::invalid_argument("Ragged CustomLayer input interface name count mismatch.");
+        }
+
+        std::optional<Tensor> commonOffsets;
+        for (uint32_t inputPortIndex = 0; inputPortIndex < inputNames.size(); ++inputPortIndex) {
+            const std::string& name = inputNames[inputPortIndex];
+            auto found = inputInterface.find(name);
+            if (found == inputInterface.end() || !found->second.isInitialized()) {
+                throw std::invalid_argument("Ragged CustomLayer input interface is missing initialized input '" + name + "'.");
+            }
+            const RaggedTensor& ragged = found->second;
+            if (!commonOffsets.has_value()) {
+                commonOffsets = ragged.getOffsets();
+            } else if (commonOffsets.value() != ragged.getOffsets()) {
+                throw std::invalid_argument(
+                    "All RaggedTensor inputs in one CustomLayer interface must share the exact same offsets tensor.");
+            }
+
+            if (!referenceBatchSize.has_value()) {
+                referenceBatchSize = ragged.getBatchSize();
+                referenceMaxTotalValues = ragged.getMaxTotalValues();
+                referenceOffsetsDataType = ragged.getOffsetsDataType();
+            } else if (ragged.getBatchSize() != referenceBatchSize.value() ||
+                       ragged.getMaxTotalValues() != referenceMaxTotalValues.value() ||
+                       ragged.getOffsetsDataType() != referenceOffsetsDataType.value()) {
+                throw std::invalid_argument(
+                    "Ragged CustomLayer interfaces must agree on batch size, packed capacity, and offsets dtype.");
+            }
+
+            Tensor values = ragged.getValues();
+            featureInputs.push_back(values);
+            inputBindingsByTensorOriginalId[values.getOriginalId()].push_back(
+                InputBinding{interfaceIndex, inputPortIndex, name});
+        }
+
+        THOR_THROW_IF_FALSE(commonOffsets.has_value());
+        const uint32_t offsetsPortIndex = static_cast<uint32_t>(inputNames.size());
+        featureInputs.push_back(commonOffsets.value());
+        inputBindingsByTensorOriginalId[commonOffsets->getOriginalId()].push_back(
+            InputBinding{interfaceIndex, offsetsPortIndex, kRaggedOffsetsInputName});
+    }
+
+    for (uint32_t interfaceIndex = 0; interfaceIndex < outputInterfaces.size(); ++interfaceIndex) {
+        const Tensor offsets = raggedInputs[interfaceIndex].at(inputNames.front()).getOffsets();
+        RaggedTensorMap outputInterface;
+        for (const std::string& outputName : outputNames) {
+            const Tensor& outputValues = outputInterfaces[interfaceIndex].at(outputName);
+            if (outputValues.getDimensions().empty() ||
+                outputValues.getDimensions().front() != referenceMaxTotalValues.value()) {
+                throw std::invalid_argument(
+                    "Ragged CustomLayer outputs must preserve the packed-row capacity as their leading dimension.");
+            }
+            if (!raggedOutputs.empty()) {
+                auto explicitOutput = raggedOutputs[interfaceIndex].find(outputName);
+                if (explicitOutput == raggedOutputs[interfaceIndex].end() ||
+                    explicitOutput->second.getValues() != outputValues ||
+                    explicitOutput->second.getOffsets() != offsets) {
+                    throw std::invalid_argument(
+                        "Explicit Ragged CustomLayer outputs must use the inferred values tensor and preserve input offsets.");
+                }
+                outputInterface.emplace(outputName, explicitOutput->second);
+            } else {
+                outputInterface.emplace(outputName, RaggedTensor(outputValues, offsets));
+            }
+        }
+        raggedOutputInterfaces.push_back(std::move(outputInterface));
+    }
+}
+
 bool CustomLayer::interfaceMatches(const TensorMap& subset, const TensorMap& superset) {
     if (subset.size() != superset.size())
         return false;
@@ -789,6 +1007,58 @@ Tensor CustomLayer::getOutput(const std::string& outputName, uint32_t interfaceI
     auto found = outputInterface.find(outputName);
     if (found == outputInterface.end()) {
         throw runtime_error("CustomLayer has no output named '" + outputName + "'.");
+    }
+    return found->second;
+}
+
+CustomLayer::RaggedTensorMap CustomLayer::getRaggedInputInterface(uint32_t interfaceIndex) const {
+    if (!raggedInterfacesEnabled || interfaceIndex >= raggedInputInterfaces.size()) {
+        throw runtime_error("CustomLayer has no ragged input interface at the requested index.");
+    }
+    return raggedInputInterfaces[interfaceIndex];
+}
+
+CustomLayer::RaggedTensorMap CustomLayer::getRaggedOutputInterfaceByIndex(uint32_t interfaceIndex) const {
+    if (!raggedInterfacesEnabled || interfaceIndex >= raggedOutputInterfaces.size()) {
+        throw runtime_error("CustomLayer has no ragged output interface at the requested index.");
+    }
+    return raggedOutputInterfaces[interfaceIndex];
+}
+
+CustomLayer::RaggedTensorMap CustomLayer::getRaggedOutputInterface(const RaggedTensorMap& inputInterface) const {
+    if (!raggedInterfacesEnabled) {
+        throw runtime_error("Cannot query a ragged interface from a dense CustomLayer.");
+    }
+    bool foundMatch = false;
+    uint32_t matchedIndex = 0;
+    for (uint32_t i = 0; i < raggedInputInterfaces.size(); ++i) {
+        if (inputInterface.size() != raggedInputInterfaces[i].size()) continue;
+        bool same = true;
+        for (const auto& [name, tensor] : inputInterface) {
+            auto found = raggedInputInterfaces[i].find(name);
+            if (found == raggedInputInterfaces[i].end() || found->second != tensor) {
+                same = false;
+                break;
+            }
+        }
+        if (!same) continue;
+        if (foundMatch) {
+            throw runtime_error("Ragged CustomLayer input interface matches more than one application.");
+        }
+        foundMatch = true;
+        matchedIndex = i;
+    }
+    if (!foundMatch) {
+        throw runtime_error("Ragged CustomLayer input interface is not connected to this layer.");
+    }
+    return getRaggedOutputInterfaceByIndex(matchedIndex);
+}
+
+RaggedTensor CustomLayer::getRaggedOutput(const std::string& outputName, uint32_t interfaceIndex) const {
+    RaggedTensorMap outputInterface = getRaggedOutputInterfaceByIndex(interfaceIndex);
+    auto found = outputInterface.find(outputName);
+    if (found == outputInterface.end()) {
+        throw runtime_error("Ragged CustomLayer has no output named '" + outputName + "'.");
     }
     return found->second;
 }
@@ -936,7 +1206,7 @@ std::vector<Tensor> CustomLayer::getOutputsFromInput(Tensor inputTensor) {
         if (emittedOutputInterface[interfaceIndex]) {
             continue;
         }
-        if (connectedInputPortIndicesByInterface[interfaceIndex].size() != inputNames.size()) {
+        if (connectedInputPortIndicesByInterface[interfaceIndex].size() != physicalInputPortCount()) {
             continue;
         }
         if (interfaceIndex >= outputInterfaces.size()) {
@@ -967,6 +1237,8 @@ uint64_t CustomLayer::getFirstInstanceMemRequirementInBytes(uint32_t batchSize, 
         totalBytes += tensor.getTotalSizeInBytes();
     if (batchValidityMaskEnabled)
         totalBytes += sizeof(float);
+    if (raggedInterfacesEnabled)
+        return totalBytes;
     return totalBytes * std::max<uint32_t>(1, batchSize);
 }
 
@@ -997,6 +1269,54 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
         const Tensor& outputTensor = outputInterface.at(outputName);
         declaredOutputDescriptors.push_back(ThorImplementation::CustomLayer::DeclaredOutputDescriptor{
             outputTensor.getDataType(), outputTensor.getDimensions(), outputDimensionsIncludeBatch.contains(outputName)});
+    }
+
+    if (raggedInterfacesEnabled) {
+        THOR_THROW_IF_FALSE(!raggedInputInterfaces.empty() && !raggedOutputInterfaces.empty());
+        THOR_THROW_IF_FALSE(serializableExpressionDefinition != nullptr);
+        const RaggedTensor& referenceInput = raggedInputInterfaces.front().at(inputNames.front());
+        std::vector<uint64_t> inputElementsPerValue;
+        std::vector<uint32_t> valuesInputPorts;
+        inputElementsPerValue.reserve(inputNames.size());
+        valuesInputPorts.reserve(inputNames.size());
+        for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+            inputElementsPerValue.push_back(
+                elementsPerValue(raggedInputInterfaces.front().at(inputNames[inputPort]).getTrailingDimensions()));
+            valuesInputPorts.push_back(inputPort);
+        }
+
+        std::vector<uint64_t> outputElementsPerValue;
+        outputElementsPerValue.reserve(outputNames.size());
+        for (const std::string& outputName : outputNames) {
+            outputElementsPerValue.push_back(
+                elementsPerValue(raggedOutputInterfaces.front().at(outputName).getTrailingDimensions()));
+        }
+
+        ThorImplementation::ExpressionDefinition raggedDefinition =
+            addRaggedRuntimeExtents(*serializableExpressionDefinition,
+                                    kRaggedOffsetsInputName,
+                                    referenceInput.getBatchSize(),
+                                    referenceInput.getMaxTotalValues(),
+                                    outputNames,
+                                    outputElementsPerValue);
+        std::vector<std::string> physicalInputNames = inputNames;
+        physicalInputNames.push_back(kRaggedOffsetsInputName);
+
+        auto physicalLayer = std::make_shared<ThorImplementation::RaggedCustomLayer>(
+            ThorImplementation::DynamicExpression::fromExpressionDefinition(raggedDefinition),
+            std::move(physicalInputNames),
+            outputNames,
+            placement,
+            physicalParameters,
+            inferenceOnly,
+            referenceInput.getMaxTotalValues(),
+            std::move(inputElementsPerValue),
+            std::move(outputElementsPerValue),
+            std::move(valuesInputPorts),
+            Layer::getId(),
+            std::move(declaredOutputDescriptors));
+        physicalLayer->setLayerName(getLayerType());
+        return physicalLayer;
     }
 
     auto physicalLayer = createPhysicalLayer(expr,
@@ -1064,6 +1384,7 @@ json CustomLayer::architectureJson() const {
     j["output_names"] = outputNames;
     j["uses_batch_validity"] = batchValidityMaskEnabled;
     j["requires_full_batch"] = fullBatchRequired;
+    j["use_ragged"] = raggedInterfacesEnabled;
     j["input_interfaces"] = json::array();
     j["output_interfaces"] = json::array();
     j["parameters"] = json::object();
@@ -1082,6 +1403,23 @@ json CustomLayer::architectureJson() const {
             interfaceJson[name] = outputInterface.at(name).architectureJson();
         }
         j["output_interfaces"].push_back(interfaceJson);
+    }
+
+    if (raggedInterfacesEnabled) {
+        j["ragged_input_interfaces"] = json::array();
+        j["ragged_output_interfaces"] = json::array();
+        for (const RaggedTensorMap& inputInterface : raggedInputInterfaces) {
+            json interfaceJson;
+            for (const std::string& name : inputNames)
+                interfaceJson[name] = inputInterface.at(name).architectureJson();
+            j["ragged_input_interfaces"].push_back(std::move(interfaceJson));
+        }
+        for (const RaggedTensorMap& outputInterface : raggedOutputInterfaces) {
+            json interfaceJson;
+            for (const std::string& name : outputNames)
+                interfaceJson[name] = outputInterface.at(name).architectureJson();
+            j["ragged_output_interfaces"].push_back(std::move(interfaceJson));
+        }
     }
 
     for (const auto& parameter : parameters) {
@@ -1142,14 +1480,84 @@ void CustomLayer::deserialize(std::shared_ptr<thor_file::TarReader>& archiveRead
         parameters.push_back(std::make_shared<ParameterSpecification>(std::move(parameter)));
     }
 
-    CustomLayer customLayer(DynamicExpression::fromExpressionDefinition(expressionDefinition),
-                            std::move(inputNames),
-                            std::move(outputNames),
-                            inputInterfaces,
-                            outputInterfaces,
-                            std::move(parameters),
-                            usesBatchValidity,
-                            requiresFullBatch);
+    const bool useRagged = j.value("use_ragged", false);
+    CustomLayer customLayer = [&]() {
+        if (!useRagged) {
+            return CustomLayer(DynamicExpression::fromExpressionDefinition(expressionDefinition),
+                               inputNames,
+                               outputNames,
+                               inputInterfaces,
+                               outputInterfaces,
+                               std::move(parameters),
+                               usesBatchValidity,
+                               requiresFullBatch);
+        }
+
+        if (usesBatchValidity || requiresFullBatch)
+            throw runtime_error("Serialized ragged CustomLayer cannot use dense placement-batch semantics.");
+        if (!j.contains("ragged_input_interfaces") || !j.contains("ragged_output_interfaces"))
+            throw runtime_error("Serialized ragged CustomLayer is missing ragged interface metadata.");
+        if (j.at("ragged_input_interfaces").size() != inputInterfaces.size() ||
+            j.at("ragged_output_interfaces").size() != outputInterfaces.size())
+            throw runtime_error("Serialized ragged CustomLayer interface metadata does not match its application count.");
+
+        std::vector<RaggedTensorMap> raggedInputs;
+        std::vector<RaggedTensorMap> raggedOutputs;
+        raggedInputs.reserve(inputInterfaces.size());
+        raggedOutputs.reserve(outputInterfaces.size());
+        for (uint32_t interfaceIndex = 0; interfaceIndex < inputInterfaces.size(); ++interfaceIndex) {
+            const json& raggedInputJson = j.at("ragged_input_interfaces").at(interfaceIndex);
+            RaggedTensorMap raggedInputInterface;
+            std::optional<Tensor> commonOffsets;
+            for (const std::string& name : inputNames) {
+                const json& tensorJson = raggedInputJson.at(name);
+                const uint64_t valuesId = tensorJson.at("values").at("id").get<uint64_t>();
+                const uint64_t offsetsId = tensorJson.at("offsets").at("id").get<uint64_t>();
+                if (valuesId != j.at("input_interfaces").at(interfaceIndex).at(name).at("id").get<uint64_t>())
+                    throw runtime_error("Serialized ragged CustomLayer values metadata disagrees with its logical input interface.");
+                Tensor values = network->getApiTensorByOriginalId(valuesId);
+                Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
+                if (commonOffsets.has_value() && commonOffsets.value() != offsets)
+                    throw runtime_error("Serialized ragged CustomLayer inputs in one application do not share offsets.");
+                commonOffsets = offsets;
+                RaggedTensor ragged(values, offsets);
+                if (ragged.getBatchSize() != tensorJson.at("batch_size").get<uint64_t>() ||
+                    ragged.getMaxTotalValues() != tensorJson.at("max_total_values").get<uint64_t>())
+                    throw runtime_error("Serialized ragged CustomLayer input metadata does not match reconstructed tensors.");
+                raggedInputInterface.emplace(name, ragged);
+            }
+            if (!commonOffsets.has_value())
+                throw runtime_error("Serialized ragged CustomLayer application has no inputs.");
+
+            const json& raggedOutputJson = j.at("ragged_output_interfaces").at(interfaceIndex);
+            RaggedTensorMap raggedOutputInterface;
+            for (const std::string& name : outputNames) {
+                const json& tensorJson = raggedOutputJson.at(name);
+                const uint64_t valuesId = tensorJson.at("values").at("id").get<uint64_t>();
+                const uint64_t offsetsId = tensorJson.at("offsets").at("id").get<uint64_t>();
+                if (valuesId != j.at("output_interfaces").at(interfaceIndex).at(name).at("id").get<uint64_t>())
+                    throw runtime_error("Serialized ragged CustomLayer values metadata disagrees with its logical output interface.");
+                if (offsetsId != commonOffsets->getOriginalId())
+                    throw runtime_error("Serialized ragged CustomLayer output must preserve its application's input offsets.");
+                RaggedTensor ragged(outputInterfaces[interfaceIndex].at(name), commonOffsets.value());
+                if (ragged.getBatchSize() != tensorJson.at("batch_size").get<uint64_t>() ||
+                    ragged.getMaxTotalValues() != tensorJson.at("max_total_values").get<uint64_t>())
+                    throw runtime_error("Serialized ragged CustomLayer output metadata does not match reconstructed tensors.");
+                raggedOutputInterface.emplace(name, ragged);
+            }
+            raggedInputs.push_back(std::move(raggedInputInterface));
+            raggedOutputs.push_back(std::move(raggedOutputInterface));
+        }
+
+        return CustomLayer(DynamicExpression::fromExpressionDefinition(expressionDefinition),
+                           inputNames,
+                           outputNames,
+                           raggedInputs,
+                           raggedOutputs,
+                           std::move(parameters),
+                           false,
+                           false);
+    }();
     customLayer.initialized = true;
     customLayer.addToNetwork(network);
 }

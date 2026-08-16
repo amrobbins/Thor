@@ -356,6 +356,33 @@ CustomLayer::CustomLayer(DynamicExpression expr,
                          bool requiresFullBatch,
                          std::vector<bool> inputDimensionsIncludeBatch,
                          std::optional<uint32_t> fixedBatchCapacity)
+    : CustomLayer(std::move(expr),
+                  std::move(inputNames),
+                  std::move(outputNames),
+                  placement,
+                  parameters,
+                  inferenceOnly,
+                  stampedId,
+                  std::move(declaredOutputDescriptors),
+                  usesBatchValidity,
+                  requiresFullBatch,
+                  std::move(inputDimensionsIncludeBatch),
+                  fixedBatchCapacity,
+                  {}) {}
+
+CustomLayer::CustomLayer(DynamicExpression expr,
+                         std::vector<std::string> inputNames,
+                         std::vector<std::string> outputNames,
+                         const TensorPlacement& placement,
+                         const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
+                         bool inferenceOnly,
+                         int64_t stampedId,
+                         std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors,
+                         bool usesBatchValidity,
+                         bool requiresFullBatch,
+                         std::vector<bool> inputDimensionsIncludeBatch,
+                         std::optional<uint32_t> fixedBatchCapacity,
+                         std::set<std::string> trustedReservedInputNames)
     : TrainableLayer(placement, inferenceOnly, stampedId),
       layerDefinitionExpression(std::move(expr)),
       batchValidityMaskEnabled(usesBatchValidity),
@@ -367,7 +394,7 @@ CustomLayer::CustomLayer(DynamicExpression expr,
       fixedBatchCapacity(fixedBatchCapacity) {
     if (batchValidityMaskEnabled && fullBatchRequired)
         throw runtime_error("CustomLayer cannot both use batch validity and require a full batch.");
-    validatePortNames(this->inputNames, "input");
+    validatePortNames(this->inputNames, "input", trustedReservedInputNames);
     validatePortNames(this->outputNames, "output");
     const std::vector<std::string>& expectedExpressionInputs = layerDefinitionExpression.getExpectedInputNames();
     if (!expectedExpressionInputs.empty()) {
@@ -439,9 +466,17 @@ CustomLayer::CustomLayer(DynamicExpression expr,
     }
 }
 
-void CustomLayer::validatePortNames(const std::vector<std::string>& names, const std::string& what) {
+void CustomLayer::validatePortNames(const std::vector<std::string>& names,
+                                    const std::string& what,
+                                    const std::set<std::string>& trustedReservedNames) {
     if (names.empty()) {
         throw runtime_error("CustomLayer requires at least one " + what + " port.");
+    }
+
+    for (const std::string& trustedName : trustedReservedNames) {
+        if (trustedName.length() < 2 || trustedName[0] != '_' || trustedName[1] != '_') {
+            throw runtime_error("CustomLayer trusted internal port names must use the reserved __ prefix: " + trustedName);
+        }
     }
 
     std::set<std::string> seen;
@@ -449,11 +484,17 @@ void CustomLayer::validatePortNames(const std::vector<std::string>& names, const
         if (name.empty()) {
             throw runtime_error("CustomLayer " + what + " port name cannot be empty.");
         }
-        if (name.length() >= 2 && name[0] == '_' && name[1] == '_') {
+        if (name.length() >= 2 && name[0] == '_' && name[1] == '_' && !trustedReservedNames.contains(name)) {
             throw runtime_error("CustomLayer " + what + " port names cannot start with __ that is reserved. Name " + name + " is illegal.");
         }
         if (!seen.insert(name).second) {
             throw runtime_error("Duplicate CustomLayer " + what + " port name: " + name);
+        }
+    }
+
+    for (const std::string& trustedName : trustedReservedNames) {
+        if (!seen.contains(trustedName)) {
+            throw runtime_error("CustomLayer trusted internal port name is not present in the declared " + what + " ports: " + trustedName);
         }
     }
 }

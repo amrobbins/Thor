@@ -1,7 +1,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
-#include "DeepLearning/Implementation/Layers/RaggedExpressionLayer.h"
+#include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 #include "Utilities/Expression/RaggedExpression.h"
 #include "Utilities/Expression/DynamicExpression.h"
 
@@ -112,7 +112,7 @@ std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActi
         for (uint64_t dim : raggedFeatureOutput->getTrailingDimensions()) {
             outputElementsPerValue *= dim;
         }
-        auto physicalActivation = std::make_shared<ThorImplementation::RaggedExpressionLayer>(
+        auto physicalActivation = std::make_shared<ThorImplementation::RaggedCustomLayer>(
             DynamicExpression::fromExpressionDefinition(definition), inputNames, std::vector<std::string>{"feature_output"},
             placement, inferenceOnly, ragged.getMaxTotalValues(), inputElementsPerValue, outputElementsPerValue, 0, getId());
         physicalActivation->setLayerName(getLayerType());

@@ -18,6 +18,8 @@ Public API metadata source: **generated .pyi**.
 
 ::: thor.layers.CustomLayer
 
+::: thor.layers.Add
+
 ::: thor.layers.AdaptiveLayerNorm
 
 ::: thor.layers.Attention
@@ -59,6 +61,8 @@ Public API metadata source: **generated .pyi**.
 ::: thor.layers.StopGradient
 
 ::: thor.layers.NetworkInput
+
+::: thor.layers.RaggedRowLengths
 
 ::: thor.layers.NetworkOutput
 

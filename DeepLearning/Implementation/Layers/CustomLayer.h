@@ -116,6 +116,24 @@ class CustomLayer : public TrainableLayer {
     uint32_t getNumFusedCustomLossGradients() const;
 
    protected:
+    // Internal specializations may add structural expression inputs whose reserved
+    // __thor_* names must never become part of the public CustomLayer port namespace.
+    // The ordinary public constructors pass an empty allowlist, so user-declared
+    // CustomLayer ports continue to reject every name beginning with "__".
+    CustomLayer(DynamicExpression expr,
+                std::vector<std::string> inputNames,
+                std::vector<std::string> outputNames,
+                const TensorPlacement& placement,
+                const std::vector<std::shared_ptr<PhysicalParameter>>& parameters,
+                bool inferenceOnly,
+                int64_t stampedId,
+                std::vector<DeclaredOutputDescriptor> declaredOutputDescriptors,
+                bool usesBatchValidity,
+                bool requiresFullBatch,
+                std::vector<bool> inputDimensionsIncludeBatch,
+                std::optional<uint32_t> fixedBatchCapacity,
+                std::set<std::string> trustedReservedInputNames);
+
     void compileImpl() override;
     // Narrow execution hooks for expression-backed specializations that need to maintain
     // structural tensor metadata/canonical padding around the regular Expression plan.
@@ -200,7 +218,9 @@ class CustomLayer : public TrainableLayer {
         uint32_t portIndex;
     };
 
-    static void validatePortNames(const std::vector<std::string>& names, const std::string& what);
+    static void validatePortNames(const std::vector<std::string>& names,
+                                  const std::string& what,
+                                  const std::set<std::string>& trustedReservedNames = {});
 
     uint32_t inputFlatIndex(uint32_t applicationIndex, uint32_t inputPortIndex) const;
     uint32_t outputFlatIndex(uint32_t applicationIndex, uint32_t outputPortIndex) const;

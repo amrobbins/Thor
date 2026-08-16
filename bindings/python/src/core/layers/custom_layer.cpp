@@ -4,6 +4,7 @@
 #include <nanobind/stl/unordered_map.h>
 #include <nanobind/stl/vector.h>
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <set>
@@ -21,6 +22,7 @@
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Expression/DynamicExpression.h"
@@ -37,6 +39,7 @@ using namespace Thor;
 using DataType = ThorImplementation::DataType;
 using PhysicalTensor = ThorImplementation::Tensor;
 using TensorMap = std::unordered_map<std::string, Tensor>;
+using RaggedTensorMap = std::unordered_map<std::string, RaggedTensor>;
 using PhysicalTensorMap = std::unordered_map<std::string, PhysicalTensor>;
 using Expression = ThorImplementation::Expression;
 using Outputs = ThorImplementation::Outputs;
@@ -71,9 +74,11 @@ class GilSafePythonObject {
     PyObject* object = nullptr;
 };
 
-struct OrderedApiTensorMap {
+struct OrderedApiInputs {
     std::vector<std::string> names;
+    bool ragged = false;
     TensorMap tensors;
+    RaggedTensorMap raggedTensors;
 };
 
 struct CustomLayerTensorSpec {
@@ -86,10 +91,15 @@ struct CustomLayerTensorSpec {
 
 class CustomLayerSpecContext {
    public:
-    explicit CustomLayerSpecContext(const OrderedApiTensorMap& inputs) {
+    explicit CustomLayerSpecContext(const OrderedApiInputs& inputs) {
         for (const std::string& name : inputs.names) {
-            const Tensor& tensor = inputs.tensors.at(name);
-            inputSpecs.emplace(name, CustomLayerTensorSpec{tensor.getDimensions(), tensor.getDataType()});
+            if (inputs.ragged) {
+                const RaggedTensor& tensor = inputs.raggedTensors.at(name);
+                inputSpecs.emplace(name, CustomLayerTensorSpec{tensor.getTrailingDimensions(), tensor.getValuesDataType()});
+            } else {
+                const Tensor& tensor = inputs.tensors.at(name);
+                inputSpecs.emplace(name, CustomLayerTensorSpec{tensor.getDimensions(), tensor.getDataType()});
+            }
         }
     }
 
@@ -106,43 +116,75 @@ class CustomLayerSpecContext {
     std::unordered_map<std::string, CustomLayerTensorSpec> inputSpecs;
 };
 
-OrderedApiTensorMap apiTensorMapFromPythonDict(nb::dict mapping, const std::string& what) {
-    OrderedApiTensorMap result;
+OrderedApiInputs apiInputsFromPythonDict(nb::dict mapping, const std::string& what) {
+    OrderedApiInputs result;
     result.names.reserve(mapping.size());
+    std::optional<bool> raggedKind;
 
     for (auto item : mapping) {
         std::string name = pybind::castOrTypeError<std::string>(item.first, "CustomLayer " + what + " key", "str", false);
-        Tensor tensor = pybind::castOrTypeError<Tensor>(item.second, "CustomLayer " + what + " value", "thor.Tensor", false);
-        if (result.tensors.contains(name)) {
+        if (std::find(result.names.begin(), result.names.end(), name) != result.names.end()) {
             throw std::runtime_error("CustomLayer " + what + " contains duplicate name '" + name + "'.");
         }
+
+        const bool isDense = nb::isinstance<Tensor>(item.second);
+        const bool isRagged = nb::isinstance<RaggedTensor>(item.second);
+        if (!isDense && !isRagged) {
+            pybind::raiseCastTypeError(
+                "CustomLayer " + what + " value", "thor.Tensor or thor.RaggedTensor", item.second);
+        }
+        if (!raggedKind.has_value()) {
+            raggedKind = isRagged;
+        } else if (raggedKind.value() != isRagged) {
+            throw nb::type_error("CustomLayer inputs may not mix thor.Tensor and thor.RaggedTensor values in one interface.");
+        }
+
         result.names.push_back(name);
-        result.tensors.emplace(std::move(name), std::move(tensor));
+        if (isRagged) {
+            result.raggedTensors.emplace(
+                std::move(name), pybind::castOrTypeError<RaggedTensor>(item.second, "CustomLayer " + what + " value", "thor.RaggedTensor", false));
+        } else {
+            result.tensors.emplace(
+                std::move(name), pybind::castOrTypeError<Tensor>(item.second, "CustomLayer " + what + " value", "thor.Tensor", false));
+        }
     }
 
     if (result.names.empty()) {
         throw std::runtime_error("CustomLayer requires at least one " + what + ".");
     }
+    result.ragged = raggedKind.value_or(false);
     return result;
 }
 
-OrderedApiTensorMap normalizeInputs(nb::object inputsObj) {
+OrderedApiInputs normalizeInputs(nb::object inputsObj) {
     if (nb::isinstance<Tensor>(inputsObj)) {
-        OrderedApiTensorMap result;
+        OrderedApiInputs result;
         result.names.push_back("feature_input");
-        result.tensors.emplace("feature_input", pybind::castOrTypeError<Tensor>(inputsObj, "CustomLayer inputs", "thor.Tensor", false));
+        result.tensors.emplace(
+            "feature_input", pybind::castOrTypeError<Tensor>(inputsObj, "CustomLayer inputs", "thor.Tensor", false));
+        return result;
+    }
+    if (nb::isinstance<RaggedTensor>(inputsObj)) {
+        OrderedApiInputs result;
+        result.names.push_back("feature_input");
+        result.ragged = true;
+        result.raggedTensors.emplace(
+            "feature_input", pybind::castOrTypeError<RaggedTensor>(inputsObj, "CustomLayer inputs", "thor.RaggedTensor", false));
         return result;
     }
 
     if (!nb::isinstance<nb::dict>(inputsObj)) {
-        pybind::raiseCastTypeError("CustomLayer inputs", "thor.Tensor or dict[str, thor.Tensor]", inputsObj);
+        pybind::raiseCastTypeError(
+            "CustomLayer inputs", "thor.Tensor, thor.RaggedTensor, or dict[str, thor.Tensor | thor.RaggedTensor]", inputsObj);
     }
 
-    return apiTensorMapFromPythonDict(
-        pybind::castOrTypeError<nb::dict>(inputsObj, "CustomLayer inputs", "dict[str, thor.Tensor]", false), "inputs");
+    return apiInputsFromPythonDict(
+        pybind::castOrTypeError<nb::dict>(
+            inputsObj, "CustomLayer inputs", "dict[str, thor.Tensor | thor.RaggedTensor]", false),
+        "inputs");
 }
 
-std::vector<std::string> normalizeOutputNames(nb::object outputNamesObj, const OrderedApiTensorMap& inputs) {
+std::vector<std::string> normalizeOutputNames(nb::object outputNamesObj, const OrderedApiInputs& inputs) {
     if (outputNamesObj.is_none()) {
         if (inputs.names.size() == 1 && inputs.names[0] == "feature_input") {
             return {"feature_output"};
@@ -172,11 +214,16 @@ std::vector<std::string> normalizeOutputNames(nb::object outputNamesObj, const O
     return names;
 }
 
-std::optional<TensorMap> outputInterfaceFromSpecs(nb::object specsObj,
-                                                  const OrderedApiTensorMap& inputs,
+struct DeclaredOutputInterface {
+    std::optional<TensorMap> dense;
+    std::optional<RaggedTensorMap> ragged;
+};
+
+DeclaredOutputInterface outputInterfaceFromSpecs(nb::object specsObj,
+                                                  const OrderedApiInputs& inputs,
                                                   const std::vector<std::string>& outputNames) {
     if (specsObj.is_none())
-        return std::nullopt;
+        return {};
 
     nb::object resolved = specsObj;
     if (nb::isinstance<nb::callable>(resolved)) {
@@ -184,7 +231,7 @@ std::optional<TensorMap> outputInterfaceFromSpecs(nb::object specsObj,
         resolved = nb::borrow<nb::callable>(resolved)(nb::cast(context));
     }
     if (resolved.is_none())
-        return std::nullopt;
+        return {};
     if (!nb::isinstance<nb::dict>(resolved)) {
         pybind::raiseCastTypeError("CustomLayer output_specs return value", "dict[str, thor.layers.TensorSpec] or None", resolved);
     }
@@ -193,7 +240,16 @@ std::optional<TensorMap> outputInterfaceFromSpecs(nb::object specsObj,
         resolved, "CustomLayer output_specs return value", "dict[str, thor.layers.TensorSpec]", false);
     std::set<std::string> expected(outputNames.begin(), outputNames.end());
     std::set<std::string> actual;
-    TensorMap outputs;
+    TensorMap denseOutputs;
+    RaggedTensorMap raggedOutputs;
+    std::optional<Tensor> raggedOffsets;
+    uint64_t maxTotalValues = 0;
+    if (inputs.ragged) {
+        const RaggedTensor& reference = inputs.raggedTensors.at(inputs.names.front());
+        raggedOffsets = reference.getOffsets();
+        maxTotalValues = reference.getMaxTotalValues();
+    }
+
     for (auto item : mapping) {
         std::string name = pybind::castOrTypeError<std::string>(item.first, "CustomLayer output_specs key", "str", false);
         CustomLayerTensorSpec spec = pybind::castOrTypeError<CustomLayerTensorSpec>(
@@ -205,12 +261,26 @@ std::optional<TensorMap> outputInterfaceFromSpecs(nb::object specsObj,
                 throw nb::value_error("CustomLayer TensorSpec.shape dimensions must be greater than zero.");
         }
         actual.insert(name);
-        outputs.emplace(name, Tensor(spec.dtype, spec.shape));
+        if (inputs.ragged) {
+            std::vector<uint64_t> valuesShape;
+            valuesShape.reserve(spec.shape.size() + 1);
+            valuesShape.push_back(maxTotalValues);
+            valuesShape.insert(valuesShape.end(), spec.shape.begin(), spec.shape.end());
+            raggedOutputs.emplace(name, RaggedTensor(Tensor(spec.dtype, valuesShape), raggedOffsets.value()));
+        } else {
+            denseOutputs.emplace(name, Tensor(spec.dtype, spec.shape));
+        }
     }
     if (actual != expected) {
         throw std::runtime_error("CustomLayer output_specs names must exactly match output_names.");
     }
-    return outputs;
+
+    DeclaredOutputInterface result;
+    if (inputs.ragged)
+        result.ragged = std::move(raggedOutputs);
+    else
+        result.dense = std::move(denseOutputs);
+    return result;
 }
 
 std::vector<std::shared_ptr<ParameterSpecification>> parametersFromPythonObject(nb::object obj) {
@@ -693,7 +763,7 @@ void bind_custom_layer(nb::module_& layers) {
            nb::object outputSpecsObj,
            bool usesBatchValidity,
            bool requiresFullBatch) {
-            OrderedApiTensorMap inputs = normalizeInputs(inputsObj);
+            OrderedApiInputs inputs = normalizeInputs(inputsObj);
             CustomLayer* self = nb::inst_ptr<CustomLayer>(pySelf.ptr());
 
             std::vector<std::string> outputNames = normalizeOutputNames(outputNamesObj, inputs);
@@ -707,7 +777,7 @@ void bind_custom_layer(nb::module_& layers) {
             if (resolvedOutputSpecs.is_none() && pySelfObj.is_valid()) {
                 resolvedOutputSpecs = pySelfObj.attr("output_specs")(nb::cast(CustomLayerSpecContext(inputs)));
             }
-            std::optional<TensorMap> declaredOutputInterface =
+            DeclaredOutputInterface declaredOutputInterface =
                 outputInterfaceFromSpecs(resolvedOutputSpecs, inputs, outputNames);
 
             std::vector<std::shared_ptr<ParameterSpecification>> parameters;
@@ -763,12 +833,16 @@ void bind_custom_layer(nb::module_& layers) {
                 .expression(std::move(expr))
                 .inputNames(inputs.names)
                 .outputNames(outputNames)
-                .inputInterface(inputs.tensors)
                 .parameters(parameters);
+            if (inputs.ragged)
+                builder.inputInterface(inputs.raggedTensors);
+            else
+                builder.inputInterface(inputs.tensors);
 
-            if (declaredOutputInterface.has_value()) {
-                builder.outputInterface(declaredOutputInterface.value());
-            }
+            if (declaredOutputInterface.ragged.has_value())
+                builder.outputInterface(declaredOutputInterface.ragged.value());
+            else if (declaredOutputInterface.dense.has_value())
+                builder.outputInterface(declaredOutputInterface.dense.value());
 
             if (optimizer != nullptr) {
                 builder.optimizer(std::move(optimizer));
@@ -815,8 +889,9 @@ ExpressionDefinition is already batch-polymorphic. Terminal storage aliases such
 strided_view are materialized generically into the layer's dense public output tensor.
 
 Convenience forms:
-- inputs=<thor.Tensor> defaults to {"feature_input": tensor}
+- inputs=<thor.Tensor or thor.RaggedTensor> defaults to {"feature_input": tensor}
 - output_names omitted defaults to ["feature_output"]
+- ragged inputs produce partition-preserving thor.RaggedTensor outputs; all named ragged inputs must share one offsets tensor
 - activation=<thor.activations.Activation> stitches that activation onto each returned expression before compilation
 - uses_batch_validity=True declares runtime batch-validity use; Thor currently exposes it as
   ``thor.BATCH_VALIDITY_MASK_NAME`` through ``context.input(...)``
@@ -834,12 +909,62 @@ Convenience forms:
 
     custom_layer.def_prop_ro("uses_batch_validity", &CustomLayer::usesBatchValidity);
     custom_layer.def_prop_ro("requires_full_batch", &CustomLayer::requiresFullBatch);
-    custom_layer.def("get_input_interface", &CustomLayer::getInputInterface, "interface_index"_a = 0);
-    custom_layer.def("get_output_interface", nb::overload_cast<const TensorMap&>(&CustomLayer::getOutputInterface, nb::const_), "inputs"_a);
-    custom_layer.def("get_output_interface_by_index", &CustomLayer::getOutputInterfaceByIndex, "interface_index"_a = 0);
-    custom_layer.def("get_output", &CustomLayer::getOutput, "name"_a, "interface_index"_a = 0);
-    custom_layer.def("__getitem__", [](const CustomLayer& self, const std::string& name) { return self.getOutput(name); }, "name"_a);
-    custom_layer.def_prop_ro("outputs", [](const CustomLayer& self) { return self.getOutputInterfaceByIndex(0); });
+    custom_layer.def_prop_ro("use_ragged", &CustomLayer::getUseRagged);
+    custom_layer.def("get_use_ragged", &CustomLayer::getUseRagged);
+    custom_layer.def(
+        "get_input_interface",
+        [](const CustomLayer& self, uint32_t interfaceIndex) -> nb::object {
+            if (self.getUseRagged())
+                return nb::cast(self.getRaggedInputInterface(interfaceIndex));
+            return nb::cast(self.getInputInterface(interfaceIndex));
+        },
+        "interface_index"_a = 0);
+    custom_layer.def(
+        "get_output_interface",
+        [](const CustomLayer& self, nb::object inputsObj) -> nb::object {
+            OrderedApiInputs inputs = normalizeInputs(inputsObj);
+            if (self.getUseRagged()) {
+                if (!inputs.ragged)
+                    throw nb::type_error("Ragged CustomLayer get_output_interface requires RaggedTensor inputs.");
+                return nb::cast(self.getRaggedOutputInterface(inputs.raggedTensors));
+            }
+            if (inputs.ragged)
+                throw nb::type_error("Dense CustomLayer get_output_interface requires Tensor inputs.");
+            return nb::cast(self.getOutputInterface(inputs.tensors));
+        },
+        "inputs"_a);
+    custom_layer.def(
+        "get_output_interface_by_index",
+        [](const CustomLayer& self, uint32_t interfaceIndex) -> nb::object {
+            if (self.getUseRagged())
+                return nb::cast(self.getRaggedOutputInterfaceByIndex(interfaceIndex));
+            return nb::cast(self.getOutputInterfaceByIndex(interfaceIndex));
+        },
+        "interface_index"_a = 0);
+    custom_layer.def(
+        "get_output",
+        [](const CustomLayer& self, const std::string& name, uint32_t interfaceIndex) -> nb::object {
+            if (self.getUseRagged())
+                return nb::cast(self.getRaggedOutput(name, interfaceIndex));
+            return nb::cast(self.getOutput(name, interfaceIndex));
+        },
+        "name"_a,
+        "interface_index"_a = 0);
+    custom_layer.def(
+        "__getitem__",
+        [](const CustomLayer& self, const std::string& name) -> nb::object {
+            if (self.getUseRagged())
+                return nb::cast(self.getRaggedOutput(name));
+            return nb::cast(self.getOutput(name));
+        },
+        "name"_a);
+    custom_layer.def_prop_ro(
+        "outputs",
+        [](const CustomLayer& self) -> nb::object {
+            if (self.getUseRagged())
+                return nb::cast(self.getRaggedOutputInterfaceByIndex(0));
+            return nb::cast(self.getOutputInterfaceByIndex(0));
+        });
     custom_layer.def("get_input_names", &CustomLayer::getInputNames);
     custom_layer.def("get_output_names", &CustomLayer::getOutputNames);
     custom_layer.def("get_parameters", &CustomLayer::getParameters, nb::rv_policy::reference_internal);

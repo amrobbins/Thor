@@ -731,3 +731,93 @@ TEST(CudaSourceEmitter, MultipleRaggedOutputsSharingOffsetsCanFuseTogether) {
         EXPECT_NE(source.find("active_values_raw"), std::string::npos);
     });
 }
+
+TEST(EquationCompiler, RaggedCompositePointwiseCustomLayerMathStaysInOneFusedStage) {
+    const RaggedTensorDescriptor descriptor(DataType::FP32, {4}, 3, 8, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    const RaggedExpression activity = ragged.mapValues([](const Expression& values) {
+        const Expression logged = values.log1p();
+        return -((-logged).expm1());
+    });
+
+    auto physical = Expression::outputs({{"activity", activity.getValues()}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::UINT32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    ASSERT_EQ(stages[0].outputs.size(), 1U);
+
+    size_t raggedExtentNodes = 0;
+    for (const ExprNode& node : stages[0].expr.nodes) {
+        if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            ++raggedExtentNodes;
+            EXPECT_EQ(node.ragged_runtime_elements_per_value, 4U);
+        }
+    }
+    EXPECT_EQ(raggedExtentNodes, 1U);
+
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_composite_pointwise_custom_layer_math");
+    EXPECT_NE(source.find("log1pf("), std::string::npos);
+    EXPECT_NE(source.find("expm1f("), std::string::npos);
+    EXPECT_NE(source.find("active_values_raw"), std::string::npos);
+}
+
+TEST(EquationCompiler, TerminalStridedViewRemainsAStorageAliasWithoutKernelStage) {
+    auto x = Expression::input("x");
+    const Expression view = x.stridedView({2}, {4}, 1);
+    auto physical = Expression::outputs({{"y", view}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    EXPECT_TRUE(stages.empty());
+}
+
+TEST(EquationCompiler, RaggedTerminalOutputsWithDifferentRowWidthsUseSeparateFusedStages) {
+    const RaggedTensorDescriptor descriptor(DataType::FP32, {4}, 3, 8, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    const RaggedExpression wide = ragged.relu();
+    const RaggedExpression narrow = wide.sliceLastDimension(1, 2);
+    auto physical = Expression::outputs({
+        {"wide", wide.getValues()},
+        {"narrow", narrow.getValues()},
+    }).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::UINT32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 2U);
+    size_t width_four_stages = 0;
+    size_t width_two_stages = 0;
+    size_t strided_view_stages = 0;
+    for (const PhysicalExecutionStage& stage : stages) {
+        ASSERT_EQ(stage.kind, PhysicalExecutionStage::Kind::FusedKernel);
+        ASSERT_EQ(stage.outputs.size(), 1U);
+
+        bool has_strided_view = false;
+        std::optional<uint64_t> runtime_width;
+        for (const ExprNode& node : stage.expr.nodes) {
+            has_strided_view = has_strided_view || node.op == ExprOp::STRIDED_VIEW;
+            if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+                ASSERT_FALSE(runtime_width.has_value());
+                runtime_width = node.ragged_runtime_elements_per_value;
+            }
+        }
+        ASSERT_TRUE(runtime_width.has_value());
+        if (runtime_width.value() == 4U) {
+            ++width_four_stages;
+            EXPECT_FALSE(has_strided_view);
+        } else if (runtime_width.value() == 2U) {
+            ++width_two_stages;
+            EXPECT_TRUE(has_strided_view);
+        } else {
+            ADD_FAILURE() << "unexpected ragged runtime width " << runtime_width.value();
+        }
+        if (has_strided_view) {
+            ++strided_view_stages;
+        }
+    }
+    EXPECT_EQ(width_four_stages, 1U);
+    EXPECT_EQ(width_two_stages, 1U);
+    EXPECT_EQ(strided_view_stages, 1U);
+}

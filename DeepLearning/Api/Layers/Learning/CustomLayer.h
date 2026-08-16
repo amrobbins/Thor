@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Parameter/BoundParameter.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "Utilities/Expression/DynamicExpression.h"
 
@@ -22,6 +23,7 @@ namespace Thor {
 class CustomLayer : public TrainableLayer {
    public:
     using TensorMap = std::unordered_map<std::string, Tensor>;
+    using RaggedTensorMap = std::unordered_map<std::string, RaggedTensor>;
 
     class Builder;
 
@@ -42,12 +44,30 @@ class CustomLayer : public TrainableLayer {
                 bool usesBatchValidity = false,
                 bool requiresFullBatch = false);
 
+    // Partition-preserving ragged CustomLayer. The user expression sees only the named
+    // packed-values inputs; row-partition offsets remain structural metadata owned by
+    // CustomLayer and are reattached to every output. Mixed dense/ragged feature
+    // interfaces are intentionally not supported.
+    CustomLayer(ThorImplementation::DynamicExpression expr,
+                std::vector<std::string> inputNames,
+                std::vector<std::string> outputNames,
+                const std::vector<RaggedTensorMap>& inputInterfaces,
+                const std::vector<RaggedTensorMap>& outputInterfaces = {},
+                std::vector<std::shared_ptr<ParameterSpecification>> parameters = {},
+                bool usesBatchValidity = false,
+                bool requiresFullBatch = false);
+
     const std::vector<std::string>& getInputNames() const { return inputNames; }
     const std::vector<std::string>& getOutputNames() const { return outputNames; }
     TensorMap getInputInterface(uint32_t interfaceIndex = 0) const;
     TensorMap getOutputInterface(const TensorMap& inputInterface) const;
     TensorMap getOutputInterfaceByIndex(uint32_t interfaceIndex = 0) const;
     Tensor getOutput(const std::string& outputName, uint32_t interfaceIndex = 0) const;
+    [[nodiscard]] bool getUseRagged() const { return raggedInterfacesEnabled; }
+    RaggedTensorMap getRaggedInputInterface(uint32_t interfaceIndex = 0) const;
+    RaggedTensorMap getRaggedOutputInterface(const RaggedTensorMap& inputInterface) const;
+    RaggedTensorMap getRaggedOutputInterfaceByIndex(uint32_t interfaceIndex = 0) const;
+    RaggedTensor getRaggedOutput(const std::string& outputName, uint32_t interfaceIndex = 0) const;
     const ThorImplementation::DynamicExpression& getExpression() const { return expr; }
     bool usesBatchValidity() const { return batchValidityMaskEnabled; }
     bool requiresFullBatch() const { return fullBatchRequired; }
@@ -135,6 +155,9 @@ class CustomLayer : public TrainableLayer {
 
     void assignInputInterfaces(const std::vector<TensorMap>& inputInterfaces);
     void assignOutputInterfaces(const std::vector<TensorMap>& outputInterfaces);
+    void enableRaggedInterfaces(const std::vector<RaggedTensorMap>& inputInterfaces,
+                                const std::vector<RaggedTensorMap>& outputInterfaces);
+    [[nodiscard]] uint32_t physicalInputPortCount() const;
     void validateInputInterfacesMatchExpression() const;
     void validateOutputInterfacesMatchExpression() const;
     void validateParameterNames() const;
@@ -172,6 +195,9 @@ class CustomLayer : public TrainableLayer {
 
     std::vector<TensorMap> inputInterfaces;
     std::vector<TensorMap> outputInterfaces;
+    bool raggedInterfacesEnabled = false;
+    std::vector<RaggedTensorMap> raggedInputInterfaces;
+    std::vector<RaggedTensorMap> raggedOutputInterfaces;
 
     // std::vector<std::shared_ptr<ParameterSpecification>> parameters;
 
@@ -199,7 +225,14 @@ class CustomLayer::Builder {
     virtual CustomLayer build() {
         THOR_THROW_IF_FALSE(_network.has_value());
         THOR_THROW_IF_FALSE(_expr != nullptr);
-        THOR_THROW_IF_FALSE(!_inputInterfaces.empty());
+        THOR_THROW_IF_FALSE(!_inputInterfaces.empty() || !_raggedInputInterfaces.empty());
+        THOR_THROW_IF_FALSE(_inputInterfaces.empty() || _raggedInputInterfaces.empty());
+        THOR_THROW_IF_FALSE(_outputInterfaces.empty() || _raggedOutputInterfaces.empty());
+        if (!_raggedInputInterfaces.empty()) {
+            THOR_THROW_IF_FALSE(_outputInterfaces.empty());
+        } else {
+            THOR_THROW_IF_FALSE(_raggedOutputInterfaces.empty());
+        }
         if (_inputNames.empty()) {
             _inputNames = _expr->getExpectedInputNames();
             if (_usesBatchValidity) {
@@ -214,14 +247,23 @@ class CustomLayer::Builder {
         THOR_THROW_IF_FALSE(!_outputNames.empty());
 
         THOR_THROW_IF_FALSE(!(_usesBatchValidity && _requiresFullBatch));
-        CustomLayer customLayer(*_expr,
-                                _inputNames,
-                                _outputNames,
-                                _inputInterfaces,
-                                _outputInterfaces,
-                                _parameters,
-                                _usesBatchValidity,
-                                _requiresFullBatch);
+        CustomLayer customLayer = !_raggedInputInterfaces.empty()
+                                      ? CustomLayer(*_expr,
+                                                    _inputNames,
+                                                    _outputNames,
+                                                    _raggedInputInterfaces,
+                                                    _raggedOutputInterfaces,
+                                                    _parameters,
+                                                    _usesBatchValidity,
+                                                    _requiresFullBatch)
+                                      : CustomLayer(*_expr,
+                                                    _inputNames,
+                                                    _outputNames,
+                                                    _inputInterfaces,
+                                                    _outputInterfaces,
+                                                    _parameters,
+                                                    _usesBatchValidity,
+                                                    _requiresFullBatch);
 
         if (_layerOptimizer != nullptr)
             customLayer.attachDefaultOptimizer(_layerOptimizer);
@@ -255,12 +297,26 @@ class CustomLayer::Builder {
     }
 
     virtual CustomLayer::Builder& inputInterface(const TensorMap& inputInterface) {
+        THOR_THROW_IF_FALSE(_raggedInputInterfaces.empty());
         this->_inputInterfaces.push_back(inputInterface);
         return *this;
     }
 
+    virtual CustomLayer::Builder& inputInterface(const RaggedTensorMap& inputInterface) {
+        THOR_THROW_IF_FALSE(_inputInterfaces.empty());
+        this->_raggedInputInterfaces.push_back(inputInterface);
+        return *this;
+    }
+
     virtual CustomLayer::Builder& outputInterface(const TensorMap& outputInterface) {
+        THOR_THROW_IF_FALSE(_raggedOutputInterfaces.empty());
         this->_outputInterfaces.push_back(outputInterface);
+        return *this;
+    }
+
+    virtual CustomLayer::Builder& outputInterface(const RaggedTensorMap& outputInterface) {
+        THOR_THROW_IF_FALSE(_outputInterfaces.empty());
+        this->_raggedOutputInterfaces.push_back(outputInterface);
         return *this;
     }
 
@@ -321,6 +377,8 @@ class CustomLayer::Builder {
     std::vector<std::string> _outputNames;
     std::vector<TensorMap> _inputInterfaces;
     std::vector<TensorMap> _outputInterfaces;
+    std::vector<RaggedTensorMap> _raggedInputInterfaces;
+    std::vector<RaggedTensorMap> _raggedOutputInterfaces;
     std::vector<std::shared_ptr<ParameterSpecification>> _parameters;
     std::shared_ptr<Optimizer> _layerOptimizer;
     bool _usesBatchValidity = false;

@@ -1,7 +1,7 @@
 #include "DeepLearning/Api/Layers/Utility/Slice.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
-#include "DeepLearning/Implementation/Layers/RaggedExpressionLayer.h"
+#include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 #include "Utilities/Expression/RaggedExpression.h"
 
 #include <algorithm>
@@ -152,7 +152,7 @@ std::shared_ptr<ThorImplementation::Layer> Slice::stamp(ThorImplementation::Tens
             for (uint64_t dimension : dimensions) elements *= dimension;
             return elements;
         };
-        auto physicalSlice = std::make_shared<ThorImplementation::RaggedExpressionLayer>(
+        auto physicalSlice = std::make_shared<ThorImplementation::RaggedCustomLayer>(
             ThorImplementation::DynamicExpression::fromExpressionDefinition(definition),
             std::vector<std::string>{"feature_input", "feature_offsets"},
             std::vector<std::string>{"feature_output"},

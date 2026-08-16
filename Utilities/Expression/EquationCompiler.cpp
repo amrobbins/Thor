@@ -678,6 +678,12 @@ static bool isStageBoundaryOp(ExprOp op) {
            op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
 }
 
+static bool expressionHasStridedViewOp(const PhysicalExpression& expr) {
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {
+        return node.op == ExprOp::STRIDED_VIEW;
+    });
+}
+
 static bool isRaggedPartitionAwareStageOp(ExprOp op) {
     return op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(op) ||
            op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD ||
@@ -1336,6 +1342,9 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
 
         if (isTransposeOp(node.op)) {
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ")";
+        } else if (node.op == ExprOp::STRIDED_VIEW) {
+            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",dims=" + uintVecSignature(node.view_dims) +
+                ",strides=" + uintVecSignature(node.view_strides) + ",offset=" + std::to_string(node.view_element_offset) + ")";
         } else if (isReduceMinMaxBackwardOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs;
@@ -1758,14 +1767,18 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
 
     const bool uses_device_ragged_runtime_extent = expressionUsesDeviceRaggedRuntimeExtent(stage.expr);
 
-    // RoPE/index-aware fused stages need runtime output dimensions to compute logical
-    // coordinates. They are always launched through the specialized-broadcast path.
-    // Ragged runtime extent is deliberately limited to ordinary flat valuewise kernels
-    // in this stabilization chunk; unsupported combinations reject rather than silently
-    // processing padded capacity.
-    if (expressionHasIndexAwareOps(stage.expr)) {
-        if (uses_device_ragged_runtime_extent) {
-            throw std::runtime_error("ragged runtime extent is not supported with index-aware fused operations.");
+    // RoPE/logical-index operations and an internally fused STRIDED_VIEW need runtime
+    // output dimensions to compute logical coordinates, so they are launched through
+    // the specialized-broadcast path.  Ragged runtime extent remains unsupported for
+    // the general index-aware family, but a STRIDED_VIEW-only shape mapping is safe:
+    // emitIndexMappedSpecializedBroadcast applies the view's affine index mapping while
+    // the ragged runtime extent limits the launch to the authoritative active prefix.
+    const bool has_general_index_aware_ops = expressionHasIndexAwareOps(stage.expr);
+    const bool has_strided_view = expressionHasStridedViewOp(stage.expr);
+    if (has_general_index_aware_ops || has_strided_view) {
+        if (uses_device_ragged_runtime_extent && has_general_index_aware_ops) {
+            throw std::runtime_error(
+                "ragged runtime extent is not supported with index-aware fused operations other than strided views.");
         }
         auto compiled = std::make_shared<CompiledEquation>();
         compiled->key = key;
@@ -3186,7 +3199,8 @@ static bool inputRequiresMaterialization(const ExprNode& node) {
 static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
                                            uint32_t root_idx,
                                            const std::unordered_set<uint32_t>& forced_boundary_nodes,
-                                           std::unordered_set<uint32_t>& region_nodes) {
+                                           std::unordered_set<uint32_t>& region_nodes,
+                                           bool allow_internal_strided_view = false) {
     if (forced_boundary_nodes.count(root_idx)) {
         throw std::runtime_error("collectFusableRegionStoppingAt root cannot be a forced boundary node.");
     }
@@ -3206,7 +3220,7 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
         }
 
         const ExprNode& node = expr.nodes[node_idx];
-        if (isStageBoundaryOp(node.op)) {
+        if (isStageBoundaryOp(node.op) && !(allow_internal_strided_view && node.op == ExprOp::STRIDED_VIEW)) {
             throw std::runtime_error("collectFusableRegion called on stage-boundary root.");
         }
 
@@ -3220,7 +3234,8 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
         }
 
         const ExprNode& lhs = expr.nodes[lhs_idx];
-        if (!isStageBoundaryOp(lhs.op) && !forced_boundary_nodes.count(lhs_idx)) {
+        if ((!isStageBoundaryOp(lhs.op) || (allow_internal_strided_view && lhs.op == ExprOp::STRIDED_VIEW)) &&
+            !forced_boundary_nodes.count(lhs_idx)) {
             stack.push_back(lhs_idx);
         }
 
@@ -3229,7 +3244,9 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
             if (effective_idx >= expr.nodes.size()) {
                 throw std::runtime_error("Invalid RoPE effective sequence length node index in expression.");
             }
-            if (!isStageBoundaryOp(expr.nodes[effective_idx].op) && !forced_boundary_nodes.count(effective_idx)) {
+            if ((!isStageBoundaryOp(expr.nodes[effective_idx].op) ||
+                 (allow_internal_strided_view && expr.nodes[effective_idx].op == ExprOp::STRIDED_VIEW)) &&
+                !forced_boundary_nodes.count(effective_idx)) {
                 stack.push_back(effective_idx);
             }
         }
@@ -3238,7 +3255,9 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
             if (position_ids_idx >= expr.nodes.size()) {
                 throw std::runtime_error("Invalid RoPE position ids node index in expression.");
             }
-            if (!isStageBoundaryOp(expr.nodes[position_ids_idx].op) && !forced_boundary_nodes.count(position_ids_idx)) {
+            if ((!isStageBoundaryOp(expr.nodes[position_ids_idx].op) ||
+                 (allow_internal_strided_view && expr.nodes[position_ids_idx].op == ExprOp::STRIDED_VIEW)) &&
+                !forced_boundary_nodes.count(position_ids_idx)) {
                 stack.push_back(position_ids_idx);
             }
         }
@@ -3250,7 +3269,8 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
             }
 
             const ExprNode& rhs = expr.nodes[rhs_idx];
-            if (!isStageBoundaryOp(rhs.op) && !forced_boundary_nodes.count(rhs_idx)) {
+            if ((!isStageBoundaryOp(rhs.op) || (allow_internal_strided_view && rhs.op == ExprOp::STRIDED_VIEW)) &&
+                !forced_boundary_nodes.count(rhs_idx)) {
                 stack.push_back(rhs_idx);
             }
         }
@@ -3262,7 +3282,8 @@ static void collectFusableRegionStoppingAt(const PhysicalExpression& expr,
             }
 
             const ExprNode& aux = expr.nodes[aux_idx];
-            if (!isStageBoundaryOp(aux.op) && !forced_boundary_nodes.count(aux_idx)) {
+            if ((!isStageBoundaryOp(aux.op) || (allow_internal_strided_view && aux.op == ExprOp::STRIDED_VIEW)) &&
+                !forced_boundary_nodes.count(aux_idx)) {
                 stack.push_back(aux_idx);
             }
         }
@@ -6042,11 +6063,52 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     std::map<std::string, uint32_t> fused_region_value_id;
     std::map<std::string, uint32_t> stage_boundary_value_id;
 
+    struct TerminalRaggedExtentKey {
+        uint32_t offsets_input_slot = UINT32_MAX;
+        uint64_t batch_size = 0;
+        uint64_t max_active_values = 0;
+        uint64_t elements_per_value = 0;
+
+        [[nodiscard]] bool operator==(const TerminalRaggedExtentKey& other) const {
+            return offsets_input_slot == other.offsets_input_slot && batch_size == other.batch_size &&
+                   max_active_values == other.max_active_values && elements_per_value == other.elements_per_value;
+        }
+    };
+
+    auto terminalRaggedExtentKey = [&](uint32_t root_idx) -> std::optional<TerminalRaggedExtentKey> {
+        if (root_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Terminal ragged-extent lookup root is out of range.");
+        }
+        const ExprNode& root = expr.nodes[root_idx];
+        if (root.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            return std::nullopt;
+        }
+        if (root.rhs == UINT32_MAX || root.rhs >= expr.nodes.size()) {
+            throw std::runtime_error("Terminal ragged runtime extent is missing its offsets input.");
+        }
+        const ExprNode& offsets = expr.nodes[root.rhs];
+        if (offsets.op != ExprOp::INPUT) {
+            throw std::runtime_error("Terminal ragged runtime extent offsets must be a direct input.");
+        }
+        return TerminalRaggedExtentKey{
+            .offsets_input_slot = offsets.input_slot,
+            .batch_size = root.ragged_runtime_batch_size,
+            .max_active_values = root.ragged_runtime_max_active_values,
+            .elements_per_value = root.ragged_runtime_elements_per_value,
+        };
+    };
+
+    auto terminalRaggedExtentsCompatible = [](const std::optional<TerminalRaggedExtentKey>& lhs,
+                                              const std::optional<TerminalRaggedExtentKey>& rhs) {
+        return !lhs.has_value() || !rhs.has_value() || lhs.value() == rhs.value();
+    };
+
     struct TerminalFusedGroup {
         std::unordered_set<uint32_t> region_nodes;
         std::unordered_set<uint32_t> dependency_value_ids;
         std::vector<RequestedStageOutput> outputs;
         std::map<std::string, uint32_t> exact_region_value_id;
+        std::optional<TerminalRaggedExtentKey> ragged_extent_key;
         bool emitted = false;
     };
 
@@ -6709,7 +6771,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     auto addOrMergeTerminalGroup = [&](std::unordered_set<uint32_t> region,
                                        std::unordered_set<uint32_t> dependency_value_ids,
                                        RequestedStageOutput requested_output,
-                                       const std::string& region_sig) {
+                                       const std::string& region_sig,
+                                       std::optional<TerminalRaggedExtentKey> requested_ragged_extent_key) {
         std::vector<size_t> overlapping_groups;
         for (size_t i = 0; i < terminal_groups.size(); ++i) {
             if (!terminal_groups[i].has_value() || terminal_groups[i]->emitted) {
@@ -6720,21 +6783,33 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
         }
 
-        if (overlapping_groups.empty()) {
+        auto makeNewGroup = [&]() {
             TerminalFusedGroup new_group;
             new_group.region_nodes = std::move(region);
             new_group.dependency_value_ids = std::move(dependency_value_ids);
             new_group.outputs.push_back(requested_output);
             new_group.exact_region_value_id.emplace(region_sig, requested_output.value_id);
+            new_group.ragged_extent_key = requested_ragged_extent_key;
 
             size_t new_idx = terminal_groups.size();
             terminal_groups.push_back(std::move(new_group));
             pending_terminal_region_to_group[region_sig] = new_idx;
+        };
+
+        auto target_it = std::find_if(overlapping_groups.begin(), overlapping_groups.end(), [&](size_t group_idx) {
+            return terminal_groups[group_idx].has_value() &&
+                   terminalRaggedExtentsCompatible(terminal_groups[group_idx]->ragged_extent_key, requested_ragged_extent_key);
+        });
+        if (target_it == overlapping_groups.end()) {
+            makeNewGroup();
             return;
         }
 
-        size_t target = overlapping_groups.front();
+        size_t target = *target_it;
         TerminalFusedGroup& target_group = *terminal_groups[target];
+        if (!target_group.ragged_extent_key.has_value() && requested_ragged_extent_key.has_value()) {
+            target_group.ragged_extent_key = requested_ragged_extent_key;
+        }
 
         target_group.region_nodes.insert(region.begin(), region.end());
         target_group.dependency_value_ids.insert(dependency_value_ids.begin(), dependency_value_ids.end());
@@ -6742,13 +6817,18 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         target_group.exact_region_value_id[region_sig] = requested_output.value_id;
         pending_terminal_region_to_group[region_sig] = target;
 
-        for (size_t k = 1; k < overlapping_groups.size(); ++k) {
-            size_t src_idx = overlapping_groups[k];
-            if (!terminal_groups[src_idx].has_value()) {
+        for (size_t src_idx : overlapping_groups) {
+            if (src_idx == target || !terminal_groups[src_idx].has_value()) {
                 continue;
             }
 
             TerminalFusedGroup& src_group = *terminal_groups[src_idx];
+            if (!terminalRaggedExtentsCompatible(target_group.ragged_extent_key, src_group.ragged_extent_key)) {
+                continue;
+            }
+            if (!target_group.ragged_extent_key.has_value() && src_group.ragged_extent_key.has_value()) {
+                target_group.ragged_extent_key = src_group.ragged_extent_key;
+            }
 
             target_group.region_nodes.insert(src_group.region_nodes.begin(), src_group.region_nodes.end());
             target_group.dependency_value_ids.insert(src_group.dependency_value_ids.begin(), src_group.dependency_value_ids.end());
@@ -7095,7 +7175,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         }
 
         std::unordered_set<uint32_t> region;
-        collectFusableRegionStoppingAt(expr, named_output.node_idx, forced_transpose_boundaries, region);
+        const bool allow_internal_strided_view = root.op == ExprOp::RAGGED_VALUEWISE_EXTENT;
+        collectFusableRegionStoppingAt(
+            expr, named_output.node_idx, forced_transpose_boundaries, region, allow_internal_strided_view);
 
         std::unordered_set<uint32_t> boundary_nodes;
         collectBoundaryDependencies(expr, region, boundary_nodes);
@@ -7148,7 +7230,11 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         if (forced_transpose_boundaries.empty()) {
             std::unordered_set<uint32_t> dependency_value_ids;
             collectExternalValueIds(expr, region, node_output_value_id, dependency_value_ids);
-            addOrMergeTerminalGroup(std::move(region), std::move(dependency_value_ids), requested_output, region_sig);
+            addOrMergeTerminalGroup(std::move(region),
+                                    std::move(dependency_value_ids),
+                                    requested_output,
+                                    region_sig,
+                                    terminalRaggedExtentKey(named_output.node_idx));
         } else {
             std::vector<RequestedStageOutput> requested_outputs{requested_output};
             planned.stages.push_back(buildFusedStage(expr, region, requested_outputs, node_output_value_id));

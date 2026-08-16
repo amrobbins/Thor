@@ -1559,10 +1559,12 @@ TEST(CublasMatrixMultiply, HeuristicGemmKernelWorksFP16) {
             ldA += rand() % 10;
             ldB += rand() % 10;
             ldC += rand() % 10;
-            if (CDInPlace)
-                ldD = ldC;
-            else
-                ldD += rand() % 10;
+            // Keep C and D on the same padded row stride for FP16.  The
+            // chooseOptimal FP16 coverage above already enforces this because
+            // cuBLASLt can otherwise accept a heuristic/algorithm and later
+            // fault asynchronously for some C/D leading-dimension pairs.
+            // Different C/D leading dimensions remain covered by FP32.
+            ldD = ldC;
         }
 
         TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);

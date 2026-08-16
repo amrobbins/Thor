@@ -3439,18 +3439,6 @@ uint32_t sumToShape(BackwardGraphBuilder& builder,
     std::sort(reduction_axes.begin(), reduction_axes.end());
     std::sort(squeeze_axes.begin(), squeeze_axes.end());
 
-    double contrib_constant = 0.0;
-    if (builder.tryGetConstantLikeValue(contrib, contrib_constant)) {
-        double reduction_scale = 1.0;
-        for (uint64_t axis : reduction_axes) {
-            if (axis >= contrib_dims.size()) {
-                throw std::runtime_error("Autodiff sumToShape produced reduction axis out of range.");
-            }
-            reduction_scale *= static_cast<double>(contrib_dims[axis]);
-        }
-        return builder.fill(contrib_constant * reduction_scale, target_dims, target_dtype);
-    }
-
     bool has_numeric_reduction = false;
     for (uint64_t axis : reduction_axes) {
         if (axis >= contrib_dims.size()) {
@@ -3464,6 +3452,56 @@ uint32_t sumToShape(BackwardGraphBuilder& builder,
 
     if (!has_numeric_reduction) {
         return builder.squeeze(contrib, squeeze_axes);
+    }
+
+    // A broadcast gradient that still carries a ragged runtime extent must never
+    // reduce the packed-capacity axis as an ordinary dense axis: doing so would
+    // include storage-only rows beyond offsets[-1].  Consume that axis through a
+    // segmented sum first, which produces one dense value per ragged segment, then
+    // apply the ordinary dense reduction over the segment axis (and any other
+    // broadcasted axes).  This is algebraically the same sum over logical packed
+    // values while keeping unused capacity out of parameter/input gradients.
+    const std::optional<RaggedGradientExtent> ragged_extent = builder.tryGetFrontierRaggedExtent(contrib);
+    if (ragged_extent.has_value() &&
+        std::find(reduction_axes.begin(), reduction_axes.end(), 0) != reduction_axes.end()) {
+        if (contrib_dims.empty() || contrib_dims.front() != ragged_extent->maxActiveValues) {
+            throw std::runtime_error(
+                "Autodiff ragged broadcast backward requires packed capacity as contribution dimension zero.");
+        }
+
+        uint64_t elements_per_value = 1;
+        for (size_t axis = 1; axis < contrib_dims.size(); ++axis) {
+            elements_per_value *= contrib_dims[axis];
+        }
+        if (elements_per_value != ragged_extent->elementsPerValue) {
+            throw std::runtime_error(
+                "Autodiff ragged broadcast backward contribution width does not match its runtime extent.");
+        }
+
+        const uint32_t per_segment = builder.segmentedReduce(contrib,
+                                                             ragged_extent->offsetsNode,
+                                                             ExprOp::SEGMENTED_REDUCE_SUM,
+                                                             ragged_extent->batchSize,
+                                                             ragged_extent->maxActiveValues,
+                                                             ragged_extent->elementsPerValue);
+        return builder.reduction(ExprOp::REDUCE_SUM,
+                                 per_segment,
+                                 reduction_axes,
+                                 squeeze_axes,
+                                 std::nullopt,
+                                 target_dtype);
+    }
+
+    double contrib_constant = 0.0;
+    if (builder.tryGetConstantLikeValue(contrib, contrib_constant)) {
+        double reduction_scale = 1.0;
+        for (uint64_t axis : reduction_axes) {
+            if (axis >= contrib_dims.size()) {
+                throw std::runtime_error("Autodiff sumToShape produced reduction axis out of range.");
+            }
+            reduction_scale *= static_cast<double>(contrib_dims[axis]);
+        }
+        return builder.fill(contrib_constant * reduction_scale, target_dims, target_dtype);
     }
 
     return builder.reduction(ExprOp::REDUCE_SUM, contrib, reduction_axes, squeeze_axes, std::nullopt, target_dtype);

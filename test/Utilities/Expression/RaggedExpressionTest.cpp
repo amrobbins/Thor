@@ -1138,6 +1138,38 @@ TEST(RaggedExpression, ValuewiseAutodiffPreservesRuntimeExtentAndRejectsOffsets)
     EXPECT_THROW((void)buildBackwardOutputs(outputs, {"x.offsets"}), std::runtime_error);
 }
 
+TEST(RaggedExpression, BroadcastParameterGradientReducesOnlyAuthoritativePackedRows) {
+    constexpr uint64_t batchSize = 3;
+    constexpr uint64_t maxTotalValues = 8;
+    constexpr uint64_t width = 4;
+
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression offsets = Expression::input("offsets", std::nullopt, DataType::UINT32);
+    const Expression y = (x * scale).withRaggedRuntimeExtent(offsets, batchSize, maxTotalValues, width);
+    const PhysicalOutputs forward = Expression::outputs({{"y", y}}).physicalOutputs();
+
+    const std::unordered_map<std::string, std::vector<uint64_t>> inputDims{
+        {"x", {maxTotalValues, width}},
+        {"scale", {width}},
+        {"offsets", {batchSize + 1}},
+    };
+    PhysicalOutputs backward = buildBackwardOutputs(forward, {"scale"}, std::nullopt, inputDims);
+
+    std::vector<DataType> backwardInputDTypes(backward.expr->inputs.size(), DataType::FP32);
+    for (const NamedInput& input : backward.expr->inputs) {
+        if (input.name == "offsets") {
+            ASSERT_LT(input.slot, backwardInputDTypes.size());
+            backwardInputDTypes[input.slot] = DataType::UINT32;
+        }
+    }
+    resolveOutputsDTypesInPlace(backward, backwardInputDTypes);
+
+    EXPECT_TRUE(containsOp(backward, ExprOp::SEGMENTED_REDUCE_SUM));
+    EXPECT_TRUE(containsOp(backward, ExprOp::REDUCE_SUM));
+    EXPECT_NO_THROW((void)EquationCompiler::splitAtReductionBoundaries(backward));
+}
+
 TEST(RaggedExpression, SegmentSumAndMeanAutodiffLowerThroughSegmentedBroadcast) {
     const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {}, 3, 7));
 
