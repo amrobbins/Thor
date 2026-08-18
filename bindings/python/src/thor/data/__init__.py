@@ -18,6 +18,8 @@ from .._thor.training import NamedDataset
 from .._thor.training import NumpyDataset
 from .._thor.training import RaggedBatch
 from .._thor.training import RaggedTensorLayout
+from .._thor.training import RaggedWindowedTensorChunk
+from .._thor.training import RaggedWindowedTensorLayout
 from .._thor.training import TensorLayout
 from .._thor.training import TrainingData
 from .._thor.training import WindowedTensorChunk
@@ -53,6 +55,8 @@ __all__ = [
     "NumpyDataset",
     "RaggedBatch",
     "RaggedTensorLayout",
+    "RaggedWindowedTensorChunk",
+    "RaggedWindowedTensorLayout",
     "TensorLayout",
     "TrainingData",
     "WindowedTensorChunk",

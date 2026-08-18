@@ -10,6 +10,15 @@
 
 namespace ThorImplementation {
 
+// Logical rank-1 ragged tensor backed by fixed-capacity packed storage.
+//
+// For batch size B, the row partition is authoritative: only values in
+// [0, offsets[B]) are part of the logical tensor. Packed storage in
+// [offsets[B], maxTotalValues) has undefined contents and must not be inspected
+// or relied on by active-aware consumers. A physical implementation that
+// intentionally executes beyond offsets[B] owns sanitation of exactly the
+// additional region it will read, immediately before that read. Producers do
+// not owe canonical padding, and this contract continues across network I/O.
 class RaggedTensor {
    public:
     RaggedTensor() = default;
@@ -53,7 +62,6 @@ class RaggedTensor {
         return values.getPlacement();
     }
 
-    Tensor getActiveValueCount() const;
     [[nodiscard]] std::optional<uint64_t> getHostActiveValueCountIfAvailable() const;
     RaggedRuntimeExtent getRuntimeExtent() const;
     RaggedRuntimeExtent getRuntimeExtent(uint64_t elementsPerValue) const;

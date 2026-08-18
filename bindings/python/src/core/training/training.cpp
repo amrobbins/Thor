@@ -83,6 +83,11 @@ struct PythonRaggedTensorLayout {
     ThorImplementation::DataType dataType = ThorImplementation::DataType::FP32;
 };
 
+struct PythonRaggedWindowedTensorLayout {
+    std::string source;
+    ThorImplementation::DataType indexType = ThorImplementation::DataType::INT64;
+};
+
 struct PythonWindowedTensorSourceLayout {
     std::vector<uint64_t> stepShape;
     ThorImplementation::DataType dataType = ThorImplementation::DataType::FP32;
@@ -101,6 +106,12 @@ struct PythonWindowedTensorLayout {
 struct PythonWindowedTensorChunk {
     nb::object key;
     nb::object start;
+};
+
+struct PythonRaggedWindowedTensorChunk {
+    nb::object key;
+    nb::object start;
+    nb::object length;
 };
 
 struct PythonAffineWindowedTensorChunk {
@@ -282,13 +293,39 @@ std::vector<DatasetLayout::RaggedTensorShape> datasetRaggedTensorShapesFromPytho
     std::vector<DatasetLayout::RaggedTensorShape> out;
     out.reserve(nb::len(raggedTensors));
     for (auto item : raggedTensors) {
+        if (!nb::isinstance<PythonRaggedTensorLayout>(item.second)) {
+            continue;
+        }
         const std::string name = tensorNameFromPythonKey(item.first, context + " ragged_tensors");
-        PythonRaggedTensorLayout entry = pybind::castOrTypeError<PythonRaggedTensorLayout>(
-            item.second,
-            context + " ragged_tensors['" + name + "']",
-            "thor.data.RaggedTensorLayout",
-            false);
+        PythonRaggedTensorLayout entry = nb::cast<PythonRaggedTensorLayout>(item.second);
         out.emplace_back(name, std::move(entry.valueShape), entry.dataType);
+    }
+    return out;
+}
+
+std::vector<DatasetLayout::RaggedWindowedTensorShape> datasetRaggedWindowedTensorShapesFromPython(
+    const nb::object& maybeRaggedTensors,
+    const std::string& context) {
+    if (maybeRaggedTensors.is_none()) {
+        return {};
+    }
+    nb::dict raggedTensors = pybind::castOrTypeError<nb::dict>(
+        maybeRaggedTensors, context + " ragged_tensors", "dict or None", false);
+    std::vector<DatasetLayout::RaggedWindowedTensorShape> out;
+    out.reserve(nb::len(raggedTensors));
+    for (auto item : raggedTensors) {
+        const std::string name = tensorNameFromPythonKey(item.first, context + " ragged_tensors");
+        if (nb::isinstance<PythonRaggedTensorLayout>(item.second)) {
+            continue;
+        }
+        if (!nb::isinstance<PythonRaggedWindowedTensorLayout>(item.second)) {
+            throw nb::type_error((context + " ragged_tensors['" + name +
+                                  "'] must be thor.data.RaggedTensorLayout or "
+                                  "thor.data.RaggedWindowedTensorLayout").c_str());
+        }
+        PythonRaggedWindowedTensorLayout entry =
+            nb::cast<PythonRaggedWindowedTensorLayout>(item.second);
+        out.emplace_back(name, std::move(entry.source), entry.indexType);
     }
     return out;
 }
@@ -419,6 +456,10 @@ nb::dict datasetLayoutRaggedTensorSpecsToPythonDict(const DatasetLayout& layout)
         specDict["data_type"] = nb::cast(spec.dataType);
         specDict["reference_offset_bytes"] = spec.referenceOffsetBytes;
         specDict["reference_num_bytes"] = spec.referenceNumBytes;
+        specDict["source"] = spec.sourceName.has_value()
+            ? nb::object(nb::str(spec.sourceName->c_str())) : nb::object(nb::none());
+        specDict["index_type"] = spec.sourceName.has_value()
+            ? nb::object(nb::cast(spec.indexDataType)) : nb::object(nb::none());
         specDict["values_filename"] = spec.valuesFilename.has_value()
             ? nb::object(nb::str(spec.valuesFilename->c_str())) : nb::object(nb::none());
         specDict["values_num_bytes"] = spec.valuesNumBytes;
@@ -694,7 +735,8 @@ std::map<std::string, DatasetWriter::RaggedTensorView> datasetWriterRaggedTensor
     const nb::object& maybeRaggedTensors,
     const DatasetLayout& layout,
     const std::string& context,
-    std::vector<nb::object>& ownedArrays) {
+    std::vector<nb::object>& ownedArrays,
+    std::vector<std::vector<uint8_t>>& ownedScalars) {
     if (!layout.hasRaggedTensors()) {
         if (!maybeRaggedTensors.is_none()) {
             nb::dict supplied = pybind::castOrTypeError<nb::dict>(
@@ -711,16 +753,42 @@ std::map<std::string, DatasetWriter::RaggedTensorView> datasetWriterRaggedTensor
     nb::dict raggedTensors = pybind::castOrTypeError<nb::dict>(
         maybeRaggedTensors, context + " ragged_tensors", "dict", false);
     std::map<std::string, DatasetWriter::RaggedTensorView> views;
+    ownedScalars.reserve(layout.raggedTensors().size() * 3);
     for (const DatasetLayout::RaggedTensorSpec& spec : layout.raggedTensors()) {
         if (!dictContainsString(raggedTensors, spec.name)) {
             throw nb::value_error((context + " missing ragged tensor '" + spec.name + "'").c_str());
         }
-        nb::object valuesObject = dictGetString(raggedTensors, spec.name, context + " ragged_tensors");
-        const std::string valueContext = context + " ragged_tensors['" + spec.name + "']";
+        nb::object valueObject = dictGetString(raggedTensors, spec.name, context + " ragged_tensors");
+        const std::string fieldContext = context + " ragged_tensors['" + spec.name + "']";
+        if (spec.isWindowedSourceBacked()) {
+            if (!pythonHasAttribute(valueObject, "key") || !pythonHasAttribute(valueObject, "start") ||
+                !pythonHasAttribute(valueObject, "length")) {
+                throw nb::type_error((fieldContext + " must be thor.data.RaggedWindowedTensorChunk").c_str());
+            }
+            const DatasetLayout::WindowedTensorSourceSpec& source = layout.windowedTensorSource(*spec.sourceName);
+            ownedScalars.push_back(scalarBytesFromPython(valueObject.attr("key"), source.keyDataType, fieldContext + ".key"));
+            const uint8_t* keyBytes = ownedScalars.back().data();
+            ownedScalars.push_back(scalarBytesFromPython(valueObject.attr("start"), spec.indexDataType, fieldContext + ".start"));
+            const uint8_t* startBytes = ownedScalars.back().data();
+            ownedScalars.push_back(scalarBytesFromPython(valueObject.attr("length"), ThorImplementation::DataType::UINT64,
+                                                         fieldContext + ".length"));
+            const void* length = ownedScalars.back().data();
+            views.emplace(spec.name, DatasetWriter::RaggedTensorView{
+                                         .dataType = spec.dataType,
+                                         .storageMode = DatasetWriter::RaggedTensorView::StorageMode::WINDOW_REFERENCE,
+                                         .keyDataType = source.keyDataType,
+                                         .indexDataType = spec.indexDataType,
+                                         .key = keyBytes,
+                                         .start = startBytes,
+                                         .length = length,
+                                     });
+            continue;
+        }
+
         const pybind::CanonicalNumpyArrayView values =
-            pybind::canonicalNumpyArrayViewNoCopy(valuesObject, valueContext, spec.dataType);
+            pybind::canonicalNumpyArrayViewNoCopy(valueObject, fieldContext, spec.dataType);
         const uint64_t numBytes = values.size * pybind::thorStorageDataTypeSizeBytes(spec.dataType);
-        ownedArrays.push_back(std::move(valuesObject));
+        ownedArrays.push_back(std::move(valueObject));
         views.emplace(spec.name, DatasetWriter::RaggedTensorView{
                                      .dataType = spec.dataType,
                                      .dimensions = values.dimensions,
@@ -759,12 +827,52 @@ std::map<std::string, DatasetWriter::RaggedTensorBatchView> datasetWriterRaggedT
         if (!dictContainsString(raggedTensors, spec.name)) {
             throw nb::value_error((context + " missing ragged tensor batch '" + spec.name + "'").c_str());
         }
+        nb::object valueObject = dictGetString(raggedTensors, spec.name, context + " ragged_tensors");
+        const std::string fieldContext = context + " ragged_tensors['" + spec.name + "']";
+        if (spec.isWindowedSourceBacked()) {
+            if (!pythonHasAttribute(valueObject, "key") || !pythonHasAttribute(valueObject, "start") ||
+                !pythonHasAttribute(valueObject, "length")) {
+                throw nb::type_error((fieldContext + " must be thor.data.RaggedWindowedTensorChunk").c_str());
+            }
+            const DatasetLayout::WindowedTensorSourceSpec& source = layout.windowedTensorSource(*spec.sourceName);
+            nb::object keysObject = valueObject.attr("key");
+            nb::object startsObject = valueObject.attr("start");
+            nb::object lengthsObject = valueObject.attr("length");
+            const pybind::CanonicalNumpyArrayView keys =
+                pybind::canonicalNumpyArrayViewNoCopy(keysObject, fieldContext + ".key", source.keyDataType);
+            const pybind::CanonicalNumpyArrayView starts =
+                pybind::canonicalNumpyArrayViewNoCopy(startsObject, fieldContext + ".start", spec.indexDataType);
+            const pybind::CanonicalNumpyArrayView lengths =
+                pybind::canonicalNumpyArrayViewNoCopy(lengthsObject, fieldContext + ".length",
+                                                      ThorImplementation::DataType::UINT64);
+            if (keys.dimensions.size() != 1 || starts.dimensions.size() != 1 || lengths.dimensions.size() != 1) {
+                throw nb::value_error((fieldContext + " key, start, and length must be one-dimensional arrays").c_str());
+            }
+            if (keys.dimensions.front() == 0 || keys.dimensions.front() != starts.dimensions.front() ||
+                keys.dimensions.front() != lengths.dimensions.front()) {
+                throw nb::value_error((fieldContext + " key, start, and length arrays must have the same non-zero length").c_str());
+            }
+            ownedArrays.push_back(std::move(keysObject));
+            ownedArrays.push_back(std::move(startsObject));
+            ownedArrays.push_back(std::move(lengthsObject));
+            views.emplace(spec.name, DatasetWriter::RaggedTensorBatchView{
+                                     .dataType = spec.dataType,
+                                     .count = keys.dimensions.front(),
+                                     .storageMode = DatasetWriter::RaggedTensorBatchView::StorageMode::WINDOW_REFERENCE,
+                                     .keyDataType = source.keyDataType,
+                                     .indexDataType = spec.indexDataType,
+                                     .keys = keys.data,
+                                     .starts = starts.data,
+                                     .lengths = lengths.data,
+                                 });
+            continue;
+        }
+
         PythonRaggedBatch batch = pybind::castOrTypeError<PythonRaggedBatch>(
-            dictGetString(raggedTensors, spec.name, context + " ragged_tensors"),
-            context + " ragged_tensors['" + spec.name + "']",
+            valueObject,
+            fieldContext,
             "thor.data.RaggedBatch",
             false);
-        const std::string fieldContext = context + " ragged_tensors['" + spec.name + "']";
         const pybind::CanonicalNumpyArrayView values =
             pybind::canonicalNumpyArrayViewNoCopy(batch.values, fieldContext + ".values", spec.dataType);
         const ThorImplementation::DataType offsetsDataType =
@@ -1679,6 +1787,39 @@ row shape in the canonical representation.
         .def_ro("value_shape", &PythonRaggedTensorLayout::valueShape)
         .def_ro("data_type", &PythonRaggedTensorLayout::dataType);
 
+    auto ragged_windowed_tensor_layout =
+        nb::class_<PythonRaggedWindowedTensorLayout>(training, "RaggedWindowedTensorLayout");
+    ragged_windowed_tensor_layout.attr("__module__") = "thor.data";
+    ragged_windowed_tensor_layout.def_static(
+        "__new__",
+        [](nb::handle cls,
+           std::string source,
+           ThorImplementation::DataType indexType) -> std::shared_ptr<PythonRaggedWindowedTensorLayout> {
+            (void)cls;
+            if (source.empty()) {
+                throw nb::value_error("RaggedWindowedTensorLayout source must not be empty");
+            }
+            auto out = std::make_shared<PythonRaggedWindowedTensorLayout>();
+            out->source = std::move(source);
+            out->indexType = indexType;
+            return out;
+        },
+        "cls"_a,
+        "source"_a,
+        "index_type"_a = ThorImplementation::DataType::INT64,
+        R"nbdoc(
+Describe one variable-length dataset field backed by a named immutable window
+source. Each example stores only a compact source/key/start/length reference;
+batching materializes the selected source slices as one packed RaggedTensor.
+        )nbdoc");
+    ragged_windowed_tensor_layout.def(
+        "__init__",
+        [](PythonRaggedWindowedTensorLayout*, std::string, ThorImplementation::DataType) {},
+        "source"_a,
+        "index_type"_a = ThorImplementation::DataType::INT64)
+        .def_ro("source", &PythonRaggedWindowedTensorLayout::source)
+        .def_ro("index_type", &PythonRaggedWindowedTensorLayout::indexType);
+
     auto ragged_batch = nb::class_<PythonRaggedBatch>(training, "RaggedBatch");
     ragged_batch.attr("__module__") = "thor.data";
     ragged_batch.def_static(
@@ -1812,6 +1953,39 @@ one ``AffineWindowedTensorChunk`` formula for each appended row segment.
         .def_ro("key", &PythonWindowedTensorChunk::key)
         .def_ro("start", &PythonWindowedTensorChunk::start);
 
+    auto ragged_windowed_tensor_chunk =
+        nb::class_<PythonRaggedWindowedTensorChunk>(training, "RaggedWindowedTensorChunk");
+    ragged_windowed_tensor_chunk.attr("__module__") = "thor.data";
+    ragged_windowed_tensor_chunk.def_static(
+        "__new__",
+        [](nb::handle cls, nb::object key, nb::object start, nb::object length)
+            -> std::shared_ptr<PythonRaggedWindowedTensorChunk> {
+            (void)cls;
+            auto out = std::make_shared<PythonRaggedWindowedTensorChunk>();
+            out->key = std::move(key);
+            out->start = std::move(start);
+            out->length = std::move(length);
+            return out;
+        },
+        "cls"_a,
+        "key"_a,
+        "start"_a,
+        "length"_a,
+        R"nbdoc(
+Reference one source-backed ragged row, or a batch of rows when key/start/length
+are one-dimensional NumPy arrays. ``length`` is the number of logical source
+steps in each row.
+        )nbdoc");
+    ragged_windowed_tensor_chunk.def(
+        "__init__",
+        [](PythonRaggedWindowedTensorChunk*, nb::object, nb::object, nb::object) {},
+        "key"_a,
+        "start"_a,
+        "length"_a)
+        .def_ro("key", &PythonRaggedWindowedTensorChunk::key)
+        .def_ro("start", &PythonRaggedWindowedTensorChunk::start)
+        .def_ro("length", &PythonRaggedWindowedTensorChunk::length);
+
     auto affine_windowed_tensor_chunk =
         nb::class_<PythonAffineWindowedTensorChunk>(training, "AffineWindowedTensorChunk");
     affine_windowed_tensor_chunk.attr("__module__") = "thor.data";
@@ -1861,7 +2035,8 @@ one ``AffineWindowedTensorChunk`` formula for each appended row segment.
                 datasetTensorShapesFromPython(tensors, "DatasetLayout tensors"),
                 datasetWindowedTensorSourceShapesFromPython(windowSources, "DatasetLayout"),
                 datasetWindowedTensorShapesFromPython(windowedTensors, "DatasetLayout"),
-                datasetRaggedTensorShapesFromPython(raggedTensors, "DatasetLayout")));
+                datasetRaggedTensorShapesFromPython(raggedTensors, "DatasetLayout"),
+                datasetRaggedWindowedTensorShapesFromPython(raggedTensors, "DatasetLayout")));
         },
         "cls"_a,
         "tensors"_a,
@@ -1875,7 +2050,8 @@ Define a persistent dataset record layout.
 independent source names to ``WindowedTensorSourceLayout``. ``windowed_tensors``
 maps output field names to ``WindowedTensorLayout`` and may point several fields
 at the same source. ``ragged_tensors`` maps logical variable-length fields to
-``RaggedTensorLayout``. Every field owns its dtype.
+``RaggedTensorLayout`` or ``RaggedWindowedTensorLayout``. Source-backed ragged
+fields reuse a named window source and store only compact row references.
         )nbdoc");
     dataset_layout.def(
         "__init__",
@@ -2344,11 +2520,12 @@ at the same source. ``ragged_tensors`` maps logical variable-length fields to
         "write_indexed_example",
         [](DatasetWriter& self, nb::dict tensors, nb::object raggedTensors) {
             std::vector<nb::object> ownedArrays;
+            std::vector<std::vector<uint8_t>> ownedRaggedScalars;
             std::map<std::string, DatasetWriter::TensorView> views =
                 datasetWriterTensorViewsFromPython(tensors, self.getLayout(), "DatasetWriter.write_indexed_example", ownedArrays);
             std::map<std::string, DatasetWriter::RaggedTensorView> raggedViews =
                 datasetWriterRaggedTensorViewsFromPython(
-                    raggedTensors, self.getLayout(), "DatasetWriter.write_indexed_example", ownedArrays);
+                    raggedTensors, self.getLayout(), "DatasetWriter.write_indexed_example", ownedArrays, ownedRaggedScalars);
             if (self.getLayout().hasWindowedTensors()) {
                 std::vector<std::vector<uint8_t>> ownedScalars;
                 std::map<std::string, DatasetWriter::WindowedTensorReferenceView> windowedRefs =

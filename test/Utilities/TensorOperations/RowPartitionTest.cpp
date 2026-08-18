@@ -319,7 +319,7 @@ TEST(RowPartition, RejectsSignedLengthAndOffsetDTypes) {
     EXPECT_THROW(static_cast<void>(prepareRowPartitionLengthsToOffsets(lengths, offsets, 3)), std::invalid_argument);
 }
 
-TEST(RowPartition, OffsetsToRopePositionIdsUsesPerRowOriginsAndClearsUnusedCapacity) {
+TEST(RowPartition, OffsetsToRopePositionIdsWritesOnlyLogicalActiveCapacity) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -331,7 +331,16 @@ TEST(RowPartition, OffsetsToRopePositionIdsUsesPerRowOriginsAndClearsUnusedCapac
     rowPartitionOffsetsToRopePositionIds(offsets, &origins, 123, positions, 3, 7, stream);
     stream.synchronize();
 
-    EXPECT_EQ(copyGpuVector<float>(positions, stream), (std::vector<float>{10.0f, 11.0f, 30.0f, 31.0f, 32.0f, 0.0f, 0.0f}));
+    // This is a write-boundary assertion for the helper, not a semantic assertion
+    // about ragged tail contents: rows outside offsets[B] must simply be untouched.
+    EXPECT_EQ(copyGpuVector<float>(positions, stream),
+              (std::vector<float>{10.0f, 11.0f, 30.0f, 31.0f, 32.0f, 999.0f, 999.0f}));
+
+    Tensor shorterOffsets = makeGpuVector<uint32_t>({0U, 1U, 1U, 3U}, stream);
+    rowPartitionOffsetsToRopePositionIds(shorterOffsets, &origins, 123, positions, 3, 7, stream);
+    stream.synchronize();
+    EXPECT_EQ(copyGpuVector<float>(positions, stream),
+              (std::vector<float>{10.0f, 30.0f, 31.0f, 31.0f, 32.0f, 999.0f, 999.0f}));
 }
 
 TEST(RowPartition, OffsetsToRopePositionIdsResetsScalarOriginAtEveryRaggedRow) {

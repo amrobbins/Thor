@@ -47,7 +47,9 @@ struct BucketedCublasGemmShape {
  *
  * The runtime tensors may be physically allocated for fullCapacityRows. Selected
  * kernels carry smaller cuBLASLt matrix descriptors and therefore operate only on
- * the prefix represented by the selected capacity bucket.
+ * the prefix represented by the selected capacity bucket. An active row count of
+ * zero selects the smallest cached bucket so empty ragged batches do not fall back
+ * to full-capacity work.
  */
 class BucketedCublasGemm {
    public:

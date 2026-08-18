@@ -291,44 +291,6 @@ class NetworkInput : public Layer {
             featureInput,
             validationPass,
             batchSize,
-            std::move(sourceReference),
-            std::nullopt);
-    }
-
-    // Explicit logical-ragged boundary. The active packed-value count comes
-    // from RowPartitionRuntime owned by the matching offsets tensor; it is not
-    // inferred from, stored on, or propagated through the values tensor.
-    virtual void forwardRaggedValues(
-        std::optional<Tensor> featureInput,
-        bool validationPass,
-        uint64_t activeValueCount,
-        uint32_t batchSize,
-        std::optional<Thor::BatchSourceReference> sourceReference = std::nullopt) {
-        forwardMaterializedInput(
-            featureInput,
-            validationPass,
-            batchSize,
-            std::move(sourceReference),
-            activeValueCount);
-    }
-
-    virtual void forwardRaggedValues(
-        std::optional<Tensor> featureInput,
-        bool validationPass,
-        Event copyToSourceTensorFinished,
-        uint64_t activeValueCount,
-        uint32_t batchSize,
-        std::optional<Thor::BatchSourceReference> sourceReference = std::nullopt) {
-        if (isPassThrough() || isDeviceLoad()) {
-            stream.waitEvent(copyToSourceTensorFinished);
-        } else {
-            loadStream.waitEvent(copyToSourceTensorFinished);
-        }
-        forwardRaggedValues(
-            featureInput,
-            validationPass,
-            activeValueCount,
-            batchSize,
             std::move(sourceReference));
     }
 
@@ -348,7 +310,6 @@ class NetworkInput : public Layer {
             validationPass,
             batchSize,
             std::move(sourceReference),
-            std::nullopt,
             descriptor,
             hostActiveValueCount);
     }
@@ -381,7 +342,6 @@ class NetworkInput : public Layer {
         bool validationPass,
         uint32_t batchSize,
         std::optional<Thor::BatchSourceReference> sourceReference,
-        std::optional<uint64_t> raggedActiveValueCount,
         std::optional<RowPartitionDescriptor> rowPartitionDescriptor = std::nullopt,
         std::optional<uint64_t> rowPartitionHostActiveValueCount = std::nullopt) {
         const bool emitDiagnostics = layerSubmitDiagnosticsActive();
@@ -442,12 +402,6 @@ class NetworkInput : public Layer {
                 featureOutput.value().copyFromAsync(slot.outputBuffer.value(), stream);
                 stream.putEvent(slot.outputBufferWritableEvent);
             }
-        }
-        if (raggedActiveValueCount.has_value()) {
-            THOR_THROW_IF_FALSE(contentDimensions.has_value());
-            THOR_THROW_IF_FALSE(!isPassThrough());
-            THOR_THROW_IF_FALSE(featureOutput.has_value());
-            canonicalizeRaggedPadding(featureOutput.value(), raggedActiveValueCount.value(), stream);
         }
         if (rowPartitionDescriptor.has_value()) {
             THOR_THROW_IF_FALSE(contentDimensions.has_value());
@@ -592,21 +546,6 @@ class NetworkInput : public Layer {
     }
 
    protected:
-    static void canonicalizeRaggedPadding(Tensor tensor, uint64_t activeValueCount, Stream stream) {
-        const std::vector<uint64_t> dimensions = tensor.getDimensions();
-        THOR_THROW_IF_FALSE(!dimensions.empty());
-        const uint64_t capacityValues = dimensions.front();
-        THOR_THROW_IF_FALSE(capacityValues > 0);
-        THOR_THROW_IF_FALSE(activeValueCount <= capacityValues);
-        if (activeValueCount == capacityValues) return;
-
-        const uint64_t elementsPerValue = tensor.getTotalNumElements() / capacityValues;
-        THOR_THROW_IF_FALSE(elementsPerValue > 0);
-        const uint64_t tailElements = (capacityValues - activeValueCount) * elementsPerValue;
-        Tensor tail = tensor.aliasView({tailElements}, {1}, activeValueCount * elementsPerValue);
-        tail.memsetAsync(stream, 0);
-    }
-
     struct InputSlot {
         std::optional<Tensor> outputBuffer;
         std::optional<Thor::DeviceBatchReference> deviceBatchReference;

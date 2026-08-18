@@ -1156,6 +1156,50 @@ TEST(TrainingRuns, ReportableLossesExposeLossWeightsForNamedGraphLosses) {
     EXPECT_DOUBLE_EQ(p90->lossWeight, 0.5);
 }
 
+
+TEST(TrainingRuns, InternalNetworkOutputsAreNotPredictionSourcesForReportableLosses) {
+    auto network = std::make_shared<Network>("training-runs-internal-output-loss-source");
+    NetworkInput features = NetworkInput::Builder()
+                                .network(*network)
+                                .name("features")
+                                .dimensions({4})
+                                .dataType(DataType::FP32)
+                                .build();
+    NetworkInput labels = NetworkInput::Builder()
+                              .network(*network)
+                              .name("labels")
+                              .dimensions({1})
+                              .dataType(DataType::FP32)
+                              .build();
+    FullyConnected prediction = FullyConnected::Builder()
+                                    .network(*network)
+                                    .featureInput(features.getFeatureOutput().value())
+                                    .numOutputFeatures(1)
+                                    .hasBias(true)
+                                    .noActivation()
+                                    .build();
+    MSE loss = MSE::Builder()
+                   .network(*network)
+                   .predictions(prediction.getFeatureOutput().value())
+                   .labels(labels.getFeatureOutput().value())
+                   .lossDataType(DataType::FP32)
+                   .build();
+
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("private_prediction_handoff")
+        .inputTensor(prediction.getFeatureOutput().value())
+        .external(false)
+        .build();
+    NetworkOutput::Builder().network(*network).name("mse_loss").inputTensor(loss.getLoss()).build();
+
+    const std::vector<NetworkLossReference> reportableLosses = network->getReportableLosses();
+    ASSERT_EQ(reportableLosses.size(), 1u);
+    EXPECT_EQ(reportableLosses[0].lossName, "mse_loss");
+    EXPECT_TRUE(reportableLosses[0].predictionOutputName.empty());
+    EXPECT_EQ(reportableLosses[0].targetInputName, "labels");
+}
+
 TEST(TrainingRuns, RejectsInvalidRunSpecs) {
     auto network = std::make_shared<Network>("training-runs-invalid");
     auto coordinator = std::make_shared<Coordinator>(1);

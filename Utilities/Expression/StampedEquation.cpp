@@ -332,6 +332,53 @@ CudnnRmsNormDescriptor CompiledRmsNorm::descriptorFor(const Tensor& inputTensor,
     return descriptor;
 }
 
+DataType CompiledRmsNormBackward::outputDTypeFor(ExprOp op) const {
+    switch (op) {
+        case ExprOp::RMSNORM_BACKWARD_X:
+            return dx_dtype;
+        case ExprOp::RMSNORM_BACKWARD_SCALE:
+            return dscale_dtype;
+        default:
+            throw std::runtime_error("CompiledRmsNormBackward::outputDTypeFor received a non-RMSNorm-backward op.");
+    }
+}
+
+CudnnRmsNormDescriptor CompiledRmsNormBackward::descriptorFor(const Tensor& inputTensor,
+                                                              const Tensor& scaleTensor,
+                                                              const Tensor& dyTensor,
+                                                              const Tensor& dxTensor,
+                                                              const Tensor& dscaleTensor) const {
+    const std::vector<uint64_t> inputDims = inputTensor.getDimensions();
+    if (inputDims.size() != 2 || dyTensor.getDimensions() != inputDims || dxTensor.getDimensions() != inputDims) {
+        throw std::runtime_error("Thor RMSNorm backward stage requires rank-2 x/dy/dx tensors with identical dimensions.");
+    }
+    if (scaleTensor.getDimensions() != std::vector<uint64_t>{normalized_feature_count} ||
+        dscaleTensor.getDimensions() != std::vector<uint64_t>{normalized_feature_count}) {
+        throw std::runtime_error("Thor RMSNorm backward stage requires rank-1 scale/dscale tensors matching hidden size.");
+    }
+    if (inputDims[1] != normalized_feature_count) {
+        throw std::runtime_error("Thor RMSNorm backward hidden dimension does not match the compiled descriptor.");
+    }
+    if (inputTensor.getDataType() != input_dtype || scaleTensor.getDataType() != scale_dtype ||
+        dyTensor.getDataType() != dy_dtype || dxTensor.getDataType() != dx_dtype || dscaleTensor.getDataType() != dscale_dtype) {
+        throw std::runtime_error("Thor RMSNorm backward tensor dtype does not match the compiled descriptor.");
+    }
+
+    CudnnRmsNormDescriptor descriptor;
+    descriptor.outerSize = inputDims[0];
+    descriptor.normalizedFeatureCount = normalized_feature_count;
+    descriptor.inputDataType = input_dtype;
+    descriptor.parameterDataType = scale_dtype;
+    descriptor.outputDataType = dy_dtype;
+    descriptor.computeDataType = compute_dtype;
+    descriptor.epsilon = static_cast<float>(epsilon);
+    descriptor.training = true;
+    descriptor.fusedActivation = CudnnRmsNormFusedActivation::NONE;
+    descriptor.debugName = debug_name;
+    descriptor.validateBackward();
+    return descriptor;
+}
+
 CudnnAttentionDescriptor CompiledAttention::descriptorFor(const Tensor& qTensor,
                                                           const Tensor& kTensor,
                                                           const Tensor& vTensor,
@@ -1588,18 +1635,49 @@ void StampedConvolutionBackward::runOn(Stream& run_stream) const {
     throw std::runtime_error("StampedConvolutionBackward received non-frontend convolution payload unexpectedly.");
 }
 
+// Consumer-side pre-read sanitation for bucketed cuDNN RMSNorm. cuDNN is
+// deliberately dispatched over selected_rows, so only [active_rows, selected_rows)
+// must be made safe. Storage in [selected_rows, full_capacity_rows) is outside this
+// consumer's physical read and remains undefined.
+static void sanitizePackedRmsNormOverreadRows(Tensor tensor,
+                                                uint64_t active_rows,
+                                                uint64_t selected_rows,
+                                                uint64_t full_capacity_rows,
+                                                uint64_t outer_per_packed_row,
+                                                Stream& stream) {
+    if (selected_rows > full_capacity_rows || active_rows > selected_rows || outer_per_packed_row == 0) {
+        throw std::runtime_error("Packed-row RMSNorm selected extent is incompatible with its logical active extent.");
+    }
+    if (active_rows == selected_rows) {
+        return;
+    }
+    const std::vector<uint64_t> dims = tensor.getDimensions();
+    if (dims.size() != 2 || dims[0] != full_capacity_rows * outer_per_packed_row || dims[1] == 0) {
+        throw std::runtime_error("Packed-row RMSNorm operand must be a contiguous rank-2 full-capacity tensor.");
+    }
+    const uint64_t hidden = dims[1];
+    const uint64_t active_outer = active_rows * outer_per_packed_row;
+    const uint64_t selected_outer = selected_rows * outer_per_packed_row;
+    Tensor overread = tensor.aliasView({selected_outer - active_outer, hidden},
+                                       {hidden, 1},
+                                       active_outer * hidden);
+    overread.memsetAsync(stream, 0);
+}
+
 StampedRmsNorm::StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
                                const Tensor& input,
                                const Tensor& scale,
                                const Tensor& output,
                                const Stream& stream,
-                               std::optional<Tensor> row_partition_offsets)
+                               std::optional<Tensor> row_partition_offsets,
+                               std::shared_ptr<RmsNormForwardState> forward_state)
     : compiled_rms_norm(std::move(compiled)),
       input(input),
       scale(scale),
       row_partition_offsets(std::move(row_partition_offsets)),
       output(output),
-      stream(stream) {
+      stream(stream),
+      forward_state(forward_state ? std::move(forward_state) : std::make_shared<RmsNormForwardState>()) {
     if (!compiled_rms_norm) {
         throw std::runtime_error("StampedRmsNorm requires a compiled RMSNorm payload.");
     }
@@ -1639,12 +1717,26 @@ void StampedRmsNorm::run() { runOn(stream); }
 
 void StampedRmsNorm::runOn(Stream& run_stream) const {
     if (compiled_rms_norm->packed_row_capacity == 0) {
-        const CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(input, scale, output);
+        CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(input, scale, output);
         CudnnRmsNormForwardArgs args;
         args.x = input;
         args.scale = scale;
         args.y = output;
+        if (forward_state != nullptr && forward_state->retain_for_backward) {
+            descriptor.training = true;
+            if (!forward_state->inv_variance.isInitialized()) {
+                forward_state->inv_variance =
+                    Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input.getDimensions().at(0)}));
+            }
+            args.invVariance = forward_state->inv_variance;
+            forward_state->has_valid_state = false;
+        }
         CudnnRmsNorm::instance().forward(descriptor, args, run_stream);
+        if (descriptor.training) {
+            forward_state->has_valid_state = true;
+            forward_state->packed_active_rows = 0;
+            forward_state->packed_selected_rows = 0;
+        }
         return;
     }
 
@@ -1661,44 +1753,334 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
     const std::vector<uint64_t> input_dims = input.getDimensions();
     const uint64_t hidden = input_dims[1];
     const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm->packed_row_capacity;
-    if (active_rows == 0) {
-        Tensor mutable_output = output;
-        mutable_output.memsetAsync(run_stream, 0);
-        return;
-    }
     const std::vector<uint64_t> buckets = makeRaggedMatmulCapacityBuckets(compiled_rms_norm->packed_row_capacity);
-    const uint64_t selected_rows = chooseRaggedMatmulCapacityBucket(active_rows, buckets);
+    const uint64_t selected_rows =
+        active_rows == 0 ? buckets.front() : chooseRaggedMatmulCapacityBucket(active_rows, buckets);
     const uint64_t selected_outer = selected_rows * outer_per_packed_row;
-    const uint64_t active_outer = active_rows * outer_per_packed_row;
 
-    // Bucket slack and all unused packed capacity are outside the logical ragged
-    // tensor. Canonicalize them before cuDNN so a bucket larger than active_rows
-    // contributes exactly zero, and so RMSNorm autodiff's later dscale reduction
-    // cannot observe poisoned padding.
+    // cuDNN deliberately executes the selected physical bucket. Sanitize exactly
+    // the rows that this consumer will over-read and leave all later capacity undefined.
     Tensor mutable_input = input;
-    if (active_outer < input_dims[0]) {
-        Tensor input_tail = mutable_input.aliasView({input_dims[0] - active_outer, hidden},
-                                                   {hidden, 1},
-                                                   active_outer * hidden);
-        input_tail.memsetAsync(run_stream, 0);
-    }
+    sanitizePackedRmsNormOverreadRows(mutable_input,
+                                      active_rows,
+                                      selected_rows,
+                                      compiled_rms_norm->packed_row_capacity,
+                                      outer_per_packed_row,
+                                      run_stream);
 
     Tensor bucket_input = input.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
     Tensor bucket_output = output.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
-    const CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output);
+    CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output);
     CudnnRmsNormForwardArgs args;
     args.x = bucket_input;
     args.scale = scale;
     args.y = bucket_output;
-    CudnnRmsNorm::instance().forward(descriptor, args, run_stream);
-
-    Tensor mutable_output = output;
-    if (active_outer < input_dims[0]) {
-        Tensor output_tail = mutable_output.aliasView({input_dims[0] - active_outer, hidden},
-                                                     {hidden, 1},
-                                                     active_outer * hidden);
-        output_tail.memsetAsync(run_stream, 0);
+    if (forward_state != nullptr && forward_state->retain_for_backward) {
+        descriptor.training = true;
+        if (!forward_state->inv_variance.isInitialized()) {
+            forward_state->inv_variance =
+                Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input_dims[0]}));
+        }
+        args.invVariance = forward_state->inv_variance.aliasView({selected_outer}, {1}, 0);
+        forward_state->has_valid_state = false;
     }
+    CudnnRmsNorm::instance().forward(descriptor, args, run_stream);
+    if (descriptor.training) {
+        forward_state->packed_active_rows = active_rows;
+        forward_state->packed_selected_rows = selected_rows;
+        forward_state->has_valid_state = true;
+    }
+}
+
+void StampedRmsNorm::retainForwardStateForBackward() {
+    if (compiled_rms_norm->fused_activation != CudnnRmsNormFusedActivation::NONE) {
+        throw std::runtime_error("RMSNorm fused activation backward is not supported.");
+    }
+    if (!forward_state->retain_for_backward) {
+        // A state produced before retention was requested would have come from an
+        // inference forward and therefore cannot contain training invVariance.
+        forward_state->has_valid_state = false;
+        if (compiled_rms_norm->packed_row_capacity != 0) {
+            const std::vector<uint64_t> input_dims = input.getDimensions();
+            const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm->packed_row_capacity;
+            for (const uint64_t capacity_rows : makeRaggedMatmulCapacityBuckets(compiled_rms_norm->packed_row_capacity)) {
+                const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
+                Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+                Tensor bucket_output = output.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+                CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output);
+                descriptor.training = true;
+                CudnnRmsNorm::instance().warmForward(descriptor, stream.getGpuNum());
+            }
+        }
+    }
+    forward_state->retain_for_backward = true;
+    if (!forward_state->inv_variance.isInitialized()) {
+        forward_state->inv_variance =
+            Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input.getDimensions().at(0)}));
+    }
+}
+
+std::optional<PackedRowConsumerDiagnostic> StampedRmsNorm::packedRowConsumerDiagnostic() const {
+    if (compiled_rms_norm->packed_row_capacity == 0) {
+        return std::nullopt;
+    }
+    if (!row_partition_offsets.has_value()) {
+        throw std::runtime_error("Packed-row RMSNorm diagnostic is missing its row-partition runtime binding.");
+    }
+    const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
+    RowPartitionRuntime row_partition(row_partition_offsets.value(),
+                                      RowPartitionDescriptor(compiled_rms_norm->ragged_batch_size,
+                                                             compiled_rms_norm->packed_row_capacity,
+                                                             offsets_descriptor.getDataType()));
+    const uint64_t active_rows = row_partition.requireHostActiveValueCount();
+    const std::vector<uint64_t> buckets = makeRaggedMatmulCapacityBuckets(compiled_rms_norm->packed_row_capacity);
+    const uint64_t selected_rows =
+        active_rows == 0 ? buckets.front() : chooseRaggedMatmulCapacityBucket(active_rows, buckets);
+    if (selected_rows < active_rows || selected_rows > compiled_rms_norm->packed_row_capacity) {
+        throw std::runtime_error("Packed-row RMSNorm diagnostic selected an invalid physical row extent.");
+    }
+
+    const std::vector<uint64_t> dims = input.getDimensions();
+    if (dims.size() != 2 || dims[0] % compiled_rms_norm->packed_row_capacity != 0 || dims[1] == 0) {
+        throw std::runtime_error("Packed-row RMSNorm diagnostic requires a contiguous rank-2 full-capacity input.");
+    }
+    const uint64_t outer_per_packed_row = dims[0] / compiled_rms_norm->packed_row_capacity;
+    const uint64_t elements_per_packed_row = outer_per_packed_row * dims[1];
+    const uint64_t bytes_per_packed_row = input.getDescriptor().getArraySizeInBytes(elements_per_packed_row);
+
+    PackedRowConsumerDiagnostic diagnostic;
+    diagnostic.kind = PackedRowConsumerKind::RmsNorm;
+    diagnostic.active_rows = active_rows;
+    diagnostic.selected_rows = selected_rows;
+    diagnostic.full_capacity_rows = compiled_rms_norm->packed_row_capacity;
+    diagnostic.sanitized_rows = selected_rows - active_rows;
+    if (diagnostic.sanitized_rows != 0) {
+        diagnostic.sanitized_operand_count = 1;
+        diagnostic.sanitized_bytes = diagnostic.sanitized_rows * bytes_per_packed_row;
+    }
+    diagnostic.full_tail_bytes =
+        (compiled_rms_norm->packed_row_capacity - active_rows) * bytes_per_packed_row;
+    return diagnostic;
+}
+
+bool StampedRmsNorm::canProvideForwardStateFor(const CompiledRmsNormBackward& backward,
+                                              const Tensor& input_tensor,
+                                              const Tensor& scale_tensor,
+                                              const Tensor& dy_tensor,
+                                              const std::optional<Tensor>& backward_row_partition_offsets) const {
+    if (compiled_rms_norm->fused_activation != CudnnRmsNormFusedActivation::NONE) {
+        return false;
+    }
+    const bool packed_offsets_match =
+        compiled_rms_norm->packed_row_capacity == 0
+            ? !row_partition_offsets.has_value() && !backward_row_partition_offsets.has_value()
+            : row_partition_offsets.has_value() && backward_row_partition_offsets.has_value() &&
+                  tensorMatches(row_partition_offsets.value(), backward_row_partition_offsets.value());
+    return packed_offsets_match && tensorMatches(input, input_tensor) && tensorMatches(scale, scale_tensor) &&
+           dy_tensor.getDimensions() == output.getDimensions() && dy_tensor.getDataType() == backward.dy_dtype &&
+           compiled_rms_norm->normalized_feature_count == backward.normalized_feature_count &&
+           compiled_rms_norm->packed_row_capacity == backward.packed_row_capacity &&
+           compiled_rms_norm->ragged_batch_size == backward.ragged_batch_size &&
+           compiled_rms_norm->epsilon == backward.epsilon && compiled_rms_norm->input_dtype == backward.input_dtype &&
+           compiled_rms_norm->scale_dtype == backward.scale_dtype && compiled_rms_norm->output_dtype == backward.dy_dtype &&
+           compiled_rms_norm->compute_dtype == backward.compute_dtype;
+}
+
+StampedRmsNormBackward::StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBackward> compiled,
+                                               const Tensor& input,
+                                               const Tensor& scale,
+                                               const Tensor& dY,
+                                               const Tensor& dX,
+                                               const Tensor& dScale,
+                                               const Stream& stream,
+                                               std::optional<Tensor> row_partition_offsets,
+                                               std::shared_ptr<RmsNormForwardState> saved_forward_state)
+    : compiled_rms_norm_backward(std::move(compiled)),
+      input(input),
+      scale(scale),
+      dY(dY),
+      dX(dX),
+      dScale(dScale),
+      row_partition_offsets(std::move(row_partition_offsets)),
+      stream(stream),
+      outputs({dX, dScale}),
+      saved_forward_state(std::move(saved_forward_state)) {
+    if (!compiled_rms_norm_backward) {
+        throw std::runtime_error("StampedRmsNormBackward requires a compiled RMSNorm backward payload.");
+    }
+    if (compiled_rms_norm_backward->packed_row_capacity != 0) {
+        if (!this->row_partition_offsets.has_value() || compiled_rms_norm_backward->ragged_batch_size == 0) {
+            throw std::runtime_error("Packed-row RMSNorm backward requires an explicit row-partition runtime binding.");
+        }
+        const TensorDescriptor offsets_descriptor = this->row_partition_offsets->getDescriptor();
+        RowPartitionRuntime(this->row_partition_offsets.value(),
+                            RowPartitionDescriptor(compiled_rms_norm_backward->ragged_batch_size,
+                                                   compiled_rms_norm_backward->packed_row_capacity,
+                                                   offsets_descriptor.getDataType()));
+        const std::vector<uint64_t> input_dims = input.getDimensions();
+        if (input_dims.size() != 2 || input_dims[0] % compiled_rms_norm_backward->packed_row_capacity != 0) {
+            throw std::runtime_error(
+                "Packed-row RMSNorm backward requires [outer, hidden] input divisible by packed row capacity.");
+        }
+        const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm_backward->packed_row_capacity;
+        for (const uint64_t capacity_rows : makeRaggedMatmulCapacityBuckets(compiled_rms_norm_backward->packed_row_capacity)) {
+            const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
+            Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            Tensor bucket_dy = dY.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            Tensor bucket_dx = dX.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            CudnnRmsNormDescriptor descriptor =
+                compiled_rms_norm_backward->descriptorFor(bucket_input, scale, bucket_dy, bucket_dx, dScale);
+            CudnnRmsNorm::instance().warmBackward(descriptor, stream.getGpuNum());
+        }
+    }
+}
+
+bool StampedRmsNormBackward::tryLinkForwardStateFrom(const std::shared_ptr<StampedRmsNorm>& forward) {
+    if (!forward ||
+        !forward->canProvideForwardStateFor(*compiled_rms_norm_backward, input, scale, dY, row_partition_offsets)) {
+        return false;
+    }
+    forward->retainForwardStateForBackward();
+    saved_forward_state = forward->getForwardState();
+    return true;
+}
+
+void StampedRmsNormBackward::run() { runOn(stream); }
+
+void StampedRmsNormBackward::runOn(Stream& run_stream) const {
+    if (compiled_rms_norm_backward->packed_row_capacity == 0) {
+        std::shared_ptr<RmsNormForwardState> state = saved_forward_state;
+        if (state != nullptr) {
+            if (!state->has_valid_state || !state->inv_variance.isInitialized()) {
+                throw std::runtime_error(
+                    "Dense RMSNorm backward was linked to forward state that has not been populated by a training forward pass.");
+            }
+        } else {
+            // A standalone differentiated equation has no separately stamped forward execution plan.
+            // Generate the exact cuDNN training statistic locally rather than falling back to
+            // the old algebraic RMSNorm derivative. CustomLayer/network training never takes
+            // this path: its backward plan is linked to the retained forward state above.
+            if (fallback_forward_state == nullptr) {
+                fallback_forward_state = std::make_shared<RmsNormForwardState>();
+            }
+            if (!fallback_forward_state->inv_variance.isInitialized()) {
+                fallback_forward_state->inv_variance =
+                    Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input.getDimensions().at(0)}));
+            }
+            if (!fallback_output.isInitialized()) {
+                fallback_output = Tensor(input.getPlacement(), TensorDescriptor(dY.getDataType(), input.getDimensions()));
+            }
+            CudnnRmsNormDescriptor forward_descriptor =
+                compiled_rms_norm_backward->descriptorFor(input, scale, dY, dX, dScale);
+            forward_descriptor.training = true;
+            CudnnRmsNormForwardArgs forward_args;
+            forward_args.x = input;
+            forward_args.scale = scale;
+            forward_args.y = fallback_output;
+            forward_args.invVariance = fallback_forward_state->inv_variance;
+            CudnnRmsNorm::instance().forward(forward_descriptor, forward_args, run_stream);
+            fallback_forward_state->has_valid_state = true;
+            state = fallback_forward_state;
+        }
+
+        CudnnRmsNormDescriptor descriptor = compiled_rms_norm_backward->descriptorFor(input, scale, dY, dX, dScale);
+        CudnnRmsNormBackwardArgs args;
+        args.dy = dY;
+        args.x = input;
+        args.scale = scale;
+        args.invVariance = state->inv_variance;
+        args.dx = dX;
+        args.dscale = dScale;
+        CudnnRmsNorm::instance().backward(descriptor, args, run_stream);
+        return;
+    }
+
+    if (!row_partition_offsets.has_value()) {
+        throw std::runtime_error("Packed-row RMSNorm backward is missing its row-partition runtime binding.");
+    }
+    const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
+    RowPartitionRuntime row_partition(row_partition_offsets.value(),
+                                      RowPartitionDescriptor(compiled_rms_norm_backward->ragged_batch_size,
+                                                             compiled_rms_norm_backward->packed_row_capacity,
+                                                             offsets_descriptor.getDataType()));
+    const uint64_t active_rows = row_partition.requireHostActiveValueCount();
+    const std::vector<uint64_t> input_dims = input.getDimensions();
+    const uint64_t hidden = input_dims[1];
+    const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm_backward->packed_row_capacity;
+    const std::vector<uint64_t> buckets = makeRaggedMatmulCapacityBuckets(compiled_rms_norm_backward->packed_row_capacity);
+    const uint64_t selected_rows =
+        active_rows == 0 ? buckets.front() : chooseRaggedMatmulCapacityBucket(active_rows, buckets);
+    const uint64_t selected_outer = selected_rows * outer_per_packed_row;
+
+    // dY is the backward consumer's newly supplied row-bound operand. Sanitize only
+    // the bucket slack cuDNN will read. x was sanitized by the matching forward
+    // consumer and remains the same retained forward input storage.
+    Tensor mutable_dy = dY;
+    sanitizePackedRmsNormOverreadRows(mutable_dy,
+                                      active_rows,
+                                      selected_rows,
+                                      compiled_rms_norm_backward->packed_row_capacity,
+                                      outer_per_packed_row,
+                                      run_stream);
+
+    Tensor bucket_input = input.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
+    Tensor bucket_dy = dY.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
+    Tensor bucket_dx = dX.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
+
+    std::shared_ptr<RmsNormForwardState> state = saved_forward_state;
+    if (state != nullptr) {
+        if (!state->has_valid_state || !state->inv_variance.isInitialized() ||
+            state->packed_active_rows != active_rows || state->packed_selected_rows != selected_rows) {
+            throw std::runtime_error(
+                "Packed-row RMSNorm backward forward state does not match the current logical/bucket extent.");
+        }
+    } else {
+        // Standalone differentiated packed equations have no separately stamped
+        // forward plan. Recreate the cuDNN training statistic over the same selected
+        // bucket while honoring the consumer-responsibility contract.
+        Tensor mutable_input = input;
+        sanitizePackedRmsNormOverreadRows(mutable_input,
+                                          active_rows,
+                                          selected_rows,
+                                          compiled_rms_norm_backward->packed_row_capacity,
+                                          outer_per_packed_row,
+                                          run_stream);
+        if (fallback_forward_state == nullptr) {
+            fallback_forward_state = std::make_shared<RmsNormForwardState>();
+        }
+        if (!fallback_forward_state->inv_variance.isInitialized()) {
+            fallback_forward_state->inv_variance =
+                Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input_dims[0]}));
+        }
+        if (!fallback_output.isInitialized()) {
+            fallback_output = Tensor(input.getPlacement(), TensorDescriptor(dY.getDataType(), input_dims));
+        }
+        Tensor bucket_fallback_output = fallback_output.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
+        CudnnRmsNormDescriptor forward_descriptor =
+            compiled_rms_norm_backward->descriptorFor(bucket_input, scale, bucket_dy, bucket_dx, dScale);
+        forward_descriptor.training = true;
+        CudnnRmsNormForwardArgs forward_args;
+        forward_args.x = bucket_input;
+        forward_args.scale = scale;
+        forward_args.y = bucket_fallback_output;
+        forward_args.invVariance = fallback_forward_state->inv_variance.aliasView({selected_outer}, {1}, 0);
+        CudnnRmsNorm::instance().forward(forward_descriptor, forward_args, run_stream);
+        fallback_forward_state->packed_active_rows = active_rows;
+        fallback_forward_state->packed_selected_rows = selected_rows;
+        fallback_forward_state->has_valid_state = true;
+        state = fallback_forward_state;
+    }
+
+    CudnnRmsNormDescriptor descriptor =
+        compiled_rms_norm_backward->descriptorFor(bucket_input, scale, bucket_dy, bucket_dx, dScale);
+    CudnnRmsNormBackwardArgs args;
+    args.dy = bucket_dy;
+    args.x = bucket_input;
+    args.scale = scale;
+    args.invVariance = state->inv_variance.aliasView({selected_outer}, {1}, 0);
+    args.dx = bucket_dx;
+    args.dscale = dScale;
+    CudnnRmsNorm::instance().backward(descriptor, args, run_stream);
 }
 
 StampedEmbeddingLookup::StampedEmbeddingLookup(std::shared_ptr<CompiledEmbeddingLookup> compiled,
@@ -1845,6 +2227,57 @@ StampedMatmulKernelDiagnostic StampedMatmul::kernelDiagnostic() const {
             diagnostic.picker_runtime_ms = kernel.getAverageRunTimeMilliseconds();
         }
         diagnostic.algorithm_id = kernel.getAlgorithmId();
+    }
+    return diagnostic;
+}
+
+std::optional<PackedRowConsumerDiagnostic> StampedMatmul::packedRowConsumerDiagnostic() const {
+    if (!built_matmul->bucketed_cublas_gemm.has_value()) {
+        return std::nullopt;
+    }
+    if (!row_partition_offsets.has_value()) {
+        throw std::runtime_error("Packed-row MATMUL diagnostic is missing its row-partition runtime binding.");
+    }
+    const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
+    RowPartitionRuntime row_partition(row_partition_offsets.value(),
+                                      RowPartitionDescriptor(compiled_matmul->ragged_batch_size,
+                                                             compiled_matmul->packed_row_capacity,
+                                                             offsets_descriptor.getDataType()));
+    const uint64_t active_rows = row_partition.requireHostActiveValueCount();
+    const uint64_t selected_rows = built_matmul->bucketed_cublas_gemm->getSelectedCapacityRows(active_rows);
+    if (selected_rows < active_rows || selected_rows > compiled_matmul->packed_row_capacity) {
+        throw std::runtime_error("Packed-row MATMUL diagnostic selected an invalid physical row extent.");
+    }
+
+    PackedRowConsumerDiagnostic diagnostic;
+    diagnostic.kind = PackedRowConsumerKind::Matmul;
+    diagnostic.active_rows = active_rows;
+    diagnostic.selected_rows = selected_rows;
+    diagnostic.full_capacity_rows = compiled_matmul->packed_row_capacity;
+    diagnostic.sanitized_rows = selected_rows - active_rows;
+
+    auto account_row_bound_operand = [&](const Tensor& tensor) {
+        const std::vector<uint64_t> dims = tensor.getDimensions();
+        if (dims.size() != 2 || dims[0] != compiled_matmul->packed_row_capacity || dims[1] == 0) {
+            throw std::runtime_error("Packed-row MATMUL diagnostic requires contiguous rank-2 row-bound operands.");
+        }
+        const uint64_t bytes_per_row = tensor.getDescriptor().getArraySizeInBytes(dims[1]);
+        diagnostic.full_tail_bytes += (compiled_matmul->packed_row_capacity - active_rows) * bytes_per_row;
+        if (diagnostic.sanitized_rows != 0) {
+            ++diagnostic.sanitized_operand_count;
+            diagnostic.sanitized_bytes += diagnostic.sanitized_rows * bytes_per_row;
+        }
+    };
+
+    const bool binds_lhs = compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsA ||
+                           compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB;
+    const bool binds_rhs = compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsB ||
+                           compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB;
+    if (binds_lhs) {
+        account_row_bound_operand(lhs);
+    }
+    if (binds_rhs) {
+        account_row_bound_operand(rhs);
     }
     return diagnostic;
 }
@@ -2045,6 +2478,42 @@ static ResolvedMatmulScales resolveMatmulRuntimeScales(const std::optional<Runti
 static CublasMatrixMultiply::EpilogueFusion toCublasEpilogueFusion(MatmulEpilogue epilogue);
 static CublasMatrixMultiply::BackwardEpilogueFusion toCublasBackwardEpilogueFusion(MatmulBackwardEpilogue epilogue);
 
+static bool packedMatmulBindsRowsLhs(MatmulPackedRowBinding binding) {
+    return binding == MatmulPackedRowBinding::RowsA || binding == MatmulPackedRowBinding::RowsAAndRowsB;
+}
+
+static bool packedMatmulBindsRowsRhs(MatmulPackedRowBinding binding) {
+    return binding == MatmulPackedRowBinding::RowsB || binding == MatmulPackedRowBinding::RowsAAndRowsB;
+}
+
+// Consumer-side pre-read sanitation for bucketed cuBLASLt MATMUL. The selected
+// GEMM reads selected_rows from every row-bound operand, so sanitize exactly
+// [active_rows, selected_rows) immediately before that read. Never canonicalize
+// [selected_rows, full_capacity_rows) merely because the tensor is ragged.
+static void sanitizePackedMatmulOverreadRows(Tensor tensor,
+                                             uint64_t active_rows,
+                                             uint64_t selected_rows,
+                                             uint64_t full_capacity_rows,
+                                             Stream& stream) {
+    if (selected_rows > full_capacity_rows || active_rows > selected_rows) {
+        throw std::runtime_error("Packed-row MATMUL selected extent is incompatible with its logical active extent.");
+    }
+    if (active_rows == selected_rows) {
+        return;
+    }
+
+    const std::vector<uint64_t> dims = tensor.getDimensions();
+    if (dims.size() != 2 || dims[0] != full_capacity_rows || dims[1] == 0) {
+        throw std::runtime_error("Packed-row MATMUL row-bound operand must be a contiguous rank-2 full-capacity tensor.");
+    }
+
+    const uint64_t row_width = dims[1];
+    Tensor overread = tensor.aliasView({selected_rows - active_rows, row_width},
+                                       {row_width, 1},
+                                       active_rows * row_width);
+    overread.memsetAsync(stream, 0);
+}
+
 void StampedMatmul::run() { runOn(stream); }
 
 void StampedMatmul::runOn(Stream& run_stream) const { runOn(run_stream, {}); }
@@ -2086,13 +2555,23 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                                          compiled_matmul->packed_row_capacity,
                                                                          offsets_descriptor.getDataType()));
                 const uint64_t active_rows = row_partition.requireHostActiveValueCount();
-                // A zero-row batch executes the full-capacity pre-tuned kernel over the
-                // canonical zero tail because cuBLASLt does not need a zero-sized geometry.
-                const uint64_t runtime_rows = active_rows == 0 ? compiled_matmul->packed_row_capacity : active_rows;
-                const uint64_t selected_rows = built_matmul->bucketed_cublas_gemm->getSelectedCapacityRows(runtime_rows);
+                // cuBLASLt executes a pre-tuned row bucket rather than an arbitrary logical
+                // row count. The MATMUL is therefore the physical consumer responsible for
+                // sanitizing exactly the bucket slack it will read. Producer tails remain
+                // undefined, including when another active-aware ragged stage feeds us. An
+                // all-empty batch selects the smallest cached bucket rather than full capacity.
+                const uint64_t selected_rows = built_matmul->bucketed_cublas_gemm->getSelectedCapacityRows(active_rows);
+                if (packedMatmulBindsRowsLhs(compiled_matmul->packed_row_binding)) {
+                    sanitizePackedMatmulOverreadRows(
+                        lhs, active_rows, selected_rows, compiled_matmul->packed_row_capacity, run_stream);
+                }
+                if (packedMatmulBindsRowsRhs(compiled_matmul->packed_row_binding)) {
+                    sanitizePackedMatmulOverreadRows(
+                        rhs, active_rows, selected_rows, compiled_matmul->packed_row_capacity, run_stream);
+                }
                 const float alphaOne = 1.0f;
                 const float betaZero = 0.0f;
-                CHECK_CUBLAS(built_matmul->bucketed_cublas_gemm->launchUncheckedPrevalidated(runtime_rows,
+                CHECK_CUBLAS(built_matmul->bucketed_cublas_gemm->launchUncheckedPrevalidated(active_rows,
                                                                                               lhs,
                                                                                               rhs,
                                                                                               output,
@@ -2102,16 +2581,10 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                                                               &betaZero,
                                                                                               run_stream,
                                                                                               CublasScalarPointerMode::Host));
-                if (output.getDimensions().size() == 2 &&
-                    output.getDimensions()[0] == compiled_matmul->packed_row_capacity) {
-                    if (selected_rows < compiled_matmul->packed_row_capacity) {
-                        const uint64_t row_width = output.getDimensions()[1];
-                        Tensor tail = output.aliasView({compiled_matmul->packed_row_capacity - selected_rows, row_width},
-                                                       {row_width, 1},
-                                                       selected_rows * row_width);
-                        tail.memsetAsync(run_stream, 0);
-                    }
-                }
+                // The selected bucket's output slack and all rows beyond it are outside
+                // the logical ragged tensor. Do not canonicalize either region after the
+                // consumer finishes; a later over-reading consumer must sanitize its own
+                // selected over-read immediately before use.
                 return;
             }
             if (!built_matmul->cublas_kernel.has_value()) {
@@ -3150,6 +3623,28 @@ static std::unordered_set<std::string> runtimeScalarNamesForStage(const StampedE
         stage_names = stage.conditional->runtimeScalarNames();
     }
     return stage_names;
+}
+
+void StampedExecutionPlan::linkRmsNormBackwardStatesFrom(const StampedExecutionPlan& forward_plan) {
+    for (const StampedExecutionStage& backward_stage : steps) {
+        if (backward_stage.kind != StampedExecutionStage::Kind::RmsNormBackward || backward_stage.rms_norm_backward == nullptr) {
+            continue;
+        }
+        bool linked = false;
+        for (const StampedExecutionStage& forward_stage : forward_plan.steps) {
+            if (forward_stage.kind != StampedExecutionStage::Kind::RmsNorm || forward_stage.rms_norm == nullptr) {
+                continue;
+            }
+            if (backward_stage.rms_norm_backward->tryLinkForwardStateFrom(forward_stage.rms_norm)) {
+                linked = true;
+                break;
+            }
+        }
+        if (!linked) {
+            throw std::runtime_error(
+                "RMSNorm backward stage could not find a matching forward RMSNorm state provider in the linked forward plan.");
+        }
+    }
 }
 
 bool StampedExecutionPlan::requiresRuntimeScalars() const { return !runtimeScalarNames().empty(); }

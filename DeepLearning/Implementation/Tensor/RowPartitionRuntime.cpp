@@ -104,11 +104,6 @@ uint64_t RowPartitionRuntime::requireHostActiveValueCount() const {
     return activeValueCount.value();
 }
 
-Tensor RowPartitionRuntime::getActiveValueCount() const {
-    THOR_THROW_IF_FALSE(initialized);
-    return rowPartitionActiveValueCount(offsets, getBatchSize());
-}
-
 RaggedRuntimeExtent RowPartitionRuntime::getRuntimeExtent(uint64_t elementsPerValue) const {
     THOR_THROW_IF_FALSE(initialized);
     return raggedRuntimeExtentFromOffsets(offsets, getBatchSize(), getMaxTotalValues(), elementsPerValue);

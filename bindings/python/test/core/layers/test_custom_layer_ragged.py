@@ -177,7 +177,6 @@ def test_python_custom_layer_ragged_executes_active_prefix_and_round_trips(tmp_p
     assert isinstance(result, thor.physical.PhysicalRaggedTensor)
     np.testing.assert_array_equal(result.offsets.numpy(), OFFSETS)
     np.testing.assert_allclose(result.values.numpy()[: active.shape[0]], expected, rtol=1e-5, atol=1e-5)
-    np.testing.assert_array_equal(result.values.numpy()[active.shape[0]:], np.zeros((CAPACITY - active.shape[0], FEATURES)))
 
     save_dir = tmp_path / "ragged_custom_layer"
     placed.save(str(save_dir), overwrite=False, save_optimizer_state=False)
@@ -186,4 +185,9 @@ def test_python_custom_layer_ragged_executes_active_prefix_and_round_trips(tmp_p
     loaded_placed = loaded.place(BATCH_SIZE, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     loaded_result = loaded_placed.infer({"history": _physical_ragged(values)})["output"]
     np.testing.assert_array_equal(loaded_result.offsets.numpy(), OFFSETS)
-    np.testing.assert_allclose(loaded_result.values.numpy(), result.values.numpy(), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        loaded_result.values.numpy()[: active.shape[0]],
+        result.values.numpy()[: active.shape[0]],
+        rtol=1e-5,
+        atol=1e-5,
+    )

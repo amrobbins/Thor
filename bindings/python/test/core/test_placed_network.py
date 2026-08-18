@@ -439,9 +439,10 @@ def test_ragged_network_output_infer_returns_one_logical_physical_ragged_tensor(
     result = outputs["tokens_out"]
     assert isinstance(result, thor.physical.PhysicalRaggedTensor)
     assert np.array_equal(result.offsets.numpy(), offsets_np)
-    expected_values_np = values_np.copy()
-    expected_values_np[int(offsets_np[-1]) :] = 0.0
-    assert np.array_equal(result.values.numpy(), expected_values_np)
+    active_values = int(offsets_np[-1])
+    result_values = result.values.numpy()
+    assert result_values.shape == values_np.shape
+    assert np.array_equal(result_values[:active_values], values_np[:active_values])
 
     save_dir = tmp_path / "ragged_output_artifact"
     placed.save(str(save_dir), overwrite=False, save_optimizer_state=False)
@@ -459,4 +460,6 @@ def test_ragged_network_output_infer_returns_one_logical_physical_ragged_tensor(
     loaded_result = loaded_outputs["tokens_out"]
     assert isinstance(loaded_result, thor.physical.PhysicalRaggedTensor)
     assert np.array_equal(loaded_result.offsets.numpy(), offsets_np)
-    assert np.array_equal(loaded_result.values.numpy(), expected_values_np)
+    loaded_values = loaded_result.values.numpy()
+    assert loaded_values.shape == values_np.shape
+    assert np.array_equal(loaded_values[:active_values], values_np[:active_values])

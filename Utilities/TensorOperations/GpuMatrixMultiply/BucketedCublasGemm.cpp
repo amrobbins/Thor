@@ -117,7 +117,13 @@ const BucketedCublasGemm::Bucket &BucketedCublasGemm::selectBucket(uint64_t acti
         throw std::logic_error("BucketedCublasGemm has not been built.");
     }
 
-    const uint64_t selectedCapacity = chooseRaggedMatmulCapacityBucket(activeRows, capacityBuckets);
+    // An all-empty ragged batch still needs a physical GEMM for dense outputs such
+    // as parameter gradients, but it should use the smallest prebuilt capacity
+    // rather than falling back to full packed capacity. The caller sanitizes that
+    // smallest bucket to zero before launch, so the resulting dense reduction is
+    // mathematically zero while inactive packed outputs remain undefined.
+    const uint64_t selectedCapacity =
+        activeRows == 0 ? capacityBuckets.front() : chooseRaggedMatmulCapacityBucket(activeRows, capacityBuckets);
     auto it = std::lower_bound(buckets.begin(), buckets.end(), selectedCapacity, [](const Bucket &bucket, uint64_t capacity) {
         return bucket.capacityRows < capacity;
     });

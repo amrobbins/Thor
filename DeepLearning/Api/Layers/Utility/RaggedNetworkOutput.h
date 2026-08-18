@@ -12,6 +12,10 @@ namespace Thor {
 
 class Network;
 
+// Exposes a ragged tensor without extending its logical extent. The returned
+// row partition is authoritative and values beyond offsets[B] remain undefined
+// capacity; external consumers inherit the same consumer-responsibility rule as
+// internal consumers.
 class RaggedNetworkOutput {
    public:
     class Builder;

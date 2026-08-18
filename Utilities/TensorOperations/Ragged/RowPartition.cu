@@ -140,26 +140,17 @@ __global__ void offsetsToRopePositionIdsKernel(const OffsetT* offsets,
                                                uint64_t batch_size,
                                                uint64_t max_total_values) {
     const uint64_t row = static_cast<uint64_t>(blockIdx.x);
-    if (row < batch_size) {
-        const uint64_t begin = static_cast<uint64_t>(offsets[row]);
-        const uint64_t end = static_cast<uint64_t>(offsets[row + 1]);
-        const uint64_t bounded_begin = begin < max_total_values ? begin : max_total_values;
-        const uint64_t bounded_end = end < max_total_values ? end : max_total_values;
-        const int64_t origin = row_position_offsets == nullptr ? scalar_position_offset
-                                                               : static_cast<int64_t>(row_position_offsets[row]);
-        for (uint64_t idx = bounded_begin + threadIdx.x; idx < bounded_end; idx += blockDim.x) {
-            position_ids[idx] = static_cast<float>(origin + static_cast<int64_t>(idx - begin));
-        }
+    if (row >= batch_size) {
         return;
     }
-
-    // One extra block clears unused packed capacity so stale positions can never leak into a later shorter batch.
-    if (row == batch_size) {
-        const uint64_t used = static_cast<uint64_t>(offsets[batch_size]);
-        const uint64_t bounded_used = used < max_total_values ? used : max_total_values;
-        for (uint64_t idx = bounded_used + threadIdx.x; idx < max_total_values; idx += blockDim.x) {
-            position_ids[idx] = 0.0f;
-        }
+    const uint64_t begin = static_cast<uint64_t>(offsets[row]);
+    const uint64_t end = static_cast<uint64_t>(offsets[row + 1]);
+    const uint64_t bounded_begin = begin < max_total_values ? begin : max_total_values;
+    const uint64_t bounded_end = end < max_total_values ? end : max_total_values;
+    const int64_t origin = row_position_offsets == nullptr ? scalar_position_offset
+                                                           : static_cast<int64_t>(row_position_offsets[row]);
+    for (uint64_t idx = bounded_begin + threadIdx.x; idx < bounded_end; idx += blockDim.x) {
+        position_ids[idx] = static_cast<float>(origin + static_cast<int64_t>(idx - begin));
     }
 }
 
@@ -467,7 +458,10 @@ struct OffsetsToRopePositionIdsFn {
         }
         constexpr uint32_t threads = 256;
         const int32_t* row_origins = row_position_offsets == nullptr ? nullptr : row_position_offsets->getMemPtr<int32_t>();
-        offsetsToRopePositionIdsKernel<OffsetT><<<static_cast<uint32_t>(batch_size + 1), threads, 0, stream.getStream()>>>(
+        if (batch_size == 0) {
+            return;
+        }
+        offsetsToRopePositionIdsKernel<OffsetT><<<static_cast<uint32_t>(batch_size), threads, 0, stream.getStream()>>>(
             offsets.getMemPtr<OffsetT>(),
             row_origins,
             scalar_position_offset,

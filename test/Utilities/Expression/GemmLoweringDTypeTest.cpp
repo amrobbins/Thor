@@ -1,5 +1,6 @@
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/RaggedExpression.h"
 
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
@@ -156,4 +157,38 @@ TEST(GemmLoweringDType, PackedRowMatmulKeepsBiasAndUnsupportedEpilogueInExpressi
     EXPECT_EQ(compiled->stages[0].matmul->ragged_batch_size, 2u);
     EXPECT_EQ(compiled->stages[1].kind, CompiledExecutionStage::Kind::FusedKernel)
         << "bias + swish should stay in one normal Expression fusion tail after the bucketed matmul stage";
+}
+
+TEST(GemmLoweringDType, SegmentedReductionDimsAreKnownWhileInspectingGemmLoweringPatterns) {
+    REQUIRE_CUDA_DEVICE();
+    TensorPlacement placement(TensorPlacement::MemDevices::GPU, 0);
+    Tensor packedValues(placement, TensorDescriptor(DataType::FP32, {8, 4}));
+    Tensor offsets(placement, TensorDescriptor(DataType::UINT32, {4}));
+    Tensor weights(placement, TensorDescriptor(DataType::FP32, {4, 5}));
+    Tensor bias(placement, TensorDescriptor(DataType::FP32, {5}));
+
+    const RaggedTensorDescriptor descriptor(DataType::FP32, {4}, 3, 8, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("values", "offsets", descriptor);
+    const Expression w = Expression::input("weights", DataType::FP32, DataType::FP32);
+    const Expression b = Expression::input("bias", DataType::FP32, DataType::FP32);
+
+    const Expression perSegment = ragged.segment_sum();
+    const Expression output = Expression::matmul(perSegment, w, false, false, DataType::FP32, DataType::FP32) + b;
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"output", output}}).physicalOutputs(), 0);
+    const std::unordered_map<std::string, Tensor> inputs{
+        {"values", packedValues}, {"offsets", offsets}, {"weights", weights}, {"bias", bias}};
+
+    std::shared_ptr<CompiledOutputs> compiled;
+    EXPECT_NO_THROW(compiled = equation.compileForInputs(inputs));
+    ASSERT_NE(compiled, nullptr);
+
+    bool saw_segmented_reduction = false;
+    bool saw_matmul = false;
+    for (const CompiledExecutionStage& stage : compiled->stages) {
+        saw_segmented_reduction |= stage.kind == CompiledExecutionStage::Kind::SegmentedReduction;
+        saw_matmul |= stage.kind == CompiledExecutionStage::Kind::Matmul;
+    }
+    EXPECT_TRUE(saw_segmented_reduction);
+    EXPECT_TRUE(saw_matmul);
 }

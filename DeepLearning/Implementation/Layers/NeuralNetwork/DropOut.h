@@ -17,7 +17,9 @@ namespace ThorImplementation {
  * Inference aliases the input tensor as the output tensor for both dense and ragged
  * execution. A zero-rate training layer is likewise a true identity. Row-partition
  * state lives on the offsets-owned RowPartitionRuntime, so aliasing packed values does
- * not require DropOut to copy or mutate ragged metadata.
+ * not require DropOut to copy or mutate ragged metadata. Native ragged kernels execute
+ * only the logical active prefix. Storage beyond offsets[B] is undefined and is never
+ * canonicalized merely because DropOut produced it.
  *
  * When instantiating a trained network for inference only, this layer should be skipped
  * (not instantiated as part of the network), to save memory and memory bandwidth.
@@ -285,7 +287,6 @@ class DropOut : public Layer, public TrainingDropoutControllable {
                 } else {
                     copyActivePrefix(inputTensor.value(), outputTensor.value(), activeElements, stream);
                 }
-                zeroRaggedInactiveTail(outputTensor.value(), activeElements, stream);
             }
             return;
         }
@@ -358,9 +359,6 @@ class DropOut : public Layer, public TrainingDropoutControllable {
                 }
             } else if (errorOut.value() != errorIn.value()) {
                 copyActivePrefix(errorIn.value(), errorOut.value(), activeElements, stream);
-            }
-            if (errorOut.value() != errorIn.value()) {
-                zeroRaggedInactiveTail(errorOut.value(), activeElements, stream);
             }
             return;
         }
@@ -464,14 +462,6 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         Tensor sourcePrefix = source.aliasView({activeElements}, {1}, 0);
         Tensor destinationPrefix = destination.aliasView({activeElements}, {1}, 0);
         destinationPrefix.copyFromAsync(sourcePrefix, stream);
-    }
-
-    static void zeroRaggedInactiveTail(Tensor tensor, uint64_t activeElements, Stream stream) {
-        THOR_THROW_IF_FALSE(activeElements <= tensor.getTotalNumElements());
-        const uint64_t tailElements = tensor.getTotalNumElements() - activeElements;
-        if (tailElements == 0) return;
-        Tensor tail = tensor.aliasView({tailElements}, {1}, activeElements);
-        tail.memsetAsync(stream, 0);
     }
 
     void fuseBackwardIdentityAlias() {

@@ -172,6 +172,7 @@ def _build_network(name: str):
 
     thor.layers.NetworkOutput(network, "future_output", dense_ragged.get_feature_output(), thor.DataType.fp16)
     thor.layers.NetworkOutput(network, "mirror_mean", mirror_mean, thor.DataType.fp16)
+    thor.layers.RaggedNetworkOutput(network, "encoded_history", history_states)
     thor.layers.NetworkOutput(network, "future_loss", future_loss.get_loss(), thor.DataType.fp32)
     thor.layers.NetworkOutput(network, "mirror_loss", mirror_loss.get_loss(), thor.DataType.fp32)
 
@@ -292,22 +293,42 @@ def _infer(network: thor.Network, poison: float):
 
     outputs = placed.infer(batch)
     result = {}
-    for name in ("future_output", "mirror_mean", "future_loss", "mirror_loss"):
+    for name in ("future_output", "mirror_mean", "future_loss", "mirror_loss", "encoded_history"):
         if name not in outputs:
             continue
-        values = np.array(outputs[name].numpy(), copy=True)
-        assert np.all(np.isfinite(values)), name
-        result[name] = values
+        value = outputs[name]
+        if isinstance(value, thor.physical.PhysicalRaggedTensor):
+            values = np.array(value.values.numpy(), copy=True)
+            offsets = np.array(value.offsets.numpy(), copy=True)
+            assert values.shape == (HISTORY_CAPACITY, FEATURES)
+            np.testing.assert_array_equal(offsets, HISTORY_OFFSETS)
+            active = int(offsets[-1])
+            assert np.all(np.isfinite(values[:active])), name
+            result[name] = (values, offsets)
+        else:
+            values = np.array(value.numpy(), copy=True)
+            assert np.all(np.isfinite(values)), name
+            result[name] = values
 
     assert "future_output" in result
     assert "mirror_mean" in result
+    assert "encoded_history" in result
     return result
 
 
 def _assert_outputs_close(lhs, rhs, *, atol=3e-2, rtol=3e-2):
     assert lhs.keys() == rhs.keys()
     for name in lhs:
-        np.testing.assert_allclose(lhs[name], rhs[name], atol=atol, rtol=rtol, err_msg=name)
+        if isinstance(lhs[name], tuple):
+            lhs_values, lhs_offsets = lhs[name]
+            rhs_values, rhs_offsets = rhs[name]
+            np.testing.assert_array_equal(lhs_offsets, rhs_offsets)
+            active = int(lhs_offsets[-1])
+            np.testing.assert_allclose(
+                lhs_values[:active], rhs_values[:active], atol=atol, rtol=rtol, err_msg=name
+            )
+        else:
+            np.testing.assert_allclose(lhs[name], rhs[name], atol=atol, rtol=rtol, err_msg=name)
 
 
 def _changed(lhs: np.ndarray, rhs: np.ndarray, threshold: float = 1e-5) -> bool:
@@ -353,7 +374,9 @@ def _train_only(tmp_path, target: str):
     _assert_rope_and_mixed_modes(loaded)
     positive = _infer(loaded, 4096.0)
     negative = _infer(loaded, -4096.0)
+    nan_poison = _infer(loaded, np.nan)
     _assert_outputs_close(positive, negative)
+    _assert_outputs_close(positive, nan_poison)
     return positive
 
 
@@ -366,7 +389,9 @@ def test_ragged_transformer_both_mixed_quadrants_train_with_aligned_rope_and_poi
     # outside offsets[-1]. Both mixed quadrants must be insensitive to that tail.
     positive_poison = _infer(baseline_network, 4096.0)
     negative_poison = _infer(baseline_network, -4096.0)
+    nan_poison = _infer(baseline_network, np.nan)
     _assert_outputs_close(positive_poison, negative_poison)
+    _assert_outputs_close(positive_poison, nan_poison)
     baseline = positive_poison
 
     # Isolate each mixed cross-attention quadrant. With every other trainable layer
@@ -386,6 +411,6 @@ def test_ragged_transformer_both_mixed_quadrants_train_with_aligned_rope_and_poi
         baseline["mirror_mean"], trained_encoder["mirror_mean"]
     )
 
-    # _train_only() also reloads each trained artifact and verifies +poison/-poison
-    # inference equivalence, so save/reload and post-training capacity safety are
-    # exercised for both mixed quadrants and the shared encoder.
+    # _train_only() also reloads each trained artifact and verifies positive,
+    # negative, and NaN poison inference equivalence. Save/reload and post-training
+    # capacity safety are exercised for both mixed quadrants and the shared encoder.

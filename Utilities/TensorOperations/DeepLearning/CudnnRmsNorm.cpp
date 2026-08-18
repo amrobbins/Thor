@@ -320,6 +320,9 @@ class RmsNormGraphCache {
         const vector<int64_t> dims = ioDims(descriptor);
         const vector<int64_t> strides = ioStrides(descriptor);
         auto dy = ioTensor(built.graph, descriptor.debugName + "_dy", UID_DY, dims, strides);
+        if (descriptor.outputDataType != descriptor.inputDataType) {
+            dy->set_data_type(toFrontendDataType(descriptor.outputDataType));
+        }
         auto x = ioTensor(built.graph, descriptor.debugName + "_x", UID_X, dims, strides);
         auto scale = tensor(built.graph, descriptor.debugName + "_scale", UID_SCALE, parameterDims(descriptor), parameterStrides(descriptor), descriptor.parameterDataType);
         auto invVariance = tensor(built.graph,

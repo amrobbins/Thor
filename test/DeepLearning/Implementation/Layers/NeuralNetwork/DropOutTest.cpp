@@ -5,6 +5,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
+#include "test/DeepLearning/RaggedTestUtils.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -15,6 +16,7 @@
 #include "gtest/gtest.h"
 
 #include <set>
+#include <utility>
 #include <vector>
 
 using namespace std;
@@ -574,7 +576,8 @@ TEST(DropOut, RaggedTrainingUsesOnlyActivePrefixAndBackwardReusesForwardMask) {
     Tensor sourceGpu(gpuPlacement, descriptor);
     float* source = sourceCpu.getMemPtr<float>();
     for (uint64_t i = 0; i < activeElements; ++i) source[i] = 1.0f;
-    for (uint64_t i = activeElements; i < totalElements; ++i) source[i] = 1234.0f;
+    ThorTest::poisonInactiveElements(
+        source, activeElements, totalElements, ThorTest::RaggedInactivePoison::NaN);
 
     vector<shared_ptr<Layer>> layers;
     layers.push_back(make_shared<NetworkInput>(sourceGpu));
@@ -627,14 +630,14 @@ TEST(DropOut, RaggedTrainingUsesOnlyActivePrefixAndBackwardReusesForwardMask) {
     }
     EXPECT_GT(dropped, 0U);
     EXPECT_GT(kept, 0U);
-    for (uint64_t i = activeElements; i < totalElements; ++i) EXPECT_FLOAT_EQ(output[i], 0.0f);
 
     Tensor errorInput = dropOutLayer->getErrorInput().value();
     Tensor errorOutput = dropOutLayer->getErrorOutput().value();
     Tensor errorInputCpu(cpuPlacement, descriptor);
     float* errorInputValues = errorInputCpu.getMemPtr<float>();
     for (uint64_t i = 0; i < activeElements; ++i) errorInputValues[i] = 1.0f;
-    for (uint64_t i = activeElements; i < totalElements; ++i) errorInputValues[i] = -9999.0f;
+    ThorTest::poisonInactiveElements(
+        errorInputValues, activeElements, totalElements, ThorTest::RaggedInactivePoison::NegativeFinite);
     errorInput.copyFromAsync(errorInputCpu, stream);
     dropOutLayer->backward(errorInput);
 
@@ -645,12 +648,106 @@ TEST(DropOut, RaggedTrainingUsesOnlyActivePrefixAndBackwardReusesForwardMask) {
     for (uint64_t i = 0; i < activeElements; ++i) {
         EXPECT_FLOAT_EQ(errorOutputValues[i], output[i] == 0.0f ? 0.0f : 2.0f);
     }
-    for (uint64_t i = activeElements; i < totalElements; ++i) EXPECT_FLOAT_EQ(errorOutputValues[i], 0.0f);
 
     LayerTestHelper::tearDownNetwork(layers);
 }
 
-TEST(DropOut, RaggedValidationIsIdentityOverActivePrefixAndCanonicalizesInactiveCapacity) {
+TEST(DropOut, RaggedTrainingMaskAndBackwardAreInvariantToInactivePoison) {
+    constexpr uint64_t fullRows = 16;
+    constexpr uint64_t activeRows = 7;
+    constexpr uint64_t elementsPerValue = 3;
+    constexpr uint64_t totalElements = fullRows * elementsPerValue;
+    constexpr uint64_t activeElements = activeRows * elementsPerValue;
+
+    auto runCase = [&](ThorTest::RaggedInactivePoison poison) {
+        TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+        TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+        TensorDescriptor descriptor(DataType::FP32, {fullRows, elementsPerValue});
+
+        Tensor sourceCpu(cpuPlacement, descriptor);
+        float* source = sourceCpu.getMemPtr<float>();
+        for (uint64_t i = 0; i < activeElements; ++i) source[i] = 1.0f;
+        ThorTest::poisonInactiveElements(source, activeElements, totalElements, poison);
+
+        Tensor sourceGpu(gpuPlacement, descriptor);
+        vector<shared_ptr<Layer>> layers;
+        layers.push_back(make_shared<NetworkInput>(sourceGpu));
+        layers.push_back(make_shared<NoOpLayer>());
+        auto dropOutLayer = make_shared<DropOut>(
+            0.5f, true, true, DropOut::RaggedConfiguration{fullRows, elementsPerValue});
+        dropOutLayer->seed(0x43a71d2bULL);
+        layers.push_back(dropOutLayer);
+        layers.push_back(make_shared<NoOpLayer>());
+        layers.push_back(make_shared<NetworkOutput>(gpuPlacement));
+
+        Stream stream = layers.front()->getStream();
+        LayerTestHelper::connectNetwork(layers);
+        Tensor offsetsGpu(gpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
+        Tensor offsetsCpu(cpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
+        offsetsCpu.getMemPtr<uint32_t>()[0] = 0;
+        offsetsCpu.getMemPtr<uint32_t>()[1] = 3;
+        offsetsCpu.getMemPtr<uint32_t>()[2] = static_cast<uint32_t>(activeRows);
+        offsetsGpu.copyFromAsync(offsetsCpu, stream);
+        RowPartitionRuntime rowPartition(
+            offsetsGpu, RowPartitionDescriptor(/*batchSize=*/2, fullRows, DataType::UINT32));
+        rowPartition.setHostActiveValueCount(activeRows);
+        dropOutLayer->connectToPreviousLayer(
+            nullptr, offsetsGpu, stream, /*backPropagateError=*/false, /*connectionType=*/1);
+        LayerTestHelper::initializeNetwork(layers);
+
+        Tensor packedInput = dropOutLayer->getFeatureInput().value();
+        packedInput.copyFromAsync(sourceCpu, stream);
+        dropOutLayer->forward(packedInput, false);
+        dropOutLayer->forward(offsetsGpu, false);
+        stream.waitEvent(dynamic_pointer_cast<NetworkOutput>(layers.back())->getOutputReadyEvent());
+
+        Tensor outputCpu(cpuPlacement, descriptor);
+        outputCpu.copyFromAsync(dynamic_pointer_cast<NetworkOutput>(layers.back())->getFeatureOutput().value(), stream);
+
+        Tensor errorInput = dropOutLayer->getErrorInput().value();
+        Tensor errorOutput = dropOutLayer->getErrorOutput().value();
+        Tensor errorInputCpu(cpuPlacement, descriptor);
+        float* dy = errorInputCpu.getMemPtr<float>();
+        for (uint64_t i = 0; i < activeElements; ++i) dy[i] = 1.0f;
+        ThorTest::poisonInactiveElements(dy, activeElements, totalElements, poison);
+        errorInput.copyFromAsync(errorInputCpu, stream);
+        dropOutLayer->backward(errorInput);
+
+        Tensor errorOutputCpu(cpuPlacement, descriptor);
+        errorOutputCpu.copyFromAsync(errorOutput, stream);
+        stream.synchronize();
+
+        vector<float> activeOutput(activeElements);
+        vector<float> activeDx(activeElements);
+        const float* output = outputCpu.getMemPtr<float>();
+        const float* dx = errorOutputCpu.getMemPtr<float>();
+        for (uint64_t i = 0; i < activeElements; ++i) {
+            activeOutput[i] = output[i];
+            activeDx[i] = dx[i];
+        }
+
+        LayerTestHelper::tearDownNetwork(layers);
+        return std::make_pair(activeOutput, activeDx);
+    };
+
+    const auto positive = runCase(ThorTest::RaggedInactivePoison::PositiveFinite);
+    const auto negative = runCase(ThorTest::RaggedInactivePoison::NegativeFinite);
+    const auto nan = runCase(ThorTest::RaggedInactivePoison::NaN);
+
+    ASSERT_EQ(positive.first.size(), negative.first.size());
+    ASSERT_EQ(positive.first.size(), nan.first.size());
+    ASSERT_EQ(positive.second.size(), negative.second.size());
+    ASSERT_EQ(positive.second.size(), nan.second.size());
+    for (uint64_t i = 0; i < activeElements; ++i) {
+        EXPECT_FLOAT_EQ(positive.first[i], negative.first[i]);
+        EXPECT_FLOAT_EQ(positive.first[i], nan.first[i]);
+        EXPECT_FLOAT_EQ(positive.second[i], negative.second[i]);
+        EXPECT_FLOAT_EQ(positive.second[i], nan.second[i]);
+        EXPECT_FLOAT_EQ(positive.second[i], positive.first[i]);
+    }
+}
+
+TEST(DropOut, RaggedValidationIsIdentityOverActivePrefixWithPoisonedInactiveStorage) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     constexpr uint64_t fullRows = 8;
@@ -664,7 +761,8 @@ TEST(DropOut, RaggedValidationIsIdentityOverActivePrefixAndCanonicalizesInactive
     Tensor sourceGpu(gpuPlacement, descriptor);
     float* source = sourceCpu.getMemPtr<float>();
     for (uint64_t i = 0; i < activeElements; ++i) source[i] = static_cast<float>(i + 1);
-    for (uint64_t i = activeElements; i < totalElements; ++i) source[i] = 7777.0f;
+    ThorTest::poisonInactiveElements(
+        source, activeElements, totalElements, ThorTest::RaggedInactivePoison::PositiveFinite);
 
     vector<shared_ptr<Layer>> layers;
     layers.push_back(make_shared<NetworkInput>(sourceGpu));
@@ -697,7 +795,6 @@ TEST(DropOut, RaggedValidationIsIdentityOverActivePrefixAndCanonicalizesInactive
 
     const float* output = outputCpu.getMemPtr<float>();
     for (uint64_t i = 0; i < activeElements; ++i) EXPECT_FLOAT_EQ(output[i], source[i]);
-    for (uint64_t i = activeElements; i < totalElements; ++i) EXPECT_FLOAT_EQ(output[i], 0.0f);
 
     LayerTestHelper::tearDownNetwork(layers);
 }

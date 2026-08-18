@@ -663,6 +663,9 @@ static bool isSegmentedReduceOp(ExprOp op) {
 }
 static bool isSegmentedBroadcastOp(ExprOp op) { return op == ExprOp::SEGMENTED_BROADCAST; }
 static bool isRmsNormOp(ExprOp op) { return op == ExprOp::RMSNORM; }
+static bool isRmsNormBackwardOp(ExprOp op) {
+    return op == ExprOp::RMSNORM_BACKWARD_X || op == ExprOp::RMSNORM_BACKWARD_SCALE;
+}
 static bool isEmbeddingLookupOp(ExprOp op) { return op == ExprOp::EMBEDDING_LOOKUP; }
 static bool isAttentionOp(ExprOp op) { return op == ExprOp::ATTENTION; }
 static bool isAttentionBackwardOp(ExprOp op) {
@@ -678,7 +681,7 @@ static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
-    return isReductionOp(op) || isSoftmaxOp(op) || isScanOp(op) || isSegmentedReduceOp(op) || isSegmentedBroadcastOp(op) || isRmsNormOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
+    return isReductionOp(op) || isSoftmaxOp(op) || isScanOp(op) || isSegmentedReduceOp(op) || isSegmentedBroadcastOp(op) || isRmsNormOp(op) || isRmsNormBackwardOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
            isAttentionBackwardOp(op) || isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isScanMinMaxBackwardOp(op) || isEmbeddingLookupOp(op) ||
            op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
 }
@@ -884,6 +887,25 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
             continue;
         }
 
+        if (isRmsNormBackwardOp(node.op) && node.rms_norm_packed_row_capacity != 0) {
+            const std::optional<DirectRaggedRuntimeExtent> extent = directRaggedRuntimeExtent(expr, node.lhs);
+            if (!extent.has_value() || ambiguous_partition || !dependency_offsets_slot.has_value() ||
+                extent->offsets_input_slot != dependency_offsets_slot.value()) {
+                throw std::runtime_error(
+                    "packed RMSNorm backward must receive its row partition through a direct RAGGED_VALUEWISE_EXTENT x operand.");
+            }
+            if (extent->max_active_values != node.rms_norm_packed_row_capacity) {
+                throw std::runtime_error("packed RMSNorm backward row-partition metadata does not match its packed row capacity.");
+            }
+
+            // The bucketed cuDNN backward stage consumes the runtime extent. dY is
+            // sanitized immediately before the physical read; dX slack is undefined.
+            depends_on_ragged_extent[node_idx] = false;
+            ragged_offsets_input_slot[node_idx] = std::nullopt;
+            ambiguous_ragged_partition[node_idx] = false;
+            continue;
+        }
+
         if (isRaggedPartitionAwareStageOp(node.op)) {
             if (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
                 node.ragged_runtime_elements_per_value == 0) {
@@ -902,6 +924,41 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
                 ragged_offsets_input_slot[node_idx] = std::nullopt;
                 ambiguous_ragged_partition[node_idx] = false;
             }
+            continue;
+        }
+
+        if (isAttentionBackwardOp(node.op) && node.attention_use_ragged_offsets) {
+            // dO is in the query/output row domain.  In the ragged-query training path it can
+            // legitimately arrive through active-aware valuewise/reshape stages carrying the
+            // query row partition.  cuDNN Attention backward already consumes that same query
+            // partition explicitly and therefore does not require producer-side tail
+            // canonicalization. Keep this consumer contract narrow: only dO may bring an
+            // implicit extent to this boundary; q/k/v continue to use the Attention
+            // node's explicit q/kv row-partition inputs.
+            const auto nodeCarriesRaggedExtent = [&](uint32_t parent_idx) {
+                return parent_idx != UINT32_MAX && parent_idx < depends_on_ragged_extent.size() &&
+                       depends_on_ragged_extent[parent_idx];
+            };
+            const bool non_do_operand_carries_extent =
+                nodeCarriesRaggedExtent(node.lhs) || nodeCarriesRaggedExtent(node.rhs) || nodeCarriesRaggedExtent(node.aux) ||
+                (node.attention_use_bias && nodeCarriesRaggedExtent(node.beta_node));
+            const bool do_carries_extent = nodeCarriesRaggedExtent(node.alpha_node);
+            const std::optional<uint32_t> query_offsets_slot =
+                directInputSlot(expr, node.attention_ragged_offset_q_node);
+            const std::optional<uint32_t> do_offsets_slot =
+                do_carries_extent ? ragged_offsets_input_slot.at(node.alpha_node) : std::nullopt;
+            const bool do_partition_ambiguous =
+                do_carries_extent && ambiguous_ragged_partition.at(node.alpha_node);
+            if (non_do_operand_carries_extent || !do_carries_extent || do_partition_ambiguous ||
+                !do_offsets_slot.has_value() || !query_offsets_slot.has_value() ||
+                do_offsets_slot.value() != query_offsets_slot.value()) {
+                throw std::runtime_error(
+                    "ragged Attention backward dO must be the only implicit ragged extent and must carry the same row partition as the query/output domain.");
+            }
+
+            depends_on_ragged_extent[node_idx] = false;
+            ragged_offsets_input_slot[node_idx] = std::nullopt;
+            ambiguous_ragged_partition[node_idx] = false;
             continue;
         }
 
@@ -1259,6 +1316,10 @@ static const char* fusedOpTag(ExprOp op) {
             return "SEG_BROADCAST";
         case ExprOp::RMSNORM:
             return "RMSNORM";
+        case ExprOp::RMSNORM_BACKWARD_X:
+            return "RMSNORM_BW_X";
+        case ExprOp::RMSNORM_BACKWARD_SCALE:
+            return "RMSNORM_BW_SCALE";
         case ExprOp::EMBEDDING_LOOKUP:
             return "EMBEDDING_LOOKUP";
         case ExprOp::MATMUL:
@@ -1489,6 +1550,12 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 ",epsilon=" + std::to_string(scalarBits(node.rms_norm_epsilon)) +
                 ",fused=" + std::string(toString(node.rms_norm_fused_activation)) +
                 ",packedRowsCapacity=" + std::to_string(node.rms_norm_packed_row_capacity) + ")";
+        } else if (isRmsNormBackwardOp(node.op)) {
+            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
+            const std::string aux = fusedRegionSignatureRec(expr, node.aux);
+            s = std::string(fusedOpTag(node.op)) + "(x=" + lhs + ",scale=" + rhs + ",dY=" + aux +
+                ",hidden=" + std::to_string(node.rms_norm_normalized_feature_count) +
+                ",epsilon=" + std::to_string(scalarBits(node.rms_norm_epsilon)) + ")";
         } else if (isMatmulOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
 
@@ -2382,6 +2449,124 @@ static std::string compileEmbeddingEpilogueExpression(const PhysicalExpression& 
 
     visiting.erase(local_idx);
     return result;
+}
+
+shared_ptr<CompiledRmsNormBackward> EquationCompiler::compileRmsNormBackward(const PhysicalExpression& expr) {
+    if (expr.numInputs() != 3 && expr.numInputs() != 4) {
+        throw std::runtime_error(
+            "RMSNorm backward stage must have x, scale, and dY inputs, plus optional structural row-partition offsets.");
+    }
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("RMSNorm backward stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isRmsNormBackwardOp(node.op)) {
+        throw std::runtime_error("RMSNorm backward stage output node is not an RMSNorm backward route.");
+    }
+    if (node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size() || node.aux >= expr.nodes.size()) {
+        throw std::runtime_error("RMSNorm backward node is missing x, scale, or dY.");
+    }
+    const ExprNode& x_node = expr.nodes[node.lhs];
+    const ExprNode& scale_node = expr.nodes[node.rhs];
+    const ExprNode& dy_node = expr.nodes[node.aux];
+    if (x_node.op != ExprOp::INPUT || scale_node.op != ExprOp::INPUT || dy_node.op != ExprOp::INPUT) {
+        throw std::runtime_error("RMSNorm backward stage operands must be local INPUT nodes.");
+    }
+    if (!x_node.input_tensor_dtype.has_value() || !scale_node.input_tensor_dtype.has_value() ||
+        !dy_node.input_tensor_dtype.has_value()) {
+        throw std::runtime_error("RMSNorm backward inputs are missing resolved input dtypes.");
+    }
+    if (node.rms_norm_packed_row_capacity != 0) {
+        if (node.ragged_runtime_offsets_input_slot == UINT32_MAX || node.ragged_runtime_batch_size == 0 ||
+            node.ragged_runtime_max_active_values != node.rms_norm_packed_row_capacity ||
+            node.ragged_runtime_offsets_input_slot >= expr.inputs.size()) {
+            throw std::runtime_error("Packed RMSNorm backward stage is missing its explicit row-partition runtime binding.");
+        }
+        bool found_offsets_input = false;
+        for (const ExprNode& candidate : expr.nodes) {
+            if (candidate.op == ExprOp::INPUT && candidate.input_slot == node.ragged_runtime_offsets_input_slot) {
+                if (!candidate.input_tensor_dtype.has_value() ||
+                    !isCanonicalRowPartitionOffsetDataType(candidate.input_tensor_dtype.value())) {
+                    throw std::runtime_error("Packed RMSNorm backward row-partition offsets input has unsupported dtype.");
+                }
+                found_offsets_input = true;
+                break;
+            }
+        }
+        if (!found_offsets_input) {
+            throw std::runtime_error("Packed RMSNorm backward row-partition slot does not reference a local INPUT node.");
+        }
+    } else if (node.ragged_runtime_offsets_input_slot != UINT32_MAX) {
+        throw std::runtime_error("Dense RMSNorm backward stage unexpectedly carries a row-partition runtime binding.");
+    }
+    if (node.rms_norm_fused_activation != CudnnRmsNormFusedActivation::NONE) {
+        throw std::runtime_error("RMSNorm fused activation backward is not supported.");
+    }
+    if (node.rms_norm_normalized_feature_count == 0 || !(node.rms_norm_epsilon > 0.0)) {
+        throw std::runtime_error("RMSNorm backward node has invalid hidden size or epsilon.");
+    }
+    if (!node.compute_dtype.has_value()) {
+        throw std::runtime_error("RMSNorm backward node is missing compute dtype.");
+    }
+
+    auto compiled = make_shared<CompiledRmsNormBackward>();
+    compiled->normalized_feature_count = node.rms_norm_normalized_feature_count;
+    compiled->packed_row_capacity = node.rms_norm_packed_row_capacity;
+    compiled->ragged_offsets_input_slot = node.ragged_runtime_offsets_input_slot;
+    compiled->ragged_batch_size = node.ragged_runtime_batch_size;
+    compiled->epsilon = node.rms_norm_epsilon;
+    compiled->input_dtype = x_node.input_tensor_dtype.value();
+    compiled->scale_dtype = scale_node.input_tensor_dtype.value();
+    compiled->dy_dtype = dy_node.input_tensor_dtype.value();
+    compiled->dx_dtype = compiled->input_dtype;
+    compiled->dscale_dtype = compiled->scale_dtype;
+    compiled->compute_dtype = toSupportedComputeDType(node.op, node.compute_dtype.value());
+    compiled->debug_name = "thor_expr_rms_norm_backward";
+
+    bool saw_dx_route = false;
+    bool saw_dscale_route = false;
+    for (const ExprNode& route : expr.nodes) {
+        if (!isRmsNormBackwardOp(route.op)) {
+            continue;
+        }
+        if (route.lhs != node.lhs || route.rhs != node.rhs || route.aux != node.aux ||
+            route.rms_norm_normalized_feature_count != node.rms_norm_normalized_feature_count ||
+            route.rms_norm_epsilon != node.rms_norm_epsilon ||
+            route.rms_norm_packed_row_capacity != node.rms_norm_packed_row_capacity ||
+            route.ragged_runtime_offsets_input_slot != node.ragged_runtime_offsets_input_slot ||
+            route.ragged_runtime_batch_size != node.ragged_runtime_batch_size ||
+            route.ragged_runtime_max_active_values != node.ragged_runtime_max_active_values ||
+            route.rms_norm_fused_activation != CudnnRmsNormFusedActivation::NONE || route.compute_dtype != node.compute_dtype) {
+            throw std::runtime_error("Merged RMSNorm-backward routes do not describe the same cuDNN backward operation.");
+        }
+        const DataType expected_output_dtype =
+            route.op == ExprOp::RMSNORM_BACKWARD_X ? compiled->dx_dtype : compiled->dscale_dtype;
+        if (!route.output_dtype.has_value() || route.output_dtype.value() != expected_output_dtype) {
+            throw std::runtime_error(
+                "RMSNorm-backward route output dtype must match the storage dtype required by cuDNN; cast the gradient after the stage.");
+        }
+        saw_dx_route = saw_dx_route || route.op == ExprOp::RMSNORM_BACKWARD_X;
+        saw_dscale_route = saw_dscale_route || route.op == ExprOp::RMSNORM_BACKWARD_SCALE;
+    }
+    if (!saw_dx_route && !saw_dscale_route) {
+        throw std::runtime_error("RMSNorm-backward stage contains no backward output route.");
+    }
+
+    // Validate the dtype/configuration contract independent of the eventual outer dimension.
+    CudnnRmsNormDescriptor descriptor;
+    descriptor.outerSize = 1;
+    descriptor.normalizedFeatureCount = compiled->normalized_feature_count;
+    descriptor.inputDataType = compiled->input_dtype;
+    descriptor.parameterDataType = compiled->scale_dtype;
+    descriptor.outputDataType = compiled->dy_dtype;
+    descriptor.computeDataType = compiled->compute_dtype;
+    descriptor.epsilon = static_cast<float>(compiled->epsilon);
+    descriptor.training = true;
+    descriptor.fusedActivation = CudnnRmsNormFusedActivation::NONE;
+    descriptor.debugName = compiled->debug_name;
+    descriptor.validateBackward();
+    return compiled;
 }
 
 shared_ptr<CompiledEmbeddingLookup> EquationCompiler::compileEmbeddingLookup(const PhysicalExpression& expr) {
@@ -5409,6 +5594,146 @@ static PhysicalExecutionStage buildAttentionStage(const PhysicalExpression& expr
     };
 }
 
+static PhysicalExecutionStage buildRmsNormBackwardStage(
+    const PhysicalExpression& expr,
+    uint32_t node_idx,
+    uint32_t output_value_id,
+    const std::string& output_name,
+    const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes.at(node_idx);
+    if (!isRmsNormBackwardOp(node.op)) {
+        throw std::runtime_error("buildRmsNormBackwardStage called on non-RMSNorm-backward node.");
+    }
+
+    PhysicalExpression stage_expr;
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(node.rms_norm_packed_row_capacity == 0 ? 3u : 4u);
+    auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
+    auto bind_parent = [&](uint32_t parent_idx, uint32_t local_slot, bool structural_input = false) -> uint32_t {
+        if (parent_idx == UINT32_MAX || parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("RMSNorm backward node has invalid parent.");
+        }
+        const ExprNode& parent = expr.nodes[parent_idx];
+        std::optional<DataType> actual_dtype;
+        if (parent.op == ExprOp::INPUT) {
+            input_value_ids.push_back(parent.input_slot);
+            actual_dtype = parent.input_tensor_dtype;
+        } else {
+            auto value_it = node_output_value_id.find(parent_idx);
+            if (value_it == node_output_value_id.end()) {
+                throw std::runtime_error("Missing value id for RMSNorm backward input.");
+            }
+            input_value_ids.push_back(value_it->second);
+            actual_dtype = parent.output_dtype;
+        }
+        if (!actual_dtype.has_value()) {
+            throw std::runtime_error("RMSNorm backward parent is missing resolved dtype.");
+        }
+        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot), local_slot, NamedInput::Kind::Tensor});
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = local_slot;
+        input_node.input_tensor_dtype = actual_dtype;
+        input_node.output_dtype = actual_dtype;
+        if (structural_input) {
+            input_node.compute_dtype = actual_dtype;
+            input_node.backward_output_dtype = actual_dtype;
+            input_node.backward_compute_dtype = actual_dtype;
+        } else {
+            input_node.compute_dtype = parent.compute_dtype;
+            input_node.backward_output_dtype = parent.backward_output_dtype;
+            input_node.backward_compute_dtype = parent.backward_compute_dtype;
+        }
+        stage_expr.nodes.push_back(std::move(input_node));
+        return static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+    };
+
+    const std::optional<DirectRaggedRuntimeExtent> ragged_extent = directRaggedRuntimeExtent(expr, node.lhs);
+    if ((node.rms_norm_packed_row_capacity != 0) != ragged_extent.has_value()) {
+        throw std::runtime_error("RMSNorm backward packed-row metadata and direct ragged extent disagree.");
+    }
+
+    const uint32_t x_local = bind_parent(ragged_extent.has_value() ? ragged_extent->values_node : node.lhs, 0);
+    const uint32_t scale_local = bind_parent(node.rhs, 1);
+    const uint32_t dy_local = bind_parent(node.aux, 2);
+    if (ragged_extent.has_value()) {
+        bind_parent(ragged_extent->offsets_node, 3, true);
+    }
+
+    ExprNode route = node;
+    route.lhs = x_local;
+    route.rhs = scale_local;
+    route.aux = dy_local;
+    if (ragged_extent.has_value()) {
+        route.ragged_runtime_offsets_input_slot = 3;
+        route.ragged_runtime_batch_size = ragged_extent->batch_size;
+        route.ragged_runtime_max_active_values = ragged_extent->max_active_values;
+        route.ragged_runtime_elements_per_value = ragged_extent->elements_per_value;
+    } else {
+        route.ragged_runtime_offsets_input_slot = UINT32_MAX;
+        route.ragged_runtime_batch_size = 0;
+        route.ragged_runtime_max_active_values = 0;
+        route.ragged_runtime_elements_per_value = 0;
+    }
+    stage_expr.nodes.push_back(std::move(route));
+    stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+
+    const uint32_t route_local_idx = stage_expr.output_node;
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::RmsNormBackward,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = {CompiledStageOutput{.name = output_name,
+                                        .local_node_idx = route_local_idx,
+                                        .value_id = output_value_id}},
+    };
+}
+
+static std::string rmsNormBackwardMergeKey(const PhysicalExecutionStage& stage) {
+    if (stage.kind != PhysicalExecutionStage::Kind::RmsNormBackward || stage.expr.output_node >= stage.expr.nodes.size()) {
+        throw std::runtime_error("rmsNormBackwardMergeKey expected an RMSNorm-backward stage.");
+    }
+    const ExprNode& node = stage.expr.nodes.at(stage.expr.output_node);
+    std::string key = "rmsnorm_bwd";
+    for (uint32_t value_id : stage.input_value_ids) key += ":" + std::to_string(value_id);
+    key += ";hidden=" + std::to_string(node.rms_norm_normalized_feature_count);
+    key += ";packedRows=" + std::to_string(node.rms_norm_packed_row_capacity);
+    key += ";raggedBatch=" + std::to_string(node.ragged_runtime_batch_size);
+    key += ";eps=" + formatFloatCanonical(node.rms_norm_epsilon);
+    key += ";compute=" + optionalDTypeSignature(node.compute_dtype);
+    return key;
+}
+
+static void mergeRmsNormBackwardStages(std::vector<PhysicalExecutionStage>& stages) {
+    std::unordered_map<std::string, size_t> first_by_key;
+    std::vector<PhysicalExecutionStage> merged;
+    merged.reserve(stages.size());
+    for (PhysicalExecutionStage& stage : stages) {
+        if (stage.kind != PhysicalExecutionStage::Kind::RmsNormBackward) {
+            merged.push_back(std::move(stage));
+            continue;
+        }
+        const std::string key = rmsNormBackwardMergeKey(stage);
+        auto it = first_by_key.find(key);
+        if (it == first_by_key.end()) {
+            first_by_key.emplace(key, merged.size());
+            merged.push_back(std::move(stage));
+            continue;
+        }
+        PhysicalExecutionStage& target = merged.at(it->second);
+        if (stage.outputs.size() != 1 || stage.expr.output_node >= stage.expr.nodes.size()) {
+            throw std::runtime_error("RMSNorm-backward stage merge expected one source output.");
+        }
+        ExprNode route = stage.expr.nodes.at(stage.expr.output_node);
+        const uint32_t new_local_idx = static_cast<uint32_t>(target.expr.nodes.size());
+        target.expr.nodes.push_back(std::move(route));
+        CompiledStageOutput output = stage.outputs.front();
+        output.local_node_idx = new_local_idx;
+        target.outputs.push_back(std::move(output));
+    }
+    stages = std::move(merged);
+}
+
 static PhysicalExecutionStage buildAttentionBackwardStage(const PhysicalExpression& expr,
                                                           uint32_t node_idx,
                                                           uint32_t output_value_id,
@@ -6799,12 +7124,12 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
             if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
                 root.op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
-                isConvolutionOp(root.op)) {
+                isRmsNormBackwardOp(root.op) || isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs");
                 }
             }
-            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
+            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isRmsNormBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux");
             }
             if (root.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD ||
@@ -6912,6 +7237,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 planned.stages.push_back(buildSoftmaxStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isRmsNormOp(root.op)) {
                 planned.stages.push_back(buildRmsNormStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isRmsNormBackwardOp(root.op)) {
+                planned.stages.push_back(buildRmsNormBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isMatmulOp(root.op)) {
                 std::vector<PendingMatmulBgradOutput> bgrad_outputs = takePendingMatmulBgradOutputs(root_idx);
                 planned.stages.push_back(buildMatmulStage(expr, root_idx, stage_out_id, "", node_output_value_id, bgrad_outputs));
@@ -7231,12 +7558,12 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
             if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
                 root.op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
-                isConvolutionOp(root.op)) {
+                isRmsNormBackwardOp(root.op) || isConvolutionOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs");
                 }
             }
-            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op)) {
+            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isRmsNormBackwardOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux");
             }
             if (root.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD ||
@@ -7357,6 +7684,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isRmsNormOp(root.op)) {
                 planned.stages.push_back(
                     buildRmsNormStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isRmsNormBackwardOp(root.op)) {
+                planned.stages.push_back(
+                    buildRmsNormBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isEmbeddingLookupOp(root.op)) {
                 planned.stages.push_back(
                     buildEmbeddingLookupStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -7480,6 +7810,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         materializeTerminalGroup(i);
     }
 
+    mergeRmsNormBackwardStages(planned.stages);
     mergeAttentionBackwardStages(planned.stages);
 
     // Planner invariant: every staged input must be either a root input, an
@@ -7626,6 +7957,12 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::RmsNorm: {
                 std::shared_ptr<CompiledRmsNorm> rms_norm = compileRmsNorm(stage.expr);
                 compiled->stages.emplace_back(rms_norm, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::RmsNormBackward: {
+                std::shared_ptr<CompiledRmsNormBackward> rms_norm_backward = compileRmsNormBackward(stage.expr);
+                compiled->stages.emplace_back(
+                    stage.expr, rms_norm_backward, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::EmbeddingLookup: {

@@ -24,7 +24,7 @@
 namespace ThorImplementation {
 
 struct PhysicalExecutionStage {
-    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, SegmentedReduction, SegmentedBroadcast, Scan, Softmax, RmsNorm, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward, ScanMinMaxBackward };
+    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, SegmentedReduction, SegmentedBroadcast, Scan, Softmax, RmsNorm, RmsNormBackward, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward, ScanMinMaxBackward };
 
     Kind kind;
     PhysicalExpression expr;
@@ -58,6 +58,7 @@ class EquationCompiler {
     static std::shared_ptr<CompiledScan> compileScan(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledSoftmax> compileSoftmax(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledRmsNorm> compileRmsNorm(const PhysicalExpression& expr);
+    static std::shared_ptr<CompiledRmsNormBackward> compileRmsNormBackward(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledEmbeddingLookup> compileEmbeddingLookup(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledMatmul> compileMatmul(const PhysicalExpression& expr, const std::vector<CompiledStageOutput>& outputs = {});
     static std::shared_ptr<CompiledInPlaceRope> compileInPlaceRope(const PhysicalExpression& expr, const std::vector<CompiledStageOutput>& outputs = {});

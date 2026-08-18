@@ -240,12 +240,14 @@ uint64_t DatasetLayout::RaggedTensorSpec::storedValueCount() const {
 
 bool DatasetLayout::RaggedTensorSpec::operator==(const RaggedTensorSpec &rhs) const {
     return name == rhs.name && dataType == rhs.dataType && valueDimensions == rhs.valueDimensions &&
+           sourceName == rhs.sourceName && indexDataType == rhs.indexDataType &&
            referenceOffsetBytes == rhs.referenceOffsetBytes && referenceNumBytes == rhs.referenceNumBytes &&
            valuesFilename == rhs.valuesFilename && valuesNumBytes == rhs.valuesNumBytes;
 }
 
 bool DatasetLayout::RaggedTensorSpec::contractEquals(const RaggedTensorSpec &rhs) const {
     return name == rhs.name && dataType == rhs.dataType && valueDimensions == rhs.valueDimensions &&
+           sourceName == rhs.sourceName && indexDataType == rhs.indexDataType &&
            referenceOffsetBytes == rhs.referenceOffsetBytes && referenceNumBytes == rhs.referenceNumBytes;
 }
 
@@ -253,6 +255,12 @@ DatasetLayout::RaggedTensorShape::RaggedTensorShape(std::string name,
                                                     std::vector<uint64_t> valueDimensions,
                                                     DataType dataType)
     : name(std::move(name)), valueDimensions(std::move(valueDimensions)), dataType(dataType) {}
+
+DatasetLayout::RaggedWindowedTensorShape::RaggedWindowedTensorShape(
+    std::string name,
+    std::string sourceName,
+    DataType indexDataType)
+    : name(std::move(name)), sourceName(std::move(sourceName)), indexDataType(indexDataType) {}
 
 bool DatasetLayout::WindowedTensorSourceSequence::operator==(const WindowedTensorSourceSequence &rhs) const {
     return keyHex == rhs.keyHex && startIndex == rhs.startIndex && endIndexExclusive == rhs.endIndexExclusive &&
@@ -498,6 +506,28 @@ void DatasetLayout::validate() const {
         if (spec.name.empty()) throw std::runtime_error("DatasetLayout ragged tensor names must be non-empty.");
         if (!names.insert(spec.name).second) throw std::runtime_error("DatasetLayout duplicate tensor name: " + spec.name);
         (void)spec.valueNumBytes();
+        if (spec.sourceName.has_value()) {
+            if (spec.sourceName->empty()) {
+                throw std::runtime_error("DatasetLayout ragged window source name must be non-empty.");
+            }
+            const WindowedTensorSourceSpec &source = windowedTensorSource(*spec.sourceName);
+            referencedSources.insert(source.name);
+            if (spec.dataType != source.dataType || spec.valueDimensions != source.stepDimensions) {
+                throw std::runtime_error("DatasetLayout ragged tensor '" + spec.name +
+                                         "' does not match source '" + source.name + "'.");
+            }
+            if (!isIntegerDataType(spec.indexDataType)) {
+                throw std::runtime_error("DatasetLayout ragged tensor '" + spec.name +
+                                         "' index dtype must be integer.");
+            }
+            if (spec.valuesFilename.has_value() || source.sourceFilename.has_value()) {
+                if (!spec.valuesFilename.has_value() || !source.sourceFilename.has_value() ||
+                    spec.valuesFilename != source.sourceFilename || spec.valuesNumBytes != source.sourceNumBytes) {
+                    throw std::runtime_error("DatasetLayout ragged tensor '" + spec.name +
+                                             "' storage must alias its window source exactly.");
+                }
+            }
+        }
         if (spec.referenceNumBytes != 2 * sizeof(uint64_t)) {
             throw std::runtime_error("DatasetLayout ragged tensor '" + spec.name +
                                      "' reference_num_bytes must be 16 for UINT64 {start_value, value_count}.");
@@ -623,6 +653,10 @@ json DatasetLayout::toJson() const {
             json specJson{{"value_shape", spec->valueDimensions}, {"data_type", dataTypeToString(spec->dataType)},
                           {"reference_offset_bytes", spec->referenceOffsetBytes},
                           {"reference_num_bytes", spec->referenceNumBytes}};
+            if (spec->sourceName.has_value()) {
+                specJson["source"] = *spec->sourceName;
+                specJson["index_data_type"] = dataTypeToString(spec->indexDataType);
+            }
             if (spec->valuesFilename.has_value()) {
                 specJson["storage"] = json{{"file", *spec->valuesFilename}, {"num_bytes", spec->valuesNumBytes},
                                            {"num_values", spec->storedValueCount()}};
@@ -710,6 +744,14 @@ DatasetLayout DatasetLayout::fromJson(const json &j) {
                                   .valueDimensions = specJson.at("value_shape").get<std::vector<uint64_t>>(),
                                   .referenceOffsetBytes = specJson.at("reference_offset_bytes").get<uint64_t>(),
                                   .referenceNumBytes = specJson.at("reference_num_bytes").get<uint64_t>()};
+            if (specJson.contains("source")) {
+                spec.sourceName = specJson.at("source").get<std::string>();
+                if (!specJson.contains("index_data_type")) {
+                    throw std::runtime_error("DatasetLayout ragged tensor '" + spec.name +
+                                             "' with a source is missing index_data_type.");
+                }
+                spec.indexDataType = dataTypeFromString(specJson.at("index_data_type").get<std::string>());
+            }
             if (specJson.contains("storage")) {
                 const json &storage = specJson.at("storage");
                 spec.valuesFilename = storage.at("file").get<std::string>();
@@ -829,24 +871,32 @@ DatasetLayout DatasetLayout::readManifest(const std::filesystem::path &path) {
 }
 
 DatasetLayout DatasetLayout::fromTensorShapes(const std::vector<TensorShape> &tensors) {
-    return fromTensorShapes(tensors, {}, {}, {});
+    return fromTensorShapes(tensors, {}, {}, {}, {});
 }
 
 DatasetLayout DatasetLayout::fromTensorShapes(const std::vector<TensorShape> &tensors,
                                               const std::vector<RaggedTensorShape> &raggedTensors) {
-    return fromTensorShapes(tensors, {}, {}, raggedTensors);
+    return fromTensorShapes(tensors, {}, {}, raggedTensors, {});
 }
 
 DatasetLayout DatasetLayout::fromTensorShapes(const std::vector<TensorShape> &tensors,
                                               const std::vector<WindowedTensorSourceShape> &windowedTensorSources,
                                               const std::vector<WindowedTensorShape> &windowedTensors) {
-    return fromTensorShapes(tensors, windowedTensorSources, windowedTensors, {});
+    return fromTensorShapes(tensors, windowedTensorSources, windowedTensors, {}, {});
 }
 
 DatasetLayout DatasetLayout::fromTensorShapes(const std::vector<TensorShape> &tensors,
                                               const std::vector<WindowedTensorSourceShape> &windowedTensorSources,
                                               const std::vector<WindowedTensorShape> &windowedTensors,
                                               const std::vector<RaggedTensorShape> &raggedTensors) {
+    return fromTensorShapes(tensors, windowedTensorSources, windowedTensors, raggedTensors, {});
+}
+
+DatasetLayout DatasetLayout::fromTensorShapes(const std::vector<TensorShape> &tensors,
+                                              const std::vector<WindowedTensorSourceShape> &windowedTensorSources,
+                                              const std::vector<WindowedTensorShape> &windowedTensors,
+                                              const std::vector<RaggedTensorShape> &raggedTensors,
+                                              const std::vector<RaggedWindowedTensorShape> &raggedWindowedTensors) {
     uint64_t offsetBytes = 0;
     std::vector<TensorSpec> tensorSpecs;
     tensorSpecs.reserve(tensors.size());
@@ -901,6 +951,25 @@ DatasetLayout DatasetLayout::fromTensorShapes(const std::vector<TensorShape> &te
                               .valueDimensions = entry.valueDimensions,
                               .referenceOffsetBytes = offsetBytes,
                               .referenceNumBytes = 2 * sizeof(uint64_t)};
+        (void)spec.valueNumBytes();
+        offsetBytes = checkedAdd(offsetBytes, spec.referenceNumBytes,
+                                 "record size for ragged tensor reference '" + entry.name + "'");
+        raggedSpecs.push_back(std::move(spec));
+    }
+    for (const RaggedWindowedTensorShape &entry : raggedWindowedTensors) {
+        const auto sourceIt = sourceByName.find(entry.sourceName);
+        if (sourceIt == sourceByName.end()) {
+            throw std::runtime_error("DatasetLayout ragged tensor '" + entry.name +
+                                     "' references unknown source '" + entry.sourceName + "'.");
+        }
+        const WindowedTensorSourceSpec &source = *sourceIt->second;
+        RaggedTensorSpec spec{.name = entry.name,
+                              .dataType = source.dataType,
+                              .valueDimensions = source.stepDimensions,
+                              .referenceOffsetBytes = offsetBytes,
+                              .referenceNumBytes = 2 * sizeof(uint64_t),
+                              .sourceName = entry.sourceName,
+                              .indexDataType = entry.indexDataType};
         (void)spec.valueNumBytes();
         offsetBytes = checkedAdd(offsetBytes, spec.referenceNumBytes,
                                  "record size for ragged tensor reference '" + entry.name + "'");

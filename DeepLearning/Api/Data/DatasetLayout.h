@@ -52,7 +52,15 @@ class DatasetLayout {
         uint64_t referenceNumBytes = 0;
         std::optional<std::string> valuesFilename;
         uint64_t valuesNumBytes = 0;
+        /**
+         * Optional named window source backing this ragged field. When set,
+         * each row reference points into that immutable source instead of a
+         * field-owned ragged values sidecar.
+         */
+        std::optional<std::string> sourceName;
+        ThorImplementation::DataType indexDataType = ThorImplementation::DataType::INT64;
 
+        [[nodiscard]] bool isWindowedSourceBacked() const { return sourceName.has_value(); }
         [[nodiscard]] uint64_t valueNumBytes() const;
         [[nodiscard]] uint64_t storedValueCount() const;
 
@@ -69,6 +77,17 @@ class DatasetLayout {
         RaggedTensorShape(std::string name,
                           std::vector<uint64_t> valueDimensions,
                           ThorImplementation::DataType dataType);
+    };
+
+    /** One variable-length field backed by a named immutable window source. */
+    struct RaggedWindowedTensorShape {
+        std::string name;
+        std::string sourceName;
+        ThorImplementation::DataType indexDataType;
+
+        RaggedWindowedTensorShape(std::string name,
+                                  std::string sourceName,
+                                  ThorImplementation::DataType indexDataType);
     };
 
     struct WindowedTensorSourceSequence {
@@ -201,6 +220,11 @@ class DatasetLayout {
                                           const std::vector<WindowedTensorSourceShape> &windowedTensorSources,
                                           const std::vector<WindowedTensorShape> &windowedTensors,
                                           const std::vector<RaggedTensorShape> &raggedTensors);
+    static DatasetLayout fromTensorShapes(const std::vector<TensorShape> &tensors,
+                                          const std::vector<WindowedTensorSourceShape> &windowedTensorSources,
+                                          const std::vector<WindowedTensorShape> &windowedTensors,
+                                          const std::vector<RaggedTensorShape> &raggedTensors,
+                                          const std::vector<RaggedWindowedTensorShape> &raggedWindowedTensors);
 
    private:
     uint64_t layoutRecordSizeBytes;

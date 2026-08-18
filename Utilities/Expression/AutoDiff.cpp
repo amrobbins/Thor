@@ -429,6 +429,10 @@ static bool isAttentionBackwardOp(ExprOp op) {
            op == ExprOp::ATTENTION_BACKWARD_BIAS;
 }
 
+static bool isRmsNormBackwardOp(ExprOp op) {
+    return op == ExprOp::RMSNORM_BACKWARD_X || op == ExprOp::RMSNORM_BACKWARD_SCALE;
+}
+
 static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
     switch (op) {
         case ExprOp::MATMUL:
@@ -449,6 +453,8 @@ static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
         case ExprOp::REDUCE_MAX:
         case ExprOp::SOFTMAX:
         case ExprOp::RMSNORM:
+        case ExprOp::RMSNORM_BACKWARD_X:
+        case ExprOp::RMSNORM_BACKWARD_SCALE:
         case ExprOp::ATTENTION:
         case ExprOp::ATTENTION_BACKWARD_Q:
         case ExprOp::ATTENTION_BACKWARD_K:
@@ -617,6 +623,10 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::SEGMENTED_REDUCE_MAX:
             case ExprOp::SEGMENTED_REDUCE_MEAN:
                 reaches[i] = reaches.at(node.lhs);
+                break;
+            case ExprOp::RMSNORM_BACKWARD_X:
+            case ExprOp::RMSNORM_BACKWARD_SCALE:
+                reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs) || reaches.at(node.aux);
                 break;
             case ExprOp::MATMUL:
             case ExprOp::RMSNORM:
@@ -1691,6 +1701,40 @@ class BackwardGraphBuilder {
             node.compute_dtype = compute_dtype.value();
         } else if (forward_rope.compute_dtype.has_value()) {
             node.compute_dtype = forward_rope.compute_dtype.value();
+        }
+        return push(std::move(node));
+    }
+
+    uint32_t rmsNormBackward(ExprOp op,
+                             uint32_t x,
+                             uint32_t scale,
+                             uint32_t dY,
+                             const ExprNode& forward_rms_norm,
+                             std::optional<DataType> output_dtype = std::nullopt,
+                             std::optional<DataType> compute_dtype = std::nullopt) {
+        if (!isRmsNormBackwardOp(op)) {
+            throw std::runtime_error("rmsNormBackward builder called with non-RMSNorm-backward op.");
+        }
+        if (forward_rms_norm.rms_norm_fused_activation != CudnnRmsNormFusedActivation::NONE) {
+            throw std::runtime_error("cuDNN RMSNorm backward does not support fused activation in training.");
+        }
+
+        ExprNode node{};
+        node.op = op;
+        node.lhs = x;
+        node.rhs = scale;
+        node.aux = dY;
+        node.rms_norm_normalized_feature_count = forward_rms_norm.rms_norm_normalized_feature_count;
+        node.rms_norm_epsilon = forward_rms_norm.rms_norm_epsilon;
+        node.rms_norm_fused_activation = CudnnRmsNormFusedActivation::NONE;
+        node.rms_norm_packed_row_capacity = forward_rms_norm.rms_norm_packed_row_capacity;
+        if (output_dtype.has_value()) {
+            node.output_dtype = output_dtype.value();
+        }
+        if (compute_dtype.has_value()) {
+            node.compute_dtype = compute_dtype.value();
+        } else if (forward_rms_norm.compute_dtype.has_value()) {
+            node.compute_dtype = forward_rms_norm.compute_dtype.value();
         }
         return push(std::move(node));
     }
@@ -3277,6 +3321,20 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
                 node_dims[i] = input_dims;
                 break;
             }
+            case ExprOp::RMSNORM_BACKWARD_X:
+            case ExprOp::RMSNORM_BACKWARD_SCALE: {
+                const std::vector<uint64_t>& input_dims = node_dims[node.lhs];
+                const std::vector<uint64_t>& scale_dims = node_dims[node.rhs];
+                const std::vector<uint64_t>& dy_dims = node_dims[node.aux];
+                if (input_dims.size() != 2 || scale_dims.size() != 1 || dy_dims != input_dims ||
+                    input_dims[1] != node.rms_norm_normalized_feature_count ||
+                    scale_dims[0] != node.rms_norm_normalized_feature_count) {
+                    throw std::runtime_error(
+                        "inferForwardNodeDims RMSNorm backward expects x/dY [outer, hidden] and scale [hidden].");
+                }
+                node_dims[i] = node.op == ExprOp::RMSNORM_BACKWARD_X ? input_dims : scale_dims;
+                break;
+            }
             case ExprOp::ATTENTION:
                 node_dims[i] = inferAttentionOutputDims(node, node_dims[node.lhs], node_dims[node.rhs], node_dims[node.aux]);
                 break;
@@ -4588,62 +4646,132 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
             }
 
             case ExprOp::RMSNORM: {
+                if (node.rms_norm_packed_row_capacity == 0) {
+                    if (!has_forward_dims) {
+                        throw std::runtime_error("Autodiff RMSNorm backward requires forward shape information.");
+                    }
+                    if (node.rms_norm_fused_activation != CudnnRmsNormFusedActivation::NONE) {
+                        throw std::runtime_error(
+                            "Training autodiff cannot use a fused RMSNorm activation; keep the activation as a separate expression.");
+                    }
+                    const std::vector<uint64_t>& x_dims = forward_node_dims.at(node.lhs);
+                    const std::vector<uint64_t>& scale_dims = forward_node_dims.at(node.rhs);
+                    if (x_dims.size() != 2 || scale_dims.size() != 1 ||
+                        x_dims[1] != node.rms_norm_normalized_feature_count ||
+                        scale_dims[0] != node.rms_norm_normalized_feature_count) {
+                        throw std::runtime_error(
+                            "Autodiff RMSNorm backward expects [outer, hidden] input and [hidden] scale tensors.");
+                    }
+
+                    uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                    if (node.output_dtype.has_value()) {
+                        grad_like_output = builder.cast(grad_like_output, node.output_dtype.value());
+                    }
+                    const uint32_t x = builder.cloneForward(node.lhs);
+                    const uint32_t scale = builder.cloneForward(node.rhs);
+                    const ExprNode& forward_x = forward_expr.nodes.at(node.lhs);
+                    const ExprNode& forward_scale = forward_expr.nodes.at(node.rhs);
+                    if (!forward_x.output_dtype.has_value() || !forward_scale.output_dtype.has_value()) {
+                        throw std::runtime_error("Autodiff RMSNorm backward requires resolved x/scale storage dtypes.");
+                    }
+                    if (node_reaches_requested_inputs.at(node.lhs)) {
+                        uint32_t dx = builder.rmsNormBackward(ExprOp::RMSNORM_BACKWARD_X,
+                                                              x,
+                                                              scale,
+                                                              grad_like_output,
+                                                              node,
+                                                              forward_x.output_dtype,
+                                                              node.compute_dtype);
+                        const std::optional<DataType> target_dx_dtype = preferredGradValueDType(forward_x);
+                        if (target_dx_dtype.has_value() && target_dx_dtype.value() != forward_x.output_dtype.value()) {
+                            dx = builder.cast(dx, target_dx_dtype.value());
+                        }
+                        addContributionToChild(node.lhs, dx, x_dims);
+                    }
+                    if (node_reaches_requested_inputs.at(node.rhs)) {
+                        uint32_t dscale = builder.rmsNormBackward(ExprOp::RMSNORM_BACKWARD_SCALE,
+                                                                  x,
+                                                                  scale,
+                                                                  grad_like_output,
+                                                                  node,
+                                                                  forward_scale.output_dtype,
+                                                                  node.compute_dtype);
+                        const std::optional<DataType> target_dscale_dtype = preferredGradValueDType(forward_scale);
+                        if (target_dscale_dtype.has_value() && target_dscale_dtype.value() != forward_scale.output_dtype.value()) {
+                            dscale = builder.cast(dscale, target_dscale_dtype.value());
+                        }
+                        addContributionToChild(node.rhs, dscale, scale_dims);
+                    }
+                    break;
+                }
+
                 if (!has_forward_dims) {
                     throw std::runtime_error("Autodiff RMSNorm backward requires forward shape information.");
                 }
+                if (node.rms_norm_fused_activation != CudnnRmsNormFusedActivation::NONE) {
+                    throw std::runtime_error(
+                        "Training autodiff cannot use a fused RMSNorm activation; keep the activation as a separate expression.");
+                }
                 const std::vector<uint64_t>& x_dims = forward_node_dims.at(node.lhs);
                 const std::vector<uint64_t>& scale_dims = forward_node_dims.at(node.rhs);
-                if (x_dims.size() != 2 || scale_dims.size() != 1 || x_dims[1] != node.rms_norm_normalized_feature_count ||
+                if (x_dims.size() != 2 || scale_dims.size() != 1 ||
+                    x_dims[1] != node.rms_norm_normalized_feature_count ||
                     scale_dims[0] != node.rms_norm_normalized_feature_count) {
-                    throw std::runtime_error("Autodiff RMSNorm backward expects [outer, hidden] input and [hidden] scale tensors.");
+                    throw std::runtime_error(
+                        "Autodiff packed RMSNorm backward expects [outer, hidden] input and [hidden] scale tensors.");
+                }
+                const ExprNode& forward_x_extent = forward_expr.nodes.at(node.lhs);
+                if (forward_x_extent.op != ExprOp::RAGGED_VALUEWISE_EXTENT ||
+                    forward_x_extent.ragged_runtime_max_active_values != node.rms_norm_packed_row_capacity) {
+                    throw std::runtime_error(
+                        "Autodiff packed RMSNorm backward requires a direct ragged runtime extent matching packed capacity.");
                 }
 
                 uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
-                uint32_t rms_x_forward_node = node.lhs;
-                if (forward_expr.nodes.at(node.lhs).op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
-                    // The row-partition marker is consumed by the forward RMSNorm stage.  Its
-                    // backward algebra uses full-capacity reductions over already-zeroed tails;
-                    // keep the marker out of those reductions and let the marker's own derivative
-                    // reattach the partition to dX at the boundary.
-                    rms_x_forward_node = forward_expr.nodes.at(node.lhs).lhs;
+                if (node.output_dtype.has_value()) {
+                    grad_like_output = builder.cast(grad_like_output, node.output_dtype.value());
                 }
-                const uint32_t x = builder.cloneForward(rms_x_forward_node);
+                const uint32_t x = builder.cloneForward(node.lhs);
                 const uint32_t scale = builder.cloneForward(node.rhs);
-
-                const uint32_t x_squared = builder.mul(x, x);
-                const uint32_t mean_x_squared =
-                    builder.reduction(ExprOp::REDUCE_AVG, x_squared, {1}, {}, node.compute_dtype, node.compute_dtype);
-                const uint32_t inv_rms = builder.div(
-                    builder.scalar(1.0),
-                    builder.unary(ExprOp::SQRT, builder.add(mean_x_squared, builder.scalar(node.rms_norm_epsilon))));
-
-                if (node.rms_norm_fused_activation == CudnnRmsNormFusedActivation::SWISH) {
-                    const uint32_t z = builder.mul(builder.mul(x, scale), inv_rms);
-                    const uint32_t sigmoid = builder.div(builder.scalar(1.0),
-                                                         builder.add(builder.scalar(1.0), builder.exp(builder.neg(z))));
-                    const uint32_t one_minus_sigmoid = builder.sub(builder.scalar(1.0), sigmoid);
-                    const uint32_t swish_grad = builder.mul(sigmoid, builder.add(builder.scalar(1.0), builder.mul(z, one_minus_sigmoid)));
-                    grad_like_output = builder.mul(grad_like_output, swish_grad);
+                const ExprNode& forward_scale = forward_expr.nodes.at(node.rhs);
+                const ExprNode& forward_values = forward_expr.nodes.at(forward_x_extent.lhs);
+                if (!forward_values.output_dtype.has_value() || !forward_scale.output_dtype.has_value()) {
+                    throw std::runtime_error("Autodiff packed RMSNorm backward requires resolved x/scale storage dtypes.");
                 }
-
-                const uint32_t scaled_grad = builder.mul(grad_like_output, scale);
-
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t mean_scaled_grad_x =
-                        builder.reduction(ExprOp::REDUCE_AVG, builder.mul(scaled_grad, x), {1}, {}, node.compute_dtype, node.compute_dtype);
-                    const uint32_t inv_rms_squared = builder.mul(inv_rms, inv_rms);
-                    const uint32_t inv_rms_cubed = builder.mul(inv_rms_squared, inv_rms);
-                    const uint32_t first = builder.mul(scaled_grad, inv_rms);
-                    const uint32_t second = builder.mul(x, builder.mul(inv_rms_cubed, mean_scaled_grad_x));
-                    addContributionToChild(node.lhs, builder.sub(first, second), x_dims);
+                    uint32_t dx = builder.rmsNormBackward(ExprOp::RMSNORM_BACKWARD_X,
+                                                          x,
+                                                          scale,
+                                                          grad_like_output,
+                                                          node,
+                                                          forward_values.output_dtype,
+                                                          node.compute_dtype);
+                    const std::optional<DataType> target_dx_dtype = preferredGradValueDType(forward_values);
+                    if (target_dx_dtype.has_value() && target_dx_dtype.value() != forward_values.output_dtype.value()) {
+                        dx = builder.cast(dx, target_dx_dtype.value());
+                    }
+                    addContributionToChild(node.lhs, dx, x_dims);
                 }
                 if (node_reaches_requested_inputs.at(node.rhs)) {
-                    const uint32_t dscale = builder.reduction(ExprOp::REDUCE_SUM, builder.mul(grad_like_output, builder.mul(x, inv_rms)),
-                                                              {0}, {0}, node.compute_dtype, preferredGradValueDType(forward_expr.nodes.at(node.rhs)));
+                    uint32_t dscale = builder.rmsNormBackward(ExprOp::RMSNORM_BACKWARD_SCALE,
+                                                              x,
+                                                              scale,
+                                                              grad_like_output,
+                                                              node,
+                                                              forward_scale.output_dtype,
+                                                              node.compute_dtype);
+                    const std::optional<DataType> target_dscale_dtype = preferredGradValueDType(forward_scale);
+                    if (target_dscale_dtype.has_value() && target_dscale_dtype.value() != forward_scale.output_dtype.value()) {
+                        dscale = builder.cast(dscale, target_dscale_dtype.value());
+                    }
                     addContributionToChild(node.rhs, dscale, scale_dims);
                 }
                 break;
             }
+
+            case ExprOp::RMSNORM_BACKWARD_X:
+            case ExprOp::RMSNORM_BACKWARD_SCALE:
+                throw std::runtime_error("Thor expressions autodiff does not support second derivatives for RMSNorm backward yet.");
 
             case ExprOp::POW: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {

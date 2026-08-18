@@ -9,7 +9,7 @@ Native-backed namespaces automatically gain full signatures when the generated `
 - [`thor`](thor.md) — 1 native symbol awaiting stub metadata
 - [`thor.activations`](thor-activations.md)
 - [`thor.constraints`](thor-constraints.md)
-- [`thor.data`](thor-data.md) — 25 native symbols awaiting stub metadata
+- [`thor.data`](thor-data.md) — 27 native symbols awaiting stub metadata
 - [`thor.ensembles`](thor-ensembles.md)
 - [`thor.initializers`](thor-initializers.md)
 - [`thor.layers`](thor-layers.md)

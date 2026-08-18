@@ -17,6 +17,10 @@
 
 namespace Thor {
 
+// Public logical ragged tensor. offsets defines the logical packed extent.
+// For batch size B, values[offsets[B]:maxTotalValues] is inactive capacity with
+// undefined contents. Callers must not depend on that storage being zero or
+// otherwise canonical, including for tensors entering or leaving a Network.
 class RaggedTensor {
    public:
     RaggedTensor() = default;

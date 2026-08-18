@@ -14,7 +14,11 @@ The values tensor is an ordinary dense-capacity tensor. It carries no ragged run
 
 ## Source of truth
 
-The canonical offsets tensor is the semantic row partition. For batch size `B`, `offsets[B]` is the active packed-value count.
+The canonical offsets tensor is the semantic row partition. For batch size `B`, `offsets[B]` is the active packed-value count and the exclusive logical end of the packed values tensor.
+
+Packed capacity in `[offsets[B], maxTotalValues)` is undefined storage. It is not padding with a semantic value, and neither internal layers nor callers outside a network may rely on it being zero, finite, stable, or otherwise canonical. The same rule applies at `RaggedNetworkInput` and `RaggedNetworkOutput` boundaries.
+
+Thor uses a consumer-responsibility policy for physical kernels. An active-aware consumer executes only the logical extent and ignores inactive capacity. If a physical implementation deliberately chooses an execution extent larger than `offsets[B]` (for example, a bucketed GEMM), that consumer must sanitize exactly the additional region it will read immediately before the read. After the consumer finishes, that region is undefined again. Producers do not canonicalize inactive capacity merely because they produced a ragged tensor.
 
 `RowPartitionRuntime` may cache that terminal offset on the host. The cache exists only to support operations that must make a host-side dispatch decision, such as selecting a pre-tuned packed GEMM capacity bucket. It is not a second semantic representation of the partition.
 
@@ -71,17 +75,23 @@ An operation that changes row membership or segmentation must explicitly produce
 
 There is no implicit propagation convention on values tensors that can create `Q` accidentally.
 
-## Input-boundary tail canonicalization
+## Network boundaries and inactive capacity
 
-A logical `RaggedNetworkInput` materializes values and offsets through separate physical input ports. The submitted host-known active count is carried as boundary metadata. Values use that count to canonicalize inactive capacity, while the offsets input publishes the count onto its canonical placed allocation only after the new offsets payload has been materialized and before downstream layers run.
+A logical `RaggedNetworkInput` materializes values and offsets through separate physical input ports. The submitted host-known active count is boundary execution metadata used to publish the offsets-owned runtime cache after the new offsets payload is materialized. It does not extend the logical tensor into inactive packed capacity.
 
-This ordering lets generic Tensor writes invalidate stale payload-derived metadata without racing the ragged input boundary. It keeps inactive packed capacity deterministic while preserving zero-copy identity layers such as inference DropOut.
+The consumer-responsibility contract continues unchanged across both network boundaries:
 
-The legacy flattened `map<string, Tensor>` submission surface cannot represent this logical contract and is rejected for stamped networks with `RaggedNetworkInput`s. Submit a `Batch` containing `RaggedTensor` entries instead.
+- `RaggedNetworkInput` does not semantically promise zero or canonical values in `[offsets[B], maxTotalValues)`;
+- `RaggedNetworkOutput` exposes the values capacity and the authoritative offsets without assigning semantics to the inactive tail;
+- code consuming a ragged output after it leaves a network must treat `offsets[B]` as the logical boundary exactly as an internal consumer would.
+
+Current implementations may temporarily perform broader sanitation while the consumer-responsibility cleanup is staged. That behavior is incidental and is deliberately not part of the public or internal semantic contract. Tests therefore compare logical prefixes and poison inactive capacity rather than asserting tail bytes.
+
+The legacy flattened `map<string, Tensor>` submission surface cannot represent the logical ragged boundary contract and is rejected for stamped networks with `RaggedNetworkInput`s. Submit a `Batch` containing `RaggedTensor` entries instead.
 
 ## Expression execution
 
-Packed Expression MATMUL and RMSNorm retain the canonical offsets tensor as a structural stage input. Forward and autodiff stages query the corresponding `RowPartitionRuntime` for host bucket selection. Expression values do not carry a parallel active-row annotation.
+Packed Expression operations retain the canonical offsets tensor as a structural stage input when they need runtime extent. Active-aware valuewise stages execute only the logical prefix. Bucketed physical operations such as MATMUL (and, after the RMSNorm lifecycle cleanup, bucketed RMSNorm) may choose a larger execution extent; each such consumer owns sanitation of exactly the bucket slack it will physically read. Expression values do not carry a parallel active-row annotation.
 
 ## Regression gates
 
@@ -96,7 +106,7 @@ The cutover is covered at several levels rather than by one metadata-propagation
 | Surface | Primary regression coverage |
 | --- | --- |
 | Runtime ownership and generic copies | `RowPartitionRuntime.*`, `RaggedTensorImplementation.*` |
-| Logical ragged input/output and tail canonicalization | `RaggedNetworkOutputApi.*`, Python `test_placed_network.py` |
+| Logical ragged input/output boundary semantics | `RaggedNetworkOutputApi.*`, Python `test_placed_network.py` |
 | Indexed/File/NamedBatch session production | `IndexedNamedBatchSessionTest.*` and device-resident ragged session tests |
 | FullyConnected / packed MATMUL / autodiff | `FullyConnectedApi.Ragged*`, `RaggedExpression.*` |
 | RMSNorm / packed RMSNorm / parameter gradients | `UtilityApiLayers.RaggedRMSNorm*`, `RaggedExpression.*` |

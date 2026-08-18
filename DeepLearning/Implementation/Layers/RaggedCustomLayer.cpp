@@ -1,8 +1,5 @@
 #include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 
-#include "DeepLearning/Implementation/ThorError.h"
-#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
-
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -115,123 +112,33 @@ RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
                   false,
                   raggedInputDimensionsIncludeBatch(inputNames.size(), valuesInputPorts),
                   std::nullopt,
-                  trustedReservedRaggedInputNames(inputNames)),
-      fullCapacityRows(fullCapacityRows),
-      inputElementsPerValue(std::move(inputElementsPerValue)),
-      outputElementsPerValue(std::move(outputElementsPerValue)),
-      valuesInputPorts(std::move(valuesInputPorts)),
-      offsetsInputPort(offsetsInputPort),
-      inputPortCount(static_cast<uint32_t>(inputNames.size())),
-      outputPortCount(static_cast<uint32_t>(outputNames.size())) {
+                  trustedReservedRaggedInputNames(inputNames)) {
+    const uint32_t inputPortCount = static_cast<uint32_t>(inputNames.size());
+    const uint32_t outputPortCount = static_cast<uint32_t>(outputNames.size());
     if (fullCapacityRows == 0) {
         throw std::invalid_argument("RaggedCustomLayer packed capacity must be non-zero.");
     }
-    if (inputPortCount == 0 || outputPortCount == 0 || this->valuesInputPorts.empty() ||
-        this->inputElementsPerValue.size() != this->valuesInputPorts.size() ||
-        this->outputElementsPerValue.size() != outputPortCount || this->offsetsInputPort >= inputPortCount) {
+    if (inputPortCount == 0 || outputPortCount == 0 || valuesInputPorts.empty() ||
+        inputElementsPerValue.size() != valuesInputPorts.size() ||
+        outputElementsPerValue.size() != outputPortCount || offsetsInputPort >= inputPortCount) {
         throw std::invalid_argument(
             "RaggedCustomLayer requires packed-values metadata for at least one input and every output.");
     }
-    for (uint64_t elementsPerValue : this->outputElementsPerValue) {
+    for (uint64_t elementsPerValue : outputElementsPerValue) {
         if (elementsPerValue == 0) {
             throw std::invalid_argument("RaggedCustomLayer output row widths must be non-zero.");
         }
     }
-    for (size_t i = 0; i < this->valuesInputPorts.size(); ++i) {
-        if (this->valuesInputPorts[i] >= inputPortCount || this->valuesInputPorts[i] == this->offsetsInputPort ||
-            this->inputElementsPerValue[i] == 0) {
+    for (size_t i = 0; i < valuesInputPorts.size(); ++i) {
+        if (valuesInputPorts[i] >= inputPortCount || valuesInputPorts[i] == offsetsInputPort ||
+            inputElementsPerValue[i] == 0) {
             throw std::invalid_argument("RaggedCustomLayer packed-values input metadata is invalid.");
         }
         for (size_t j = 0; j < i; ++j) {
-            if (this->valuesInputPorts[j] == this->valuesInputPorts[i]) {
+            if (valuesInputPorts[j] == valuesInputPorts[i]) {
                 throw std::invalid_argument("RaggedCustomLayer packed-values input ports must be unique.");
             }
         }
-    }
-}
-
-uint32_t RaggedCustomLayer::applicationIndexForConnection(uint32_t connectionNumber) const {
-    return connectionNumber / inputPortCount;
-}
-
-uint64_t RaggedCustomLayer::requireActiveRows(uint32_t applicationIndex) const {
-    const uint32_t offsetsFlatIndex = applicationIndex * inputPortCount + offsetsInputPort;
-    if (offsetsFlatIndex >= featureInputs.size() || !featureInputs[offsetsFlatIndex].has_value()) {
-        throw std::runtime_error("RaggedCustomLayer row-partition offsets input is not connected for this application.");
-    }
-
-    const Tensor offsets = featureInputs[offsetsFlatIndex].value();
-    const TensorDescriptor offsetsDescriptor = offsets.getDescriptor();
-    if (offsetsDescriptor.getNumDimensions() != 1 || offsetsDescriptor.getDimensions()[0] == 0 ||
-        !RowPartitionDescriptor::isValidOffsetsDataType(offsetsDescriptor.getDataType())) {
-        throw std::runtime_error("RaggedCustomLayer row-partition offsets input is not canonical.");
-    }
-
-    const uint64_t batchSize = offsetsDescriptor.getDimensions()[0] - 1;
-    RowPartitionRuntime rowPartition(
-        offsets, RowPartitionDescriptor(batchSize, fullCapacityRows, offsetsDescriptor.getDataType()));
-    const std::optional<uint64_t> activeRows = rowPartition.getHostActiveValueCountIfAvailable();
-    if (!activeRows.has_value()) {
-        throw std::runtime_error(
-            "RaggedCustomLayer requires a host-known active-value count on its row partition for tail canonicalization.");
-    }
-    if (activeRows.value() > fullCapacityRows) {
-        throw std::runtime_error("RaggedCustomLayer active row count exceeds its packed capacity.");
-    }
-    return activeRows.value();
-}
-
-void RaggedCustomLayer::zeroInactiveTail(Tensor tensor, uint64_t activeRows, uint64_t rowWidth, Stream stream) const {
-    THOR_THROW_IF_FALSE(activeRows <= fullCapacityRows);
-    THOR_THROW_IF_FALSE(rowWidth > 0);
-    THOR_THROW_IF_FALSE(tensor.getTotalNumElements() == fullCapacityRows * rowWidth);
-    if (activeRows == fullCapacityRows) {
-        return;
-    }
-    Tensor tail =
-        tensor.aliasView({fullCapacityRows - activeRows, rowWidth}, {rowWidth, 1}, activeRows * rowWidth);
-    tail.memsetAsync(stream, 0);
-}
-
-void RaggedCustomLayer::beforeForwardExpressionRun(uint32_t connectionNumber, Stream& stream) {
-    (void)stream;
-    const uint32_t applicationIndex = applicationIndexForConnection(connectionNumber);
-    const uint64_t activeRows = requireActiveRows(applicationIndex);
-    if (activeRowsByApplication.size() <= applicationIndex) {
-        activeRowsByApplication.resize(applicationIndex + 1, 0);
-    }
-    activeRowsByApplication[applicationIndex] = activeRows;
-}
-
-void RaggedCustomLayer::afterForwardExpressionRun(uint32_t connectionNumber, Stream& stream) {
-    const uint32_t applicationIndex = applicationIndexForConnection(connectionNumber);
-    if (applicationIndex >= activeRowsByApplication.size()) {
-        throw std::runtime_error("RaggedCustomLayer has no active-row state for this application.");
-    }
-    const uint64_t activeRows = activeRowsByApplication[applicationIndex];
-    for (uint32_t outputPort = 0; outputPort < outputPortCount; ++outputPort) {
-        const uint32_t outputFlatIndex = applicationIndex * outputPortCount + outputPort;
-        if (outputFlatIndex >= featureOutputs.size() || !featureOutputs[outputFlatIndex].has_value()) {
-            throw std::runtime_error("RaggedCustomLayer output is not connected for this application.");
-        }
-        Tensor output = featureOutputs[outputFlatIndex].value();
-        zeroInactiveTail(output, activeRows, outputElementsPerValue[outputPort], stream);
-    }
-}
-
-void RaggedCustomLayer::afterBackwardErrorExpressionRun(uint32_t connectionNumber, Stream& stream) {
-    const uint32_t applicationIndex = applicationIndexForConnection(connectionNumber);
-    if (applicationIndex >= activeRowsByApplication.size()) {
-        return;
-    }
-    const uint64_t activeRows = activeRowsByApplication[applicationIndex];
-    for (size_t i = 0; i < valuesInputPorts.size(); ++i) {
-        const uint32_t valuesFlatIndex = applicationIndex * inputPortCount + valuesInputPorts[i];
-        if (valuesFlatIndex >= errorOutputs.size() || !errorOutputs[valuesFlatIndex].has_value()) {
-            continue;
-        }
-        Tensor dValues = errorOutputs[valuesFlatIndex].value();
-        zeroInactiveTail(dValues, activeRows, inputElementsPerValue[i], stream);
     }
 }
 

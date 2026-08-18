@@ -48,11 +48,6 @@ std::optional<uint64_t> RaggedTensor::getHostActiveValueCountIfAvailable() const
     return rowPartition.getHostActiveValueCountIfAvailable();
 }
 
-Tensor RaggedTensor::getActiveValueCount() const {
-    THOR_THROW_IF_FALSE(initialized);
-    return rowPartition.getActiveValueCount();
-}
-
 RaggedRuntimeExtent RaggedTensor::getRuntimeExtent() const {
     THOR_THROW_IF_FALSE(initialized);
     uint64_t elementsPerValue = 1;

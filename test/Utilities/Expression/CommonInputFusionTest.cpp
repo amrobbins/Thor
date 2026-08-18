@@ -354,6 +354,64 @@ TEST(EquationCompiler, RmsNormIsOwnBoundaryStageAndCompilesDescriptor) {
     EXPECT_EQ(compiled->fused_activation, CudnnRmsNormFusedActivation::NONE);
 }
 
+TEST(EquationCompiler, DenseRmsNormAutodiffCompilesOneCudnnBackwardStageForDxAndDscale) {
+    for (DataType io_dtype : {DataType::FP16, DataType::BF16, DataType::FP32}) {
+        auto x = Expression::input("x", io_dtype, io_dtype);
+        auto scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+        auto y = Expression::rmsNorm(x, scale, 8, 1.0e-5, DataType::FP32, io_dtype);
+        auto forward = Expression::outputs({{"y", y}}).physicalOutputs();
+        resolveOutputsDTypesInPlace(forward, {io_dtype, DataType::FP32});
+
+        // Match the production CustomLayer backward path: its connected upstream
+        // gradient tensor has a concrete runtime dtype before autodiff is built.
+        // Leaving "dy" untyped here would legitimately insert a pointwise CAST
+        // materialization before the cuDNN stage and make this a two-stage plan
+        // even though dX/dscale still coalesce into one RMSNorm backward.
+        auto backward = buildBackwardOutputs(
+            forward,
+            {"x", "scale"},
+            std::unordered_map<std::string, std::string>{{"y", "dy"}},
+            std::unordered_map<std::string, DataType>{{"y", io_dtype}},
+            std::unordered_map<std::string, std::vector<uint64_t>>{
+                {"x", {4, 8}},
+                {"scale", {8}},
+            });
+
+        std::vector<DataType> backward_input_dtypes;
+        backward_input_dtypes.reserve(backward.expr->inputs.size());
+        for (const NamedInput& input : backward.expr->inputs) {
+            backward_input_dtypes.push_back(input.name == "scale" ? DataType::FP32 : io_dtype);
+        }
+        resolveOutputsDTypesInPlace(backward, backward_input_dtypes);
+
+        size_t dx_routes = 0;
+        size_t dscale_routes = 0;
+        for (const ExprNode& node : backward.expr->nodes) {
+            dx_routes += node.op == ExprOp::RMSNORM_BACKWARD_X ? 1u : 0u;
+            dscale_routes += node.op == ExprOp::RMSNORM_BACKWARD_SCALE ? 1u : 0u;
+            EXPECT_NE(node.op, ExprOp::SQRT);
+            EXPECT_NE(node.op, ExprOp::REDUCE_AVG);
+            EXPECT_NE(node.op, ExprOp::REDUCE_SUM);
+        }
+        EXPECT_EQ(dx_routes, 1u);
+        EXPECT_EQ(dscale_routes, 1u);
+
+        const auto stages = EquationCompiler::splitAtReductionBoundaries(backward);
+        ASSERT_EQ(stages.size(), 1u);
+        ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::RmsNormBackward);
+        ASSERT_EQ(stages[0].outputs.size(), 2u);
+
+        auto compiled = EquationCompiler::compileRmsNormBackward(stages[0].expr);
+        ASSERT_NE(compiled, nullptr);
+        EXPECT_EQ(compiled->input_dtype, io_dtype);
+        EXPECT_EQ(compiled->scale_dtype, DataType::FP32);
+        EXPECT_EQ(compiled->dy_dtype, io_dtype);
+        EXPECT_EQ(compiled->dx_dtype, io_dtype);
+        EXPECT_EQ(compiled->dscale_dtype, DataType::FP32);
+        EXPECT_EQ(compiled->compute_dtype, DataType::FP32);
+    }
+}
+
 TEST(EquationCompiler, SwishHelperDoesNotImplicitlyTurnRmsNormIntoCudnnFusion) {
 
     auto x = Expression::input("x", DataType::BF16, DataType::BF16);

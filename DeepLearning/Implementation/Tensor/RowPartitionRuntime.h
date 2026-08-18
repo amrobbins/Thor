@@ -11,7 +11,13 @@ namespace ThorImplementation {
 
 // Runtime state shared by tensors that preserve one ragged row partition.
 //
-// The offsets tensor is the semantic source of truth. hostActiveValueCount is only
+// The offsets tensor is the semantic source of truth. For batch size B,
+// offsets[B] is the exclusive logical end of packed values; physical capacity
+// beyond that point is undefined storage. Consumers that intentionally launch
+// over a larger physical extent must sanitize precisely their own over-read
+// region before consuming it.
+//
+// hostActiveValueCount is only
 // a host-side cache of offsets[batchSize], used by execution paths that must choose
 // capacity-dependent work without synchronously reading device offsets. Generic
 // Tensor mutations invalidate the cache; inspectable CPU offsets are checked for
@@ -35,7 +41,6 @@ class RowPartitionRuntime {
     [[nodiscard]] std::optional<uint64_t> getHostActiveValueCountIfAvailable() const;
     [[nodiscard]] uint64_t requireHostActiveValueCount() const;
 
-    Tensor getActiveValueCount() const;
     RaggedRuntimeExtent getRuntimeExtent(uint64_t elementsPerValue) const;
 
     bool describesSamePartition(const RowPartitionRuntime &rhs) const;

@@ -62,9 +62,8 @@ def test_shape_preserving_activation_accepts_ragged_tensor_and_preserves_partiti
     result = placed.infer({"tokens": physical})["output"]
     assert isinstance(result, thor.physical.PhysicalRaggedTensor)
     assert np.array_equal(result.offsets.numpy(), offsets_np)
-    expected = np.zeros_like(values_np)
-    expected[:4] = reference(values_np[:4])
-    assert np.allclose(result.values.numpy(), expected, rtol=2e-5, atol=2e-5)
+    expected = reference(values_np[:4])
+    assert np.allclose(result.values.numpy()[:4], expected, rtol=2e-5, atol=2e-5)
 
 
 def test_ragged_softmax_remains_explicitly_deferred():
@@ -142,11 +141,10 @@ def test_gated_activation_accepts_ragged_tensor_halves_width_and_preserves_parti
     assert isinstance(result, thor.physical.PhysicalRaggedTensor)
     assert np.array_equal(result.offsets.numpy(), offsets_np)
 
-    expected = np.zeros((8, 3), dtype=np.float32)
     value = values_np[:4, :3]
     gate = values_np[:4, 3:]
-    expected[:4] = value * gate_reference(gate)
-    assert np.allclose(result.values.numpy(), expected, rtol=5e-5, atol=5e-5)
+    expected = value * gate_reference(gate)
+    assert np.allclose(result.values.numpy()[:4], expected, rtol=5e-5, atol=5e-5)
 
 
 @pytest.mark.cuda
@@ -193,11 +191,10 @@ def test_ragged_swiglu_save_load_preserves_shape_partition_and_execution(tmp_pat
 
     result = placed.infer({"tokens": physical})["output"]
     assert np.array_equal(result.offsets.numpy(), offsets_np)
-    expected = np.zeros((6, 2), dtype=np.float32)
     value = values_np[:3, :2]
     gate = values_np[:3, 2:]
-    expected[:3] = value * (gate / (1.0 + np.exp(-gate)))
-    assert np.allclose(result.values.numpy(), expected, rtol=5e-5, atol=5e-5)
+    expected = value * (gate / (1.0 + np.exp(-gate)))
+    assert np.allclose(result.values.numpy()[:3], expected, rtol=5e-5, atol=5e-5)
 
 
 @pytest.mark.cuda
@@ -236,6 +233,5 @@ def test_ragged_swish_save_load_preserves_partition_and_execution(tmp_path):
 
     result = placed.infer({"tokens": physical})["output"]
     assert np.array_equal(result.offsets.numpy(), offsets_np)
-    expected = np.zeros_like(values_np)
-    expected[:3] = values_np[:3] / (1.0 + np.exp(-values_np[:3]))
-    assert np.allclose(result.values.numpy(), expected, rtol=2e-5, atol=2e-5)
+    expected = values_np[:3] / (1.0 + np.exp(-values_np[:3]))
+    assert np.allclose(result.values.numpy()[:3], expected, rtol=2e-5, atol=2e-5)

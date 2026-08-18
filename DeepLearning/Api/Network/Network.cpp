@@ -1765,7 +1765,7 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
     const uint32_t numLayers = getNumLayers();
     for (uint32_t i = 0; i < numLayers; ++i) {
         std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(getLayer(i));
-        if (output == nullptr) {
+        if (output == nullptr || !output->isExternal()) {
             continue;
         }
         std::optional<Tensor> outputTensor = output->getFeatureInput();
@@ -1817,7 +1817,7 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
 
     for (uint32_t i = 0; i < numLayers; ++i) {
         std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(getLayer(i));
-        if (output == nullptr) {
+        if (output == nullptr || !output->isExternal()) {
             continue;
         }
         std::optional<Tensor> outputTensor = output->getFeatureInput();
@@ -2057,7 +2057,7 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
     const uint32_t numLayers = getNumLayers();
     for (uint32_t i = 0; i < numLayers; ++i) {
         std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(getLayer(i));
-        if (output == nullptr) {
+        if (output == nullptr || !output->isExternal()) {
             continue;
         }
         std::optional<Tensor> outputTensor = output->getFeatureInput();
@@ -2109,7 +2109,7 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
 
     for (uint32_t i = 0; i < numLayers; ++i) {
         std::shared_ptr<NetworkOutput> output = std::dynamic_pointer_cast<NetworkOutput>(getLayer(i));
-        if (output == nullptr) {
+        if (output == nullptr || !output->isExternal()) {
             continue;
         }
         std::optional<Tensor> outputTensor = output->getFeatureInput();

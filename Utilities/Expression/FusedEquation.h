@@ -43,6 +43,7 @@ struct CompiledExecutionStage {
         Scan,
         Softmax,
         RmsNorm,
+        RmsNormBackward,
         EmbeddingLookup,
         Matmul,
         InPlaceRope,
@@ -73,6 +74,8 @@ struct CompiledExecutionStage {
                 return "Softmax";
             case Kind::RmsNorm:
                 return "RmsNorm";
+            case Kind::RmsNormBackward:
+                return "RmsNormBackward";
             case Kind::EmbeddingLookup:
                 return "EmbeddingLookup";
             case Kind::Matmul:
@@ -110,6 +113,7 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledScan> scan = nullptr;
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
     const std::shared_ptr<CompiledRmsNorm> rms_norm = nullptr;
+    const std::shared_ptr<CompiledRmsNormBackward> rms_norm_backward = nullptr;
     const std::shared_ptr<CompiledEmbeddingLookup> embedding_lookup = nullptr;
     const std::shared_ptr<CompiledMatmul> matmul = nullptr;
     const std::shared_ptr<CompiledInPlaceRope> in_place_rope = nullptr;
@@ -190,6 +194,15 @@ struct CompiledExecutionStage {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing RMSNorm stage.");
                 }
                 return rms_norm->output_dtype;
+
+            case Kind::RmsNormBackward:
+                if (!rms_norm_backward) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing RMSNorm-backward stage.");
+                }
+                if (outputs.at(output_idx).local_node_idx >= expr.nodes.size()) {
+                    throw std::runtime_error("RMSNorm-backward output node index out of range while resolving dtype.");
+                }
+                return rms_norm_backward->outputDTypeFor(expr.nodes.at(outputs.at(output_idx).local_node_idx).op);
 
             case Kind::EmbeddingLookup:
                 if (!embedding_lookup) {
@@ -355,6 +368,18 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::RmsNorm),
           rms_norm(rms_norm),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const PhysicalExpression& expr,
+                           const std::shared_ptr<CompiledRmsNormBackward>& rms_norm_backward,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::RmsNormBackward),
+          expr(expr),
+          rms_norm_backward(rms_norm_backward),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
@@ -691,6 +716,16 @@ class FusedEquation {
                                                                const std::optional<Tensor>& preallocatedOutput,
                                                                const Stream& stream,
                                                                const std::optional<Tensor>& rowPartitionOffsets = std::nullopt) const;
+
+    [[nodiscard]] std::shared_ptr<StampedRmsNormBackward> stampRmsNormBackward(
+        const std::shared_ptr<CompiledRmsNormBackward>& compiledStage,
+        const Tensor& input,
+        const Tensor& scale,
+        const Tensor& dY,
+        const std::vector<std::optional<Tensor>>& preallocatedOutputs,
+        const Stream& stream,
+        const std::optional<Tensor>& rowPartitionOffsets = std::nullopt,
+        std::shared_ptr<RmsNormForwardState> saved_forward_state = nullptr) const;
 
     [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
                                                              Tensor& lhs,

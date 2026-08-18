@@ -1,5 +1,6 @@
 #include "DeepLearning/Api/Data/DatasetWriter.h"
 #include "Utilities/Data/Storage/DatasetShard.h"
+#include "Utilities/Data/Readers/IndexedDatasetReader.h"
 
 #include "gtest/gtest.h"
 
@@ -804,5 +805,238 @@ TEST(DatasetWriterTest, RejectsMalformedRaggedBatchBeforeWritingSidecar) {
     EXPECT_EQ(storage.at("num_bytes").get<uint64_t>(), 0);
     EXPECT_EQ(std::filesystem::file_size(datasetPath / storage.at("file").get<string>()), 0);
 
+    std::filesystem::remove_all(datasetPath);
+}
+
+
+TEST(DatasetWriterTest, RaggedWindowedTensorStoresCompactReferencesIntoSharedWindowSource) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_windowed_source");
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        {},
+        vector<DatasetLayout::WindowedTensorSourceShape>{
+            DatasetLayout::WindowedTensorSourceShape("history_source", {2}, DataType::FP32, DataType::UINT64)},
+        {},
+        {},
+        vector<DatasetLayout::RaggedWindowedTensorShape>{
+            DatasetLayout::RaggedWindowedTensorShape("history", "history_source", DataType::INT64)});
+
+    EXPECT_EQ(layout.recordSizeBytes(), 2 * sizeof(uint64_t));
+    EXPECT_TRUE(layout.hasRaggedTensors());
+    EXPECT_FALSE(layout.hasWindowedTensors());
+    ASSERT_TRUE(layout.raggedTensor("history").sourceName.has_value());
+    EXPECT_EQ(*layout.raggedTensor("history").sourceName, "history_source");
+
+    uint64_t sourceKey = 7;
+    vector<float> sourceValues(20);
+    for (uint64_t i = 0; i < sourceValues.size(); ++i) sourceValues[i] = static_cast<float>(i);
+    DatasetWriter writer(datasetPath, layout, 8, 3, true);
+    writer.writeWindowSource(
+        "history_source",
+        DatasetWriter::WindowedTensorSourceView{
+            .dataType = DataType::FP32,
+            .key = &sourceKey,
+            .startIndex = 100,
+            .dimensions = {10, 2},
+            .data = sourceValues.data(),
+            .numBytes = sourceValues.size() * sizeof(float)});
+
+    vector<uint64_t> keys{7, 7, 7};
+    vector<int64_t> starts{100, 102, 107};
+    vector<uint64_t> lengths{4, 3, 2};
+    writer.writeIndexedExamples(
+        {},
+        std::map<std::string, DatasetWriter::RaggedTensorBatchView>{
+            {"history", DatasetWriter::RaggedTensorBatchView{
+                            .dataType = DataType::FP32,
+                            .count = 3,
+                            .storageMode = DatasetWriter::RaggedTensorBatchView::StorageMode::WINDOW_REFERENCE,
+                            .keyDataType = DataType::UINT64,
+                            .indexDataType = DataType::INT64,
+                            .keys = keys.data(),
+                            .starts = starts.data(),
+                            .lengths = lengths.data()}}});
+    writer.close();
+
+    const nlohmann::json manifest = readJson(datasetPath / DatasetWriter::MANIFEST_FILENAME);
+    const nlohmann::json &sourceStorage = manifest.at("window_sources").at("history_source").at("storage");
+    const nlohmann::json &raggedStorage = manifest.at("ragged_tensors").at("history").at("storage");
+    EXPECT_EQ(raggedStorage.at("file").get<string>(), sourceStorage.at("file").get<string>());
+    EXPECT_EQ(raggedStorage.at("num_bytes").get<uint64_t>(), sourceValues.size() * sizeof(float));
+    EXPECT_EQ(raggedStorage.at("num_values").get<uint64_t>(), 10u);
+    EXPECT_FALSE(std::filesystem::exists(datasetPath / "ragged_values"));
+
+    DatasetShard shard;
+    shard.openShard((datasetPath / manifest.at("shards").at(0).at("file").get<string>()).string());
+    const DatasetLayout parsed = DatasetLayout::fromJson(manifest);
+    const DatasetLayout::RaggedTensorSpec &spec = parsed.raggedTensor("history");
+    const vector<std::pair<uint64_t, uint64_t>> expected{{0, 4}, {2, 3}, {7, 2}};
+    for (uint64_t row = 0; row < expected.size(); ++row) {
+        vector<uint8_t> record(parsed.recordSizeBytes());
+        string label;
+        string filename;
+        shard.loadExample(record.data(), label, filename, ExampleType::TRAIN, row);
+        uint64_t startValue = 0;
+        uint64_t valueCount = 0;
+        std::memcpy(&startValue, record.data() + spec.referenceOffsetBytes, sizeof(startValue));
+        std::memcpy(&valueCount, record.data() + spec.referenceOffsetBytes + sizeof(startValue), sizeof(valueCount));
+        EXPECT_EQ(startValue, expected.at(row).first);
+        EXPECT_EQ(valueCount, expected.at(row).second);
+    }
+
+    std::shared_ptr<IndexedDatasetReader> reader = IndexedDatasetReader::openDataset(datasetPath, layout);
+    vector<IndexedRaggedTensorReference> references(1);
+    vector<IndexedRaggedTensorReference *> destinations(reader->getRaggedTensorCount(), nullptr);
+    destinations.at(reader->getLayoutRaggedTensorOrdinal("history")) = references.data();
+    std::unique_ptr<IndexedDatasetReader::Session> session = reader->createSession(1);
+    session->loadExampleInto(1, 0, {}, {}, {}, destinations);
+    session->drain();
+    EXPECT_EQ(references.at(0).startValue, 2u);
+    EXPECT_EQ(references.at(0).valueCount, 3u);
+    vector<float> packed(6, -1.0f);
+    session->loadRaggedValuesInto(0, 2, 3, packed.data());
+    EXPECT_EQ(packed, (vector<float>{4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f}));
+
+    EXPECT_NO_THROW(layout.validateRequestedLayoutExact(parsed));
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DatasetWriterTest, RaggedWindowedTensorResolvesMultipleKeysIntoOneSharedSourceFile) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_windowed_multiple_keys");
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        {},
+        vector<DatasetLayout::WindowedTensorSourceShape>{
+            DatasetLayout::WindowedTensorSourceShape("history_source", {}, DataType::INT32, DataType::UINT64)},
+        {},
+        {},
+        vector<DatasetLayout::RaggedWindowedTensorShape>{
+            DatasetLayout::RaggedWindowedTensorShape("history", "history_source", DataType::INT64)});
+
+    DatasetWriter writer(datasetPath, layout, 8, 2, true);
+    uint64_t firstKey = 11;
+    uint64_t secondKey = 22;
+    vector<int32_t> firstValues{100, 101, 102};
+    vector<int32_t> secondValues{200, 201, 202, 203};
+    writer.writeWindowSource(
+        "history_source",
+        DatasetWriter::WindowedTensorSourceView{
+            .dataType = DataType::INT32,
+            .key = &firstKey,
+            .startIndex = 10,
+            .dimensions = {firstValues.size()},
+            .data = firstValues.data(),
+            .numBytes = firstValues.size() * sizeof(int32_t)});
+    writer.writeWindowSource(
+        "history_source",
+        DatasetWriter::WindowedTensorSourceView{
+            .dataType = DataType::INT32,
+            .key = &secondKey,
+            .startIndex = 50,
+            .dimensions = {secondValues.size()},
+            .data = secondValues.data(),
+            .numBytes = secondValues.size() * sizeof(int32_t)});
+
+    vector<uint64_t> keys{firstKey, secondKey};
+    vector<int64_t> starts{11, 51};
+    vector<uint64_t> lengths{2, 2};
+    writer.writeIndexedExamples(
+        {},
+        {{"history", DatasetWriter::RaggedTensorBatchView{
+                         .dataType = DataType::INT32,
+                         .count = 2,
+                         .storageMode = DatasetWriter::RaggedTensorBatchView::StorageMode::WINDOW_REFERENCE,
+                         .keyDataType = DataType::UINT64,
+                         .indexDataType = DataType::INT64,
+                         .keys = keys.data(),
+                         .starts = starts.data(),
+                         .lengths = lengths.data()}}});
+    writer.close();
+
+    const nlohmann::json manifest = readJson(datasetPath / DatasetWriter::MANIFEST_FILENAME);
+    const DatasetLayout parsed = DatasetLayout::fromJson(manifest);
+    const DatasetLayout::RaggedTensorSpec &spec = parsed.raggedTensor("history");
+    DatasetShard shard;
+    shard.openShard((datasetPath / manifest.at("shards").at(0).at("file").get<string>()).string());
+    const vector<std::pair<uint64_t, uint64_t>> expected{{1, 2}, {4, 2}};
+    for (uint64_t row = 0; row < expected.size(); ++row) {
+        vector<uint8_t> record(parsed.recordSizeBytes());
+        string label;
+        string filename;
+        shard.loadExample(record.data(), label, filename, ExampleType::TRAIN, row);
+        uint64_t startValue = 0;
+        uint64_t valueCount = 0;
+        std::memcpy(&startValue, record.data() + spec.referenceOffsetBytes, sizeof(startValue));
+        std::memcpy(&valueCount,
+                    record.data() + spec.referenceOffsetBytes + sizeof(startValue),
+                    sizeof(valueCount));
+        EXPECT_EQ(startValue, expected.at(row).first);
+        EXPECT_EQ(valueCount, expected.at(row).second);
+    }
+
+    std::shared_ptr<IndexedDatasetReader> reader = IndexedDatasetReader::openDataset(datasetPath, layout);
+    std::unique_ptr<IndexedDatasetReader::Session> session = reader->createSession(1);
+    vector<int32_t> values(2, -1);
+    session->loadRaggedValuesInto(0, 4, 2, values.data());
+    EXPECT_EQ(values, (vector<int32_t>{201, 202}));
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DatasetWriterTest, RaggedWindowedTensorRejectsMissingKeyAndOutOfBoundsWindow) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_windowed_bounds");
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        {},
+        vector<DatasetLayout::WindowedTensorSourceShape>{
+            DatasetLayout::WindowedTensorSourceShape("tokens", {}, DataType::INT32, DataType::UINT64)},
+        {},
+        {},
+        vector<DatasetLayout::RaggedWindowedTensorShape>{
+            DatasetLayout::RaggedWindowedTensorShape("tokens", "tokens", DataType::INT64)});
+    DatasetWriter writer(datasetPath, layout, 8);
+    uint64_t sourceKey = 3;
+    vector<int32_t> values{10, 11, 12, 13, 14};
+    writer.writeWindowSource(
+        "tokens",
+        DatasetWriter::WindowedTensorSourceView{
+            .dataType = DataType::INT32,
+            .key = &sourceKey,
+            .startIndex = 10,
+            .dimensions = {5},
+            .data = values.data(),
+            .numBytes = values.size() * sizeof(int32_t)});
+
+    uint64_t missingKey = 4;
+    int64_t start = 10;
+    uint64_t length = 1;
+    EXPECT_THROW(
+        writer.writeIndexedExample(
+            {},
+            std::map<std::string, DatasetWriter::RaggedTensorView>{
+                {"tokens", DatasetWriter::RaggedTensorView{
+                               .dataType = DataType::INT32,
+                               .storageMode = DatasetWriter::RaggedTensorView::StorageMode::WINDOW_REFERENCE,
+                               .keyDataType = DataType::UINT64,
+                               .indexDataType = DataType::INT64,
+                               .key = &missingKey,
+                               .start = &start,
+                               .length = &length}}}),
+        std::runtime_error);
+
+    start = 13;
+    length = 3;
+    EXPECT_THROW(
+        writer.writeIndexedExample(
+            {},
+            std::map<std::string, DatasetWriter::RaggedTensorView>{
+                {"tokens", DatasetWriter::RaggedTensorView{
+                               .dataType = DataType::INT32,
+                               .storageMode = DatasetWriter::RaggedTensorView::StorageMode::WINDOW_REFERENCE,
+                               .keyDataType = DataType::UINT64,
+                               .indexDataType = DataType::INT64,
+                               .key = &sourceKey,
+                               .start = &start,
+                               .length = &length}}}),
+        std::runtime_error);
+
+    writer.close();
     std::filesystem::remove_all(datasetPath);
 }

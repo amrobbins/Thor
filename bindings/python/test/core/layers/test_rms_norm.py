@@ -323,7 +323,28 @@ def test_ragged_rms_norm_matches_dense_prefix_across_capacity_buckets(active_row
 
     assert np.array_equal(result.offsets.numpy(), offsets)
     np.testing.assert_allclose(actual[:active_rows], expected, rtol=2.5e-5, atol=2.5e-5)
-    np.testing.assert_array_equal(actual[active_rows:], np.zeros_like(actual[active_rows:]))
+
+
+@pytest.mark.cuda
+def test_dense_rms_norm_save_load_preserves_execution(tmp_path):
+    epsilon = 1e-4
+    name = "test_dense_rms_norm_save_load"
+    n = thor.Network(name)
+    x = _input_tensor(n, [3, 4], thor.DataType.fp32)
+    rn = thor.layers.RMSNorm(n, x, normalized_shape=[4], epsilon=epsilon)
+    thor.layers.NetworkOutput(n, "output", rn.get_feature_output(), thor.DataType.fp32)
+
+    save_dir = tmp_path / "model"
+    n.save(str(save_dir), overwrite=False)
+    loaded = thor.Network(name)
+    loaded.load(str(save_dir))
+
+    values = (np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4) - 7.0) / 3.0
+    placed = loaded.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    actual = np.array(placed.infer({"input": _cpu_tensor(values, thor.DataType.fp32)})["output"].numpy(), copy=True)
+    expected = _rms_norm_reference(values, [4], epsilon)
+
+    np.testing.assert_allclose(actual, expected, rtol=2.5e-5, atol=2.5e-5)
 
 
 @pytest.mark.cuda
@@ -361,4 +382,3 @@ def test_ragged_rms_norm_save_load_preserves_execution(tmp_path):
 
     assert np.array_equal(result.offsets.numpy(), offsets)
     np.testing.assert_allclose(actual[:active_rows], expected, rtol=2.5e-5, atol=2.5e-5)
-    np.testing.assert_array_equal(actual[active_rows:], np.zeros_like(actual[active_rows:]))

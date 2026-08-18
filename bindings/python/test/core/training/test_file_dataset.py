@@ -1349,3 +1349,150 @@ def test_python_ragged_dataset_batch_writer_rejects_noncanonical_offsets_dtype(t
                 )
             },
         )
+
+
+def test_ragged_windowed_tensor_reuses_one_physical_source_and_compact_references(tmp_path):
+    dataset_path = tmp_path / "ragged_windowed_source"
+    layout = thor.data.DatasetLayout(
+        tensors={},
+        window_sources={
+            "history_source": thor.data.WindowedTensorSourceLayout(
+                step_shape=[2],
+                data_type=thor.DataType.fp32,
+                key_type=thor.DataType.uint64,
+            )
+        },
+        ragged_tensors={
+            "history": thor.data.RaggedWindowedTensorLayout(
+                source="history_source",
+                index_type=thor.DataType.int64,
+            )
+        },
+    )
+
+    assert layout.get_record_size_bytes() == 16
+    assert not layout.has_windowed_tensors()
+    assert layout.has_ragged_tensors()
+    spec = layout.get_ragged_tensor_specs()["history"]
+    assert spec["source"] == "history_source"
+    assert spec["index_type"] == thor.DataType.int64
+    assert spec["value_shape"] == [2]
+
+    source = np.arange(20, dtype=np.float32).reshape(10, 2)
+    writer = thor.data.DatasetWriter(
+        dataset_path,
+        layout,
+        examples_per_shard=8,
+        expected_num_examples=3,
+        preallocate=True,
+    )
+    writer.write_window_source("history_source", key=7, start_index=100, values=source)
+    writer.write_indexed_examples(
+        {},
+        ragged_tensors={
+            "history": thor.data.RaggedWindowedTensorChunk(
+                key=np.asarray([7, 7, 7], dtype=np.uint64),
+                start=np.asarray([100, 102, 107], dtype=np.int64),
+                length=np.asarray([4, 3, 2], dtype=np.uint64),
+            )
+        },
+    )
+    writer.close()
+
+    manifest = json.loads((dataset_path / "manifest.json").read_text())
+    source_storage = manifest["window_sources"]["history_source"]["storage"]
+    ragged_storage = manifest["ragged_tensors"]["history"]["storage"]
+    assert ragged_storage["file"] == source_storage["file"]
+    assert ragged_storage["num_bytes"] == source.nbytes
+    assert ragged_storage["num_values"] == len(source)
+    assert list((dataset_path / "window_sources").glob("*.bin"))
+    assert not (dataset_path / "ragged_values").exists()
+
+    dataset = thor.data.FileDataset.open(dataset_path)
+    field = dataset.schema.field("history")
+    assert field.kind == thor.data.DatasetFieldKind.RAGGED
+    assert field.dtype == thor.DataType.fp32
+    assert field.dimensions == [2]
+
+
+def test_ragged_windowed_tensor_rejects_reference_outside_source(tmp_path):
+    dataset_path = tmp_path / "ragged_windowed_bad_reference"
+    layout = thor.data.DatasetLayout(
+        tensors={},
+        window_sources={
+            "tokens": thor.data.WindowedTensorSourceLayout(
+                step_shape=[], data_type=thor.DataType.int32, key_type=thor.DataType.uint64)
+        },
+        ragged_tensors={
+            "tokens": thor.data.RaggedWindowedTensorLayout(
+                source="tokens", index_type=thor.DataType.int64)
+        },
+    )
+    writer = thor.data.DatasetWriter(dataset_path, layout)
+    writer.write_window_source("tokens", key=3, start_index=10, values=np.arange(5, dtype=np.int32))
+
+    with pytest.raises(RuntimeError, match="length extends past"):
+        writer.write_indexed_example(
+            {},
+            ragged_tensors={
+                "tokens": thor.data.RaggedWindowedTensorChunk(key=3, start=13, length=3)
+            },
+        )
+
+
+def test_ragged_windowed_tensor_storage_scales_with_source_not_overlapping_logical_windows(tmp_path):
+    dataset_path = tmp_path / "ragged_windowed_storage_scaling"
+    value_width = 8
+    source_steps = 1024
+    num_examples = 128
+    window_length = 512
+    layout = thor.data.DatasetLayout(
+        tensors={},
+        window_sources={
+            "history_source": thor.data.WindowedTensorSourceLayout(
+                step_shape=[value_width],
+                data_type=thor.DataType.fp32,
+                key_type=thor.DataType.uint64,
+            )
+        },
+        ragged_tensors={
+            "history": thor.data.RaggedWindowedTensorLayout(
+                source="history_source",
+                index_type=thor.DataType.int64,
+            )
+        },
+    )
+
+    source = np.arange(source_steps * value_width, dtype=np.float32).reshape(source_steps, value_width)
+    starts = np.arange(num_examples, dtype=np.int64)
+    lengths = np.full(num_examples, window_length, dtype=np.uint64)
+    writer = thor.data.DatasetWriter(
+        dataset_path,
+        layout,
+        examples_per_shard=num_examples,
+        expected_num_examples=num_examples,
+        preallocate=True,
+    )
+    writer.write_window_source("history_source", key=1, start_index=0, values=source)
+    writer.write_indexed_examples(
+        {},
+        ragged_tensors={
+            "history": thor.data.RaggedWindowedTensorChunk(
+                key=np.ones(num_examples, dtype=np.uint64),
+                start=starts,
+                length=lengths,
+            )
+        },
+    )
+    writer.close()
+
+    manifest = json.loads((dataset_path / "manifest.json").read_text())
+    source_storage = manifest["window_sources"]["history_source"]["storage"]
+    ragged_storage = manifest["ragged_tensors"]["history"]["storage"]
+    record_bytes = manifest["record_size_bytes"] * num_examples
+    logical_window_bytes = num_examples * window_length * value_width * np.dtype(np.float32).itemsize
+
+    assert source_storage["num_bytes"] == source.nbytes
+    assert ragged_storage["num_bytes"] == source.nbytes
+    assert record_bytes == num_examples * 16
+    assert source.nbytes + record_bytes < logical_window_bytes // 16

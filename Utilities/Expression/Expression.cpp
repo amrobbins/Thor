@@ -350,6 +350,10 @@ std::string exprOpExternalName(ExprOp op) {
             return "scan";
         case ExprOp::RMSNORM:
             return "rmsnorm";
+        case ExprOp::RMSNORM_BACKWARD_X:
+            return "rmsnorm_backward_x";
+        case ExprOp::RMSNORM_BACKWARD_SCALE:
+            return "rmsnorm_backward_scale";
         case ExprOp::ATTENTION:
             return "attention";
         case ExprOp::ATTENTION_BACKWARD_Q:
@@ -503,6 +507,8 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"reduce_norm2", ExprOp::REDUCE_NORM2},
         {"scan", ExprOp::SCAN},
         {"rmsnorm", ExprOp::RMSNORM},
+        {"rmsnorm_backward_x", ExprOp::RMSNORM_BACKWARD_X},
+        {"rmsnorm_backward_scale", ExprOp::RMSNORM_BACKWARD_SCALE},
         {"attention", ExprOp::ATTENTION},
         {"attention_backward_q", ExprOp::ATTENTION_BACKWARD_Q},
         {"attention_backward_k", ExprOp::ATTENTION_BACKWARD_K},
@@ -1083,6 +1089,10 @@ std::string opName(ExprOp op) {
             return "RAGGED_VALUEWISE_EXTENT";
         case ExprOp::RMSNORM:
             return "RMSNORM";
+        case ExprOp::RMSNORM_BACKWARD_X:
+            return "RMSNORM_BW_X";
+        case ExprOp::RMSNORM_BACKWARD_SCALE:
+            return "RMSNORM_BW_SCALE";
         case ExprOp::ATTENTION:
             return "ATTENTION";
         case ExprOp::ATTENTION_BACKWARD_Q:
@@ -1448,6 +1458,18 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             break;
         }
 
+        case ExprOp::RMSNORM_BACKWARD_X:
+        case ExprOp::RMSNORM_BACKWARD_SCALE: {
+            std::string x = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string scale = canonicalizeNode(expr, n.rhs, memo, memoReady);
+            std::string dY = canonicalizeNode(expr, n.aux, memo, memoReady);
+            out = opName(n.op) + "(" + x + "," + scale + "," + dY;
+            out += ";hidden=" + std::to_string(n.rms_norm_normalized_feature_count);
+            out += ";epsilon=" + formatFloatCanonical(n.rms_norm_epsilon);
+            out += ")";
+            break;
+        }
+
         case ExprOp::ATTENTION:
         case ExprOp::ATTENTION_BACKWARD_Q:
         case ExprOp::ATTENTION_BACKWARD_K:
@@ -1598,6 +1620,9 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
             break;
         case PhysicalExecutionStage::Kind::RmsNorm:
             ss << "rmsnorm";
+            break;
+        case PhysicalExecutionStage::Kind::RmsNormBackward:
+            ss << "rmsnorm_backward";
             break;
         case PhysicalExecutionStage::Kind::Matmul:
             ss << "matmul";
@@ -2531,6 +2556,8 @@ bool Expression::isBinaryOp(const ExprOp op) {
 bool Expression::isTernaryOp(const ExprOp op) {
     switch (op) {
         case ExprOp::GEMM:
+        case ExprOp::RMSNORM_BACKWARD_X:
+        case ExprOp::RMSNORM_BACKWARD_SCALE:
         case ExprOp::ATTENTION:
         case ExprOp::ATTENTION_BACKWARD_Q:
         case ExprOp::ATTENTION_BACKWARD_K:

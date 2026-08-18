@@ -15,8 +15,13 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/RaggedTestUtils.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/RaggedMatmulCapacityBuckets.h"
 
 #include "gtest/gtest.h"
+
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 
 #include <cmath>
 #include <memory>
@@ -50,20 +55,49 @@ void rmsSynchronizeEvents(vector<Event>& events) {
 void rmsWriteCpuTensor(Impl::Tensor& tensor, const vector<float>& values) {
     ASSERT_EQ(tensor.getPlacement(), rmsCpuPlacement);
     ASSERT_EQ(rmsTensorNumel(tensor), values.size());
-    ASSERT_EQ(tensor.getDataType(), Impl::DataType::FP32);
-    auto* ptr = static_cast<float*>(tensor.getMemPtr());
-    for (uint64_t i = 0; i < values.size(); ++i) {
-        ptr[i] = values[i];
+    switch (tensor.getDataType()) {
+        case Impl::DataType::FP32: {
+            auto* ptr = static_cast<float*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i) ptr[i] = values[i];
+            return;
+        }
+        case Impl::DataType::FP16: {
+            auto* ptr = static_cast<__half*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i) ptr[i] = __float2half_rn(values[i]);
+            return;
+        }
+        case Impl::DataType::BF16: {
+            auto* ptr = static_cast<__nv_bfloat16*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i) ptr[i] = __float2bfloat16_rn(values[i]);
+            return;
+        }
+        default:
+            FAIL() << "Unsupported RMSNorm test tensor dtype for CPU write.";
     }
 }
 
 vector<float> rmsReadCpuTensor(const Impl::Tensor& tensor) {
     EXPECT_EQ(tensor.getPlacement(), rmsCpuPlacement);
-    EXPECT_EQ(tensor.getDataType(), Impl::DataType::FP32);
     vector<float> values(rmsTensorNumel(tensor));
-    const auto* ptr = static_cast<const float*>(tensor.getMemPtr());
-    for (uint64_t i = 0; i < values.size(); ++i) {
-        values[i] = ptr[i];
+    switch (tensor.getDataType()) {
+        case Impl::DataType::FP32: {
+            const auto* ptr = static_cast<const float*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i) values[i] = ptr[i];
+            break;
+        }
+        case Impl::DataType::FP16: {
+            const auto* ptr = static_cast<const __half*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i) values[i] = __half2float(ptr[i]);
+            break;
+        }
+        case Impl::DataType::BF16: {
+            const auto* ptr = static_cast<const __nv_bfloat16*>(tensor.getMemPtr());
+            for (uint64_t i = 0; i < values.size(); ++i) values[i] = __bfloat162float(ptr[i]);
+            break;
+        }
+        default:
+            ADD_FAILURE() << "Unsupported RMSNorm test tensor dtype for CPU read.";
+            return {};
     }
     return values;
 }
@@ -410,6 +444,169 @@ TEST(UtilityApiLayers, RMSNormMultiInputEpilogueRunsForwardBackwardResidualAddAn
                       "rmsnorm residual epilogue auxiliary residual error out");
     rmsExpectAllClose(rmsReadCpuTensor(weightsAfterHost), expectedWeightsAfter, 3e-4f, 3e-4f,
                       "rmsnorm residual epilogue weights after");
+
+    // Run a second, different batch through the same stamped training plan. The
+    // saved cuDNN invVariance must be refreshed by this forward pass rather than
+    // reusing the statistic retained for the first backward pass.
+    const vector<float> secondInputValues = {
+        -0.75f, 1.25f, 2.5f,
+        3.0f, -1.0f, 0.5f,
+    };
+    const vector<float> secondResidualValues = {
+        -0.5f, 0.25f, 1.0f,
+        0.75f, -1.25f, 0.5f,
+    };
+    const vector<float> secondUpstreamErrors = {
+        -1.0f, 0.25f, 0.75f,
+        1.25f, -0.5f, 0.125f,
+    };
+
+    rmsWriteCpuTensor(inputHost, secondInputValues);
+    rmsWriteCpuTensor(residualHost, secondResidualValues);
+    physicalInput->forward(inputHost, false, batchSize);
+    physicalResidual->forward(residualHost, false, batchSize);
+    physicalOutput->getOutputReadyEvent().synchronize();
+
+    const vector<float> expectedSecondForward =
+        rmsNormForwardReference(secondInputValues, expectedWeightsAfter, secondResidualValues, batchSize, hidden, epsilon);
+    rmsExpectAllClose(rmsReadCpuTensor(physicalOutput->getFeatureOutput().value()), expectedSecondForward, 3e-4f, 3e-4f,
+                      "rmsnorm second forward");
+
+    rmsWriteCpuTensor(errorInputHost, secondUpstreamErrors);
+    errorInput.copyFromAsync(errorInputHost, stream);
+    physicalRmsNorm->backward(errorInput, batchSize);
+
+    Impl::Tensor secondPrimaryErrorOutputHost = rmsCopyTensorToCpu(physicalRmsNorm->getErrorOutputs()[0].value(), stream);
+    Impl::Tensor secondWeightsAfterHost = rmsCopyTensorToCpu(physicalRmsNorm->getParameter("weights")->getStorage().value(), gradientStream);
+    stream.synchronize();
+    gradientStream.synchronize();
+
+    const vector<float> expectedSecondPrimaryError =
+        rmsNormInputGradientReference(secondInputValues, expectedWeightsAfter, secondUpstreamErrors, batchSize, hidden, epsilon);
+    const vector<float> expectedSecondWeightsGrad =
+        rmsNormWeightGradientReference(secondInputValues, secondUpstreamErrors, batchSize, hidden, epsilon);
+    const vector<float> expectedSecondWeightsAfter =
+        rmsSgdUpdatedReference(expectedWeightsAfter, expectedSecondWeightsGrad, batchSize, learningRate);
+
+    rmsExpectAllClose(rmsReadCpuTensor(secondPrimaryErrorOutputHost), expectedSecondPrimaryError, 3e-4f, 3e-4f,
+                      "rmsnorm second primary error out");
+    rmsExpectAllClose(rmsReadCpuTensor(secondWeightsAfterHost), expectedSecondWeightsAfter, 3e-4f, 3e-4f,
+                      "rmsnorm second weights after");
+}
+
+TEST(UtilityApiLayers, RMSNormDenseFp16AndBf16BackwardMatchReferenceAndUpdateFp32Weights) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t hidden = 4;
+    constexpr float epsilon = 1.0e-5f;
+    constexpr float learningRate = 0.05f;
+    const vector<float> inputValues = {
+        1.0f, -2.25f, 0.5f, 3.0f,
+        -1.5f, 0.25f, 2.0f, -0.75f,
+    };
+    const vector<float> upstreamErrors = {
+        0.5f, -1.0f, 1.5f, -0.25f,
+        0.75f, -1.25f, 0.375f, 1.0f,
+    };
+    const vector<float> initialWeights = {1.0f, 0.5f, -0.25f, 1.5f};
+    const vector<float> zeroResidual(batchSize * hidden, 0.0f);
+
+    for (const DataType dataType : {DataType::FP16, DataType::BF16}) {
+        SCOPED_TRACE("dtype=" + std::to_string(static_cast<int>(dataType)));
+        const float activationTolerance = dataType == DataType::FP16 ? 3.0e-3f : 1.5e-2f;
+        const float weightsTolerance = dataType == DataType::FP16 ? 1.5e-3f : 6.0e-3f;
+
+        shared_ptr<Api::Sgd> weightsSgd =
+            Api::Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+        Api::Network network("rms_norm_dense_low_precision_backward_" + std::to_string(static_cast<int>(dataType)));
+        Api::NetworkInput input =
+            Api::NetworkInput::Builder().network(network).name("input").dimensions({hidden}).dataType(dataType).build();
+        Api::GradientRivet inputRivet =
+            Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+        Api::RMSNorm rmsNorm = Api::RMSNorm::Builder()
+                                   .network(network)
+                                   .featureInput(inputRivet.getFeatureOutput().value())
+                                   .normalizedShape({hidden})
+                                   .epsilon(epsilon)
+                                   .parameterDataType(DataType::FP32)
+                                   .weightsOptimizer(weightsSgd)
+                                   .build();
+        Api::GradientRivet outputRivet =
+            Api::GradientRivet::Builder().network(network).tensor(rmsNorm.getFeatureOutput().value()).build();
+        Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                        .network(network)
+                                        .name("output")
+                                        .inputTensor(outputRivet.getFeatureOutput().value())
+                                        .dataType(dataType)
+                                        .build();
+
+        vector<Event> initDoneEvents;
+        shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+        rmsSynchronizeEvents(initDoneEvents);
+        ASSERT_NE(placedNetwork, nullptr);
+        Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+        auto physicalInput = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(input.getId()));
+        auto physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+        auto physicalRmsNorm = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(rmsNorm.getId()));
+        ASSERT_NE(physicalInput, nullptr);
+        ASSERT_NE(physicalOutput, nullptr);
+        ASSERT_NE(physicalRmsNorm, nullptr);
+        ASSERT_TRUE(physicalRmsNorm->getGradientUpdateStream().has_value());
+
+        Stream stream = physicalRmsNorm->getStreams()[0];
+        Stream gradientStream = physicalRmsNorm->getGradientUpdateStream().value();
+        rmsSetParameterTensor(physicalRmsNorm->getParameter("weights"), initialWeights, stream);
+        stream.synchronize();
+
+        Impl::Tensor inputHost(rmsCpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, hidden}));
+        rmsWriteCpuTensor(inputHost, inputValues);
+        const vector<float> quantizedInput = rmsReadCpuTensor(inputHost);
+        physicalInput->forward(inputHost, false, batchSize);
+        physicalOutput->getOutputReadyEvent().synchronize();
+
+        const vector<float> expectedForward =
+            rmsNormForwardReference(quantizedInput, initialWeights, zeroResidual, batchSize, hidden, epsilon);
+        rmsExpectAllClose(rmsReadCpuTensor(physicalOutput->getFeatureOutput().value()),
+                          expectedForward,
+                          activationTolerance,
+                          activationTolerance,
+                          "low-precision RMSNorm forward");
+
+        ASSERT_EQ(physicalRmsNorm->getErrorInputs().size(), 1u);
+        ASSERT_TRUE(physicalRmsNorm->getErrorInputs()[0].has_value());
+        ASSERT_EQ(physicalRmsNorm->getErrorOutputs().size(), 1u);
+        ASSERT_TRUE(physicalRmsNorm->getErrorOutputs()[0].has_value());
+
+        Impl::Tensor errorInput = physicalRmsNorm->getErrorInputs()[0].value();
+        Impl::Tensor errorInputHost = errorInput.clone(rmsCpuPlacement);
+        rmsWriteCpuTensor(errorInputHost, upstreamErrors);
+        const vector<float> quantizedUpstream = rmsReadCpuTensor(errorInputHost);
+        errorInput.copyFromAsync(errorInputHost, stream);
+        physicalRmsNorm->backward(errorInput, batchSize);
+
+        Impl::Tensor inputGradientHost = rmsCopyTensorToCpu(physicalRmsNorm->getErrorOutputs()[0].value(), stream);
+        Impl::Tensor weightsAfterHost =
+            rmsCopyTensorToCpu(physicalRmsNorm->getParameter("weights")->getStorage().value(), gradientStream);
+        stream.synchronize();
+        gradientStream.synchronize();
+
+        const vector<float> expectedInputGradient =
+            rmsNormInputGradientReference(quantizedInput, initialWeights, quantizedUpstream, batchSize, hidden, epsilon);
+        const vector<float> expectedWeightsGradient =
+            rmsNormWeightGradientReference(quantizedInput, quantizedUpstream, batchSize, hidden, epsilon);
+        const vector<float> expectedWeightsAfter =
+            rmsSgdUpdatedReference(initialWeights, expectedWeightsGradient, batchSize, learningRate);
+
+        rmsExpectAllClose(rmsReadCpuTensor(inputGradientHost),
+                          expectedInputGradient,
+                          activationTolerance,
+                          activationTolerance,
+                          "low-precision RMSNorm dX");
+        rmsExpectAllClose(rmsReadCpuTensor(weightsAfterHost),
+                          expectedWeightsAfter,
+                          weightsTolerance,
+                          weightsTolerance,
+                          "low-precision RMSNorm weights after");
+    }
 }
 
 
@@ -489,13 +686,13 @@ TEST(UtilityApiLayers, RaggedRMSNormBf16PlacesWithFp32Scale) {
     auto physicalRmsNorm = dynamic_pointer_cast<Impl::RaggedRMSNorm>(
         placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(rmsNorm.getId()));
     ASSERT_NE(physicalRmsNorm, nullptr);
-    EXPECT_EQ(physicalRmsNorm->selectedCapacityRows(33), 66u);
+    const vector<uint64_t> capacityBuckets = Impl::makeRaggedMatmulCapacityBuckets(66);
+    EXPECT_EQ(Impl::chooseRaggedMatmulCapacityBucket(33, capacityBuckets), 66u);
 }
 
-TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnoresInvalidTail) {
+TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnoresInactiveStorage) {
     constexpr uint32_t logicalBatchSize = 2;
     constexpr uint64_t fullRows = 66;
-    constexpr uint64_t activeRows = 31;
     constexpr uint64_t hidden = 4;
     constexpr float epsilon = 1.0e-5f;
     constexpr float learningRate = 0.001f;
@@ -552,111 +749,174 @@ TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnores
     ASSERT_NE(physicalRmsNorm, nullptr);
     ASSERT_TRUE(physicalRmsNorm->getGradientUpdateStream().has_value());
 
-    EXPECT_EQ(physicalRmsNorm->selectedCapacityRows(7), 8u);
-    EXPECT_EQ(physicalRmsNorm->selectedCapacityRows(9), 16u);
-    EXPECT_EQ(physicalRmsNorm->selectedCapacityRows(31), 32u);
-    EXPECT_EQ(physicalRmsNorm->selectedCapacityRows(33), 66u);
-    EXPECT_EQ(physicalRmsNorm->selectedCapacityRows(66), 66u);
+    const vector<uint64_t> capacityBuckets = Impl::makeRaggedMatmulCapacityBuckets(fullRows);
+    auto selectedCapacityRows = [&](uint64_t activeRows) {
+        return Impl::chooseRaggedMatmulCapacityBucket(activeRows, capacityBuckets);
+    };
+    EXPECT_EQ(selectedCapacityRows(7), 8u);
+    EXPECT_EQ(selectedCapacityRows(9), 16u);
+    EXPECT_EQ(selectedCapacityRows(31), 32u);
+    EXPECT_EQ(selectedCapacityRows(33), 66u);
+    EXPECT_EQ(selectedCapacityRows(66), 66u);
 
     const vector<float> initialWeights = {1.0f, 0.75f, -0.5f, 1.25f};
     Stream stream = physicalRmsNorm->getStreams()[0];
     Stream gradientStream = physicalRmsNorm->getGradientUpdateStream().value();
-    rmsSetParameterTensor(physicalRmsNorm->getParameter("weights"), initialWeights, stream);
-    stream.synchronize();
 
-    vector<float> inputValues(fullRows * hidden, std::numeric_limits<float>::quiet_NaN());
-    for (uint64_t row = 0; row < activeRows; ++row) {
-        for (uint64_t col = 0; col < hidden; ++col) {
-            inputValues[row * hidden + col] =
-                static_cast<float>(static_cast<int>((row + 2 * col) % 11) - 5) * 0.2f + static_cast<float>(col + 1) * 0.075f;
-        }
-    }
-
-    // Bypass RaggedNetworkInput's own invalid-capacity canonicalization and put
-    // poisoned padding directly into the RMSNorm physical input. This verifies
-    // RaggedRMSNorm itself protects both the bucket slack and the full inactive tail.
     ASSERT_EQ(physicalRmsNorm->getFeatureInputs().size(), 2u);
     ASSERT_TRUE(physicalRmsNorm->getFeatureInputs()[0].has_value());
     ASSERT_TRUE(physicalRmsNorm->getFeatureInputs()[1].has_value());
-    Impl::Tensor packedInput = physicalRmsNorm->getFeatureInputs()[0].value();
-    Impl::Tensor rowPartitionOffsets = physicalRmsNorm->getFeatureInputs()[1].value();
-    Impl::Tensor rowPartitionOffsetsHost(
-        rmsCpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {logicalBatchSize + 1}));
-    rowPartitionOffsetsHost.getMemPtr<uint32_t>()[0] = 0;
-    rowPartitionOffsetsHost.getMemPtr<uint32_t>()[1] = static_cast<uint32_t>(activeRows / 2);
-    rowPartitionOffsetsHost.getMemPtr<uint32_t>()[2] = static_cast<uint32_t>(activeRows);
-    rowPartitionOffsets.copyFromAsync(rowPartitionOffsetsHost, stream);
-    Impl::RowPartitionRuntime rowPartition(
-        rowPartitionOffsets,
-        Impl::RowPartitionDescriptor(logicalBatchSize, fullRows, rowPartitionOffsets.getDataType()));
-    rowPartition.setHostActiveValueCount(activeRows);
-
-    Impl::Tensor packedInputHost(rmsCpuPlacement, Impl::TensorDescriptor(dataType, {fullRows, hidden}));
-    rmsWriteCpuTensor(packedInputHost, inputValues);
-    packedInput.copyFromAsync(packedInputHost, stream);
-    physicalRmsNorm->forward(packedInput, false, logicalBatchSize);
-    physicalRmsNorm->forward(rowPartitionOffsets, false, logicalBatchSize);
-    Event outputReady = physicalOutput->getOutputReadyEvent();
-    outputReady.synchronize();
-
-    const vector<float> actualForward = rmsReadCpuTensor(physicalOutput->getFeatureOutput().value());
-    const vector<float> validInput(inputValues.begin(), inputValues.begin() + activeRows * hidden);
-    const vector<float> zeroResidual(activeRows * hidden, 0.0f);
-    const vector<float> expectedForward =
-        rmsNormForwardReference(validInput, initialWeights, zeroResidual, activeRows, hidden, epsilon);
-    rmsExpectAllClose(vector<float>(actualForward.begin(), actualForward.begin() + activeRows * hidden),
-                      expectedForward,
-                      3e-4f,
-                      3e-4f,
-                      "ragged rmsnorm forward active prefix");
-    for (uint64_t i = activeRows * hidden; i < actualForward.size(); ++i) {
-        EXPECT_EQ(actualForward[i], 0.0f) << "ragged RMSNorm output tail must be canonical zero";
-    }
-
+    ASSERT_EQ(physicalRmsNorm->getFeatureOutputs().size(), 1u);
+    ASSERT_TRUE(physicalRmsNorm->getFeatureOutputs()[0].has_value());
     ASSERT_EQ(physicalRmsNorm->getErrorInputs().size(), 1u);
     ASSERT_TRUE(physicalRmsNorm->getErrorInputs()[0].has_value());
     ASSERT_EQ(physicalRmsNorm->getErrorOutputs().size(), 2u);
     ASSERT_TRUE(physicalRmsNorm->getErrorOutputs()[0].has_value());
     EXPECT_FALSE(physicalRmsNorm->getErrorOutputs()[1].has_value());
 
-    vector<float> upstream(fullRows * hidden, -9999.0f);
-    for (uint64_t row = 0; row < activeRows; ++row) {
-        for (uint64_t col = 0; col < hidden; ++col) {
-            upstream[row * hidden + col] =
-                static_cast<float>(static_cast<int>((3 * row + col) % 9) - 4) * 0.125f;
-        }
-    }
+    Impl::Tensor packedInput = physicalRmsNorm->getFeatureInputs()[0].value();
+    Impl::Tensor rowPartitionOffsets = physicalRmsNorm->getFeatureInputs()[1].value();
+    Impl::Tensor rmsOutput = physicalRmsNorm->getFeatureOutputs()[0].value();
     Impl::Tensor errorInput = physicalRmsNorm->getErrorInputs()[0].value();
-    Impl::Tensor errorInputHost = errorInput.clone(rmsCpuPlacement);
-    rmsWriteCpuTensor(errorInputHost, upstream);
-    errorInput.copyFromAsync(errorInputHost, stream);
-    physicalRmsNorm->backward(errorInput, logicalBatchSize);
-    stream.synchronize();
-    gradientStream.synchronize();
+    Impl::Tensor dXTensor = physicalRmsNorm->getErrorOutputs()[0].value();
 
-    const vector<float> validUpstream(upstream.begin(), upstream.begin() + activeRows * hidden);
-    const vector<float> expectedDX =
-        rmsNormInputGradientReference(validInput, initialWeights, validUpstream, activeRows, hidden, epsilon);
-    const vector<float> expectedDScale =
-        rmsNormWeightGradientReference(validInput, validUpstream, activeRows, hidden, epsilon);
-    const vector<float> expectedWeightsAfter =
-        rmsSgdUpdatedReference(initialWeights, expectedDScale, logicalBatchSize, learningRate);
+    for (const uint64_t activeRows : vector<uint64_t>{7, 9, 31, 33, fullRows}) {
+        SCOPED_TRACE("activeRows=" + std::to_string(activeRows));
+        const uint64_t selectedRows = selectedCapacityRows(activeRows);
 
-    const vector<float> actualDX =
-        rmsReadCpuTensor(rmsCopyTensorToCpu(physicalRmsNorm->getErrorOutputs()[0].value(), stream));
-    rmsExpectAllClose(vector<float>(actualDX.begin(), actualDX.begin() + activeRows * hidden),
-                      expectedDX,
-                      4e-4f,
-                      4e-4f,
-                      "ragged rmsnorm dX active prefix");
-    for (uint64_t i = activeRows * hidden; i < actualDX.size(); ++i) {
-        EXPECT_EQ(actualDX[i], 0.0f) << "ragged RMSNorm dX tail must be canonical zero";
+        rmsSetParameterTensor(physicalRmsNorm->getParameter("weights"), initialWeights, stream);
+        stream.synchronize();
+
+        vector<float> inputValues(fullRows * hidden, 0.0f);
+        for (uint64_t row = 0; row < activeRows; ++row) {
+            for (uint64_t col = 0; col < hidden; ++col) {
+                inputValues[row * hidden + col] =
+                    static_cast<float>(static_cast<int>((row + 2 * col) % 11) - 5) * 0.2f +
+                    static_cast<float>(col + 1) * 0.075f;
+            }
+        }
+        ThorTest::poisonInactiveRows(inputValues, activeRows, hidden, ThorTest::RaggedInactivePoison::NaN);
+
+        Impl::Tensor rowPartitionOffsetsHost(
+            rmsCpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {logicalBatchSize + 1}));
+        rowPartitionOffsetsHost.getMemPtr<uint32_t>()[0] = 0;
+        rowPartitionOffsetsHost.getMemPtr<uint32_t>()[1] = static_cast<uint32_t>(activeRows / 2);
+        rowPartitionOffsetsHost.getMemPtr<uint32_t>()[2] = static_cast<uint32_t>(activeRows);
+        rowPartitionOffsets.copyFromAsync(rowPartitionOffsetsHost, stream);
+        Impl::RowPartitionRuntime rowPartition(
+            rowPartitionOffsets,
+            Impl::RowPartitionDescriptor(logicalBatchSize, fullRows, rowPartitionOffsets.getDataType()));
+        rowPartition.setHostActiveValueCount(activeRows);
+
+        Impl::Tensor packedInputHost(rmsCpuPlacement, Impl::TensorDescriptor(dataType, {fullRows, hidden}));
+        rmsWriteCpuTensor(packedInputHost, inputValues);
+        packedInput.copyFromAsync(packedInputHost, stream);
+
+        Impl::Tensor poisonedOutputHost = rmsOutput.clone(rmsCpuPlacement);
+        rmsWriteCpuTensor(poisonedOutputHost,
+                          vector<float>(fullRows * hidden, std::numeric_limits<float>::quiet_NaN()));
+        rmsOutput.copyFromAsync(poisonedOutputHost, stream);
+
+        // Bypass RaggedNetworkInput so the packed consumer sees deliberately
+        // poisoned inactive storage. Publish the offsets separately so host bucket
+        // selection receives the authoritative logical extent.
+        physicalRmsNorm->forward(packedInput, false, logicalBatchSize);
+        physicalRmsNorm->forward(rowPartitionOffsets, false, logicalBatchSize);
+        Event outputReady = physicalOutput->getOutputReadyEvent();
+        outputReady.synchronize();
+
+        const vector<float> actualForward = rmsReadCpuTensor(physicalOutput->getFeatureOutput().value());
+        const vector<float> validInput(inputValues.begin(), inputValues.begin() + activeRows * hidden);
+        const vector<float> zeroResidual(activeRows * hidden, 0.0f);
+        const vector<float> expectedForward =
+            rmsNormForwardReference(validInput, initialWeights, zeroResidual, activeRows, hidden, epsilon);
+        rmsExpectAllClose(vector<float>(actualForward.begin(), actualForward.begin() + activeRows * hidden),
+                          expectedForward,
+                          3e-4f,
+                          3e-4f,
+                          "ragged rmsnorm forward active prefix");
+
+        // Forward cuDNN consumes exactly the selected bucket: only [active,bucket)
+        // is sanitized. Neither the consumer nor the producer touches [bucket,capacity).
+        const vector<float> consumedInput = rmsReadCpuTensor(rmsCopyTensorToCpu(packedInput, stream));
+        for (uint64_t row = activeRows; row < selectedRows; ++row) {
+            for (uint64_t col = 0; col < hidden; ++col) {
+                EXPECT_EQ(consumedInput[row * hidden + col], 0.0f)
+                    << "RMSNorm forward bucket slack was not sanitized";
+            }
+        }
+        for (uint64_t row = selectedRows; row < fullRows; ++row) {
+            for (uint64_t col = 0; col < hidden; ++col) {
+                EXPECT_TRUE(std::isnan(consumedInput[row * hidden + col]))
+                    << "RMSNorm forward touched storage beyond its selected bucket";
+            }
+        }
+        const vector<float> producedOutput = rmsReadCpuTensor(rmsCopyTensorToCpu(rmsOutput, stream));
+        for (uint64_t row = selectedRows; row < fullRows; ++row) {
+            for (uint64_t col = 0; col < hidden; ++col) {
+                EXPECT_TRUE(std::isnan(producedOutput[row * hidden + col]))
+                    << "RMSNorm producer canonicalized output beyond its selected bucket";
+            }
+        }
+
+        vector<float> upstream(fullRows * hidden, 0.0f);
+        for (uint64_t row = 0; row < activeRows; ++row) {
+            for (uint64_t col = 0; col < hidden; ++col) {
+                upstream[row * hidden + col] =
+                    static_cast<float>(static_cast<int>((3 * row + col) % 9) - 4) * 0.125f;
+            }
+        }
+        ThorTest::poisonInactiveRows(upstream, activeRows, hidden, ThorTest::RaggedInactivePoison::NaN);
+        Impl::Tensor errorInputHost = errorInput.clone(rmsCpuPlacement);
+        rmsWriteCpuTensor(errorInputHost, upstream);
+        errorInput.copyFromAsync(errorInputHost, stream);
+
+        Impl::Tensor poisonedDXHost = dXTensor.clone(rmsCpuPlacement);
+        rmsWriteCpuTensor(poisonedDXHost,
+                          vector<float>(fullRows * hidden, std::numeric_limits<float>::quiet_NaN()));
+        dXTensor.copyFromAsync(poisonedDXHost, stream);
+
+        physicalRmsNorm->backward(errorInput, logicalBatchSize);
+        stream.synchronize();
+        gradientStream.synchronize();
+
+        const vector<float> validUpstream(upstream.begin(), upstream.begin() + activeRows * hidden);
+        const vector<float> expectedDX =
+            rmsNormInputGradientReference(validInput, initialWeights, validUpstream, activeRows, hidden, epsilon);
+        const vector<float> expectedDScale =
+            rmsNormWeightGradientReference(validInput, validUpstream, activeRows, hidden, epsilon);
+        const vector<float> expectedWeightsAfter =
+            rmsSgdUpdatedReference(initialWeights, expectedDScale, logicalBatchSize, learningRate);
+
+        const vector<float> actualDX = rmsReadCpuTensor(rmsCopyTensorToCpu(dXTensor, stream));
+        rmsExpectAllClose(vector<float>(actualDX.begin(), actualDX.begin() + activeRows * hidden),
+                          expectedDX,
+                          4e-4f,
+                          4e-4f,
+                          "ragged rmsnorm dX active prefix");
+
+        const vector<float> consumedDY = rmsReadCpuTensor(rmsCopyTensorToCpu(errorInput, stream));
+        for (uint64_t row = activeRows; row < selectedRows; ++row) {
+            for (uint64_t col = 0; col < hidden; ++col) {
+                EXPECT_EQ(consumedDY[row * hidden + col], 0.0f)
+                    << "RMSNorm backward bucket slack was not sanitized";
+            }
+        }
+        for (uint64_t row = selectedRows; row < fullRows; ++row) {
+            for (uint64_t col = 0; col < hidden; ++col) {
+                EXPECT_TRUE(std::isnan(consumedDY[row * hidden + col]))
+                    << "RMSNorm backward touched dY storage beyond its selected bucket";
+                EXPECT_TRUE(std::isnan(actualDX[row * hidden + col]))
+                    << "RMSNorm producer canonicalized dX beyond its selected bucket";
+            }
+        }
+
+        const vector<float> actualWeightsAfter = rmsReadCpuTensor(
+            rmsCopyTensorToCpu(physicalRmsNorm->getParameter("weights")->getStorage().value(), gradientStream));
+        rmsExpectAllClose(actualWeightsAfter,
+                          expectedWeightsAfter,
+                          4e-4f,
+                          4e-4f,
+                          "ragged rmsnorm dscale through fused SGD update");
     }
-    const vector<float> actualWeightsAfter = rmsReadCpuTensor(
-        rmsCopyTensorToCpu(physicalRmsNorm->getParameter("weights")->getStorage().value(), gradientStream));
-    rmsExpectAllClose(actualWeightsAfter,
-                      expectedWeightsAfter,
-                      4e-4f,
-                      4e-4f,
-                      "ragged rmsnorm dscale through fused SGD update");
 }

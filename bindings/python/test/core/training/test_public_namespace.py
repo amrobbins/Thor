@@ -24,6 +24,8 @@ EXPECTED_DATA_API = {
     "NumpyDataset",
     "RaggedBatch",
     "RaggedTensorLayout",
+    "RaggedWindowedTensorChunk",
+    "RaggedWindowedTensorLayout",
     "StratificationMode",
     "StratifiedFold",
     "StratifiedHoldoutKFoldManifest",

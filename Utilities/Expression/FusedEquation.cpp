@@ -981,6 +981,9 @@ static std::vector<uint64_t> inferExpressionConvolutionBackwardFilterOutputDims(
 static std::vector<uint64_t> inferRmsNormOutputDims(const ExprNode& node,
                                                     const std::vector<uint64_t>& input_dims,
                                                     const std::vector<uint64_t>& scale_dims);
+static std::vector<uint64_t> inferRmsNormOutputDims(uint64_t normalized_feature_count,
+                                                    const std::vector<uint64_t>& input_dims,
+                                                    const std::vector<uint64_t>& scale_dims);
 
 static std::vector<uint64_t> inferEmbeddingLookupOutputDims(const std::vector<uint64_t>& index_dims,
                                                              const std::vector<uint64_t>& weights_dims) {
@@ -1202,6 +1205,30 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::RAGGED_VALUEWISE_EXTENT:
                 node_dims[i] = inferRaggedValuewiseExtentDims(node, node_dims.at(node.lhs), node_dims.at(node.rhs));
                 break;
+            case ExprOp::SEGMENTED_REDUCE_SUM:
+            case ExprOp::SEGMENTED_REDUCE_MIN:
+            case ExprOp::SEGMENTED_REDUCE_MAX:
+            case ExprOp::SEGMENTED_REDUCE_MEAN: {
+                const std::vector<uint64_t>& value_dims = node_dims.at(node.lhs);
+                const std::vector<uint64_t>& offsets_dims = node_dims.at(node.rhs);
+                if (value_dims.empty() || offsets_dims.size() != 1 || offsets_dims[0] == 0) {
+                    throw std::runtime_error(
+                        "Segmented reduction shape inference for GEMM optimization requires values [N,D...] and non-empty rank-1 offsets.");
+                }
+                if (node.ragged_runtime_elements_per_value == 0) {
+                    throw std::runtime_error(
+                        "Segmented reduction shape inference for GEMM optimization requires non-zero elements-per-value metadata.");
+                }
+                node_dims[i] = value_dims;
+                node_dims[i][0] = offsets_dims[0] - 1;
+                const uint64_t value_numel = numelFromDims(value_dims);
+                if (value_dims[0] == 0 || value_numel % value_dims[0] != 0 ||
+                    value_numel / value_dims[0] != node.ragged_runtime_elements_per_value) {
+                    throw std::runtime_error(
+                        "Segmented reduction shape inference for GEMM optimization found inconsistent elements-per-value metadata.");
+                }
+                break;
+            }
             case ExprOp::ADD:
             case ExprOp::SUB:
             case ExprOp::MUL:
@@ -1332,6 +1359,15 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::RMSNORM:
                 node_dims[i] = inferRmsNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
+            case ExprOp::RMSNORM_BACKWARD_X:
+            case ExprOp::RMSNORM_BACKWARD_SCALE: {
+                const std::vector<uint64_t> forward_dims = inferRmsNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                if (node.aux == UINT32_MAX || node.aux >= node_dims.size() || node_dims[node.aux] != forward_dims) {
+                    throw std::runtime_error("RMSNorm backward dY dimensions must match RMSNorm output dimensions.");
+                }
+                node_dims[i] = node.op == ExprOp::RMSNORM_BACKWARD_X ? node_dims[node.lhs] : node_dims[node.rhs];
+                break;
+            }
             case ExprOp::EMBEDDING_LOOKUP:
                 node_dims[i] = inferEmbeddingLookupOutputDims(node_dims[node.lhs], node_dims[node.rhs]);
                 break;
@@ -1512,7 +1548,7 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 break;
             }
             default:
-                throw std::runtime_error("inferExpressionNodeDimsForOptimization encountered unknown ExprOp.");
+                throw std::runtime_error("inferExpressionNodeDimsForOptimization encountered unsupported ExprOp " + opName(node.op) + ".");
         }
     }
 
@@ -2921,6 +2957,29 @@ static std::vector<std::string> inferBackwardWrtNamesFromOutputs(const PhysicalO
     return wrt_names;
 }
 
+static std::vector<uint64_t> inferRmsNormBackwardOutputDims(const CompiledRmsNormBackward& compiled,
+                                                            const std::vector<std::vector<uint64_t>>& input_dims,
+                                                            ExprOp output_op) {
+    const bool packed = compiled.packed_row_capacity != 0;
+    const size_t expected_input_count = packed ? 4u : 3u;
+    if (input_dims.size() != expected_input_count) {
+        throw std::runtime_error(
+            "RMSNorm backward stage input count does not match its compiled row-partition binding.");
+    }
+    const std::vector<uint64_t> y_dims = inferRmsNormOutputDims(compiled.normalized_feature_count, input_dims[0], input_dims[1]);
+    if (input_dims[2] != y_dims) {
+        throw std::runtime_error("RMSNorm backward dY shape must match the forward output shape.");
+    }
+    if (packed) {
+        if (compiled.ragged_batch_size == 0 || input_dims[3] != std::vector<uint64_t>{compiled.ragged_batch_size + 1}) {
+            throw std::runtime_error("Packed RMSNorm backward offsets shape must be [batch_size + 1].");
+        }
+    }
+    if (output_op == ExprOp::RMSNORM_BACKWARD_X) return input_dims[0];
+    if (output_op == ExprOp::RMSNORM_BACKWARD_SCALE) return input_dims[1];
+    throw std::runtime_error("RMSNorm backward stage output route has unsupported ExprOp.");
+}
+
 static std::string dimsToString(const std::vector<uint64_t>& dims);
 static void verifyRequestedOutputLayout(const std::vector<uint64_t>& outputDimensions, const std::vector<uint64_t>& expectedDimensions);
 
@@ -4096,6 +4155,15 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::RMSNORM:
                 node_dims[i] = inferRmsNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
+            case ExprOp::RMSNORM_BACKWARD_X:
+            case ExprOp::RMSNORM_BACKWARD_SCALE: {
+                const std::vector<uint64_t> forward_dims = inferRmsNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
+                if (node.aux == UINT32_MAX || node.aux >= node_dims.size() || node_dims[node.aux] != forward_dims) {
+                    throw std::runtime_error("RMSNorm backward dY dimensions must match RMSNorm output dimensions.");
+                }
+                node_dims[i] = node.op == ExprOp::RMSNORM_BACKWARD_X ? node_dims[node.lhs] : node_dims[node.rhs];
+                break;
+            }
             case ExprOp::RESHAPE:
                 node_dims[i] = resolveDynamicAliasDims(node_dims[node.lhs], node.reshape_dims, true, "Fused-stage reshape");
                 break;
@@ -4299,6 +4367,8 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::CONV3D_BACKWARD_DATA:
             case ExprOp::CONV3D_BACKWARD_FILTER:
             case ExprOp::RMSNORM:
+            case ExprOp::RMSNORM_BACKWARD_X:
+            case ExprOp::RMSNORM_BACKWARD_SCALE:
             case ExprOp::REDUCE_MIN_BACKWARD:
             case ExprOp::REDUCE_MAX_BACKWARD:
             case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
@@ -4603,6 +4673,13 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
             return base_flops;
         }
 
+        case CompiledExecutionStage::Kind::RmsNormBackward: {
+            if (!stage.rms_norm_backward || stage_input_dims.empty()) {
+                throw std::runtime_error("RMSNormBackward stage missing payload/input dims while computing FLOPs.");
+            }
+            return checkedMulU64(numelFromDims(stage_input_dims[0]), 12, "computeRmsNormBackwardStageFlops");
+        }
+
         case CompiledExecutionStage::Kind::EmbeddingLookup:
             return 0;
 
@@ -4759,6 +4836,17 @@ static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecu
                 throw std::runtime_error("resolveOutputDimsForStageOutput RMSNorm stage input count does not match its compiled row-partition binding.");
             }
             return inferRmsNormOutputDims(*stage.rms_norm, stage_input_dims[0], stage_input_dims[1]);
+        }
+
+        case CompiledExecutionStage::Kind::RmsNormBackward: {
+            if (!stage.rms_norm_backward) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput RMSNorm-backward stage missing payload.");
+            }
+            if (output_idx >= stage.outputs.size() || stage.outputs[output_idx].local_node_idx >= stage.expr.nodes.size()) {
+                throw std::runtime_error("resolveOutputDimsForStageOutput RMSNorm-backward output node index out of range.");
+            }
+            return inferRmsNormBackwardOutputDims(
+                *stage.rms_norm_backward, stage_input_dims, stage.expr.nodes[stage.outputs[output_idx].local_node_idx].op);
         }
 
         case CompiledExecutionStage::Kind::EmbeddingLookup: {
@@ -6312,6 +6400,21 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
                 throw std::runtime_error("RMSNorm stage input count does not match its compiled row-partition binding.");
             }
             value_dims[stage.outputs[0].value_id] = inferRmsNormOutputDims(*stage.rms_norm, stage_input_dims[0], stage_input_dims[1]);
+        } else if (stage.kind == CompiledExecutionStage::Kind::RmsNormBackward) {
+            const size_t expected_rms_norm_backward_inputs =
+                stage.rms_norm_backward && stage.rms_norm_backward->packed_row_capacity != 0 ? 4u : 3u;
+            if (!stage.rms_norm_backward || stage.input_value_ids.size() != expected_rms_norm_backward_inputs ||
+                stage.outputs.empty() || stage.outputs.size() > 2) {
+                throw std::runtime_error(
+                    "RMSNorm-backward stage input count does not match its compiled row-partition binding.");
+            }
+            for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                if (stage.outputs[output_idx].local_node_idx >= stage.expr.nodes.size()) {
+                    throw std::runtime_error("RMSNorm-backward stage output node index out of range.");
+                }
+                value_dims[stage.outputs[output_idx].value_id] = inferRmsNormBackwardOutputDims(
+                    *stage.rms_norm_backward, stage_input_dims, stage.expr.nodes[stage.outputs[output_idx].local_node_idx].op);
+            }
         } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");
@@ -7565,6 +7668,62 @@ std::shared_ptr<StampedRmsNorm> FusedEquation::stampRmsNorm(const std::shared_pt
     }
 
     return std::make_shared<StampedRmsNorm>(compiledStage, adaptedInput, adaptedScale, output, stream, rowPartitionOffsets);
+}
+
+std::shared_ptr<StampedRmsNormBackward> FusedEquation::stampRmsNormBackward(
+    const std::shared_ptr<CompiledRmsNormBackward>& compiledStage,
+    const Tensor& input,
+    const Tensor& scale,
+    const Tensor& dY,
+    const std::vector<std::optional<Tensor>>& preallocatedOutputs,
+    const Stream& stream,
+    const std::optional<Tensor>& rowPartitionOffsets,
+    std::shared_ptr<RmsNormForwardState> saved_forward_state) const {
+    if (!compiledStage) {
+        throw std::runtime_error("stampRmsNormBackward requires non-null compiled stage.");
+    }
+    if (preallocatedOutputs.size() != 2) {
+        throw std::runtime_error("stampRmsNormBackward expects semantic dX/dScale preallocation slots.");
+    }
+    const bool packed = compiledStage->packed_row_capacity != 0;
+    if (packed != rowPartitionOffsets.has_value()) {
+        throw std::runtime_error(
+            "RMSNorm backward row-partition binding does not match the compiled packed-row contract.");
+    }
+    std::vector<std::vector<uint64_t>> input_dims = {input.getDimensions(), scale.getDimensions(), dY.getDimensions()};
+    if (rowPartitionOffsets.has_value()) {
+        input_dims.push_back(rowPartitionOffsets->getDimensions());
+    }
+    const std::vector<uint64_t> dx_dims =
+        inferRmsNormBackwardOutputDims(*compiledStage, input_dims, ExprOp::RMSNORM_BACKWARD_X);
+    const std::vector<uint64_t> dscale_dims =
+        inferRmsNormBackwardOutputDims(*compiledStage, input_dims, ExprOp::RMSNORM_BACKWARD_SCALE);
+
+    auto allocate_or_validate = [&](const std::optional<Tensor>& preallocated,
+                                    DataType dtype,
+                                    const std::vector<uint64_t>& dims,
+                                    const char* name) {
+        if (preallocated.has_value()) {
+            Tensor tensor = preallocated.value();
+            if (tensor.getPlacement() != input.getPlacement() || tensor.getDataType() != dtype || tensor.getDimensions() != dims) {
+                throw std::runtime_error(std::string("Preallocated RMSNorm backward ") + name + " tensor is incompatible.");
+            }
+            return tensor;
+        }
+        return Tensor(input.getPlacement(), TensorDescriptor(dtype, dims));
+    };
+
+    Tensor dX = allocate_or_validate(preallocatedOutputs[0], compiledStage->dx_dtype, dx_dims, "dX");
+    Tensor dScale = allocate_or_validate(preallocatedOutputs[1], compiledStage->dscale_dtype, dscale_dims, "dScale");
+    // Dense backward has one physical extent. Packed backward pre-warms its finite
+    // bucket family in StampedRmsNormBackward instead of building the full-capacity graph.
+    (void)compiledStage->descriptorFor(input, scale, dY, dX, dScale);
+    if (compiledStage->packed_row_capacity == 0) {
+        CudnnRmsNormDescriptor warm_descriptor = compiledStage->descriptorFor(input, scale, dY, dX, dScale);
+        CudnnRmsNorm::instance().warmBackward(warm_descriptor, stream.getGpuNum());
+    }
+    return std::make_shared<StampedRmsNormBackward>(
+        compiledStage, input, scale, dY, dX, dScale, stream, rowPartitionOffsets, std::move(saved_forward_state));
 }
 
 std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::shared_ptr<CompiledConvolution>& compiledStage,
@@ -9547,6 +9706,53 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 stampedStages.emplace_back(stampedRmsNorm, std::move(dependency_stage_indices), stage_flops);
                 break;
             }
+            case CompiledExecutionStage::Kind::RmsNormBackward: {
+                const bool packedRmsNormBackward = stage.rms_norm_backward && stage.rms_norm_backward->packed_row_capacity != 0;
+                const size_t expectedRmsNormBackwardInputs = packedRmsNormBackward ? 4u : 3u;
+                if (!stage.rms_norm_backward || stageInputs.size() != expectedRmsNormBackwardInputs || stage.outputs.empty() ||
+                    stage.outputs.size() > 2) {
+                    throw std::runtime_error(
+                        "RMSNorm-backward stage expects x/scale/dY, optional packed row-partition offsets, and one or two requested outputs.");
+                }
+                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                Tensor scaleTensor = runtimeInputTensor(stageInputs[1]);
+                Tensor dYTensor = runtimeInputTensor(stageInputs[2]);
+                std::optional<Tensor> rowPartitionOffsets = std::nullopt;
+                if (packedRmsNormBackward) {
+                    rowPartitionOffsets = runtimeInputTensor(stageInputs[3]);
+                }
+
+                std::vector<std::optional<Tensor>> semanticPreallocated(2, std::nullopt);
+                for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                    const CompiledStageOutput& stageOutput = stage.outputs[output_idx];
+                    if (stageOutput.local_node_idx >= stage.expr.nodes.size()) {
+                        throw std::runtime_error("RMSNorm-backward output node index out of range while stamping.");
+                    }
+                    const ExprOp output_op = stage.expr.nodes[stageOutput.local_node_idx].op;
+                    const size_t semantic_idx = output_op == ExprOp::RMSNORM_BACKWARD_X
+                                                    ? 0u
+                                                    : output_op == ExprOp::RMSNORM_BACKWARD_SCALE ? 1u : 2u;
+                    if (semantic_idx >= 2) {
+                        throw std::runtime_error("RMSNorm-backward stage has unsupported output route while stamping.");
+                    }
+                    const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, output_idx, stageInputs);
+                    semanticPreallocated[semantic_idx] = preallocatedForStageOutput(stageOutput, output_dims);
+                }
+
+                std::shared_ptr<StampedRmsNormBackward> stampedRmsNormBackward = stampRmsNormBackward(
+                    stage.rms_norm_backward, inputTensor, scaleTensor, dYTensor, semanticPreallocated, stream, rowPartitionOffsets);
+                const std::vector<Tensor>& semanticOutputs = stampedRmsNormBackward->getOutputTensors();
+                const uint32_t producer_stage_idx = static_cast<uint32_t>(stampedStages.size());
+                for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                    const CompiledStageOutput& stageOutput = stage.outputs[output_idx];
+                    const ExprOp output_op = stage.expr.nodes[stageOutput.local_node_idx].op;
+                    const size_t semantic_idx = output_op == ExprOp::RMSNORM_BACKWARD_X ? 0u : 1u;
+                    values[stageOutput.value_id] = semanticOutputs.at(semantic_idx);
+                    producer_stage_by_value_id[stageOutput.value_id] = producer_stage_idx;
+                }
+                stampedStages.emplace_back(stampedRmsNormBackward, std::move(dependency_stage_indices), stage_flops);
+                break;
+            }
             case CompiledExecutionStage::Kind::EmbeddingLookup: {
                 if (!stage.embedding_lookup) {
                     throw std::runtime_error("EmbeddingLookup stage missing compiled payload.");
@@ -10900,6 +11106,21 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
                 throw std::runtime_error("RMSNorm stage input count does not match its compiled row-partition binding.");
             }
             value_dims[stage.outputs[0].value_id] = inferRmsNormOutputDims(*stage.rms_norm, stage_input_dims[0], stage_input_dims[1]);
+        } else if (stage.kind == CompiledExecutionStage::Kind::RmsNormBackward) {
+            const size_t expected_rms_norm_backward_inputs =
+                stage.rms_norm_backward && stage.rms_norm_backward->packed_row_capacity != 0 ? 4u : 3u;
+            if (!stage.rms_norm_backward || stage.input_value_ids.size() != expected_rms_norm_backward_inputs ||
+                stage.outputs.empty() || stage.outputs.size() > 2) {
+                throw std::runtime_error(
+                    "RMSNorm-backward stage input count does not match its compiled row-partition binding.");
+            }
+            for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                if (stage.outputs[output_idx].local_node_idx >= stage.expr.nodes.size()) {
+                    throw std::runtime_error("RMSNorm-backward stage output node index out of range.");
+                }
+                value_dims[stage.outputs[output_idx].value_id] = inferRmsNormBackwardOutputDims(
+                    *stage.rms_norm_backward, stage_input_dims, stage.expr.nodes[stage.outputs[output_idx].local_node_idx].op);
+            }
         } else if (stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward) {
             if (!stage.reduce_minmax_backward) {
                 throw std::runtime_error("Missing compiled reduce-min/max-backward stage.");

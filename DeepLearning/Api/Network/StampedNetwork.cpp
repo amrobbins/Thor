@@ -557,32 +557,18 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
     const auto inputForwardStart = timingNow(submitTiming);
 
     // A logical RaggedNetworkInput materializes values and offsets through two
-    // physical NetworkInput ports. Tail canonicalization is a values-copy concern,
-    // but its extent comes exclusively from the matching offsets-owned runtime.
-    // Keep this association transient: no ragged state is stored on values tensors.
-    std::map<std::string, uint64_t> raggedValuesActiveValueCounts;
-    for (const auto& [logicalName, binding] : raggedInputNamed) {
-        (void)logicalName;
-        auto valuesBatchIt = batchInputs.find(binding.valuesInputName);
-        auto offsetsBatchIt = batchInputs.find(binding.offsetsInputName);
-        if (valuesBatchIt == batchInputs.end() || offsetsBatchIt == batchInputs.end()) continue;
-
-        THOR_THROW_IF_FALSE(offsetsBatchIt->second.rowPartitionDescriptor.has_value());
-        THOR_THROW_IF_FALSE(offsetsBatchIt->second.rowPartitionHostActiveValueCount.has_value());
-        const uint64_t activeValueCount = offsetsBatchIt->second.rowPartitionHostActiveValueCount.value();
-        THOR_THROW_IF_FALSE(
-            raggedValuesActiveValueCounts.emplace(binding.valuesInputName, activeValueCount).second);
-    }
+    // physical NetworkInput ports. Values use the ordinary tensor-copy path: packed
+    // storage beyond offsets[B] is undefined and the input boundary does not inspect
+    // or canonicalize it. The offsets port alone publishes the row-partition runtime
+    // metadata required by host-dispatched ragged consumers.
 
     for (uint32_t i = 0; i < inputs.size(); ++i) {
         auto it = batchInputs.find(inputs[i]->getName());
         THOR_THROW_IF_FALSE(it != batchInputs.end());
         const auto readyIt = inputReadyEvents.find(inputs[i]->getName());
-        const auto raggedValuesIt = raggedValuesActiveValueCounts.find(inputs[i]->getName());
         if (std::holds_alternative<Tensor>(it->second.value)) {
             Tensor inputTensor = std::get<Tensor>(it->second.value);
             if (it->second.rowPartitionDescriptor.has_value()) {
-                THOR_THROW_IF_FALSE(raggedValuesIt == raggedValuesActiveValueCounts.end());
                 if (readyIt != inputReadyEvents.end()) {
                     inputs[i]->forwardRowPartitionOffsets(
                         inputTensor,
@@ -598,24 +584,6 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
                         isInferenceOnly,
                         it->second.rowPartitionDescriptor.value(),
                         it->second.rowPartitionHostActiveValueCount,
-                        validExampleCount,
-                        it->second.sourceReference);
-                }
-            } else if (raggedValuesIt != raggedValuesActiveValueCounts.end()) {
-                const uint64_t activeValueCount = raggedValuesIt->second;
-                if (readyIt != inputReadyEvents.end()) {
-                    inputs[i]->forwardRaggedValues(
-                        inputTensor,
-                        isInferenceOnly,
-                        readyIt->second,
-                        activeValueCount,
-                        validExampleCount,
-                        it->second.sourceReference);
-                } else {
-                    inputs[i]->forwardRaggedValues(
-                        inputTensor,
-                        isInferenceOnly,
-                        activeValueCount,
                         validExampleCount,
                         it->second.sourceReference);
                 }
@@ -635,7 +603,6 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
             }
         } else if (std::holds_alternative<Thor::DeviceBatchReference>(it->second.value)) {
             THOR_THROW_IF_FALSE(readyIt == inputReadyEvents.end());
-            THOR_THROW_IF_FALSE(raggedValuesIt == raggedValuesActiveValueCounts.end());
             inputs[i]->forward(
                 std::get<Thor::DeviceBatchReference>(it->second.value),
                 isInferenceOnly,

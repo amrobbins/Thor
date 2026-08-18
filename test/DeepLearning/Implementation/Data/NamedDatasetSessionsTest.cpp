@@ -214,6 +214,51 @@ void writeRaggedSessionDataset(const std::filesystem::path &datasetPath, uint64_
     writer.close();
 }
 
+DatasetLayout raggedWindowedSessionLayout() {
+    return DatasetLayout::fromTensorShapes(
+        {},
+        vector<DatasetLayout::WindowedTensorSourceShape>{
+            DatasetLayout::WindowedTensorSourceShape("history_source", {}, DataType::INT32, DataType::UINT64)},
+        {},
+        {},
+        vector<DatasetLayout::RaggedWindowedTensorShape>{
+            DatasetLayout::RaggedWindowedTensorShape("history", "history_source", DataType::INT64)});
+}
+
+void writeRaggedWindowedSessionDataset(const std::filesystem::path &datasetPath, uint64_t examplesPerShard = 2) {
+    DatasetLayout layout = raggedWindowedSessionLayout();
+    DatasetWriter writer(datasetPath, layout, examplesPerShard);
+
+    uint64_t sourceKey = 9;
+    vector<int32_t> sourceValues{10, 11, 12, 13, 14, 15, 16, 17, 18, 19};
+    writer.writeWindowSource(
+        "history_source",
+        DatasetWriter::WindowedTensorSourceView{
+            .dataType = DataType::INT32,
+            .key = &sourceKey,
+            .startIndex = 100,
+            .dimensions = {sourceValues.size()},
+            .data = sourceValues.data(),
+            .numBytes = sourceValues.size() * sizeof(int32_t)});
+
+    vector<uint64_t> keys{9, 9, 9, 9, 9};
+    vector<int64_t> starts{100, 102, 104, 107, 109};
+    vector<uint64_t> lengths{4, 3, 3, 2, 1};
+    writer.writeIndexedExamples(
+        {},
+        {{"history",
+          DatasetWriter::RaggedTensorBatchView{
+              .dataType = DataType::INT32,
+              .count = keys.size(),
+              .storageMode = DatasetWriter::RaggedTensorBatchView::StorageMode::WINDOW_REFERENCE,
+              .keyDataType = DataType::UINT64,
+              .indexDataType = DataType::INT64,
+              .keys = keys.data(),
+              .starts = starts.data(),
+              .lengths = lengths.data()}}});
+    writer.close();
+}
+
 void writeAllEmptyRaggedSessionDataset(const std::filesystem::path &datasetPath) {
     DatasetLayout layout = raggedSessionLayout();
     DatasetWriter writer(datasetPath, layout, 2);
@@ -1558,6 +1603,66 @@ TEST(IndexedNamedBatchSessionTest, MaterializesLogicalRaggedBatchesForBothCanoni
 
         std::filesystem::remove_all(datasetPath);
     }
+}
+
+TEST(IndexedNamedBatchSessionTest, RaggedWindowedSourceMaterializesArbitrarySplitOrderAndRandomizedEpochs) {
+    const std::filesystem::path datasetPath = makeTempDatasetPath("ragged_windowed_randomized");
+    writeRaggedWindowedSessionDataset(datasetPath, 2);
+    std::shared_ptr<Thor::FileDataset> dataset = Thor::FileDataset::open(datasetPath);
+    const Thor::DatasetField &field = dataset->getField("history");
+    Thor::DatasetFieldMaterializationRequirements requirements;
+    requirements.emplace(
+        field.id,
+        Thor::DatasetFieldMaterializationRequirement::ragged(
+            field.id,
+            RaggedTensorDescriptor(DataType::INT32, {}, 2, 8, DataType::UINT64)));
+
+    // Arbitrary split order must materialize the referenced source rows, not physical record order.
+    Thor::DatasetSplitManifest orderedSplits(
+        *dataset, vector<uint64_t>{3, 0}, vector<uint64_t>{1}, vector<uint64_t>{4});
+    TestIndexedNamedBatchSession ordered(
+        dataset, std::move(orderedSplits), Thor::BatchPolicy(2, false), 2, requirements);
+    uint64_t orderedBatchNum = 99;
+    BatchLease orderedLease = ordered.leaseBatch(ExampleType::TRAIN, orderedBatchNum);
+    ASSERT_EQ(orderedBatchNum, 0u);
+    const RaggedTensor &orderedHistory = orderedLease.get().getRaggedTensor("history");
+    EXPECT_EQ(raggedOffsetsAsUint64(orderedHistory), (vector<uint64_t>{0, 2, 6}));
+    EXPECT_EQ(activeRaggedInt32Values(orderedHistory),
+              (vector<int32_t>{17, 18, 10, 11, 12, 13}));
+    orderedLease.reset();
+
+    // Randomized traversal must still consume every logical source-backed row exactly once per epoch.
+    Thor::DatasetSplitManifest randomizedSplits(
+        *dataset, vector<uint64_t>{0, 1, 2, 3, 4}, vector<uint64_t>{0}, vector<uint64_t>{});
+    TestIndexedNamedBatchSession randomized(
+        dataset, std::move(randomizedSplits), Thor::BatchPolicy(2, true, 12345), 2, requirements);
+    for (uint64_t epoch = 0; epoch < 2; ++epoch) {
+        std::multiset<int32_t> firstValues;
+        uint64_t validExamplesSeen = 0;
+        for (uint64_t batchIndex = 0;
+             batchIndex < randomized.getNumBatchesPerEpoch(ExampleType::TRAIN);
+             ++batchIndex) {
+            uint64_t batchNum = 99;
+            BatchLease lease = randomized.leaseBatch(ExampleType::TRAIN, batchNum);
+            EXPECT_EQ(batchNum, batchIndex);
+            const Batch &batch = lease.get();
+            const uint32_t validExampleCount =
+                batch.getValidExampleCount().value_or(static_cast<uint32_t>(randomized.getBatchSize()));
+            const RaggedTensor &history = batch.getRaggedTensor("history");
+            const vector<uint64_t> offsets = raggedOffsetsAsUint64(history);
+            const vector<int32_t> values = activeRaggedInt32Values(history);
+            for (uint32_t row = 0; row < validExampleCount; ++row) {
+                ASSERT_LT(offsets.at(row), offsets.at(row + 1));
+                firstValues.insert(values.at(offsets.at(row)));
+                ++validExamplesSeen;
+            }
+            lease.reset();
+        }
+        EXPECT_EQ(validExamplesSeen, 5u);
+        EXPECT_EQ(firstValues, (std::multiset<int32_t>{10, 12, 14, 17, 19}));
+    }
+
+    std::filesystem::remove_all(datasetPath);
 }
 
 TEST(IndexedNamedBatchSessionTest, ExactRaggedTailUsesEmptyPhysicalTailRowsAndRecyclesBuffers) {
@@ -3550,6 +3655,131 @@ TEST(DeviceDatasetStorageSelection, StrictWindowedOnlyRejectsNonWindowedDatasets
                 "strict_windowed_only_requires_file_backed_windowed_dataset"),
             std::string::npos);
     }
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentFileNamedBatchSessionTest, RaggedWindowedSourceIsResidentOnceAndMaterializesIndexedRows) {
+    requireCudaDevice("CUDA device is required for resident ragged-windowed dataset tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+    Thor::resetDeviceDatasetMemoryReservationsForTesting();
+
+    const std::filesystem::path datasetPath = makeTempDatasetPath("resident_ragged_windowed_source");
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        {},
+        vector<DatasetLayout::WindowedTensorSourceShape>{
+            DatasetLayout::WindowedTensorSourceShape("history_source", {}, DataType::INT32, DataType::UINT64)},
+        {},
+        {},
+        vector<DatasetLayout::RaggedWindowedTensorShape>{
+            DatasetLayout::RaggedWindowedTensorShape("history", "history_source", DataType::INT64)});
+
+    DatasetWriter writer(datasetPath, layout, 8, 4, true);
+    uint64_t sourceKey = 9;
+    vector<int32_t> sourceValues{10, 11, 12, 13, 14, 15, 16, 17, 18, 19};
+    writer.writeWindowSource(
+        "history_source",
+        DatasetWriter::WindowedTensorSourceView{
+            .dataType = DataType::INT32,
+            .key = &sourceKey,
+            .startIndex = 100,
+            .dimensions = {sourceValues.size()},
+            .data = sourceValues.data(),
+            .numBytes = sourceValues.size() * sizeof(int32_t)});
+
+    vector<uint64_t> keys{9, 9, 9, 9};
+    vector<int64_t> starts{100, 102, 107, 109};
+    vector<uint64_t> lengths{4, 3, 2, 1};
+    writer.writeIndexedExamples(
+        {},
+        std::map<std::string, DatasetWriter::RaggedTensorBatchView>{
+            {"history", DatasetWriter::RaggedTensorBatchView{
+                            .dataType = DataType::INT32,
+                            .count = 4,
+                            .storageMode = DatasetWriter::RaggedTensorBatchView::StorageMode::WINDOW_REFERENCE,
+                            .keyDataType = DataType::UINT64,
+                            .indexDataType = DataType::INT64,
+                            .keys = keys.data(),
+                            .starts = starts.data(),
+                            .lengths = lengths.data()}}});
+    writer.close();
+
+    std::shared_ptr<Thor::FileDataset> dataset = Thor::FileDataset::open(datasetPath);
+    Thor::DatasetSplitManifest splits(
+        *dataset,
+        vector<uint64_t>{2, 0, 3},
+        vector<uint64_t>{1},
+        vector<uint64_t>{});
+    const Thor::DatasetField &field = dataset->getField("history");
+    Thor::DatasetFieldMaterializationRequirements requirements;
+    requirements.emplace(
+        field.id,
+        Thor::DatasetFieldMaterializationRequirement::ragged(
+            field.id,
+            RaggedTensorDescriptor(DataType::INT32, {}, 2, 6, DataType::UINT64)));
+    auto source = std::make_shared<TestIndexedNamedBatchSession>(
+        dataset,
+        splits,
+        Thor::BatchPolicy(2, false),
+        2,
+        requirements);
+
+    constexpr uint64_t ampleBytes =
+        ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES + (1ull << 20);
+    Thor::DeviceDatasetStorageSelection selection = selectDeviceStorage(
+        source,
+        Thor::DeviceDatasetStorage::STRICT,
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+        2,
+        ampleBytes);
+    auto residentSession =
+        std::dynamic_pointer_cast<DeviceResidentFileNamedBatchSession>(selection.session);
+    ASSERT_NE(residentSession, nullptr);
+    ASSERT_TRUE(selection.report.used);
+    EXPECT_EQ(selection.report.reason, "compact_file_residency");
+    EXPECT_TRUE(residentSession->getDeviceDataset()->hasCompactRaggedField("history"));
+
+    const Thor::DatasetMaterializationDescription description =
+        Thor::describeDatasetMaterialization(*dataset);
+    const DatasetLayout::RaggedTensorSpec &ragged = description.layout.raggedTensor("history");
+    const DatasetLayout::WindowedTensorSourceSpec &windowSource =
+        description.layout.windowedTensorSource("history_source");
+    ASSERT_TRUE(ragged.valuesFilename.has_value());
+    ASSERT_TRUE(windowSource.sourceFilename.has_value());
+    EXPECT_EQ(ragged.valuesFilename, windowSource.sourceFilename);
+    EXPECT_EQ(ragged.valuesNumBytes, sourceValues.size() * sizeof(int32_t));
+    EXPECT_EQ(windowSource.sourceNumBytes, sourceValues.size() * sizeof(int32_t));
+    EXPECT_EQ(
+        selection.report.residentBytes,
+        description.numExamples * description.layout.recordSizeBytes() + ragged.valuesNumBytes);
+    EXPECT_EQ(
+        residentSession->getDeviceDataset()->compactSourceBytes(),
+        sourceValues.size() * sizeof(int32_t));
+    EXPECT_EQ(residentSession->getDeviceDataset()->compactMetadataBytes(), 0u);
+
+    for (int batch = 0; batch < 2; ++batch) {
+        uint64_t sourceBatchNum = 99;
+        uint64_t residentBatchNum = 99;
+        BatchLease sourceLease = source->leaseBatch(ExampleType::TRAIN, sourceBatchNum);
+        BatchLease residentLease = selection.session->leaseBatch(ExampleType::TRAIN, residentBatchNum);
+        EXPECT_EQ(residentBatchNum, sourceBatchNum);
+        EXPECT_EQ(
+            residentLease.get().getValidExampleCount(),
+            sourceLease.get().getValidExampleCount());
+        waitForBatchFieldReady(residentLease.get(), "history");
+        expectRaggedInt32Equal(
+            residentLease.get().getRaggedTensor("history"),
+            sourceLease.get().getRaggedTensor("history"));
+    }
+
+    uint64_t sourceValidationBatch = 99;
+    uint64_t residentValidationBatch = 99;
+    BatchLease sourceValidation = source->leaseBatch(ExampleType::VALIDATE, sourceValidationBatch);
+    BatchLease residentValidation = selection.session->leaseBatch(ExampleType::VALIDATE, residentValidationBatch);
+    waitForBatchFieldReady(residentValidation.get(), "history");
+    expectRaggedInt32Equal(
+        residentValidation.get().getRaggedTensor("history"),
+        sourceValidation.get().getRaggedTensor("history"));
 
     std::filesystem::remove_all(datasetPath);
 }

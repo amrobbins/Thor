@@ -114,6 +114,54 @@ void checkedIndexBounds(int64_t startIndex, uint64_t numSteps, const std::string
     }
 }
 
+int64_t readIntegerIndex(const void *data, ThorImplementation::DataType dataType, const std::string &context) {
+    if (data == nullptr) {
+        throw std::runtime_error(context + " pointer is null.");
+    }
+    switch (dataType) {
+        case ThorImplementation::DataType::INT8: { int8_t v; std::memcpy(&v, data, sizeof(v)); return v; }
+        case ThorImplementation::DataType::UINT8: { uint8_t v; std::memcpy(&v, data, sizeof(v)); return v; }
+        case ThorImplementation::DataType::INT16: { int16_t v; std::memcpy(&v, data, sizeof(v)); return v; }
+        case ThorImplementation::DataType::UINT16: { uint16_t v; std::memcpy(&v, data, sizeof(v)); return v; }
+        case ThorImplementation::DataType::INT32: { int32_t v; std::memcpy(&v, data, sizeof(v)); return v; }
+        case ThorImplementation::DataType::UINT32: { uint32_t v; std::memcpy(&v, data, sizeof(v)); return static_cast<int64_t>(v); }
+        case ThorImplementation::DataType::INT64: { int64_t v; std::memcpy(&v, data, sizeof(v)); return v; }
+        case ThorImplementation::DataType::UINT64: {
+            uint64_t v; std::memcpy(&v, data, sizeof(v));
+            if (v > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+                throw std::runtime_error(context + " is outside the supported int64 index range.");
+            }
+            return static_cast<int64_t>(v);
+        }
+        default: break;
+    }
+    throw std::runtime_error(context + " dtype must be integer.");
+}
+
+uint64_t readUint64Value(const void *data, const std::string &context) {
+    if (data == nullptr) {
+        throw std::runtime_error(context + " pointer is null.");
+    }
+    uint64_t value = 0;
+    std::memcpy(&value, data, sizeof(value));
+    return value;
+}
+
+uint64_t integerDataTypeSizeBytes(ThorImplementation::DataType dataType, const std::string &context) {
+    switch (dataType) {
+        case ThorImplementation::DataType::INT8:
+        case ThorImplementation::DataType::UINT8: return 1;
+        case ThorImplementation::DataType::INT16:
+        case ThorImplementation::DataType::UINT16: return 2;
+        case ThorImplementation::DataType::INT32:
+        case ThorImplementation::DataType::UINT32: return 4;
+        case ThorImplementation::DataType::INT64:
+        case ThorImplementation::DataType::UINT64: return 8;
+        default: break;
+    }
+    throw std::runtime_error(context + " dtype must be integer.");
+}
+
 uint64_t readRaggedOffset(const void *offsets, ThorImplementation::DataType dataType, uint64_t index) {
     if (offsets == nullptr) {
         throw std::runtime_error("DatasetWriter ragged offsets pointer is null.");
@@ -206,6 +254,9 @@ DatasetWriter::DatasetWriter(std::filesystem::path datasetPath,
     }
     ordinal = 0;
     for (const DatasetLayout::RaggedTensorSpec &spec : this->layout.raggedTensors()) {
+        if (spec.isWindowedSourceBacked()) {
+            continue;
+        }
         RaggedTensorManifestEntry entry;
         entry.filename = makeRaggedValuesFilename(ordinal++);
         raggedValues.emplace(spec.name, std::move(entry));
@@ -555,6 +606,7 @@ void DatasetWriter::writeWindowSource(std::string_view sourceName, const Windowe
         .offsetBytes = offsetBytes,
         .numSteps = numSteps,
         .numBytes = source.numBytes});
+    manifestEntry.sequenceIndexByKeyHex.emplace(keyHex, manifestEntry.sequences.size() - 1);
 }
 
 void DatasetWriter::writePackedIndexedRecords(const uint8_t *records, uint64_t count) {
@@ -883,6 +935,32 @@ void DatasetWriter::validateRaggedTensorMapExact(
             throw std::runtime_error("DatasetWriter missing ragged tensor: " + spec.name);
         }
         const RaggedTensorView &view = it->second;
+        if (spec.isWindowedSourceBacked()) {
+            if (view.storageMode != RaggedTensorView::StorageMode::WINDOW_REFERENCE) {
+                throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name +
+                                         "' requires a source-window reference.");
+            }
+            const DatasetLayout::WindowedTensorSourceSpec &source =
+                layout.windowedTensorSource(*spec.sourceName);
+            if (view.key == nullptr || view.start == nullptr || view.length == nullptr) {
+                throw std::runtime_error("DatasetWriter ragged window reference '" + spec.name +
+                                         "' requires key, start, and length.");
+            }
+            if (view.keyDataType != source.keyDataType) {
+                throw std::runtime_error("DatasetWriter ragged window reference '" + spec.name +
+                                         "' has wrong key dtype.");
+            }
+            if (view.indexDataType != spec.indexDataType) {
+                throw std::runtime_error("DatasetWriter ragged window reference '" + spec.name +
+                                         "' has wrong index dtype.");
+            }
+            continue;
+        }
+
+        if (view.storageMode != RaggedTensorView::StorageMode::VALUES) {
+            throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name +
+                                     "' requires explicit ragged values.");
+        }
         if (view.dataType != spec.dataType) {
             throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name + "' has wrong dtype.");
         }
@@ -931,6 +1009,33 @@ uint64_t DatasetWriter::validateRaggedTensorBatchMapExact(
             haveCount = true;
         } else if (count != view.count) {
             throw std::runtime_error("DatasetWriter ragged tensor batches must have the same example count.");
+        }
+
+        if (spec.isWindowedSourceBacked()) {
+            if (view.storageMode != RaggedTensorBatchView::StorageMode::WINDOW_REFERENCE) {
+                throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name +
+                                         "' requires source-window references.");
+            }
+            const DatasetLayout::WindowedTensorSourceSpec &source =
+                layout.windowedTensorSource(*spec.sourceName);
+            if (view.keys == nullptr || view.starts == nullptr || view.lengths == nullptr) {
+                throw std::runtime_error("DatasetWriter ragged window reference batch '" + spec.name +
+                                         "' requires key, start, and length arrays.");
+            }
+            if (view.keyDataType != source.keyDataType) {
+                throw std::runtime_error("DatasetWriter ragged window reference batch '" + spec.name +
+                                         "' has wrong key dtype.");
+            }
+            if (view.indexDataType != spec.indexDataType) {
+                throw std::runtime_error("DatasetWriter ragged window reference batch '" + spec.name +
+                                         "' has wrong index dtype.");
+            }
+            continue;
+        }
+
+        if (view.storageMode != RaggedTensorBatchView::StorageMode::VALUES) {
+            throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name +
+                                     "' requires explicit ragged values.");
         }
         if (view.dataType != spec.dataType) {
             throw std::runtime_error("DatasetWriter ragged tensor batch '" + spec.name + "' has wrong dtype.");
@@ -981,11 +1086,62 @@ uint64_t DatasetWriter::validateRaggedTensorBatchMapExact(
     return haveCount ? count : 0;
 }
 
+DatasetWriter::RaggedTensorReference DatasetWriter::resolveRaggedWindowReference(
+    const DatasetLayout::RaggedTensorSpec &spec,
+    const void *key,
+    const void *start,
+    uint64_t length) const {
+    if (!spec.sourceName.has_value()) {
+        throw std::runtime_error("DatasetWriter internal error: ragged source reference has no source.");
+    }
+    const DatasetLayout::WindowedTensorSourceSpec &sourceSpec =
+        layout.windowedTensorSource(*spec.sourceName);
+    const auto sourceIt = windowSources.find(*spec.sourceName);
+    if (sourceIt == windowSources.end()) {
+        throw std::runtime_error("DatasetWriter ragged source '" + *spec.sourceName + "' was not registered.");
+    }
+    const WindowedTensorSourceManifestEntry &source = sourceIt->second;
+    const std::string keyHex = bytesToHex(key, sourceSpec.keyNumBytes());
+    const auto sequenceIt = source.sequenceIndexByKeyHex.find(keyHex);
+    if (sequenceIt == source.sequenceIndexByKeyHex.end()) {
+        throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name +
+                                 "' references a key that was not written to source '" +
+                                 *spec.sourceName + "'.");
+    }
+    const DatasetLayout::WindowedTensorSourceSequence &sequence =
+        source.sequences.at(sequenceIt->second);
+    const int64_t startIndex = readIntegerIndex(
+        start, spec.indexDataType, "DatasetWriter ragged tensor '" + spec.name + "' start");
+    if (startIndex < sequence.startIndex || startIndex > sequence.endIndexExclusive) {
+        throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name +
+                                 "' start is outside source sequence bounds.");
+    }
+    const uint64_t available = static_cast<uint64_t>(sequence.endIndexExclusive - startIndex);
+    if (length > available) {
+        throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name +
+                                 "' length extends past the source sequence.");
+    }
+    const uint64_t valueBytes = spec.valueNumBytes();
+    if (sourceSpec.stepNumBytes() != valueBytes || (sequence.offsetBytes % valueBytes) != 0) {
+        throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name +
+                                 "' source storage is not aligned to logical values.");
+    }
+    const uint64_t sequenceBaseValue = sequence.offsetBytes / valueBytes;
+    const uint64_t localStart = static_cast<uint64_t>(startIndex - sequence.startIndex);
+    return RaggedTensorReference{
+        .startValue = checkedAdd(sequenceBaseValue, localStart, "DatasetWriter ragged source start"),
+        .valueCount = length};
+}
+
 std::map<std::string, DatasetWriter::RaggedTensorReference> DatasetWriter::appendRaggedValues(
     const std::map<std::string, RaggedTensorView> &raggedTensors) {
     std::map<std::string, RaggedTensorReference> references;
     for (const DatasetLayout::RaggedTensorSpec &spec : layout.raggedTensors()) {
         const RaggedTensorView &view = raggedTensors.at(spec.name);
+        if (spec.isWindowedSourceBacked()) {
+            references.emplace(spec.name, resolveRaggedWindowReference(spec, view.key, view.start, readUint64Value(view.length, "DatasetWriter ragged length")));
+            continue;
+        }
         RaggedTensorManifestEntry &entry = raggedValues.at(spec.name);
         const uint64_t valueCount = view.dimensions.front();
         const uint64_t baseValue = entry.numValues;
@@ -1010,13 +1166,33 @@ std::map<std::string, std::vector<DatasetWriter::RaggedTensorReference>> Dataset
         if (view.count != count) {
             throw std::runtime_error("DatasetWriter ragged batch count changed after validation.");
         }
+        std::vector<RaggedTensorReference> fieldReferences;
+        fieldReferences.reserve(static_cast<size_t>(count));
+        if (spec.isWindowedSourceBacked()) {
+            const DatasetLayout::WindowedTensorSourceSpec &sourceSpec =
+                layout.windowedTensorSource(*spec.sourceName);
+            const uint64_t keyBytes = sourceSpec.keyNumBytes();
+            const uint64_t indexBytes = integerDataTypeSizeBytes(
+                spec.indexDataType, "DatasetWriter ragged tensor '" + spec.name + "' index");
+            for (uint64_t row = 0; row < count; ++row) {
+                const uint8_t *key = static_cast<const uint8_t *>(view.keys) +
+                                     checkedMul(row, keyBytes, "DatasetWriter ragged key row offset");
+                const uint8_t *start = static_cast<const uint8_t *>(view.starts) +
+                                       checkedMul(row, indexBytes, "DatasetWriter ragged start row offset");
+                fieldReferences.push_back(resolveRaggedWindowReference(
+                    spec, key, start, readUint64Value(static_cast<const uint8_t *>(view.lengths) +
+                                                       checkedMul(row, sizeof(uint64_t), "DatasetWriter ragged length row offset"),
+                                                       "DatasetWriter ragged length")));
+            }
+            references.emplace(spec.name, std::move(fieldReferences));
+            continue;
+        }
+
         RaggedTensorManifestEntry &entry = raggedValues.at(spec.name);
         const uint64_t totalValues = view.dimensions.front();
         const uint64_t baseValue = entry.numValues;
         const uint64_t newNumValues = checkedAdd(baseValue, totalValues, "DatasetWriter ragged value count");
         const uint64_t newNumBytes = checkedAdd(entry.numBytes, view.numBytes, "DatasetWriter ragged sidecar byte count");
-        std::vector<RaggedTensorReference> fieldReferences;
-        fieldReferences.reserve(static_cast<size_t>(count));
         for (uint64_t row = 0; row < count; ++row) {
             const uint64_t begin = readRaggedOffset(view.offsets, view.offsetsDataType, row);
             const uint64_t end = readRaggedOffset(view.offsets, view.offsetsDataType, row + 1);
@@ -1190,19 +1366,48 @@ void DatasetWriter::writeManifest() const {
     root["preallocated"] = preallocate;
     root["shards"] = json::array();
 
-    if (!raggedValues.empty()) {
+    if (layout.hasRaggedTensors()) {
         if (!root.contains("ragged_tensors") || !root.at("ragged_tensors").is_object()) {
             throw std::runtime_error("DatasetWriter internal error: missing ragged_tensors in layout manifest.");
         }
-        for (const auto &entry : raggedValues) {
-            const DatasetLayout::RaggedTensorSpec &spec = layout.raggedTensor(entry.first);
-            const uint64_t expectedBytes = checkedMul(entry.second.numValues, spec.valueNumBytes(),
-                                                      "DatasetWriter ragged manifest byte count");
-            if (expectedBytes != entry.second.numBytes) {
-                throw std::runtime_error("DatasetWriter internal ragged sidecar byte/value count mismatch for '" +
-                                         entry.first + "'.");
+        for (const DatasetLayout::RaggedTensorSpec &spec : layout.raggedTensors()) {
+            if (spec.isWindowedSourceBacked()) {
+                const auto sourceIt = windowSources.find(*spec.sourceName);
+                if (sourceIt == windowSources.end()) {
+                    throw std::runtime_error("DatasetWriter internal error: missing ragged window source '" +
+                                             *spec.sourceName + "'.");
+                }
+                const DatasetLayout::WindowedTensorSourceSpec &sourceSpec =
+                    layout.windowedTensorSource(*spec.sourceName);
+                if (sourceSpec.stepNumBytes() != spec.valueNumBytes()) {
+                    throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name +
+                                             "' source step size does not match value size.");
+                }
+                const WindowedTensorSourceManifestEntry &source = sourceIt->second;
+                if ((source.numBytes % spec.valueNumBytes()) != 0) {
+                    throw std::runtime_error("DatasetWriter ragged tensor '" + spec.name +
+                                             "' source storage is not value aligned.");
+                }
+                root["ragged_tensors"].at(spec.name)["storage"] =
+                    json{{"file", source.filename},
+                         {"num_bytes", source.numBytes},
+                         {"num_values", source.numBytes / spec.valueNumBytes()}};
+                continue;
             }
-            const std::filesystem::path valuesPath = datasetPath / entry.second.filename;
+
+            const auto entryIt = raggedValues.find(spec.name);
+            if (entryIt == raggedValues.end()) {
+                throw std::runtime_error("DatasetWriter internal error: missing ragged sidecar state for '" +
+                                         spec.name + "'.");
+            }
+            const RaggedTensorManifestEntry &entry = entryIt->second;
+            const uint64_t expectedBytes = checkedMul(entry.numValues, spec.valueNumBytes(),
+                                                      "DatasetWriter ragged manifest byte count");
+            if (expectedBytes != entry.numBytes) {
+                throw std::runtime_error("DatasetWriter internal ragged sidecar byte/value count mismatch for '" +
+                                         spec.name + "'.");
+            }
+            const std::filesystem::path valuesPath = datasetPath / entry.filename;
             std::filesystem::create_directories(valuesPath.parent_path());
             if (!std::filesystem::exists(valuesPath)) {
                 std::ofstream emptyValues(valuesPath, std::ios::binary | std::ios::app);
@@ -1211,14 +1416,14 @@ void DatasetWriter::writeManifest() const {
                                              valuesPath.string());
                 }
             }
-            if (std::filesystem::file_size(valuesPath) != entry.second.numBytes) {
+            if (std::filesystem::file_size(valuesPath) != entry.numBytes) {
                 throw std::runtime_error("DatasetWriter ragged values sidecar size does not match bytes written: " +
                                          valuesPath.string());
             }
-            root["ragged_tensors"].at(entry.first)["storage"] =
-                json{{"file", entry.second.filename},
-                     {"num_bytes", entry.second.numBytes},
-                     {"num_values", entry.second.numValues}};
+            root["ragged_tensors"].at(spec.name)["storage"] =
+                json{{"file", entry.filename},
+                     {"num_bytes", entry.numBytes},
+                     {"num_values", entry.numValues}};
         }
     }
 

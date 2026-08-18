@@ -669,21 +669,12 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
 
     shared_ptr<ThorImplementation::CustomLayer> physicalRmsNorm;
     if (raggedTemplate != nullptr) {
-        uint64_t elementsPerValue = 1;
-        for (uint64_t dim : raggedTemplate->getTrailingDimensions()) {
-            if (elementsPerValue > numeric_limits<uint64_t>::max() / dim) {
-                throw overflow_error("RMSNorm ragged elements-per-value overflow.");
-            }
-            elementsPerValue *= dim;
-        }
         physicalRmsNorm = make_shared<ThorImplementation::RaggedRMSNorm>(
             std::move(expression),
             inputNames,
             std::vector<std::string>{"feature_output"},
             placement,
             physicalParameters,
-            raggedTemplate->getMaxTotalValues(),
-            elementsPerValue,
             inferenceOnly,
             getId());
     } else {

@@ -7,6 +7,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
+#include "test/DeepLearning/RaggedTestUtils.h"
 
 #include "gtest/gtest.h"
 
@@ -139,10 +140,10 @@ TEST(RaggedNetworkOutputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTenso
 }
 
 
-TEST(RaggedNetworkOutputApi, LogicalInputBoundaryCanonicalizesInactiveCapacityBeforeIdentityOutput) {
+TEST(RaggedNetworkOutputApi, IdentityOutputPreservesLogicalValuesAndOffsetsWithPoisonedInactiveCapacity) {
     constexpr uint32_t batchSize = 2;
     constexpr uint64_t maxTotalValues = 6;
-    Network network("ragged_network_output_identity_canonical_tail");
+    Network network("ragged_network_output_identity_logical_extent");
     RaggedTensor input = RaggedNetworkInput::Builder()
                              .network(network)
                              .name("tokens")
@@ -169,11 +170,9 @@ TEST(RaggedNetworkOutputApi, LogicalInputBoundaryCanonicalizesInactiveCapacityBe
         ThorImplementation::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
 
     float* valuesPtr = values.getMemPtr<float>();
-    for (uint64_t i = 0; i < maxTotalValues * 2; ++i) valuesPtr[i] = static_cast<float>(i + 1);
-    valuesPtr[8] = 9999.0f;
-    valuesPtr[9] = 9999.0f;
-    valuesPtr[10] = -9999.0f;
-    valuesPtr[11] = -9999.0f;
+    for (uint64_t i = 0; i < 8; ++i) valuesPtr[i] = static_cast<float>(i + 1);
+    ThorTest::poisonInactiveElements(
+        valuesPtr, /*activeElements=*/8, /*totalElements=*/maxTotalValues * 2, ThorTest::RaggedInactivePoison::NaN);
     uint32_t* offsetsPtr = offsets.getMemPtr<uint32_t>();
     offsetsPtr[0] = 0;
     offsetsPtr[1] = 1;
@@ -196,5 +195,4 @@ TEST(RaggedNetworkOutputApi, LogicalInputBoundaryCanonicalizesInactiveCapacityBe
 
     const float* resultValues = result.getValues().getMemPtr<float>();
     for (uint64_t i = 0; i < 8; ++i) EXPECT_EQ(resultValues[i], static_cast<float>(i + 1));
-    for (uint64_t i = 8; i < 12; ++i) EXPECT_EQ(resultValues[i], 0.0f);
 }

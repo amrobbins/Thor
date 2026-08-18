@@ -31,23 +31,41 @@ class DatasetWriter {
     };
 
     struct RaggedTensorView {
-        ThorImplementation::DataType dataType;
+        ThorImplementation::DataType dataType = ThorImplementation::DataType::FP32;
         /** Shape [row_values, *value_shape]. Scalar values use [row_values]. */
         std::vector<uint64_t> dimensions;
-        const void *data;
-        uint64_t numBytes;
+        const void *data = nullptr;
+        uint64_t numBytes = 0;
+
+        enum class StorageMode { VALUES, WINDOW_REFERENCE };
+        StorageMode storageMode = StorageMode::VALUES;
+        /** Source-backed ragged row metadata. */
+        ThorImplementation::DataType keyDataType = ThorImplementation::DataType::UINT64;
+        ThorImplementation::DataType indexDataType = ThorImplementation::DataType::INT64;
+        const void *key = nullptr;
+        const void *start = nullptr;
+        const void *length = nullptr;
     };
 
     struct RaggedTensorBatchView {
-        ThorImplementation::DataType dataType;
+        ThorImplementation::DataType dataType = ThorImplementation::DataType::FP32;
         /** Shape [total_values, *value_shape]. Scalar values use [total_values]. */
         std::vector<uint64_t> dimensions;
-        const void *data;
-        uint64_t numBytes;
-        ThorImplementation::DataType offsetsDataType;
+        const void *data = nullptr;
+        uint64_t numBytes = 0;
+        ThorImplementation::DataType offsetsDataType = ThorImplementation::DataType::UINT32;
         /** Host-resident canonical offsets with count + 1 entries. */
-        const void *offsets;
-        uint64_t count;
+        const void *offsets = nullptr;
+        uint64_t count = 0;
+
+        enum class StorageMode { VALUES, WINDOW_REFERENCE };
+        StorageMode storageMode = StorageMode::VALUES;
+        /** Source-backed ragged row metadata arrays with count entries. */
+        ThorImplementation::DataType keyDataType = ThorImplementation::DataType::UINT64;
+        ThorImplementation::DataType indexDataType = ThorImplementation::DataType::INT64;
+        const void *keys = nullptr;
+        const void *starts = nullptr;
+        const void *lengths = nullptr;
     };
 
     struct WindowedTensorReferenceView {
@@ -167,6 +185,7 @@ class DatasetWriter {
         uint64_t numBytes = 0;
         std::set<std::string> keyHexValues;
         std::vector<DatasetLayout::WindowedTensorSourceSequence> sequences;
+        std::map<std::string, size_t> sequenceIndexByKeyHex;
     };
 
     struct RaggedTensorManifestEntry {
@@ -219,6 +238,11 @@ class DatasetWriter {
     std::map<std::string, std::vector<RaggedTensorReference>> appendRaggedValues(
         const std::map<std::string, RaggedTensorBatchView> &raggedTensors,
         uint64_t count);
+    [[nodiscard]] RaggedTensorReference resolveRaggedWindowReference(
+        const DatasetLayout::RaggedTensorSpec &spec,
+        const void *key,
+        const void *start,
+        uint64_t length) const;
     void packRaggedReferences(std::vector<uint8_t> &record,
                               const std::map<std::string, RaggedTensorReference> &references) const;
     void packRaggedReferences(std::vector<uint8_t> &records,

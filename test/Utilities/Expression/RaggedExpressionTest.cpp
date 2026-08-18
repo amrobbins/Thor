@@ -2142,6 +2142,69 @@ TEST(RaggedExpression, PackedRmsNormLowersRowPartitionAsStructuralStageInput) {
 }
 
 
+TEST(RaggedExpression, PackedRmsNormAutodiffUsesBucketedCudnnBackwardWithStructuralOffsets) {
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression offsets = Expression::input("offsets", DataType::UINT32, DataType::UINT32);
+    const Expression packed = x.withRaggedRuntimeExtent(offsets, 3, 9, 4);
+    const Expression y = Expression::rmsNorm(packed, scale, 4, 1.0e-5, DataType::FP32, DataType::FP32, 9);
+
+    PhysicalOutputs forward = Expression::outputs({{"y", y}}).physicalOutputs();
+    std::vector<DataType> forward_input_dtypes;
+    forward_input_dtypes.reserve(forward.expr->inputs.size());
+    for (const NamedInput& input : forward.expr->inputs) {
+        forward_input_dtypes.push_back(input.name == "offsets" ? DataType::UINT32 : DataType::FP32);
+    }
+    resolveOutputsDTypesInPlace(forward, forward_input_dtypes);
+
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward,
+        {"x", "scale"},
+        std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        std::unordered_map<std::string, DataType>{{"y", DataType::FP32}},
+        std::unordered_map<std::string, std::vector<uint64_t>>{
+            {"x", {9, 4}},
+            {"scale", {4}},
+            {"offsets", {4}},
+        });
+    std::vector<DataType> backward_input_dtypes;
+    backward_input_dtypes.reserve(backward.expr->inputs.size());
+    for (const NamedInput& input : backward.expr->inputs) {
+        backward_input_dtypes.push_back(input.name == "offsets" ? DataType::UINT32 : DataType::FP32);
+    }
+    resolveOutputsDTypesInPlace(backward, backward_input_dtypes);
+
+    size_t dx_routes = 0;
+    size_t dscale_routes = 0;
+    for (const ExprNode& node : backward.expr->nodes) {
+        dx_routes += node.op == ExprOp::RMSNORM_BACKWARD_X ? 1u : 0u;
+        dscale_routes += node.op == ExprOp::RMSNORM_BACKWARD_SCALE ? 1u : 0u;
+        EXPECT_NE(node.op, ExprOp::SQRT);
+        EXPECT_NE(node.op, ExprOp::REDUCE_AVG);
+        EXPECT_NE(node.op, ExprOp::REDUCE_SUM);
+    }
+    EXPECT_EQ(dx_routes, 1u);
+    EXPECT_EQ(dscale_routes, 1u);
+
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(backward);
+    size_t rms_backward_stage_count = 0;
+    for (const PhysicalExecutionStage& stage : stages) {
+        if (stage.kind != PhysicalExecutionStage::Kind::RmsNormBackward) {
+            continue;
+        }
+        ++rms_backward_stage_count;
+        EXPECT_EQ(stage.input_value_ids.size(), 4u);
+        ASSERT_EQ(stage.outputs.size(), 2u);
+        const std::shared_ptr<CompiledRmsNormBackward> compiled = EquationCompiler::compileRmsNormBackward(stage.expr);
+        ASSERT_NE(compiled, nullptr);
+        EXPECT_EQ(compiled->packed_row_capacity, 9u);
+        EXPECT_EQ(compiled->ragged_offsets_input_slot, 3u);
+        EXPECT_EQ(compiled->ragged_batch_size, 3u);
+    }
+    EXPECT_EQ(rms_backward_stage_count, 1u);
+}
+
+
 TEST(RaggedExpression, PackedMatmulForwardAndAutodiffUseOffsetsRuntimeWithoutValuesMetadata) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -2220,4 +2283,87 @@ TEST(RaggedExpression, PackedMatmulForwardAndAutodiffUseOffsetsRuntimeWithoutVal
     EXPECT_EQ(RowPartitionRuntime(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
                   .requireHostActiveValueCount(),
               active_rows);
+}
+
+TEST(RaggedExpression, RaggedAttentionBackwardConsumesMatchingQueryExtentOnUpstreamGradient) {
+    auto build = [](bool use_query_partition_for_do) {
+        auto expr = std::make_shared<PhysicalExpression>();
+        expr->inputs = {
+            NamedInput{"q", 0, NamedInput::Kind::Tensor},
+            NamedInput{"k", 1, NamedInput::Kind::Tensor},
+            NamedInput{"v", 2, NamedInput::Kind::Tensor},
+            NamedInput{"do", 3, NamedInput::Kind::Tensor},
+            NamedInput{"q_offsets", 4, NamedInput::Kind::Tensor},
+            NamedInput{"kv_offsets", 5, NamedInput::Kind::Tensor},
+        };
+
+        auto addInput = [&](uint32_t slot, DataType dtype) {
+            ExprNode input;
+            input.op = ExprOp::INPUT;
+            input.input_slot = slot;
+            input.input_tensor_dtype = dtype;
+            input.output_dtype = dtype;
+            input.compute_dtype = dtype == DataType::FP32 ? std::optional<DataType>(DataType::FP32) : std::nullopt;
+            expr->nodes.push_back(std::move(input));
+        };
+        addInput(0, DataType::FP32);
+        addInput(1, DataType::FP32);
+        addInput(2, DataType::FP32);
+        addInput(3, DataType::FP32);
+        addInput(4, DataType::UINT32);
+        addInput(5, DataType::UINT32);
+
+        ExprNode extent;
+        extent.op = ExprOp::RAGGED_VALUEWISE_EXTENT;
+        extent.lhs = 3;
+        extent.rhs = use_query_partition_for_do ? 4 : 5;
+        extent.ragged_runtime_batch_size = 2;
+        extent.ragged_runtime_max_active_values = 6;
+        extent.ragged_runtime_elements_per_value = 4;
+        extent.output_dtype = DataType::FP32;
+        extent.compute_dtype = DataType::FP32;
+        expr->nodes.push_back(std::move(extent));
+
+        // Match the real ragged-query Attention training path: the active-aware dO
+        // extent can flow through a metadata-only shape transform before cuDNN backward.
+        ExprNode reshape;
+        reshape.op = ExprOp::RESHAPE;
+        reshape.lhs = 6;
+        reshape.reshape_dims = {6, 1, 4};
+        reshape.output_dtype = DataType::FP32;
+        reshape.compute_dtype = DataType::FP32;
+        expr->nodes.push_back(std::move(reshape));
+
+        ExprNode backward;
+        backward.op = ExprOp::ATTENTION_BACKWARD_Q;
+        backward.lhs = 0;
+        backward.rhs = 1;
+        backward.aux = 2;
+        backward.alpha_node = 7;
+        backward.attention_use_ragged_offsets = true;
+        backward.attention_ragged_offset_q_node = 4;
+        backward.attention_ragged_offset_kv_node = 5;
+        backward.output_dtype = DataType::FP32;
+        backward.compute_dtype = DataType::FP32;
+        expr->nodes.push_back(std::move(backward));
+        expr->output_node = 8;
+
+        return PhysicalOutputs{
+            .expr = std::move(expr),
+            .outputs = {NamedOutput{"dq", 8}},
+        };
+    };
+
+    const PhysicalOutputs matching = build(true);
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(matching);
+    ASSERT_FALSE(stages.empty());
+    EXPECT_EQ(stages.back().kind, PhysicalExecutionStage::Kind::AttentionBackward);
+
+    const PhysicalOutputs mismatched = build(false);
+    try {
+        (void)EquationCompiler::splitAtReductionBoundaries(mismatched);
+        FAIL() << "Expected ragged Attention backward to reject dO carrying the KV partition.";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("same row partition as the query/output domain"), std::string::npos);
+    }
 }

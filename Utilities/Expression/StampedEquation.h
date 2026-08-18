@@ -270,6 +270,28 @@ struct CompiledRmsNorm {
     [[nodiscard]] CudnnRmsNormDescriptor descriptorFor(const Tensor& input, const Tensor& scale, const Tensor& output) const;
 };
 
+struct CompiledRmsNormBackward {
+    uint64_t normalized_feature_count = 0;
+    uint64_t packed_row_capacity = 0;
+    uint32_t ragged_offsets_input_slot = UINT32_MAX;
+    uint64_t ragged_batch_size = 0;
+    double epsilon = 1.0e-5;
+    DataType input_dtype = DataType::FP16;
+    DataType scale_dtype = DataType::FP32;
+    DataType dy_dtype = DataType::FP16;
+    DataType dx_dtype = DataType::FP16;
+    DataType dscale_dtype = DataType::FP32;
+    DataType compute_dtype = DataType::FP32;
+    std::string debug_name = "thor_expr_rms_norm_backward";
+
+    [[nodiscard]] CudnnRmsNormDescriptor descriptorFor(const Tensor& input,
+                                                       const Tensor& scale,
+                                                       const Tensor& dy,
+                                                       const Tensor& dx,
+                                                       const Tensor& dscale) const;
+    [[nodiscard]] DataType outputDTypeFor(ExprOp op) const;
+};
+
 struct CompiledAttention {
     AttentionTensorLayout q_layout = AttentionTensorLayout::BHSD;
     AttentionTensorLayout k_layout = AttentionTensorLayout::BHSD;
@@ -688,6 +710,14 @@ class StampedSoftmax {
 };
 
 
+struct RmsNormForwardState {
+    Tensor inv_variance;
+    bool retain_for_backward = false;
+    bool has_valid_state = false;
+    uint64_t packed_active_rows = 0;
+    uint64_t packed_selected_rows = 0;
+};
+
 class StampedRmsNorm {
    public:
     void run();
@@ -696,13 +726,22 @@ class StampedRmsNorm {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    std::shared_ptr<RmsNormForwardState> getForwardState() const { return forward_state; }
+    [[nodiscard]] std::optional<PackedRowConsumerDiagnostic> packedRowConsumerDiagnostic() const;
+    bool canProvideForwardStateFor(const CompiledRmsNormBackward& backward,
+                                   const Tensor& input_tensor,
+                                   const Tensor& scale_tensor,
+                                   const Tensor& dy_tensor,
+                                   const std::optional<Tensor>& backward_row_partition_offsets) const;
+    void retainForwardStateForBackward();
 
     StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
                    const Tensor& input,
                    const Tensor& scale,
                    const Tensor& output,
                    const Stream& stream,
-                   std::optional<Tensor> row_partition_offsets = std::nullopt);
+                   std::optional<Tensor> row_partition_offsets = std::nullopt,
+                   std::shared_ptr<RmsNormForwardState> forward_state = nullptr);
 
    private:
     const std::shared_ptr<CompiledRmsNorm> compiled_rms_norm;
@@ -711,6 +750,41 @@ class StampedRmsNorm {
     const std::optional<Tensor> row_partition_offsets;
     Tensor output;
     Stream stream;
+    std::shared_ptr<RmsNormForwardState> forward_state;
+};
+
+class StampedRmsNormBackward {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return dX.getPlacement().getDeviceNum(); }
+    const std::vector<Tensor>& getOutputTensors() const { return outputs; }
+    bool tryLinkForwardStateFrom(const std::shared_ptr<StampedRmsNorm>& forward);
+
+    StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBackward> compiled,
+                           const Tensor& input,
+                           const Tensor& scale,
+                           const Tensor& dY,
+                           const Tensor& dX,
+                           const Tensor& dScale,
+                           const Stream& stream,
+                           std::optional<Tensor> row_partition_offsets = std::nullopt,
+                           std::shared_ptr<RmsNormForwardState> saved_forward_state = nullptr);
+
+   private:
+    const std::shared_ptr<CompiledRmsNormBackward> compiled_rms_norm_backward;
+    const Tensor input;
+    const Tensor scale;
+    const Tensor dY;
+    Tensor dX;
+    Tensor dScale;
+    const std::optional<Tensor> row_partition_offsets;
+    Stream stream;
+    std::vector<Tensor> outputs;
+    std::shared_ptr<RmsNormForwardState> saved_forward_state;
+    mutable std::shared_ptr<RmsNormForwardState> fallback_forward_state;
+    mutable Tensor fallback_output;
 };
 
 
@@ -774,6 +848,7 @@ class StampedMatmul {
     [[nodiscard]] std::optional<std::string> alphaRuntimeName() const { return alpha_runtime_name; }
     [[nodiscard]] std::optional<std::string> betaRuntimeName() const { return beta_runtime_name; }
     [[nodiscard]] StampedMatmulKernelDiagnostic kernelDiagnostic() const;
+    [[nodiscard]] std::optional<PackedRowConsumerDiagnostic> packedRowConsumerDiagnostic() const;
 
    private:
     friend struct detail::ConditionalGraphCaptureAccess;
@@ -1144,6 +1219,7 @@ struct StampedExecutionStage {
         Scan,
         Softmax,
         RmsNorm,
+        RmsNormBackward,
         EmbeddingLookup,
         Matmul,
         DependencyBarrier,
@@ -1176,6 +1252,8 @@ struct StampedExecutionStage {
                 return "Softmax";
             case Kind::RmsNorm:
                 return "RmsNorm";
+            case Kind::RmsNormBackward:
+                return "RmsNormBackward";
             case Kind::EmbeddingLookup:
                 return "EmbeddingLookup";
             case Kind::Matmul:
@@ -1217,6 +1295,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedScan> scan = nullptr;
     const std::shared_ptr<StampedSoftmax> softmax = nullptr;
     const std::shared_ptr<StampedRmsNorm> rms_norm = nullptr;
+    const std::shared_ptr<StampedRmsNormBackward> rms_norm_backward = nullptr;
     const std::shared_ptr<StampedEmbeddingLookup> embedding_lookup = nullptr;
     const std::shared_ptr<StampedMatmul> matmul = nullptr;
     const std::shared_ptr<StampedInPlaceRope> in_place_rope = nullptr;
@@ -1309,6 +1388,16 @@ struct StampedExecutionStage {
           gpu_num(rms_norm->gpuNum()),
           flop_count(flop_count),
           rms_norm(rms_norm) {}
+
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedRmsNormBackward>& rms_norm_backward,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::RmsNormBackward),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(rms_norm_backward->gpuNum()),
+          flop_count(flop_count),
+          rms_norm_backward(rms_norm_backward) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedEmbeddingLookup>& embedding_lookup,
                                    std::vector<uint32_t> dependency_stage_indices = {},
@@ -1450,6 +1539,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::RmsNorm) {
             THOR_THROW_IF_FALSE(rms_norm != nullptr);
             rms_norm->runOn(run_stream);
+        } else if (kind == Kind::RmsNormBackward) {
+            THOR_THROW_IF_FALSE(rms_norm_backward != nullptr);
+            rms_norm_backward->runOn(run_stream);
         } else if (kind == Kind::EmbeddingLookup) {
             THOR_THROW_IF_FALSE(embedding_lookup != nullptr);
             embedding_lookup->runOn(run_stream);
@@ -1544,6 +1636,9 @@ class StampedExecutionPlan {
     [[nodiscard]] bool requiresRuntimeScalars() const;
     [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
 
+    // Link dense RMSNorm backward stages to retained invVariance produced by the matching forward plan.
+    void linkRmsNormBackwardStatesFrom(const StampedExecutionPlan& forward_plan);
+
     [[nodiscard]] uint64_t flopCount() const {
         uint64_t total = 0;
         for (const StampedExecutionStage& step : steps) {
@@ -1599,6 +1694,30 @@ class StampedExecutionPlan {
             diagnostic.dependency_count = static_cast<uint32_t>(step.dependency_stage_indices.size());
             diagnostic.kernel = step.matmul->kernelDiagnostic();
             out.push_back(diagnostic);
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::vector<PackedRowConsumerDiagnostic> packedRowConsumerDiagnostics() const {
+        std::vector<PackedRowConsumerDiagnostic> out;
+        for (size_t stage_index = 0; stage_index < steps.size(); ++stage_index) {
+            const StampedExecutionStage& step = steps[stage_index];
+            std::optional<PackedRowConsumerDiagnostic> diagnostic;
+            if (step.kind == StampedExecutionStage::Kind::Matmul) {
+                if (!step.matmul) {
+                    throw std::runtime_error("Matmul execution stage is missing its stamped matmul.");
+                }
+                diagnostic = step.matmul->packedRowConsumerDiagnostic();
+            } else if (step.kind == StampedExecutionStage::Kind::RmsNorm) {
+                if (!step.rms_norm) {
+                    throw std::runtime_error("RMSNorm execution stage is missing its stamped RMSNorm.");
+                }
+                diagnostic = step.rms_norm->packedRowConsumerDiagnostic();
+            }
+            if (diagnostic.has_value()) {
+                diagnostic->stage_index = static_cast<uint32_t>(stage_index);
+                out.push_back(diagnostic.value());
+            }
         }
         return out;
     }

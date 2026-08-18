@@ -190,7 +190,10 @@ def _assert_snapshots_close(lhs, rhs, *, rtol=2e-2, atol=2e-2):
             lhs_values, lhs_offsets = lhs[name]
             rhs_values, rhs_offsets = rhs[name]
             np.testing.assert_array_equal(lhs_offsets, rhs_offsets)
-            np.testing.assert_allclose(lhs_values, rhs_values, rtol=rtol, atol=atol, err_msg=name)
+            active = int(lhs_offsets[-1])
+            np.testing.assert_allclose(
+                lhs_values[:active], rhs_values[:active], rtol=rtol, atol=atol, err_msg=name
+            )
         else:
             np.testing.assert_allclose(lhs[name], rhs[name], rtol=rtol, atol=atol, err_msg=name)
 
@@ -273,10 +276,14 @@ def test_combined_ragged_transformer_placed_save_load_preserves_numerical_behavi
     short_positive = _snapshot_outputs(loaded_placed.infer(short_positive_batch))
     short_negative_batch, _ = _batch_inputs(short_offsets, poison=-4096.0)
     short_negative = _snapshot_outputs(loaded_placed.infer(short_negative_batch))
+    # NaN is the strongest end-to-end check now that RaggedNetworkInput no longer
+    # canonicalizes inactive packed values before the transformer sees them.
+    short_nan_batch, _ = _batch_inputs(short_offsets, poison=np.nan)
+    short_nan = _snapshot_outputs(loaded_placed.infer(short_nan_batch))
     _assert_snapshots_close(short_positive, short_negative)
-    short_values, short_output_offsets = short_positive["encoded_history"]
+    _assert_snapshots_close(short_positive, short_nan)
+    _, short_output_offsets = short_positive["encoded_history"]
     np.testing.assert_array_equal(short_output_offsets, short_offsets)
-    np.testing.assert_allclose(short_values[int(short_offsets[-1]) :], 0.0, rtol=0, atol=0)
 
     # Reuse the same placed network with a larger partition and then return to the
     # short partition. This proves per-batch runtime state is refreshed rather than
@@ -284,9 +291,8 @@ def test_combined_ragged_transformer_placed_save_load_preserves_numerical_behavi
     long_offsets = np.array([0, 3, 6], dtype=np.uint32)
     long_batch, _ = _batch_inputs(long_offsets, poison=8192.0)
     long_snapshot = _snapshot_outputs(loaded_placed.infer(long_batch))
-    long_values, long_output_offsets = long_snapshot["encoded_history"]
+    _, long_output_offsets = long_snapshot["encoded_history"]
     np.testing.assert_array_equal(long_output_offsets, long_offsets)
-    np.testing.assert_allclose(long_values[int(long_offsets[-1]) :], 0.0, rtol=0, atol=0)
 
     short_again_batch, _ = _batch_inputs(short_offsets, poison=-16384.0)
     short_again = _snapshot_outputs(loaded_placed.infer(short_again_batch))

@@ -135,11 +135,6 @@ class CustomLayer : public TrainableLayer {
                 std::set<std::string> trustedReservedInputNames);
 
     void compileImpl() override;
-    // Narrow execution hooks for expression-backed specializations that need to maintain
-    // structural tensor metadata/canonical padding around the regular Expression plan.
-    virtual void beforeForwardExpressionRun(uint32_t connectionNumber, Stream& stream) { (void)connectionNumber; (void)stream; }
-    virtual void afterForwardExpressionRun(uint32_t connectionNumber, Stream& stream) { (void)connectionNumber; (void)stream; }
-    virtual void afterBackwardErrorExpressionRun(uint32_t connectionNumber, Stream& stream) { (void)connectionNumber; (void)stream; }
     PhysicalParameter::StorageContext buildParameterStorageContext() const override;
     void pruneUpstreamErrorOutputsForApplication(uint32_t applicationIndex);
     void setActiveTrainingExecutionVariant(DynamicExpressionVariantId variantId);

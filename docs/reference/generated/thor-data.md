@@ -5,7 +5,7 @@
 Public API metadata source: **python __all__**.
 
 !!! info "Native signature metadata pending"
-    25 public symbols are known from the Python namespace but cannot yet be rendered without generated native `.pyi` metadata. The page will expand automatically when that snapshot is present.
+    27 public symbols are known from the Python namespace but cannot yet be rendered without generated native `.pyi` metadata. The page will expand automatically when that snapshot is present.
 
 ::: thor.data.StratificationMode
 

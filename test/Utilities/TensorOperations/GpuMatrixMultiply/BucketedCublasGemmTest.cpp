@@ -68,6 +68,7 @@ TEST(BucketedCublasGemm, RowsABindingUsesSelectedCachedDescriptorAgainstFullCapa
                                                         CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP32));
 
     EXPECT_EQ(gemm.getCapacityBuckets(), (std::vector<uint64_t>{8, 16, 32, 66}));
+    EXPECT_EQ(gemm.getSelectedCapacityRows(0), 8U);
     EXPECT_EQ(gemm.getSelectedCapacityRows(7), 8U);
     EXPECT_EQ(gemm.getSelectedCapacityRows(9), 16U);
     EXPECT_EQ(gemm.getSelectedCapacityRows(20), 32U);

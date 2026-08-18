@@ -13,6 +13,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/RaggedTestUtils.h"
 
 #include <cuda_bf16.h>
 #include "cuda_fp16.h"
@@ -336,7 +337,10 @@ vector<float> runForwardWithRaggedRowPartitionRuntime(Impl::NetworkInput& physic
 
     const uint64_t maxTotalValues = physicalInput.getFeatureOutput()->getDimensions().front();
 
-    physicalInput.forwardRaggedValues(featureInHost, false, activeRows, batchSize);
+    // Keep the packed values payload untouched so poison in inactive capacity
+    // reaches Attention. The row-partition edge separately publishes the host
+    // active-row count required by host-dispatched packed consumers.
+    physicalInput.forward(featureInHost, false, batchSize);
     forwardPhysicalRowPartitionOffsets(
         physicalRaggedOffsetsInput, raggedOffsetsHost, batchSize, maxTotalValues, activeRows);
     Event featureOutReadyEvent = physicalOutput.getOutputReadyEvent();
@@ -1074,6 +1078,252 @@ struct ResidualAttentionTrainingResult {
     vector<float> upstreamGradient;
 };
 
+struct RaggedAttentionPoisonTrainingResult {
+    vector<float> outputActive;
+    vector<float> queryGradientActive;
+    optional<vector<float>> contextGradient;
+    unordered_map<string, vector<float>> parametersAfter;
+};
+
+RaggedAttentionPoisonTrainingResult runRaggedQueryAttentionPoisonTrainingCase(
+    const string& networkName,
+    bool denseContext,
+    ThorTest::RaggedInactivePoison inputPoison,
+    ThorTest::RaggedInactivePoison upstreamPoison) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t queryCapacity = 8;
+    constexpr uint64_t activeQueryRows = 5;
+    constexpr uint64_t contextLength = 4;
+    constexpr uint32_t features = 16;
+    const DataType dataType = DataType::FP16;
+
+    shared_ptr<Api::Sgd> sgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+
+    Api::Network network(networkName);
+    Api::RaggedTensor query = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("query")
+                                  .valuesDataType(dataType)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({features})
+                                  .maxTotalValues(queryCapacity)
+                                  .batchSize(batchSize)
+                                  .build();
+    Api::GradientRivet queryRivet =
+        Api::GradientRivet::Builder().network(network).tensor(query.getValues()).build();
+    Api::RaggedTensor queryForAttention(queryRivet.getFeatureOutput().value(), query.getOffsets());
+
+    optional<Api::NetworkInput> context;
+    optional<Api::GradientRivet> contextRivet;
+    if (denseContext) {
+        context = Api::NetworkInput::Builder()
+                      .network(network)
+                      .name("context")
+                      .dimensions({contextLength, features})
+                      .dataType(dataType)
+                      .build();
+        contextRivet = Api::GradientRivet::Builder()
+                           .network(network)
+                           .tensor(context->getFeatureOutput().value())
+                           .build();
+    }
+
+    Api::Attention::Builder builder;
+    builder.network(network)
+        .featureInput(queryForAttention)
+        .numHeads(1)
+        .headDim(features)
+        .valueDim(features)
+        .outputFeatures(features)
+        .hasBias(false)
+        .dropoutProbability(0.0f)
+        .weightsDataType(dataType)
+        .computeDataType(DataType::FP32)
+        .outputDataType(dataType)
+        .optimizer(sgd);
+    if (denseContext) builder.contextInput(contextRivet->getFeatureOutput().value());
+    Api::Attention attention = builder.build();
+    if (!attention.getRaggedFeatureOutput().has_value()) {
+        throw runtime_error("Ragged Attention poison training case expected a ragged output.");
+    }
+
+    Api::GradientRivet outputRivet = Api::GradientRivet::Builder()
+                                         .network(network)
+                                         .tensor(attention.getRaggedFeatureOutput()->getValues())
+                                         .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    if (placed == nullptr) throw runtime_error("Ragged Attention poison training case failed to place network.");
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+
+    auto queryValuesInput = stamped.getNamedInput("query.values");
+    auto queryOffsetsInput = stamped.getNamedInput("query.offsets");
+    auto physicalContext = denseContext ? stamped.getNamedInput("context") : nullptr;
+    auto physicalAttention =
+        dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
+    auto physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
+    if (queryValuesInput == nullptr || queryOffsetsInput == nullptr || physicalAttention == nullptr ||
+        physicalOutput == nullptr || (denseContext && physicalContext == nullptr)) {
+        throw runtime_error("Ragged Attention poison training case failed to resolve physical layers.");
+    }
+
+    Stream stream = physicalAttention->getStreams()[0];
+    if (!physicalAttention->getGradientUpdateStream().has_value()) {
+        throw runtime_error("Ragged Attention poison training case requires a gradient update stream.");
+    }
+    Stream gradientStream = physicalAttention->getGradientUpdateStream().value();
+    for (const string& parameterName : physicalAttention->listParameters()) {
+        const shared_ptr<Impl::PhysicalParameter> parameter = physicalAttention->getParameter(parameterName);
+        if (parameter == nullptr || !parameter->getStorage().has_value()) {
+            throw runtime_error("Ragged Attention poison training case encountered an unbacked parameter.");
+        }
+        setParameterTensor(parameter,
+                           deterministicValues(tensorNumel(parameter->getStorage().value()),
+                                               0.04f,
+                                               deterministicParameterPhase(parameterName)),
+                           stream);
+    }
+    stream.synchronize();
+
+    vector<float> queryValues(queryCapacity * features, 0.0f);
+    for (uint64_t row = 0; row < activeQueryRows; ++row) {
+        for (uint32_t feature = 0; feature < features; ++feature) {
+            queryValues[row * features + feature] =
+                0.02f * static_cast<float>(1 + row * features + feature);
+        }
+    }
+    ThorTest::poisonInactiveRows(queryValues, activeQueryRows, features, inputPoison);
+    Impl::Tensor queryValuesHost(cpuPlacement, Impl::TensorDescriptor(dataType, {queryCapacity, features}));
+    writeCpuTensor(queryValuesHost, queryValues);
+    Impl::Tensor queryOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    writeCpuUint32Tensor(queryOffsetsHost, {0U, 2U, static_cast<uint32_t>(activeQueryRows)});
+
+    optional<Impl::Tensor> contextHost;
+    if (denseContext) {
+        vector<float> contextValues(batchSize * contextLength * features, 0.0f);
+        for (uint64_t i = 0; i < contextValues.size(); ++i) {
+            contextValues[i] = 0.015f * static_cast<float>(1 + i);
+        }
+        contextHost.emplace(cpuPlacement,
+                            Impl::TensorDescriptor(dataType, {batchSize, contextLength, features}));
+        writeCpuTensor(contextHost.value(), contextValues);
+    }
+
+    queryValuesInput->forward(queryValuesHost, false, batchSize);
+    forwardPhysicalRowPartitionOffsets(
+        *queryOffsetsInput, queryOffsetsHost, batchSize, queryCapacity, activeQueryRows);
+    if (denseContext) physicalContext->forward(contextHost.value(), false, batchSize);
+    physicalOutput->getOutputReadyEvent().synchronize();
+
+    RaggedAttentionPoisonTrainingResult result;
+    const vector<float> outputValues = readCpuTensor(physicalOutput->getFeatureOutput().value());
+    result.outputActive.assign(outputValues.begin(), outputValues.begin() + activeQueryRows * features);
+
+    if (physicalAttention->getErrorInputs().size() != 1U ||
+        !physicalAttention->getErrorInputs().front().has_value()) {
+        throw runtime_error("Ragged Attention poison training case expected one downstream error input.");
+    }
+    Impl::Tensor errorInput = physicalAttention->getErrorInputs().front().value();
+    vector<float> upstreamGradient(queryCapacity * features, 0.0f);
+    for (uint64_t i = 0; i < activeQueryRows * features; ++i) {
+        upstreamGradient[i] = 0.01f * static_cast<float>(1 + (i % features));
+    }
+    ThorTest::poisonInactiveRows(upstreamGradient, activeQueryRows, features, upstreamPoison);
+    Impl::Tensor errorInputHost(cpuPlacement, errorInput.getDescriptor());
+    writeCpuTensor(errorInputHost, upstreamGradient);
+    errorInput.copyFromAsync(errorInputHost, stream);
+    physicalAttention->backward(errorInput, batchSize);
+
+    // CustomLayer errorOutputs is indexed by input port, including structural
+    // inputs such as ragged row partitions.  Those structural ports do not
+    // produce gradients, so count allocated tensors rather than assuming the
+    // vector size equals the number of differentiable inputs.
+    const vector<optional<Impl::Tensor>> errorOutputs = physicalAttention->getErrorOutputs();
+    const size_t expectedGradientOutputs = denseContext ? 2U : 1U;
+    const size_t actualGradientOutputs =
+        static_cast<size_t>(std::count_if(errorOutputs.begin(), errorOutputs.end(), [](const auto& errorOutput) {
+            return errorOutput.has_value();
+        }));
+    if (actualGradientOutputs != expectedGradientOutputs) {
+        throw runtime_error("Ragged Attention poison training case produced an unexpected upstream gradient count.");
+    }
+    if (errorOutputs.empty() || !errorOutputs.at(0).has_value()) {
+        throw runtime_error("Ragged Attention poison training case did not produce a query gradient.");
+    }
+    if (denseContext && (errorOutputs.size() < 2U || !errorOutputs.at(1).has_value())) {
+        throw runtime_error("Ragged Attention poison training case did not produce a context gradient.");
+    }
+
+    const vector<float> queryGradient =
+        readCpuTensor(copyTensorToCpu(errorOutputs.at(0).value(), stream));
+    result.queryGradientActive.assign(
+        queryGradient.begin(), queryGradient.begin() + activeQueryRows * features);
+    if (denseContext) {
+        result.contextGradient =
+            readCpuTensor(copyTensorToCpu(errorOutputs.at(1).value(), stream));
+    }
+    for (const string& parameterName : physicalAttention->listParameters()) {
+        result.parametersAfter.emplace(
+            parameterName,
+            readCpuTensor(copyTensorToCpu(
+                physicalAttention->getParameter(parameterName)->getStorage().value(), gradientStream)));
+    }
+    stream.synchronize();
+    gradientStream.synchronize();
+    return result;
+}
+
+void expectRaggedAttentionPoisonTrainingInvariant(bool denseContext) {
+    const string mode = denseContext ? "ragged_query_dense_kv" : "fully_ragged_self";
+    const RaggedAttentionPoisonTrainingResult positive = runRaggedQueryAttentionPoisonTrainingCase(
+        "attention_api_cr3_" + mode + "_positive",
+        denseContext,
+        ThorTest::RaggedInactivePoison::PositiveFinite,
+        ThorTest::RaggedInactivePoison::NegativeFinite);
+    const RaggedAttentionPoisonTrainingResult negative = runRaggedQueryAttentionPoisonTrainingCase(
+        "attention_api_cr3_" + mode + "_negative",
+        denseContext,
+        ThorTest::RaggedInactivePoison::NegativeFinite,
+        ThorTest::RaggedInactivePoison::NaN);
+    const RaggedAttentionPoisonTrainingResult nan = runRaggedQueryAttentionPoisonTrainingCase(
+        "attention_api_cr3_" + mode + "_nan",
+        denseContext,
+        ThorTest::RaggedInactivePoison::NaN,
+        ThorTest::RaggedInactivePoison::PositiveFinite);
+
+    expectAllClose(negative.outputActive, positive.outputActive, 6.0e-2f, 6.0e-2f);
+    expectAllClose(nan.outputActive, positive.outputActive, 6.0e-2f, 6.0e-2f);
+    expectAllClose(negative.queryGradientActive, positive.queryGradientActive, 8.0e-2f, 8.0e-2f);
+    expectAllClose(nan.queryGradientActive, positive.queryGradientActive, 8.0e-2f, 8.0e-2f);
+
+    ASSERT_EQ(positive.contextGradient.has_value(), denseContext);
+    ASSERT_EQ(negative.contextGradient.has_value(), denseContext);
+    ASSERT_EQ(nan.contextGradient.has_value(), denseContext);
+    if (denseContext) {
+        expectAllClose(negative.contextGradient.value(), positive.contextGradient.value(), 8.0e-2f, 8.0e-2f);
+        expectAllClose(nan.contextGradient.value(), positive.contextGradient.value(), 8.0e-2f, 8.0e-2f);
+    }
+
+    ASSERT_EQ(negative.parametersAfter.size(), positive.parametersAfter.size());
+    ASSERT_EQ(nan.parametersAfter.size(), positive.parametersAfter.size());
+    for (const auto& [name, expected] : positive.parametersAfter) {
+        ASSERT_TRUE(negative.parametersAfter.contains(name));
+        ASSERT_TRUE(nan.parametersAfter.contains(name));
+        expectAllClose(negative.parametersAfter.at(name), expected, 8.0e-2f, 8.0e-2f);
+        expectAllClose(nan.parametersAfter.at(name), expected, 8.0e-2f, 8.0e-2f);
+    }
+}
+
 ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& networkName,
                                                                  bool fused,
                                                                  bool crossAttention,
@@ -1667,6 +1917,14 @@ TEST(AttentionApi, DeserializeRejectsInvalidResidualEpilogueMetadata) {
     nlohmann::json missingBinding = attention.architectureJson();
     missingBinding["epilogue_inputs"] = nlohmann::json::array();
     EXPECT_THROW(Api::Attention::deserialize(archiveReader, missingBinding, &network), std::invalid_argument);
+}
+
+TEST(AttentionApi, FullyRaggedForwardBackwardAndUpdatesIgnoreInactivePoison) {
+    expectRaggedAttentionPoisonTrainingInvariant(/*denseContext=*/false);
+}
+
+TEST(AttentionApi, RaggedQueryDenseKvForwardBackwardAndUpdatesIgnoreInactivePoison) {
+    expectRaggedAttentionPoisonTrainingInvariant(/*denseContext=*/true);
 }
 
 TEST(AttentionApi, ResidualEpilogueForwardBackwardMatchesUnfusedSelfAttention) {
@@ -2720,7 +2978,7 @@ TEST(AttentionApi, DenseQueryRaggedKvRopeMatchesUniformRaggedQueryReference) {
             queryValues[row * features + 4] = -0.5f + 0.1f * static_cast<float>(row);
         }
     }
-    std::vector<float> contextValues(contextCapacity * features, 123.0f);
+    std::vector<float> contextValues(contextCapacity * features, 0.0f);
     const std::vector<uint64_t> contextLengths{2, 3};
     uint64_t packedRow = 0;
     for (uint32_t b = 0; b < batchSize; ++b) {
@@ -2733,6 +2991,8 @@ TEST(AttentionApi, DenseQueryRaggedKvRopeMatchesUniformRaggedQueryReference) {
             contextValues[packedRow * features + 4] = 0.2f * static_cast<float>(packedRow + 1);
         }
     }
+    ThorTest::poisonInactiveRows(
+        contextValues, packedRow, features, ThorTest::RaggedInactivePoison::PositiveFinite);
 
     Impl::Tensor denseQueryHost(
         cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {batchSize, queryLength, features}));
@@ -2762,16 +3022,17 @@ TEST(AttentionApi, DenseQueryRaggedKvRopeMatchesUniformRaggedQueryReference) {
     // PlacedNetwork::infer(). Use the explicit ragged boundaries so the offsets
     // payload is materialized before its host cache is published.
     denseQueryInput->forward(denseQueryHost, false, batchSize);
-    raggedQueryValuesInput->forwardRaggedValues(
-        raggedQueryValuesHost, false, queryCapacity, batchSize);
+    raggedQueryValuesInput->forward(raggedQueryValuesHost, false, batchSize);
     forwardPhysicalRowPartitionOffsets(
         *raggedQueryOffsetsInput,
         raggedQueryOffsetsHost,
         batchSize,
         queryCapacity,
         queryCapacity);
+    const uint64_t contextActiveRows = contextLengths[0] + contextLengths[1];
     contextValuesInput->forward(contextValuesHost, false, batchSize);
-    contextOffsetsInput->forward(contextOffsetsHost, false, batchSize);
+    forwardPhysicalRowPartitionOffsets(
+        *contextOffsetsInput, contextOffsetsHost, batchSize, contextCapacity, contextActiveRows);
     raggedQueryOriginsInput->forward(raggedQueryOriginsHost, false, batchSize);
     keyOriginsInput->forward(keyOriginsHost, false, batchSize);
     physicalMixedOutput->getOutputReadyEvent().synchronize();
@@ -2937,7 +3198,7 @@ TEST(AttentionApi, DenseQueryRaggedKvMatchesRightAlignedPaddedMaskedReference) {
     // [0, historyExtent), and a dense additive mask excludes the left padding. Padding values
     // are deliberately large so any mask regression becomes numerically obvious.
     std::vector<float> paddedContextValues(batchSize * historyExtent * features, 256.0f);
-    std::vector<float> raggedContextValues(raggedHistoryCapacity * features, -512.0f);
+    std::vector<float> raggedContextValues(raggedHistoryCapacity * features, 0.0f);
     uint64_t packedRow = 0;
     for (uint32_t b = 0; b < batchSize; ++b) {
         const uint64_t firstValid = historyExtent - historyLengths[b];
@@ -2957,6 +3218,8 @@ TEST(AttentionApi, DenseQueryRaggedKvMatchesRightAlignedPaddedMaskedReference) {
         }
     }
     ASSERT_EQ(packedRow, historyLengths[0] + historyLengths[1]);
+    ThorTest::poisonInactiveRows(
+        raggedContextValues, packedRow, features, ThorTest::RaggedInactivePoison::NegativeFinite);
 
     std::vector<float> maskValues(batchSize * queryLength * historyExtent, 0.0f);
     for (uint32_t b = 0; b < batchSize; ++b) {
@@ -2988,8 +3251,13 @@ TEST(AttentionApi, DenseQueryRaggedKvMatchesRightAlignedPaddedMaskedReference) {
                          static_cast<int32_t>(historyExtent - historyLengths[1])});
 
     queryInput->forward(queryHost, false, batchSize);
+    const uint64_t raggedContextActiveRows = historyLengths[0] + historyLengths[1];
     raggedContextValuesInput->forward(raggedContextHost, false, batchSize);
-    raggedContextOffsetsInput->forward(raggedOffsetsHost, false, batchSize);
+    forwardPhysicalRowPartitionOffsets(*raggedContextOffsetsInput,
+                                       raggedOffsetsHost,
+                                       batchSize,
+                                       raggedHistoryCapacity,
+                                       raggedContextActiveRows);
     paddedContextInput->forward(paddedContextHost, false, batchSize);
     paddedMaskInput->forward(paddedMaskHost, false, batchSize);
     keyOriginsInput->forward(keyOriginsHost, false, batchSize);
@@ -3132,7 +3400,7 @@ TEST(AttentionApi, RaggedQueryDenseKvMatchesRightAlignedPaddedQueryReference) {
     stream.synchronize();
 
     std::vector<float> paddedQueryValues(batchSize * queryExtent * features, 384.0f);
-    std::vector<float> raggedQueryValues(raggedQueryCapacity * features, -640.0f);
+    std::vector<float> raggedQueryValues(raggedQueryCapacity * features, 0.0f);
     uint64_t packedRow = 0;
     for (uint32_t b = 0; b < batchSize; ++b) {
         const uint64_t firstValid = queryExtent - queryLengths[b];
@@ -3154,6 +3422,8 @@ TEST(AttentionApi, RaggedQueryDenseKvMatchesRightAlignedPaddedQueryReference) {
         }
     }
     ASSERT_EQ(packedRow, queryLengths[0] + queryLengths[1]);
+    ThorTest::poisonInactiveRows(
+        raggedQueryValues, packedRow, features, ThorTest::RaggedInactivePoison::NaN);
 
     std::vector<float> contextValues(batchSize * keyValueLength * features, 0.0f);
     for (uint32_t b = 0; b < batchSize; ++b) {
@@ -3185,8 +3455,7 @@ TEST(AttentionApi, RaggedQueryDenseKvMatchesRightAlignedPaddedQueryReference) {
                          static_cast<int32_t>(queryExtent - queryLengths[1])});
 
     const uint64_t activeQueryRows = queryLengths[0] + queryLengths[1];
-    raggedQueryValuesInput->forwardRaggedValues(
-        raggedQueryHost, false, activeQueryRows, batchSize);
+    raggedQueryValuesInput->forward(raggedQueryHost, false, batchSize);
     forwardPhysicalRowPartitionOffsets(
         *raggedQueryOffsetsInput,
         raggedOffsetsHost,
@@ -3550,6 +3819,10 @@ TEST(AttentionApi, RaggedCrossAttentionRopePerRowOriginsExecuteWithIndependentPa
         // visibly change when the Q origin moves relative to the two key positions.
         contextValues[second * features + 1] = 4.0f;
     }
+    ThorTest::poisonInactiveRows(
+        queryValues, /*activeRows=*/2, features, ThorTest::RaggedInactivePoison::NegativeFinite);
+    ThorTest::poisonInactiveRows(
+        contextValues, /*activeRows=*/4, features, ThorTest::RaggedInactivePoison::NaN);
 
     Impl::Tensor queryValuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {queryCapacity, features}));
     Impl::Tensor contextValuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {keyCapacity, features}));
@@ -3566,7 +3839,7 @@ TEST(AttentionApi, RaggedCrossAttentionRopePerRowOriginsExecuteWithIndependentPa
                               const std::vector<int32_t>& keyOriginValues) -> std::vector<float> {
         writeCpuInt32Tensor(queryOriginsHost, queryOriginValues);
         writeCpuInt32Tensor(keyOriginsHost, keyOriginValues);
-        queryValuesInput->forwardRaggedValues(queryValuesHost, false, /*activeValueCount=*/2, batchSize);
+        queryValuesInput->forward(queryValuesHost, false, batchSize);
         contextValuesInput->forward(contextValuesHost, false, batchSize);
         forwardPhysicalRowPartitionOffsets(
             *queryOffsetsInput,
@@ -3574,7 +3847,12 @@ TEST(AttentionApi, RaggedCrossAttentionRopePerRowOriginsExecuteWithIndependentPa
             batchSize,
             queryCapacity,
             /*activeRows=*/2);
-        contextOffsetsInput->forward(contextOffsetsHost, false, batchSize);
+        forwardPhysicalRowPartitionOffsets(
+            *contextOffsetsInput,
+            contextOffsetsHost,
+            batchSize,
+            keyCapacity,
+            /*activeRows=*/4);
         queryOriginsInput->forward(queryOriginsHost, false, batchSize);
         keyOriginsInput->forward(keyOriginsHost, false, batchSize);
         Event ready = physicalOutput->getOutputReadyEvent();
@@ -3693,6 +3971,11 @@ TEST(AttentionApi, ForwardWithCanonicalRaggedTensorMatchesPackedReference) {
     AttentionReferenceInputs packedInputs = denseInputs;
     packedInputs.featureInput =
         packBsfRaggedStorage(denseInputs.featureInput, c.sequenceLengths, c.batchSize, c.sequenceLength, c.inputFeatures);
+    ThorTest::poisonInactiveRows(
+        packedInputs.featureInput,
+        static_cast<uint64_t>(c.sequenceLengths[0] + c.sequenceLengths[1]),
+        c.inputFeatures,
+        ThorTest::RaggedInactivePoison::NaN);
     const vector<float> expectedDense = attentionLayerReference(denseInputs, c);
     const vector<float> expectedPacked =
         packBsfRaggedStorage(expectedDense, c.sequenceLengths, c.batchSize, c.sequenceLength, c.outputFeatures);
@@ -3834,11 +4117,8 @@ TEST(AttentionApi, RaggedAttentionResidualAddUsesOffsetsRuntimeWithoutValuesMeta
             packed[row * features + column] = 0.01f * static_cast<float>(1 + row * features + column);
         }
     }
-    for (uint64_t row = activeRows; row < maxTotalValues; ++row) {
-        for (uint32_t column = 0; column < features; ++column) {
-            packed[row * features + column] = 4096.0f;
-        }
-    }
+    ThorTest::poisonInactiveRows(
+        packed, activeRows, features, ThorTest::RaggedInactivePoison::NaN);
 
     Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {maxTotalValues, features}));
     writeCpuTensor(featureInHost, packed);
@@ -3866,12 +4146,10 @@ TEST(AttentionApi, RaggedAttentionResidualAddUsesOffsetsRuntimeWithoutValuesMeta
             .getHostActiveValueCountIfAvailable();
     ASSERT_EQ(placedActiveRows, std::optional<uint64_t>(activeRows));
 
-    // Drive the physical graph directly without any values-owned metadata.
-    // The dedicated ragged NetworkInput boundaries canonicalize the values tail
-    // and publish the offsets-owned host cache only after the offsets payload is
-    // materialized. Attention and the downstream ragged Add must both obtain
-    // their extent solely from that shared row-partition runtime.
-    physicalValuesInput->forwardRaggedValues(featureInHost, false, activeRows, batchSize);
+    // Drive the physical graph directly without any values-owned metadata. The
+    // row partition is the logical boundary; no assertion below assigns semantics
+    // to storage beyond offsets[B].
+    physicalValuesInput->forward(featureInHost, false, batchSize);
     forwardPhysicalRowPartitionOffsets(
         *physicalOffsetsInput,
         offsetsHost,
@@ -3886,8 +4164,8 @@ TEST(AttentionApi, RaggedAttentionResidualAddUsesOffsetsRuntimeWithoutValuesMeta
 
     const vector<float> actual = readCpuTensor(physicalOutput->getFeatureOutput().value());
     ASSERT_EQ(actual.size(), maxTotalValues * features);
-    for (uint64_t i = activeRows * features; i < actual.size(); ++i) {
-        EXPECT_EQ(actual[i], 0.0f) << "inactive packed tail index " << i;
+    for (uint64_t i = 0; i < activeRows * features; ++i) {
+        EXPECT_TRUE(std::isfinite(actual[i])) << "logical packed output index " << i;
     }
 }
 
@@ -3978,6 +4256,19 @@ TEST(AttentionApi, RaggedDynamicNtkUsesLongestLogicalRowNotPackedCapacity) {
 
     Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(c.dataType, {maxTotalValues, c.inputFeatures}));
     writeCpuTensor(featureInHost, packedInputs.featureInput);
+    // Prime the reusable RoPE position-id storage through the full packed capacity.
+    // The following short logical batch deliberately leaves those larger position ids
+    // in inactive storage. Dynamic-NTK must derive its effective length from the row
+    // partition rather than from a full-capacity reduction over stale producer bytes.
+    Impl::Tensor fullOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT64, {c.batchSize + 1}));
+    writeCpuUint64Tensor(fullOffsetsHost, {0ULL, c.sequenceLength, maxTotalValues});
+    (void)runForwardWithRaggedRowPartitionRuntime(*fixture.physicalInput,
+                                                  *physicalRaggedOffsetsInput,
+                                                  *fixture.physicalOutput,
+                                                  featureInHost,
+                                                  fullOffsetsHost,
+                                                  c.batchSize);
+
     const vector<uint32_t> offsets32 = canonicalRaggedRowOffsets(c.sequenceLengths);
     const vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
     Impl::Tensor raggedOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT64, {c.batchSize + 1}));

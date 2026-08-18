@@ -1303,9 +1303,14 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
         }
     }
 
-    return std::make_shared<StampedExecutionPlan>(
+    auto backwardPlan = std::make_shared<StampedExecutionPlan>(
         backwardEquation.stamp(
             stampInputs, runStream, app.forwardPrepared->tensorScalarInputsForVariant(variantId), preallocatedGradOutputs));
+    StampedExecutionVariant& variant = stampedVariant(applicationIndex, variantId);
+    if (variant.forward != nullptr) {
+        backwardPlan->linkRmsNormBackwardStatesFrom(*variant.forward);
+    }
+    return backwardPlan;
 }
 
 std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan(
@@ -1417,8 +1422,12 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
     PhysicalOutputs physicalOutputs = outputs.physicalOutputs();
     PreparedDynamicExpression::TensorMap filteredStampInputs = filterTensorInputsForPhysicalOutputs(stampInputs, physicalOutputs);
     FusedEquation fusedUpdateEquation = FusedEquation::compile(physicalOutputs, placement.getDeviceNum());
-    return std::make_shared<StampedExecutionPlan>(
+    auto fusedUpdatePlan = std::make_shared<StampedExecutionPlan>(
         fusedUpdateEquation.stamp(filteredStampInputs, gradientUpdateStream.value(), {}, preallocatedOutputs));
+    if (variant.forward != nullptr) {
+        fusedUpdatePlan->linkRmsNormBackwardStatesFrom(*variant.forward);
+    }
+    return fusedUpdatePlan;
 }
 
 const std::unordered_map<std::string, float>& CustomLayer::updateFusedOptimizerRuntimeScalars(
@@ -2916,7 +2925,6 @@ void CustomLayer::computeFeatureOutForPass(uint32_t connectionNumber, bool valid
     const std::function<void(Stream&)>& preRunHook = variant.preForwardHook;
     StampedExecutionPlan& executionPlan = *variant.forward;
 
-    beforeForwardExpressionRun(connectionNumber, computeStream(decoded.applicationIndex));
     if (preRunHook) {
         const auto preRunStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         preRunHook(computeStream(decoded.applicationIndex));
@@ -2926,7 +2934,6 @@ void CustomLayer::computeFeatureOutForPass(uint32_t connectionNumber, bool valid
     }
     const auto runStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
     executionPlan.run();
-    afterForwardExpressionRun(connectionNumber, computeStream(decoded.applicationIndex));
     if (emitDiagnostics) {
         runMicros = layerSubmitDiagnosticElapsedMicros(runStart, layerSubmitDiagnosticNow());
         emitLayerSubmitDiagnostic("custom_forward_compute",
@@ -2966,7 +2973,6 @@ std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
     }
     const auto runStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
     variant.backwardError->run();
-    afterBackwardErrorExpressionRun(connectionNumber, computeStream(decoded.applicationIndex));
     if (emitDiagnostics) {
         runMicros = layerSubmitDiagnosticElapsedMicros(runStart, layerSubmitDiagnosticNow());
     }

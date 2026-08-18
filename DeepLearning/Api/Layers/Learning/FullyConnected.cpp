@@ -422,6 +422,35 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
             // The API layer's declared output tensor dtype is authoritative.
             fout = fout.withOutputDType(outputDataType);
 
+            if (rowPartitionTensor.has_value()) {
+                // MATMUL consumes the input-side extent for bucket dispatch. Re-attach
+                // the same logical row partition to the public FC result so valuewise
+                // epilogues and autodiff (notably db broadcast reduction) remain
+                // active-aware without requiring producer-side tail canonicalization.
+                if (!packedRowCapacity.has_value() || runtimeFeatureOutputDimensions.empty() ||
+                    runtimeFeatureOutputDimensions[0] != packedRowCapacity.value()) {
+                    throw std::runtime_error(
+                        "Ragged FullyConnected output geometry does not match its packed row capacity.");
+                }
+                uint64_t outputElementsPerPackedValue = 1;
+                for (size_t axis = 1; axis < runtimeFeatureOutputDimensions.size(); ++axis) {
+                    if (runtimeFeatureOutputDimensions[axis] == 0 ||
+                        outputElementsPerPackedValue >
+                            std::numeric_limits<uint64_t>::max() / runtimeFeatureOutputDimensions[axis]) {
+                        throw std::runtime_error("Ragged FullyConnected output row width overflows uint64_t.");
+                    }
+                    outputElementsPerPackedValue *= runtimeFeatureOutputDimensions[axis];
+                }
+                const ThorImplementation::TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
+                Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
+                                                       offsetsDescriptor.getDataType(),
+                                                       offsetsDescriptor.getDataType());
+                fout = fout.withRaggedRuntimeExtent(offsets,
+                                                    offsetsDescriptor.getDimensions()[0] - 1,
+                                                    packedRowCapacity.value(),
+                                                    outputElementsPerPackedValue);
+            }
+
             auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
 
             DynamicExpression::TensorMap stampInputs = inputs;
@@ -958,11 +987,6 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
                 {}),
             placement,
             physicalParameters,
-            inputDimensions[1],
-            numOutputFeatures,
-            inputDimensions[0],
-            raggedFeatureInputs.front().getValuesDataType(),
-            outputDataType,
             inferenceOnly,
             getId());
         physicalFullyConnected->setLayerName(getLayerType() + "#" + std::to_string(getId()));

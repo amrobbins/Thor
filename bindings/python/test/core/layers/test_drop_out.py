@@ -148,10 +148,8 @@ def test_ragged_dropout_inference_is_identity_on_active_prefix_and_survives_save
 
     placed = n.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     result = placed.infer({"tokens": physical})["output"]
-    expected = values_np.copy()
-    expected[4:] = 0.0
     assert np.array_equal(result.offsets.numpy(), offsets_np)
-    np.testing.assert_allclose(result.values.numpy(), expected, rtol=0, atol=0)
+    np.testing.assert_allclose(result.values.numpy()[: offsets_np[-1]], values_np[: offsets_np[-1]], rtol=0, atol=0)
 
     save_dir = tmp_path / "model"
     n.save(str(save_dir), overwrite=False)
@@ -160,4 +158,6 @@ def test_ragged_dropout_inference_is_identity_on_active_prefix_and_survives_save
     loaded_placed = loaded.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
     reloaded = loaded_placed.infer({"tokens": physical})["output"]
     assert np.array_equal(reloaded.offsets.numpy(), offsets_np)
-    np.testing.assert_allclose(reloaded.values.numpy(), expected, rtol=0, atol=0)
+    np.testing.assert_allclose(
+        reloaded.values.numpy()[: offsets_np[-1]], values_np[: offsets_np[-1]], rtol=0, atol=0
+    )

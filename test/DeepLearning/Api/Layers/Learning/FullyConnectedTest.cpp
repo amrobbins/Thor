@@ -2,17 +2,21 @@
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Adam.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/RaggedFullyConnected.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "test/DeepLearning/RaggedTestUtils.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/RaggedMatmulCapacityBuckets.h"
 
 #include <regex>
 #include "cuda_bf16.h"
@@ -682,10 +686,115 @@ TEST(FullyConnectedApi, RaggedArchitectureSaveLoadRoundTripPreservesRowPartition
     std::filesystem::remove_all(archiveDir);
 }
 
-TEST(FullyConnectedApi, RaggedForwardBackwardUsesCapacityBucketAndIgnoresInvalidTail) {
+TEST(FullyConnectedApi, RaggedDropOutToFcLeavesInactiveCapacityToTheFcConsumer) {
+    constexpr uint32_t logicalBatchSize = 2;
+    constexpr uint64_t fullRows = 100;
+    constexpr uint64_t activeRows = 9;
+    constexpr uint64_t inputFeatures = 4;
+    constexpr uint64_t outputFeatures = 3;
+
+    Api::Network network("ragged_dropout_to_fc_consumer_responsibility");
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({inputFeatures})
+                                  .maxTotalValues(fullRows)
+                                  .batchSize(logicalBatchSize)
+                                  .build();
+    Api::DropOut dropOut =
+        Api::DropOut::Builder().network(network).featureInput(input).dropProportion(0.5f).build();
+    ASSERT_TRUE(dropOut.getRaggedFeatureOutput().has_value());
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(dropOut.getRaggedFeatureOutput().value())
+                                 .numOutputFeatures(outputFeatures)
+                                 .hasBias(false)
+                                 .weightsDataType(DataType::FP32)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(DataType::FP32)
+                                 .noActivation()
+                                 .build();
+    ASSERT_TRUE(fc.getRaggedFeatureOutput().has_value());
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(fc.getRaggedFeatureOutput()->getValues())
+                                    .dataType(DataType::FP32)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed =
+        network.place(logicalBatchSize, initDoneEvents, /*inferenceOnly=*/true);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+    auto physicalValuesInput = stamped.getNamedInput("tokens.values");
+    auto physicalOffsetsInput = stamped.getNamedInput("tokens.offsets");
+    auto physicalDropOut =
+        dynamic_pointer_cast<Impl::DropOut>(stamped.getPhysicalLayerFromApiLayer(dropOut.getId()));
+    auto physicalFc =
+        dynamic_pointer_cast<Impl::RaggedFullyConnected>(stamped.getPhysicalLayerFromApiLayer(fc.getId()));
+    auto physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
+    ASSERT_NE(physicalValuesInput, nullptr);
+    ASSERT_NE(physicalOffsetsInput, nullptr);
+    ASSERT_NE(physicalDropOut, nullptr);
+    ASSERT_NE(physicalFc, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_TRUE(physicalDropOut->getFeatureInput().has_value());
+    ASSERT_TRUE(physicalDropOut->getFeatureOutput().has_value());
+    EXPECT_EQ(physicalDropOut->getFeatureInput().value(), physicalDropOut->getFeatureOutput().value())
+        << "inference DropOut should be an identity alias and must not canonicalize ragged capacity";
+
+    vector<float> values(fullRows * inputFeatures, 0.0f);
+    for (uint64_t row = 0; row < activeRows; ++row) {
+        for (uint64_t col = 0; col < inputFeatures; ++col) {
+            values[row * inputFeatures + col] = 0.05f * static_cast<float>(1 + row * inputFeatures + col);
+        }
+    }
+    ThorTest::poisonInactiveRows(values, activeRows, inputFeatures, ThorTest::RaggedInactivePoison::NaN);
+    Impl::Tensor valuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {fullRows, inputFeatures}));
+    writeCpuTensor(valuesHost, values);
+    Impl::Tensor offsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {logicalBatchSize + 1}));
+    offsetsHost.getMemPtr<uint32_t>()[0] = 0;
+    offsetsHost.getMemPtr<uint32_t>()[1] = 4;
+    offsetsHost.getMemPtr<uint32_t>()[2] = static_cast<uint32_t>(activeRows);
+
+    physicalOffsetsInput->forwardRowPartitionOffsets(offsetsHost,
+                                                     /*validationPass=*/false,
+                                                     Impl::RowPartitionDescriptor(logicalBatchSize, fullRows, DataType::UINT32),
+                                                     activeRows,
+                                                     logicalBatchSize);
+    physicalValuesInput->forward(valuesHost, false, logicalBatchSize);
+    physicalOutput->getOutputReadyEvent().synchronize();
+
+    const uint64_t selectedRows = Impl::chooseRaggedMatmulCapacityBucket(
+        activeRows, Impl::makeRaggedMatmulCapacityBuckets(fullRows));
+    ASSERT_EQ(selectedRows, 16u);
+    ASSERT_FALSE(physicalFc->getFeatureInputs().empty());
+    ASSERT_TRUE(physicalFc->getFeatureInputs()[0].has_value());
+    Stream stream = physicalFc->getStreams()[0];
+    const vector<float> consumed =
+        readCpuTensor(copyTensorToCpu(physicalFc->getFeatureInputs()[0].value(), stream));
+    for (uint64_t row = activeRows; row < selectedRows; ++row) {
+        for (uint64_t col = 0; col < inputFeatures; ++col) {
+            EXPECT_EQ(consumed[row * inputFeatures + col], 0.0f)
+                << "FC did not sanitize the exact bucket slack it physically reads";
+        }
+    }
+    for (uint64_t row = selectedRows; row < fullRows; ++row) {
+        for (uint64_t col = 0; col < inputFeatures; ++col) {
+            EXPECT_TRUE(std::isnan(consumed[row * inputFeatures + col]))
+                << "DropOut or FC canonicalized storage beyond the selected FC bucket";
+        }
+    }
+}
+
+TEST(FullyConnectedApi, RaggedForwardBackwardSanitizesOnlySelectedConsumerBucketSlack) {
     constexpr uint32_t logicalBatchSize = 2;
     constexpr uint64_t fullRows = 66;
-    constexpr uint64_t activeRows = 31;
     constexpr uint64_t inputFeatures = 3;
     constexpr uint64_t outputFeatures = 2;
     const DataType dataType = DataType::FP32;
@@ -732,152 +841,182 @@ TEST(FullyConnectedApi, RaggedForwardBackwardUsesCapacityBucketAndIgnoresInvalid
 
     PlacedRaggedFullyConnectedFixture fixture =
         placeSingleRaggedFullyConnectedNetwork(network, output, fc, "tokens", logicalBatchSize, false);
-    ASSERT_EQ(fixture.physicalFc->selectedCapacityRows(7), 8u);
-    ASSERT_EQ(fixture.physicalFc->selectedCapacityRows(9), 16u);
-    ASSERT_EQ(fixture.physicalFc->selectedCapacityRows(activeRows), 32u);
-    ASSERT_EQ(fixture.physicalFc->selectedCapacityRows(33), 66u);
+    const vector<uint64_t> capacityBuckets = Impl::makeRaggedMatmulCapacityBuckets(fullRows);
+    auto selectedCapacityRows = [&](uint64_t activeRows) {
+        return Impl::chooseRaggedMatmulCapacityBucket(activeRows, capacityBuckets);
+    };
+    ASSERT_EQ(selectedCapacityRows(7), 8u);
+    ASSERT_EQ(selectedCapacityRows(9), 16u);
+    ASSERT_EQ(selectedCapacityRows(31), 32u);
+    ASSERT_EQ(selectedCapacityRows(33), 66u);
+    ASSERT_EQ(selectedCapacityRows(fullRows), fullRows);
 
-    vector<float> weights = {0.5f, -0.25f, 1.0f, 0.75f, -0.5f, 0.125f};
-    vector<float> biases = {0.2f, -0.3f};
+    const vector<float> weights = {0.5f, -0.25f, 1.0f, 0.75f, -0.5f, 0.125f};
+    const vector<float> biases = {0.2f, -0.3f};
     Stream stream = fixture.physicalFc->getStreams()[0];
-    setParameterTensor(fixture.physicalFc->getParameter("weights"), weights, stream);
-    setParameterTensor(fixture.physicalFc->getParameter("biases"), biases, stream);
-    stream.synchronize();
-
-    vector<float> inputValues(fullRows * inputFeatures, 0.0f);
-    for (uint64_t row = 0; row < activeRows; ++row) {
-        for (uint64_t col = 0; col < inputFeatures; ++col) {
-            inputValues[row * inputFeatures + col] = static_cast<float>(static_cast<int>(row % 7) - 3) * 0.1f + static_cast<float>(col) * 0.25f;
-        }
-    }
-    for (uint64_t row = activeRows; row < fullRows; ++row) {
-        for (uint64_t col = 0; col < inputFeatures; ++col) {
-            inputValues[row * inputFeatures + col] = std::numeric_limits<float>::quiet_NaN();
-        }
-    }
-    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {fullRows, inputFeatures}));
-    writeCpuTensor(featureInHost, inputValues);
-
-    const vector<float> actualForward = runRaggedForward(
-        fixture, featureInHost, activeRows, logicalBatchSize, fullRows, DataType::UINT32);
-    ASSERT_TRUE(fixture.physicalFc->getFeatureOutputs()[0].has_value());
-    vector<float> validInput(inputValues.begin(), inputValues.begin() + activeRows * inputFeatures);
-    const vector<float> expectedForward =
-        fullyConnectedReference(validInput, weights, biases, activeRows, inputFeatures, outputFeatures, true);
-    expectAllClose(vector<float>(actualForward.begin(), actualForward.begin() + activeRows * outputFeatures),
-                   expectedForward,
-                   2e-4f,
-                   2e-4f,
-                   "ragged feature out");
-    for (uint64_t i = activeRows * outputFeatures; i < actualForward.size(); ++i) {
-        EXPECT_EQ(actualForward[i], 0.0f) << "invalid ragged FC output tail must be canonical zero";
-    }
-
-    ASSERT_GT(fixture.physicalFc->getErrorInputs().size(), 0u);
-    ASSERT_TRUE(fixture.physicalFc->getErrorInputs()[0].has_value());
-    ASSERT_GT(fixture.physicalFc->getErrorOutputs().size(), 0u);
-    ASSERT_TRUE(fixture.physicalFc->getErrorOutputs()[0].has_value());
-
-    vector<float> dYValues(fullRows * outputFeatures, 0.0f);
-    for (uint64_t row = 0; row < activeRows; ++row) {
-        for (uint64_t col = 0; col < outputFeatures; ++col) {
-            dYValues[row * outputFeatures + col] = static_cast<float>(static_cast<int>((row + 2 * col) % 9) - 4) * 0.2f;
-        }
-    }
-    for (uint64_t row = activeRows; row < fullRows; ++row) {
-        for (uint64_t col = 0; col < outputFeatures; ++col) dYValues[row * outputFeatures + col] = -2000.0f - row - col;
-    }
-
-    Impl::Tensor fcErrorInput = fixture.physicalFc->getErrorInputs()[0].value();
-    Impl::Tensor fcErrorInputHost = fcErrorInput.clone(cpuPlacement);
-    writeCpuTensor(fcErrorInputHost, dYValues);
-    fcErrorInput.copyFromAsync(fcErrorInputHost, stream);
-    fixture.physicalFc->backward(fcErrorInput, logicalBatchSize);
-
     ASSERT_TRUE(fixture.physicalFc->getGradientUpdateStream().has_value());
     Stream gradientStream = fixture.physicalFc->getGradientUpdateStream().value();
-    gradientStream.synchronize();
-    stream.synchronize();
-
-    const vector<float> validDY(dYValues.begin(), dYValues.begin() + activeRows * outputFeatures);
-    const vector<float> expectedDX =
-        fullyConnectedBackwardErrorReference(validDY, weights, activeRows, inputFeatures, outputFeatures);
-    const vector<float> expectedDW =
-        fullyConnectedWeightGradReference(validInput, validDY, activeRows, inputFeatures, outputFeatures);
-    const vector<float> expectedDB = fullyConnectedBiasGradReference(validDY, activeRows, outputFeatures);
-
-    Impl::Tensor dXHost = copyTensorToCpu(fixture.physicalFc->getErrorOutputs()[0].value(), stream);
-    const vector<float> actualDX = readCpuTensor(dXHost);
-    expectAllClose(vector<float>(actualDX.begin(), actualDX.begin() + activeRows * inputFeatures),
-                   expectedDX,
-                   2e-4f,
-                   2e-4f,
-                   "ragged dX");
-    for (uint64_t i = activeRows * inputFeatures; i < actualDX.size(); ++i) EXPECT_EQ(actualDX[i], 0.0f);
-
-    // Expression-backed FullyConnected follows the ordinary CustomLayer optimizer path. For a
-    // single-input/single-application layer with SGD, CustomLayer fuses the parameter-gradient
-    // expression directly into the optimizer update and intentionally does not allocate the
-    // optimizer-owned dense gradient tensors. Verify dW/db through the resulting SGD update
-    // rather than requiring the legacy materialized-gradient path.
-    const auto weightsGradient = fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient();
-    const auto biasesGradient = fixture.physicalFc->getParameter("biases")->getOptimizer()->getWeightsGradient();
-    EXPECT_FALSE(weightsGradient.has_value());
-    EXPECT_FALSE(biasesGradient.has_value());
 
     constexpr float learningRate = 0.001f;
     const float sgdStep =
         learningRate / (static_cast<float>(logicalBatchSize) * Impl::Loss::getLossScalingFactor());
-    vector<float> expectedUpdatedWeights = weights;
-    vector<float> expectedUpdatedBiases = biases;
-    for (uint64_t i = 0; i < expectedUpdatedWeights.size(); ++i) expectedUpdatedWeights[i] -= sgdStep * expectedDW[i];
-    for (uint64_t i = 0; i < expectedUpdatedBiases.size(); ++i) expectedUpdatedBiases[i] -= sgdStep * expectedDB[i];
 
-    const vector<float> actualUpdatedWeights = readCpuTensor(
-        copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage().value(), gradientStream));
-    const vector<float> actualUpdatedBiases = readCpuTensor(
-        copyTensorToCpu(fixture.physicalFc->getParameter("biases")->getStorage().value(), gradientStream));
-    expectAllClose(actualUpdatedWeights, expectedUpdatedWeights, 2e-4f, 2e-4f, "ragged fused-SGD dW update");
-    expectAllClose(actualUpdatedBiases, expectedUpdatedBiases, 2e-4f, 2e-4f, "ragged fused-SGD db update");
+    for (const uint64_t activeRows : vector<uint64_t>{7, 9, 31, 33, fullRows}) {
+        SCOPED_TRACE("activeRows=" + std::to_string(activeRows));
+        setParameterTensor(fixture.physicalFc->getParameter("weights"), weights, stream);
+        setParameterTensor(fixture.physicalFc->getParameter("biases"), biases, stream);
+        stream.synchronize();
 
-    // A training-mode CustomLayer executes one forward per forward/backward cycle. Validate the
-    // >32-row/full-capacity bucket only after completing the 31-row backward pass above; issuing
-    // two forwards before backward would intentionally reuse the first application state. Reset
-    // the parameters because SGD updated them during that backward pass.
-    setParameterTensor(fixture.physicalFc->getParameter("weights"), weights, stream);
-    setParameterTensor(fixture.physicalFc->getParameter("biases"), biases, stream);
-    stream.synchronize();
-
-    constexpr uint64_t aboveSmallBucketRows = 33;
-    vector<float> aboveSmallBucketInput(fullRows * inputFeatures, std::numeric_limits<float>::quiet_NaN());
-    for (uint64_t row = 0; row < aboveSmallBucketRows; ++row) {
-        for (uint64_t col = 0; col < inputFeatures; ++col) {
-            aboveSmallBucketInput[row * inputFeatures + col] =
-                static_cast<float>(static_cast<int>(row % 5) - 2) * 0.15f + static_cast<float>(col) * 0.2f;
+        vector<float> inputValues(fullRows * inputFeatures, 0.0f);
+        for (uint64_t row = 0; row < activeRows; ++row) {
+            for (uint64_t col = 0; col < inputFeatures; ++col) {
+                inputValues[row * inputFeatures + col] =
+                    static_cast<float>(static_cast<int>(row % 7) - 3) * 0.1f + static_cast<float>(col) * 0.25f;
+            }
         }
-    }
-    Impl::Tensor aboveSmallBucketHost(cpuPlacement, Impl::TensorDescriptor(dataType, {fullRows, inputFeatures}));
-    writeCpuTensor(aboveSmallBucketHost, aboveSmallBucketInput);
-    const vector<float> actualAboveSmallBucket = runRaggedForward(
-        fixture, aboveSmallBucketHost, aboveSmallBucketRows, logicalBatchSize, fullRows, DataType::UINT32);
-    vector<float> validAboveSmallBucketInput(
-        aboveSmallBucketInput.begin(), aboveSmallBucketInput.begin() + aboveSmallBucketRows * inputFeatures);
-    const vector<float> expectedAboveSmallBucket =
-        fullyConnectedReference(validAboveSmallBucketInput,
-                                weights,
-                                biases,
-                                aboveSmallBucketRows,
-                                inputFeatures,
-                                outputFeatures,
-                                true);
-    expectAllClose(vector<float>(actualAboveSmallBucket.begin(),
-                                 actualAboveSmallBucket.begin() + aboveSmallBucketRows * outputFeatures),
-                   expectedAboveSmallBucket,
-                   2e-4f,
-                   2e-4f,
-                   "ragged feature out full bucket");
-    for (uint64_t i = aboveSmallBucketRows * outputFeatures; i < actualAboveSmallBucket.size(); ++i) {
-        EXPECT_EQ(actualAboveSmallBucket[i], 0.0f);
+        ThorTest::poisonInactiveRows(
+            inputValues, activeRows, inputFeatures, ThorTest::RaggedInactivePoison::NaN);
+        const vector<float> validInput(inputValues.begin(), inputValues.begin() + activeRows * inputFeatures);
+        Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {fullRows, inputFeatures}));
+        writeCpuTensor(featureInHost, inputValues);
+
+        const uint64_t selectedRows = selectedCapacityRows(activeRows);
+        ASSERT_GT(fixture.physicalFc->getFeatureOutputs().size(), 0u);
+        ASSERT_TRUE(fixture.physicalFc->getFeatureOutputs()[0].has_value());
+        Impl::Tensor fcFeatureOutput = fixture.physicalFc->getFeatureOutputs()[0].value();
+        Impl::Tensor poisonedFeatureOutputHost = fcFeatureOutput.clone(cpuPlacement);
+        writeCpuTensor(poisonedFeatureOutputHost,
+                       vector<float>(fullRows * outputFeatures, std::numeric_limits<float>::quiet_NaN()));
+        fcFeatureOutput.copyFromAsync(poisonedFeatureOutputHost, stream);
+
+        const vector<float> actualForward = runRaggedForward(
+            fixture, featureInHost, activeRows, logicalBatchSize, fullRows, DataType::UINT32);
+        const vector<float> expectedForward =
+            fullyConnectedReference(validInput, weights, biases, activeRows, inputFeatures, outputFeatures, true);
+        expectAllClose(vector<float>(actualForward.begin(), actualForward.begin() + activeRows * outputFeatures),
+                       expectedForward,
+                       2e-4f,
+                       2e-4f,
+                       "ragged feature out");
+
+        // The bucketed forward MATMUL is the consumer. It may mutate precisely the
+        // rows it will over-read, but it must not canonicalize storage beyond the
+        // selected physical bucket.
+        ASSERT_GE(fixture.physicalFc->getFeatureInputs().size(), 1u);
+        ASSERT_TRUE(fixture.physicalFc->getFeatureInputs()[0].has_value());
+        const vector<float> consumedInput = readCpuTensor(
+            copyTensorToCpu(fixture.physicalFc->getFeatureInputs()[0].value(), stream));
+        for (uint64_t row = activeRows; row < selectedRows; ++row) {
+            for (uint64_t col = 0; col < inputFeatures; ++col) {
+                EXPECT_EQ(consumedInput[row * inputFeatures + col], 0.0f)
+                    << "forward bucket slack was not sanitized";
+            }
+        }
+        for (uint64_t row = selectedRows; row < fullRows; ++row) {
+            for (uint64_t col = 0; col < inputFeatures; ++col) {
+                EXPECT_TRUE(std::isnan(consumedInput[row * inputFeatures + col]))
+                    << "forward consumer touched storage beyond its selected bucket";
+            }
+        }
+        const vector<float> producedOutput = readCpuTensor(copyTensorToCpu(fcFeatureOutput, stream));
+        for (uint64_t row = selectedRows; row < fullRows; ++row) {
+            for (uint64_t col = 0; col < outputFeatures; ++col) {
+                EXPECT_TRUE(std::isnan(producedOutput[row * outputFeatures + col]))
+                    << "ragged FC producer canonicalized storage beyond the selected bucket";
+            }
+        }
+
+        ASSERT_GT(fixture.physicalFc->getErrorInputs().size(), 0u);
+        ASSERT_TRUE(fixture.physicalFc->getErrorInputs()[0].has_value());
+        ASSERT_GT(fixture.physicalFc->getErrorOutputs().size(), 0u);
+        ASSERT_TRUE(fixture.physicalFc->getErrorOutputs()[0].has_value());
+
+        vector<float> dYValues(fullRows * outputFeatures, 0.0f);
+        for (uint64_t row = 0; row < activeRows; ++row) {
+            for (uint64_t col = 0; col < outputFeatures; ++col) {
+                dYValues[row * outputFeatures + col] =
+                    static_cast<float>(static_cast<int>((row + 2 * col) % 9) - 4) * 0.2f;
+            }
+        }
+        ThorTest::poisonInactiveRows(
+            dYValues, activeRows, outputFeatures, ThorTest::RaggedInactivePoison::NaN);
+        const vector<float> validDY(dYValues.begin(), dYValues.begin() + activeRows * outputFeatures);
+
+        Impl::Tensor fcErrorInput = fixture.physicalFc->getErrorInputs()[0].value();
+        Impl::Tensor fcErrorInputHost = fcErrorInput.clone(cpuPlacement);
+        writeCpuTensor(fcErrorInputHost, dYValues);
+        fcErrorInput.copyFromAsync(fcErrorInputHost, stream);
+
+        Impl::Tensor fcErrorOutput = fixture.physicalFc->getErrorOutputs()[0].value();
+        Impl::Tensor poisonedErrorOutputHost = fcErrorOutput.clone(cpuPlacement);
+        writeCpuTensor(poisonedErrorOutputHost,
+                       vector<float>(fullRows * inputFeatures, std::numeric_limits<float>::quiet_NaN()));
+        fcErrorOutput.copyFromAsync(poisonedErrorOutputHost, stream);
+        fixture.physicalFc->backward(fcErrorInput, logicalBatchSize);
+        gradientStream.synchronize();
+        stream.synchronize();
+
+        const vector<float> expectedDX =
+            fullyConnectedBackwardErrorReference(validDY, weights, activeRows, inputFeatures, outputFeatures);
+        const vector<float> expectedDW =
+            fullyConnectedWeightGradReference(validInput, validDY, activeRows, inputFeatures, outputFeatures);
+        const vector<float> expectedDB = fullyConnectedBiasGradReference(validDY, activeRows, outputFeatures);
+
+        const vector<float> actualDX = readCpuTensor(
+            copyTensorToCpu(fixture.physicalFc->getErrorOutputs()[0].value(), stream));
+        expectAllClose(vector<float>(actualDX.begin(), actualDX.begin() + activeRows * inputFeatures),
+                       expectedDX,
+                       2e-4f,
+                       2e-4f,
+                       "ragged dX");
+
+        // dX and dW MATMULs consume dY with the same packed-row bucket. The
+        // incoming gradient remains poisoned beyond that bucket; db is computed
+        // through the logical ragged reduction and therefore must not require a
+        // full-capacity dY clear.
+        const vector<float> consumedDY = readCpuTensor(copyTensorToCpu(fcErrorInput, stream));
+        for (uint64_t row = activeRows; row < selectedRows; ++row) {
+            for (uint64_t col = 0; col < outputFeatures; ++col) {
+                EXPECT_EQ(consumedDY[row * outputFeatures + col], 0.0f)
+                    << "backward bucket slack was not sanitized";
+            }
+        }
+        for (uint64_t row = selectedRows; row < fullRows; ++row) {
+            for (uint64_t col = 0; col < outputFeatures; ++col) {
+                EXPECT_TRUE(std::isnan(consumedDY[row * outputFeatures + col]))
+                    << "backward consumer touched storage beyond its selected bucket";
+            }
+        }
+        for (uint64_t row = selectedRows; row < fullRows; ++row) {
+            for (uint64_t col = 0; col < inputFeatures; ++col) {
+                EXPECT_TRUE(std::isnan(actualDX[row * inputFeatures + col]))
+                    << "ragged FC producer canonicalized dX storage beyond the selected bucket";
+            }
+        }
+
+        // Expression-backed FullyConnected fuses parameter gradients into the
+        // SGD update for this single-application case. Validate dW/db through
+        // the exact resulting parameter update.
+        const auto weightsGradient = fixture.physicalFc->getParameter("weights")->getOptimizer()->getWeightsGradient();
+        const auto biasesGradient = fixture.physicalFc->getParameter("biases")->getOptimizer()->getWeightsGradient();
+        EXPECT_FALSE(weightsGradient.has_value());
+        EXPECT_FALSE(biasesGradient.has_value());
+
+        vector<float> expectedUpdatedWeights = weights;
+        vector<float> expectedUpdatedBiases = biases;
+        for (uint64_t i = 0; i < expectedUpdatedWeights.size(); ++i) {
+            expectedUpdatedWeights[i] -= sgdStep * expectedDW[i];
+        }
+        for (uint64_t i = 0; i < expectedUpdatedBiases.size(); ++i) {
+            expectedUpdatedBiases[i] -= sgdStep * expectedDB[i];
+        }
+
+        const vector<float> actualUpdatedWeights = readCpuTensor(
+            copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage().value(), gradientStream));
+        const vector<float> actualUpdatedBiases = readCpuTensor(
+            copyTensorToCpu(fixture.physicalFc->getParameter("biases")->getStorage().value(), gradientStream));
+        expectAllClose(actualUpdatedWeights, expectedUpdatedWeights, 2e-4f, 2e-4f, "ragged fused-SGD dW update");
+        expectAllClose(actualUpdatedBiases, expectedUpdatedBiases, 2e-4f, 2e-4f, "ragged fused-SGD db update");
     }
 }
 

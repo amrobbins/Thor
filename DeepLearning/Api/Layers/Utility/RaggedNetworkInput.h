@@ -12,6 +12,10 @@ namespace Thor {
 
 class Network;
 
+// Declares a ragged network boundary. The row partition remains authoritative
+// at the boundary: values beyond offsets[B] are inactive, undefined capacity.
+// RaggedNetworkInput copies packed values without inspecting or canonicalizing
+// that inactive storage; consumers that over-read own their required sanitation.
 class RaggedNetworkInput {
    public:
     class Builder;

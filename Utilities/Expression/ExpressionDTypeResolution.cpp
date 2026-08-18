@@ -44,8 +44,13 @@ static bool isAttentionBackwardOp(ExprOp op) {
            op == ExprOp::ATTENTION_BACKWARD_BIAS;
 }
 
+static bool isRmsNormBackwardOp(ExprOp op) {
+    return op == ExprOp::RMSNORM_BACKWARD_X || op == ExprOp::RMSNORM_BACKWARD_SCALE;
+}
+
 static bool isReductionComputeOp(ExprOp op) {
-    return isReductionOp(op) || op == ExprOp::RMSNORM || op == ExprOp::ATTENTION || isAttentionBackwardOp(op) || op == ExprOp::ROPE;
+    return isReductionOp(op) || op == ExprOp::RMSNORM || isRmsNormBackwardOp(op) || op == ExprOp::ATTENTION ||
+           isAttentionBackwardOp(op) || op == ExprOp::ROPE;
 }
 static bool isMatmulOp(ExprOp op) { return op == ExprOp::MATMUL || op == ExprOp::GEMM; }
 static bool isConvolutionOp(ExprOp op) {
@@ -658,6 +663,16 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         }
         const DataType input_dtype = resolved_output_dtypes[node.lhs];
         return node.output_dtype.has_value() ? node.output_dtype.value() : input_dtype;
+    }
+
+    if (isRmsNormBackwardOp(node.op)) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size() ||
+            node.aux >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("RMSNorm-backward node has input index out of range in resolveNodeOutputDType.");
+        }
+        const DataType default_dtype = node.op == ExprOp::RMSNORM_BACKWARD_X ? resolved_output_dtypes[node.lhs]
+                                                                            : resolved_output_dtypes[node.rhs];
+        return node.output_dtype.value_or(default_dtype);
     }
 
     if (node.op == ExprOp::SCAN || node.op == ExprOp::SEGMENTED_SCAN) {

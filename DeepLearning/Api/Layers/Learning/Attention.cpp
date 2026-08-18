@@ -941,13 +941,31 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                     featureInput.getPlacement(), ThorImplementation::TensorDescriptor(DataType::FP32, {keyValueSequenceLength}));
             }
 
-            Expression x = Expression::input(kAttentionFeatureInputName, inputDType, inputDType);
-            if (!queryRagged) {
+            Expression rawX = Expression::input(kAttentionFeatureInputName, inputDType, inputDType);
+            Expression x = rawX;
+            if (queryRagged) {
+                Expression offsets = Expression::input(
+                    kAttentionQueryRowPartitionInputName, queryRowPartitionDType, queryRowPartitionDType);
+                x = x.withRaggedRuntimeExtent(
+                    offsets, batch, querySequenceLength, queryInputFeatures);
+            } else {
                 x = x.reshape({batch * querySequenceLength, queryInputFeatures});
             }
-            Expression kvx = useContextInput ? Expression::input(kAttentionContextInputName, inputDType, inputDType) : x;
-            if (useContextInput && !keyValueRagged) {
-                kvx = kvx.reshape({batch * keyValueSequenceLength, contextInputFeatures});
+
+            // Self-attention Q/K/V share one logical tensor, so start K/V from the same
+            // Expression (and therefore the same ragged row-partition identity) as Q.
+            // Cross-attention replaces it with the independently partitioned context input.
+            Expression kvx = x;
+            if (useContextInput) {
+                kvx = Expression::input(kAttentionContextInputName, inputDType, inputDType);
+                if (keyValueRagged) {
+                    Expression offsets = Expression::input(
+                        kAttentionKeyValueRowPartitionInputName, keyValueRowPartitionDType, keyValueRowPartitionDType);
+                    kvx = kvx.withRaggedRuntimeExtent(
+                        offsets, batch, keyValueSequenceLength, contextInputFeatures);
+                } else {
+                    kvx = kvx.reshape({batch * keyValueSequenceLength, contextInputFeatures});
+                }
             }
             std::optional<Expression> scoreBiasExpr;
             if (useScoreBias) {
@@ -965,9 +983,30 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 Expression kw = Expression::input("key_weights", weightsDType, weightsDType);
                 Expression vw = Expression::input("value_weights", weightsDType, weightsDType);
 
-                Expression q = Expression::matmul(x, qw, false, false, computeDType, outputDType);
-                Expression k = Expression::matmul(kvx, kw, false, false, computeDType, outputDType);
-                Expression v = Expression::matmul(kvx, vw, false, false, computeDType, outputDType);
+                Expression q = Expression::matmul(
+                    x,
+                    qw,
+                    false,
+                    false,
+                    computeDType,
+                    outputDType,
+                    queryRagged ? std::optional<uint64_t>(querySequenceLength) : std::nullopt);
+                Expression k = Expression::matmul(
+                    kvx,
+                    kw,
+                    false,
+                    false,
+                    computeDType,
+                    outputDType,
+                    keyValueRagged ? std::optional<uint64_t>(keyValueSequenceLength) : std::nullopt);
+                Expression v = Expression::matmul(
+                    kvx,
+                    vw,
+                    false,
+                    false,
+                    computeDType,
+                    outputDType,
+                    keyValueRagged ? std::optional<uint64_t>(keyValueSequenceLength) : std::nullopt);
                 if (hasBias) {
                     q = q + Expression::input("query_bias", weightsDType, weightsDType);
                     k = k + Expression::input("key_bias", weightsDType, weightsDType);
@@ -1064,11 +1103,27 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                     if (scalingNeedsLogicalSequenceLength) {
                         const double positiveQueryOffset = static_cast<double>(std::max<int64_t>(0, queryRopePositionOffset));
                         const double positiveKeyOffset = static_cast<double>(std::max<int64_t>(0, keyRopePositionOffset));
+                        auto logicalRaggedPositionMax = [&](const Expression& positions,
+                                                             const char* offsetsInputName,
+                                                             DataType offsetsDataType) {
+                            Expression offsets = Expression::input(offsetsInputName, offsetsDataType, offsetsDataType);
+                            // Position-id storage has the same packed capacity as the ragged values, but only
+                            // [0, offsets[B]) is logical. Reduce each row through the explicit partition first,
+                            // then reduce the dense [B] result. This keeps the full-capacity reduction from
+                            // depending on any incidental contents in inactive position-id storage.
+                            return positions.segmentedReduceMax(offsets).reduce_max({0}, {});
+                        };
                         Expression queryExtent = queryRagged
-                            ? queryPositions.value().reduce_max({0}, {}) + Expression::constantScalar(1.0)
+                            ? logicalRaggedPositionMax(queryPositions.value(),
+                                                       kAttentionQueryRowPartitionInputName,
+                                                       queryRowPartitionDType) +
+                                  Expression::constantScalar(1.0)
                             : Expression::constantScalar(static_cast<double>(querySequenceLength) + positiveQueryOffset);
                         Expression keyExtent = keyValueRagged
-                            ? keyPositions.value().reduce_max({0}, {}) + Expression::constantScalar(1.0)
+                            ? logicalRaggedPositionMax(keyPositions.value(),
+                                                       kAttentionKeyValueRowPartitionInputName,
+                                                       keyValueRowPartitionDType) +
+                                  Expression::constantScalar(1.0)
                             : Expression::constantScalar(static_cast<double>(keyValueSequenceLength) + positiveKeyOffset);
                         absoluteExtent = queryExtent.max(keyExtent).max(Expression::constantScalar(1.0));
                     }
@@ -1265,11 +1320,24 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
             const std::vector<uint64_t> foldedOutputDimensions =
                 {queryRagged ? querySequenceLength : batch * querySequenceLength, outputFeatures};
             auto buildProjectedOutput = [&](Expression attn) -> Expression {
+                const uint64_t mergedWidth = checkedMul(numHeads, valueDim, "merged head width");
                 Expression merged = attn.reshape(
-                    {queryRagged ? querySequenceLength : batch * querySequenceLength,
-                     checkedMul(numHeads, valueDim, "merged head width")});
+                    {queryRagged ? querySequenceLength : batch * querySequenceLength, mergedWidth});
+                if (queryRagged) {
+                    Expression offsets = Expression::input(
+                        kAttentionQueryRowPartitionInputName, queryRowPartitionDType, queryRowPartitionDType);
+                    merged = merged.withRaggedRuntimeExtent(
+                        offsets, batch, querySequenceLength, mergedWidth);
+                }
                 Expression outputWeights = Expression::input("output_weights", weightsDType, weightsDType);
-                Expression out = Expression::matmul(merged, outputWeights, false, false, computeDType, outputDType);
+                Expression out = Expression::matmul(
+                    merged,
+                    outputWeights,
+                    false,
+                    false,
+                    computeDType,
+                    outputDType,
+                    queryRagged ? std::optional<uint64_t>(querySequenceLength) : std::nullopt);
                 if (hasBias) {
                     out = out + Expression::input("output_bias", weightsDType, weightsDType);
                 }
@@ -1478,35 +1546,6 @@ std::shared_ptr<ThorImplementation::CustomLayer> Attention::createPhysicalLayer(
             ? std::optional<ThorImplementation::DynamicExpressionVariantId>(kAttentionEvaluationVariant)
             : std::nullopt;
 
-    std::optional<ThorImplementation::Attention::RaggedQueryMetadata> raggedQueryMetadata;
-    if (raggedFeatureInput.has_value()) {
-        THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
-        const auto featureInputIt =
-            std::find(physicalInputNames.begin(), physicalInputNames.end(), std::string(kAttentionFeatureInputName));
-        const auto queryOffsetsIt =
-            std::find(physicalInputNames.begin(), physicalInputNames.end(), std::string(kAttentionQueryRowPartitionInputName));
-        THOR_THROW_IF_FALSE(featureInputIt != physicalInputNames.end());
-        THOR_THROW_IF_FALSE(queryOffsetsIt != physicalInputNames.end());
-        const uint32_t featureInputPort = static_cast<uint32_t>(
-            std::distance(physicalInputNames.begin(), featureInputIt));
-        const uint32_t queryOffsetsPort = static_cast<uint32_t>(
-            std::distance(physicalInputNames.begin(), queryOffsetsIt));
-        const auto elementsPerValue = [](const std::vector<uint64_t>& dimensions) {
-            uint64_t elements = 1;
-            for (uint64_t dimension : dimensions) {
-                elements = checkedMul(elements, dimension, "ragged elements-per-value");
-            }
-            return elements;
-        };
-        raggedQueryMetadata = ThorImplementation::Attention::RaggedQueryMetadata{
-            .valuesInputPort = featureInputPort,
-            .offsetsInputPort = queryOffsetsPort,
-            .rowPartitionDescriptor = raggedFeatureInput->getDescriptor().getRowPartition(),
-            .inputElementsPerValue = elementsPerValue(raggedFeatureInput->getTrailingDimensions()),
-            .outputElementsPerValue = elementsPerValue(raggedFeatureOutput->getTrailingDimensions()),
-        };
-    }
-
     return std::make_shared<ThorImplementation::Attention>(std::move(expression),
                                                             std::move(physicalInputNames),
                                                             std::move(physicalOutputNames),
@@ -1518,8 +1557,7 @@ std::shared_ptr<ThorImplementation::CustomLayer> Attention::createPhysicalLayer(
                                                             deterministicTrainingVariant,
                                                             isTrainingDropoutEnabled(),
                                                             std::move(inputDimensionsIncludeBatch),
-                                                            fixedBatchCapacity,
-                                                            raggedQueryMetadata);
+                                                            fixedBatchCapacity);
 }
 
 void Attention::validateEpilogueShapePreserving(const ThorImplementation::ExpressionDefinition& definition) {

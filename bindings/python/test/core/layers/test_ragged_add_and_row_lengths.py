@@ -89,12 +89,10 @@ def test_ragged_add_and_row_lengths_execute_over_authoritative_partition_and_rou
 
     expected = np.maximum(active, 0.0) + active / (1.0 + np.exp(-active))
     np.testing.assert_allclose(summed.values.numpy()[: active.shape[0]], expected, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(summed.values.numpy()[active.shape[0]:], 0.0, rtol=0.0, atol=0.0)
     activity = outputs["activity"]
     expected_activity = 1.0 - np.exp(-np.log1p(np.maximum(active, 0.0)))
     np.testing.assert_allclose(
         activity.values.numpy()[: active.shape[0]], expected_activity, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(activity.values.numpy()[active.shape[0]:], 0.0, rtol=0.0, atol=0.0)
 
     save_dir = tmp_path / "model"
     placed.save(str(save_dir), overwrite=False, save_optimizer_state=False)
@@ -104,7 +102,16 @@ def test_ragged_add_and_row_lengths_execute_over_authoritative_partition_and_rou
     loaded_outputs = loaded_placed.infer({"history": _physical_ragged(values)})
     np.testing.assert_array_equal(loaded_outputs["lengths"].numpy(), outputs["lengths"].numpy())
     np.testing.assert_array_equal(loaded_outputs["summed"].offsets.numpy(), OFFSETS)
-    np.testing.assert_allclose(loaded_outputs["summed"].values.numpy(), summed.values.numpy(), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        loaded_outputs["summed"].values.numpy()[: active.shape[0]],
+        summed.values.numpy()[: active.shape[0]],
+        rtol=1e-5,
+        atol=1e-5,
+    )
     np.testing.assert_array_equal(loaded_outputs["activity"].offsets.numpy(), OFFSETS)
     np.testing.assert_allclose(
-        loaded_outputs["activity"].values.numpy(), activity.values.numpy(), rtol=1e-5, atol=1e-5)
+        loaded_outputs["activity"].values.numpy()[: active.shape[0]],
+        activity.values.numpy()[: active.shape[0]],
+        rtol=1e-5,
+        atol=1e-5,
+    )
