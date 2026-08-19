@@ -6,11 +6,13 @@
 #include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 
 #include <cstddef>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <set>
 
@@ -41,6 +43,11 @@ bool isSwishEpilogueExpression(const ThorImplementation::Expression& epilogue) {
     Swish swish;
     ThorImplementation::Expression reference = swish.toExpression(RMSNorm::epilogueInput());
     return LayerEpilogue::hasSameCanonicalForm(epilogue, reference, RMSNorm::epilogueInputName(), {}, RMSNorm::epilogueOutputName(), "RMSNorm");
+}
+
+bool isUnavailableCudnnRmsNormFusion(const std::runtime_error& error) {
+    return std::string_view(error.what()).find("Failed to build cuDNN Frontend RMSNorm graph with primary heuristics only") !=
+           std::string_view::npos;
 }
 
 ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation::TensorPlacement placement,
@@ -87,8 +94,6 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
             const DynamicExpression::TensorMap& inputs,
             const DynamicExpression::TensorMap& outputs,
             Stream& stream) -> DynamicExpressionBuild {
-            (void)stream;
-
             Tensor featureInputTensor = inputs.at("feature_input");
             std::optional<Tensor> rowPartitionTensor;
             if (rowPartitionInputName.has_value()) {
@@ -184,30 +189,88 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                                                   elementsPerPackedValue);
             }
             Expression weights = Expression::input("weights", parameterDataType, parameterDataType);
-            Expression fout = Expression::rmsNorm(fin,
-                                                   weights,
-                                                   hidden,
-                                                   epsilon,
-                                                   DataType::FP32,
-                                                   inputDataType,
-                                                   packedRowCapacity);
-            const bool useCudnnSwishFusion = epilogueIsSwish && parameterDataType == DataType::BF16 &&
-                                             inputDataType == DataType::BF16;
-            if (useCudnnSwishFusion) {
+            const bool cudnnSwishFusionCandidate = epilogueIsSwish && parameterDataType == DataType::BF16 &&
+                                                   inputDataType == DataType::BF16;
+            bool useCudnnSwishFusion = cudnnSwishFusionCandidate;
+            if (cudnnSwishFusionCandidate) {
                 if (!inferenceOnly) {
                     throw std::runtime_error(
                         "RMSNorm Swish epilogue can use cuDNN Frontend RMSNorm + SiLU only for inference; "
                         "training should use fp32 RMSNorm weights so the Swish epilogue can run as a separate expression.");
                 }
-                ThorImplementation::PhysicalExpression physical = fout.expression();
-                if (physical.output_node >= physical.nodes.size() || physical.nodes[physical.output_node].op != ThorImplementation::ExprOp::RMSNORM) {
-                    throw std::runtime_error("RMSNorm internal fusion rewrite expected an RMSNORM output node.");
+
+                // RMSNorm + SiLU is an optional cuDNN fusion. Some otherwise-supported
+                // GPUs/cuDNN versions reject the pointwise epilogue graph pattern. Probe
+                // the exact concrete descriptor while stamping; if the fused plan is not
+                // available for a dense CustomLayer, preserve API semantics by lowering
+                // RMSNorm algebraically in fp32 and applying the Swish epilogue separately.
+                ThorImplementation::CudnnRmsNormDescriptor fusedDescriptor;
+                fusedDescriptor.outerSize = outer;
+                fusedDescriptor.normalizedFeatureCount = hidden;
+                fusedDescriptor.inputDataType = inputDataType;
+                fusedDescriptor.outputDataType = inputDataType;
+                fusedDescriptor.parameterDataType = parameterDataType;
+                fusedDescriptor.computeDataType = DataType::FP32;
+                fusedDescriptor.epsilon = static_cast<float>(epsilon);
+                fusedDescriptor.training = false;
+                fusedDescriptor.fusedActivation = ThorImplementation::CudnnRmsNormFusedActivation::SWISH;
+                fusedDescriptor.debugName = "thor_api_rms_norm_swish_probe";
+                try {
+                    (void)ThorImplementation::CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(
+                        fusedDescriptor, stream.getGpuNum());
+                } catch (const std::runtime_error& error) {
+                    if (rowPartitionTensor.has_value() || !isUnavailableCudnnRmsNormFusion(error)) {
+                        throw;
+                    }
+                    useCudnnSwishFusion = false;
                 }
-                physical.nodes[physical.output_node].rms_norm_fused_activation =
-                    ThorImplementation::CudnnRmsNormFusedActivation::SWISH;
-                auto fusedPhysical = std::make_shared<ThorImplementation::PhysicalExpression>(std::move(physical));
-                fout = Expression::fromPhysicalNode(fusedPhysical, fusedPhysical->output_node);
-            } else if (epilogue.has_value()) {
+            }
+
+            Expression fout = [&]() -> Expression {
+                if (useCudnnSwishFusion) {
+                    Expression fused = Expression::rmsNorm(fin,
+                                                           weights,
+                                                           hidden,
+                                                           epsilon,
+                                                           DataType::FP32,
+                                                           inputDataType,
+                                                           packedRowCapacity);
+                    ThorImplementation::PhysicalExpression physical = fused.expression();
+                    if (physical.output_node >= physical.nodes.size() ||
+                        physical.nodes[physical.output_node].op != ThorImplementation::ExprOp::RMSNORM) {
+                        throw std::runtime_error("RMSNorm internal fusion rewrite expected an RMSNORM output node.");
+                    }
+                    physical.nodes[physical.output_node].rms_norm_fused_activation =
+                        ThorImplementation::CudnnRmsNormFusedActivation::SWISH;
+                    auto fusedPhysical = std::make_shared<ThorImplementation::PhysicalExpression>(std::move(physical));
+                    return Expression::fromPhysicalNode(fusedPhysical, fusedPhysical->output_node);
+                }
+
+                if (cudnnSwishFusionCandidate) {
+                    // BF16 scale parameters are retained in model storage, but the generic
+                    // fallback computes the normalization and scale application in fp32.
+                    // This path is inference-only, so there is no parameter-gradient contract
+                    // to preserve. It exists specifically so an optional backend fusion cannot
+                    // make a valid RMSNorm+Swish API graph unplaceable.
+                    Expression finFp32 = fin.cast(DataType::FP32);
+                    Expression weightsFp32 = weights.cast(DataType::FP32);
+                    Expression meanSquare = (finFp32 * finFp32).reduce_mean({1}, {}, DataType::FP32);
+                    Expression invRms = Expression(1.0) / (meanSquare + Expression(epsilon)).sqrt();
+                    Expression fallback = (finFp32 * invRms * weightsFp32).cast(inputDataType);
+                    return RMSNorm::applyEpilogue(fallback, epilogue.value());
+                }
+
+                Expression rmsNorm = Expression::rmsNorm(fin,
+                                                          weights,
+                                                          hidden,
+                                                          epsilon,
+                                                          DataType::FP32,
+                                                          inputDataType,
+                                                          packedRowCapacity);
+                if (!epilogue.has_value()) {
+                    return rmsNorm;
+                }
+
                 ThorImplementation::Expression effectiveEpilogue = epilogue.value();
                 if (needsFlattenedExpressionView) {
                     for (const std::string& auxInputName : epilogueAuxInputNames) {
@@ -216,8 +279,8 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                         effectiveEpilogue = effectiveEpilogue.substituteInput(auxInputName, auxInput);
                     }
                 }
-                fout = RMSNorm::applyEpilogue(fout, effectiveEpilogue);
-            }
+                return RMSNorm::applyEpilogue(rmsNorm, effectiveEpilogue);
+            }();
             if (needsFlattenedExpressionView) {
                 fout = fout.reshape(originalInputDims);
             }

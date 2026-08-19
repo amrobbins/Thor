@@ -198,9 +198,9 @@ void bind_attention(nb::module_& layers) {
            std::shared_ptr<Initializer> bias_initializer,
            std::shared_ptr<Optimizer> optimizer,
            bool rope_in_place,
-           float dropout_probability,
-           int64_t dropout_seed,
-           int64_t dropout_offset,
+           float sdpa_dropout_probability,
+           int64_t sdpa_dropout_seed,
+           int64_t sdpa_dropout_offset,
            std::optional<Tensor> query_sequence_lengths,
            std::optional<Tensor> key_value_sequence_lengths,
            nb::object context_input,
@@ -210,7 +210,13 @@ void bind_attention(nb::module_& layers) {
            std::optional<int64_t> rope_query_position_offset,
            std::optional<int64_t> rope_key_position_offset,
            std::optional<Tensor> rope_query_position_offsets,
-           std::optional<Tensor> rope_key_position_offsets) {
+           std::optional<Tensor> rope_key_position_offsets,
+           float output_dropout_probability,
+           std::optional<int64_t> output_dropout_seed,
+           nb::object residual_input,
+           std::optional<float> dropout_probability,
+           std::optional<int64_t> dropout_seed,
+           std::optional<int64_t> dropout_offset) {
             if (num_heads == 0) {
                 throw nb::value_error("Attention instance: num_heads must be > 0.");
             }
@@ -226,8 +232,37 @@ void bind_attention(nb::module_& layers) {
             if (output_features.has_value() && output_features.value() == 0) {
                 throw nb::value_error("Attention instance: output_features must be > 0.");
             }
-            if (!std::isfinite(dropout_probability) || dropout_probability < 0.0f || dropout_probability >= 1.0f) {
-                throw nb::value_error("Attention instance: dropout_probability must be finite and in [0, 1).");
+            float effective_sdpa_dropout_probability = sdpa_dropout_probability;
+            if (dropout_probability.has_value()) {
+                if (sdpa_dropout_probability != 0.0f && sdpa_dropout_probability != dropout_probability.value()) {
+                    throw nb::value_error(
+                        "Attention instance: sdpa_dropout_probability and legacy dropout_probability disagree.");
+                }
+                effective_sdpa_dropout_probability = dropout_probability.value();
+            }
+            if (!std::isfinite(effective_sdpa_dropout_probability) || effective_sdpa_dropout_probability < 0.0f ||
+                effective_sdpa_dropout_probability >= 1.0f) {
+                throw nb::value_error("Attention instance: sdpa_dropout_probability must be finite and in [0, 1).");
+            }
+            if (!std::isfinite(output_dropout_probability) || output_dropout_probability < 0.0f ||
+                output_dropout_probability >= 1.0f) {
+                throw nb::value_error("Attention instance: output_dropout_probability must be finite and in [0, 1).");
+            }
+            int64_t effective_sdpa_dropout_seed = sdpa_dropout_seed;
+            if (dropout_seed.has_value()) {
+                if (sdpa_dropout_seed != 0 && sdpa_dropout_seed != dropout_seed.value()) {
+                    throw nb::value_error(
+                        "Attention instance: sdpa_dropout_seed and legacy dropout_seed disagree.");
+                }
+                effective_sdpa_dropout_seed = dropout_seed.value();
+            }
+            int64_t effective_sdpa_dropout_offset = sdpa_dropout_offset;
+            if (dropout_offset.has_value()) {
+                if (sdpa_dropout_offset != 0 && sdpa_dropout_offset != dropout_offset.value()) {
+                    throw nb::value_error(
+                        "Attention instance: sdpa_dropout_offset and legacy dropout_offset disagree.");
+                }
+                effective_sdpa_dropout_offset = dropout_offset.value();
             }
             if (query_sequence_lengths.has_value() != key_value_sequence_lengths.has_value()) {
                 throw nb::value_error(
@@ -261,6 +296,15 @@ void bind_attention(nb::module_& layers) {
             if (score_bias_input.has_value()) {
                 builder.scoreBiasInput(score_bias_input.value());
             }
+            if (!residual_input.is_none()) {
+                if (nb::isinstance<RaggedTensor>(residual_input)) {
+                    builder.residualInput(nb::cast<RaggedTensor>(residual_input));
+                } else if (nb::isinstance<Tensor>(residual_input)) {
+                    builder.residualInput(nb::cast<Tensor>(residual_input));
+                } else {
+                    throw nb::type_error("Attention residual_input must be thor.Tensor, thor.RaggedTensor, or None.");
+                }
+            }
             applyPythonEpilogueInputs(builder, epilogue_inputs);
             applyPythonEpilogue(builder, epilogue);
 
@@ -292,8 +336,16 @@ void bind_attention(nb::module_& layers) {
             if (attention_scale.has_value()) {
                 builder.attentionScale(attention_scale.value());
             }
-            if (dropout_probability != 0.0f) {
-                builder.dropoutProbability(dropout_probability).dropoutSeed(dropout_seed).dropoutOffset(dropout_offset);
+            if (effective_sdpa_dropout_probability != 0.0f) {
+                builder.sdpaDropoutProbability(effective_sdpa_dropout_probability)
+                    .sdpaDropoutSeed(effective_sdpa_dropout_seed)
+                    .sdpaDropoutOffset(effective_sdpa_dropout_offset);
+            }
+            if (output_dropout_probability != 0.0f) {
+                builder.outputDropoutProbability(output_dropout_probability);
+                if (output_dropout_seed.has_value()) {
+                    builder.outputDropoutSeed(output_dropout_seed.value());
+                }
             }
             if (use_rope) {
                 ThorImplementation::RotaryPositionEmbeddingOptions rope_options;
@@ -382,9 +434,9 @@ void bind_attention(nb::module_& layers) {
         "bias_initializer"_a.none() = nb::none(),
         "optimizer"_a.none() = nb::none(),
         "rope_in_place"_a = false,
-        "dropout_probability"_a = 0.0f,
-        "dropout_seed"_a = int64_t{0},
-        "dropout_offset"_a = int64_t{0},
+        "sdpa_dropout_probability"_a = 0.0f,
+        "sdpa_dropout_seed"_a = int64_t{0},
+        "sdpa_dropout_offset"_a = int64_t{0},
         "query_sequence_lengths"_a.none() = nb::none(),
         "key_value_sequence_lengths"_a.none() = nb::none(),
         "context_input"_a = nb::none(),
@@ -395,6 +447,12 @@ void bind_attention(nb::module_& layers) {
         "rope_key_position_offset"_a.none() = nb::none(),
         "rope_query_position_offsets"_a.none() = nb::none(),
         "rope_key_position_offsets"_a.none() = nb::none(),
+        "output_dropout_probability"_a = 0.0f,
+        "output_dropout_seed"_a.none() = nb::none(),
+        "residual_input"_a = nb::none(),
+        "dropout_probability"_a.none() = nb::none(),
+        "dropout_seed"_a.none() = nb::none(),
+        "dropout_offset"_a.none() = nb::none(),
         R"nbdoc(
 Public transformer attention layer built from learned Q/K/V/O projections and the
 cuDNN scaled-dot-product attention stage.
@@ -441,8 +499,19 @@ Supported features for FP16/BF16:
 * Output-projection epilogues support the primary projected output plus named
   auxiliary tensors. Auxiliary tensors must already match the public Attention
   output shape, storage dtype, and placement; Thor does not insert conversions.
-* Dropout uses cuDNN Philox attention dropout.  ``dropout_probability`` must be in
-  ``[0, 1)``.  Thor advances the runtime dropout offset by ``B * Hq * Sq * Skv``.
+* ``sdpa_dropout_probability``, ``sdpa_dropout_seed``, and ``sdpa_dropout_offset``
+  control cuDNN Philox dropout on the SDPA probability matrix. Thor advances the
+  runtime offset by ``B * Hq * Sq * Skv``. The legacy ``dropout_probability``,
+  ``dropout_seed``, and ``dropout_offset`` keywords remain accepted as aliases.
+* ``output_dropout_probability`` controls dropout after the learned output projection.
+  ``output_dropout_seed`` is optional; when omitted Thor chooses an independent seed
+  for the layer and persists that chosen seed in the serialized architecture.
+  When ``residual_input`` is supplied, the exact contract is
+  ``residual_input + dropout(projected_output)`` during training. Thor fuses residual
+  addition into the projection GEMM when output dropout is inactive (including
+  validation/inference), and otherwise uses one native fused dropout+residual post-op.
+  A residual must match the query/output domain; ragged residuals must share the exact
+  query row partition.
 * Padding masks use ``query_sequence_lengths`` and ``key_value_sequence_lengths``
   together, both int32 logical ``[1]`` tensors.
 * ``feature_input`` and ``context_input`` independently accept ``thor.Tensor`` or
@@ -503,14 +572,27 @@ Important combination rules:
     attention.def("get_diagonal_right_bound", &Attention::getDiagonalRightBound);
     attention.def("get_use_alibi_mask", &Attention::getUseAlibiMask);
     attention.def("get_attention_scale", &Attention::getAttentionScale);
-    attention.def("get_dropout_probability", &Attention::getDropoutProbability);
+    attention.def("get_sdpa_dropout_probability", &Attention::getSdpaDropoutProbability);
+    attention.def("get_dropout_probability", &Attention::getDropoutProbability);  // legacy alias
     attention.def("set_training_dropout_enabled",
                   [](Attention& layer, bool enabled) { layer.setTrainingDropoutEnabled(enabled); },
                   "enabled"_a);
     attention.def("is_training_dropout_enabled",
                   [](const Attention& layer) { return layer.isTrainingDropoutEnabled(); });
-    attention.def("get_dropout_seed", &Attention::getDropoutSeed);
-    attention.def("get_dropout_offset", &Attention::getDropoutOffset);
+    attention.def("get_sdpa_dropout_seed", &Attention::getSdpaDropoutSeed);
+    attention.def("get_sdpa_dropout_offset", &Attention::getSdpaDropoutOffset);
+    attention.def("get_dropout_seed", &Attention::getDropoutSeed);  // legacy alias
+    attention.def("get_dropout_offset", &Attention::getDropoutOffset);  // legacy alias
+    attention.def("get_output_dropout_probability", &Attention::getOutputDropoutProbability);
+    attention.def("get_output_dropout_seed", &Attention::getOutputDropoutSeed);
+    attention.def("get_use_residual", &Attention::getUseResidual);
+    attention.def("get_residual_input", [](Attention& self) -> nb::object {
+        if (self.getRaggedResidualInput().has_value()) {
+            return nb::cast(self.getRaggedResidualInput().value());
+        }
+        const std::optional<Tensor> residual = self.getResidualInput();
+        return residual.has_value() ? nb::cast(residual.value()) : nb::none();
+    });
     attention.def("get_use_cross_attention", &Attention::getUseCrossAttention);
     attention.def("get_use_ragged", &Attention::getUseRagged);
     attention.def("get_query_ragged", &Attention::getQueryRagged);

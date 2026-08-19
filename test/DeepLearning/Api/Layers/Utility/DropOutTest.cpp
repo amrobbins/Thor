@@ -22,40 +22,17 @@ class TestableDropOut : public DropOut {
 
 }  // namespace
 
-TEST(UtilityApiLayers, DropOutReservedSpaceEstimateUsesFeatureInputDataType) {
-    Network network("dropout_reserved_space_uses_dtype");
+TEST(UtilityApiLayers, NativeDropOutUsesNoReserveSpaceForSupportedStorageTypes) {
     const uint32_t batchSize = 7;
     const vector<uint64_t> dimensions = {3, 5};
-
-    Tensor featureInput(DataType::FP32, dimensions);
-    DropOut dropOut = DropOut::Builder().network(network).featureInput(featureInput).dropProportion(0.25f).build();
-
-    vector<uint64_t> dimensionsWithBatchSize = {batchSize};
-    dimensionsWithBatchSize.insert(dimensionsWithBatchSize.end(), dimensions.begin(), dimensions.end());
-
-    const uint64_t expectedFp32ReserveBytes =
-        ThorImplementation::DropOut::getReservedSpaceSizeInBytes(dimensionsWithBatchSize, DataType::FP32);
-    const uint64_t fp16ReserveBytes =
-        ThorImplementation::DropOut::getReservedSpaceSizeInBytes(dimensionsWithBatchSize, DataType::FP16);
-
-    TestableDropOut testableDropOut(dropOut);
-    EXPECT_EQ(testableDropOut.reservedStateSizeInBytes(batchSize), expectedFp32ReserveBytes);
-    if (expectedFp32ReserveBytes != fp16ReserveBytes) {
-        EXPECT_NE(testableDropOut.reservedStateSizeInBytes(batchSize), fp16ReserveBytes);
+    for (DataType dataType : {DataType::FP16, DataType::FP32, DataType::FP64, DataType::BF16}) {
+        Network network("dropout_stateless_native_" + std::to_string(static_cast<int>(dataType)));
+        Tensor featureInput(dataType, dimensions);
+        DropOut dropOut = DropOut::Builder().network(network).featureInput(featureInput).dropProportion(0.25f).build();
+        TestableDropOut testableDropOut(dropOut);
+        EXPECT_TRUE(ThorImplementation::DropOut::usesNativeKernel(dataType));
+        EXPECT_EQ(testableDropOut.reservedStateSizeInBytes(batchSize), 0u);
     }
-}
-
-
-TEST(UtilityApiLayers, Bfloat16DropOutUsesOneByteKeepMaskPerElement) {
-    Network network("bfloat16_dropout_native_keep_mask");
-    const uint32_t batchSize = 7;
-    const vector<uint64_t> dimensions = {3, 5};
-
-    Tensor featureInput(DataType::BF16, dimensions);
-    DropOut dropOut = DropOut::Builder().network(network).featureInput(featureInput).dropProportion(0.25f).build();
-
-    TestableDropOut testableDropOut(dropOut);
-    EXPECT_EQ(testableDropOut.reservedStateSizeInBytes(batchSize), batchSize * 3 * 5);
 }
 
 TEST(UtilityApiLayers, DropOutBuilds) {
@@ -299,7 +276,7 @@ TEST(UtilityApiLayers, NetworkAndPlacedNetworkControlTrainingDropoutWithoutSeria
 }
 
 
-TEST(UtilityApiLayers, RaggedDropOutPreservesPartitionAndUsesPackedCapacityForReserveSpace) {
+TEST(UtilityApiLayers, RaggedDropOutPreservesPartitionWithoutReserveSpace) {
     Network network("ragged_dropout_builds");
     const uint64_t batchSize = 3;
     const uint64_t maxTotalValues = 9;
@@ -326,7 +303,7 @@ TEST(UtilityApiLayers, RaggedDropOutPreservesPartitionAndUsesPackedCapacityForRe
     EXPECT_EQ(dropOut.getOutputTensorBytes(batchSize), input.getValues().getTotalSizeInBytes());
 
     TestableDropOut testableDropOut(dropOut);
-    EXPECT_EQ(testableDropOut.reservedStateSizeInBytes(batchSize), maxTotalValues * 4);
+    EXPECT_EQ(testableDropOut.reservedStateSizeInBytes(batchSize), 0u);
 
     const json architecture = dropOut.architectureJson();
     ASSERT_TRUE(architecture.at("use_ragged").get<bool>());

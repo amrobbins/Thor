@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Parameter/ParameterConstraint.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
+#include "DeepLearning/Api/Layers/TrainingDropoutControllable.h"
 #include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
@@ -25,13 +26,22 @@
 
 namespace Thor {
 
-class FullyConnected : public TrainableLayer {
+class FullyConnected : public TrainableLayer, public TrainingDropoutControllable {
    public:
     class Builder;
 
     explicit FullyConnected(const std::optional<ThorImplementation::Expression> epilogue,
-                           std::vector<std::pair<std::string, Tensor>> epilogueInputBindings = {})
-        : epilogue(epilogue), epilogueInputBindings(std::move(epilogueInputBindings)) {}
+                           std::vector<std::pair<std::string, Tensor>> epilogueInputBindings = {},
+                           float outputDropoutProbability = 0.0f,
+                           int64_t outputDropoutSeed = 0,
+                           std::optional<Tensor> residualInput = std::nullopt,
+                           std::optional<RaggedTensor> raggedResidualInput = std::nullopt)
+        : epilogue(epilogue),
+          epilogueInputBindings(std::move(epilogueInputBindings)),
+          outputDropoutProbability(outputDropoutProbability),
+          outputDropoutSeed(outputDropoutSeed),
+          residualInput(std::move(residualInput)),
+          raggedResidualInput(std::move(raggedResidualInput)) {}
 
     ~FullyConnected() override = default;
 
@@ -103,12 +113,19 @@ class FullyConnected : public TrainableLayer {
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;
-    bool mustConnectAllInputsToDriveOutput() const override { return !raggedFeatureInputs.empty() || !epilogueInputBindings.empty(); }
+    bool mustConnectAllInputsToDriveOutput() const override {
+        return !raggedFeatureInputs.empty() || !epilogueInputBindings.empty() || residualInput.has_value();
+    }
 
     DataType getWeightsDataType() const { return weightsDataType; }
     DataType getComputeDataType() const { return computeDataType; }
     DataType getOutputDataType() const { return outputDataType; }
     bool getUseRagged() const { return !raggedFeatureInputs.empty(); }
+    float getOutputDropoutProbability() const { return outputDropoutProbability; }
+    int64_t getOutputDropoutSeed() const { return outputDropoutSeed; }
+    std::optional<Tensor> getResidualInput() const { return residualInput; }
+    std::optional<RaggedTensor> getRaggedResidualInput() const { return raggedResidualInput; }
+    bool getUseResidual() const { return residualInput.has_value(); }
     std::optional<RaggedTensor> getRaggedFeatureInput(uint32_t index = 0) const {
         if (index >= raggedFeatureInputs.size()) return std::nullopt;
         return raggedFeatureInputs[index];
@@ -142,6 +159,10 @@ class FullyConnected : public TrainableLayer {
     const std::optional<ThorImplementation::Expression> epilogue;
     std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
+    float outputDropoutProbability = 0.0f;
+    int64_t outputDropoutSeed = 0;
+    std::optional<Tensor> residualInput;
+    std::optional<RaggedTensor> raggedResidualInput;
 
     std::vector<std::string> epilogueAuxInputNames() const;
     std::vector<uint32_t> inputPortIndicesForTensor(Tensor tensor) const;
@@ -314,6 +335,37 @@ class FullyConnected::Builder {
         return *this;
     }
 
+    // Dropout on the final FullyConnected output branch (after bias and activation).
+    // With residualInput(), the exact semantic contract is residual + dropout(fc_output).
+    virtual FullyConnected::Builder &outputDropoutProbability(float value) {
+        THOR_THROW_IF_FALSE(!this->_outputDropoutProbability.has_value());
+        this->_outputDropoutProbability = value;
+        return *this;
+    }
+
+    // Optional deterministic seed. If omitted while dropout is enabled, Thor
+    // chooses an independent per-layer seed at build time.
+    virtual FullyConnected::Builder &outputDropoutSeed(int64_t value) {
+        THOR_THROW_IF_FALSE(!this->_outputDropoutSeed.has_value());
+        this->_outputDropoutSeed = value;
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &residualInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_residualInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedResidualInput.has_value());
+        this->_residualInput = input;
+        return *this;
+    }
+
+    virtual FullyConnected::Builder &residualInput(RaggedTensor input) {
+        THOR_THROW_IF_FALSE(!this->_residualInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedResidualInput.has_value());
+        this->_raggedResidualInput = input;
+        this->_residualInput = input.getValues();
+        return *this;
+    }
+
     virtual FullyConnected::Builder &weightsOptimizer(std::shared_ptr<Optimizer> _weightsOptimizer) {
         THOR_THROW_IF_FALSE(this->_weightsOptimizer == nullptr);
         this->_weightsOptimizer = _weightsOptimizer;
@@ -369,6 +421,10 @@ class FullyConnected::Builder {
     std::optional<DataType> _weightsDataType;
     std::optional<DataType> _computeDataType;
     std::optional<DataType> _outputDataType;
+    std::optional<float> _outputDropoutProbability;
+    std::optional<int64_t> _outputDropoutSeed;
+    std::optional<Tensor> _residualInput;
+    std::optional<RaggedTensor> _raggedResidualInput;
 
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasInitializer;

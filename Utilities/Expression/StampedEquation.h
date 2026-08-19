@@ -727,6 +727,12 @@ class StampedRmsNorm {
 
     Tensor getOutputTensor() const { return output; }
     std::shared_ptr<RmsNormForwardState> getForwardState() const { return forward_state; }
+    [[nodiscard]] uint64_t workspaceSizeInBytes() const {
+        return workspace.has_value() ? workspace->getArraySizeInBytes() : 0;
+    }
+    [[nodiscard]] const void* workspaceAddress() const {
+        return workspace.has_value() ? workspace->getMemPtr<void>() : nullptr;
+    }
     [[nodiscard]] std::optional<PackedRowConsumerDiagnostic> packedRowConsumerDiagnostic() const;
     bool canProvideForwardStateFor(const CompiledRmsNormBackward& backward,
                                    const Tensor& input_tensor,
@@ -751,6 +757,10 @@ class StampedRmsNorm {
     Tensor output;
     Stream stream;
     std::shared_ptr<RmsNormForwardState> forward_state;
+    // Mutable execution scratch is owned by this stamped operation, never by
+    // the shared cuDNN graph cache. Packed RMSNorm sizes this once to the
+    // maximum workspace requirement across its finite bucket family.
+    mutable std::optional<Tensor> workspace;
 };
 
 class StampedRmsNormBackward {
@@ -760,6 +770,12 @@ class StampedRmsNormBackward {
 
     uint32_t gpuNum() const { return dX.getPlacement().getDeviceNum(); }
     const std::vector<Tensor>& getOutputTensors() const { return outputs; }
+    [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes() const {
+        return backward_workspace.has_value() ? backward_workspace->getArraySizeInBytes() : 0;
+    }
+    [[nodiscard]] uint64_t fallbackForwardWorkspaceSizeInBytes() const {
+        return fallback_forward_workspace.has_value() ? fallback_forward_workspace->getArraySizeInBytes() : 0;
+    }
     bool tryLinkForwardStateFrom(const std::shared_ptr<StampedRmsNorm>& forward);
 
     StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBackward> compiled,
@@ -785,6 +801,10 @@ class StampedRmsNormBackward {
     std::shared_ptr<RmsNormForwardState> saved_forward_state;
     mutable std::shared_ptr<RmsNormForwardState> fallback_forward_state;
     mutable Tensor fallback_output;
+    // Backward and fallback-forward are independently executable cuDNN graphs,
+    // so each stamped backward stage owns distinct scratch for each role.
+    mutable std::optional<Tensor> backward_workspace;
+    mutable std::optional<Tensor> fallback_forward_workspace;
 };
 
 
@@ -891,6 +911,12 @@ class StampedAttention {
 
     Tensor getOutputTensor() const { return output; }
     std::shared_ptr<AttentionForwardState> getForwardState() const { return forward_state; }
+    [[nodiscard]] uint64_t workspaceSizeInBytes() const {
+        return workspace.has_value() ? workspace->getArraySizeInBytes() : 0;
+    }
+    [[nodiscard]] const void* workspaceAddress() const {
+        return workspace.has_value() ? workspace->getMemPtr<void>() : nullptr;
+    }
 
     bool canProvideForwardStateFor(const CompiledAttentionBackward& backward,
                                    const Tensor& q_tensor,
@@ -904,6 +930,7 @@ class StampedAttention {
                                    const std::optional<Tensor>& dropout_seed_tensor,
                                    const std::optional<Tensor>& dropout_offset_tensor,
                                    const Tensor& dO_tensor) const;
+    void retainForwardStateForBackward();
 
     StampedAttention(std::shared_ptr<CompiledAttention> compiled,
                      const Tensor& q,
@@ -957,6 +984,9 @@ class StampedAttention {
     Tensor output;
     Stream stream;
     std::shared_ptr<AttentionForwardState> forward_state;
+    // Mutable cuDNN execution scratch belongs to this stamped forward stage,
+    // never to the shared descriptor-keyed graph cache.
+    mutable std::optional<Tensor> workspace;
 };
 
 class StampedAttentionBackward {
@@ -967,6 +997,12 @@ class StampedAttentionBackward {
     uint32_t gpuNum() const { return dQ.getPlacement().getDeviceNum(); }
 
     const std::vector<Tensor>& getOutputTensors() const { return outputs; }
+    [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes() const {
+        return backward_workspace.has_value() ? backward_workspace->getArraySizeInBytes() : 0;
+    }
+    [[nodiscard]] uint64_t fallbackForwardWorkspaceSizeInBytes() const {
+        return fallback_forward_workspace.has_value() ? fallback_forward_workspace->getArraySizeInBytes() : 0;
+    }
 
     StampedAttentionBackward(std::shared_ptr<CompiledAttentionBackward> compiled,
                              const Tensor& q,
@@ -1013,6 +1049,11 @@ class StampedAttentionBackward {
     Stream stream;
     std::shared_ptr<AttentionForwardState> saved_forward_state;
     std::vector<Tensor> outputs;
+    // Backward and fallback-forward are distinct cuDNN executions and therefore
+    // own independent scratch. The fallback workspace is omitted when a retained
+    // forward state is linked during stamping.
+    mutable std::optional<Tensor> backward_workspace;
+    mutable std::optional<Tensor> fallback_forward_workspace;
 };
 
 class StampedConvolution {

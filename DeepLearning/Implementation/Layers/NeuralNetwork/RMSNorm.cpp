@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/RMSNorm.h"
+#include "Utilities/Common/GpuMemoryDiagnostics.h"
 
 #include "DeepLearning/Implementation/Initializers/ConstantInitializer.h"
 #include "Utilities/TensorOperations/DeepLearning/BatchNormFrontendHelpers.h"
@@ -46,6 +47,16 @@ void validateEpsilon(double epsilon) {
     if (!(epsilon > 0.0)) {
         throw runtime_error("RMSNorm epsilon must be > 0.");
     }
+}
+
+
+optional<Tensor> allocateRmsNormWorkspace(const TensorPlacement& placement, uint64_t requiredBytes) {
+    if (requiredBytes == 0) {
+        return nullopt;
+    }
+    reportGpuWorkspaceAllocationRequest("rmsnorm_physical", placement.getDeviceNum(), requiredBytes);
+    ScopedGpuAllocationContext allocationContext("rmsnorm_physical");
+    return Tensor(placement, TensorDescriptor(DataType::UINT8, {requiredBytes}), 256);
 }
 
 shared_ptr<PhysicalParameter> makeDefaultParameter(const string& name,
@@ -228,9 +239,13 @@ void RMSNorm::compileImpl() {
     saveInvVariance.clear();
     scratchDScale.clear();
     scratchErrorOutput.reset();
+    forwardWorkspaces.clear();
+    backwardWorkspaces.clear();
 
     saveInvVariance.reserve(featureInputs.size());
     scratchDScale.reserve(featureInputs.size());
+    forwardWorkspaces.reserve(featureInputs.size());
+    backwardWorkspaces.reserve(featureInputs.size());
 
     for (uint32_t i = 0; i < featureInputs.size(); ++i) {
         if (featureInputs[i].has_value()) {
@@ -248,6 +263,38 @@ void RMSNorm::compileImpl() {
                 scratchErrorOutput = featureInputs[i].value().clone();
             }
         }
+
+        optional<Tensor> forwardWorkspace = nullopt;
+        optional<Tensor> backwardWorkspace = nullopt;
+        if (featureInputs[i].has_value() && featureOutputs[i].has_value()) {
+            const Tensor& in = featureInputs[i].value();
+            const Tensor& out = featureOutputs[i].value();
+            CudnnRmsNormDescriptor forwardDescriptor;
+            forwardDescriptor.outerSize = computeOuterSize(in);
+            forwardDescriptor.normalizedFeatureCount = normalizedFeatureCount;
+            forwardDescriptor.inputDataType = in.getDataType();
+            forwardDescriptor.outputDataType = out.getDataType();
+            forwardDescriptor.parameterDataType = parameterDataType;
+            forwardDescriptor.computeDataType = DataType::FP32;
+            forwardDescriptor.epsilon = static_cast<float>(epsilon);
+            forwardDescriptor.training = !isInferenceOnly();
+            forwardDescriptor.fusedActivation = fusedActivation;
+            const uint64_t forwardWorkspaceBytes =
+                CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(forwardDescriptor, placement.getDeviceNum());
+            forwardWorkspace = allocateRmsNormWorkspace(placement, forwardWorkspaceBytes);
+
+            if (!isInferenceOnly() && errorInputs.size() > i && errorInputs[i].has_value()) {
+                CudnnRmsNormDescriptor backwardDescriptor = forwardDescriptor;
+                backwardDescriptor.outputDataType = errorInputs[i].value().getDataType();
+                backwardDescriptor.training = true;
+                backwardDescriptor.fusedActivation = CudnnRmsNormFusedActivation::NONE;
+                const uint64_t backwardWorkspaceBytes =
+                    CudnnRmsNorm::instance().backwardWorkspaceSizeInBytes(backwardDescriptor, placement.getDeviceNum());
+                backwardWorkspace = allocateRmsNormWorkspace(placement, backwardWorkspaceBytes);
+            }
+        }
+        forwardWorkspaces.emplace_back(std::move(forwardWorkspace));
+        backwardWorkspaces.emplace_back(std::move(backwardWorkspace));
     }
 }
 
@@ -255,6 +302,8 @@ void RMSNorm::cleanup() {
     saveInvVariance.clear();
     scratchDScale.clear();
     scratchErrorOutput.reset();
+    forwardWorkspaces.clear();
+    backwardWorkspaces.clear();
     Layer::cleanup();
 }
 
@@ -287,7 +336,8 @@ void RMSNorm::computeFeatureOut(uint32_t connectionNumber) {
         args.invVariance = saveInvVariance[connectionNumber];
     }
 
-    CudnnRmsNorm::instance().forward(descriptor, args, streams[connectionNumber]);
+    THOR_THROW_IF_FALSE(connectionNumber < forwardWorkspaces.size());
+    CudnnRmsNorm::instance().forward(descriptor, args, forwardWorkspaces[connectionNumber], streams[connectionNumber]);
 }
 
 optional<Event> RMSNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
@@ -345,7 +395,8 @@ optional<Event> RMSNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t c
     args.dx = errorOut.value();
     args.dscale = dscaleOutput;
 
-    CudnnRmsNorm::instance().backward(descriptor, args, executionStream);
+    THOR_THROW_IF_FALSE(connectionNumber < backwardWorkspaces.size());
+    CudnnRmsNorm::instance().backward(descriptor, args, backwardWorkspaces[connectionNumber], executionStream);
 
     if (needWeightsGradient && !clearWeightsGradientFirstIfFused) {
         launchAccumulateBatchNormGradientFp32(weightsGradient->getMemPtr<float>(),

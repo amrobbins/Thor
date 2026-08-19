@@ -3,6 +3,8 @@
 
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "DeepLearning/Api/Data/BatchSession.h"
@@ -22,6 +24,7 @@
 #include <cmath>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -344,31 +347,6 @@ std::vector<TrainingRunOutputSignature> collectMergedNetworkOutputSignature(
     return merged;
 }
 
-std::vector<NetworkLossReference> collectNetworkReportableLosses(
-    const std::vector<std::shared_ptr<Network>>& networks) {
-    std::vector<NetworkLossReference> losses;
-    for (const std::shared_ptr<Network>& network : networks) {
-        if (network == nullptr) {
-            continue;
-        }
-        const std::vector<NetworkLossReference> networkLosses = network->getReportableLosses();
-        losses.insert(losses.end(), networkLosses.begin(), networkLosses.end());
-    }
-    return losses;
-}
-
-std::vector<NetworkMetricReference> collectNetworkReportableMetrics(
-    const std::vector<std::shared_ptr<Network>>& networks) {
-    std::vector<NetworkMetricReference> metrics;
-    for (const std::shared_ptr<Network>& network : networks) {
-        if (network == nullptr) {
-            continue;
-        }
-        const std::vector<NetworkMetricReference> networkMetrics = network->getReportableMetrics();
-        metrics.insert(metrics.end(), networkMetrics.begin(), networkMetrics.end());
-    }
-    return metrics;
-}
 
 std::vector<std::string> filterRequestedLossNamesToAvailable(const std::vector<NetworkLossReference>& availableLosses,
                                                             const std::vector<std::string>& requestedLossNames) {
@@ -1311,6 +1289,10 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
       maxSummaryLogsPerSecond(maxSummaryLogsPerSecond),
       maxParallelRuns(maxParallelRuns),
       minSuccessfulModels(std::move(minSuccessfulModels)) {
+    const auto constructionStart = std::chrono::steady_clock::now();
+    std::fprintf(stderr, "INFO TrainingRuns startup validation starting: runs=%zu\n", this->runs.size());
+    std::fflush(stderr);
+
     if (!std::isfinite(maxSummaryLogsPerSecond) || maxSummaryLogsPerSecond < 0.0) {
         throw std::runtime_error("TrainingRuns maxSummaryLogsPerSecond must be finite and >= 0.");
     }
@@ -1319,6 +1301,14 @@ TrainingRuns::TrainingRuns(std::vector<TrainingRunsSpec> runs,
     }
     validateRunSpecs();
     validateMinSuccessfulModels();
+
+    const double constructionElapsedMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - constructionStart).count();
+    std::fprintf(stderr,
+                 "INFO TrainingRuns startup validation completed: runs=%zu elapsed_ms=%.1f\n",
+                 this->runs.size(),
+                 constructionElapsedMs);
+    std::fflush(stderr);
 }
 
 size_t TrainingRuns::getEffectiveMaxParallelRuns() const {
@@ -1379,15 +1369,40 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
 
     const TrainingRunsEvaluationOptions& evaluationOptions = sessionOptions.evaluation;
 
+    const auto fitPreflightStart = std::chrono::steady_clock::now();
+    std::fprintf(stderr, "INFO TrainingRuns fit preflight validation starting: runs=%zu\n", runs.size());
+    std::fflush(stderr);
     validateFitOptions(options);
     validateRestartConditions();
     validateEarlyCompletionRules();
+
+    const auto lossValidationStart = std::chrono::steady_clock::now();
+    std::fprintf(stderr, "INFO TrainingRuns validating reported losses\n");
+    std::fflush(stderr);
     validateReportedLosses();
+    std::fprintf(stderr,
+                 "INFO TrainingRuns validated reported losses: elapsed_ms=%.1f\n",
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - lossValidationStart).count());
+    std::fflush(stderr);
+
+    const auto metricValidationStart = std::chrono::steady_clock::now();
+    std::fprintf(stderr, "INFO TrainingRuns validating reported metrics\n");
+    std::fflush(stderr);
     validateReportedMetrics();
+    std::fprintf(stderr,
+                 "INFO TrainingRuns validated reported metrics: elapsed_ms=%.1f\n",
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - metricValidationStart).count());
+    std::fflush(stderr);
+
     if (evaluationOptions.testData != nullptr) {
         validateTestData(*evaluationOptions.testData);
     }
     validateEnsembleArtifactsForFit(evaluationOptions);
+    std::fprintf(stderr,
+                 "INFO TrainingRuns fit preflight validation completed: runs=%zu elapsed_ms=%.1f\n",
+                 runs.size(),
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fitPreflightStart).count());
+    std::fflush(stderr);
 
     TrainingCancellationSource cancellationSource;
     std::vector<TrainingRunResult> results;
@@ -1501,14 +1516,39 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
             if (!result.savedModelNetworkName.has_value() && runs[i].trainer->getNetwork() != nullptr) {
                 result.savedModelNetworkName = runs[i].trainer->getNetwork()->getNetworkName();
             }
-            if (result.completed() && result.savedModelDirectory.has_value()) {
-                // TrainingRuns consumes trained members through saved artifacts for
-                // later phase handoff and ensemble composition. Once the artifact
-                // is finalized, keep the CPU-side trainer/spec but release the
-                // completed member placement so finished folds do not accumulate
-                // unnecessary GPU residency while siblings or composed evaluators
-                // run.
-                runs[i].trainer->releasePlacedNetworkAfterLastFit();
+            const bool failedOrCancelled = result.failed() || result.cancelled();
+            const bool completedWithArtifact = result.completed() && result.savedModelDirectory.has_value();
+            if (failedOrCancelled || completedWithArtifact) {
+                // TrainingRuns never consumes a failed/cancelled member's live
+                // placement.  Release it before publishing the terminal worker
+                // state so a later sibling cannot race placement against stale
+                // GPU residency from this run. Completed members are likewise
+                // releasable once their persisted artifact is finalized; members
+                // without an artifact retain the historical in-memory behavior.
+                try {
+                    runs[i].trainer->releasePlacedNetworkAfterLastFit();
+                } catch (const std::exception& cleanupError) {
+                    const std::string cleanupMessage =
+                        std::string("placed-network cleanup failed: ") + cleanupError.what();
+                    if (result.exception.message.empty()) {
+                        result.exception = TrainingRunExceptionSummary{"PlacedNetworkReleaseFailure", cleanupMessage};
+                    } else {
+                        result.exception.message += "; " + cleanupMessage;
+                    }
+                    if (result.completed()) {
+                        result.status = TrainingRunStatus::FAILED;
+                    }
+                } catch (...) {
+                    const std::string cleanupMessage = "placed-network cleanup failed with an unknown exception";
+                    if (result.exception.message.empty()) {
+                        result.exception = TrainingRunExceptionSummary{"PlacedNetworkReleaseFailure", cleanupMessage};
+                    } else {
+                        result.exception.message += "; " + cleanupMessage;
+                    }
+                    if (result.completed()) {
+                        result.status = TrainingRunStatus::FAILED;
+                    }
+                }
             }
 
             bool shouldCancelSiblings = false;
@@ -1672,6 +1712,18 @@ std::shared_ptr<Network> TrainingRuns::validationNetworkForSpec(const TrainingRu
         return trainerNetwork;
     }
 
+    // With one active phase, the phase network already is the exact validation
+    // graph. Composing it would clone the entire network solely to recover the
+    // same public boundary and report surface. Returning the source network also
+    // lets the constructor-level validation snapshot deduplicate this active view
+    // against the same network in the complete all-phase validation set.
+    if (phaseSpecs.size() == 1) {
+        if (phaseSpecs.front().network == nullptr) {
+            throw std::runtime_error(context + " has a null active phase Network.");
+        }
+        return phaseSpecs.front().network;
+    }
+
     PhaseGraphComposeOptions composeOptions;
     const std::string baseName = trainerNetwork == nullptr ? spec.runName : trainerNetwork->getNetworkName();
     composeOptions.networkName = baseName + "_training_runs_validation_phases";
@@ -1724,11 +1776,11 @@ std::vector<std::shared_ptr<Network>> TrainingRuns::reportingValidationNetworksF
 }
 
 std::vector<NetworkLossReference> TrainingRuns::reportableLossesForSpec(const TrainingRunsSpec& spec) const {
-    return collectNetworkReportableLosses(reportingValidationNetworksForSpec(spec));
+    return validatedMetadataForSpec(spec).reportableLosses;
 }
 
 std::vector<NetworkMetricReference> TrainingRuns::reportableMetricsForSpec(const TrainingRunsSpec& spec) const {
-    return collectNetworkReportableMetrics(reportingValidationNetworksForSpec(spec));
+    return validatedMetadataForSpec(spec).reportableMetrics;
 }
 
 std::vector<std::string> TrainingRuns::reportOrderForGroup(std::string_view ensembleGroup) const {
@@ -1737,8 +1789,8 @@ std::vector<std::string> TrainingRuns::reportOrderForGroup(std::string_view ense
 }
 
 std::vector<std::string> TrainingRuns::reportedScalarTensorNamesForSpec(const TrainingRunsSpec& spec) const {
-    std::shared_ptr<Network> activeNetwork = validationNetworkForSpec(spec);
-    if (spec.trainer == nullptr || activeNetwork == nullptr) {
+    const ValidatedRunMetadata& validated = validatedMetadataForSpec(spec);
+    if (spec.trainer == nullptr || !validated.hasActiveNetwork) {
         return {};
     }
 
@@ -1756,8 +1808,8 @@ std::vector<std::string> TrainingRuns::reportedScalarTensorNamesForSpec(const Tr
         }
     }
 
-    const std::vector<NetworkLossReference> activeLosses = activeNetwork->getReportableLosses();
-    const std::vector<NetworkMetricReference> activeMetrics = activeNetwork->getReportableMetrics();
+    const std::vector<NetworkLossReference>& activeLosses = validated.activeReportableLosses;
+    const std::vector<NetworkMetricReference>& activeMetrics = validated.activeReportableMetrics;
     const std::vector<std::string> activeRequestedReportNames =
         filterRequestedReportNamesToAvailable(activeLosses, activeMetrics, requestedReportNames);
     if (!requestedReportNames.empty() && activeRequestedReportNames.empty()) {
@@ -1796,22 +1848,16 @@ std::vector<std::string> TrainingRuns::reportedScalarTensorNamesForSpec(const Tr
 }
 
 
-void TrainingRuns::validateRunSpecs() const {
+void TrainingRuns::validateRunSpecs() {
     if (runs.empty()) {
         throw std::runtime_error("TrainingRuns requires at least one run.");
     }
 
+    // Validate cheap run-level invariants first so configuration errors keep
+    // their existing precedence over graph validation failures.
     std::set<std::string> runNames;
     std::set<const Trainer*> trainers;
     std::map<std::string, std::string> saveModelDirectories;
-    struct EnsembleValidationState {
-        std::string firstRunName{};
-        std::vector<TrainingRunInputSignature> inputSignature{};
-        std::vector<TrainingRunOutputSignature> outputSignature{};
-        bool reportsGraphLosses = false;
-    };
-    std::map<std::string, EnsembleValidationState> ensembleSignatures;
-
     for (size_t i = 0; i < runs.size(); ++i) {
         const TrainingRunsSpec& spec = runs[i];
         if (spec.runName.empty()) {
@@ -1846,59 +1892,196 @@ void TrainingRuns::validateRunSpecs() const {
                                          "'. Give each trainer a distinct save_model_dir or disable saving for one of them.");
             }
         }
+    }
 
-        if (spec.ensembleGroup.has_value()) {
-            const std::vector<TrainingRunInputSignature> inputSignature = collectNetworkInputSignature(validationNetworkForSpec(spec));
-            const std::vector<TrainingRunOutputSignature> outputSignature = collectNetworkOutputSignature(validationNetworkForSpec(spec));
-            if (inputSignature.empty()) {
-                throw std::runtime_error("TrainingRuns run '" + spec.runName + "' is in ensemble_group '" + *spec.ensembleGroup +
-                                         "' but its network has no NetworkInput layers to validate for ensemble evaluation.");
-            }
-            if (outputSignature.empty()) {
-                throw std::runtime_error("TrainingRuns run '" + spec.runName + "' is in ensemble_group '" + *spec.ensembleGroup +
-                                         "' but its network has no NetworkOutput layers to ensemble.");
-            }
-            if (!outputSignatureHasPredictionTensor(outputSignature)) {
-                throw std::runtime_error("TrainingRuns run '" + spec.runName + "' is in ensemble_group '" + *spec.ensembleGroup +
-                                         "' but its network has no non-loss NetworkOutput prediction tensor to ensemble.");
-            }
+    validatedRunMetadata.clear();
 
-            const std::vector<NetworkLossReference> reportableLosses = reportableLossesForSpec(spec);
-            const std::vector<NetworkMetricReference> reportableMetrics = reportableMetricsForSpec(spec);
-            const auto reportsIt = reports.find(*spec.ensembleGroup);
-            const std::vector<std::string> requestedReportNames = reportsIt == reports.end() ? std::vector<std::string>{} : reportsIt->second;
-            const TrainingRunsReportNameSelections reportSelections = splitTrainingRunsRequestedReportsByKind(
-                reportableLosses,
-                reportableMetrics,
-                requestedReportNames,
-                "TrainingRuns reports for ensemble_group '" + *spec.ensembleGroup + "' run '" + spec.runName + "'");
-            const bool reportsGraphLosses = !resolveTrainingRunsSelectedLossReports(
-                reportableLosses,
-                reportSelections.lossNames,
-                "TrainingRuns reports for ensemble_group '" + *spec.ensembleGroup + "' run '" + spec.runName + "'")
-                                                 .empty();
+    // A Network can appear in both the active composed view and the complete
+    // all-phase reporting view. Validate each concrete Network object at most
+    // once during this TrainingRuns construction and reuse the resulting report
+    // metadata everywhere else in the session.
+    std::map<const Network*, NetworkTrainingValidationSnapshot> validatedNetworks;
+    auto validateNetworkOnce = [&](const std::shared_ptr<Network>& network,
+                                   const std::string& runName,
+                                   const std::string& role) -> const NetworkTrainingValidationSnapshot& {
+        if (network == nullptr) {
+            throw std::runtime_error("TrainingRuns run '" + runName + "' has a null Network in its " + role + " validation view.");
+        }
+        auto existing = validatedNetworks.find(network.get());
+        if (existing != validatedNetworks.end()) {
+            return existing->second;
+        }
 
-            auto [it, inserted] = ensembleSignatures.emplace(
-                *spec.ensembleGroup, EnsembleValidationState{spec.runName, inputSignature, outputSignature, reportsGraphLosses});
-            if (!inserted && !inputSignaturesCompatible(it->second.inputSignature, inputSignature)) {
-                throw std::runtime_error("TrainingRuns ensemble_group '" + *spec.ensembleGroup + "' has incompatible input signatures: run '" +
-                                         it->second.firstRunName + "' has " + inputSignatureToString(it->second.inputSignature) +
-                                         ", but run '" + spec.runName + "' has " + inputSignatureToString(inputSignature) + ".");
-            }
-            if (!inserted && it->second.reportsGraphLosses != reportsGraphLosses) {
-                throw std::runtime_error("TrainingRuns ensemble_group '" + *spec.ensembleGroup +
-                                         "' mixes runs with and without reportable graph losses; run '" + it->second.firstRunName +
-                                         "' and run '" + spec.runName + "' must use compatible loss reporting configuration.");
-            }
-            if (!inserted && !it->second.reportsGraphLosses && !outputSignaturesCompatible(it->second.outputSignature, outputSignature)) {
-                throw std::runtime_error("TrainingRuns ensemble_group '" + *spec.ensembleGroup + "' has incompatible output signatures: run '" +
-                                         it->second.firstRunName + "' has " + outputSignatureToString(it->second.outputSignature) +
-                                         ", but run '" + spec.runName + "' has " + outputSignatureToString(outputSignature) + ".");
-            }
+        const auto validationStart = std::chrono::steady_clock::now();
+        std::fprintf(stderr,
+                     "INFO TrainingRuns validating network graph: run=%s role=%s network=%s\n",
+                     runName.c_str(),
+                     role.c_str(),
+                     network->getNetworkName().c_str());
+        std::fflush(stderr);
+        NetworkTrainingValidationSnapshot snapshot = network->validateTrainingGraphAndCollectReports();
+        const double elapsedMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - validationStart).count();
+        std::fprintf(stderr,
+                     "INFO TrainingRuns validated network graph: run=%s role=%s network=%s losses=%zu metrics=%zu elapsed_ms=%.1f\n",
+                     runName.c_str(),
+                     role.c_str(),
+                     network->getNetworkName().c_str(),
+                     snapshot.reportableLosses.size(),
+                     snapshot.reportableMetrics.size(),
+                     elapsedMs);
+        std::fflush(stderr);
+        return validatedNetworks.emplace(network.get(), std::move(snapshot)).first->second;
+    };
+
+    struct EnsembleValidationState {
+        std::string firstRunName{};
+        std::vector<TrainingRunInputSignature> inputSignature{};
+        std::vector<TrainingRunOutputSignature> outputSignature{};
+        bool reportsGraphLosses = false;
+    };
+    std::map<std::string, EnsembleValidationState> ensembleSignatures;
+
+    for (const TrainingRunsSpec& spec : runs) {
+        ValidatedRunMetadata metadata;
+        const auto validationViewStart = std::chrono::steady_clock::now();
+        std::fprintf(stderr,
+                     "INFO TrainingRuns building validation views: run=%s\n",
+                     spec.runName.c_str());
+        std::fflush(stderr);
+        std::shared_ptr<Network> activeNetwork = validationNetworkForSpec(spec);
+        std::vector<std::shared_ptr<Network>> reportingNetworks = reportingValidationNetworksForSpec(spec);
+        metadata.hasActiveNetwork = activeNetwork != nullptr;
+        std::fprintf(stderr,
+                     "INFO TrainingRuns built validation views: run=%s active_network=%s training_program_networks=%zu elapsed_ms=%.1f\n",
+                     spec.runName.c_str(),
+                     activeNetwork == nullptr ? "<none>" : activeNetwork->getNetworkName().c_str(),
+                     reportingNetworks.size(),
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - validationViewStart).count());
+        std::fflush(stderr);
+
+        if (activeNetwork != nullptr) {
+            std::fprintf(stderr,
+                         "INFO TrainingRuns validating active graph boundary: run=%s\n",
+                         spec.runName.c_str());
+            std::fflush(stderr);
+            const auto activeBoundaryValidationStart = std::chrono::steady_clock::now();
+            const NetworkTrainingValidationSnapshot& activeSnapshot =
+                validateNetworkOnce(activeNetwork, spec.runName, "active");
+            metadata.activeInputSignature = collectNetworkInputSignature(activeNetwork);
+            metadata.activeOutputSignature = collectNetworkOutputSignature(activeNetwork);
+            metadata.activeReportableLosses = activeSnapshot.reportableLosses;
+            metadata.activeReportableMetrics = activeSnapshot.reportableMetrics;
+            const double activeBoundaryValidationElapsedMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - activeBoundaryValidationStart).count();
+            std::fprintf(stderr,
+                         "INFO TrainingRuns validated active graph boundary: run=%s inputs=%zu outputs=%zu elapsed_ms=%.1f\n",
+                         spec.runName.c_str(),
+                         metadata.activeInputSignature.size(),
+                         metadata.activeOutputSignature.size(),
+                         activeBoundaryValidationElapsedMs);
+            std::fflush(stderr);
+        }
+
+        std::fprintf(stderr,
+                     "INFO TrainingRuns validating full training program: run=%s networks=%zu\n",
+                     spec.runName.c_str(),
+                     reportingNetworks.size());
+        std::fflush(stderr);
+        const auto fullProgramValidationStart = std::chrono::steady_clock::now();
+        for (const std::shared_ptr<Network>& network : reportingNetworks) {
+            const NetworkTrainingValidationSnapshot& snapshot =
+                validateNetworkOnce(network, spec.runName, "training_program");
+            metadata.reportableLosses.insert(metadata.reportableLosses.end(),
+                                              snapshot.reportableLosses.begin(),
+                                              snapshot.reportableLosses.end());
+            metadata.reportableMetrics.insert(metadata.reportableMetrics.end(),
+                                               snapshot.reportableMetrics.begin(),
+                                               snapshot.reportableMetrics.end());
+        }
+        if (!reportingNetworks.empty()) {
+            const std::string context = "TrainingRuns full training program for run '" + spec.runName + "'";
+            metadata.reportingInputSignature = collectMergedNetworkInputSignature(reportingNetworks, context);
+            metadata.reportingOutputSignature = collectMergedNetworkOutputSignature(reportingNetworks, context);
+        }
+        const double fullProgramValidationElapsedMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fullProgramValidationStart).count();
+        std::fprintf(stderr,
+                     "INFO TrainingRuns validated full training program: run=%s networks=%zu losses=%zu metrics=%zu elapsed_ms=%.1f\n",
+                     spec.runName.c_str(),
+                     reportingNetworks.size(),
+                     metadata.reportableLosses.size(),
+                     metadata.reportableMetrics.size(),
+                     fullProgramValidationElapsedMs);
+        std::fflush(stderr);
+
+        auto [metadataIt, metadataInserted] = validatedRunMetadata.emplace(spec.runName, std::move(metadata));
+        if (!metadataInserted) {
+            throw std::logic_error("TrainingRuns internal error: duplicate validated metadata for run '" + spec.runName + "'.");
+        }
+        const ValidatedRunMetadata& validated = metadataIt->second;
+
+        if (!spec.ensembleGroup.has_value()) {
+            continue;
+        }
+        if (validated.activeInputSignature.empty()) {
+            throw std::runtime_error("TrainingRuns run '" + spec.runName + "' is in ensemble_group '" + *spec.ensembleGroup +
+                                     "' but its network has no NetworkInput layers to validate for ensemble evaluation.");
+        }
+        if (validated.activeOutputSignature.empty()) {
+            throw std::runtime_error("TrainingRuns run '" + spec.runName + "' is in ensemble_group '" + *spec.ensembleGroup +
+                                     "' but its network has no NetworkOutput layers to ensemble.");
+        }
+        if (!outputSignatureHasPredictionTensor(validated.activeOutputSignature)) {
+            throw std::runtime_error("TrainingRuns run '" + spec.runName + "' is in ensemble_group '" + *spec.ensembleGroup +
+                                     "' but its network has no non-loss NetworkOutput prediction tensor to ensemble.");
+        }
+
+        const auto reportsIt = reports.find(*spec.ensembleGroup);
+        const std::vector<std::string> requestedReportNames = reportsIt == reports.end() ? std::vector<std::string>{} : reportsIt->second;
+        const TrainingRunsReportNameSelections reportSelections = splitTrainingRunsRequestedReportsByKind(
+            validated.reportableLosses,
+            validated.reportableMetrics,
+            requestedReportNames,
+            "TrainingRuns reports for ensemble_group '" + *spec.ensembleGroup + "' run '" + spec.runName + "'");
+        const bool reportsGraphLosses = !resolveTrainingRunsSelectedLossReports(
+            validated.reportableLosses,
+            reportSelections.lossNames,
+            "TrainingRuns reports for ensemble_group '" + *spec.ensembleGroup + "' run '" + spec.runName + "'")
+                                             .empty();
+
+        auto [it, inserted] = ensembleSignatures.emplace(
+            *spec.ensembleGroup,
+            EnsembleValidationState{spec.runName,
+                                    validated.activeInputSignature,
+                                    validated.activeOutputSignature,
+                                    reportsGraphLosses});
+        if (!inserted && !inputSignaturesCompatible(it->second.inputSignature, validated.activeInputSignature)) {
+            throw std::runtime_error("TrainingRuns ensemble_group '" + *spec.ensembleGroup + "' has incompatible input signatures: run '" +
+                                     it->second.firstRunName + "' has " + inputSignatureToString(it->second.inputSignature) +
+                                     ", but run '" + spec.runName + "' has " + inputSignatureToString(validated.activeInputSignature) + ".");
+        }
+        if (!inserted && it->second.reportsGraphLosses != reportsGraphLosses) {
+            throw std::runtime_error("TrainingRuns ensemble_group '" + *spec.ensembleGroup +
+                                     "' mixes runs with and without reportable graph losses; run '" + it->second.firstRunName +
+                                     "' and run '" + spec.runName + "' must use compatible loss reporting configuration.");
+        }
+        if (!inserted && !it->second.reportsGraphLosses &&
+            !outputSignaturesCompatible(it->second.outputSignature, validated.activeOutputSignature)) {
+            throw std::runtime_error("TrainingRuns ensemble_group '" + *spec.ensembleGroup + "' has incompatible output signatures: run '" +
+                                     it->second.firstRunName + "' has " + outputSignatureToString(it->second.outputSignature) +
+                                     ", but run '" + spec.runName + "' has " + outputSignatureToString(validated.activeOutputSignature) + ".");
         }
     }
 }
 
+const TrainingRuns::ValidatedRunMetadata& TrainingRuns::validatedMetadataForSpec(const TrainingRunsSpec& spec) const {
+    const auto it = validatedRunMetadata.find(spec.runName);
+    if (it == validatedRunMetadata.end()) {
+        throw std::logic_error("TrainingRuns internal error: validation metadata is unavailable for run '" + spec.runName + "'.");
+    }
+    return it->second;
+}
 
 void TrainingRuns::validateMinSuccessfulModels() const {
     if (minSuccessfulModels.empty()) {
@@ -2101,8 +2284,8 @@ void TrainingRuns::validateReportedLosses() const {
         std::string runName{};
         std::vector<TrainingRunInputSignature> inputSignature{};
         std::vector<TrainingRunOutputSignature> outputSignature{};
-        std::vector<std::shared_ptr<Network>> reportingNetworks{};
-        std::optional<std::vector<NetworkLossReference>> reportableLosses{};
+        std::vector<NetworkLossReference> reportableLosses{};
+        std::vector<NetworkMetricReference> reportableMetrics{};
     };
 
     std::map<std::string, std::vector<EnsembleMemberSignatureState>> membersByGroup;
@@ -2112,22 +2295,20 @@ void TrainingRuns::validateReportedLosses() const {
         }
         EnsembleMemberSignatureState state;
         state.runName = spec.runName;
-        state.reportingNetworks = reportingValidationNetworksForSpec(spec);
-        const std::string context = "TrainingRuns reports for ensemble_group '" + *spec.ensembleGroup + "' run '" + spec.runName + "'";
-        state.inputSignature = collectMergedNetworkInputSignature(state.reportingNetworks, context);
-        state.outputSignature = collectMergedNetworkOutputSignature(state.reportingNetworks, context);
+        const ValidatedRunMetadata& validated = validatedMetadataForSpec(spec);
+        state.inputSignature = validated.reportingInputSignature;
+        state.outputSignature = validated.reportingOutputSignature;
+        state.reportableLosses = validated.reportableLosses;
+        state.reportableMetrics = validated.reportableMetrics;
         membersByGroup[*spec.ensembleGroup].push_back(std::move(state));
     }
 
     auto reportableLossesForMember = [](EnsembleMemberSignatureState& member) -> const std::vector<NetworkLossReference>& {
-        if (!member.reportableLosses.has_value()) {
-            member.reportableLosses = collectNetworkReportableLosses(member.reportingNetworks);
-        }
-        return *member.reportableLosses;
+        return member.reportableLosses;
     };
 
-    auto reportableMetricsForMember = [](EnsembleMemberSignatureState& member) -> std::vector<NetworkMetricReference> {
-        return collectNetworkReportableMetrics(member.reportingNetworks);
+    auto reportableMetricsForMember = [](EnsembleMemberSignatureState& member) -> const std::vector<NetworkMetricReference>& {
+        return member.reportableMetrics;
     };
 
     for (auto& [groupName, members] : membersByGroup) {
@@ -2244,8 +2425,8 @@ void TrainingRuns::validateReportedMetrics() const {
         std::optional<std::string> ensembleGroup{};
         std::vector<TrainingRunInputSignature> inputSignature{};
         std::vector<TrainingRunOutputSignature> outputSignature{};
-        std::vector<std::shared_ptr<Network>> reportingNetworks{};
-        std::optional<std::vector<NetworkMetricReference>> reportableMetrics{};
+        std::vector<NetworkLossReference> reportableLosses{};
+        std::vector<NetworkMetricReference> reportableMetrics{};
     };
 
     std::set<std::string> runNames;
@@ -2261,10 +2442,11 @@ void TrainingRuns::validateReportedMetrics() const {
         MemberMetricState state;
         state.runName = spec.runName;
         state.ensembleGroup = spec.ensembleGroup;
-        state.reportingNetworks = reportingValidationNetworksForSpec(spec);
-        const std::string context = "TrainingRuns reports for run '" + spec.runName + "'";
-        state.inputSignature = collectMergedNetworkInputSignature(state.reportingNetworks, context);
-        state.outputSignature = collectMergedNetworkOutputSignature(state.reportingNetworks, context);
+        const ValidatedRunMetadata& validated = validatedMetadataForSpec(spec);
+        state.inputSignature = validated.reportingInputSignature;
+        state.outputSignature = validated.reportingOutputSignature;
+        state.reportableLosses = validated.reportableLosses;
+        state.reportableMetrics = validated.reportableMetrics;
         memberStates.push_back(std::move(state));
     }
     for (MemberMetricState& state : memberStates) {
@@ -2292,10 +2474,7 @@ void TrainingRuns::validateReportedMetrics() const {
     }
 
     auto reportableMetricsForMember = [](MemberMetricState& member) -> const std::vector<NetworkMetricReference>& {
-        if (!member.reportableMetrics.has_value()) {
-            member.reportableMetrics = collectNetworkReportableMetrics(member.reportingNetworks);
-        }
-        return *member.reportableMetrics;
+        return member.reportableMetrics;
     };
 
     for (MemberMetricState& state : memberStates) {
@@ -2313,7 +2492,7 @@ void TrainingRuns::validateReportedMetrics() const {
         const std::string context = "TrainingRuns reports for run '" + state.runName + "'";
         const std::vector<NetworkMetricReference>& availableMetrics = reportableMetricsForMember(state);
         const TrainingRunsReportNameSelections selections = splitTrainingRunsRequestedReportsByKind(
-            collectNetworkReportableLosses(state.reportingNetworks),
+            state.reportableLosses,
             availableMetrics,
             requestedReportNames,
             context);
@@ -2348,7 +2527,7 @@ void TrainingRuns::validateReportedMetrics() const {
         const std::string context = "TrainingRuns reports for ensemble_group '" + groupName + "'";
         const std::vector<NetworkMetricReference>& referenceAvailableMetrics = reportableMetricsForMember(referenceMember);
         const TrainingRunsReportNameSelections referenceSelections = splitTrainingRunsRequestedReportsByKind(
-            collectNetworkReportableLosses(referenceMember.reportingNetworks),
+            referenceMember.reportableLosses,
             referenceAvailableMetrics,
             requestedReportNames,
             context + " reference run '" + referenceMember.runName + "'");
@@ -2370,7 +2549,7 @@ void TrainingRuns::validateReportedMetrics() const {
                 const std::string memberContext = context + " run '" + member.runName + "'";
                 const std::vector<NetworkMetricReference>& memberAvailableMetrics = reportableMetricsForMember(member);
                 const TrainingRunsReportNameSelections memberSelections = splitTrainingRunsRequestedReportsByKind(
-                    collectNetworkReportableLosses(member.reportingNetworks),
+                    member.reportableLosses,
                     memberAvailableMetrics,
                     requestedReportNames,
                     memberContext);
@@ -2429,21 +2608,24 @@ void TrainingRuns::validateReportedMetrics() const {
 }
 
 std::vector<TrainingNamedMetricResult> TrainingRuns::namedGraphMetricResultsForGroup(std::string_view ensembleGroup) const {
-    std::shared_ptr<Network> representativeNetwork;
+    const TrainingRunsSpec* representativeSpec = nullptr;
     for (const TrainingRunsSpec& run : runs) {
-        if (run.ensembleGroup.has_value() && std::string_view(run.ensembleGroup.value()) == ensembleGroup && run.trainer != nullptr &&
-            validationNetworkForSpec(run) != nullptr) {
-            representativeNetwork = validationNetworkForSpec(run);
-            break;
+        if (run.ensembleGroup.has_value() && std::string_view(run.ensembleGroup.value()) == ensembleGroup && run.trainer != nullptr) {
+            const ValidatedRunMetadata& validated = validatedMetadataForSpec(run);
+            if (validated.hasActiveNetwork) {
+                representativeSpec = &run;
+                break;
+            }
         }
     }
-    if (representativeNetwork == nullptr) {
+    if (representativeSpec == nullptr) {
         return {};
     }
 
+    const ValidatedRunMetadata& validated = validatedMetadataForSpec(*representativeSpec);
     const std::vector<std::string> requestedReportNames = reportOrderForGroup(ensembleGroup);
-    const std::vector<NetworkLossReference> activeLosses = representativeNetwork->getReportableLosses();
-    const std::vector<NetworkMetricReference> activeMetrics = representativeNetwork->getReportableMetrics();
+    const std::vector<NetworkLossReference>& activeLosses = validated.activeReportableLosses;
+    const std::vector<NetworkMetricReference>& activeMetrics = validated.activeReportableMetrics;
     const std::vector<std::string> activeRequestedReportNames =
         filterRequestedReportNamesToAvailable(activeLosses, activeMetrics, requestedReportNames);
     if (!requestedReportNames.empty() && activeRequestedReportNames.empty()) {
@@ -2473,21 +2655,24 @@ std::vector<TrainingNamedMetricResult> TrainingRuns::namedGraphMetricResultsForG
 }
 
 std::vector<TrainingNamedMetricResult> TrainingRuns::namedMetricResultsForGroup(std::string_view ensembleGroup) const {
-    std::shared_ptr<Network> representativeNetwork;
+    const TrainingRunsSpec* representativeSpec = nullptr;
     for (const TrainingRunsSpec& run : runs) {
-        if (run.ensembleGroup.has_value() && std::string_view(run.ensembleGroup.value()) == ensembleGroup && run.trainer != nullptr &&
-            validationNetworkForSpec(run) != nullptr) {
-            representativeNetwork = validationNetworkForSpec(run);
-            break;
+        if (run.ensembleGroup.has_value() && std::string_view(run.ensembleGroup.value()) == ensembleGroup && run.trainer != nullptr) {
+            const ValidatedRunMetadata& validated = validatedMetadataForSpec(run);
+            if (validated.hasActiveNetwork) {
+                representativeSpec = &run;
+                break;
+            }
         }
     }
-    if (representativeNetwork == nullptr) {
+    if (representativeSpec == nullptr) {
         return {};
     }
 
+    const ValidatedRunMetadata& validated = validatedMetadataForSpec(*representativeSpec);
     const std::vector<std::string> requestedReportNames = reportOrderForGroup(ensembleGroup);
-    const std::vector<NetworkLossReference> activeLosses = representativeNetwork->getReportableLosses();
-    const std::vector<NetworkMetricReference> activeMetrics = representativeNetwork->getReportableMetrics();
+    const std::vector<NetworkLossReference>& activeLosses = validated.activeReportableLosses;
+    const std::vector<NetworkMetricReference>& activeMetrics = validated.activeReportableMetrics;
     const std::vector<std::string> activeRequestedReportNames =
         filterRequestedReportNamesToAvailable(activeLosses, activeMetrics, requestedReportNames);
     if (!requestedReportNames.empty() && activeRequestedReportNames.empty()) {
@@ -2541,8 +2726,9 @@ std::map<std::string, TrainingEnsembleResult> TrainingRuns::buildEnsembleResults
         TrainingEnsembleResult& ensemble = byGroup[*spec.ensembleGroup];
         if (ensemble.ensembleGroup.empty()) {
             ensemble.ensembleGroup = *spec.ensembleGroup;
-            ensemble.inputSignature = collectNetworkInputSignature(validationNetworkForSpec(spec));
-            ensemble.outputSignature = collectNetworkOutputSignature(validationNetworkForSpec(spec));
+            const ValidatedRunMetadata& validated = validatedMetadataForSpec(spec);
+            ensemble.inputSignature = validated.activeInputSignature;
+            ensemble.outputSignature = validated.activeOutputSignature;
             ensemble.minSuccessfulModels = minSuccessfulModelsForGroup(*spec.ensembleGroup, 0);
             ensemble.namedMetrics = namedMetricResultsForGroup(*spec.ensembleGroup);
             ensemble.namedGraphMetrics = namedGraphMetricResultsForGroup(*spec.ensembleGroup);
@@ -2657,6 +2843,7 @@ ThorImplementation::DynamicExpression makeWeightedMeanExpression(const std::vect
 struct TrainingRunsComposedEnsembleEvaluator {
     std::shared_ptr<Network> network = nullptr;
     std::map<std::string, Tensor> sharedInputTensorsByName{};
+    std::map<std::string, RaggedTensor> sharedRaggedInputTensorsByName{};
     std::vector<std::map<std::string, Tensor>> memberOutputTensorsByName{};
     std::map<std::string, Tensor> averagedOutputTensorsByName{};
     std::map<std::string, Tensor> lossOutputTensorsByName{};
@@ -2689,6 +2876,67 @@ std::map<std::string, std::shared_ptr<NetworkInput>> apiNetworkInputsByName(Netw
         }
     }
     return inputsByName;
+}
+
+std::map<std::string, RaggedNetworkInputReference> apiRaggedNetworkInputsByName(Network& network) {
+    std::map<std::string, RaggedNetworkInputReference> inputsByName;
+    for (const RaggedNetworkInputReference& input : network.getExternalRaggedNetworkInputs()) {
+        if (!inputsByName.emplace(input.name, input).second) {
+            throw std::runtime_error("TrainingRuns composed ensemble evaluator found duplicate ragged NetworkInput named '" +
+                                     input.name + "' in network '" + network.getNetworkName() + "'.");
+        }
+    }
+    return inputsByName;
+}
+
+RaggedNetworkInputReference requiredApiRaggedNetworkInputByName(
+    Network& network,
+    const std::map<std::string, RaggedNetworkInputReference>& inputsByName,
+    const std::string& inputName,
+    const std::string& context) {
+    auto inputIt = inputsByName.find(inputName);
+    if (inputIt == inputsByName.end()) {
+        throw std::runtime_error(context + " is missing ragged API NetworkInput '" + inputName + "' in network '" +
+                                 network.getNetworkName() + "'.");
+    }
+    if (!inputIt->second.raggedTensor.isInitialized()) {
+        throw std::runtime_error(context + " ragged API NetworkInput '" + inputName + "' is not initialized.");
+    }
+    return inputIt->second;
+}
+
+RaggedTensor buildMatchingRaggedNetworkInput(Network& destination,
+                                             const RaggedNetworkInputReference& source,
+                                             const std::string& inputName) {
+    const ThorImplementation::RaggedTensorDescriptor descriptor = source.raggedTensor.getDescriptor();
+    RaggedTensor result = RaggedNetworkInput::Builder()
+                              .network(destination)
+                              .name(inputName)
+                              .valuesDataType(descriptor.getValuesDataType())
+                              .offsetsDataType(descriptor.getOffsetsDataType())
+                              .trailingDimensions(descriptor.getTrailingDimensions())
+                              .maxTotalValues(descriptor.getMaxTotalValues())
+                              .batchSize(descriptor.getBatchSize())
+                              .build();
+
+    // A logical ragged boundary always owns both physical components even when a
+    // particular bounded subgraph uses only values or only offsets. Stub both
+    // components so component-level graph validation remains valid without
+    // changing the logical external-input contract.
+    Stub::Builder().network(destination).inputTensor(result.getValues()).build();
+    Stub::Builder().network(destination).inputTensor(result.getOffsets()).build();
+    return result;
+}
+
+void validateComposedEvaluatorMemberRaggedInputsCompatible(
+    const RaggedNetworkInputReference& referenceInput,
+    const RaggedNetworkInputReference& memberInput,
+    size_t memberIndex,
+    const std::string& inputName) {
+    if (referenceInput.raggedTensor.getDescriptor() != memberInput.raggedTensor.getDescriptor()) {
+        throw std::runtime_error("TrainingRuns composed ensemble evaluator member " + std::to_string(memberIndex) +
+                                 " has incompatible ragged descriptor for input '" + inputName + "'.");
+    }
 }
 
 std::map<std::string, std::shared_ptr<NetworkOutput>> apiNetworkOutputsByName(Network& network) {
@@ -2791,6 +3039,8 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     }
     const std::map<std::string, std::shared_ptr<NetworkInput>> referenceInputsByName =
         apiNetworkInputsByName(referenceMember, /*includePassThroughInputs=*/false);
+    const std::map<std::string, RaggedNetworkInputReference> referenceRaggedInputsByName =
+        apiRaggedNetworkInputsByName(referenceMember);
 
     TrainingRunsComposedEnsembleEvaluator evaluator;
     evaluator.network = std::make_shared<Network>(networkName);
@@ -2801,16 +3051,26 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         if (!seenReferenceInputNames.insert(inputName).second) {
             throw std::runtime_error("TrainingRuns composed ensemble evaluator found duplicate shared input name '" + inputName + "'.");
         }
-        std::shared_ptr<NetworkInput> referenceInput =
-            requiredApiNetworkInputByName(referenceMember, referenceInputsByName, inputName, "TrainingRuns composed ensemble evaluator reference member");
-        NetworkInput evaluatorInput = NetworkInput::Builder()
-                                          .network(*evaluator.network)
-                                          .name(inputName)
-                                          .dimensions(referenceInput->getDimensions())
-                                          .dataType(referenceInput->getDataType())
-                                          .dimensionsIncludeBatch(referenceInput->dimensionsIncludeBatch())
-                                          .build();
-        evaluator.sharedInputTensorsByName[inputName] = evaluatorInput.getFeatureOutput().value();
+        auto referenceRaggedIt = referenceRaggedInputsByName.find(inputName);
+        if (referenceRaggedIt != referenceRaggedInputsByName.end()) {
+            RaggedTensor evaluatorInput =
+                buildMatchingRaggedNetworkInput(*evaluator.network, referenceRaggedIt->second, inputName);
+            evaluator.sharedRaggedInputTensorsByName[inputName] = evaluatorInput;
+        } else {
+            std::shared_ptr<NetworkInput> referenceInput =
+                requiredApiNetworkInputByName(referenceMember,
+                                              referenceInputsByName,
+                                              inputName,
+                                              "TrainingRuns composed ensemble evaluator reference member");
+            NetworkInput evaluatorInput = NetworkInput::Builder()
+                                              .network(*evaluator.network)
+                                              .name(inputName)
+                                              .dimensions(referenceInput->getDimensions())
+                                              .dataType(referenceInput->getDataType())
+                                              .dimensionsIncludeBatch(referenceInput->dimensionsIncludeBatch())
+                                              .build();
+            evaluator.sharedInputTensorsByName[inputName] = evaluatorInput.getFeatureOutput().value();
+        }
         evaluator.externalInputNames.push_back(inputName);
     }
 
@@ -2835,16 +3095,17 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         Network& memberNetwork = *memberNetworks[memberIndex];
         const std::map<std::string, std::shared_ptr<NetworkInput>> memberInputsByName =
             apiNetworkInputsByName(memberNetwork, /*includePassThroughInputs=*/false);
+        const std::map<std::string, RaggedNetworkInputReference> memberRaggedInputsByName =
+            apiRaggedNetworkInputsByName(memberNetwork);
         std::vector<std::string> memberInputNames;
         if (requireExactSharedInferenceInputSet) {
             memberInputNames = memberNetwork.getInferenceNetworkInputNames();
             eraseNames(memberInputNames, memberNetwork.getTrainingOnlyNetworkInputNames());
         } else {
-            memberInputNames.reserve(memberInputsByName.size());
-            for (const auto& [inputName, _] : memberInputsByName) {
-                (void)_;
-                memberInputNames.push_back(inputName);
-            }
+            // The shared-input override is expressed in the same logical
+            // boundary namespace returned by getRequiredNetworkInputNamesForOutputs().
+            // Collapse ragged .values/.offsets physical ports to their logical name.
+            memberInputNames = memberNetwork.getExternalNetworkInputNames();
         }
         std::set<std::string> memberInputNameSet(memberInputNames.begin(), memberInputNames.end());
         if (memberInputNames.size() != memberInputNameSet.size()) {
@@ -2866,10 +3127,51 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
 
         ApiTensorRemap remap;
         for (const std::string& inputName : memberCloneInputNames) {
+            auto referenceRaggedIt = referenceRaggedInputsByName.find(inputName);
+            if (referenceRaggedIt != referenceRaggedInputsByName.end()) {
+                const RaggedNetworkInputReference memberRaggedInput =
+                    requiredApiRaggedNetworkInputByName(memberNetwork,
+                                                        memberRaggedInputsByName,
+                                                        inputName,
+                                                        "TrainingRuns composed ensemble evaluator member");
+                validateComposedEvaluatorMemberRaggedInputsCompatible(
+                    referenceRaggedIt->second, memberRaggedInput, memberIndex, inputName);
+
+                auto sharedRaggedIt = evaluator.sharedRaggedInputTensorsByName.find(inputName);
+                if (sharedRaggedIt == evaluator.sharedRaggedInputTensorsByName.end()) {
+                    throw std::runtime_error("TrainingRuns composed ensemble evaluator internal error: ragged shared input '" +
+                                             inputName + "' was not built.");
+                }
+
+                NetworkInput memberValuesPassThrough = NetworkInput::Builder()
+                                                               .network(*evaluator.network)
+                                                               .name(trainingRunsMemberScopedName(
+                                                                   memberIndex, memberRaggedInput.valuesInputName))
+                                                               .passThroughSource(sharedRaggedIt->second.getValues())
+                                                               .build();
+                NetworkInput memberOffsetsPassThrough = NetworkInput::Builder()
+                                                                .network(*evaluator.network)
+                                                                .name(trainingRunsMemberScopedName(
+                                                                    memberIndex, memberRaggedInput.offsetsInputName))
+                                                                .passThroughSource(sharedRaggedIt->second.getOffsets())
+                                                                .build();
+                remap.map(memberRaggedInput.raggedTensor.getValues(),
+                          memberValuesPassThrough.getFeatureOutput().value());
+                remap.map(memberRaggedInput.raggedTensor.getOffsets(),
+                          memberOffsetsPassThrough.getFeatureOutput().value());
+                continue;
+            }
+
             std::shared_ptr<NetworkInput> referenceInput =
-                requiredApiNetworkInputByName(referenceMember, referenceInputsByName, inputName, "TrainingRuns composed ensemble evaluator reference member");
+                requiredApiNetworkInputByName(referenceMember,
+                                              referenceInputsByName,
+                                              inputName,
+                                              "TrainingRuns composed ensemble evaluator reference member");
             std::shared_ptr<NetworkInput> memberInput =
-                requiredApiNetworkInputByName(memberNetwork, memberInputsByName, inputName, "TrainingRuns composed ensemble evaluator member");
+                requiredApiNetworkInputByName(memberNetwork,
+                                              memberInputsByName,
+                                              inputName,
+                                              "TrainingRuns composed ensemble evaluator member");
             validateComposedEvaluatorMemberInputsCompatible(*referenceInput, *memberInput, memberIndex, inputName);
 
             const Tensor& sharedInputTensor = evaluator.sharedInputTensorsByName.at(inputName);
@@ -2934,6 +3236,25 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     return evaluator;
 }
 
+uint32_t trainingRunsEnsembleArtifactPlacementBatchSize(const Network& network) {
+    const std::vector<RaggedNetworkInputReference> raggedInputs = network.getExternalRaggedNetworkInputs();
+    if (raggedInputs.empty()) {
+        return 1;
+    }
+
+    const uint64_t batchSize = raggedInputs.front().raggedTensor.getBatchSize();
+    if (batchSize == 0 || batchSize > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("TrainingRunsResult.save_ensemble ragged input batch size is outside uint32 placement capacity.");
+    }
+    for (const RaggedNetworkInputReference& input : raggedInputs) {
+        if (input.raggedTensor.getBatchSize() != batchSize) {
+            throw std::runtime_error(
+                "TrainingRunsResult.save_ensemble requires all ragged external inputs to use the same fixed batch size.");
+        }
+    }
+    return static_cast<uint32_t>(batchSize);
+}
+
 std::shared_ptr<Network> buildSingleMemberEnsembleNetworkArtifact(Network& memberNetwork,
                                                                const std::vector<std::string>& outputNames,
                                                                const std::vector<std::string>& deployableInputNames,
@@ -2948,6 +3269,8 @@ std::shared_ptr<Network> buildSingleMemberEnsembleNetworkArtifact(Network& membe
     auto ensembleNetwork = std::make_shared<Network>(networkName);
     const std::map<std::string, std::shared_ptr<NetworkInput>> memberInputsByName =
         apiNetworkInputsByName(memberNetwork, /*includePassThroughInputs=*/false);
+    const std::map<std::string, RaggedNetworkInputReference> memberRaggedInputsByName =
+        apiRaggedNetworkInputsByName(memberNetwork);
 
     ApiTensorRemap remap;
     std::set<std::string> seenInputNames;
@@ -2956,6 +3279,15 @@ std::shared_ptr<Network> buildSingleMemberEnsembleNetworkArtifact(Network& membe
             throw std::runtime_error("TrainingRunsResult.save_ensemble single-member artifact found duplicate deployable input name '" +
                                      inputName + "'.");
         }
+        auto memberRaggedIt = memberRaggedInputsByName.find(inputName);
+        if (memberRaggedIt != memberRaggedInputsByName.end()) {
+            RaggedTensor ensembleInput =
+                buildMatchingRaggedNetworkInput(*ensembleNetwork, memberRaggedIt->second, inputName);
+            remap.map(memberRaggedIt->second.raggedTensor.getValues(), ensembleInput.getValues());
+            remap.map(memberRaggedIt->second.raggedTensor.getOffsets(), ensembleInput.getOffsets());
+            continue;
+        }
+
         std::shared_ptr<NetworkInput> memberInput =
             requiredApiNetworkInputByName(memberNetwork, memberInputsByName, inputName,
                                           "TrainingRunsResult.save_ensemble single-member artifact member");
@@ -3045,10 +3377,12 @@ void saveEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
             outputNames,
             deployableInputNames,
             safeNetworkNameForSavedEnsemble(ensembleResult.ensembleGroup));
+        const uint32_t placementBatchSize =
+            trainingRunsEnsembleArtifactPlacementBatchSize(*singleMemberEnsembleNetwork);
         std::shared_ptr<PlacedNetwork> placed =
             placeInferenceNetworkWithSerializedStartup(
                 *singleMemberEnsembleNetwork,
-                /*batchSize=*/1);
+                placementBatchSize);
         placed->save(artifactDirectory.string(), overwriteNetworkArchive, /*saveOptimizerState=*/false);
         return;
     }
@@ -3060,10 +3394,12 @@ void saveEnsembleNetworkArtifact(const TrainingEnsembleResult& ensembleResult,
         /*exposeAveragedOutputsAsNetworkOutputs=*/true,
         safeNetworkNameForSavedEnsemble(ensembleResult.ensembleGroup),
         std::optional<std::vector<std::string>>{deployableInputNames});
+    const uint32_t placementBatchSize =
+        trainingRunsEnsembleArtifactPlacementBatchSize(*evaluator.network);
     std::shared_ptr<PlacedNetwork> placed =
         placeInferenceNetworkWithSerializedStartup(
             *evaluator.network,
-            /*batchSize=*/1);
+            placementBatchSize);
     placed->save(artifactDirectory.string(), overwriteNetworkArchive, /*saveOptimizerState=*/false);
 }
 
@@ -3084,7 +3420,26 @@ void mapTrainingRunsEvaluatorRequiredGraphInputs(
     const std::vector<std::string>& requiredInputNames,
     ApiTensorRemap& remap,
     const std::string& context) {
+    const std::map<std::string, RaggedNetworkInputReference> referenceRaggedInputsByName =
+        apiRaggedNetworkInputsByName(referenceMember);
     for (const std::string& inputName : requiredInputNames) {
+        auto referenceRaggedIt = referenceRaggedInputsByName.find(inputName);
+        if (referenceRaggedIt != referenceRaggedInputsByName.end()) {
+            auto evaluatorRaggedIt = evaluator.sharedRaggedInputTensorsByName.find(inputName);
+            if (evaluatorRaggedIt == evaluator.sharedRaggedInputTensorsByName.end()) {
+                throw std::runtime_error(context + " did not build required ragged graph input '" + inputName + "'.");
+            }
+            const Tensor sourceValues = referenceRaggedIt->second.raggedTensor.getValues();
+            const Tensor sourceOffsets = referenceRaggedIt->second.raggedTensor.getOffsets();
+            if (!remap.contains(sourceValues)) {
+                remap.map(sourceValues, evaluatorRaggedIt->second.getValues());
+            }
+            if (!remap.contains(sourceOffsets)) {
+                remap.map(sourceOffsets, evaluatorRaggedIt->second.getOffsets());
+            }
+            continue;
+        }
+
         std::shared_ptr<NetworkInput> sourceInput =
             requiredApiNetworkInputByName(referenceMember, referenceInputsByName, inputName, context);
         const Tensor sourceTensor = sourceInput->getFeatureOutput().value();

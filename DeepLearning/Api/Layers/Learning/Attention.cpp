@@ -8,6 +8,8 @@
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/CudaKernelExpression.h"
+#include "Utilities/Expression/DropOutPostOp.h"
 #include "Utilities/TensorOperations/Scalar/SetScalar.h"
 
 #include <algorithm>
@@ -15,6 +17,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -39,6 +42,9 @@ constexpr const char* kAttentionQueryRopePositionIdsInputName = "__attention_que
 constexpr const char* kAttentionKeyRopePositionIdsInputName = "__attention_key_rope_position_ids";
 constexpr const char* kAttentionDropoutSeedInputName = "__attention_dropout_seed";
 constexpr const char* kAttentionDropoutOffsetInputName = "__attention_dropout_offset";
+constexpr const char* kAttentionResidualInputName = "residual_input";
+constexpr const char* kAttentionOutputDropoutSeedInputName = "__attention_output_dropout_seed";
+constexpr const char* kAttentionOutputDropoutSequenceInputName = "__attention_output_dropout_sequence";
 constexpr ThorImplementation::DynamicExpressionVariantId kAttentionEvaluationVariant = 1;
 
 std::string dtypeName(DataType dtype) {
@@ -196,6 +202,7 @@ std::vector<std::string> publicAttentionInputNames(bool useContextInput,
                                                    bool keyValueRagged,
                                                    bool useQueryRopePositionOffsets,
                                                    bool useKeyRopePositionOffsets,
+                                                   bool useResidual,
                                                    const std::vector<std::string>& epilogueAuxInputNames) {
     std::vector<std::string> names{kAttentionFeatureInputName};
     if (useContextInput) {
@@ -220,6 +227,9 @@ std::vector<std::string> publicAttentionInputNames(bool useContextInput,
     if (useKeyRopePositionOffsets) {
         names.push_back(kAttentionKeyRopePositionOffsetsInputName);
     }
+    if (useResidual) {
+        names.push_back(kAttentionResidualInputName);
+    }
     names.insert(names.end(), epilogueAuxInputNames.begin(), epilogueAuxInputNames.end());
     return names;
 }
@@ -233,6 +243,7 @@ Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& f
                                                            const std::optional<Thor::Tensor>& keyRopePositionOffsetsInput,
                                                            const std::optional<Thor::RaggedTensor>& raggedFeatureInput,
                                                            const std::optional<Thor::RaggedTensor>& raggedContextInput,
+                                                           const std::optional<Thor::Tensor>& residualInput,
                                                            const std::vector<std::pair<std::string, Thor::Tensor>>& epilogueInputBindings) {
     Thor::CustomLayer::TensorMap inputInterface{{kAttentionFeatureInputName, featureInput}};
     if (contextInput.has_value()) {
@@ -258,6 +269,9 @@ Thor::CustomLayer::TensorMap publicAttentionInputInterface(const Thor::Tensor& f
     }
     if (keyRopePositionOffsetsInput.has_value()) {
         inputInterface[kAttentionKeyRopePositionOffsetsInputName] = keyRopePositionOffsetsInput.value();
+    }
+    if (residualInput.has_value()) {
+        inputInterface[kAttentionResidualInputName] = residualInput.value();
     }
     for (const auto& [name, tensor] : epilogueInputBindings) {
         inputInterface[name] = tensor;
@@ -310,7 +324,7 @@ class AttentionDropoutRuntimeState {
    public:
     AttentionDropoutRuntimeState(int64_t seed, int64_t initialOffset) : seed(seed), nextOffset(initialOffset) {
         if (initialOffset < 0) {
-            throw std::invalid_argument("Attention dropoutOffset must be non-negative when dropout is enabled.");
+            throw std::invalid_argument("Attention sdpaDropoutOffset must be non-negative when SDPA dropout is enabled.");
         }
     }
 
@@ -585,9 +599,12 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                                                               int64_t diagonalRightBound,
                                                               bool useAlibiMask,
                                                               std::optional<double> attentionScale,
-                                                              float dropoutProbability,
+                                                              float sdpaDropoutProbability,
                                                               int64_t dropoutSeed,
                                                               int64_t dropoutOffset,
+                                                              float outputDropoutProbability,
+                                                              int64_t outputDropoutSeed,
+                                                              bool useResidual,
                                                               bool useContextInput,
                                                               bool useScoreBias,
                                                               bool useSequenceLengths,
@@ -641,6 +658,9 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
         if (useKeyRopePositionOffsets) {
             expectedInputs.push_back(kAttentionKeyRopePositionOffsetsInputName);
         }
+        if (useResidual) {
+            expectedInputs.push_back(kAttentionResidualInputName);
+        }
         expectedInputs.push_back("qkv_weights");
         expectedInputs.push_back("output_weights");
         if (hasBias) {
@@ -670,6 +690,9 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
         }
         if (useKeyRopePositionOffsets) {
             expectedInputs.push_back(kAttentionKeyRopePositionOffsetsInputName);
+        }
+        if (useResidual) {
+            expectedInputs.push_back(kAttentionResidualInputName);
         }
         expectedInputs.push_back("query_weights");
         expectedInputs.push_back("key_weights");
@@ -708,9 +731,12 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
          diagonalRightBound,
          useAlibiMask,
          attentionScale,
-         dropoutProbability,
+         sdpaDropoutProbability,
          dropoutSeed,
          dropoutOffset,
+         outputDropoutProbability,
+         outputDropoutSeed,
+         useResidual,
          useContextInput,
          useScoreBias,
          useSequenceLengths,
@@ -1214,7 +1240,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
 
             auto buildSdpa = [&](bool enableDropout) -> Expression {
                 AttentionOptions activeOptions = options;
-                activeOptions.dropout_probability = enableDropout ? dropoutProbability : 0.0f;
+                activeOptions.dropout_probability = enableDropout ? sdpaDropoutProbability : 0.0f;
 
                 if (useAnyRagged) {
                     const char* queryOffsetsName = queryRagged
@@ -1319,7 +1345,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
 
             const std::vector<uint64_t> foldedOutputDimensions =
                 {queryRagged ? querySequenceLength : batch * querySequenceLength, outputFeatures};
-            auto buildProjectedOutput = [&](Expression attn) -> Expression {
+            auto buildProjectedOutput = [&](Expression attn, bool enableOutputDropout) -> Expression {
                 const uint64_t mergedWidth = checkedMul(numHeads, valueDim, "merged head width");
                 Expression merged = attn.reshape(
                     {queryRagged ? querySequenceLength : batch * querySequenceLength, mergedWidth});
@@ -1341,6 +1367,51 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 if (hasBias) {
                     out = out + Expression::input("output_bias", weightsDType, weightsDType);
                 }
+
+                std::optional<Expression> flattenedResidual;
+                if (useResidual) {
+                    flattenedResidual = Expression::input(kAttentionResidualInputName, outputDType, outputDType)
+                                            .reshape(foldedOutputDimensions);
+                }
+
+                if (enableOutputDropout && outputDropoutProbability > 0.0f) {
+                    ThorImplementation::CudaKernelExpression outputDropout =
+                        ThorImplementation::makeDropOutPostOpKernel(outputDType,
+                                                                  outputDropoutProbability,
+                                                                  useResidual,
+                                                                  queryRagged,
+                                                                  queryRowPartitionDType,
+                                                                  queryRagged ? batch : 0,
+                                                                  outputFeatures,
+                                                                  "Attention output");
+                    std::unordered_map<std::string, Expression> dropoutInputs{
+                        {"projected", out},
+                        {"seed", Expression::tensorRuntimeScalar(
+                                     kAttentionOutputDropoutSeedInputName, DataType::INT64, DataType::INT64)},
+                        {"sequence", Expression::tensorRuntimeScalar(
+                                         kAttentionOutputDropoutSequenceInputName, DataType::INT64, DataType::INT64)},
+                    };
+                    if (flattenedResidual.has_value()) {
+                        dropoutInputs.emplace("residual", flattenedResidual.value());
+                    }
+                    if (queryRagged) {
+                        dropoutInputs.emplace(
+                            "offsets",
+                            Expression::input(kAttentionQueryRowPartitionInputName, queryRowPartitionDType, queryRowPartitionDType));
+                    }
+                    ThorImplementation::Outputs dropoutOutputs = outputDropout.apply(dropoutInputs);
+                    const auto& namedDropoutOutputs = dropoutOutputs.namedOutputs();
+                    if (namedDropoutOutputs.size() != 1 || namedDropoutOutputs.front().name != "output") {
+                        throw std::logic_error("Attention output-dropout kernel produced an unexpected output interface.");
+                    }
+                    out = Expression::fromPhysicalNode(
+                        dropoutOutputs.expression(), namedDropoutOutputs.front().node_idx);
+                } else if (flattenedResidual.has_value()) {
+                    // With no active output dropout this add is intentionally kept adjacent to the
+                    // projection so EquationCompiler can lower it into the output GEMM beta/residual path.
+                    out = out + flattenedResidual.value();
+                }
+
                 if (epilogue.has_value()) {
                     // Attention exposes [B, Q, O], while the output projection is physically [B*Q, O].
                     // Apply pointwise epilogues in the projection geometry so matmul + residual can lower
@@ -1370,11 +1441,12 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
                 return out;
             };
 
-            auto expressionOutputs = Expression::outputs({{"feature_output", buildProjectedOutput(buildSdpa(dropoutProbability > 0.0f))}});
+            auto expressionOutputs = Expression::outputs(
+                {{"feature_output", buildProjectedOutput(buildSdpa(sdpaDropoutProbability > 0.0f), outputDropoutProbability > 0.0f)}});
             std::shared_ptr<FusedEquation> evaluationEquation;
-            if (dropoutProbability > 0.0f) {
+            if (sdpaDropoutProbability > 0.0f || outputDropoutProbability > 0.0f) {
                 auto validationExpressionOutputs =
-                    Expression::outputs({{"feature_output", buildProjectedOutput(buildSdpa(false))}});
+                    Expression::outputs({{"feature_output", buildProjectedOutput(buildSdpa(false), false)}});
                 evaluationEquation = std::make_shared<FusedEquation>(
                     FusedEquation::compile(validationExpressionOutputs.physicalOutputs(), stream.getGpuNum()));
             }
@@ -1455,18 +1527,30 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
 
             std::unordered_map<std::string, TensorScalarBinding> tensorScalarInputs;
             std::function<void(Stream&)> preForwardHook = ropePreForwardHook;
-            if (dropoutProbability > 0.0f) {
+            auto appendPreForwardHook = [&](std::function<void(Stream&)> nextHook) {
+                const std::function<void(Stream&)> previousHook = preForwardHook;
+                preForwardHook = [previousHook, nextHook = std::move(nextHook)](Stream& runStream) mutable {
+                    if (previousHook) previousHook(runStream);
+                    nextHook(runStream);
+                };
+            };
+            if (sdpaDropoutProbability > 0.0f) {
                 auto dropoutState = std::make_shared<AttentionDropoutRuntimeState>(dropoutSeed, dropoutOffset);
                 dropoutState->setOffsetAdvance(checkedDropoutOffsetAdvance(batch, numHeads, querySequenceLength, keyValueSequenceLength));
                 tensorScalarInputs[kAttentionDropoutSeedInputName] = dropoutState->seedBinding(featureInput.getPlacement());
                 tensorScalarInputs[kAttentionDropoutOffsetInputName] = dropoutState->offsetBinding(featureInput.getPlacement());
-                const std::function<void(Stream&)> ropeHook = ropePreForwardHook;
-                preForwardHook = [ropeHook, dropoutState](Stream& runStream) {
-                    if (ropeHook) {
-                        ropeHook(runStream);
-                    }
-                    dropoutState->uploadForForward(runStream);
-                };
+                appendPreForwardHook([dropoutState](Stream& runStream) { dropoutState->uploadForForward(runStream); });
+            }
+            if (outputDropoutProbability > 0.0f) {
+                auto outputDropoutState = std::make_shared<ThorImplementation::DropOutRuntimeState>(
+                    outputDropoutSeed, 0, "Attention output");
+                outputDropoutState->setSequenceAdvance(1);
+                tensorScalarInputs[kAttentionOutputDropoutSeedInputName] =
+                    outputDropoutState->seedBinding(featureInput.getPlacement());
+                tensorScalarInputs[kAttentionOutputDropoutSequenceInputName] =
+                    outputDropoutState->sequenceBinding(featureInput.getPlacement());
+                appendPreForwardHook(
+                    [outputDropoutState](Stream& runStream) { outputDropoutState->uploadForForward(runStream); });
             }
 
             auto equation = std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), stream.getGpuNum()));
@@ -1542,7 +1626,7 @@ std::shared_ptr<ThorImplementation::CustomLayer> Attention::createPhysicalLayer(
     THOR_THROW_IF_FALSE(!usesBatchValidity);
     THOR_THROW_IF_FALSE(!requiresFullBatch);
     const std::optional<ThorImplementation::DynamicExpressionVariantId> deterministicTrainingVariant =
-        dropoutProbability > 0.0f
+        (sdpaDropoutProbability > 0.0f || outputDropoutProbability > 0.0f)
             ? std::optional<ThorImplementation::DynamicExpressionVariantId>(kAttentionEvaluationVariant)
             : std::nullopt;
 
@@ -1638,6 +1722,7 @@ void Attention::validateEpilogueAuxInputName(const std::string& inputName) {
         kAttentionKeyValueRowPartitionInputName,
         kAttentionQueryRopePositionOffsetsInputName,
         kAttentionKeyRopePositionOffsetsInputName,
+        kAttentionResidualInputName,
         "feature_output",
         "qkv_weights",
         "query_weights",
@@ -1794,16 +1879,56 @@ void Attention::Builder::verifyConfig() const {
                      maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight)) {
         throw std::invalid_argument("Attention ALiBi cannot currently be combined with bottom-right/decode masks in cuDNN SDPA.");
     }
-    const float dropoutProbability = _dropoutProbability.value_or(0.0f);
-    if (!std::isfinite(dropoutProbability) || dropoutProbability < 0.0f || dropoutProbability >= 1.0f) {
-        throw std::invalid_argument("Attention dropoutProbability must be finite and in [0, 1).");
+    const float sdpaDropoutProbability = _sdpaDropoutProbability.value_or(0.0f);
+    if (!std::isfinite(sdpaDropoutProbability) || sdpaDropoutProbability < 0.0f || sdpaDropoutProbability >= 1.0f) {
+        throw std::invalid_argument("Attention sdpaDropoutProbability must be finite and in [0, 1).");
     }
-    if (dropoutProbability > 0.0f && (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
+    if (sdpaDropoutProbability > 0.0f && (maskKind == ThorImplementation::AttentionMaskKind::CausalBottomRight ||
                                       maskKind == ThorImplementation::AttentionMaskKind::SlidingWindowBottomRight)) {
-        throw std::invalid_argument("Attention dropout cannot currently be combined with bottom-right/decode masks in cuDNN SDPA.");
+        throw std::invalid_argument("Attention SDPA dropout cannot currently be combined with bottom-right/decode masks in cuDNN SDPA.");
     }
-    if (dropoutProbability > 0.0f && _dropoutOffset.value_or(0) < 0) {
-        throw std::invalid_argument("Attention dropoutOffset must be non-negative when dropout is enabled.");
+    if (sdpaDropoutProbability > 0.0f && _dropoutOffset.value_or(0) < 0) {
+        throw std::invalid_argument("Attention sdpaDropoutOffset must be non-negative when SDPA dropout is enabled.");
+    }
+
+    const float outputDropoutProbability = _outputDropoutProbability.value_or(0.0f);
+    if (!std::isfinite(outputDropoutProbability) || outputDropoutProbability < 0.0f || outputDropoutProbability >= 1.0f) {
+        throw std::invalid_argument("Attention outputDropoutProbability must be finite and in [0, 1).");
+    }
+    if (_epilogue.has_value() && (_residualInput.has_value() || outputDropoutProbability > 0.0f)) {
+        throw std::invalid_argument(
+            "Attention residualInput/outputDropoutProbability cannot currently be combined with a custom epilogue; "
+            "use the first-class residual/output-dropout path or the custom epilogue, not both.");
+    }
+    if (_residualInput.has_value()) {
+        const std::vector<uint64_t> expectedResidualDimensions = {
+            _featureInput->getDimensions().at(0),
+            _outputFeatures.value_or(static_cast<uint32_t>(_featureInput->getDimensions().at(1))),
+        };
+        if (!_residualInput->isInitialized()) {
+            throw std::invalid_argument("Attention residualInput tensor is not initialized.");
+        }
+        if (_residualInput->getDataType() != outputDType) {
+            throw std::invalid_argument("Attention residualInput dtype must match outputDataType.");
+        }
+        if (_residualInput->getDimensions() != expectedResidualDimensions) {
+            throw std::invalid_argument("Attention residualInput shape must match the feature output shape.");
+        }
+        if (queryRagged != _raggedResidualInput.has_value()) {
+            throw std::invalid_argument(
+                "Attention residualInput must be ragged exactly when the query/output is ragged.");
+        }
+        if (_raggedResidualInput.has_value()) {
+            requireRaggedFeatureInput(_raggedResidualInput.value(), "residualInput(RaggedTensor)");
+            if (_raggedResidualInput->getBatchSize() != _raggedFeatureInput->getBatchSize() ||
+                _raggedResidualInput->getMaxTotalValues() != _raggedFeatureInput->getMaxTotalValues() ||
+                _raggedResidualInput->getOffsets() != _raggedFeatureInput->getOffsets()) {
+                throw std::invalid_argument(
+                    "Attention ragged residualInput must use the exact query row partition and capacity.");
+            }
+        }
+    } else if (_raggedResidualInput.has_value()) {
+        throw std::invalid_argument("Attention ragged residual metadata requires residualInput.");
     }
     if (_ropeInPlace.value_or(false) && !_useRope.value_or(false)) {
         throw std::invalid_argument("Attention ropeInPlace requires useRope to be enabled.");
@@ -1903,14 +2028,32 @@ Attention Attention::Builder::build() {
     if (!_useAlibiMask.has_value()) {
         _useAlibiMask = false;
     }
-    if (!_dropoutProbability.has_value()) {
-        _dropoutProbability = 0.0f;
+    if (!_sdpaDropoutProbability.has_value()) {
+        _sdpaDropoutProbability = 0.0f;
     }
     if (!_dropoutSeed.has_value()) {
         _dropoutSeed = 0;
     }
     if (!_dropoutOffset.has_value()) {
         _dropoutOffset = 0;
+    }
+    if (!_outputDropoutProbability.has_value()) {
+        _outputDropoutProbability = 0.0f;
+    }
+    if (!_outputDropoutSeed.has_value()) {
+        if (_outputDropoutProbability.value() > 0.0f) {
+            // Match standalone DropOut: independently built output-dropout sites should
+            // not share a deterministic mask stream unless the caller explicitly asks
+            // for one. The selected seed is retained in the layer architecture so a
+            // saved/reloaded model keeps the same configured RNG stream origin.
+            std::random_device rd;
+            const uint64_t high = static_cast<uint64_t>(rd()) << 32U;
+            const uint64_t low = static_cast<uint64_t>(rd());
+            _outputDropoutSeed =
+                static_cast<int64_t>((high ^ low) & static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
+        } else {
+            _outputDropoutSeed = 0;
+        }
     }
     if (!_useRope.has_value()) {
         _useRope = false;
@@ -2014,9 +2157,12 @@ Attention Attention::Builder::build() {
                                             _diagonalRightBound.value(),
                                             _useAlibiMask.value(),
                                             _attentionScale,
-                                            _dropoutProbability.value(),
+                                            _sdpaDropoutProbability.value(),
                                             _dropoutSeed.value(),
                                             _dropoutOffset.value(),
+                                            _outputDropoutProbability.value(),
+                                            _outputDropoutSeed.value(),
+                                            _residualInput.has_value(),
                                             _contextInput.has_value(),
                                             useScoreBias,
                                             useSequenceLengths,
@@ -2046,6 +2192,7 @@ Attention Attention::Builder::build() {
                                               keyValueRagged,
                                               useQueryRopePositionOffsets,
                                               useKeyRopePositionOffsets,
+                                              _residualInput.has_value(),
                                               epilogueAuxNames),
                     {publicAttentionInputInterface(_featureInput.value(),
                                                    _contextInput,
@@ -2056,6 +2203,7 @@ Attention Attention::Builder::build() {
                                                    _keyRopePositionOffsetsInput,
                                                    _raggedFeatureInput,
                                                    _raggedContextInput,
+                                                   _residualInput,
                                                    _epilogueInputBindings)},
                     {{{"feature_output", output}}},
                     std::move(parameters),
@@ -2077,9 +2225,13 @@ Attention Attention::Builder::build() {
                     _diagonalRightBound.value(),
                     _useAlibiMask.value(),
                     _attentionScale,
-                    _dropoutProbability.value(),
+                    _sdpaDropoutProbability.value(),
                     _dropoutSeed.value(),
                     _dropoutOffset.value(),
+                    _outputDropoutProbability.value(),
+                    _outputDropoutSeed.value(),
+                    _residualInput,
+                    _raggedResidualInput,
                     _contextInput,
                     _scoreBiasInput,
                     _querySequenceLengthsInput,
@@ -2100,7 +2252,11 @@ Attention Attention::Builder::build() {
 json Attention::architectureJson() const {
     json j;
     j["factory"] = Layer::Factory::Learning.value();
-    j["version"] = "1.0.0";
+    // Preserve forward compatibility with Thor versions that understand the legacy
+    // Attention contract whenever no new 1.1 semantics are used. Older readers
+    // ignore the additional sdpa_* aliases but must never silently ignore a
+    // residual or post-projection dropout path.
+    j["version"] = (residualInput.has_value() || outputDropoutProbability > 0.0f) ? "1.1.0" : "1.0.0";
     j["layer_type"] = "attention";
     j["layer_name"] = std::string("layer") + std::to_string(getId());
 
@@ -2126,9 +2282,17 @@ json Attention::architectureJson() const {
     j["diagonal_right_bound"] = diagonalRightBound;
     j["use_alibi_mask"] = useAlibiMask;
     j["attention_scale"] = attentionScale.has_value() ? json(attentionScale.value()) : json(nullptr);
-    j["dropout_probability"] = dropoutProbability;
+    // Keep the legacy key for backward readers while making the distinction from
+    // post-projection dropout explicit in new archives.
+    j["sdpa_dropout_probability"] = sdpaDropoutProbability;
+    j["dropout_probability"] = sdpaDropoutProbability;
+    j["sdpa_dropout_seed"] = dropoutSeed;
+    j["sdpa_dropout_offset"] = dropoutOffset;
     j["dropout_seed"] = dropoutSeed;
     j["dropout_offset"] = dropoutOffset;
+    j["output_dropout_probability"] = outputDropoutProbability;
+    j["output_dropout_seed"] = outputDropoutSeed;
+    j["use_residual"] = residualInput.has_value();
     j["use_cross_attention"] = contextInput.has_value();
     j["use_score_bias"] = scoreBiasInput.has_value();
     j["use_sequence_lengths"] = querySequenceLengthsInput.has_value();
@@ -2169,6 +2333,9 @@ json Attention::architectureJson() const {
         throw std::runtime_error("Attention serialization requires one feature input and one feature output.");
     }
     j["feature_input"] = input.value().architectureJson();
+    if (residualInput.has_value()) {
+        j["residual_input"] = residualInput->architectureJson();
+    }
     if (contextInput.has_value()) {
         j["context_input"] = contextInput.value().architectureJson();
     }
@@ -2195,6 +2362,9 @@ json Attention::architectureJson() const {
     if (raggedContextInput.has_value()) {
         j["ragged_context_input"] = raggedContextInput->architectureJson();
     }
+    if (raggedResidualInput.has_value()) {
+        j["ragged_residual_input"] = raggedResidualInput->architectureJson();
+    }
     j["feature_output"] = output.value().architectureJson();
     j["parameters"] = getParametersArchitectureJson()["parameters"];
     return j;
@@ -2210,8 +2380,9 @@ json Attention::serialize(thor_file::TarWriter& archiveWriter,
 }
 
 void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
-    if (j.at("version").get<std::string>() != "1.0.0") {
-        throw std::runtime_error("Unsupported version in Attention::deserialize: " + j.at("version").get<std::string>());
+    const std::string serializedVersion = j.at("version").get<std::string>();
+    if (serializedVersion != "1.0.0" && serializedVersion != "1.1.0") {
+        throw std::runtime_error("Unsupported version in Attention::deserialize: " + serializedVersion);
     }
     if (j.at("layer_type").get<std::string>() != "attention") {
         throw std::runtime_error("Layer type mismatch in Attention::deserialize: " + j.at("layer_type").get<std::string>());
@@ -2219,6 +2390,13 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
 
     const uint64_t inputOriginalId = j.at("feature_input").at("id").get<uint64_t>();
     Tensor featureInput = network->getApiTensorByOriginalId(inputOriginalId);
+    std::optional<Tensor> residualInput = std::nullopt;
+    if (j.value("use_residual", false) || j.contains("residual_input")) {
+        if (!j.contains("residual_input")) {
+            throw std::runtime_error("Attention deserialize missing residual_input.");
+        }
+        residualInput = network->getApiTensorByOriginalId(j.at("residual_input").at("id").get<uint64_t>());
+    }
     std::optional<Tensor> contextInput = std::nullopt;
     if (j.value("use_cross_attention", false) || j.contains("context_input")) {
         if (!j.contains("context_input")) {
@@ -2371,6 +2549,27 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
         throw std::runtime_error("Attention serialized ragged_context_input requires key_value_ragged=true.");
     }
 
+    std::optional<RaggedTensor> raggedResidualInput = std::nullopt;
+    if (residualInput.has_value() && queryRagged) {
+        if (!j.contains("ragged_residual_input")) {
+            throw std::runtime_error("Attention deserialize ragged residual requires ragged_residual_input metadata.");
+        }
+        raggedResidualInput = raggedFromNetworkMetadata(j.at("ragged_residual_input"), "ragged_residual_input");
+        if (raggedResidualInput->getValues() != residualInput.value() ||
+            raggedResidualInput->getBatchSize() != raggedFeatureInput->getBatchSize() ||
+            raggedResidualInput->getMaxTotalValues() != raggedFeatureInput->getMaxTotalValues() ||
+            raggedResidualInput->getOffsets() != raggedFeatureInput->getOffsets()) {
+            throw std::runtime_error(
+                "Attention serialized ragged residual must use the residual values tensor and exact query row partition/capacity.");
+        }
+    } else if (j.contains("ragged_residual_input")) {
+        throw std::runtime_error("Attention serialized ragged_residual_input requires a ragged query and residual_input.");
+    }
+
+    if (queryRagged && residualInput.has_value() != raggedResidualInput.has_value()) {
+        throw std::runtime_error("Attention serialized residual must be ragged exactly when the query/output is ragged.");
+    }
+
     if (queryRagged && raggedContextInput.has_value() &&
         raggedContextInput->getBatchSize() != raggedFeatureInput->getBatchSize()) {
         throw std::runtime_error("Attention serialized ragged query and key/value inputs must have the same batch size.");
@@ -2411,12 +2610,40 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     if (j.contains("attention_scale") && !j.at("attention_scale").is_null()) {
         attentionScale = j.at("attention_scale").get<double>();
     }
-    const float dropoutProbability = j.value("dropout_probability", 0.0f);
-    const int64_t dropoutSeed = j.value("dropout_seed", int64_t{0});
-    const int64_t dropoutOffset = j.value("dropout_offset", int64_t{0});
+    const float sdpaDropoutProbability =
+        j.value("sdpa_dropout_probability", j.value("dropout_probability", 0.0f));
+    const int64_t dropoutSeed = j.value("sdpa_dropout_seed", j.value("dropout_seed", int64_t{0}));
+    const int64_t dropoutOffset = j.value("sdpa_dropout_offset", j.value("dropout_offset", int64_t{0}));
+    const float outputDropoutProbability = j.value("output_dropout_probability", 0.0f);
+    const int64_t outputDropoutSeed = j.value("output_dropout_seed", int64_t{0});
+    if (serializedVersion == "1.0.0" && (residualInput.has_value() || outputDropoutProbability > 0.0f)) {
+        throw std::runtime_error(
+            "Attention schema 1.0.0 cannot encode first-class residual/output dropout semantics; version 1.1.0 is required.");
+    }
     const DataType weightsDataType = j.at("weights_data_type").get<DataType>();
     const DataType computeDataType = j.at("compute_data_type").get<DataType>();
     const DataType outputDataType = j.at("output_data_type").get<DataType>();
+    if (!std::isfinite(sdpaDropoutProbability) || sdpaDropoutProbability < 0.0f || sdpaDropoutProbability >= 1.0f) {
+        throw std::runtime_error("Attention serialized sdpa_dropout_probability must be finite and in [0, 1).");
+    }
+    if (!std::isfinite(outputDropoutProbability) || outputDropoutProbability < 0.0f || outputDropoutProbability >= 1.0f) {
+        throw std::runtime_error("Attention serialized output_dropout_probability must be finite and in [0, 1).");
+    }
+    if (epilogue.has_value() && (residualInput.has_value() || outputDropoutProbability > 0.0f)) {
+        throw std::runtime_error(
+            "Attention serialized custom epilogue cannot be combined with residual/output dropout.");
+    }
+    if (residualInput.has_value()) {
+        if (residualInput->getDimensions() != std::vector<uint64_t>{querySequenceLength, outputFeatures} ||
+            residualInput->getDataType() != outputDataType) {
+            throw std::runtime_error(
+                "Attention serialized residual_input must match the feature output shape and output_data_type.");
+        }
+        if (queryRagged != raggedResidualInput.has_value()) {
+            throw std::runtime_error(
+                "Attention serialized residual_input must be ragged exactly when the query/output is ragged.");
+        }
+    }
     const uint64_t maximumPossibleQuerySequenceLength =
         queryRagged ? raggedFeatureInput->getMaxTotalValues() : querySequenceLength;
     const uint64_t maximumPossibleKeySequenceLength =
@@ -2578,9 +2805,12 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                                             diagonalRightBound,
                                             useAlibiMask,
                                             attentionScale,
-                                            dropoutProbability,
+                                            sdpaDropoutProbability,
                                             dropoutSeed,
                                             dropoutOffset,
+                                            outputDropoutProbability,
+                                            outputDropoutSeed,
+                                            residualInput.has_value(),
                                             contextInput.has_value(),
                                             useScoreBias,
                                             useSequenceLengths,
@@ -2610,6 +2840,7 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                                               keyValueRagged,
                                               useQueryRopePositionOffsets,
                                               useKeyRopePositionOffsets,
+                                              residualInput.has_value(),
                                               epilogueAuxInputNames),
                     {publicAttentionInputInterface(featureInput,
                                                    contextInput,
@@ -2620,6 +2851,7 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                                                    keyRopePositionOffsetsInput,
                                                    raggedFeatureInput,
                                                    raggedContextInput,
+                                                   residualInput,
                                                    epilogueInputBindings)},
                     {{{"feature_output", featureOutput}}},
                     std::move(parameters),
@@ -2641,9 +2873,13 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
                     diagonalRightBound,
                     useAlibiMask,
                     attentionScale,
-                    dropoutProbability,
+                    sdpaDropoutProbability,
                     dropoutSeed,
                     dropoutOffset,
+                    outputDropoutProbability,
+                    outputDropoutSeed,
+                    residualInput,
+                    raggedResidualInput,
                     contextInput,
                     scoreBiasInput,
                     querySequenceLengthsInput,

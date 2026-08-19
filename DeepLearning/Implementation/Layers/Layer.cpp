@@ -1,5 +1,4 @@
 #include "Layer.h"
-#include "NeuralNetwork/DropOut.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 using namespace ThorImplementation;
@@ -7,7 +6,6 @@ using namespace std;
 
 atomic<uint64_t> Layer::nextId(2);
 
-mutex DropOut::mtx;
 
 cudnnTensorDescriptor_t Layer::createCudnnTensorDescriptor(vector<unsigned long> featureInputDimensions,
                                                            DataType dataType) {

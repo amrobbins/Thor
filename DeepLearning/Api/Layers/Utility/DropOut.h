@@ -7,7 +7,6 @@
 #include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
-#include "Utilities/Common/CudnnHelper.h"
 #include <limits>
 #include <optional>
 #include <set>
@@ -87,12 +86,8 @@ class DropOut : public Layer, public TrainingDropoutControllable {
             return 0;
         THOR_THROW_IF_FALSE(tensorPlacement.getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::GPU);
         const ThorImplementation::DataType dataType = featureInput.value().getDataType();
-        uint64_t randomStateSize = 0;
-        if (!raggedFeatureInput.has_value() && !ThorImplementation::DropOut::usesNativeKernel(dataType)) {
-            uint32_t gpuNum = tensorPlacement.getDeviceNum();
-            cudnnHandle_t cudnnHandle = ThorImplementation::CudnnHelper::getCudnnHandle(gpuNum);
-            randomStateSize = ThorImplementation::DropOut::getRandomStateSizeInBytes(cudnnHandle);
-        }
+        THOR_THROW_IF_FALSE(ThorImplementation::DropOut::nativeKernelSupportsDataType(dataType));
+        const uint64_t randomStateSize = 0;
 
         uint64_t featureOutputSize = featureOutput.value().getTotalSizeInBytes();
         uint64_t errorOutputSize = featureInput.value().getTotalSizeInBytes();
@@ -104,20 +99,12 @@ class DropOut : public Layer, public TrainingDropoutControllable {
 
    protected:
     virtual uint64_t getReservedStateSizeInBytes(uint32_t batchSize) const {
+        (void)batchSize;
         THOR_THROW_IF_FALSE(featureInput.has_value());
-        ThorImplementation::DataType dataType = featureInput.value().getDataType();
-        if (raggedFeatureInput.has_value()) {
-            THOR_THROW_IF_FALSE(ThorImplementation::DropOut::nativeKernelSupportsDataType(dataType));
-            return featureInput->getTotalNumElements();
-        }
-
-        std::vector<uint64_t> featureInputDimensionsWithBatchSize;
-        featureInputDimensionsWithBatchSize.push_back(batchSize);
-        for (uint32_t i = 0; i < featureInput.value().getDimensions().size(); ++i)
-            featureInputDimensionsWithBatchSize.push_back(featureInput.value().getDimensions()[i]);
-        if (ThorImplementation::DropOut::usesNativeKernel(dataType))
-            return ThorImplementation::DropOut::getNativeReserveSpaceSizeInBytes(featureInputDimensionsWithBatchSize);
-        return ThorImplementation::DropOut::getReservedSpaceSizeInBytes(featureInputDimensionsWithBatchSize, dataType);
+        const ThorImplementation::DataType dataType = featureInput.value().getDataType();
+        THOR_THROW_IF_FALSE(ThorImplementation::DropOut::nativeKernelSupportsDataType(dataType));
+        // Native Philox dropout regenerates the forward mask during backward.
+        return 0;
     }
 
    private:
@@ -135,9 +122,8 @@ class DropOut::Builder {
         THOR_THROW_IF_FALSE(_featureInput.has_value());
         THOR_THROW_IF_FALSE(_dropProportion.has_value());
 
-        if (_raggedFeatureInput.has_value() &&
-            !ThorImplementation::DropOut::nativeKernelSupportsDataType(_featureInput->getDataType())) {
-            throw std::invalid_argument("Ragged DropOut supports FP16, FP32, and BF16 values.");
+        if (!ThorImplementation::DropOut::nativeKernelSupportsDataType(_featureInput->getDataType())) {
+            throw std::invalid_argument("DropOut supports FP16, FP32, FP64, and BF16 values.");
         }
 
         DropOut dropOut;

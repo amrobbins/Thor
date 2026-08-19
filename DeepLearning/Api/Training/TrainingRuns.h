@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Api/Training/Results/TrainingRunResult.h"
+#include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Training/Trainer.h"
 
 #include <cstddef>
@@ -14,9 +15,6 @@
 #include <vector>
 
 namespace Thor {
-
-struct NetworkLossReference;
-struct NetworkMetricReference;
 
 enum class TrainingRunsFailurePolicy { CONTINUE, CANCEL_SIBLINGS };
 
@@ -114,10 +112,26 @@ class TrainingRuns {
     [[nodiscard]] const std::vector<TrainingRunsEarlyCompletionRule>& getEarlyCompletionRules() const { return earlyCompletionRules; }
     [[nodiscard]] const std::map<std::string, std::vector<std::string>>& getReports() const { return reports; }
     [[nodiscard]] size_t getEffectiveMaxParallelRuns() const;
-    void releaseRunsForPythonGc() { runs.clear(); }
+    void releaseRunsForPythonGc() {
+        runs.clear();
+        validatedRunMetadata.clear();
+    }
 
    private:
-    void validateRunSpecs() const;
+    struct ValidatedRunMetadata {
+        bool hasActiveNetwork = false;
+        std::vector<TrainingRunInputSignature> activeInputSignature{};
+        std::vector<TrainingRunOutputSignature> activeOutputSignature{};
+        std::vector<NetworkLossReference> activeReportableLosses{};
+        std::vector<NetworkMetricReference> activeReportableMetrics{};
+        std::vector<TrainingRunInputSignature> reportingInputSignature{};
+        std::vector<TrainingRunOutputSignature> reportingOutputSignature{};
+        std::vector<NetworkLossReference> reportableLosses{};
+        std::vector<NetworkMetricReference> reportableMetrics{};
+    };
+
+    void validateRunSpecs();
+    [[nodiscard]] const ValidatedRunMetadata& validatedMetadataForSpec(const TrainingRunsSpec& spec) const;
     void validateMinSuccessfulModels() const;
     [[nodiscard]] bool failedRunShouldTriggerCancellation(size_t runIndex, const std::vector<TrainingRunResult>& results) const;
     [[nodiscard]] size_t minSuccessfulModelsForGroup(std::string_view ensembleGroup, size_t defaultValue) const;
@@ -154,6 +168,7 @@ class TrainingRuns {
     std::vector<TrainingRunsRestartPolicy> restartConditions{};
     std::vector<TrainingRunsEarlyCompletionRule> earlyCompletionRules{};
     std::map<std::string, std::vector<std::string>> reports{};
+    std::map<std::string, ValidatedRunMetadata> validatedRunMetadata{};
 };
 
 }  // namespace Thor

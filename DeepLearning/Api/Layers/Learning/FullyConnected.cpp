@@ -4,12 +4,16 @@
 #include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Layers/Activations/Gelu.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/FullyConnected.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/RaggedFullyConnected.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
+#include "Utilities/Expression/DropOutPostOp.h"
 
 #include <cstdint>
 #include <functional>
+#include <cmath>
+#include <random>
 #include <limits>
 #include <stdexcept>
 #include <optional>
@@ -24,6 +28,10 @@ namespace Thor {
 namespace {
 
 constexpr const char* RAGGED_ROW_PARTITION_EXPRESSION_INPUT = "__ragged_row_partition_runtime";
+constexpr const char* FC_RESIDUAL_INPUT_NAME = "residual_input";
+constexpr const char* FC_OUTPUT_DROPOUT_SEED_INPUT_NAME = "__fully_connected_output_dropout_seed";
+constexpr const char* FC_OUTPUT_DROPOUT_SEQUENCE_INPUT_NAME = "__fully_connected_output_dropout_sequence";
+constexpr ThorImplementation::DynamicExpressionVariantId FC_EVALUATION_VARIANT = 1;
 
 bool supportedRaggedFcStorageType(DataType dataType) {
     return dataType == DataType::FP16 || dataType == DataType::BF16 || dataType == DataType::FP32;
@@ -181,16 +189,24 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                                                                     std::optional<uint64_t> packedRowCapacity,
                                                                     std::optional<std::string> rowPartitionInputName,
                                                                     std::optional<ThorImplementation::Expression> epilogue,
-                                                                    std::vector<std::string> epilogueAuxInputNames) {
+                                                                    std::vector<std::string> epilogueAuxInputNames,
+                                                                    float outputDropoutProbability,
+                                                                    int64_t outputDropoutSeed,
+                                                                    bool useResidual) {
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
+    using ThorImplementation::DynamicExpressionVariant;
     using ThorImplementation::Expression;
     using ThorImplementation::FusedEquation;
     using ThorImplementation::Tensor;
+    using ThorImplementation::TensorScalarBinding;
 
     std::vector<std::string> expectedInputNames = {"feature_input"};
     if (rowPartitionInputName.has_value()) {
         expectedInputNames.push_back(rowPartitionInputName.value());
+    }
+    if (useResidual) {
+        expectedInputNames.push_back(FC_RESIDUAL_INPUT_NAME);
     }
     expectedInputNames.insert(expectedInputNames.end(), epilogueAuxInputNames.begin(), epilogueAuxInputNames.end());
     expectedInputNames.push_back("weights");
@@ -220,7 +236,10 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
          packedRowCapacity,
          rowPartitionInputName = std::move(rowPartitionInputName),
          epilogue,
-         epilogueAuxInputNames = std::move(epilogueAuxInputNames)](
+         epilogueAuxInputNames = std::move(epilogueAuxInputNames),
+         outputDropoutProbability,
+         outputDropoutSeed,
+         useResidual](
             const DynamicExpression::TensorMap& inputs,
             const DynamicExpression::TensorMap& outputs,
             Stream& stream) -> DynamicExpressionBuild {
@@ -394,64 +413,139 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                     throw std::runtime_error("FullyConnected epilogue auxiliary input placement does not match the layer placement.");
                 }
             }
-            if (epilogue.has_value()) {
-                // Keep the entire epilogue in the folded matmul geometry.  In training, applying a rank-3
-                // residual epilogue after first reshaping the primary result to [B, ...prefix, O] causes the
-                // same upstream gradient tensor to participate in both the public rank-3 domain and the
-                // folded [B*prefix, O] domain in one backward fused equation.  The fused layout planner
-                // cannot assign one broadcast layout to that input.  Flatten each public-shape auxiliary
-                // epilogue input instead, apply the epilogue at [B*prefix, O], and restore the public shape
-                // only once after the epilogue.
-                Expression effectiveEpilogue = epilogue.value();
+
+            if (useResidual) {
+                const Tensor& residualTensor = inputs.at(FC_RESIDUAL_INPUT_NAME);
+                if (residualTensor.getDimensions() != runtimeFeatureOutputDimensions) {
+                    throw std::runtime_error("FullyConnected residual input shape must match the feature output shape.");
+                }
+                if (residualTensor.getDataType() != outputDataType) {
+                    throw std::runtime_error("FullyConnected residual input dtype must match outputDataType.");
+                }
+                if (residualTensor.getPlacement() != placement) {
+                    throw std::runtime_error("FullyConnected residual input placement does not match the layer placement.");
+                }
+            }
+
+            const Expression preOutputPostOp = fout;
+            auto buildOutputBranch = [&](bool enableOutputDropout) -> Expression {
+                Expression branch = preOutputPostOp;
+
+                std::optional<Expression> flattenedResidual;
+                if (useResidual) {
+                    flattenedResidual = Expression::input(FC_RESIDUAL_INPUT_NAME, outputDataType, outputDataType);
+                    if (runtimeFeatureOutputDimensions != matmulOutputDimensions) {
+                        flattenedResidual = flattenedResidual->reshape(matmulOutputDimensions);
+                    }
+                }
+
+                if (enableOutputDropout && outputDropoutProbability > 0.0f) {
+                    const bool ragged = rowPartitionTensor.has_value();
+                    DataType offsetsDataType = DataType::UINT32;
+                    uint64_t raggedBatchSize = 0;
+                    uint64_t featuresPerValue = 0;
+                    if (ragged) {
+                        const ThorImplementation::TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
+                        offsetsDataType = offsetsDescriptor.getDataType();
+                        raggedBatchSize = offsetsDescriptor.getDimensions()[0] - 1;
+                        featuresPerValue = matmulOutputDimensions[1];
+                    }
+                    ThorImplementation::CudaKernelExpression outputDropout =
+                        ThorImplementation::makeDropOutPostOpKernel(outputDataType,
+                                                                  outputDropoutProbability,
+                                                                  useResidual,
+                                                                  ragged,
+                                                                  offsetsDataType,
+                                                                  raggedBatchSize,
+                                                                  featuresPerValue,
+                                                                  "FullyConnected output");
+                    std::unordered_map<std::string, Expression> dropoutInputs{
+                        {"projected", branch},
+                        {"seed", Expression::tensorRuntimeScalar(
+                                     FC_OUTPUT_DROPOUT_SEED_INPUT_NAME, DataType::INT64, DataType::INT64)},
+                        {"sequence", Expression::tensorRuntimeScalar(
+                                         FC_OUTPUT_DROPOUT_SEQUENCE_INPUT_NAME, DataType::INT64, DataType::INT64)},
+                    };
+                    if (flattenedResidual.has_value()) {
+                        dropoutInputs.emplace("residual", flattenedResidual.value());
+                    }
+                    if (ragged) {
+                        dropoutInputs.emplace(
+                            "offsets",
+                            Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT, offsetsDataType, offsetsDataType));
+                    }
+                    ThorImplementation::Outputs dropoutOutputs = outputDropout.apply(dropoutInputs);
+                    const auto& namedDropoutOutputs = dropoutOutputs.namedOutputs();
+                    if (namedDropoutOutputs.size() != 1 || namedDropoutOutputs.front().name != "output") {
+                        throw std::logic_error("FullyConnected output-dropout kernel produced an unexpected output interface.");
+                    }
+                    branch = Expression::fromPhysicalNode(dropoutOutputs.expression(), namedDropoutOutputs.front().node_idx);
+                } else if (flattenedResidual.has_value()) {
+                    // Keep the residual add directly adjacent to the affine/activation branch. For the common
+                    // Transformer final-projection case (no activation), EquationCompiler can lower this into
+                    // the existing cuBLASLt GEMM beta/residual path.
+                    branch = branch + flattenedResidual.value();
+                }
+
+                if (epilogue.has_value()) {
+                    // Keep the entire epilogue in the folded matmul geometry. In training, applying a rank-3
+                    // residual epilogue after first reshaping the primary result to [B, ...prefix, O] causes the
+                    // same upstream gradient tensor to participate in both the public rank-3 domain and the
+                    // folded [B*prefix, O] domain in one backward fused equation. Flatten each public-shape
+                    // auxiliary epilogue input instead and restore the public shape only once after the epilogue.
+                    Expression effectiveEpilogue = epilogue.value();
+                    if (runtimeFeatureOutputDimensions != matmulOutputDimensions) {
+                        for (const std::string& auxInputName : epilogueAuxInputNames) {
+                            const ExpressionInputDataTypes inputDataTypes = expressionInputDataTypes(effectiveEpilogue, auxInputName);
+                            Expression flattenedAuxInput =
+                                Expression::input(auxInputName, inputDataTypes.computeDataType, inputDataTypes.outputDataType)
+                                    .reshape(matmulOutputDimensions);
+                            effectiveEpilogue = effectiveEpilogue.substituteInput(auxInputName, flattenedAuxInput);
+                        }
+                    }
+                    branch = FullyConnected::applyEpilogue(branch, effectiveEpilogue);
+                }
+
                 if (runtimeFeatureOutputDimensions != matmulOutputDimensions) {
-                    for (const std::string& auxInputName : epilogueAuxInputNames) {
-                        const ExpressionInputDataTypes inputDataTypes = expressionInputDataTypes(effectiveEpilogue, auxInputName);
-                        Expression flattenedAuxInput =
-                            Expression::input(auxInputName, inputDataTypes.computeDataType, inputDataTypes.outputDataType)
-                                .reshape(matmulOutputDimensions);
-                        effectiveEpilogue = effectiveEpilogue.substituteInput(auxInputName, flattenedAuxInput);
+                    branch = branch.reshape(runtimeFeatureOutputDimensions);
+                }
+
+                branch = branch.withOutputDType(outputDataType);
+
+                if (rowPartitionTensor.has_value()) {
+                    if (!packedRowCapacity.has_value() || runtimeFeatureOutputDimensions.empty() ||
+                        runtimeFeatureOutputDimensions[0] != packedRowCapacity.value()) {
+                        throw std::runtime_error(
+                            "Ragged FullyConnected output geometry does not match its packed row capacity.");
                     }
-                }
-                fout = FullyConnected::applyEpilogue(fout, effectiveEpilogue);
-            }
-
-            if (runtimeFeatureOutputDimensions != matmulOutputDimensions) {
-                fout = fout.reshape(runtimeFeatureOutputDimensions);
-            }
-
-            // The API layer's declared output tensor dtype is authoritative.
-            fout = fout.withOutputDType(outputDataType);
-
-            if (rowPartitionTensor.has_value()) {
-                // MATMUL consumes the input-side extent for bucket dispatch. Re-attach
-                // the same logical row partition to the public FC result so valuewise
-                // epilogues and autodiff (notably db broadcast reduction) remain
-                // active-aware without requiring producer-side tail canonicalization.
-                if (!packedRowCapacity.has_value() || runtimeFeatureOutputDimensions.empty() ||
-                    runtimeFeatureOutputDimensions[0] != packedRowCapacity.value()) {
-                    throw std::runtime_error(
-                        "Ragged FullyConnected output geometry does not match its packed row capacity.");
-                }
-                uint64_t outputElementsPerPackedValue = 1;
-                for (size_t axis = 1; axis < runtimeFeatureOutputDimensions.size(); ++axis) {
-                    if (runtimeFeatureOutputDimensions[axis] == 0 ||
-                        outputElementsPerPackedValue >
-                            std::numeric_limits<uint64_t>::max() / runtimeFeatureOutputDimensions[axis]) {
-                        throw std::runtime_error("Ragged FullyConnected output row width overflows uint64_t.");
+                    uint64_t outputElementsPerPackedValue = 1;
+                    for (size_t axis = 1; axis < runtimeFeatureOutputDimensions.size(); ++axis) {
+                        if (runtimeFeatureOutputDimensions[axis] == 0 ||
+                            outputElementsPerPackedValue >
+                                std::numeric_limits<uint64_t>::max() / runtimeFeatureOutputDimensions[axis]) {
+                            throw std::runtime_error("Ragged FullyConnected output row width overflows uint64_t.");
+                        }
+                        outputElementsPerPackedValue *= runtimeFeatureOutputDimensions[axis];
                     }
-                    outputElementsPerPackedValue *= runtimeFeatureOutputDimensions[axis];
+                    const ThorImplementation::TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
+                    Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
+                                                           offsetsDescriptor.getDataType(),
+                                                           offsetsDescriptor.getDataType());
+                    branch = branch.withRaggedRuntimeExtent(offsets,
+                                                            offsetsDescriptor.getDimensions()[0] - 1,
+                                                            packedRowCapacity.value(),
+                                                            outputElementsPerPackedValue);
                 }
-                const ThorImplementation::TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
-                Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
-                                                       offsetsDescriptor.getDataType(),
-                                                       offsetsDescriptor.getDataType());
-                fout = fout.withRaggedRuntimeExtent(offsets,
-                                                    offsetsDescriptor.getDimensions()[0] - 1,
-                                                    packedRowCapacity.value(),
-                                                    outputElementsPerPackedValue);
-            }
+                return branch;
+            };
 
-            auto expressionOutputs = Expression::outputs({{"feature_output", fout}});
+            auto expressionOutputs = Expression::outputs({{"feature_output", buildOutputBranch(outputDropoutProbability > 0.0f)}});
+            std::shared_ptr<FusedEquation> evaluationEquation;
+            if (outputDropoutProbability > 0.0f) {
+                auto evaluationOutputs = Expression::outputs({{"feature_output", buildOutputBranch(false)}});
+                evaluationEquation = std::make_shared<FusedEquation>(
+                    FusedEquation::compile(evaluationOutputs.physicalOutputs(), placement.getDeviceNum()));
+            }
 
             DynamicExpression::TensorMap stampInputs = inputs;
             DynamicExpression::TensorMap preForwardOnlyInputs;
@@ -466,11 +560,27 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                 preForwardHook = [](Stream&) {};
             }
 
-            return DynamicExpressionBuild{
+            std::unordered_map<std::string, TensorScalarBinding> tensorScalarInputs;
+            if (outputDropoutProbability > 0.0f) {
+                auto outputDropoutState = std::make_shared<ThorImplementation::DropOutRuntimeState>(
+                    outputDropoutSeed, 0, "FullyConnected output");
+                outputDropoutState->setSequenceAdvance(1);
+                tensorScalarInputs[FC_OUTPUT_DROPOUT_SEED_INPUT_NAME] =
+                    outputDropoutState->seedBinding(featureInputTensor.getPlacement());
+                tensorScalarInputs[FC_OUTPUT_DROPOUT_SEQUENCE_INPUT_NAME] =
+                    outputDropoutState->sequenceBinding(featureInputTensor.getPlacement());
+                const std::function<void(Stream&)> previousHook = preForwardHook;
+                preForwardHook = [previousHook, outputDropoutState](Stream& runStream) {
+                    if (previousHook) previousHook(runStream);
+                    outputDropoutState->uploadForForward(runStream);
+                };
+            }
+
+            DynamicExpressionBuild build{
                 .equation = std::make_shared<FusedEquation>(
                     FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
                 .stamp_inputs = std::move(stampInputs),
-                .tensor_scalar_inputs = {},
+                .tensor_scalar_inputs = std::move(tensorScalarInputs),
                 .preallocated_outputs = outputs,
                 .requested_output_shapes = {},
                 .pre_forward_hook = std::move(preForwardHook),
@@ -479,6 +589,19 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                 .evaluation_variant_id = std::nullopt,
                 .pre_forward_only_inputs = std::move(preForwardOnlyInputs),
             };
+            if (evaluationEquation) {
+                build.execution_variants.emplace(
+                    FC_EVALUATION_VARIANT,
+                    DynamicExpressionVariant{
+                        .equation = std::move(evaluationEquation),
+                        .tensor_scalar_inputs = {},
+                        .pre_forward_hook = rowPartitionInputName.has_value() ? std::function<void(Stream&)>([](Stream&) {})
+                                                                            : std::function<void(Stream&)>{},
+                        .supports_backward = true,
+                    });
+                build.evaluation_variant_id = FC_EVALUATION_VARIANT;
+            }
+            return build;
         });
 }
 
@@ -585,6 +708,7 @@ void FullyConnected::validateEpilogueAuxInputName(const std::string& inputName) 
         "feature_output",
         "weights",
         "biases",
+        FC_RESIDUAL_INPUT_NAME,
         epilogueInputName(),
         epilogueOutputName(),
     };
@@ -606,16 +730,18 @@ std::vector<std::string> FullyConnected::epilogueAuxInputNames() const {
 std::vector<Tensor> FullyConnected::getFeatureInputs() const {
     if (!raggedFeatureInputs.empty()) {
         std::vector<Tensor> inputs;
-        inputs.reserve(raggedFeatureInputs.size() * 2);
+        inputs.reserve(raggedFeatureInputs.size() * 2 + (residualInput.has_value() ? 1 : 0));
         for (const RaggedTensor& ragged : raggedFeatureInputs) {
             inputs.push_back(ragged.getValues());
             inputs.push_back(ragged.getOffsets());
         }
+        if (residualInput.has_value()) inputs.push_back(residualInput.value());
         return inputs;
     }
 
     std::vector<Tensor> inputs = featureInputs;
-    inputs.reserve(inputs.size() + epilogueInputBindings.size());
+    inputs.reserve(inputs.size() + (residualInput.has_value() ? 1 : 0) + epilogueInputBindings.size());
+    if (residualInput.has_value()) inputs.push_back(residualInput.value());
     for (const auto& [name, tensor] : epilogueInputBindings) {
         (void)name;
         inputs.push_back(tensor);
@@ -634,15 +760,24 @@ std::vector<uint32_t> FullyConnected::inputPortIndicesForTensor(Tensor tensor) c
                 ports.push_back(i * 2 + 1);
             }
         }
+        if (residualInput.has_value() && tensor.getOriginalId() == residualInput->getOriginalId()) {
+            // residualInput currently requires exactly one ragged application.
+            ports.push_back(2);
+        }
         return ports;
     }
 
     if (!featureInputs.empty() && tensor.getOriginalId() == featureInputs[0].getOriginalId()) {
         ports.push_back(0);
     }
+    uint32_t nextPort = 1;
+    if (residualInput.has_value()) {
+        if (tensor.getOriginalId() == residualInput->getOriginalId()) ports.push_back(nextPort);
+        ++nextPort;
+    }
     for (uint32_t i = 0; i < epilogueInputBindings.size(); ++i) {
         if (tensor.getOriginalId() == epilogueInputBindings[i].second.getOriginalId()) {
-            ports.push_back(i + 1);
+            ports.push_back(nextPort + i);
         }
     }
     return ports;
@@ -652,6 +787,12 @@ std::vector<Tensor> FullyConnected::getOutputsFromInput(Tensor inputTensor) {
     if (!raggedFeatureInputs.empty()) {
         if (inputPortIndicesForTensor(inputTensor).empty()) {
             throw std::runtime_error("FullyConnected received an unknown ragged input tensor.");
+        }
+        if (residualInput.has_value()) {
+            if (emittedFeatureOutputAfterAllInputsConnected) return {};
+            if (connectedInputPortIndices.size() != 3) return {};
+            emittedFeatureOutputAfterAllInputsConnected = true;
+            return {featureOutputs[0]};
         }
         std::vector<Tensor> readyOutputs;
         for (uint32_t applicationIndex = 0; applicationIndex < raggedFeatureInputs.size(); ++applicationIndex) {
@@ -668,19 +809,15 @@ std::vector<Tensor> FullyConnected::getOutputsFromInput(Tensor inputTensor) {
         return readyOutputs;
     }
 
-    if (epilogueInputBindings.empty()) {
+    if (epilogueInputBindings.empty() && !residualInput.has_value()) {
         return {getFeatureOutput(inputTensor)};
     }
 
     (void)getFeatureOutput(inputTensor);
-
-    if (emittedFeatureOutputAfterAllInputsConnected) {
-        return {};
-    }
-    const uint32_t requiredInputPorts = static_cast<uint32_t>(1 + epilogueInputBindings.size());
-    if (connectedInputPortIndices.size() != requiredInputPorts) {
-        return {};
-    }
+    if (emittedFeatureOutputAfterAllInputsConnected) return {};
+    const uint32_t requiredInputPorts =
+        static_cast<uint32_t>(1 + (residualInput.has_value() ? 1 : 0) + epilogueInputBindings.size());
+    if (connectedInputPortIndices.size() != requiredInputPorts) return {};
 
     emittedFeatureOutputAfterAllInputsConnected = true;
     return {featureOutputs[0]};
@@ -698,7 +835,7 @@ void FullyConnected::informThatInputConnectionMade(Tensor inputTensor) {
         return;
     }
 
-    if (epilogueInputBindings.empty()) {
+    if (epilogueInputBindings.empty() && !residualInput.has_value()) {
         return;
     }
     std::vector<uint32_t> ports = inputPortIndicesForTensor(inputTensor);
@@ -719,7 +856,7 @@ void FullyConnected::resetGraphTraversalState() {
 }
 
 int FullyConnected::getConnectionType(Tensor connectingTensor) const {
-    if (!raggedFeatureInputs.empty() || !epilogueInputBindings.empty()) {
+    if (!raggedFeatureInputs.empty() || !epilogueInputBindings.empty() || residualInput.has_value()) {
         std::vector<uint32_t> inputPorts = inputPortIndicesForTensor(connectingTensor);
         if (!inputPorts.empty()) {
             uint32_t& cursor = nextInputConnectionCursorByTensorOriginalId[connectingTensor.getOriginalId()];
@@ -769,14 +906,32 @@ FullyConnected FullyConnected::Builder::build() {
     if (!_computeDataType.has_value())
         _computeDataType = FullyConnected::defaultFullyConnectedComputeDataType(
             _featureInputs[0].getDataType(), _weightsDataType.value(), _outputDataType.value());
+    if (!_outputDropoutProbability.has_value())
+        _outputDropoutProbability = 0.0f;
+    if (!_outputDropoutSeed.has_value()) {
+        if (_outputDropoutProbability.value() > 0.0f) {
+            std::random_device rd;
+            const uint64_t high = static_cast<uint64_t>(rd()) << 32U;
+            const uint64_t low = static_cast<uint64_t>(rd());
+            _outputDropoutSeed =
+                static_cast<int64_t>((high ^ low) & static_cast<uint64_t>(std::numeric_limits<int64_t>::max()));
+        } else {
+            _outputDropoutSeed = 0;
+        }
+    }
 
-    if (!_epilogueInputBindings.empty() && _featureInputs.size() != 1) {
-        throw std::invalid_argument("FullyConnected epilogue auxiliary inputs currently require exactly one feature input.");
+    if ((!_epilogueInputBindings.empty() || _residualInput.has_value()) && _featureInputs.size() != 1) {
+        throw std::invalid_argument("FullyConnected epilogue/residual auxiliary inputs currently require exactly one feature input.");
     }
 
     verifyConfig();
 
-    FullyConnected fullyConnected(_epilogue, _epilogueInputBindings);
+    FullyConnected fullyConnected(_epilogue,
+                                  _epilogueInputBindings,
+                                  _outputDropoutProbability.value(),
+                                  _outputDropoutSeed.value(),
+                                  _residualInput,
+                                  _raggedResidualInput);
 
     fullyConnected.featureInputs = _featureInputs;
     fullyConnected.raggedFeatureInputs = _raggedFeatureInputs;
@@ -836,6 +991,10 @@ FullyConnected FullyConnected::Builder::build() {
             fullyConnected.raggedFeatureOutputs.emplace_back(out, fullyConnected.raggedFeatureInputs[i].getOffsets());
         }
     }
+    if (fullyConnected.residualInput.has_value()) {
+        THOR_THROW_IF_FALSE(fullyConnected.featureOutputs.size() == 1);
+        fullyConnected.outputTensorFromInputTensor[fullyConnected.residualInput.value()] = fullyConnected.featureOutputs[0];
+    }
     for (const auto& [name, tensor] : fullyConnected.epilogueInputBindings) {
         (void)name;
         THOR_THROW_IF_FALSE(tensor.getDataType() == fullyConnected.outputDataType);
@@ -878,6 +1037,23 @@ void FullyConnected::Builder::verifyConfig() const {
     } else if (!_epilogueInputBindings.empty()) {
         throw std::invalid_argument("FullyConnected epilogue_inputs were provided without an epilogue expression.");
     }
+    const float outputDropoutProbability = _outputDropoutProbability.value_or(0.0f);
+    if (!std::isfinite(outputDropoutProbability) || outputDropoutProbability < 0.0f || outputDropoutProbability >= 1.0f) {
+        throw std::invalid_argument("FullyConnected outputDropoutProbability must be finite and in [0, 1).");
+    }
+    if (_epilogue.has_value() && (_residualInput.has_value() || outputDropoutProbability > 0.0f)) {
+        throw std::invalid_argument(
+            "FullyConnected residualInput/outputDropoutProbability cannot currently be combined with a custom epilogue; "
+            "use one output post-op surface so ordering remains unambiguous.");
+    }
+    if (outputDropoutProbability > 0.0f &&
+        _outputDataType.value() != DataType::FP16 && _outputDataType.value() != DataType::BF16 &&
+        _outputDataType.value() != DataType::FP32) {
+        throw std::invalid_argument("FullyConnected output dropout currently supports FP16, BF16, and FP32 output storage.");
+    }
+    if (_residualInput.has_value() && _featureInputs.size() != 1) {
+        throw std::invalid_argument("FullyConnected residualInput currently requires exactly one featureInput.");
+    }
 
     if (!_raggedFeatureInputs.empty()) {
         if (_raggedFeatureInputs.size() != _featureInputs.size()) {
@@ -898,11 +1074,27 @@ void FullyConnected::Builder::verifyConfig() const {
                 throw std::invalid_argument("FullyConnected ragged feature input values do not match the primary feature input tensor.");
             }
         }
+        if (_residualInput.has_value() != _raggedResidualInput.has_value()) {
+            throw std::invalid_argument("FullyConnected ragged feature input requires residualInput to also be ragged.");
+        }
+        if (_raggedResidualInput.has_value()) {
+            const RaggedTensor& feature = _raggedFeatureInputs.front();
+            const RaggedTensor& residual = _raggedResidualInput.value();
+            if (residual.getOffsets() != feature.getOffsets() ||
+                residual.getBatchSize() != feature.getBatchSize() ||
+                residual.getMaxTotalValues() != feature.getMaxTotalValues()) {
+                throw std::invalid_argument("FullyConnected ragged residualInput must preserve the exact feature-input row partition.");
+            }
+        }
         if (!supportedRaggedFcStorageType(_featureInputs.front().getDataType()) ||
             !supportedRaggedFcStorageType(_weightsDataType.value()) ||
             !supportedRaggedFcStorageType(_outputDataType.value())) {
             throw std::invalid_argument("FullyConnected(RaggedTensor) currently supports fp16, bf16, and fp32 storage types.");
         }
+    }
+
+    if (_raggedFeatureInputs.empty() && _raggedResidualInput.has_value()) {
+        throw std::invalid_argument("FullyConnected dense feature input cannot use a ragged residualInput.");
     }
 
     const DataType inputDataType = _featureInputs.front().getDataType();
@@ -932,6 +1124,18 @@ void FullyConnected::Builder::verifyConfig() const {
     }
     const std::vector<uint64_t> expectedEpilogueInputDims =
         FullyConnected::fullyConnectedOutputDimensions(inputDimensions, _numOutputFeatures.value(), _preserveInputPrefixDimensions.value());
+    if (_residualInput.has_value()) {
+        const Tensor& residual = _residualInput.value();
+        if (!residual.isInitialized()) {
+            throw std::invalid_argument("FullyConnected residualInput is not initialized.");
+        }
+        if (residual.getDataType() != _outputDataType.value()) {
+            throw std::invalid_argument("FullyConnected residualInput dtype must match outputDataType.");
+        }
+        if (residual.getDimensions() != expectedEpilogueInputDims) {
+            throw std::invalid_argument("FullyConnected residualInput shape must match feature output shape.");
+        }
+    }
     for (const auto& [name, tensor] : _epilogueInputBindings) {
         FullyConnected::validateEpilogueAuxInputName(name);
         if (!tensor.isInitialized()) {
@@ -984,16 +1188,24 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
                 inputDimensions[0],
                 std::string(ThorImplementation::RaggedFullyConnected::ROW_PARTITION_INPUT_NAME),
                 std::nullopt,
-                {}),
+                {},
+                outputDropoutProbability,
+                outputDropoutSeed,
+                residualInput.has_value()),
             placement,
             physicalParameters,
             inferenceOnly,
-            getId());
+            getId(),
+            residualInput.has_value(),
+            outputDropoutProbability > 0.0f
+                ? std::optional<ThorImplementation::DynamicExpressionVariantId>(FC_EVALUATION_VARIANT)
+                : std::nullopt,
+            isTrainingDropoutEnabled());
         physicalFullyConnected->setLayerName(getLayerType() + "#" + std::to_string(getId()));
         return physicalFullyConnected;
     }
 
-    std::shared_ptr<ThorImplementation::CustomLayer> physicalFullyConnected = std::make_shared<ThorImplementation::CustomLayer>(
+    std::shared_ptr<ThorImplementation::CustomLayer> physicalFullyConnected = std::make_shared<ThorImplementation::FullyConnected>(
         buildFullyConnectedExpression(
             getId(),
             hasBias,
@@ -1006,18 +1218,25 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
             std::nullopt,
             std::nullopt,
             epilogue,
-            epilogueAuxInputNames()),
+            epilogueAuxInputNames(),
+            outputDropoutProbability,
+            outputDropoutSeed,
+            residualInput.has_value()),
         [&]() {
             std::vector<std::string> inputNames = {"feature_input"};
+            if (residualInput.has_value()) inputNames.push_back(FC_RESIDUAL_INPUT_NAME);
             std::vector<std::string> auxNames = epilogueAuxInputNames();
             inputNames.insert(inputNames.end(), auxNames.begin(), auxNames.end());
             return inputNames;
         }(),
-        std::vector<std::string>{"feature_output"},
         placement,
         physicalParameters,
         inferenceOnly,
-        getId());
+        getId(),
+        outputDropoutProbability > 0.0f
+            ? std::optional<ThorImplementation::DynamicExpressionVariantId>(FC_EVALUATION_VARIANT)
+            : std::nullopt,
+        isTrainingDropoutEnabled());
     physicalFullyConnected->setLayerName(getLayerType() + "#" + std::to_string(getId()));
 
     return physicalFullyConnected;
@@ -1029,7 +1248,7 @@ json FullyConnected::architectureJson() const {
 
     json j;
     j["factory"] = Layer::Factory::Learning.value();
-    j["version"] = getLayerVersion();
+    j["version"] = (residualInput.has_value() || outputDropoutProbability > 0.0f) ? "1.1.0" : getLayerVersion();
     j["layer_type"] = "fully_connected";
     string layerName = string("layer") + to_string(getId());
     j["layer_name"] = layerName;
@@ -1039,6 +1258,15 @@ json FullyConnected::architectureJson() const {
     j["weights_data_type"] = weightsDataType;
     j["compute_data_type"] = computeDataType;
     j["output_data_type"] = outputDataType;
+    j["output_dropout_probability"] = outputDropoutProbability;
+    j["output_dropout_seed"] = outputDropoutSeed;
+    j["use_residual"] = residualInput.has_value();
+    if (residualInput.has_value()) {
+        j["residual_input"] = residualInput->architectureJson();
+        if (raggedResidualInput.has_value()) {
+            j["ragged_residual_input"] = raggedResidualInput->architectureJson();
+        }
+    }
     j["use_ragged"] = !raggedFeatureInputs.empty();
     if (!raggedFeatureInputs.empty()) {
         json raggedInputsJson = json::array();
@@ -1097,8 +1325,9 @@ json FullyConnected::serialize(thor_file::TarWriter& archiveWriter,
 }
 
 void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
-    if (j.at("version").get<std::string>() != "1.0.0")
-        throw runtime_error("Unsupported version in FullyConnected::deserialize: " + j["version"].get<std::string>());
+    const std::string serializedVersion = j.at("version").get<std::string>();
+    if (serializedVersion != "1.0.0" && serializedVersion != "1.1.0")
+        throw runtime_error("Unsupported version in FullyConnected::deserialize: " + serializedVersion);
     if (j.at("layer_type").get<std::string>() != "fully_connected")
         throw runtime_error("Layer type mismatch in FullyConnected::deserialize: " + j.at("layer_type").get<std::string>());
 
@@ -1127,13 +1356,43 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
         throw runtime_error("FullyConnected serialized epilogue_inputs require a non-null epilogue expression.");
     }
 
-    FullyConnected fullyConnected(epilogue, epilogueInputBindings);
+    const float outputDropoutProbability = j.value("output_dropout_probability", 0.0f);
+    const int64_t outputDropoutSeed = j.value("output_dropout_seed", int64_t{0});
+    std::optional<Tensor> residualInput = std::nullopt;
+    if (j.value("use_residual", false)) {
+        if (!j.contains("residual_input")) {
+            throw runtime_error("FullyConnected serialized residual is missing residual_input metadata.");
+        }
+        const uint64_t originalTensorId = j.at("residual_input").at("id").get<uint64_t>();
+        residualInput = network->getApiTensorByOriginalId(originalTensorId);
+    }
+    if (serializedVersion == "1.0.0" && (residualInput.has_value() || outputDropoutProbability > 0.0f)) {
+        throw runtime_error("FullyConnected 1.0.0 archives cannot contain residual/output-dropout semantics.");
+    }
+    if (!std::isfinite(outputDropoutProbability) || outputDropoutProbability < 0.0f || outputDropoutProbability >= 1.0f) {
+        throw runtime_error("FullyConnected serialized output_dropout_probability must be finite and in [0, 1).");
+    }
+    if (epilogue.has_value() && (residualInput.has_value() || outputDropoutProbability > 0.0f)) {
+        throw runtime_error("FullyConnected serialized custom epilogue cannot be combined with residual/output dropout.");
+    }
+
+    FullyConnected fullyConnected(epilogue,
+                                  epilogueInputBindings,
+                                  outputDropoutProbability,
+                                  outputDropoutSeed,
+                                  residualInput,
+                                  std::nullopt);
     fullyConnected.numOutputFeatures = j.at("num_output_features").get<uint32_t>();
     fullyConnected.hasBias = j.at("has_bias").get<bool>();
     fullyConnected.preserveInputPrefixDimensions = j.value("preserve_input_prefix_dimensions", false);
     fullyConnected.weightsDataType = j.at("weights_data_type").get<DataType>();
     fullyConnected.computeDataType = j.at("compute_data_type").get<DataType>();
     fullyConnected.outputDataType = j.at("output_data_type").get<DataType>();
+    if (outputDropoutProbability > 0.0f &&
+        fullyConnected.outputDataType != DataType::FP16 && fullyConnected.outputDataType != DataType::BF16 &&
+        fullyConnected.outputDataType != DataType::FP32) {
+        throw runtime_error("FullyConnected serialized output dropout supports FP16, BF16, and FP32 output storage.");
+    }
 
     if (j.contains("activation") && !j.at("activation").is_null()) {
         fullyConnected.activation = Activation::deserializeTemplate(j.at("activation"));
@@ -1172,9 +1431,39 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
             }
         }
     }
+    if (residualInput.has_value()) {
+        if (fullyConnected.featureOutputs.size() != 1) {
+            throw runtime_error("FullyConnected serialized residual requires exactly one feature input/output application.");
+        }
+        if (residualInput->getDataType() != fullyConnected.outputDataType ||
+            residualInput->getDimensions() != fullyConnected.featureOutputs[0].getDimensions()) {
+            throw runtime_error("FullyConnected serialized residual input descriptor does not match feature output.");
+        }
+        if (useRagged) {
+            if (!j.contains("ragged_residual_input")) {
+                throw runtime_error("FullyConnected serialized ragged residual is missing ragged_residual_input metadata.");
+            }
+            const json& residualJson = j.at("ragged_residual_input");
+            const uint64_t offsetsId = residualJson.at("offsets").at("id").get<uint64_t>();
+            RaggedTensor raggedResidual(residualInput.value(), network->getApiTensorByOriginalId(offsetsId));
+            const RaggedTensor& raggedFeature = fullyConnected.raggedFeatureInputs.front();
+            if (raggedResidual.getOffsets() != raggedFeature.getOffsets() ||
+                raggedResidual.getBatchSize() != raggedFeature.getBatchSize() ||
+                raggedResidual.getMaxTotalValues() != raggedFeature.getMaxTotalValues()) {
+                throw runtime_error("FullyConnected serialized ragged residual does not preserve the feature row partition.");
+            }
+            fullyConnected.raggedResidualInput = raggedResidual;
+        } else if (j.contains("ragged_residual_input")) {
+            throw runtime_error("FullyConnected dense serialized residual cannot contain ragged metadata.");
+        }
+    }
+
     for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
         fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = fullyConnected.featureOutputs[i];
         fullyConnected.inputTensorFromOutputTensor[fullyConnected.featureOutputs[i]] = fullyConnected.featureInputs[i];
+    }
+    if (fullyConnected.residualInput.has_value()) {
+        fullyConnected.outputTensorFromInputTensor[fullyConnected.residualInput.value()] = fullyConnected.featureOutputs[0];
     }
     if (!fullyConnected.epilogueInputBindings.empty()) {
         if (fullyConnected.featureOutputs.size() != 1) {

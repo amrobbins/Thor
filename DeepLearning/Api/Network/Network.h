@@ -93,6 +93,11 @@ struct NetworkMetricReference {
     MetricAggregation aggregation = MetricAggregation::MEAN_BY_EXAMPLE;
 };
 
+struct NetworkTrainingValidationSnapshot {
+    std::vector<NetworkLossReference> reportableLosses{};
+    std::vector<NetworkMetricReference> reportableMetrics{};
+};
+
 class ApiTensorRemap {
    public:
     void map(const Tensor& sourceTensor, const Tensor& destinationTensor);
@@ -241,6 +246,11 @@ class Network {
     [[nodiscard]] std::vector<std::shared_ptr<NetworkInput>> getExternalNetworkInputs() const;
     // Logical external boundary names. A RaggedNetworkInput contributes exactly one name.
     [[nodiscard]] std::vector<std::string> getExternalNetworkInputNames() const;
+    // Validate the training graph exactly once and collect all report metadata
+    // from the graph indexes produced by that validation pass. TrainingRuns uses
+    // this to build an immutable startup snapshot instead of re-evaluating the
+    // same network independently for losses and metrics.
+    [[nodiscard]] NetworkTrainingValidationSnapshot validateTrainingGraphAndCollectReports();
     [[nodiscard]] std::vector<NetworkLossReference> getReportableLosses();
     [[nodiscard]] std::vector<NetworkMetricReference> getReportableMetrics();
 
@@ -385,7 +395,26 @@ class Network {
     void addToNetwork(Initializer *initializer);
     void addToNetwork(Optimizer *optimizer);
 
+    // Scratch state shared by report-discovery queries after evaluateGraph() has
+    // populated the API graph indexes.  Transformer graphs are highly
+    // reconvergent DAGs; without memoizing completed tensor queries, recursively
+    // walking upstream can revisit the same subgraph once per distinct path.
+    // This cache is deliberately scoped to one report-discovery operation and is
+    // never retained across graph mutation or a later validation pass.
+    struct ReportDiscoveryTraversalCache {
+        std::map<Tensor, std::optional<std::string>> sourceNetworkInputNameByTensor;
+        std::map<Tensor, std::vector<std::string>> predictionOutputNamesByTensor;
+        std::map<Tensor, std::set<std::string>> requiredInputNamesByTensor;
+    };
+
     [[nodiscard]] std::string logicalExternalInputName(const std::string& physicalInputName) const;
+    [[nodiscard]] std::vector<std::string> collectRequiredNetworkInputNamesForOutputsFromCurrentGraph(
+        const std::vector<std::string>& outputNames,
+        ReportDiscoveryTraversalCache* traversalCache = nullptr);
+    [[nodiscard]] std::vector<NetworkLossReference> collectReportableLossesFromCurrentGraph(
+        ReportDiscoveryTraversalCache* traversalCache = nullptr);
+    [[nodiscard]] std::vector<NetworkMetricReference> collectReportableMetricsFromCurrentGraph(
+        ReportDiscoveryTraversalCache* traversalCache = nullptr);
     void appendRaggedNetworkBoundaryJson(nlohmann::json& modelJson) const;
 
     void setGraphValidationIssue(StatusCode status, std::string summary, std::string detail);

@@ -45,6 +45,19 @@ CudnnAttentionDescriptor makePagedDescriptor() {
     return descriptor;
 }
 
+std::optional<Tensor> allocateAttentionWorkspace(const TensorPlacement& placement,
+                                                 const CudnnAttentionDescriptor& descriptor,
+                                                 int gpuNum,
+                                                 bool backward) {
+    CudnnScaledDotProductAttention& attention = CudnnScaledDotProductAttention::instance();
+    const uint64_t bytes = backward ? attention.backwardWorkspaceSizeInBytes(descriptor, gpuNum)
+                                    : attention.forwardWorkspaceSizeInBytes(descriptor, gpuNum);
+    if (bytes == 0) {
+        return std::nullopt;
+    }
+    return Tensor(placement, TensorDescriptor(DataType::UINT8, {bytes}), 256);
+}
+
 
 bool envFlagEnabled(const char* name) {
     const char* value = std::getenv(name);
@@ -720,7 +733,9 @@ TEST(CudnnAttentionFrontendFp8Probe, ExperimentalForwardSupportSurface) {
                                                   .amaxS = amaxS,
                                                   .amaxO = amaxO};
 
-            CudnnScaledDotProductAttention::instance().forward(descriptor, forwardArgs, stream);
+            std::optional<Tensor> forwardWorkspace =
+                allocateAttentionWorkspace(gpuPlacement, descriptor, gpuNum, false);
+            CudnnScaledDotProductAttention::instance().forward(descriptor, forwardArgs, forwardWorkspace, stream);
 
             if (probeCase.runBackward) {
                 Tensor dO = makeTensorForSpec(gpuPlacement, descriptor.o, stream);
@@ -764,7 +779,9 @@ TEST(CudnnAttentionFrontendFp8Probe, ExperimentalForwardSupportSurface) {
                                                         .amaxDK = amaxDK,
                                                         .amaxDV = amaxDV,
                                                         .amaxDP = amaxDP};
-                CudnnScaledDotProductAttention::instance().backward(descriptor, backwardArgs, stream);
+                std::optional<Tensor> backwardWorkspace =
+                    allocateAttentionWorkspace(gpuPlacement, descriptor, gpuNum, true);
+                CudnnScaledDotProductAttention::instance().backward(descriptor, backwardArgs, backwardWorkspace, stream);
             }
 
             stream.synchronize();

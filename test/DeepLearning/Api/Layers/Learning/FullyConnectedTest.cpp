@@ -1,7 +1,10 @@
 #include "DeepLearning/Api/Initializers/Glorot.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
+#include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedReduction.h"
 #include "DeepLearning/Api/Layers/Utility/DropOut.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -848,7 +851,7 @@ TEST(FullyConnectedApi, RaggedForwardBackwardSanitizesOnlySelectedConsumerBucket
     ASSERT_EQ(selectedCapacityRows(7), 8u);
     ASSERT_EQ(selectedCapacityRows(9), 16u);
     ASSERT_EQ(selectedCapacityRows(31), 32u);
-    ASSERT_EQ(selectedCapacityRows(33), 66u);
+    ASSERT_EQ(selectedCapacityRows(33), 64u);
     ASSERT_EQ(selectedCapacityRows(fullRows), fullRows);
 
     const vector<float> weights = {0.5f, -0.25f, 1.0f, 0.75f, -0.5f, 0.125f};
@@ -2356,6 +2359,632 @@ void runFullyConnectedAdamThreePasses(bool hasBias) {
 TEST(FullyConnectedApi, AdamThreePassesForwardBackwardAndUpdateWithBias) { runFullyConnectedAdamThreePasses(true); }
 
 TEST(FullyConnectedApi, AdamThreePassesForwardBackwardAndUpdateWithoutBias) { runFullyConnectedAdamThreePasses(false); }
+
+
+TEST(FullyConnectedApi, FirstClassResidualConfigurationSaveLoadRoundTrip) {
+    constexpr uint32_t numFeatures = 4;
+    constexpr float dropoutProbability = 0.25f;
+    constexpr int64_t dropoutSeed = 1234567;
+    const DataType dataType = DataType::FP32;
+    const std::string networkName = "fc_first_class_residual_round_trip";
+    std::filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("input")
+                                      .dimensions({numFeatures})
+                                      .dataType(dataType)
+                                      .build();
+        Api::NetworkInput residual = Api::NetworkInput::Builder()
+                                         .network(network)
+                                         .name("residual")
+                                         .dimensions({numFeatures})
+                                         .dataType(dataType)
+                                         .build();
+        Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                     .network(network)
+                                     .featureInput(input.getFeatureOutput().value())
+                                     .numOutputFeatures(numFeatures)
+                                     .hasBias(false)
+                                     .weightsDataType(dataType)
+                                     .computeDataType(dataType)
+                                     .outputDataType(dataType)
+                                     .noActivation()
+                                     .residualInput(residual.getFeatureOutput().value())
+                                     .outputDropoutProbability(dropoutProbability)
+                                     .outputDropoutSeed(dropoutSeed)
+                                     .build();
+        Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                        .network(network)
+                                        .name("output")
+                                        .inputTensor(fc.getFeatureOutput().value())
+                                        .dataType(dataType)
+                                        .build();
+        (void)output;
+
+        EXPECT_TRUE(fc.getUseResidual());
+        ASSERT_TRUE(fc.getResidualInput().has_value());
+        EXPECT_EQ(fc.getResidualInput()->getOriginalId(), residual.getFeatureOutput()->getOriginalId());
+        EXPECT_FLOAT_EQ(fc.getOutputDropoutProbability(), dropoutProbability);
+        EXPECT_EQ(fc.getOutputDropoutSeed(), dropoutSeed);
+        const nlohmann::json before = fc.architectureJson();
+        EXPECT_EQ(before.at("version").get<string>(), "1.1.0");
+        EXPECT_TRUE(before.at("use_residual").get<bool>());
+        EXPECT_FLOAT_EQ(before.at("output_dropout_probability").get<float>(), dropoutProbability);
+        EXPECT_EQ(before.at("output_dropout_seed").get<int64_t>(), dropoutSeed);
+
+        network.save(archiveDir.string(), true);
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+        std::shared_ptr<Api::FullyConnected> loadedFc = findOnlyLayerOfType<Api::FullyConnected>(loadedNetwork);
+        ASSERT_NE(loadedFc, nullptr);
+        EXPECT_TRUE(loadedFc->getUseResidual());
+        ASSERT_TRUE(loadedFc->getResidualInput().has_value());
+        EXPECT_EQ(loadedFc->getResidualInput()->getDimensions(), (vector<uint64_t>{numFeatures}));
+        EXPECT_EQ(loadedFc->getResidualInput()->getDataType(), dataType);
+        EXPECT_FLOAT_EQ(loadedFc->getOutputDropoutProbability(), dropoutProbability);
+        EXPECT_EQ(loadedFc->getOutputDropoutSeed(), dropoutSeed);
+        EXPECT_EQ(loadedFc->architectureJson().at("version").get<string>(), "1.1.0");
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        throw;
+    }
+    std::filesystem::remove_all(archiveDir);
+}
+
+TEST(FullyConnectedApi, FirstClassResidualRunsForwardBackwardAndUpdatesWeights) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t numInputFeatures = 3;
+    constexpr uint32_t numOutputFeatures = 2;
+    constexpr float learningRate = 0.1f;
+    const DataType dataType = DataType::FP32;
+
+    const vector<float> inputValues = {
+        1.0f, -2.0f, 0.5f,
+        -1.5f, 0.25f, 2.0f,
+    };
+    const vector<float> residualValues = {
+        0.25f, -0.50f,
+        1.25f, 0.75f,
+    };
+    const vector<float> upstreamErrors = {
+        0.5f, -1.0f,
+        1.5f, -0.25f,
+    };
+    const vector<float> initialWeights = {
+        0.25f, -0.50f,
+        0.75f, 1.00f,
+        -0.25f, 0.50f,
+    };
+
+    shared_ptr<Api::Sgd> weightsSgd =
+        Api::Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+
+    Api::Network network("fullyConnectedFirstClassResidualForwardBackward");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({numInputFeatures}).dataType(dataType).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({numOutputFeatures}).dataType(dataType).build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::GradientRivet residualRivet =
+        Api::GradientRivet::Builder().network(network).tensor(residual.getFeatureOutput().value()).build();
+
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(inputRivet.getFeatureOutput().value())
+                                 .numOutputFeatures(numOutputFeatures)
+                                 .hasBias(false)
+                                 .weightsDataType(dataType)
+                                 .computeDataType(dataType)
+                                 .outputDataType(dataType)
+                                 .weightsOptimizer(weightsSgd)
+                                 .noActivation()
+                                 .residualInput(residualRivet.getFeatureOutput().value())
+                                 .build();
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(fc.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placedNetwork, nullptr);
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalInput = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(input.getId()));
+    auto physicalResidual = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(residual.getId()));
+    auto physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalFc = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(fc.getId()));
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalResidual, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalFc, nullptr);
+    ASSERT_TRUE(physicalFc->getGradientUpdateStream().has_value());
+
+    Stream stream = physicalFc->getStreams()[0];
+    Stream gradientStream = physicalFc->getGradientUpdateStream().value();
+    setParameterTensor(physicalFc->getParameter("weights"), initialWeights, stream);
+    stream.synchronize();
+
+    Impl::Tensor inputHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numInputFeatures}));
+    Impl::Tensor residualHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numOutputFeatures}));
+    writeCpuTensor(inputHost, inputValues);
+    writeCpuTensor(residualHost, residualValues);
+
+    physicalInput->forward(inputHost, false, batchSize);
+    physicalResidual->forward(residualHost, false, batchSize);
+    physicalOutput->getOutputReadyEvent().synchronize();
+
+    vector<float> expectedForward =
+        fullyConnectedReference(inputValues, initialWeights, {}, batchSize, numInputFeatures, numOutputFeatures, false);
+    for (uint64_t i = 0; i < expectedForward.size(); ++i) expectedForward[i] += residualValues[i];
+    expectAllClose(readCpuTensor(physicalOutput->getFeatureOutput().value()), expectedForward, 2e-4f, 2e-4f,
+                   "fully connected first-class residual forward");
+
+    ASSERT_EQ(physicalFc->getErrorInputs().size(), 1u);
+    ASSERT_TRUE(physicalFc->getErrorInputs()[0].has_value());
+    ASSERT_EQ(physicalFc->getErrorOutputs().size(), 2u);
+    ASSERT_TRUE(physicalFc->getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(physicalFc->getErrorOutputs()[1].has_value());
+
+    Impl::Tensor errorInput = physicalFc->getErrorInputs()[0].value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, upstreamErrors);
+    errorInput.copyFromAsync(errorInputHost, stream);
+    physicalFc->backward(errorInput, batchSize);
+
+    Impl::Tensor primaryErrorOutputHost = copyTensorToCpu(physicalFc->getErrorOutputs()[0].value(), stream);
+    Impl::Tensor residualErrorOutputHost = copyTensorToCpu(physicalFc->getErrorOutputs()[1].value(), stream);
+    Impl::Tensor weightsAfterHost = copyTensorToCpu(physicalFc->getParameter("weights")->getStorage().value(), gradientStream);
+    stream.synchronize();
+    gradientStream.synchronize();
+
+    const vector<float> expectedPrimaryError =
+        fullyConnectedBackwardErrorReference(upstreamErrors, initialWeights, batchSize, numInputFeatures, numOutputFeatures);
+    const vector<float> expectedWeightsGrad =
+        fullyConnectedWeightGradReference(inputValues, upstreamErrors, batchSize, numInputFeatures, numOutputFeatures);
+    const vector<float> expectedWeightsAfter =
+        sgdUpdatedReference(initialWeights, expectedWeightsGrad, batchSize, learningRate);
+
+    expectAllClose(readCpuTensor(primaryErrorOutputHost), expectedPrimaryError, 2e-4f, 2e-4f,
+                   "fully connected first-class residual primary error");
+    expectAllClose(readCpuTensor(residualErrorOutputHost), upstreamErrors, 2e-4f, 2e-4f,
+                   "fully connected first-class residual identity gradient");
+    expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, 2e-4f, 2e-4f,
+                   "fully connected first-class residual weights update");
+}
+
+TEST(FullyConnectedApi, OutputDropoutResidualUsesResidualPlusDroppedFcAndIdentityResidualGradient) {
+    constexpr uint32_t batchSize = 4;
+    constexpr uint32_t numFeatures = 4;
+    constexpr float probability = 0.5f;
+    const DataType dataType = DataType::FP32;
+
+    const vector<float> inputValues = {
+        1.0f, 2.0f, 3.0f, 4.0f,
+        5.0f, 6.0f, 7.0f, 8.0f,
+        9.0f, 10.0f, 11.0f, 12.0f,
+        13.0f, 14.0f, 15.0f, 16.0f,
+    };
+    const vector<float> residualValues = {
+        0.25f, -0.5f, 0.75f, -1.0f,
+        1.25f, -1.5f, 1.75f, -2.0f,
+        2.25f, -2.5f, 2.75f, -3.0f,
+        3.25f, -3.5f, 3.75f, -4.0f,
+    };
+    const vector<float> identityWeights = {
+        1.0f, 0.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f,
+        0.0f, 0.0f, 0.0f, 1.0f,
+    };
+    const vector<float> upstreamErrors(batchSize * numFeatures, 1.0f);
+
+    shared_ptr<Api::Sgd> weightsSgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+
+    Api::Network network("fullyConnectedOutputDropoutResidual");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({numFeatures}).dataType(dataType).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({numFeatures}).dataType(dataType).build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::GradientRivet residualRivet =
+        Api::GradientRivet::Builder().network(network).tensor(residual.getFeatureOutput().value()).build();
+
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(inputRivet.getFeatureOutput().value())
+                                 .numOutputFeatures(numFeatures)
+                                 .hasBias(false)
+                                 .weightsDataType(dataType)
+                                 .computeDataType(dataType)
+                                 .outputDataType(dataType)
+                                 .weightsOptimizer(weightsSgd)
+                                 .noActivation()
+                                 .residualInput(residualRivet.getFeatureOutput().value())
+                                 .outputDropoutProbability(probability)
+                                 .outputDropoutSeed(987654321)
+                                 .build();
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(fc.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placedNetwork, nullptr);
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalInput = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(input.getId()));
+    auto physicalResidual = dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(residual.getId()));
+    auto physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalFc = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(fc.getId()));
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalResidual, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalFc, nullptr);
+
+    Stream stream = physicalFc->getStreams()[0];
+    setParameterTensor(physicalFc->getParameter("weights"), identityWeights, stream);
+    stream.synchronize();
+
+    Impl::Tensor inputHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numFeatures}));
+    Impl::Tensor residualHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numFeatures}));
+    writeCpuTensor(inputHost, inputValues);
+    writeCpuTensor(residualHost, residualValues);
+
+    physicalInput->forward(inputHost, false, batchSize);
+    physicalResidual->forward(residualHost, false, batchSize);
+    physicalOutput->getOutputReadyEvent().synchronize();
+
+    const vector<float> actualOutput = readCpuTensor(physicalOutput->getFeatureOutput().value());
+    vector<bool> kept(actualOutput.size(), false);
+    bool sawKept = false;
+    bool sawDropped = false;
+    for (uint64_t i = 0; i < actualOutput.size(); ++i) {
+        const float branch = actualOutput[i] - residualValues[i];
+        const float keptValue = 2.0f * inputValues[i];
+        if (std::fabs(branch - keptValue) <= 2e-4f) {
+            kept[i] = true;
+            sawKept = true;
+        } else {
+            EXPECT_NEAR(branch, 0.0f, 2e-4f) << "dropout branch mismatch at index " << i;
+            sawDropped = true;
+        }
+    }
+    EXPECT_TRUE(sawKept);
+    EXPECT_TRUE(sawDropped);
+
+    ASSERT_EQ(physicalFc->getErrorInputs().size(), 1u);
+    ASSERT_TRUE(physicalFc->getErrorInputs()[0].has_value());
+    ASSERT_EQ(physicalFc->getErrorOutputs().size(), 2u);
+    ASSERT_TRUE(physicalFc->getErrorOutputs()[0].has_value());
+    ASSERT_TRUE(physicalFc->getErrorOutputs()[1].has_value());
+
+    Impl::Tensor errorInput = physicalFc->getErrorInputs()[0].value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, upstreamErrors);
+    errorInput.copyFromAsync(errorInputHost, stream);
+    physicalFc->backward(errorInput, batchSize);
+
+    const vector<float> inputGradient = readCpuTensor(copyTensorToCpu(physicalFc->getErrorOutputs()[0].value(), stream));
+    const vector<float> residualGradient = readCpuTensor(copyTensorToCpu(physicalFc->getErrorOutputs()[1].value(), stream));
+    stream.synchronize();
+
+    ASSERT_EQ(inputGradient.size(), kept.size());
+    for (uint64_t i = 0; i < inputGradient.size(); ++i) {
+        EXPECT_NEAR(inputGradient[i], kept[i] ? 2.0f : 0.0f, 2e-4f) << "input gradient mismatch at index " << i;
+        EXPECT_NEAR(residualGradient[i], 1.0f, 2e-4f) << "residual gradient mismatch at index " << i;
+    }
+}
+
+
+TEST(FullyConnectedApi, RaggedFirstClassResidualWidthChangingProjectionPlacesForTraining) {
+    constexpr uint32_t batchSize = 2;
+    Api::Network network("raggedFcResidualWidthChangingProjectionTraining");
+    Api::RaggedTensor feature = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("feature")
+                                    .valuesDataType(DataType::BF16)
+                                    .offsetsDataType(DataType::UINT32)
+                                    .trailingDimensions({4})
+                                    .maxTotalValues(8)
+                                    .batchSize(batchSize)
+                                    .build();
+
+    shared_ptr<Api::Sgd> expandSgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+    Api::FullyConnected expand = Api::FullyConnected::Builder()
+                                     .network(network)
+                                     .featureInput(feature)
+                                     .numOutputFeatures(12)
+                                     .hasBias(false)
+                                     .weightsDataType(DataType::BF16)
+                                     .computeDataType(DataType::FP32)
+                                     .outputDataType(DataType::BF16)
+                                     .weightsOptimizer(expandSgd)
+                                     .noActivation()
+                                     .build();
+    ASSERT_TRUE(expand.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(expand.getRaggedFeatureOutput()->getOffsets(), feature.getOffsets());
+
+    shared_ptr<Api::Sgd> projectSgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+    Api::FullyConnected project = Api::FullyConnected::Builder()
+                                      .network(network)
+                                      .featureInput(expand.getRaggedFeatureOutput().value())
+                                      .numOutputFeatures(4)
+                                      .hasBias(false)
+                                      .weightsDataType(DataType::BF16)
+                                      .computeDataType(DataType::FP32)
+                                      .outputDataType(DataType::BF16)
+                                      .weightsOptimizer(projectSgd)
+                                      .noActivation()
+                                      .residualInput(feature)
+                                      .outputDropoutProbability(0.0f)
+                                      .build();
+    ASSERT_TRUE(project.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(project.getRaggedFeatureOutput()->getOffsets(), feature.getOffsets());
+    (void)Api::RaggedNetworkOutput::Builder()
+        .network(network)
+        .name("output")
+        .inputTensor(project.getRaggedFeatureOutput().value())
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false));
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+}
+
+TEST(FullyConnectedApi, RaggedFirstClassResidualWidthChangingProjectionWithOutputDropoutPlacesForTraining) {
+    constexpr uint32_t batchSize = 2;
+    Api::Network network("raggedFcResidualWidthChangingProjectionDropoutTraining");
+    Api::RaggedTensor feature = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("feature")
+                                    .valuesDataType(DataType::BF16)
+                                    .offsetsDataType(DataType::UINT32)
+                                    .trailingDimensions({4})
+                                    .maxTotalValues(8)
+                                    .batchSize(batchSize)
+                                    .build();
+
+    shared_ptr<Api::Sgd> expandSgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+    Api::FullyConnected expand = Api::FullyConnected::Builder()
+                                     .network(network)
+                                     .featureInput(feature)
+                                     .numOutputFeatures(12)
+                                     .hasBias(false)
+                                     .weightsDataType(DataType::BF16)
+                                     .computeDataType(DataType::FP32)
+                                     .outputDataType(DataType::BF16)
+                                     .weightsOptimizer(expandSgd)
+                                     .noActivation()
+                                     .build();
+    ASSERT_TRUE(expand.getRaggedFeatureOutput().has_value());
+
+    shared_ptr<Api::Sgd> projectSgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+    Api::FullyConnected project = Api::FullyConnected::Builder()
+                                      .network(network)
+                                      .featureInput(expand.getRaggedFeatureOutput().value())
+                                      .numOutputFeatures(4)
+                                      .hasBias(false)
+                                      .weightsDataType(DataType::BF16)
+                                      .computeDataType(DataType::FP32)
+                                      .outputDataType(DataType::BF16)
+                                      .weightsOptimizer(projectSgd)
+                                      .noActivation()
+                                      .residualInput(feature)
+                                      .outputDropoutProbability(0.1f)
+                                      .outputDropoutSeed(3333)
+                                      .build();
+    ASSERT_TRUE(project.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(project.getRaggedFeatureOutput()->getOffsets(), feature.getOffsets());
+    (void)Api::RaggedNetworkOutput::Builder()
+        .network(network)
+        .name("output")
+        .inputTensor(project.getRaggedFeatureOutput().value())
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false));
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+}
+
+TEST(FullyConnectedApi, RaggedFirstClassResidualOutputDropoutPlacesForTraining) {
+    constexpr uint32_t batchSize = 2;
+    Api::Network network("raggedFcResidualOutputDropoutTraining");
+    Api::RaggedTensor feature = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("feature")
+                                    .valuesDataType(DataType::BF16)
+                                    .offsetsDataType(DataType::UINT32)
+                                    .trailingDimensions({4})
+                                    .maxTotalValues(8)
+                                    .batchSize(batchSize)
+                                    .build();
+    Api::DropOut residualIdentity =
+        Api::DropOut::Builder().network(network).featureInput(feature).dropProportion(0.0f).build();
+    ASSERT_TRUE(residualIdentity.getRaggedFeatureOutput().has_value());
+
+    shared_ptr<Api::Sgd> weightsSgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(feature)
+                                 .numOutputFeatures(4)
+                                 .hasBias(false)
+                                 .weightsDataType(DataType::BF16)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(DataType::BF16)
+                                 .weightsOptimizer(weightsSgd)
+                                 .noActivation()
+                                 .residualInput(residualIdentity.getRaggedFeatureOutput().value())
+                                 .outputDropoutProbability(0.1f)
+                                 .outputDropoutSeed(2222)
+                                 .build();
+    ASSERT_TRUE(fc.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(fc.getRaggedFeatureOutput()->getOffsets(), feature.getOffsets());
+    (void)Api::RaggedNetworkOutput::Builder()
+        .network(network)
+        .name("output")
+        .inputTensor(fc.getRaggedFeatureOutput().value())
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false));
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    auto physicalFc = dynamic_pointer_cast<Impl::RaggedFullyConnected>(
+        placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(fc.getId()));
+    ASSERT_NE(physicalFc, nullptr);
+    EXPECT_TRUE(physicalFc->isTrainingDropoutEnabled());
+}
+
+TEST(FullyConnectedApi, RaggedFirstClassResidualOutputDropoutWithDownstreamLossPlacesForTraining) {
+    constexpr uint32_t batchSize = 2;
+    Api::Network network("raggedFcResidualOutputDropoutDownstreamLossTraining");
+    Api::RaggedTensor feature = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("feature")
+                                    .valuesDataType(DataType::BF16)
+                                    .offsetsDataType(DataType::UINT32)
+                                    .trailingDimensions({4})
+                                    .maxTotalValues(8)
+                                    .batchSize(batchSize)
+                                    .build();
+
+    shared_ptr<Api::Sgd> weightsSgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(feature)
+                                 .numOutputFeatures(4)
+                                 .hasBias(false)
+                                 .weightsDataType(DataType::BF16)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(DataType::BF16)
+                                 .weightsOptimizer(weightsSgd)
+                                 .noActivation()
+                                 .residualInput(feature)
+                                 .outputDropoutProbability(0.1f)
+                                 .outputDropoutSeed(4444)
+                                 .build();
+    ASSERT_TRUE(fc.getRaggedFeatureOutput().has_value());
+
+    Api::SegmentedReduction mean = Api::SegmentedReduction::Builder()
+                                       .network(network)
+                                       .featureInput(fc.getRaggedFeatureOutput().value())
+                                       .reductionType(Api::SegmentedReduction::Type::MEAN)
+                                       .build();
+    Api::NetworkInput labels = Api::NetworkInput::Builder()
+                                   .network(network)
+                                   .name("labels")
+                                   .dimensions({4})
+                                   .dataType(DataType::BF16)
+                                   .build();
+    Api::MSE loss = Api::MSE::Builder()
+                        .network(network)
+                        .predictions(mean.getFeatureOutput().value())
+                        .labels(labels.getFeatureOutput().value())
+                        .lossDataType(DataType::FP32)
+                        .reportsBatchLoss()
+                        .build();
+    (void)Api::NetworkOutput::Builder()
+        .network(network)
+        .name("loss")
+        .inputTensor(loss.getLoss())
+        .dataType(DataType::FP32)
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false));
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+}
+
+TEST(FullyConnectedApi, RaggedFirstClassResidualRequiresExactRowPartition) {
+    Api::Network network("raggedFcResidualPartitionGuard");
+    Api::RaggedTensor feature = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("feature")
+                                    .valuesDataType(DataType::BF16)
+                                    .offsetsDataType(DataType::UINT32)
+                                    .trailingDimensions({4})
+                                    .maxTotalValues(8)
+                                    .batchSize(2)
+                                    .build();
+    Api::RaggedTensor differentPartition = Api::RaggedNetworkInput::Builder()
+                                               .network(network)
+                                               .name("residual")
+                                               .valuesDataType(DataType::BF16)
+                                               .offsetsDataType(DataType::UINT32)
+                                               .trailingDimensions({4})
+                                               .maxTotalValues(8)
+                                               .batchSize(2)
+                                               .build();
+
+    EXPECT_THROW(
+        (void)Api::FullyConnected::Builder()
+            .network(network)
+            .featureInput(feature)
+            .numOutputFeatures(4)
+            .hasBias(false)
+            .weightsDataType(DataType::BF16)
+            .computeDataType(DataType::FP32)
+            .outputDataType(DataType::BF16)
+            .noActivation()
+            .residualInput(differentPartition)
+            .build(),
+        std::invalid_argument);
+}
+
+TEST(FullyConnectedApi, FirstClassResidualOutputDropoutRejectsCustomEpilogue) {
+    Api::Network network("fcResidualCustomEpilogueGuard");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({4}).dataType(DataType::FP32).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({4}).dataType(DataType::FP32).build();
+    Impl::Expression projected = Api::FullyConnected::epilogueInput(DataType::FP32, DataType::FP32);
+
+    EXPECT_THROW(
+        (void)Api::FullyConnected::Builder()
+            .network(network)
+            .featureInput(input.getFeatureOutput().value())
+            .numOutputFeatures(4)
+            .hasBias(false)
+            .weightsDataType(DataType::FP32)
+            .computeDataType(DataType::FP32)
+            .outputDataType(DataType::FP32)
+            .noActivation()
+            .residualInput(residual.getFeatureOutput().value())
+            .outputDropoutProbability(0.1f)
+            .epilogue(projected)
+            .build(),
+        std::invalid_argument);
+}
 
 TEST(FullyConnectedApi, MultiInputEpilogueRunsForwardBackwardResidualAddAndUpdatesWeights) {
     constexpr uint32_t batchSize = 2;

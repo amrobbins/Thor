@@ -65,6 +65,11 @@ class RMSNorm : public TrainableLayer {
     std::vector<Tensor> saveInvVariance;
     std::vector<Tensor> scratchDScale;
     std::optional<Tensor> scratchErrorOutput;
+    // RMSNorm instances may have multiple independently scheduled connections.
+    // Each connection owns its own cuDNN execution scratch so compatible graph
+    // cache entries can be shared without aliasing mutable workspace.
+    std::vector<std::optional<Tensor>> forwardWorkspaces;
+    std::vector<std::optional<Tensor>> backwardWorkspaces;
 };
 
 }  // namespace ThorImplementation

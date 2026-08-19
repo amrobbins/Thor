@@ -15,6 +15,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -6604,34 +6605,52 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             return offsets_input_slot == other.offsets_input_slot && batch_size == other.batch_size &&
                    max_active_values == other.max_active_values && elements_per_value == other.elements_per_value;
         }
+
+        [[nodiscard]] bool operator<(const TerminalRaggedExtentKey& other) const {
+            if (offsets_input_slot != other.offsets_input_slot) return offsets_input_slot < other.offsets_input_slot;
+            if (batch_size != other.batch_size) return batch_size < other.batch_size;
+            if (max_active_values != other.max_active_values) return max_active_values < other.max_active_values;
+            return elements_per_value < other.elements_per_value;
+        }
     };
 
-    auto terminalRaggedExtentKey = [&](uint32_t root_idx) -> std::optional<TerminalRaggedExtentKey> {
-        if (root_idx >= expr.nodes.size()) {
-            throw std::runtime_error("Terminal ragged-extent lookup root is out of range.");
+    using TerminalRaggedExtentSignature = std::set<TerminalRaggedExtentKey>;
+
+    auto terminalRaggedExtentSignature = [&](const std::unordered_set<uint32_t>& region) {
+        TerminalRaggedExtentSignature signature;
+        for (uint32_t node_idx : region) {
+            if (node_idx >= expr.nodes.size()) {
+                throw std::runtime_error("Terminal ragged-extent region contains an out-of-range node.");
+            }
+            const ExprNode& node = expr.nodes[node_idx];
+            if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
+                continue;
+            }
+            if (node.rhs == UINT32_MAX || node.rhs >= expr.nodes.size()) {
+                throw std::runtime_error("Terminal ragged runtime extent is missing its offsets input.");
+            }
+            const ExprNode& offsets = expr.nodes[node.rhs];
+            if (offsets.op != ExprOp::INPUT) {
+                throw std::runtime_error("Terminal ragged runtime extent offsets must be a direct input.");
+            }
+            signature.insert(TerminalRaggedExtentKey{
+                .offsets_input_slot = offsets.input_slot,
+                .batch_size = node.ragged_runtime_batch_size,
+                .max_active_values = node.ragged_runtime_max_active_values,
+                .elements_per_value = node.ragged_runtime_elements_per_value,
+            });
         }
-        const ExprNode& root = expr.nodes[root_idx];
-        if (root.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
-            return std::nullopt;
-        }
-        if (root.rhs == UINT32_MAX || root.rhs >= expr.nodes.size()) {
-            throw std::runtime_error("Terminal ragged runtime extent is missing its offsets input.");
-        }
-        const ExprNode& offsets = expr.nodes[root.rhs];
-        if (offsets.op != ExprOp::INPUT) {
-            throw std::runtime_error("Terminal ragged runtime extent offsets must be a direct input.");
-        }
-        return TerminalRaggedExtentKey{
-            .offsets_input_slot = offsets.input_slot,
-            .batch_size = root.ragged_runtime_batch_size,
-            .max_active_values = root.ragged_runtime_max_active_values,
-            .elements_per_value = root.ragged_runtime_elements_per_value,
-        };
+        return signature;
     };
 
-    auto terminalRaggedExtentsCompatible = [](const std::optional<TerminalRaggedExtentKey>& lhs,
-                                              const std::optional<TerminalRaggedExtentKey>& rhs) {
-        return !lhs.has_value() || !rhs.has_value() || lhs.value() == rhs.value();
+    auto terminalRaggedExtentsCompatible = [](const TerminalRaggedExtentSignature& lhs,
+                                              const TerminalRaggedExtentSignature& rhs) {
+        // A terminal fused group has one launch domain.  Do not treat the absence
+        // of a root-level ragged marker as a wildcard: pointwise wrappers around a
+        // ragged value can hide the marker below the terminal root.  Merging such a
+        // region with a different row width is exactly how two otherwise-valid
+        // terminal gradients can become one invalid mixed-width fused kernel.
+        return lhs == rhs;
     };
 
     struct TerminalFusedGroup {
@@ -6639,7 +6658,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         std::unordered_set<uint32_t> dependency_value_ids;
         std::vector<RequestedStageOutput> outputs;
         std::map<std::string, uint32_t> exact_region_value_id;
-        std::optional<TerminalRaggedExtentKey> ragged_extent_key;
+        TerminalRaggedExtentSignature ragged_extent_signature;
         bool emitted = false;
     };
 
@@ -7315,7 +7334,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                                        std::unordered_set<uint32_t> dependency_value_ids,
                                        RequestedStageOutput requested_output,
                                        const std::string& region_sig,
-                                       std::optional<TerminalRaggedExtentKey> requested_ragged_extent_key) {
+                                       TerminalRaggedExtentSignature requested_ragged_extent_signature) {
         std::vector<size_t> overlapping_groups;
         for (size_t i = 0; i < terminal_groups.size(); ++i) {
             if (!terminal_groups[i].has_value() || terminal_groups[i]->emitted) {
@@ -7332,7 +7351,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             new_group.dependency_value_ids = std::move(dependency_value_ids);
             new_group.outputs.push_back(requested_output);
             new_group.exact_region_value_id.emplace(region_sig, requested_output.value_id);
-            new_group.ragged_extent_key = requested_ragged_extent_key;
+            new_group.ragged_extent_signature = std::move(requested_ragged_extent_signature);
 
             size_t new_idx = terminal_groups.size();
             terminal_groups.push_back(std::move(new_group));
@@ -7341,7 +7360,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
         auto target_it = std::find_if(overlapping_groups.begin(), overlapping_groups.end(), [&](size_t group_idx) {
             return terminal_groups[group_idx].has_value() &&
-                   terminalRaggedExtentsCompatible(terminal_groups[group_idx]->ragged_extent_key, requested_ragged_extent_key);
+                   terminalRaggedExtentsCompatible(terminal_groups[group_idx]->ragged_extent_signature, requested_ragged_extent_signature);
         });
         if (target_it == overlapping_groups.end()) {
             makeNewGroup();
@@ -7350,10 +7369,6 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
         size_t target = *target_it;
         TerminalFusedGroup& target_group = *terminal_groups[target];
-        if (!target_group.ragged_extent_key.has_value() && requested_ragged_extent_key.has_value()) {
-            target_group.ragged_extent_key = requested_ragged_extent_key;
-        }
-
         target_group.region_nodes.insert(region.begin(), region.end());
         target_group.dependency_value_ids.insert(dependency_value_ids.begin(), dependency_value_ids.end());
         target_group.outputs.push_back(requested_output);
@@ -7366,13 +7381,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
 
             TerminalFusedGroup& src_group = *terminal_groups[src_idx];
-            if (!terminalRaggedExtentsCompatible(target_group.ragged_extent_key, src_group.ragged_extent_key)) {
+            if (!terminalRaggedExtentsCompatible(target_group.ragged_extent_signature, src_group.ragged_extent_signature)) {
                 continue;
             }
-            if (!target_group.ragged_extent_key.has_value() && src_group.ragged_extent_key.has_value()) {
-                target_group.ragged_extent_key = src_group.ragged_extent_key;
-            }
-
             target_group.region_nodes.insert(src_group.region_nodes.begin(), src_group.region_nodes.end());
             target_group.dependency_value_ids.insert(src_group.dependency_value_ids.begin(), src_group.dependency_value_ids.end());
             target_group.outputs.insert(target_group.outputs.end(), src_group.outputs.begin(), src_group.outputs.end());
@@ -7786,11 +7797,12 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         if (forced_transpose_boundaries.empty()) {
             std::unordered_set<uint32_t> dependency_value_ids;
             collectExternalValueIds(expr, region, node_output_value_id, dependency_value_ids);
+            TerminalRaggedExtentSignature ragged_extent_signature = terminalRaggedExtentSignature(region);
             addOrMergeTerminalGroup(std::move(region),
                                     std::move(dependency_value_ids),
                                     requested_output,
                                     region_sig,
-                                    terminalRaggedExtentKey(named_output.node_idx));
+                                    std::move(ragged_extent_signature));
         } else {
             std::vector<RequestedStageOutput> requested_outputs{requested_output};
             planned.stages.push_back(buildFusedStage(expr, region, requested_outputs, node_output_value_id));

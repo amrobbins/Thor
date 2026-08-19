@@ -95,6 +95,13 @@ class AdaptiveLayerNorm : public Layer {
     Tensor saveMean;
     Tensor saveInvVariance;
     std::array<std::optional<Tensor>, NUM_INPUT_PORTS> scratchErrorOutputs;
+
+    // AdaptiveLayerNorm synchronizes all three input ports onto one private
+    // compute stream. Mutable cuDNN scratch therefore belongs to this placed
+    // execution object, never to the globally shared graph cache. Forward and
+    // backward own separate workspaces so their lifetimes remain independent.
+    std::optional<Tensor> forwardWorkspace;
+    std::optional<Tensor> backwardWorkspace;
 };
 
 }  // namespace ThorImplementation

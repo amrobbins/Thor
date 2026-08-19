@@ -541,6 +541,48 @@ TEST(ExpressionBooleanComparisonOps, LogicalOpsComposeBooleanMasksInSingleFusedS
     EXPECT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
 }
 
+TEST(ExpressionBooleanComparisonOps, LogicalNotTransposePushThroughNormalizesTransposePair) {
+    auto x = Expression::input("x");
+    auto mask = x.greaterThan(Expression::constantScalar(0.0));
+    auto normalized = mask.transpose().logicalNot().transpose();
+
+    auto outputs = Expression::outputs({{"mask", normalized}}).physicalOutputs();
+    const ExprNode& root = outputNode(outputs);
+    ASSERT_EQ(root.op, ExprOp::LOGICAL_NOT);
+    ASSERT_NE(root.lhs, UINT32_MAX);
+    EXPECT_EQ(outputs.expr->nodes.at(root.lhs).op, ExprOp::GREATER);
+}
+
+TEST(ExpressionBooleanComparisonOps, LogicalNotSubexpressionsDoNotBlockMatmulGeluEpilogueMatching) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor x = makeGpuTensor({2, 2}, {1.0f, -2.0f, 3.0f, 4.0f}, stream);
+    Tensor gate = makeGpuTensor({2, 2}, {-1.0f, 1.0f, -2.0f, 2.0f}, stream);
+    Tensor w = makeGpuTensor({2, 2}, {0.5f, 1.0f, -1.0f, 2.0f}, stream);
+
+    auto x_expr = Expression::input("x");
+    auto gate_expr = Expression::input("gate");
+    auto use_full_value = (gate_expr > Expression::constantScalar(0.0)).logicalNot();
+    auto gated = Expression::where(use_full_value, x_expr, x_expr * Expression::constantScalar(0.5));
+    auto projection =
+        Expression::matmul(gated, Expression::input("w"), false, false, DataType::FP32, DataType::FP32);
+    auto expression_outputs = Expression::outputs({{"y", projection.gelu()}});
+
+    FusedEquation eq = FusedEquation::compile(expression_outputs.physicalOutputs(), 0);
+    auto compiled = eq.compileForInputs({{"x", x}, {"gate", gate}, {"w", w}});
+
+    bool found_gelu_matmul_epilogue = false;
+    for (const CompiledExecutionStage& stage : compiled->stages) {
+        if (stage.kind == CompiledExecutionStage::Kind::Matmul && stage.matmul &&
+            stage.matmul->epilogue == MatmulEpilogue::Gelu) {
+            found_gelu_matmul_epilogue = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found_gelu_matmul_epilogue);
+}
+
 TEST(ExpressionBooleanComparisonOps, AutodiffRejectsNondifferentiableBooleanOps) {
     auto x = Expression::input("x");
     auto y = Expression::input("y");
@@ -585,12 +627,26 @@ TEST(ExpressionBooleanComparisonOps, LogicalCompositionProducesExpectedValuesWhe
 
     auto prediction = Expression::input("x").greaterEqual(Expression::constantScalar(0.5));
     auto truth = Expression::input("label").notEqual(Expression::constantScalar(0.0));
-    auto correct = prediction.equal(truth).withOutputDType(DataType::FP32);
-    auto expression_outputs = Expression::outputs({{"correct", correct}});
-    Tensor out = runExpressionOutput(expression_outputs, {{"x", x}, {"label", label}}, "correct", stream);
+    auto expression_outputs = Expression::outputs({
+        {"not_prediction", prediction.logicalNot().cast(DataType::FP32)},
+        {"both", prediction.logicalAnd(truth).cast(DataType::FP32)},
+        {"either", prediction.logicalOr(truth).cast(DataType::FP32)},
+        {"prediction_and_not_truth", prediction.logicalAnd(truth.logicalNot()).cast(DataType::FP32)},
+    });
 
-    EXPECT_EQ(out.getDimensions(), (std::vector<uint64_t>{6}));
-    expectNear(copyToCpuValues(out, stream), {1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f});
+    FusedEquation eq = FusedEquation::compile(expression_outputs.physicalOutputs(), 0);
+    StampedExecutionPlan plan = eq.stamp({{"x", x}, {"label", label}}, stream);
+    plan.run();
+
+    EXPECT_EQ(plan.output("not_prediction").getDimensions(), (std::vector<uint64_t>{6}));
+    EXPECT_EQ(plan.output("both").getDimensions(), (std::vector<uint64_t>{6}));
+    EXPECT_EQ(plan.output("either").getDimensions(), (std::vector<uint64_t>{6}));
+    EXPECT_EQ(plan.output("prediction_and_not_truth").getDimensions(), (std::vector<uint64_t>{6}));
+
+    expectNear(copyToCpuValues(plan.output("not_prediction"), stream), {1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 0.0f});
+    expectNear(copyToCpuValues(plan.output("both"), stream), {0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 1.0f});
+    expectNear(copyToCpuValues(plan.output("either"), stream), {0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f});
+    expectNear(copyToCpuValues(plan.output("prediction_and_not_truth"), stream), {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f});
 }
 
 TEST(ExpressionWhereSelectOps, WhereAndSelectLowerToTernaryExpressionNodes) {

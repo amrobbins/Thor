@@ -1122,6 +1122,63 @@ TEST(Trainer, PhaseBackedTrainingDataUsesOnlyCurrentlyActiveDatasetFields) {
     std::filesystem::remove_all(path, errorCode);
 }
 
+TEST(Trainer, PhaseBackedTrainingDataCanBeRebatchedBetweenFits) {
+    auto network = makeFakePhaseNetwork("trainer-rebatch-phase", "phase_output");
+    auto initialData = makeFakeTrainingData(BatchPolicy(1, false));
+    auto rebatchedData = makeFakeTrainingData(BatchPolicy(4, false));
+    auto executor = std::make_shared<CapturingExecutor>();
+    auto observer = std::make_shared<NullTrainingObserver>();
+
+    auto phase = std::make_shared<TrainingPhase>("phase", network);
+    auto step = std::make_shared<TrainingStep>(
+        "step", std::vector<std::shared_ptr<TrainingPhase>>{phase}, nullptr, std::vector<ParameterReference>{});
+    auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
+
+    Trainer trainer = Trainer::Builder()
+                          .data(initialData)
+                          .trainingProgram(program)
+                          .executor(executor)
+                          .observer(observer)
+                          .build();
+
+    trainer.fit(1);
+    ASSERT_NE(executor->lastTrainingData, nullptr);
+    EXPECT_EQ(executor->lastTrainingData->getBatching().getBatchSize(), 1u);
+    EXPECT_EQ(executor->lastBatchSessionSize, 1u);
+
+    trainer.setTrainingData(rebatchedData);
+    EXPECT_EQ(trainer.getTrainingData(), rebatchedData);
+    EXPECT_EQ(trainer.getTrainingData()->getBatching().getBatchSize(), 4u);
+
+    // The configured replacement recipe requests four examples, but this fake
+    // dataset contains only one training example. Trainer::fit() therefore
+    // creates its normal tail-safe effective TrainingData for the executor while
+    // leaving the configured recipe unchanged. Capturing the warning proves that
+    // the replacement batch policy, rather than the original batch size of one,
+    // is what reached the next fit.
+    testing::internal::CaptureStderr();
+    trainer.fit(1);
+    const std::string warning = testing::internal::GetCapturedStderr();
+
+    ASSERT_NE(executor->lastTrainingData, nullptr);
+    EXPECT_NE(executor->lastTrainingData, rebatchedData);
+    EXPECT_EQ(executor->lastTrainingData->getBatching().getBatchSize(), 1u);
+    EXPECT_EQ(executor->lastBatchSessionSize, 1u);
+    EXPECT_EQ(trainer.getTrainingData(), rebatchedData);
+    EXPECT_EQ(trainer.getTrainingData()->getBatching().getBatchSize(), 4u);
+    EXPECT_NE(warning.find("Thor warning: Trainer requested batch size 4"), std::string::npos);
+    EXPECT_NE(warning.find("training split contains only 1 example."), std::string::npos);
+}
+
+TEST(Trainer, RejectsTrainingDataRebindForStandaloneTrainer) {
+    auto network = makeFakePhaseNetwork("trainer-rebatch-standalone", "output");
+    auto initialData = makeFakeTrainingData(BatchPolicy(1, false));
+    auto replacementData = makeFakeTrainingData(BatchPolicy(2, false));
+    Trainer trainer = Trainer::Builder().network(network).data(initialData).build();
+
+    EXPECT_THROW(trainer.setTrainingData(replacementData), std::runtime_error);
+}
+
 TEST(Trainer, RejectsStandaloneNetworkAlongsidePhaseBackedProgram) {
     auto network = std::make_shared<Network>("trainer-phase-network");
     auto phase = std::make_shared<TrainingPhase>("phase", network);

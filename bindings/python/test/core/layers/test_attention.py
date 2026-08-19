@@ -678,12 +678,77 @@ def test_attention_python_binding_without_epilogue_is_unchanged():
     assert not attention.get_has_epilogue()
     assert attention.get_epilogue_input_names() == []
     arch = _only_layer_architecture(n, "attention")
+    assert arch["version"] == "1.0.0"
     assert arch["epilogue"] is None
     assert arch["epilogue_inputs"] == []
 
 
+def test_attention_first_class_residual_and_output_dropout_surface():
+    n = _net("test_attention_first_class_residual_and_output_dropout_surface")
+    x = _input_tensor(n, "tokens", [5, 8], thor.DataType.bf16)
+    residual = _input_tensor(n, "residual", [5, 8], thor.DataType.bf16)
+
+    attention = thor.layers.Attention(
+        n,
+        x,
+        2,
+        head_dim=4,
+        output_data_type=thor.DataType.bf16,
+        output_dropout_probability=0.10,
+        output_dropout_seed=17,
+        residual_input=residual,
+    )
+
+    assert attention.get_output_dropout_probability() == pytest.approx(0.10)
+    assert attention.get_output_dropout_seed() == 17
+    assert attention.get_use_residual() is True
+    assert attention.get_residual_input() == residual
+    arch = _only_layer_architecture(n, "attention")
+    assert arch["version"] == "1.1.0"
+    assert arch["output_dropout_probability"] == pytest.approx(0.10)
+    assert arch["output_dropout_seed"] == 17
+    assert arch["use_residual"] is True
+    assert arch["residual_input"]["dimensions"] == [5, 8]
+
+
 def test_attention_exposes_transient_training_dropout_control():
     n = _net("test_net_attention_training_dropout_control")
+    x = _input_tensor(n, "tokens", [4, 32], thor.DataType.fp16)
+    attention = thor.layers.Attention(
+        n,
+        x,
+        2,
+        head_dim=16,
+        sdpa_dropout_probability=0.25,
+        sdpa_dropout_seed=1234,
+        sdpa_dropout_offset=5678,
+    )
+
+    assert attention.get_sdpa_dropout_probability() == pytest.approx(0.25)
+    assert attention.get_sdpa_dropout_seed() == 1234
+    assert attention.get_sdpa_dropout_offset() == 5678
+    assert attention.get_dropout_probability() == pytest.approx(0.25)
+    assert attention.get_dropout_seed() == 1234
+    assert attention.get_dropout_offset() == 5678
+    assert attention.is_training_dropout_enabled() is True
+    assert n.get_num_training_dropout_controllable_layers() == 1
+
+    attention.set_training_dropout_enabled(False)
+    assert attention.is_training_dropout_enabled() is False
+    assert n.is_training_dropout_enabled() is False
+
+    architecture = _only_layer_architecture(n, "attention")
+    assert architecture["sdpa_dropout_probability"] == pytest.approx(0.25)
+    assert architecture["sdpa_dropout_seed"] == 1234
+    assert architecture["sdpa_dropout_offset"] == 5678
+    assert architecture["dropout_probability"] == pytest.approx(0.25)
+    assert architecture["dropout_seed"] == 1234
+    assert architecture["dropout_offset"] == 5678
+    assert "training_dropout_enabled" not in architecture
+
+
+def test_attention_legacy_sdpa_dropout_keywords_remain_aliases():
+    n = _net("test_net_attention_legacy_sdpa_dropout_aliases")
     x = _input_tensor(n, "tokens", [4, 32], thor.DataType.fp16)
     attention = thor.layers.Attention(
         n,
@@ -695,16 +760,39 @@ def test_attention_exposes_transient_training_dropout_control():
         dropout_offset=5678,
     )
 
-    assert attention.is_training_dropout_enabled() is True
-    assert n.get_num_training_dropout_controllable_layers() == 1
+    assert attention.get_sdpa_dropout_probability() == pytest.approx(0.25)
+    assert attention.get_sdpa_dropout_seed() == 1234
+    assert attention.get_sdpa_dropout_offset() == 5678
 
-    attention.set_training_dropout_enabled(False)
-    assert attention.is_training_dropout_enabled() is False
-    assert n.is_training_dropout_enabled() is False
-
-    architecture = _only_layer_architecture(n, "attention")
-    assert architecture["dropout_probability"] == pytest.approx(0.25)
-    assert "training_dropout_enabled" not in architecture
+    with pytest.raises(ValueError, match="sdpa_dropout_probability and legacy dropout_probability disagree"):
+        thor.layers.Attention(
+            n,
+            x,
+            2,
+            head_dim=16,
+            sdpa_dropout_probability=0.10,
+            dropout_probability=0.20,
+        )
+    with pytest.raises(ValueError, match="sdpa_dropout_seed and legacy dropout_seed disagree"):
+        thor.layers.Attention(
+            n,
+            x,
+            2,
+            head_dim=16,
+            sdpa_dropout_probability=0.10,
+            sdpa_dropout_seed=3,
+            dropout_seed=4,
+        )
+    with pytest.raises(ValueError, match="sdpa_dropout_offset and legacy dropout_offset disagree"):
+        thor.layers.Attention(
+            n,
+            x,
+            2,
+            head_dim=16,
+            sdpa_dropout_probability=0.10,
+            sdpa_dropout_offset=5,
+            dropout_offset=6,
+        )
 
 
 def test_attention_dense_query_ragged_kv_infers_mixed_mode_and_key_rope_origins():

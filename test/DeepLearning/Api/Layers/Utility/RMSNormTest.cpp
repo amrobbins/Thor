@@ -686,8 +686,8 @@ TEST(UtilityApiLayers, RaggedRMSNormBf16PlacesWithFp32Scale) {
     auto physicalRmsNorm = dynamic_pointer_cast<Impl::RaggedRMSNorm>(
         placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(rmsNorm.getId()));
     ASSERT_NE(physicalRmsNorm, nullptr);
-    const vector<uint64_t> capacityBuckets = Impl::makeRaggedMatmulCapacityBuckets(66);
-    EXPECT_EQ(Impl::chooseRaggedMatmulCapacityBucket(33, capacityBuckets), 66u);
+    const vector<uint64_t> capacityBuckets = Impl::makeRaggedRmsNormCapacityBuckets(66);
+    EXPECT_EQ(Impl::chooseRaggedMatmulCapacityBucket(33, capacityBuckets), 64u);
 }
 
 TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnoresInactiveStorage) {
@@ -749,14 +749,14 @@ TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnores
     ASSERT_NE(physicalRmsNorm, nullptr);
     ASSERT_TRUE(physicalRmsNorm->getGradientUpdateStream().has_value());
 
-    const vector<uint64_t> capacityBuckets = Impl::makeRaggedMatmulCapacityBuckets(fullRows);
+    const vector<uint64_t> capacityBuckets = Impl::makeRaggedRmsNormCapacityBuckets(fullRows);
     auto selectedCapacityRows = [&](uint64_t activeRows) {
         return Impl::chooseRaggedMatmulCapacityBucket(activeRows, capacityBuckets);
     };
     EXPECT_EQ(selectedCapacityRows(7), 8u);
     EXPECT_EQ(selectedCapacityRows(9), 16u);
     EXPECT_EQ(selectedCapacityRows(31), 32u);
-    EXPECT_EQ(selectedCapacityRows(33), 66u);
+    EXPECT_EQ(selectedCapacityRows(33), 64u);
     EXPECT_EQ(selectedCapacityRows(66), 66u);
 
     const vector<float> initialWeights = {1.0f, 0.75f, -0.5f, 1.25f};

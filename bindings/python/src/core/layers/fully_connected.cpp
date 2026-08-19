@@ -177,7 +177,10 @@ void bind_fully_connected(nb::module_ &m) {
            nb::object biases_constraints,
            nb::object weights_data_type,
            nb::object compute_data_type,
-           nb::object output_data_type) {
+           nb::object output_data_type,
+           float output_dropout_probability,
+           std::optional<int64_t> output_dropout_seed,
+           nb::object residual_input) {
             if (numOutputFeatures == 0) {
                 throw nb::value_error("FullyConnected instance: num_output_features must be > 0.");
             }
@@ -215,6 +218,18 @@ void bind_fully_connected(nb::module_ &m) {
             if (outputDataType.has_value())
                 builder.outputDataType(outputDataType.value());
 
+            builder.outputDropoutProbability(output_dropout_probability);
+            if (output_dropout_seed.has_value()) builder.outputDropoutSeed(output_dropout_seed.value());
+            if (!residual_input.is_none()) {
+                if (nb::isinstance<RaggedTensor>(residual_input)) {
+                    builder.residualInput(nb::cast<RaggedTensor>(residual_input));
+                } else if (nb::isinstance<Tensor>(residual_input)) {
+                    builder.residualInput(nb::cast<Tensor>(residual_input));
+                } else {
+                    throw nb::type_error("FullyConnected residual_input must be thor.Tensor, thor.RaggedTensor, or None.");
+                }
+            }
+
             builder.weightsOptimizer(weights_optimizer);
             builder.biasesOptimizer(biases_optimizer);
             applyConstraints(builder, weights_constraints, biases_constraints);
@@ -239,7 +254,10 @@ void bind_fully_connected(nb::module_ &m) {
         "biases_constraints"_a.none() = nb::none(),
         "weights_data_type"_a.none() = nb::none(),
         "compute_data_type"_a.none() = nb::none(),
-        "output_data_type"_a.none() = nb::none());
+        "output_data_type"_a.none() = nb::none(),
+        "output_dropout_probability"_a = 0.0f,
+        "output_dropout_seed"_a.none() = nb::none(),
+        "residual_input"_a.none() = nb::none());
 
     fully_connected.def_static(
         "epilogue_input",
@@ -284,20 +302,35 @@ void bind_fully_connected(nb::module_ &m) {
             )nbdoc");
 
     fully_connected.def("get_use_ragged", &FullyConnected::getUseRagged);
+    fully_connected.def("get_output_dropout_probability", &FullyConnected::getOutputDropoutProbability);
+    fully_connected.def("get_output_dropout_seed", &FullyConnected::getOutputDropoutSeed);
+    fully_connected.def("get_use_residual", &FullyConnected::getUseResidual);
+    fully_connected.def("get_residual_input", [](FullyConnected &self) -> nb::object {
+        if (self.getRaggedResidualInput().has_value()) {
+            return nb::cast(self.getRaggedResidualInput().value());
+        }
+        const std::optional<Tensor> residual = self.getResidualInput();
+        return residual.has_value() ? nb::cast(residual.value()) : nb::none();
+    });
+    fully_connected.def("set_training_dropout_enabled",
+                        [](FullyConnected &layer, bool enabled) { layer.setTrainingDropoutEnabled(enabled); },
+                        "enabled"_a);
+    fully_connected.def("is_training_dropout_enabled",
+                        [](const FullyConnected &layer) { return layer.isTrainingDropoutEnabled(); });
 
     fully_connected.attr("__doc__") = R"nbdoc(
-        Fully connected (dense) layer.
+        Fully connected layer.
 
-        Builds a fully connected layer with optional activation, dropout,
-        and batch normalization. This is the standard affine layer
+        Computes an affine projection followed by the optional activation. ``output_dropout_probability``
+        applies dropout after that branch. When ``residual_input`` is supplied, the exact training contract is
 
-            y = W x + b
+            residual_input + dropout(activation(W x + b))
 
-        optionally preceded by batch normalization and or drop out,
-        and optionally followed by a non-linear activation.
-
-        The connection order of the optional layers, when used, is the following:
-        [batch norm] -> [drop out] -> [fully connected] -> [activation]
+        with omitted operations removed. When output dropout is inactive, Thor keeps the residual add adjacent
+        to the projection so the compiler can use the existing GEMM residual/beta fusion where legal. When
+        output dropout is active, Thor uses the shared native fused dropout+residual post-op. Validation and
+        inference always use the deterministic no-dropout branch. Ragged residuals must share the exact input
+        row partition.
 
         Parameters
         ----------
@@ -330,6 +363,14 @@ void bind_fully_connected(nb::module_ &m) {
             FP32 inputs default to strict FP32 compute. Pass ``thor.DataType.tf32`` to opt into TF32.
         output_data_type : thor.DataType or None, default None
             Storage type for the layer output. When omitted, uses the feature input type.
+        output_dropout_probability : float, default 0.0
+            Dropout probability on the final FullyConnected branch after bias and activation.
+        output_dropout_seed : int or None, default None
+            Optional deterministic Philox seed. When omitted with dropout enabled, Thor chooses an independent
+            per-layer seed and persists it in the architecture.
+        residual_input : thor.Tensor, thor.RaggedTensor, or None, default None
+            Optional skip tensor. The exact contract is ``residual_input + dropout(fc_output)`` during training.
+            Ragged residuals must share the exact row partition of ``feature_input``.
         epilogue : thor.physical.Expression or None, default None
             Optional expression applied after the affine transform and activation.
             Build it from ``FullyConnected.epilogue_input()``.

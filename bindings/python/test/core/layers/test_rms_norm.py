@@ -228,12 +228,25 @@ def test_rms_norm_bf16_swish_fusion_candidate_places_via_custom_layer():
     rn = thor.layers.RMSNorm(n, x, parameter_data_type=thor.DataType.bf16, epilogue=_swish_epilogue())
     thor.layers.NetworkOutput(n, "output", rn.get_feature_output(), thor.DataType.bf16)
 
-    n.place(
+    placed = n.place(
         2,
         inference_only=True,
         forced_devices=[0],
         forced_num_stamps_per_gpu=1,
     )
+
+    values = np.array(
+        [
+            [[-2.0, -1.0, 0.0, 1.0], [1.5, 2.0, 3.0, 4.0], [-3.0, 0.5, 2.5, 5.0]],
+            [[0.25, -0.75, 1.25, 2.25], [4.0, 1.0, -2.0, -5.0], [3.5, 3.0, 2.5, 2.0]],
+        ],
+        dtype=np.float32,
+    )
+    outputs = placed.infer({"input": _cpu_tensor(values, thor.DataType.bf16)})
+    actual = np.array(outputs["output"].numpy(), copy=True).astype(np.float32)
+    normalized = _rms_norm_reference_for_dtype(values, [4], 1.0e-5, thor.DataType.bf16).astype(np.float32)
+    expected = normalized / (1.0 + np.exp(-normalized))
+    np.testing.assert_allclose(actual, expected, atol=2.0e-2, rtol=2.0e-2)
 
 
 def test_rms_norm_rejects_bad_epilogue_type():

@@ -92,6 +92,11 @@ class Trainer {
 
     TrainingRunResult fit(uint32_t epochs);
     TrainingRunResult fit(const TrainerFitOptions& options);
+    // Replace the immutable TrainingData recipe between fit calls while preserving
+    // model-selection/artifact handoff state. Phase-backed Trainers resolve their
+    // active graph bindings against the replacement data at the start of each fit.
+    // This is intended for phase-specific batching over the same dataset/splits.
+    void setTrainingData(std::shared_ptr<const TrainingData> data);
     void saveModel(const std::string& directory, bool overwrite = false, bool saveOptimizerState = true) const;
     void releasePlacedNetworkAfterLastFit();
 

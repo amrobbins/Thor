@@ -245,7 +245,7 @@ class AdaptiveLayerNorm(MultiConnectionLayer):
     def get_scale_bias_data_type(self) -> thor.DataType: ...
 
 class Attention(CustomLayer):
-    def __init__(self, network: thor.Network, feature_input: object, num_heads: int, num_key_value_heads: int | None = None, head_dim: int | None = None, value_dim: int | None = None, output_features: int | None = None, has_bias: bool | None = False, mask_kind: str = 'none', diagonal_left_bound: int = 0, diagonal_right_bound: int = 0, use_alibi_mask: bool = False, attention_scale: float | None = None, use_rope: bool | None = False, rope_rotary_dim: int = 0, rope_base: float = 10000.0, rope_position_offset: int = 0, rope_interleaved: bool = False, rope_scaling_kind: str = 'none', rope_scaling_factor: float = 1.0, rope_original_max_position_embeddings: int = 0, rope_attention_factor: float | None = None, rope_yarn_beta_fast: float | None = 32.0, rope_yarn_beta_slow: float = 1.0, rope_llama3_low_freq_factor: float = 1.0, rope_llama3_high_freq_factor: float = 4.0, rope_long_rope_short_factors: Sequence[float] = [], rope_long_rope_long_factors: Sequence[float] = [], weights_data_type: thor.DataType | None = None, compute_data_type: thor.DataType | None = thor.DataType.fp32, output_data_type: thor.DataType | None = None, weights_initializer: thor.initializers.Initializer | None = None, bias_initializer: thor.initializers.Initializer | None = None, optimizer: thor.optimizers.Optimizer | None = None, rope_in_place: bool = False, dropout_probability: float = 0.0, dropout_seed: int = 0, dropout_offset: int = 0, query_sequence_lengths: thor.Tensor | None = None, key_value_sequence_lengths: thor.Tensor | None = None, context_input: object | None = None, score_bias_input: thor.Tensor | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, rope_query_position_offset: int | None = None, rope_key_position_offset: int | None = None, rope_query_position_offsets: thor.Tensor | None = None, rope_key_position_offsets: thor.Tensor | None = None) -> None:
+    def __init__(self, network: thor.Network, feature_input: object, num_heads: int, num_key_value_heads: int | None = None, head_dim: int | None = None, value_dim: int | None = None, output_features: int | None = None, has_bias: bool | None = False, mask_kind: str = 'none', diagonal_left_bound: int = 0, diagonal_right_bound: int = 0, use_alibi_mask: bool = False, attention_scale: float | None = None, use_rope: bool | None = False, rope_rotary_dim: int = 0, rope_base: float = 10000.0, rope_position_offset: int = 0, rope_interleaved: bool = False, rope_scaling_kind: str = 'none', rope_scaling_factor: float = 1.0, rope_original_max_position_embeddings: int = 0, rope_attention_factor: float | None = None, rope_yarn_beta_fast: float | None = 32.0, rope_yarn_beta_slow: float = 1.0, rope_llama3_low_freq_factor: float = 1.0, rope_llama3_high_freq_factor: float = 4.0, rope_long_rope_short_factors: Sequence[float] = [], rope_long_rope_long_factors: Sequence[float] = [], weights_data_type: thor.DataType | None = None, compute_data_type: thor.DataType | None = thor.DataType.fp32, output_data_type: thor.DataType | None = None, weights_initializer: thor.initializers.Initializer | None = None, bias_initializer: thor.initializers.Initializer | None = None, optimizer: thor.optimizers.Optimizer | None = None, rope_in_place: bool = False, sdpa_dropout_probability: float = 0.0, sdpa_dropout_seed: int = 0, sdpa_dropout_offset: int = 0, query_sequence_lengths: thor.Tensor | None = None, key_value_sequence_lengths: thor.Tensor | None = None, context_input: object | None = None, score_bias_input: thor.Tensor | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, rope_query_position_offset: int | None = None, rope_key_position_offset: int | None = None, rope_query_position_offsets: thor.Tensor | None = None, rope_key_position_offsets: thor.Tensor | None = None, output_dropout_probability: float | None = 0.0, output_dropout_seed: int | None = None, residual_input: object | None = None, dropout_probability: float | None = None, dropout_seed: int | None = None, dropout_offset: int | None = None) -> None:
         """
         Public transformer attention layer built from learned Q/K/V/O projections and the
         cuDNN scaled-dot-product attention stage.
@@ -292,8 +292,19 @@ class Attention(CustomLayer):
         * Output-projection epilogues support the primary projected output plus named
           auxiliary tensors. Auxiliary tensors must already match the public Attention
           output shape, storage dtype, and placement; Thor does not insert conversions.
-        * Dropout uses cuDNN Philox attention dropout.  ``dropout_probability`` must be in
-          ``[0, 1)``.  Thor advances the runtime dropout offset by ``B * Hq * Sq * Skv``.
+        * ``sdpa_dropout_probability``, ``sdpa_dropout_seed``, and ``sdpa_dropout_offset``
+          control cuDNN Philox dropout on the SDPA probability matrix. Thor advances the
+          runtime offset by ``B * Hq * Sq * Skv``. The legacy ``dropout_probability``,
+          ``dropout_seed``, and ``dropout_offset`` keywords remain accepted as aliases.
+        * ``output_dropout_probability`` controls dropout after the learned output projection.
+          ``output_dropout_seed`` is optional; when omitted Thor chooses an independent seed
+          for the layer and persists that chosen seed in the serialized architecture.
+          When ``residual_input`` is supplied, the exact contract is
+          ``residual_input + dropout(projected_output)`` during training. Thor fuses residual
+          addition into the projection GEMM when output dropout is inactive (including
+          validation/inference), and otherwise uses one native fused dropout+residual post-op.
+          A residual must match the query/output domain; ragged residuals must share the exact
+          query row partition.
         * Padding masks use ``query_sequence_lengths`` and ``key_value_sequence_lengths``
           together, both int32 logical ``[1]`` tensors.
         * ``feature_input`` and ``context_input`` independently accept ``thor.Tensor`` or
@@ -366,15 +377,29 @@ class Attention(CustomLayer):
 
     def get_attention_scale(self) -> float | None: ...
 
+    def get_sdpa_dropout_probability(self) -> float: ...
+
     def get_dropout_probability(self) -> float: ...
 
     def set_training_dropout_enabled(self, enabled: bool) -> None: ...
 
     def is_training_dropout_enabled(self) -> bool: ...
 
+    def get_sdpa_dropout_seed(self) -> int: ...
+
+    def get_sdpa_dropout_offset(self) -> int: ...
+
     def get_dropout_seed(self) -> int: ...
 
     def get_dropout_offset(self) -> int: ...
+
+    def get_output_dropout_probability(self) -> float: ...
+
+    def get_output_dropout_seed(self) -> int: ...
+
+    def get_use_residual(self) -> bool: ...
+
+    def get_residual_input(self) -> object: ...
 
     def get_use_cross_attention(self) -> bool: ...
 
@@ -728,18 +753,18 @@ class Einsum(MultiConnectionLayer):
 
 class FullyConnected(TrainableLayer):
     """
-    Fully connected (dense) layer.
+    Fully connected layer.
 
-    Builds a fully connected layer with optional activation, dropout,
-    and batch normalization. This is the standard affine layer
+    Computes an affine projection followed by the optional activation. ``output_dropout_probability``
+    applies dropout after that branch. When ``residual_input`` is supplied, the exact training contract is
 
-        y = W x + b
+        residual_input + dropout(activation(W x + b))
 
-    optionally preceded by batch normalization and or drop out,
-    and optionally followed by a non-linear activation.
-
-    The connection order of the optional layers, when used, is the following:
-    [batch norm] -> [drop out] -> [fully connected] -> [activation]
+    with omitted operations removed. When output dropout is inactive, Thor keeps the residual add adjacent
+    to the projection so the compiler can use the existing GEMM residual/beta fusion where legal. When
+    output dropout is active, Thor uses the shared native fused dropout+residual post-op. Validation and
+    inference always use the deterministic no-dropout branch. Ragged residuals must share the exact input
+    row partition.
 
     Parameters
     ----------
@@ -772,12 +797,20 @@ class FullyConnected(TrainableLayer):
         FP32 inputs default to strict FP32 compute. Pass ``thor.DataType.tf32`` to opt into TF32.
     output_data_type : thor.DataType or None, default None
         Storage type for the layer output. When omitted, uses the feature input type.
+    output_dropout_probability : float, default 0.0
+        Dropout probability on the final FullyConnected branch after bias and activation.
+    output_dropout_seed : int or None, default None
+        Optional deterministic Philox seed. When omitted with dropout enabled, Thor chooses an independent
+        per-layer seed and persists it in the architecture.
+    residual_input : thor.Tensor, thor.RaggedTensor, or None, default None
+        Optional skip tensor. The exact contract is ``residual_input + dropout(fc_output)`` during training.
+        Ragged residuals must share the exact row partition of ``feature_input``.
     epilogue : thor.physical.Expression or None, default None
         Optional expression applied after the affine transform and activation.
         Build it from ``FullyConnected.epilogue_input()``.
     """
 
-    def __init__(self, network: thor.Network, feature_input: object, num_output_features: int, has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, weights_optimizer: thor.optimizers.Optimizer | None = None, biases_optimizer: thor.optimizers.Optimizer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, preserve_prefix_dimensions: bool | None = None, weights_constraints: object | None = None, biases_constraints: object | None = None, weights_data_type: object | None = None, compute_data_type: object | None = None, output_data_type: object | None = None) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: object, num_output_features: int, has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, weights_optimizer: thor.optimizers.Optimizer | None = None, biases_optimizer: thor.optimizers.Optimizer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, preserve_prefix_dimensions: bool | None = None, weights_constraints: object | None = None, biases_constraints: object | None = None, weights_data_type: object | None = None, compute_data_type: object | None = None, output_data_type: object | None = None, output_dropout_probability: float = 0.0, output_dropout_seed: int | None = None, residual_input: object | None = None) -> None: ...
 
     @staticmethod
     def epilogue_input(output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression:
@@ -810,6 +843,18 @@ class FullyConnected(TrainableLayer):
         """
 
     def get_use_ragged(self) -> bool: ...
+
+    def get_output_dropout_probability(self) -> float: ...
+
+    def get_output_dropout_seed(self) -> int: ...
+
+    def get_use_residual(self) -> bool: ...
+
+    def get_residual_input(self) -> object: ...
+
+    def set_training_dropout_enabled(self, enabled: bool) -> None: ...
+
+    def is_training_dropout_enabled(self) -> bool: ...
 
 class InstanceNorm(TrainableLayer):
     """

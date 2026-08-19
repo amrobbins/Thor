@@ -110,6 +110,11 @@ class Trainer:
 
     def fit(self, epochs: int, check_best_model_every_epochs: int = 0, first_model_selection_epoch: int = 0, restart_conditions: object | None = None, early_completion_policies: object | None = None, max_training_batches_per_epoch: object | None = None) -> object: ...
 
+    def set_data(self, data: thor.data.TrainingData) -> None:
+        """
+        Replace this phase-backed Trainer's TrainingData recipe between fit calls while preserving model-state handoff.
+        """
+
     def save_model(self, directory: object, overwrite: bool = False, save_optimizer_state: bool = True) -> None: ...
 
     @property

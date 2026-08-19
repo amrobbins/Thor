@@ -71,8 +71,20 @@ class CudnnRmsNorm {
    public:
     static CudnnRmsNorm& instance();
 
-    void forward(const CudnnRmsNormDescriptor& descriptor, const CudnnRmsNormForwardArgs& args, Stream stream);
-    void backward(const CudnnRmsNormDescriptor& descriptor, const CudnnRmsNormBackwardArgs& args, Stream stream);
+    void forward(const CudnnRmsNormDescriptor& descriptor,
+                 const CudnnRmsNormForwardArgs& args,
+                 std::optional<Tensor>& workspace,
+                 Stream stream);
+    void backward(const CudnnRmsNormDescriptor& descriptor,
+                  const CudnnRmsNormBackwardArgs& args,
+                  std::optional<Tensor>& workspace,
+                  Stream stream);
+
+    // Build/lookup the compatible cached graph and report its cuDNN execution
+    // workspace requirement. The returned byte count is immutable graph metadata;
+    // execution workspace itself belongs to the placed/stamped caller.
+    [[nodiscard]] uint64_t forwardWorkspaceSizeInBytes(const CudnnRmsNormDescriptor& descriptor, int gpuNum);
+    [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes(const CudnnRmsNormDescriptor& descriptor, int gpuNum);
 
     void warmForward(const CudnnRmsNormDescriptor& descriptor, int gpuNum);
     void warmBackward(const CudnnRmsNormDescriptor& descriptor, int gpuNum);

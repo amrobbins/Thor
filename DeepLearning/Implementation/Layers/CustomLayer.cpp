@@ -99,6 +99,28 @@ PreparedDynamicExpression::TensorMap filterTensorInputsForPhysicalOutputs(
     return filteredInputs;
 }
 
+PreparedDynamicExpression::TensorScalarMap filterTensorScalarInputsForPhysicalOutputs(
+    const PreparedDynamicExpression::TensorScalarMap& availableInputs,
+    const PhysicalOutputs& outputs) {
+    PreparedDynamicExpression::TensorScalarMap filteredInputs;
+    if (outputs.expr == nullptr) {
+        return filteredInputs;
+    }
+
+    for (const NamedInput& input : outputs.expr->inputs) {
+        if (input.kind != NamedInput::Kind::TensorRuntimeScalar) {
+            continue;
+        }
+
+        auto it = availableInputs.find(input.name);
+        if (it == availableInputs.end()) {
+            throw runtime_error("CustomLayer fused optimizer update missing required tensor runtime scalar input: " + input.name);
+        }
+        filteredInputs.emplace(input.name, it->second);
+    }
+    return filteredInputs;
+}
+
 PhysicalOutputs clonePhysicalOutputsTreeForBackwardDTypeResolution(const PhysicalOutputs& outputs) {
     PhysicalOutputs cloned;
     if (outputs.expr != nullptr) {
@@ -1421,9 +1443,13 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
     Outputs outputs = Expression::outputs(fusedOutputs);
     PhysicalOutputs physicalOutputs = outputs.physicalOutputs();
     PreparedDynamicExpression::TensorMap filteredStampInputs = filterTensorInputsForPhysicalOutputs(stampInputs, physicalOutputs);
+    PreparedDynamicExpression::TensorScalarMap filteredTensorScalarInputs =
+        filterTensorScalarInputsForPhysicalOutputs(
+            app.forwardPrepared->tensorScalarInputsForVariant(variantId), physicalOutputs);
     FusedEquation fusedUpdateEquation = FusedEquation::compile(physicalOutputs, placement.getDeviceNum());
     auto fusedUpdatePlan = std::make_shared<StampedExecutionPlan>(
-        fusedUpdateEquation.stamp(filteredStampInputs, gradientUpdateStream.value(), {}, preallocatedOutputs));
+        fusedUpdateEquation.stamp(
+            filteredStampInputs, gradientUpdateStream.value(), filteredTensorScalarInputs, preallocatedOutputs));
     if (variant.forward != nullptr) {
         fusedUpdatePlan->linkRmsNormBackwardStatesFrom(*variant.forward);
     }
@@ -2680,6 +2706,29 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             }
             if (errorOutHasBeenComputedEvent.has_value()) {
                 errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent.value());
+
+                // The backward expression runs on this application's primary compute stream, but a
+                // multi-input CustomLayer can have a different upstream stream for every input port.
+                // Publish the produced input gradients to those connection streams before recursively
+                // invoking the upstream layers. Otherwise the upstream layer can record its own
+                // `errorInputReadyEvent` on a stream that has no dependency on the stream which wrote
+                // the error tensor, allowing its parameter-gradient work to race the downstream VJP.
+                //
+                // This is the backward analogue of synchronizeComputeStreamForForwardInputs(): the
+                // producer owns readiness, and each consumer stream must wait for that readiness
+                // before it may treat the tensor as available.
+                Stream& backwardComputeStream = computeStream(applicationIndex);
+                for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+                    const uint32_t inputFlat = inputFlatIndex(applicationIndex, inputPort);
+                    if (inputFlat >= streams.size() || !previousLayers[inputFlat].has_value() ||
+                        !errorOutputs[inputFlat].has_value()) {
+                        continue;
+                    }
+                    Stream& upstreamStream = streams[inputFlat];
+                    if (upstreamStream != backwardComputeStream) {
+                        upstreamStream.waitEvent(errorOutHasBeenComputedEvent.value());
+                    }
+                }
             }
         }
 

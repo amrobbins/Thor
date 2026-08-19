@@ -1,10 +1,12 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 
 #include "Utilities/Common/SharedOwnership.h"
+#include "Utilities/Common/GpuMemoryDiagnostics.h"
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <sstream>
 #include "Utilities/Common/LowPrecisionFloat.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
@@ -263,9 +265,36 @@ void Tensor::allocateMemory(uint32_t alignmentBytes) {
         CUDA_CHECK(cudaSetDevice(targetGpuNum));
 
     const cudaError_t allocationStatus = cudaMalloc(&backingMemory->mem, memBytes);
-    const cudaError_t restoreStatus = switchGpu ? cudaSetDevice(previousGpuNum) : cudaSuccess;
+    if (allocationStatus != cudaSuccess) {
+        size_t freeBytes = 0;
+        size_t totalBytes = 0;
+        const cudaError_t memoryInfoStatus = cudaMemGetInfo(&freeBytes, &totalBytes);
+        const std::string allocationContext = currentGpuAllocationContext();
+        const cudaError_t restoreStatus = switchGpu ? cudaSetDevice(previousGpuNum) : cudaSuccess;
 
-    CUDA_CHECK(allocationStatus);
+        std::ostringstream message;
+        message << "GPU tensor allocation failed with " << cudaGetErrorName(allocationStatus) << " ("
+                << static_cast<int>(allocationStatus) << "): " << cudaGetErrorString(allocationStatus)
+                << "; gpu=" << targetGpuNum
+                << "; requested=" << formatGpuMemoryBytes(memBytes)
+                << "; tensor_payload=" << formatGpuMemoryBytes(descriptor.getArraySizeInBytes())
+                << "; dtype=" << descriptor.getElementTypeName()
+                << "; dims=" << descriptor.toString();
+        if (memoryInfoStatus == cudaSuccess) {
+            message << "; free_before_failure=" << formatGpuMemoryBytes(static_cast<uint64_t>(freeBytes))
+                    << "; total=" << formatGpuMemoryBytes(static_cast<uint64_t>(totalBytes));
+        }
+        if (!allocationContext.empty()) {
+            message << "; allocation_context=\"" << allocationContext << "\"";
+        }
+        if (restoreStatus != cudaSuccess) {
+            message << "; additionally failed to restore CUDA device with " << cudaGetErrorName(restoreStatus)
+                    << ": " << cudaGetErrorString(restoreStatus);
+        }
+        throw std::runtime_error(message.str());
+    }
+
+    const cudaError_t restoreStatus = switchGpu ? cudaSetDevice(previousGpuNum) : cudaSuccess;
     CUDA_CHECK(restoreStatus);
 }
 

@@ -69,8 +69,20 @@ class CudnnLayerNorm {
    public:
     static CudnnLayerNorm& instance();
 
-    void forward(const CudnnLayerNormDescriptor& descriptor, const CudnnLayerNormForwardArgs& args, Stream stream);
-    void backward(const CudnnLayerNormDescriptor& descriptor, const CudnnLayerNormBackwardArgs& args, Stream stream);
+    void forward(const CudnnLayerNormDescriptor& descriptor,
+                 const CudnnLayerNormForwardArgs& args,
+                 std::optional<Tensor>& workspace,
+                 Stream stream);
+    void backward(const CudnnLayerNormDescriptor& descriptor,
+                  const CudnnLayerNormBackwardArgs& args,
+                  std::optional<Tensor>& workspace,
+                  Stream stream);
+
+    // Build/lookup the compatible cached graph and report its cuDNN execution
+    // workspace requirement. The returned byte count is immutable graph metadata;
+    // execution workspace itself belongs to the placed/stamped caller.
+    [[nodiscard]] uint64_t forwardWorkspaceSizeInBytes(const CudnnLayerNormDescriptor& descriptor, int gpuNum);
+    [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes(const CudnnLayerNormDescriptor& descriptor, int gpuNum);
 
     void warmForward(const CudnnLayerNormDescriptor& descriptor, int gpuNum);
     void warmBackward(const CudnnLayerNormDescriptor& descriptor, int gpuNum);

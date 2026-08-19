@@ -4429,12 +4429,70 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     forward_input_index_by_name.emplace(forward_kernel.inputs()[input_idx].name, input_idx);
                 }
 
+                // A custom backward kernel can explicitly consume a ragged upstream gradient by also
+                // receiving the canonical offsets tensor that defines that gradient's active prefix.
+                // Keep the compiler's generic stage-boundary guard strict: unwrap the valuewise extent
+                // only for a kernel whose declared forward inputs include that exact offsets INPUT, then
+                // restore the same extent on backward outputs declared outputLike(dY). This is the
+                // consumer-responsibility contract used by the fused ragged dropout post-op: the kernel
+                // bounds every read/write by offsets[-1], while downstream gradient expressions retain
+                // the partition metadata needed to avoid capacity-tail reads.
+                std::optional<RaggedGradientExtent> custom_backward_ragged_extent;
+                uint32_t custom_backward_upstream_grad = grad;
+                const ExprNode& upstream_grad_node = builder.node(grad);
+                if (upstream_grad_node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+                    if (upstream_grad_node.lhs == UINT32_MAX || upstream_grad_node.rhs == UINT32_MAX ||
+                        upstream_grad_node.ragged_runtime_batch_size == 0 ||
+                        upstream_grad_node.ragged_runtime_max_active_values == 0 ||
+                        upstream_grad_node.ragged_runtime_elements_per_value == 0) {
+                        throw std::runtime_error(
+                            "CudaKernelExpression backward received malformed ragged upstream-gradient metadata.");
+                    }
+                    const ExprNode& offsets_node = builder.node(upstream_grad_node.rhs);
+                    if (offsets_node.op != ExprOp::INPUT) {
+                        throw std::runtime_error(
+                            "CudaKernelExpression ragged backward requires canonical direct-input offsets.");
+                    }
+
+                    bool kernel_receives_matching_offsets = false;
+                    for (const auto& backward_input : backward->kernel->inputs()) {
+                        if (backward_input.name == backward->upstream_gradient_input_name) {
+                            continue;
+                        }
+                        auto forward_input_it = forward_input_index_by_name.find(backward_input.name);
+                        if (forward_input_it == forward_input_index_by_name.end()) {
+                            continue;
+                        }
+                        const uint32_t forward_input_node = node.cuda_kernel_input_nodes[forward_input_it->second];
+                        if (forward_input_node >= forward_expr.nodes.size()) {
+                            throw std::runtime_error(
+                                "CudaKernelExpression ragged backward offsets candidate is out of range.");
+                        }
+                        const ExprNode& forward_input = forward_expr.nodes[forward_input_node];
+                        if (forward_input.op == ExprOp::INPUT && forward_input.input_slot == offsets_node.input_slot) {
+                            kernel_receives_matching_offsets = true;
+                            break;
+                        }
+                    }
+
+                    if (kernel_receives_matching_offsets) {
+                        custom_backward_ragged_extent = RaggedGradientExtent{
+                            .offsetsNode = upstream_grad_node.rhs,
+                            .offsetsInputSlot = offsets_node.input_slot,
+                            .batchSize = upstream_grad_node.ragged_runtime_batch_size,
+                            .maxActiveValues = upstream_grad_node.ragged_runtime_max_active_values,
+                            .elementsPerValue = upstream_grad_node.ragged_runtime_elements_per_value,
+                        };
+                        custom_backward_upstream_grad = upstream_grad_node.lhs;
+                    }
+                }
+
                 std::unordered_map<std::string, uint32_t> backward_input_nodes;
                 backward_input_nodes.reserve(backward->kernel->inputs().size());
                 std::unordered_map<std::string, std::vector<uint64_t>> backward_input_shapes;
                 for (const auto& backward_input : backward->kernel->inputs()) {
                     if (backward_input.name == backward->upstream_gradient_input_name) {
-                        backward_input_nodes.emplace(backward_input.name, grad);
+                        backward_input_nodes.emplace(backward_input.name, custom_backward_upstream_grad);
                         if (has_forward_dims) {
                             backward_input_shapes.emplace(backward_input.name, node_dims);
                         }
@@ -4484,7 +4542,30 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                                                      "' must have exactly the shape of forward input '" + forward_input_name + "'.");
                         }
                     }
-                    builder.addContribution(forward_input_node, backward_output_it->second);
+                    uint32_t backward_contribution = backward_output_it->second;
+                    if (custom_backward_ragged_extent.has_value()) {
+                        const auto backward_output_spec_it = std::find_if(
+                            backward->kernel->outputs().begin(),
+                            backward->kernel->outputs().end(),
+                            [&](const CudaKernelExpression::OutputParamSpec& output) {
+                                return output.name == backward_output_name;
+                            });
+                        if (backward_output_spec_it == backward->kernel->outputs().end()) {
+                            throw std::runtime_error(
+                                "CudaKernelExpression backward output metadata disappeared while propagating ragged extent.");
+                        }
+                        if (backward_output_spec_it->like_input_name == backward->upstream_gradient_input_name) {
+                            const RaggedGradientExtent& extent = custom_backward_ragged_extent.value();
+                            backward_contribution = builder.raggedValuewiseExtent(
+                                backward_contribution,
+                                extent.offsetsNode,
+                                extent.batchSize,
+                                extent.maxActiveValues,
+                                extent.elementsPerValue,
+                                preferredGradValueDType(forward_expr.nodes.at(forward_input_node)));
+                        }
+                    }
+                    builder.addContribution(forward_input_node, backward_contribution);
                 }
                 break;
             }

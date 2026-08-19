@@ -1,5 +1,6 @@
 #include "Utilities/Expression/StampedEquation.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
+#include "Utilities/Common/GpuMemoryDiagnostics.h"
 #include "Utilities/CudaDriver/CudaGraphConditional.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/Expression/BatchedMatmulPlan.h"
@@ -553,6 +554,55 @@ bool tensorMatches(const Tensor& lhs, const Tensor& rhs) {
            lhs.getDataType() == rhs.getDataType() && lhs.getPlacement() == rhs.getPlacement();
 }
 
+void ensureAttentionExecutionWorkspace(std::optional<Tensor>& workspace,
+                                       const TensorPlacement& placement,
+                                       uint64_t required_bytes,
+                                       std::string_view category,
+                                       std::string_view detail) {
+    if (required_bytes == 0) {
+        return;
+    }
+    if (workspace.has_value() && workspace->isInitialized() && workspace->getPlacement() == placement &&
+        workspace->getDataType() == DataType::UINT8 && workspace->getArraySizeInBytes() >= required_bytes) {
+        return;
+    }
+    reportGpuWorkspaceAllocationRequest(category, placement.getDeviceNum(), required_bytes, detail);
+    ScopedGpuAllocationContext allocation_context(std::string(category) + ": " + std::string(detail));
+    workspace = Tensor(placement, TensorDescriptor(DataType::UINT8, {required_bytes}), 256);
+}
+
+std::string attentionWorkspaceDetail(const CudnnAttentionDescriptor& descriptor, bool ragged) {
+    std::ostringstream detail;
+    detail << "B=" << descriptor.batchSize()
+           << " Hq=" << descriptor.queryHeads()
+           << " Hkv=" << descriptor.keyValueHeads()
+           << " Sq=" << descriptor.queryLength()
+           << " Skv=" << descriptor.keyValueLength()
+           << " Dqk=" << descriptor.qkHeadDim()
+           << " Dv=" << descriptor.vHeadDim()
+           << " ragged=" << (ragged ? "true" : "false")
+           << " stats=" << (descriptor.generateStats ? "true" : "false");
+    return detail.str();
+}
+
+uint64_t attentionRaggedBatchSize(bool use_ragged_offsets,
+                                  const std::optional<Tensor>& q_ragged_offsets,
+                                  const std::optional<Tensor>& kv_ragged_offsets,
+                                  const char* operation_name) {
+    if (!use_ragged_offsets) {
+        return 0;
+    }
+    if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
+        throw std::runtime_error(std::string(operation_name) + " requires canonical q/kv row partitions for ragged attention.");
+    }
+    const auto qOffsetDims = q_ragged_offsets->getDimensions();
+    const auto kvOffsetDims = kv_ragged_offsets->getDimensions();
+    if (qOffsetDims.size() != 1 || qOffsetDims != kvOffsetDims || qOffsetDims[0] < 2) {
+        throw std::runtime_error(std::string(operation_name) + " ragged q/kv row partitions must both have shape [B+1].");
+    }
+    return qOffsetDims[0] - 1;
+}
+
 }  // namespace
 
 void StampedAttention::run() { runOn(stream); }
@@ -641,7 +691,7 @@ void StampedAttention::runOn(Stream& run_stream) const {
         forward_state->has_valid_stats = false;
     }
 
-    CudnnScaledDotProductAttention::instance().forward(descriptor, args, run_stream);
+    CudnnScaledDotProductAttention::instance().forward(descriptor, args, workspace, run_stream);
 
     if (forward_state && forward_state->retain_for_backward) {
         forward_state->output = output;
@@ -748,7 +798,62 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
       amax_o(amax_o),
       output(output),
       stream(stream),
-      forward_state(std::move(forward_state)) {}
+      forward_state(forward_state ? std::move(forward_state) : std::make_shared<AttentionForwardState>()) {
+    if (!compiled_attention) {
+        throw std::runtime_error("StampedAttention requires a compiled attention payload.");
+    }
+    const uint64_t raggedBatchSize = attentionRaggedBatchSize(
+        compiled_attention->use_ragged_offsets, q_ragged_offsets, kv_ragged_offsets, "StampedAttention");
+    const CudnnAttentionDescriptor descriptor = compiled_attention->descriptorFor(q, k, v, output, raggedBatchSize);
+    CudnnAttentionForwardArgs workspaceArgs{.q = q, .k = k, .v = v, .o = output};
+    workspaceArgs.bias = bias;
+    const uint64_t workspace_bytes = CudnnScaledDotProductAttention::instance().forwardWorkspaceSizeInBytes(
+        descriptor, workspaceArgs, stream.getGpuNum());
+    ensureAttentionExecutionWorkspace(workspace,
+                                      output.getPlacement(),
+                                      workspace_bytes,
+                                      "attention_forward",
+                                      attentionWorkspaceDetail(descriptor, compiled_attention->use_ragged_offsets));
+
+    if (this->forward_state->retain_for_backward) {
+        retainForwardStateForBackward();
+    }
+}
+
+void StampedAttention::retainForwardStateForBackward() {
+    if (!compiled_attention || !forward_state) {
+        throw std::runtime_error("StampedAttention cannot retain forward state without compiled attention state.");
+    }
+    const uint64_t raggedBatchSize = attentionRaggedBatchSize(
+        compiled_attention->use_ragged_offsets, q_ragged_offsets, kv_ragged_offsets, "StampedAttention");
+    CudnnAttentionDescriptor descriptor = compiled_attention->descriptorFor(q, k, v, output, raggedBatchSize);
+    descriptor.generateStats = true;
+    CudnnAttentionForwardArgs workspaceArgs{.q = q, .k = k, .v = v, .o = output};
+    workspaceArgs.bias = bias;
+    const uint64_t workspace_bytes = CudnnScaledDotProductAttention::instance().forwardWorkspaceSizeInBytes(
+        descriptor, workspaceArgs, stream.getGpuNum());
+    ensureAttentionExecutionWorkspace(workspace,
+                                      output.getPlacement(),
+                                      workspace_bytes,
+                                      "attention_forward",
+                                      attentionWorkspaceDetail(descriptor, compiled_attention->use_ragged_offsets));
+
+    if (!forward_state->retain_for_backward) {
+        forward_state->has_valid_stats = false;
+    }
+    forward_state->retain_for_backward = true;
+    if (!forward_state->stats.isInitialized()) {
+        ScopedGpuAllocationContext allocation_context(
+            "attention_forward_stats: " + attentionWorkspaceDetail(descriptor, compiled_attention->use_ragged_offsets));
+        forward_state->stats = Tensor(
+            output.getPlacement(),
+            TensorDescriptor(DataType::FP32,
+                             {static_cast<uint64_t>(descriptor.batchSize()),
+                              static_cast<uint64_t>(descriptor.queryHeads()),
+                              static_cast<uint64_t>(descriptor.queryLength()),
+                              1}));
+    }
+}
 
 void StampedAttentionBackward::run() { runOn(stream); }
 
@@ -831,7 +936,7 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
             fwdArgs.dropoutSeed = dropout_seed.value();
             fwdArgs.dropoutOffset = dropout_offset.value();
         }
-        CudnnScaledDotProductAttention::instance().forward(descriptor, fwdArgs, run_stream);
+        CudnnScaledDotProductAttention::instance().forward(descriptor, fwdArgs, fallback_forward_workspace, run_stream);
     }
 
     CudnnAttentionBackwardArgs bwdArgs{.q = cudnnQ,
@@ -876,7 +981,7 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
         bwdArgs.dropoutSeed = dropout_seed.value();
         bwdArgs.dropoutOffset = dropout_offset.value();
     }
-    CudnnScaledDotProductAttention::instance().backward(descriptor, bwdArgs, run_stream);
+    CudnnScaledDotProductAttention::instance().backward(descriptor, bwdArgs, backward_workspace, run_stream);
 }
 
 StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAttentionBackward> compiled,
@@ -922,8 +1027,50 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
       stream(stream),
       saved_forward_state(std::move(saved_forward_state)),
       outputs{this->dQ, this->dK, this->dV} {
+    if (!compiled_attention_backward) {
+        throw std::runtime_error("StampedAttentionBackward requires a compiled attention-backward payload.");
+    }
     if (this->dBiasScratch.has_value()) {
         outputs.push_back(this->dBiasScratch.value());
+    }
+
+    const uint64_t raggedBatchSize = attentionRaggedBatchSize(compiled_attention_backward->use_ragged_offsets,
+                                                               q_ragged_offsets,
+                                                               kv_ragged_offsets,
+                                                               "StampedAttentionBackward");
+    CudnnAttentionDescriptor descriptor =
+        compiled_attention_backward->descriptorFor(q, k, v, oScratch, raggedBatchSize);
+    descriptor.generateStats = true;
+    CudnnAttentionBackwardArgs backwardWorkspaceArgs{.q = q,
+                                                      .k = k,
+                                                      .v = v,
+                                                      .o = oScratch,
+                                                      .dO = dO,
+                                                      .stats = stats,
+                                                      .dQ = dQ,
+                                                      .dK = dK,
+                                                      .dV = dV};
+    backwardWorkspaceArgs.bias = bias;
+    backwardWorkspaceArgs.dBias = dBiasScratch;
+    const uint64_t backward_workspace_bytes = CudnnScaledDotProductAttention::instance().backwardWorkspaceSizeInBytes(
+        descriptor, backwardWorkspaceArgs, stream.getGpuNum());
+    ensureAttentionExecutionWorkspace(backward_workspace,
+                                      dQ.getPlacement(),
+                                      backward_workspace_bytes,
+                                      "attention_backward",
+                                      attentionWorkspaceDetail(descriptor, compiled_attention_backward->use_ragged_offsets));
+
+    if (!this->saved_forward_state) {
+        CudnnAttentionForwardArgs forwardWorkspaceArgs{.q = q, .k = k, .v = v, .o = oScratch};
+        forwardWorkspaceArgs.bias = bias;
+        const uint64_t fallback_forward_workspace_bytes = CudnnScaledDotProductAttention::instance().forwardWorkspaceSizeInBytes(
+            descriptor, forwardWorkspaceArgs, stream.getGpuNum());
+        ensureAttentionExecutionWorkspace(
+            fallback_forward_workspace,
+            dQ.getPlacement(),
+            fallback_forward_workspace_bytes,
+            "attention_fallback_forward",
+            attentionWorkspaceDetail(descriptor, compiled_attention_backward->use_ragged_offsets));
     }
 }
 
@@ -1639,6 +1786,24 @@ void StampedConvolutionBackward::runOn(Stream& run_stream) const {
 // deliberately dispatched over selected_rows, so only [active_rows, selected_rows)
 // must be made safe. Storage in [selected_rows, full_capacity_rows) is outside this
 // consumer's physical read and remains undefined.
+static void ensureRmsNormExecutionWorkspace(std::optional<Tensor>& workspace,
+                                            const TensorPlacement& placement,
+                                            uint64_t required_bytes,
+                                            std::string_view category,
+                                            std::string_view detail) {
+    if (required_bytes == 0) {
+        return;
+    }
+    if (workspace.has_value() && workspace->isInitialized() &&
+        workspace->getPlacement() == placement && workspace->getDataType() == DataType::UINT8 &&
+        workspace->getArraySizeInBytes() >= required_bytes) {
+        return;
+    }
+    reportGpuWorkspaceAllocationRequest(category, placement.getDeviceNum(), required_bytes, detail);
+    ScopedGpuAllocationContext allocation_context(std::string(category) + ": " + std::string(detail));
+    workspace = Tensor(placement, TensorDescriptor(DataType::UINT8, {required_bytes}), 256);
+}
+
 static void sanitizePackedRmsNormOverreadRows(Tensor tensor,
                                                 uint64_t active_rows,
                                                 uint64_t selected_rows,
@@ -1682,7 +1847,11 @@ StampedRmsNorm::StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
         throw std::runtime_error("StampedRmsNorm requires a compiled RMSNorm payload.");
     }
 
-    if (compiled_rms_norm->packed_row_capacity != 0) {
+    uint64_t max_workspace_bytes = 0;
+    if (compiled_rms_norm->packed_row_capacity == 0) {
+        const CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(input, scale, output);
+        max_workspace_bytes = CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum());
+    } else {
         if (!this->row_partition_offsets.has_value() || compiled_rms_norm->ragged_batch_size == 0) {
             throw std::runtime_error("Packed-row RMSNorm requires an explicit row-partition runtime binding.");
         }
@@ -1701,15 +1870,30 @@ StampedRmsNorm::StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
             throw std::runtime_error("Packed-row RMSNorm outer samples per packed row must be non-zero.");
         }
 
-        // Pre-build the same finite row-capacity family used by ragged FC so
-        // runtime active-row changes never force a new cuDNN graph build.
-        for (const uint64_t capacity_rows : makeRaggedMatmulCapacityBuckets(compiled_rms_norm->packed_row_capacity)) {
+        // Pre-build the finite RMSNorm row-capacity family and size one private
+        // stamped workspace to the largest requirement across all buckets.
+        for (const uint64_t capacity_rows : makeRaggedRmsNormCapacityBuckets(compiled_rms_norm->packed_row_capacity)) {
             const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
             Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
             Tensor bucket_output = output.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
             const CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output);
-            CudnnRmsNorm::instance().warmForward(descriptor, stream.getGpuNum());
+            max_workspace_bytes = std::max(max_workspace_bytes,
+                                           CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum()));
         }
+    }
+    ensureRmsNormExecutionWorkspace(
+        workspace,
+        input.getPlacement(),
+        max_workspace_bytes,
+        "rmsnorm_forward",
+        "input=" + input.getDescriptor().toString() + " packed_capacity=" +
+            std::to_string(compiled_rms_norm->packed_row_capacity));
+
+    // A pre-linked state may already request a training forward. Ensure both its
+    // state tensor and potentially larger training-forward workspace are ready
+    // before any runOn() can execute.
+    if (this->forward_state->retain_for_backward) {
+        retainForwardStateForBackward();
     }
 }
 
@@ -1725,13 +1909,12 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
         if (forward_state != nullptr && forward_state->retain_for_backward) {
             descriptor.training = true;
             if (!forward_state->inv_variance.isInitialized()) {
-                forward_state->inv_variance =
-                    Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input.getDimensions().at(0)}));
+                throw std::runtime_error("Stamped RMSNorm training forward state was not prepared before execution.");
             }
             args.invVariance = forward_state->inv_variance;
             forward_state->has_valid_state = false;
         }
-        CudnnRmsNorm::instance().forward(descriptor, args, run_stream);
+        CudnnRmsNorm::instance().forward(descriptor, args, workspace, run_stream);
         if (descriptor.training) {
             forward_state->has_valid_state = true;
             forward_state->packed_active_rows = 0;
@@ -1753,7 +1936,7 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
     const std::vector<uint64_t> input_dims = input.getDimensions();
     const uint64_t hidden = input_dims[1];
     const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm->packed_row_capacity;
-    const std::vector<uint64_t> buckets = makeRaggedMatmulCapacityBuckets(compiled_rms_norm->packed_row_capacity);
+    const std::vector<uint64_t> buckets = makeRaggedRmsNormCapacityBuckets(compiled_rms_norm->packed_row_capacity);
     const uint64_t selected_rows =
         active_rows == 0 ? buckets.front() : chooseRaggedMatmulCapacityBucket(active_rows, buckets);
     const uint64_t selected_outer = selected_rows * outer_per_packed_row;
@@ -1778,13 +1961,12 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
     if (forward_state != nullptr && forward_state->retain_for_backward) {
         descriptor.training = true;
         if (!forward_state->inv_variance.isInitialized()) {
-            forward_state->inv_variance =
-                Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input_dims[0]}));
+            throw std::runtime_error("Packed stamped RMSNorm training forward state was not prepared before execution.");
         }
         args.invVariance = forward_state->inv_variance.aliasView({selected_outer}, {1}, 0);
         forward_state->has_valid_state = false;
     }
-    CudnnRmsNorm::instance().forward(descriptor, args, run_stream);
+    CudnnRmsNorm::instance().forward(descriptor, args, workspace, run_stream);
     if (descriptor.training) {
         forward_state->packed_active_rows = active_rows;
         forward_state->packed_selected_rows = selected_rows;
@@ -1796,25 +1978,44 @@ void StampedRmsNorm::retainForwardStateForBackward() {
     if (compiled_rms_norm->fused_activation != CudnnRmsNormFusedActivation::NONE) {
         throw std::runtime_error("RMSNorm fused activation backward is not supported.");
     }
+
     if (!forward_state->retain_for_backward) {
         // A state produced before retention was requested would have come from an
         // inference forward and therefore cannot contain training invVariance.
         forward_state->has_valid_state = false;
-        if (compiled_rms_norm->packed_row_capacity != 0) {
-            const std::vector<uint64_t> input_dims = input.getDimensions();
-            const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm->packed_row_capacity;
-            for (const uint64_t capacity_rows : makeRaggedMatmulCapacityBuckets(compiled_rms_norm->packed_row_capacity)) {
-                const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
-                Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-                Tensor bucket_output = output.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-                CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output);
-                descriptor.training = true;
-                CudnnRmsNorm::instance().warmForward(descriptor, stream.getGpuNum());
-            }
+    }
+
+    uint64_t max_training_workspace_bytes = 0;
+    if (compiled_rms_norm->packed_row_capacity == 0) {
+        CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(input, scale, output);
+        descriptor.training = true;
+        max_training_workspace_bytes =
+            CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum());
+    } else {
+        const std::vector<uint64_t> input_dims = input.getDimensions();
+        const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm->packed_row_capacity;
+        for (const uint64_t capacity_rows : makeRaggedRmsNormCapacityBuckets(compiled_rms_norm->packed_row_capacity)) {
+            const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
+            Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            Tensor bucket_output = output.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output);
+            descriptor.training = true;
+            max_training_workspace_bytes =
+                std::max(max_training_workspace_bytes,
+                         CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum()));
         }
     }
+    ensureRmsNormExecutionWorkspace(
+        workspace,
+        input.getPlacement(),
+        max_training_workspace_bytes,
+        "rmsnorm_training_forward",
+        "input=" + input.getDescriptor().toString() + " packed_capacity=" +
+            std::to_string(compiled_rms_norm->packed_row_capacity));
+
     forward_state->retain_for_backward = true;
     if (!forward_state->inv_variance.isInitialized()) {
+        ScopedGpuAllocationContext allocation_context("rmsnorm_forward_inv_variance");
         forward_state->inv_variance =
             Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input.getDimensions().at(0)}));
     }
@@ -1833,7 +2034,7 @@ std::optional<PackedRowConsumerDiagnostic> StampedRmsNorm::packedRowConsumerDiag
                                                              compiled_rms_norm->packed_row_capacity,
                                                              offsets_descriptor.getDataType()));
     const uint64_t active_rows = row_partition.requireHostActiveValueCount();
-    const std::vector<uint64_t> buckets = makeRaggedMatmulCapacityBuckets(compiled_rms_norm->packed_row_capacity);
+    const std::vector<uint64_t> buckets = makeRaggedRmsNormCapacityBuckets(compiled_rms_norm->packed_row_capacity);
     const uint64_t selected_rows =
         active_rows == 0 ? buckets.front() : chooseRaggedMatmulCapacityBucket(active_rows, buckets);
     if (selected_rows < active_rows || selected_rows > compiled_rms_norm->packed_row_capacity) {
@@ -1908,7 +2109,21 @@ StampedRmsNormBackward::StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBa
     if (!compiled_rms_norm_backward) {
         throw std::runtime_error("StampedRmsNormBackward requires a compiled RMSNorm backward payload.");
     }
-    if (compiled_rms_norm_backward->packed_row_capacity != 0) {
+
+    uint64_t max_backward_workspace_bytes = 0;
+    uint64_t max_fallback_forward_workspace_bytes = 0;
+    if (compiled_rms_norm_backward->packed_row_capacity == 0) {
+        const CudnnRmsNormDescriptor descriptor =
+            compiled_rms_norm_backward->descriptorFor(input, scale, dY, dX, dScale);
+        max_backward_workspace_bytes =
+            CudnnRmsNorm::instance().backwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum());
+        if (this->saved_forward_state == nullptr) {
+            CudnnRmsNormDescriptor forward_descriptor = descriptor;
+            forward_descriptor.training = true;
+            max_fallback_forward_workspace_bytes =
+                CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(forward_descriptor, stream.getGpuNum());
+        }
+    } else {
         if (!this->row_partition_offsets.has_value() || compiled_rms_norm_backward->ragged_batch_size == 0) {
             throw std::runtime_error("Packed-row RMSNorm backward requires an explicit row-partition runtime binding.");
         }
@@ -1923,14 +2138,47 @@ StampedRmsNormBackward::StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBa
                 "Packed-row RMSNorm backward requires [outer, hidden] input divisible by packed row capacity.");
         }
         const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm_backward->packed_row_capacity;
-        for (const uint64_t capacity_rows : makeRaggedMatmulCapacityBuckets(compiled_rms_norm_backward->packed_row_capacity)) {
+        for (const uint64_t capacity_rows : makeRaggedRmsNormCapacityBuckets(compiled_rms_norm_backward->packed_row_capacity)) {
             const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
             Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
             Tensor bucket_dy = dY.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
             Tensor bucket_dx = dX.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            CudnnRmsNormDescriptor descriptor =
+            const CudnnRmsNormDescriptor descriptor =
                 compiled_rms_norm_backward->descriptorFor(bucket_input, scale, bucket_dy, bucket_dx, dScale);
-            CudnnRmsNorm::instance().warmBackward(descriptor, stream.getGpuNum());
+            max_backward_workspace_bytes =
+                std::max(max_backward_workspace_bytes,
+                         CudnnRmsNorm::instance().backwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum()));
+            if (this->saved_forward_state == nullptr) {
+                CudnnRmsNormDescriptor forward_descriptor = descriptor;
+                forward_descriptor.training = true;
+                max_fallback_forward_workspace_bytes =
+                    std::max(max_fallback_forward_workspace_bytes,
+                             CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(forward_descriptor, stream.getGpuNum()));
+            }
+        }
+    }
+
+    ensureRmsNormExecutionWorkspace(
+        backward_workspace,
+        input.getPlacement(),
+        max_backward_workspace_bytes,
+        "rmsnorm_backward",
+        "input=" + input.getDescriptor().toString() + " packed_capacity=" +
+            std::to_string(compiled_rms_norm_backward->packed_row_capacity));
+    if (this->saved_forward_state == nullptr) {
+        ensureRmsNormExecutionWorkspace(
+            fallback_forward_workspace,
+            input.getPlacement(),
+            max_fallback_forward_workspace_bytes,
+            "rmsnorm_fallback_forward",
+            "input=" + input.getDescriptor().toString() + " packed_capacity=" +
+                std::to_string(compiled_rms_norm_backward->packed_row_capacity));
+        fallback_forward_state = std::make_shared<RmsNormForwardState>();
+        {
+            ScopedGpuAllocationContext allocation_context("rmsnorm_fallback_forward_state");
+            fallback_forward_state->inv_variance =
+                Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input.getDimensions().at(0)}));
+            fallback_output = Tensor(input.getPlacement(), TensorDescriptor(dY.getDataType(), input.getDimensions()));
         }
     }
 }
@@ -1942,6 +2190,11 @@ bool StampedRmsNormBackward::tryLinkForwardStateFrom(const std::shared_ptr<Stamp
     }
     forward->retainForwardStateForBackward();
     saved_forward_state = forward->getForwardState();
+    // A linked backward will consume retained forward statistics and can never
+    // execute the standalone fallback forward. Release that private scratch.
+    fallback_forward_workspace.reset();
+    fallback_forward_state.reset();
+    fallback_output = Tensor();
     return true;
 }
 
@@ -1960,15 +2213,9 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
             // Generate the exact cuDNN training statistic locally rather than falling back to
             // the old algebraic RMSNorm derivative. CustomLayer/network training never takes
             // this path: its backward plan is linked to the retained forward state above.
-            if (fallback_forward_state == nullptr) {
-                fallback_forward_state = std::make_shared<RmsNormForwardState>();
-            }
-            if (!fallback_forward_state->inv_variance.isInitialized()) {
-                fallback_forward_state->inv_variance =
-                    Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input.getDimensions().at(0)}));
-            }
-            if (!fallback_output.isInitialized()) {
-                fallback_output = Tensor(input.getPlacement(), TensorDescriptor(dY.getDataType(), input.getDimensions()));
+            if (fallback_forward_state == nullptr || !fallback_forward_state->inv_variance.isInitialized() ||
+                !fallback_output.isInitialized()) {
+                throw std::runtime_error("Standalone RMSNorm backward fallback state was not prepared before execution.");
             }
             CudnnRmsNormDescriptor forward_descriptor =
                 compiled_rms_norm_backward->descriptorFor(input, scale, dY, dX, dScale);
@@ -1978,7 +2225,7 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
             forward_args.scale = scale;
             forward_args.y = fallback_output;
             forward_args.invVariance = fallback_forward_state->inv_variance;
-            CudnnRmsNorm::instance().forward(forward_descriptor, forward_args, run_stream);
+            CudnnRmsNorm::instance().forward(forward_descriptor, forward_args, fallback_forward_workspace, run_stream);
             fallback_forward_state->has_valid_state = true;
             state = fallback_forward_state;
         }
@@ -1991,7 +2238,7 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
         args.invVariance = state->inv_variance;
         args.dx = dX;
         args.dscale = dScale;
-        CudnnRmsNorm::instance().backward(descriptor, args, run_stream);
+        CudnnRmsNorm::instance().backward(descriptor, args, backward_workspace, run_stream);
         return;
     }
 
@@ -2007,7 +2254,7 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
     const std::vector<uint64_t> input_dims = input.getDimensions();
     const uint64_t hidden = input_dims[1];
     const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm_backward->packed_row_capacity;
-    const std::vector<uint64_t> buckets = makeRaggedMatmulCapacityBuckets(compiled_rms_norm_backward->packed_row_capacity);
+    const std::vector<uint64_t> buckets = makeRaggedRmsNormCapacityBuckets(compiled_rms_norm_backward->packed_row_capacity);
     const uint64_t selected_rows =
         active_rows == 0 ? buckets.front() : chooseRaggedMatmulCapacityBucket(active_rows, buckets);
     const uint64_t selected_outer = selected_rows * outer_per_packed_row;
@@ -2045,15 +2292,9 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
                                           compiled_rms_norm_backward->packed_row_capacity,
                                           outer_per_packed_row,
                                           run_stream);
-        if (fallback_forward_state == nullptr) {
-            fallback_forward_state = std::make_shared<RmsNormForwardState>();
-        }
-        if (!fallback_forward_state->inv_variance.isInitialized()) {
-            fallback_forward_state->inv_variance =
-                Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input_dims[0]}));
-        }
-        if (!fallback_output.isInitialized()) {
-            fallback_output = Tensor(input.getPlacement(), TensorDescriptor(dY.getDataType(), input_dims));
+        if (fallback_forward_state == nullptr || !fallback_forward_state->inv_variance.isInitialized() ||
+            !fallback_output.isInitialized()) {
+            throw std::runtime_error("Standalone packed RMSNorm backward fallback state was not prepared before execution.");
         }
         Tensor bucket_fallback_output = fallback_output.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
         CudnnRmsNormDescriptor forward_descriptor =
@@ -2064,7 +2305,7 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
         forward_args.scale = scale;
         forward_args.y = bucket_fallback_output;
         forward_args.invVariance = fallback_forward_state->inv_variance.aliasView({selected_outer}, {1}, 0);
-        CudnnRmsNorm::instance().forward(forward_descriptor, forward_args, run_stream);
+        CudnnRmsNorm::instance().forward(forward_descriptor, forward_args, fallback_forward_workspace, run_stream);
         fallback_forward_state->packed_active_rows = active_rows;
         fallback_forward_state->packed_selected_rows = selected_rows;
         fallback_forward_state->has_valid_state = true;
@@ -2080,7 +2321,7 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
     args.invVariance = state->inv_variance.aliasView({selected_outer}, {1}, 0);
     args.dx = bucket_dx;
     args.dscale = dScale;
-    CudnnRmsNorm::instance().backward(descriptor, args, run_stream);
+    CudnnRmsNorm::instance().backward(descriptor, args, backward_workspace, run_stream);
 }
 
 StampedEmbeddingLookup::StampedEmbeddingLookup(std::shared_ptr<CompiledEmbeddingLookup> compiled,

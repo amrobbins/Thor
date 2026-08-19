@@ -1,5 +1,7 @@
 #include "Utilities/TensorOperations/DeepLearning/CudnnLayerNorm.h"
 
+#include "Utilities/Common/CudnnExecutionWorkspace.h"
+
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
 
@@ -164,11 +166,7 @@ vector<int64_t> statsDims(const CudnnLayerNormDescriptor& descriptor) {
 
 vector<int64_t> statsStrides(const CudnnLayerNormDescriptor&) { return {1, 1, 1, 1}; }
 
-struct BuiltGraph {
-    shared_ptr<fe::graph::Graph> graph;
-    Tensor workspace;
-    int64_t workspaceBytes = 0;
-};
+using BuiltGraph = CudnnCachedExecutionPlan<fe::graph::Graph>;
 
 class LayerNormGraphCache {
    public:
@@ -245,11 +243,6 @@ class LayerNormGraphCache {
         }
 
         built.workspaceBytes = workspaceBytes;
-        if (workspaceBytes > 0) {
-            built.workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                                     TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(workspaceBytes)}),
-                                     256);
-        }
     }
 
     BuiltGraph buildForwardGraph(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
@@ -393,7 +386,10 @@ CudnnLayerNorm& CudnnLayerNorm::instance() {
     return singleton;
 }
 
-void CudnnLayerNorm::forward(const CudnnLayerNormDescriptor& descriptor, const CudnnLayerNormForwardArgs& args, Stream stream) {
+void CudnnLayerNorm::forward(const CudnnLayerNormDescriptor& descriptor,
+                             const CudnnLayerNormForwardArgs& args,
+                             optional<Tensor>& workspace,
+                             Stream stream) {
     descriptor.validateForward();
     const int gpuNum = stream.getGpuNum();
     requireIoTensor(args.x, descriptor, descriptor.inputDataType, gpuNum, "x");
@@ -420,14 +416,18 @@ void CudnnLayerNorm::forward(const CudnnLayerNormDescriptor& descriptor, const C
         insertTensor(variantPack, UID_INV_VARIANCE, args.invVariance.value());
     }
 
-    void* workspace = built.workspaceBytes > 0 ? built.workspace.getMemPtr<void>() : nullptr;
-    auto status = built.graph->execute(stream.getCudnnHandle(), variantPack, workspace);
+    const uint64_t requiredWorkspaceBytes = checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "LayerNorm forward");
+    void* workspacePtr = cudnnExecutionWorkspacePointer(workspace, requiredWorkspaceBytes, gpuNum, "LayerNorm forward");
+    auto status = built.graph->execute(stream.getCudnnHandle(), variantPack, workspacePtr);
     if (!status.is_good()) {
         throw runtime_error("Failed to execute cuDNN Frontend LayerNorm graph: " + status.get_message());
     }
 }
 
-void CudnnLayerNorm::backward(const CudnnLayerNormDescriptor& descriptor, const CudnnLayerNormBackwardArgs& args, Stream stream) {
+void CudnnLayerNorm::backward(const CudnnLayerNormDescriptor& descriptor,
+                              const CudnnLayerNormBackwardArgs& args,
+                              optional<Tensor>& workspace,
+                              Stream stream) {
     descriptor.validateBackward();
     const int gpuNum = stream.getGpuNum();
     requireIoTensor(args.dy, descriptor, descriptor.outputDataType, gpuNum, "dy");
@@ -451,16 +451,31 @@ void CudnnLayerNorm::backward(const CudnnLayerNormDescriptor& descriptor, const 
     insertTensor(variantPack, UID_DSCALE, args.dscale);
     insertTensor(variantPack, UID_DBIAS, args.dbias);
 
-    void* workspace = built.workspaceBytes > 0 ? built.workspace.getMemPtr<void>() : nullptr;
-    auto status = built.graph->execute(stream.getCudnnHandle(), variantPack, workspace);
+    const uint64_t requiredWorkspaceBytes = checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "LayerNorm backward");
+    void* workspacePtr = cudnnExecutionWorkspacePointer(workspace, requiredWorkspaceBytes, gpuNum, "LayerNorm backward");
+    auto status = built.graph->execute(stream.getCudnnHandle(), variantPack, workspacePtr);
     if (!status.is_good()) {
         throw runtime_error("Failed to execute cuDNN Frontend LayerNorm graph: " + status.get_message());
     }
 }
 
-void CudnnLayerNorm::warmForward(const CudnnLayerNormDescriptor& descriptor, int gpuNum) { (void)cache().getOrBuildForward(descriptor, gpuNum); }
+uint64_t CudnnLayerNorm::forwardWorkspaceSizeInBytes(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
+    const BuiltGraph& built = cache().getOrBuildForward(descriptor, gpuNum);
+    return checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "LayerNorm forward");
+}
 
-void CudnnLayerNorm::warmBackward(const CudnnLayerNormDescriptor& descriptor, int gpuNum) { (void)cache().getOrBuildBackward(descriptor, gpuNum); }
+uint64_t CudnnLayerNorm::backwardWorkspaceSizeInBytes(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
+    const BuiltGraph& built = cache().getOrBuildBackward(descriptor, gpuNum);
+    return checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "LayerNorm backward");
+}
+
+void CudnnLayerNorm::warmForward(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
+    (void)forwardWorkspaceSizeInBytes(descriptor, gpuNum);
+}
+
+void CudnnLayerNorm::warmBackward(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
+    (void)backwardWorkspaceSizeInBytes(descriptor, gpuNum);
+}
 
 void CudnnLayerNorm::clearCache() { cache().clear(); }
 

@@ -5,6 +5,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/Add.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
+#include "DeepLearning/Api/Optimizers/AdamW.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
@@ -1611,6 +1612,222 @@ TEST(AttentionApi, BuildsComposedCausalSelfAttention) {
     EXPECT_TRUE(attention.architectureJson().at("epilogue_inputs").empty());
 }
 
+TEST(AttentionApi, FirstClassResidualSeparatesSdpaAndOutputDropoutConfiguration) {
+    Api::Network network("attention_api_first_class_residual_dropout_configuration");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({5, 8}).dataType(DataType::BF16).build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(4)
+                                   .weightsDataType(DataType::BF16)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::BF16)
+                                   .sdpaDropoutProbability(0.20f)
+                                   .sdpaDropoutSeed(11)
+                                   .sdpaDropoutOffset(13)
+                                   .outputDropoutProbability(0.10f)
+                                   .outputDropoutSeed(17)
+                                   .residualInput(residual.getFeatureOutput().value())
+                                   .build();
+
+    EXPECT_FLOAT_EQ(attention.getSdpaDropoutProbability(), 0.20f);
+    EXPECT_FLOAT_EQ(attention.getDropoutProbability(), 0.20f);  // legacy alias
+    EXPECT_FLOAT_EQ(attention.getOutputDropoutProbability(), 0.10f);
+    EXPECT_EQ(attention.getSdpaDropoutSeed(), 11);
+    EXPECT_EQ(attention.getSdpaDropoutOffset(), 13);
+    EXPECT_EQ(attention.getDropoutSeed(), 11);  // legacy alias
+    EXPECT_EQ(attention.getDropoutOffset(), 13);  // legacy alias
+    EXPECT_EQ(attention.getOutputDropoutSeed(), 17);
+    EXPECT_TRUE(attention.getUseResidual());
+    ASSERT_TRUE(attention.getResidualInput().has_value());
+    EXPECT_EQ(attention.getResidualInput()->getOriginalId(), residual.getFeatureOutput()->getOriginalId());
+    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"feature_input", "residual_input"}));
+    EXPECT_FALSE(attention.hasEpilogue());
+
+    const nlohmann::json architecture = attention.architectureJson();
+    EXPECT_EQ(architecture.at("version").get<std::string>(), "1.1.0");
+    EXPECT_FLOAT_EQ(architecture.at("sdpa_dropout_probability").get<float>(), 0.20f);
+    EXPECT_FLOAT_EQ(architecture.at("dropout_probability").get<float>(), 0.20f);
+    EXPECT_EQ(architecture.at("sdpa_dropout_seed").get<int64_t>(), 11);
+    EXPECT_EQ(architecture.at("sdpa_dropout_offset").get<int64_t>(), 13);
+    EXPECT_EQ(architecture.at("dropout_seed").get<int64_t>(), 11);
+    EXPECT_EQ(architecture.at("dropout_offset").get<int64_t>(), 13);
+    EXPECT_FLOAT_EQ(architecture.at("output_dropout_probability").get<float>(), 0.10f);
+    EXPECT_EQ(architecture.at("output_dropout_seed").get<int64_t>(), 17);
+    EXPECT_TRUE(architecture.at("use_residual").get<bool>());
+    EXPECT_EQ(architecture.at("residual_input").at("id").get<uint64_t>(),
+              residual.getFeatureOutput()->getOriginalId());
+}
+
+TEST(AttentionApi, FirstClassResidualPreservesRaggedQueryPartition) {
+    Api::Network network("attention_api_first_class_residual_preserves_ragged_partition");
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .valuesDataType(DataType::BF16)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({8})
+                                  .maxTotalValues(12)
+                                  .batchSize(3)
+                                  .build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input)
+                                   .numHeads(2)
+                                   .headDim(4)
+                                   .weightsDataType(DataType::BF16)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::BF16)
+                                   .outputDropoutProbability(0.10f)
+                                   .outputDropoutSeed(31)
+                                   .residualInput(input)
+                                   .build();
+
+    EXPECT_TRUE(attention.getUseResidual());
+    ASSERT_TRUE(attention.getRaggedResidualInput().has_value());
+    EXPECT_EQ(attention.getRaggedResidualInput()->getOffsets(), input.getOffsets());
+    EXPECT_EQ(attention.getInputNames(),
+              (std::vector<std::string>{"feature_input", "query_row_partition", "key_value_row_partition", "residual_input"}));
+    ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
+    EXPECT_EQ(attention.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{12, 8}));
+
+    Api::RaggedTensor differentPartition = Api::RaggedNetworkInput::Builder()
+                                               .network(network)
+                                               .name("different_partition")
+                                               .valuesDataType(DataType::BF16)
+                                               .offsetsDataType(DataType::UINT32)
+                                               .trailingDimensions({8})
+                                               .maxTotalValues(12)
+                                               .batchSize(3)
+                                               .build();
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input)
+                     .numHeads(2)
+                     .headDim(4)
+                     .weightsDataType(DataType::BF16)
+                     .computeDataType(DataType::FP32)
+                     .outputDataType(DataType::BF16)
+                     .residualInput(differentPartition)
+                     .build(),
+                 std::invalid_argument);
+}
+
+TEST(AttentionApi, FirstClassResidualAndOutputDropoutDeserializeRoundTrip) {
+    Api::Network network("attention_api_first_class_residual_dropout_round_trip");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({5, 8}).dataType(DataType::BF16).build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(input.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(4)
+                                   .weightsDataType(DataType::BF16)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::BF16)
+                                   .sdpaDropoutProbability(0.15f)
+                                   .sdpaDropoutSeed(71)
+                                   .sdpaDropoutOffset(73)
+                                   .outputDropoutProbability(0.25f)
+                                   .outputDropoutSeed(123)
+                                   .residualInput(residual.getFeatureOutput().value())
+                                   .build();
+
+    const uint32_t previousTrainableLayerCount = network.getNumTrainableLayers();
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    Api::Attention::deserialize(archiveReader, attention.architectureJson(), &network);
+    ASSERT_EQ(network.getNumTrainableLayers(), previousTrainableLayerCount + 1);
+    auto restored = std::dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(previousTrainableLayerCount));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_FLOAT_EQ(restored->getSdpaDropoutProbability(), 0.15f);
+    EXPECT_EQ(restored->getSdpaDropoutSeed(), 71);
+    EXPECT_EQ(restored->getSdpaDropoutOffset(), 73);
+    EXPECT_FLOAT_EQ(restored->getOutputDropoutProbability(), 0.25f);
+    EXPECT_EQ(restored->getOutputDropoutSeed(), 123);
+    EXPECT_TRUE(restored->getUseResidual());
+    ASSERT_TRUE(restored->getResidualInput().has_value());
+    EXPECT_EQ(restored->getResidualInput()->getOriginalId(), residual.getFeatureOutput()->getOriginalId());
+    EXPECT_EQ(restored->getInputNames(), (std::vector<std::string>{"feature_input", "residual_input"}));
+
+    nlohmann::json falselyLegacy = attention.architectureJson();
+    falselyLegacy["version"] = "1.0.0";
+    EXPECT_THROW(Api::Attention::deserialize(archiveReader, falselyLegacy, &network), std::runtime_error);
+}
+
+TEST(AttentionApi, RejectsInvalidFirstClassResidualAndOutputDropoutConfiguration) {
+    Api::Network network("attention_api_rejects_invalid_first_class_residual_dropout");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("tokens").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput residual =
+        Api::NetworkInput::Builder().network(network).name("residual").dimensions({5, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput badShape =
+        Api::NetworkInput::Builder().network(network).name("bad_shape").dimensions({4, 8}).dataType(DataType::BF16).build();
+    Api::NetworkInput badDtype =
+        Api::NetworkInput::Builder().network(network).name("bad_dtype").dimensions({5, 8}).dataType(DataType::FP32).build();
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(2)
+                     .headDim(4)
+                     .outputDropoutProbability(1.0f)
+                     .build(),
+                 std::invalid_argument);
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(2)
+                     .headDim(4)
+                     .outputDataType(DataType::BF16)
+                     .residualInput(badShape.getFeatureOutput().value())
+                     .build(),
+                 std::invalid_argument);
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(2)
+                     .headDim(4)
+                     .outputDataType(DataType::BF16)
+                     .residualInput(badDtype.getFeatureOutput().value())
+                     .build(),
+                 std::invalid_argument);
+
+    Impl::Expression projected = Api::Attention::epilogueInput(DataType::FP32, DataType::BF16);
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(2)
+                     .headDim(4)
+                     .outputDataType(DataType::BF16)
+                     .residualInput(residual.getFeatureOutput().value())
+                     .epilogue(projected)
+                     .build(),
+                 std::invalid_argument);
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numHeads(2)
+                     .headDim(4)
+                     .outputDataType(DataType::BF16)
+                     .outputDropoutProbability(0.1f)
+                     .epilogue(projected)
+                     .build(),
+                 std::invalid_argument);
+}
+
 TEST(AttentionApi, DeserializeAcceptsPreEpilogueVersionOneMetadata) {
     Api::Network network("attention_api_deserialize_accepts_pre_epilogue_v1_metadata");
     Api::NetworkInput input =
@@ -1626,6 +1843,13 @@ TEST(AttentionApi, DeserializeAcceptsPreEpilogueVersionOneMetadata) {
                                    .build();
 
     nlohmann::json legacyArchitecture = attention.architectureJson();
+    legacyArchitecture["version"] = "1.0.0";
+    legacyArchitecture.erase("sdpa_dropout_probability");
+    legacyArchitecture.erase("sdpa_dropout_seed");
+    legacyArchitecture.erase("sdpa_dropout_offset");
+    legacyArchitecture.erase("output_dropout_probability");
+    legacyArchitecture.erase("output_dropout_seed");
+    legacyArchitecture.erase("use_residual");
     legacyArchitecture.erase("epilogue");
     legacyArchitecture.erase("epilogue_inputs");
 
@@ -1933,6 +2157,317 @@ TEST(AttentionApi, ResidualEpilogueForwardBackwardMatchesUnfusedSelfAttention) {
 
 TEST(AttentionApi, ResidualEpilogueForwardBackwardMatchesUnfusedCrossAttention) {
     expectResidualAttentionTrainingMatchesUnfused(true);
+}
+
+TEST(AttentionApi, TrainingDropoutFusedAdamWUpdateBindsTensorRuntimeScalars) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t sequenceLength = 3;
+    constexpr uint32_t features = 8;
+    const DataType dataType = DataType::BF16;
+
+    shared_ptr<Api::AdamW> adamw = Api::AdamW::Builder()
+                                        .alpha(0.003f)
+                                        .beta1(0.9f)
+                                        .beta2(0.99f)
+                                        .epsilon(1.0e-8f)
+                                        .weightDecay(0.0f)
+                                        .build();
+
+    Api::Network network("attention_api_training_dropout_fused_adamw_runtime_scalars");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({sequenceLength, features})
+                                  .dataType(dataType)
+                                  .build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(inputRivet.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(8)
+                                   .weightsDataType(dataType)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(dataType)
+                                   .optimizer(adamw)
+                                   .dropout(0.25f, 1234, 0)
+                                   .build();
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(attention.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork;
+    ASSERT_NO_THROW(placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false));
+    ASSERT_NE(placedNetwork, nullptr);
+    synchronizeEvents(initDoneEvents);
+
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(input.getId()));
+    auto physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalAttention =
+        dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(attention.getId()));
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalAttention, nullptr);
+    ASSERT_TRUE(physicalAttention->getGradientUpdateStream().has_value());
+
+    const vector<float> inputValues =
+        deterministicValues(static_cast<uint64_t>(batchSize) * sequenceLength * features, 0.20f, 0.17f);
+    Impl::Tensor inputHost(cpuPlacement,
+                           Impl::TensorDescriptor(dataType, {batchSize, sequenceLength, features}));
+    writeCpuTensor(inputHost, inputValues);
+    ASSERT_NO_THROW(physicalInput->forward(inputHost, false, batchSize));
+    ASSERT_NO_THROW(physicalOutput->getOutputReadyEvent().synchronize());
+
+    ASSERT_EQ(physicalAttention->getErrorInputs().size(), 1U);
+    ASSERT_TRUE(physicalAttention->getErrorInputs().front().has_value());
+    Impl::Tensor errorInput = physicalAttention->getErrorInputs().front().value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost,
+                   deterministicValues(tensorNumel(errorInput), 0.10f, 0.31f));
+    Stream computeStream = physicalAttention->getStreams()[0];
+    errorInput.copyFromAsync(errorInputHost, computeStream);
+
+    ASSERT_NO_THROW(physicalAttention->backward(errorInput, batchSize));
+    ASSERT_NO_THROW(computeStream.synchronize());
+    ASSERT_NO_THROW(physicalAttention->getGradientUpdateStream().value().synchronize());
+}
+
+TEST(AttentionApi, OutputDropoutResidualUsesResidualPlusDroppedProjectionAndIdentityResidualGradient) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t sequenceLength = 3;
+    constexpr uint32_t features = 8;
+    constexpr float dropoutProbability = 0.5f;
+    constexpr float dropoutScale = 1.0f / (1.0f - dropoutProbability);
+    const DataType dataType = DataType::BF16;
+
+    shared_ptr<Api::AdamW> adamw = Api::AdamW::Builder()
+                                        .alpha(0.003f)
+                                        .beta1(0.9f)
+                                        .beta2(0.99f)
+                                        .epsilon(1.0e-8f)
+                                        .weightDecay(0.0f)
+                                        .build();
+
+    Api::Network network("attention_api_output_dropout_residual_numerical_semantics");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({sequenceLength, features})
+                                  .dataType(dataType)
+                                  .build();
+    Api::NetworkInput residual = Api::NetworkInput::Builder()
+                                     .network(network)
+                                     .name("residual")
+                                     .dimensions({sequenceLength, features})
+                                     .dataType(dataType)
+                                     .build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::GradientRivet residualRivet =
+        Api::GradientRivet::Builder().network(network).tensor(residual.getFeatureOutput().value()).build();
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(inputRivet.getFeatureOutput().value())
+                                   .numHeads(1)
+                                   .headDim(8)
+                                   .weightsDataType(dataType)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(dataType)
+                                   .optimizer(adamw)
+                                   .outputDropoutProbability(dropoutProbability)
+                                   .outputDropoutSeed(12345)
+                                   .residualInput(residualRivet.getFeatureOutput().value())
+                                   .build();
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(attention.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(input.getId()));
+    auto physicalResidual =
+        dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(residual.getId()));
+    auto physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalAttention =
+        dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(attention.getId()));
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalResidual, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalAttention, nullptr);
+
+    const uint64_t numElements = static_cast<uint64_t>(batchSize) * sequenceLength * features;
+    const vector<float> inputValues = deterministicValues(numElements, 0.20f, 0.17f);
+    const vector<float> residualValues = deterministicValues(numElements, 0.07f, 0.41f);
+    Impl::Tensor inputHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, sequenceLength, features}));
+    Impl::Tensor residualHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, sequenceLength, features}));
+    writeCpuTensor(inputHost, inputValues);
+    writeCpuTensor(residualHost, residualValues);
+
+    // Validation selects Attention's deterministic evaluation variant and, unlike a
+    // training forward, drains the forward-pass bookkeeping without requiring a
+    // backward pass. This gives us a same-parameter projection + residual baseline
+    // without abandoning a training variant whose backward would still be pending.
+    physicalInput->forward(inputHost, true, batchSize);
+    physicalResidual->forward(residualHost, true, batchSize);
+    physicalOutput->getOutputReadyEvent().synchronize();
+    const vector<float> deterministicOutput = readCpuTensor(physicalOutput->getFeatureOutput().value());
+
+    physicalInput->forward(inputHost, false, batchSize);
+    physicalResidual->forward(residualHost, false, batchSize);
+    physicalOutput->getOutputReadyEvent().synchronize();
+    const vector<float> stochasticOutput = readCpuTensor(physicalOutput->getFeatureOutput().value());
+
+    ASSERT_EQ(deterministicOutput.size(), residualValues.size());
+    ASSERT_EQ(stochasticOutput.size(), residualValues.size());
+    uint64_t kept = 0;
+    uint64_t dropped = 0;
+    for (size_t i = 0; i < stochasticOutput.size(); ++i) {
+        const float projected = deterministicOutput[i] - residualValues[i];
+        const float expectedDropped = residualValues[i];
+        const float expectedKept = residualValues[i] + projected * dropoutScale;
+        const float droppedError = std::abs(stochasticOutput[i] - expectedDropped);
+        const float keptError = std::abs(stochasticOutput[i] - expectedKept);
+        EXPECT_LT(std::min(droppedError, keptError), 6.0e-2f) << "at element " << i;
+        if (droppedError <= keptError) {
+            ++dropped;
+        } else {
+            ++kept;
+        }
+    }
+    EXPECT_GT(kept, 0U);
+    EXPECT_GT(dropped, 0U);
+
+    ASSERT_EQ(physicalAttention->getErrorInputs().size(), 1U);
+    ASSERT_TRUE(physicalAttention->getErrorInputs().front().has_value());
+    ASSERT_EQ(physicalAttention->getErrorOutputs().size(), 2U);
+    ASSERT_TRUE(physicalAttention->getErrorOutputs().at(1).has_value());
+    const vector<float> upstreamGradient = deterministicValues(numElements, 0.10f, 0.31f);
+    Impl::Tensor errorInput = physicalAttention->getErrorInputs().front().value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, upstreamGradient);
+    Stream computeStream = physicalAttention->getStreams()[0];
+    errorInput.copyFromAsync(errorInputHost, computeStream);
+    physicalAttention->backward(errorInput, batchSize);
+    const vector<float> residualGradient =
+        readCpuTensor(copyTensorToCpu(physicalAttention->getErrorOutputs().at(1).value(), computeStream));
+    expectAllClose(residualGradient, upstreamGradient, 2.0e-2f, 2.0e-2f);
+    computeStream.synchronize();
+}
+
+TEST(AttentionApi, OutputDropoutResidualFusedAdamWUpdateBindsTensorRuntimeScalars) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t sequenceLength = 3;
+    constexpr uint32_t features = 8;
+    const DataType dataType = DataType::BF16;
+
+    shared_ptr<Api::AdamW> adamw = Api::AdamW::Builder()
+                                        .alpha(0.003f)
+                                        .beta1(0.9f)
+                                        .beta2(0.99f)
+                                        .epsilon(1.0e-8f)
+                                        .weightDecay(0.0f)
+                                        .build();
+
+    Api::Network network("attention_api_output_dropout_residual_fused_adamw_runtime_scalars");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({sequenceLength, features})
+                                  .dataType(dataType)
+                                  .build();
+    Api::NetworkInput residual = Api::NetworkInput::Builder()
+                                     .network(network)
+                                     .name("residual")
+                                     .dimensions({sequenceLength, features})
+                                     .dataType(dataType)
+                                     .build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::GradientRivet residualRivet =
+        Api::GradientRivet::Builder().network(network).tensor(residual.getFeatureOutput().value()).build();
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .featureInput(inputRivet.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(8)
+                                   .weightsDataType(dataType)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(dataType)
+                                   .optimizer(adamw)
+                                   .outputDropoutProbability(0.25f)
+                                   .outputDropoutSeed(9876)
+                                   .residualInput(residualRivet.getFeatureOutput().value())
+                                   .build();
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(attention.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placedNetwork;
+    ASSERT_NO_THROW(placedNetwork = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false));
+    ASSERT_NE(placedNetwork, nullptr);
+    synchronizeEvents(initDoneEvents);
+
+    Impl::StampedNetwork& stampedNetwork = placedNetwork->getStampedNetwork(0);
+    auto physicalInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(input.getId()));
+    auto physicalResidual =
+        dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(residual.getId()));
+    auto physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalAttention =
+        dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(attention.getId()));
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalResidual, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalAttention, nullptr);
+    ASSERT_TRUE(physicalAttention->getGradientUpdateStream().has_value());
+
+    const uint64_t numElements = static_cast<uint64_t>(batchSize) * sequenceLength * features;
+    Impl::Tensor inputHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, sequenceLength, features}));
+    Impl::Tensor residualHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, sequenceLength, features}));
+    writeCpuTensor(inputHost, deterministicValues(numElements, 0.20f, 0.17f));
+    writeCpuTensor(residualHost, deterministicValues(numElements, 0.07f, 0.41f));
+    ASSERT_NO_THROW(physicalInput->forward(inputHost, false, batchSize));
+    ASSERT_NO_THROW(physicalResidual->forward(residualHost, false, batchSize));
+    ASSERT_NO_THROW(physicalOutput->getOutputReadyEvent().synchronize());
+
+    ASSERT_EQ(physicalAttention->getErrorInputs().size(), 1U);
+    ASSERT_TRUE(physicalAttention->getErrorInputs().front().has_value());
+    Impl::Tensor errorInput = physicalAttention->getErrorInputs().front().value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, deterministicValues(tensorNumel(errorInput), 0.10f, 0.31f));
+    Stream computeStream = physicalAttention->getStreams()[0];
+    errorInput.copyFromAsync(errorInputHost, computeStream);
+
+    ASSERT_NO_THROW(physicalAttention->backward(errorInput, batchSize));
+    ASSERT_NO_THROW(computeStream.synchronize());
+    ASSERT_NO_THROW(physicalAttention->getGradientUpdateStream().value().synchronize());
 }
 
 TEST(AttentionApi, DisabledTrainingDropoutUsesDeterministicForwardAndMatchingBackwardVariant) {

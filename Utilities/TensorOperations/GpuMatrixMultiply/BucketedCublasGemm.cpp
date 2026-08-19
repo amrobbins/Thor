@@ -1,6 +1,8 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/BucketedCublasGemm.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <limits>
 #include <stdexcept>
 
@@ -13,6 +15,22 @@ bool bindsRowsA(BucketedCublasGemmRowBinding binding) {
 
 bool bindsRowsB(BucketedCublasGemmRowBinding binding) {
     return binding == BucketedCublasGemmRowBinding::RowsB || binding == BucketedCublasGemmRowBinding::RowsAAndRowsB;
+}
+
+const char* rowBindingName(BucketedCublasGemmRowBinding binding) {
+    switch (binding) {
+        case BucketedCublasGemmRowBinding::RowsA:
+            return "rows_a";
+        case BucketedCublasGemmRowBinding::RowsB:
+            return "rows_b";
+        case BucketedCublasGemmRowBinding::RowsAAndRowsB:
+            return "rows_a_and_b";
+    }
+    return "unknown";
+}
+
+double elapsedMilliseconds(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
 BucketedCublasGemmShape shapeForCapacity(BucketedCublasGemmShape fullShape,
@@ -67,9 +85,38 @@ BucketedCublasGemm BucketedCublasGemm::build(int gpuNum,
     built.capacityBuckets = makeRaggedMatmulCapacityBuckets(fullCapacityRows);
     built.buckets.reserve(built.capacityBuckets.size());
 
+    //const auto optimizationStart = std::chrono::steady_clock::now();
+    //std::fprintf(stderr,
+    //             "INFO Thor bucketed GEMM optimization starting: gpu=%d full_capacity_rows=%llu buckets=%zu "
+    //             "row_binding=%s full_shape=[A:%dx%d B:%dx%d]\n",
+    //             gpuNum,
+    //             static_cast<unsigned long long>(fullCapacityRows),
+    //             built.capacityBuckets.size(),
+    //             rowBindingName(rowBinding),
+    //             fullCapacityShape.rowsA,
+    //             fullCapacityShape.colsA,
+    //             fullCapacityShape.rowsB,
+    //             fullCapacityShape.colsB);
+    //std::fflush(stderr);
+
     CublasMatrixMultiply &cublas = CublasMatrixMultiply::instance();
-    for (uint64_t capacityRows : built.capacityBuckets) {
+    for (size_t bucketIndex = 0; bucketIndex < built.capacityBuckets.size(); ++bucketIndex) {
+        const uint64_t capacityRows = built.capacityBuckets[bucketIndex];
         BucketedCublasGemmShape shape = shapeForCapacity(fullCapacityShape, rowBinding, capacityRows);
+        //const auto bucketStart = std::chrono::steady_clock::now();
+
+        //std::fprintf(stderr,
+        //             "INFO Thor bucketed GEMM optimizing bucket: gpu=%d bucket=%zu/%zu capacity_rows=%llu "
+        //             "shape=[A:%dx%d B:%dx%d]\n",
+        //             gpuNum,
+        //             bucketIndex + 1,
+        //             built.capacityBuckets.size(),
+        //             static_cast<unsigned long long>(capacityRows),
+        //             shape.rowsA,
+        //             shape.colsA,
+        //             shape.rowsB,
+        //             shape.colsB);
+        //std::fflush(stderr);
 
         cublas.chooseOptimalGemmKernel(gpuNum,
                                        shape.rowsA,
@@ -101,9 +148,31 @@ BucketedCublasGemm BucketedCublasGemm::build(int gpuNum,
                                                          dataTypes,
                                                          true);
 
-        built.workspaceSizeInBytes = std::max<uint64_t>(built.workspaceSizeInBytes, kernel.getWorkspaceSizeInBytes(gpuNum));
+        const uint64_t bucketWorkspaceBytes = kernel.getWorkspaceSizeInBytes(gpuNum);
+        built.workspaceSizeInBytes = std::max<uint64_t>(built.workspaceSizeInBytes, bucketWorkspaceBytes);
         built.buckets.push_back(Bucket{capacityRows, shape, std::move(kernel)});
+
+        //std::fprintf(stderr,
+        //             "INFO Thor bucketed GEMM optimized bucket: gpu=%d bucket=%zu/%zu capacity_rows=%llu "
+        //             "workspace_bytes=%llu elapsed_ms=%.1f\n",
+        //             gpuNum,
+        //             bucketIndex + 1,
+        //             built.capacityBuckets.size(),
+        //             static_cast<unsigned long long>(capacityRows),
+        //             static_cast<unsigned long long>(bucketWorkspaceBytes),
+        //             elapsedMilliseconds(bucketStart));
+        //std::fflush(stderr);
     }
+
+    //std::fprintf(stderr,
+    //             "INFO Thor bucketed GEMM optimization completed: gpu=%d full_capacity_rows=%llu buckets=%zu "
+    //             "workspace_bytes=%llu elapsed_ms=%.1f\n",
+    //             gpuNum,
+    //             static_cast<unsigned long long>(fullCapacityRows),
+    //             built.capacityBuckets.size(),
+    //             static_cast<unsigned long long>(built.workspaceSizeInBytes),
+    //             elapsedMilliseconds(optimizationStart));
+    //std::fflush(stderr);
 
     return built;
 }

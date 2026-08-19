@@ -718,6 +718,18 @@ TrainingRunResult Trainer::fit(const TrainerFitOptions& options) {
 }
 
 
+void Trainer::setTrainingData(std::shared_ptr<const TrainingData> data) {
+    if (data == nullptr) {
+        throw std::invalid_argument("Trainer::setTrainingData requires non-null TrainingData.");
+    }
+    if (!trainingProgramUsesPhases(trainingProgram)) {
+        throw std::runtime_error(
+            "Trainer::setTrainingData currently supports phase-backed Trainers only. "
+            "Standalone Trainers may retain explicit compiled input bindings that cannot be safely rebound.");
+    }
+    trainingData = std::move(data);
+}
+
 void Trainer::saveModel(const std::string& directory, bool overwrite, bool saveOptimizerState) const {
     if (directory.empty()) {
         throw std::runtime_error("Trainer::saveModel directory must not be empty.");
@@ -729,13 +741,18 @@ void Trainer::saveModel(const std::string& directory, bool overwrite, bool saveO
 }
 
 void Trainer::releasePlacedNetworkAfterLastFit() {
-    if (placedNetworkAfterLastFit != nullptr) {
-        // Releasing only this shared_ptr is not a residency boundary: executor,
+    // Drop the Trainer's owning reference before physical cleanup.  If draining
+    // or cleanup itself throws, stack unwinding still destroys this local owner
+    // and the PlacedNetwork destructor gets a final no-throw cleanup attempt.
+    // More importantly, a failed release can never leave the Trainer retaining
+    // stale placement residency indefinitely.
+    std::shared_ptr<PlacedNetwork> placedNetwork = std::exchange(placedNetworkAfterLastFit, nullptr);
+    if (placedNetwork != nullptr) {
+        // Releasing only a shared_ptr is not a residency boundary: executor,
         // observer, or diagnostic aliases may still own the PlacedNetwork. Tear
         // down the physical graph explicitly so the next phase observes the
         // memory release immediately and the coordinator wakes its FIFO waiter.
-        placedNetworkAfterLastFit->releaseGpuResources();
-        placedNetworkAfterLastFit.reset();
+        placedNetwork->releaseGpuResources();
     }
 }
 

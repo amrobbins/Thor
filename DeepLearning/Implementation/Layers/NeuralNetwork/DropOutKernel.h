@@ -9,7 +9,6 @@ namespace ThorImplementation {
 
 void launchDropOutForward(const void *input,
                           void *output,
-                          uint8_t *keepMask,
                           DataType dataType,
                           uint64_t numElements,
                           float probabilityOfDroppingOut,
@@ -19,15 +18,16 @@ void launchDropOutForward(const void *input,
 
 void launchDropOutBackward(const void *errorInput,
                            void *errorOutput,
-                           const uint8_t *keepMask,
                            DataType dataType,
                            uint64_t numElements,
                            float probabilityOfDroppingOut,
+                           uint64_t randomSeed,
+                           uint64_t forwardSequence,
                            Stream stream);
 
+// Compatibility wrappers retained for callers that select BF16 explicitly.
 void launchBfloat16DropOutForward(const void *input,
                                   void *output,
-                                  uint8_t *keepMask,
                                   uint64_t numElements,
                                   float probabilityOfDroppingOut,
                                   uint64_t randomSeed,
@@ -36,9 +36,10 @@ void launchBfloat16DropOutForward(const void *input,
 
 void launchBfloat16DropOutBackward(const void *errorInput,
                                    void *errorOutput,
-                                   const uint8_t *keepMask,
                                    uint64_t numElements,
                                    float probabilityOfDroppingOut,
+                                   uint64_t randomSeed,
+                                   uint64_t forwardSequence,
                                    Stream stream);
 
 }  // namespace ThorImplementation

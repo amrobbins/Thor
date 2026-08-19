@@ -799,29 +799,32 @@ TEST(DropOut, RaggedValidationIsIdentityOverActivePrefixWithPoisonedInactiveStor
     LayerTestHelper::tearDownNetwork(layers);
 }
 
-TEST(DropOut, NativeRaggedKernelSeedReproducesTheSameActiveMask) {
+TEST(DropOut, NativePhiloxForwardAndBackwardRegenerateTheSameMaskWithoutReserveSpace) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
     constexpr uint64_t fullElements = 256;
     constexpr uint64_t activeElements = 157;
     TensorDescriptor descriptor(DataType::FP32, {fullElements});
-    TensorDescriptor maskDescriptor(DataType::UINT8, {fullElements});
 
     Tensor inputCpu(cpuPlacement, descriptor);
-    for (uint64_t i = 0; i < fullElements; ++i) inputCpu.getMemPtr<float>()[i] = 1.0f;
+    Tensor gradientCpu(cpuPlacement, descriptor);
+    for (uint64_t i = 0; i < fullElements; ++i) {
+        inputCpu.getMemPtr<float>()[i] = 1.0f;
+        gradientCpu.getMemPtr<float>()[i] = 1.0f;
+    }
     Tensor inputGpu(gpuPlacement, descriptor);
+    Tensor gradientGpu(gpuPlacement, descriptor);
     Tensor outputA(gpuPlacement, descriptor);
     Tensor outputB(gpuPlacement, descriptor);
-    Tensor maskA(gpuPlacement, maskDescriptor);
-    Tensor maskB(gpuPlacement, maskDescriptor);
+    Tensor gradientOutput(gpuPlacement, descriptor);
     Stream stream(0);
     inputGpu.copyFromAsync(inputCpu, stream);
+    gradientGpu.copyFromAsync(gradientCpu, stream);
 
     constexpr uint64_t seed = 0xabcdef0123456789ULL;
     constexpr uint64_t sequence = 7;
     launchDropOutForward(inputGpu.getMemPtr(),
                          outputA.getMemPtr(),
-                         maskA.getMemPtr<uint8_t>(),
                          DataType::FP32,
                          activeElements,
                          0.5f,
@@ -830,26 +833,104 @@ TEST(DropOut, NativeRaggedKernelSeedReproducesTheSameActiveMask) {
                          stream);
     launchDropOutForward(inputGpu.getMemPtr(),
                          outputB.getMemPtr(),
-                         maskB.getMemPtr<uint8_t>(),
                          DataType::FP32,
                          activeElements,
                          0.5f,
                          seed,
                          sequence,
                          stream);
+    launchDropOutBackward(gradientGpu.getMemPtr(),
+                          gradientOutput.getMemPtr(),
+                          DataType::FP32,
+                          activeElements,
+                          0.5f,
+                          seed,
+                          sequence,
+                          stream);
 
     Tensor outputACpu(cpuPlacement, descriptor);
     Tensor outputBCpu(cpuPlacement, descriptor);
-    Tensor maskACpu(cpuPlacement, maskDescriptor);
-    Tensor maskBCpu(cpuPlacement, maskDescriptor);
+    Tensor gradientOutputCpu(cpuPlacement, descriptor);
     outputACpu.copyFromAsync(outputA, stream);
     outputBCpu.copyFromAsync(outputB, stream);
-    maskACpu.copyFromAsync(maskA, stream);
-    maskBCpu.copyFromAsync(maskB, stream);
+    gradientOutputCpu.copyFromAsync(gradientOutput, stream);
     stream.synchronize();
 
+    uint64_t kept = 0;
+    uint64_t dropped = 0;
     for (uint64_t i = 0; i < activeElements; ++i) {
-        EXPECT_FLOAT_EQ(outputACpu.getMemPtr<float>()[i], outputBCpu.getMemPtr<float>()[i]);
-        EXPECT_EQ(maskACpu.getMemPtr<uint8_t>()[i], maskBCpu.getMemPtr<uint8_t>()[i]);
+        const float a = outputACpu.getMemPtr<float>()[i];
+        const float b = outputBCpu.getMemPtr<float>()[i];
+        const float gradient = gradientOutputCpu.getMemPtr<float>()[i];
+        EXPECT_FLOAT_EQ(a, b);
+        EXPECT_TRUE(a == 0.0f || a == 2.0f);
+        EXPECT_FLOAT_EQ(gradient, a);
+        if (a == 0.0f) ++dropped;
+        else ++kept;
     }
+    EXPECT_GT(kept, 0u);
+    EXPECT_GT(dropped, 0u);
+}
+
+TEST(DropOut, NativeFp64PreservesDoublePrecisionAndRegeneratesMask) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    constexpr uint64_t numElements = 129;
+    TensorDescriptor descriptor(DataType::FP64, {numElements});
+
+    Tensor inputCpu(cpuPlacement, descriptor);
+    Tensor gradientCpu(cpuPlacement, descriptor);
+    for (uint64_t i = 0; i < numElements; ++i) {
+        inputCpu.getMemPtr<double>()[i] = 1.0 + static_cast<double>(i) * 1.0e-10;
+        gradientCpu.getMemPtr<double>()[i] = 1.0;
+    }
+    Tensor inputGpu(gpuPlacement, descriptor);
+    Tensor gradientGpu(gpuPlacement, descriptor);
+    Tensor outputGpu(gpuPlacement, descriptor);
+    Tensor gradientOutputGpu(gpuPlacement, descriptor);
+    Stream stream(0);
+    inputGpu.copyFromAsync(inputCpu, stream);
+    gradientGpu.copyFromAsync(gradientCpu, stream);
+
+    constexpr uint64_t seed = 918273645ULL;
+    constexpr uint64_t sequence = 4;
+    launchDropOutForward(inputGpu.getMemPtr(),
+                         outputGpu.getMemPtr(),
+                         DataType::FP64,
+                         numElements,
+                         0.5f,
+                         seed,
+                         sequence,
+                         stream);
+    launchDropOutBackward(gradientGpu.getMemPtr(),
+                          gradientOutputGpu.getMemPtr(),
+                          DataType::FP64,
+                          numElements,
+                          0.5f,
+                          seed,
+                          sequence,
+                          stream);
+
+    Tensor outputCpu(cpuPlacement, descriptor);
+    Tensor gradientOutputCpu(cpuPlacement, descriptor);
+    outputCpu.copyFromAsync(outputGpu, stream);
+    gradientOutputCpu.copyFromAsync(gradientOutputGpu, stream);
+    stream.synchronize();
+
+    uint64_t kept = 0;
+    uint64_t dropped = 0;
+    for (uint64_t i = 0; i < numElements; ++i) {
+        const double value = outputCpu.getMemPtr<double>()[i];
+        const double gradient = gradientOutputCpu.getMemPtr<double>()[i];
+        if (gradient == 0.0) {
+            ++dropped;
+            EXPECT_DOUBLE_EQ(value, 0.0);
+        } else {
+            ++kept;
+            EXPECT_DOUBLE_EQ(gradient, 2.0);
+            EXPECT_DOUBLE_EQ(value, inputCpu.getMemPtr<double>()[i] * 2.0);
+        }
+    }
+    EXPECT_GT(kept, 0u);
+    EXPECT_GT(dropped, 0u);
 }

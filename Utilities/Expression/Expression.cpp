@@ -3478,6 +3478,7 @@ static bool isTransposePushThroughUnaryOp(ExprOp op) {
         case ExprOp::SQRT:
         case ExprOp::TANH:
         case ExprOp::NORMCDF:
+        case ExprOp::LOGICAL_NOT:
             return true;
         default:
             return false;

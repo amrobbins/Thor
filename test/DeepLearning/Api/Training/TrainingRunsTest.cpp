@@ -3,8 +3,12 @@
 #include "DeepLearning/Api/Data/BatchSession.h"
 #include "DeepLearning/Api/Data/TrainingData.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedRowLengths.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
@@ -72,6 +76,67 @@ std::shared_ptr<Network> makeReluMemberNetwork(const std::string& networkName,
     for (const std::string& outputName : outputNames) {
         NetworkOutput::Builder().network(*network).name(outputName).inputTensor(relu->getFeatureOutput().value()).build();
     }
+    return network;
+}
+
+class CountingTrainingValidationNetwork final : public Network {
+   public:
+    explicit CountingTrainingValidationNetwork(const std::string& networkName) : Network(networkName) {}
+
+    [[nodiscard]] uint32_t trainingValidationCount() const { return trainingValidationCount_; }
+
+   protected:
+    StatusCode evaluateGraph(bool inferenceOnly) override {
+        if (!inferenceOnly) {
+            ++trainingValidationCount_;
+        }
+        return Network::evaluateGraph(inferenceOnly);
+    }
+
+   private:
+    uint32_t trainingValidationCount_ = 0;
+};
+
+
+std::shared_ptr<Network> makeRaggedRowLengthMemberNetwork(const std::string& networkName) {
+    auto network = std::make_shared<Network>(networkName);
+    RaggedTensor history = RaggedNetworkInput::Builder()
+                               .network(*network)
+                               .name("history")
+                               .valuesDataType(DataType::FP32)
+                               .trailingDimensions({2})
+                               .maxTotalValues(8)
+                               .batchSize(4)
+                               .build();
+
+    // The prediction below intentionally depends only on offsets. Keep the
+    // source member itself graph-valid while exercising the ensemble builder's
+    // responsibility for preserving the complete logical ragged boundary.
+    Stub::Builder().network(*network).inputTensor(history.getValues()).build();
+
+    RaggedRowLengths rowLengths =
+        RaggedRowLengths::Builder().network(*network).featureInput(history).build();
+    ThorImplementation::Expression lengths =
+        ThorImplementation::Expression::input(
+            "lengths", ThorImplementation::DataType::INT32, ThorImplementation::DataType::INT32)
+            .cast(ThorImplementation::DataType::FP32);
+    ThorImplementation::ExpressionDefinition definition =
+        ThorImplementation::ExpressionDefinition::fromOutputs(
+            ThorImplementation::Expression::outputs({{"predictions", lengths}}));
+    CustomLayer castLengths = CustomLayer::Builder()
+                                  .network(*network)
+                                  .expression(ThorImplementation::DynamicExpression::fromExpressionDefinition(definition))
+                                  .inputNames({"lengths"})
+                                  .outputNames({"predictions"})
+                                  .inputInterface({{"lengths", rowLengths.getFeatureOutput().value()}})
+                                  .build();
+
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("predictions")
+        .inputTensor(castLengths.getOutput("predictions"))
+        .dataType(DataType::FP32)
+        .build();
     return network;
 }
 
@@ -439,6 +504,67 @@ TrainingStatsSnapshot makeStats(const TrainingRunRequest& request, uint64_t step
     return stats;
 }
 
+class FailedPlacementReleaseState {
+   public:
+    void remember(const std::shared_ptr<PlacedNetwork>& placement) {
+        std::lock_guard<std::mutex> lock(mutex);
+        failedPlacement = placement;
+    }
+
+    [[nodiscard]] bool failedPlacementExpired() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return failedPlacement.expired();
+    }
+
+   private:
+    mutable std::mutex mutex;
+    std::weak_ptr<PlacedNetwork> failedPlacement;
+};
+
+class PlaceThenFailExecutor : public TrainingExecutor {
+   public:
+    explicit PlaceThenFailExecutor(std::shared_ptr<FailedPlacementReleaseState> state)
+        : state(std::move(state)) {}
+
+    void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
+        (void)observer;
+        if (request.network == nullptr || request.completedPlacedNetwork == nullptr) {
+            throw std::logic_error("TrainingRuns placement-release regression requires standalone network placement handoff.");
+        }
+
+        // A placement with an empty physical stamp is sufficient for this CPU-only
+        // ownership test: TrainingRuns must still drop the Trainer's placement
+        // reference after the run fails before it starts the next sequential run.
+        std::vector<ThorImplementation::StampedNetwork> stamps(1);
+        auto placement = std::make_shared<PlacedNetwork>(*request.network, std::move(stamps));
+        state->remember(placement);
+        *request.completedPlacedNetwork = std::move(placement);
+        throw std::runtime_error("planned failure after placement");
+    }
+
+   private:
+    std::shared_ptr<FailedPlacementReleaseState> state;
+};
+
+class RequirePriorFailedPlacementReleasedExecutor : public TrainingExecutor {
+   public:
+    explicit RequirePriorFailedPlacementReleasedExecutor(std::shared_ptr<FailedPlacementReleaseState> state)
+        : state(std::move(state)) {}
+
+    void fit(const TrainingRunRequest& request, TrainingObserver& observer) override {
+        if (!state->failedPlacementExpired()) {
+            throw std::runtime_error("prior failed TrainingRuns member still owns its placed network");
+        }
+        observedReleasedPlacement = true;
+        observer.onTrainingEvent(TrainingEvent::statsUpdated(makeStats(request, 1)));
+    }
+
+    bool observedReleasedPlacement = false;
+
+   private:
+    std::shared_ptr<FailedPlacementReleaseState> state;
+};
+
 class CoordinatedExecutor : public TrainingExecutor {
    public:
     CoordinatedExecutor(std::shared_ptr<Coordinator> coordinator, FakeExecutorBehavior behavior, uint64_t statsStep = 1)
@@ -747,24 +873,59 @@ std::shared_ptr<Network> makeExactMetricAggregationNetwork(const std::string& na
 }
 
 std::shared_ptr<Network> makeNetworkWithOutput(const std::string& name, const std::vector<uint64_t>& dimensions) {
+    // These helpers are used with fake executors, but the Network itself must still be a
+    // valid graph: TrainingRuns intentionally validates graph structure before any executor
+    // is launched.  Historical callers pass {0, output_features}, where 0 represented the
+    // runtime batch dimension of a fabricated Tensor.  Build the equivalent API graph and
+    // let placement supply the real batch dimension instead of manufacturing a floating,
+    // zero-sized output tensor.
+    THOR_THROW_IF_FALSE(!dimensions.empty());
+    const uint64_t outputFeatures = dimensions.back();
+    THOR_THROW_IF_FALSE(outputFeatures > 0);
+
     auto network = std::make_shared<Network>(name);
-    NetworkInput::Builder().network(*network).name("features").dimensions({4}).dataType(DataType::FP32).build();
-    Tensor outputTensor(DataType::FP32, dimensions);
-    NetworkOutput::Builder().network(*network).name("predictions").inputTensor(outputTensor).dataType(DataType::FP32).build();
+    NetworkInput features = NetworkInput::Builder()
+                                .network(*network)
+                                .name("features")
+                                .dimensions({4})
+                                .dataType(DataType::FP32)
+                                .build();
+    FullyConnected predictions = FullyConnected::Builder()
+                                     .network(*network)
+                                     .featureInput(features.getFeatureOutput().value())
+                                     .numOutputFeatures(outputFeatures)
+                                     .hasBias(true)
+                                     .noActivation()
+                                     .build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("predictions")
+        .inputTensor(predictions.getFeatureOutput().value())
+        .dataType(DataType::FP32)
+        .build();
     return network;
 }
 
 std::shared_ptr<Network> makeDemandSignatureNetwork(const std::string& name) {
     auto network = std::make_shared<Network>(name);
-    NetworkInput::Builder().network(*network).name("features").dimensions({4}).dataType(DataType::FP32).build();
-    NetworkInput::Builder().network(*network).name("observed_daily").dimensions({1}).dataType(DataType::FP32).build();
-    NetworkInput::Builder().network(*network).name("observed_aggregate").dimensions({1}).dataType(DataType::FP32).build();
-    NetworkInput::Builder().network(*network).name("example_weights").dimensions({1}).dataType(DataType::FP32).build();
+    NetworkInput features = NetworkInput::Builder()
+                                .network(*network)
+                                .name("features")
+                                .dimensions({4})
+                                .dataType(DataType::FP32)
+                                .build();
+    FullyConnected prediction = FullyConnected::Builder()
+                                    .network(*network)
+                                    .featureInput(features.getFeatureOutput().value())
+                                    .numOutputFeatures(1)
+                                    .hasBias(true)
+                                    .noActivation()
+                                    .build();
 
-    Tensor outputTensor(DataType::FP32, {0, 1});
-    NetworkOutput::Builder().network(*network).name("daily").inputTensor(outputTensor).dataType(DataType::FP32).build();
-    NetworkOutput::Builder().network(*network).name("aggregate").inputTensor(outputTensor).dataType(DataType::FP32).build();
-    NetworkOutput::Builder().network(*network).name("forecast_p90").inputTensor(outputTensor).dataType(DataType::FP32).build();
+    const Tensor predictionTensor = prediction.getFeatureOutput().value();
+    NetworkOutput::Builder().network(*network).name("daily").inputTensor(predictionTensor).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(*network).name("aggregate").inputTensor(predictionTensor).dataType(DataType::FP32).build();
+    NetworkOutput::Builder().network(*network).name("forecast_p90").inputTensor(predictionTensor).dataType(DataType::FP32).build();
     return network;
 }
 
@@ -831,19 +992,61 @@ std::shared_ptr<Network> makeLossWeightedDemandNetwork(const std::string& name, 
 std::shared_ptr<Network> makeDemandPredictionOnlyNetwork(const std::string& name,
                                                          std::vector<uint64_t> dailyOutputDimensions = {1},
                                                          bool includeDailyOutput = true) {
+    THOR_THROW_IF_FALSE(!dailyOutputDimensions.empty());
+    const uint64_t dailyOutputFeatures = dailyOutputDimensions.back();
+    THOR_THROW_IF_FALSE(dailyOutputFeatures > 0);
+
     auto network = std::make_shared<Network>(name);
-    NetworkInput::Builder().network(*network).name("features").dimensions({4}).dataType(DataType::FP32).build();
-    NetworkInput::Builder().network(*network).name("observed_daily").dimensions({1}).dataType(DataType::FP32).build();
-    NetworkInput::Builder().network(*network).name("observed_aggregate").dimensions({1}).dataType(DataType::FP32).build();
+    NetworkInput features = NetworkInput::Builder()
+                                .network(*network)
+                                .name("features")
+                                .dimensions({4})
+                                .dataType(DataType::FP32)
+                                .build();
+    FullyConnected daily = FullyConnected::Builder()
+                               .network(*network)
+                               .featureInput(features.getFeatureOutput().value())
+                               .numOutputFeatures(dailyOutputFeatures)
+                               .hasBias(true)
+                               .noActivation()
+                               .build();
+    FullyConnected aggregate = FullyConnected::Builder()
+                                   .network(*network)
+                                   .featureInput(features.getFeatureOutput().value())
+                                   .numOutputFeatures(1)
+                                   .hasBias(true)
+                                   .noActivation()
+                                   .build();
+    FullyConnected p90 = FullyConnected::Builder()
+                             .network(*network)
+                             .featureInput(features.getFeatureOutput().value())
+                             .numOutputFeatures(1)
+                             .hasBias(true)
+                             .noActivation()
+                             .build();
 
     if (includeDailyOutput) {
-        Tensor dailyTensor(DataType::FP32, std::move(dailyOutputDimensions));
-        NetworkOutput::Builder().network(*network).name("daily").inputTensor(dailyTensor).dataType(DataType::FP32).build();
+        NetworkOutput::Builder()
+            .network(*network)
+            .name("daily")
+            .inputTensor(daily.getFeatureOutput().value())
+            .dataType(DataType::FP32)
+            .build();
+    } else {
+        Stub::Builder().network(*network).inputTensor(daily.getFeatureOutput().value()).build();
     }
-    Tensor aggregateTensor(DataType::FP32, {1});
-    Tensor p90Tensor(DataType::FP32, {1});
-    NetworkOutput::Builder().network(*network).name("aggregate").inputTensor(aggregateTensor).dataType(DataType::FP32).build();
-    NetworkOutput::Builder().network(*network).name("forecast_p90").inputTensor(p90Tensor).dataType(DataType::FP32).build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("aggregate")
+        .inputTensor(aggregate.getFeatureOutput().value())
+        .dataType(DataType::FP32)
+        .build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("forecast_p90")
+        .inputTensor(p90.getFeatureOutput().value())
+        .dataType(DataType::FP32)
+        .build();
     return network;
 }
 
@@ -1029,10 +1232,34 @@ std::shared_ptr<Network> makeAmbiguousDailyLossNetwork(const std::string& name) 
 }
 
 
+void ensureMinimalValidTrainingRunsTestNetwork(const std::shared_ptr<Network>& network) {
+    if (network == nullptr || network->getNumLayers() != 0) {
+        return;
+    }
+
+    // Scheduler/restart tests use fake executors, but TrainingRuns deliberately
+    // validates every supplied graph before launching those executors. Keep the
+    // execution fake while making graph validity real.
+    NetworkInput features = NetworkInput::Builder()
+                                .network(*network)
+                                .name("features")
+                                .dimensions({4})
+                                .dataType(DataType::FP32)
+                                .build();
+    std::shared_ptr<Activation> relu =
+        Relu::Builder().network(*network).featureInput(features.getFeatureOutput().value()).build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("prediction")
+        .inputTensor(relu->getFeatureOutput().value())
+        .build();
+}
+
 std::shared_ptr<Trainer> makeTrainer(std::shared_ptr<Network> network,
                                     std::shared_ptr<TrainingExecutor> executor,
                                     std::optional<std::string> saveModelDirectory = std::nullopt,
                                     bool saveModelOverwrite = false) {
+    ensureMinimalValidTrainingRunsTestNetwork(network);
     return std::make_shared<Trainer>(Trainer::Builder()
                                          .network(std::move(network))
                                          .data(makeFakeTrainingData())
@@ -1047,6 +1274,7 @@ std::shared_ptr<Trainer> makeTrainerWithData(std::shared_ptr<Network> network,
                                             std::shared_ptr<TrainingExecutor> executor,
                                             std::shared_ptr<const TrainingData> data,
                                             std::string saveModelDirectory) {
+    ensureMinimalValidTrainingRunsTestNetwork(network);
     return std::make_shared<Trainer>(Trainer::Builder()
                                          .network(std::move(network))
                                          .data(std::move(data))
@@ -1239,6 +1467,106 @@ TEST(TrainingRuns, RejectsInvalidRunSpecs) {
 }
 
 
+
+TEST(TrainingRuns, ValidatesEachNetworkOnceAndReusesStartupSnapshotDuringFit) {
+    auto network = std::make_shared<CountingTrainingValidationNetwork>("training-runs-validation-snapshot");
+    NetworkInput features = NetworkInput::Builder()
+                                .network(*network)
+                                .name("features")
+                                .dimensions({4})
+                                .dataType(DataType::FP32)
+                                .build();
+    NetworkInput actual = NetworkInput::Builder()
+                               .network(*network)
+                               .name("actual")
+                               .dimensions({4})
+                               .dataType(DataType::FP32)
+                               .build();
+    std::shared_ptr<Activation> prediction =
+        Relu::Builder().network(*network).featureInput(features.getFeatureOutput().value()).build();
+    MAE loss = MAE::Builder()
+                   .network(*network)
+                   .predictions(prediction->getFeatureOutput().value())
+                   .labels(actual.getFeatureOutput().value())
+                   .lossDataType(DataType::FP32)
+                   .build();
+    Mean labelMean = Mean::Builder().network(*network).values(actual.getFeatureOutput().value()).build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name("prediction")
+        .inputTensor(prediction->getFeatureOutput().value())
+        .build();
+    NetworkOutput::Builder().network(*network).name("prediction_mae").inputTensor(loss.getLoss()).build();
+    NetworkOutput::Builder().network(*network).name("label_mean").inputTensor(labelMean.getMetric()).build();
+
+    auto executor = std::make_shared<RestartProgressExecutor>(std::vector<std::vector<double>>{{1.0}});
+    std::shared_ptr<Trainer> trainer = makeTrainer(network, executor);
+
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer}});
+    EXPECT_EQ(network->trainingValidationCount(), 1U);
+
+    TrainingRunsSessionOptions sessionOptions;
+    sessionOptions.reports["fold_0"] = {"prediction_mae", "label_mean"};
+    TrainingRunsResult result = runs.fit(TrainerFitOptions{.epochs = 1}, sessionOptions);
+    EXPECT_TRUE(result.allCompleted());
+    EXPECT_EQ(network->trainingValidationCount(), 1U);
+}
+
+TEST(TrainingRuns, PhaseBackedStartupValidatesEveryPhaseNetworkOnceAndReusesSnapshotDuringFit) {
+    auto activeNetwork = std::make_shared<CountingTrainingValidationNetwork>("training-runs-active-phase-validation-snapshot");
+    NetworkInput activeFeatures = NetworkInput::Builder()
+                                      .network(*activeNetwork)
+                                      .name("features")
+                                      .dimensions({4})
+                                      .dataType(DataType::FP32)
+                                      .build();
+    std::shared_ptr<Activation> activePrediction =
+        Relu::Builder().network(*activeNetwork).featureInput(activeFeatures.getFeatureOutput().value()).build();
+    NetworkOutput::Builder()
+        .network(*activeNetwork)
+        .name("prediction")
+        .inputTensor(activePrediction->getFeatureOutput().value())
+        .build();
+
+    auto futureNetwork = std::make_shared<CountingTrainingValidationNetwork>("training-runs-future-phase-validation-snapshot");
+    NetworkInput futureFeatures = NetworkInput::Builder()
+                                      .network(*futureNetwork)
+                                      .name("features")
+                                      .dimensions({4})
+                                      .dataType(DataType::FP32)
+                                      .build();
+    std::shared_ptr<Activation> futurePrediction =
+        Relu::Builder().network(*futureNetwork).featureInput(futureFeatures.getFeatureOutput().value()).build();
+    NetworkOutput::Builder()
+        .network(*futureNetwork)
+        .name("prediction")
+        .inputTensor(futurePrediction->getFeatureOutput().value())
+        .build();
+
+    auto activePhase = std::make_shared<TrainingPhase>("active", activeNetwork, true);
+    auto futurePhase = std::make_shared<TrainingPhase>("future", futureNetwork, false);
+    auto step = std::make_shared<TrainingStep>("step",
+                                               std::vector<std::shared_ptr<TrainingPhase>>{activePhase, futurePhase},
+                                               Sgd::Builder().initialLearningRate(0.01f).build(),
+                                               std::vector<ParameterReference>{});
+    auto program = std::make_shared<TrainingProgram>(std::vector<std::shared_ptr<TrainingStep>>{step});
+    auto executor = std::make_shared<RestartProgressExecutor>(std::vector<std::vector<double>>{{1.0}});
+    auto trainer = std::make_shared<Trainer>(Trainer::Builder()
+                                                 .data(makeFakeTrainingData())
+                                                 .executor(executor)
+                                                 .observer(std::make_shared<NullTrainingObserver>())
+                                                 .trainingProgram(program)
+                                                 .build());
+
+    TrainingRuns runs({TrainingRunsSpec{"fold_0", trainer}});
+    EXPECT_EQ(activeNetwork->trainingValidationCount(), 1U);
+    EXPECT_EQ(futureNetwork->trainingValidationCount(), 1U);
+
+    TrainingRunsResult result = runs.fit(TrainerFitOptions{.epochs = 1});
+    EXPECT_TRUE(result.allCompleted());
+    EXPECT_EQ(activeNetwork->trainingValidationCount(), 1U);
+    EXPECT_EQ(futureNetwork->trainingValidationCount(), 1U);
+}
 
 TEST(TrainingRuns, UsesTrainingPhaseSignaturesForEnsembleValidation) {
     auto coordinator = std::make_shared<Coordinator>(2);
@@ -1747,7 +2075,7 @@ TEST(TrainingRunsResult, ReportsEnsembleMetadata) {
     EXPECT_EQ(ensemble.members.size(), 2u);
     ASSERT_EQ(ensemble.outputSignature.size(), 1u);
     EXPECT_EQ(ensemble.outputSignature[0].outputName, "predictions");
-    EXPECT_EQ(ensemble.outputSignature[0].dimensions, (std::vector<uint64_t>{0, 10}));
+    EXPECT_EQ(ensemble.outputSignature[0].dimensions, (std::vector<uint64_t>{10}));
     EXPECT_DOUBLE_EQ(ensemble.totalWeight(), 4.0);
     ASSERT_EQ(ensemble.inputSignature.size(), 1u);
     EXPECT_EQ(ensemble.inputSignature[0].inputName, "features");
@@ -1796,6 +2124,91 @@ TEST(TrainingRunsResult, SaveEnsembleAllowsPartialSuccessWhenMinimumSatisfied) {
 
     Network loadedEnsemble("ensemble_digits");
     EXPECT_NO_THROW(loadedEnsemble.load(ensembleDir.string()));
+
+    std::filesystem::remove_all(root);
+}
+
+
+TEST(TrainingRunsResult, SaveSingleMemberEnsemblePreservesLogicalRaggedInputBoundary) {
+    const std::filesystem::path root = uniqueTempPath("thor-training-runs-ragged-single-save");
+    const std::filesystem::path memberDir = root / "member";
+    const std::filesystem::path ensembleDir = root / "ensemble";
+    std::filesystem::create_directories(memberDir);
+
+    makeRaggedRowLengthMemberNetwork("training_runs_ragged_single_source")->save(memberDir.string(), true);
+
+    TrainingRunResult result = TrainingRunResult::completedResult(
+        "fold_0", {}, {}, {}, TrainingRunCompletionReason::COMPLETED, 1, 1, 1.0, memberDir.string());
+    result.ensembleGroup = "ragged_single";
+    result.savedModelNetworkName = "training_runs_ragged_single_source";
+
+    TrainingEnsembleResult ensemble;
+    ensemble.ensembleGroup = "ragged_single";
+    ensemble.minSuccessfulModels = 1;
+    ensemble.members = {
+        TrainingEnsembleMemberResult{"fold_0", 1.0, TrainingRunStatus::COMPLETED},
+    };
+    ensemble.outputSignature = {TrainingRunOutputSignature{"predictions", {1}, "FP32"}};
+
+    TrainingRunsResult results({result}, {ensemble});
+    std::string savedEnsemblePath;
+    EXPECT_NO_THROW(savedEnsemblePath = results.saveEnsemble("ragged_single", ensembleDir.string()));
+    EXPECT_EQ(savedEnsemblePath, ensembleDir.string());
+
+    Network loaded("ensemble_ragged_single");
+    ASSERT_NO_THROW(loaded.load(ensembleDir.string()));
+    EXPECT_EQ(loaded.getInferenceNetworkInputNames(), (std::vector<std::string>{"history"}));
+    const std::vector<RaggedNetworkInputReference> raggedInputs = loaded.getExternalRaggedNetworkInputs();
+    ASSERT_EQ(raggedInputs.size(), 1u);
+    EXPECT_EQ(raggedInputs.front().name, "history");
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getBatchSize(), 4u);
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getMaxTotalValues(), 8u);
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(TrainingRunsResult, SaveMultiMemberEnsemblePreservesLogicalRaggedInputBoundary) {
+    const std::filesystem::path root = uniqueTempPath("thor-training-runs-ragged-multi-save");
+    const std::filesystem::path member0Dir = root / "member_0";
+    const std::filesystem::path member1Dir = root / "member_1";
+    const std::filesystem::path ensembleDir = root / "ensemble";
+    std::filesystem::create_directories(member0Dir);
+    std::filesystem::create_directories(member1Dir);
+
+    makeRaggedRowLengthMemberNetwork("training_runs_ragged_multi_source_0")->save(member0Dir.string(), true);
+    makeRaggedRowLengthMemberNetwork("training_runs_ragged_multi_source_1")->save(member1Dir.string(), true);
+
+    TrainingRunResult result0 = TrainingRunResult::completedResult(
+        "fold_0", {}, {}, {}, TrainingRunCompletionReason::COMPLETED, 1, 1, 1.0, member0Dir.string());
+    TrainingRunResult result1 = TrainingRunResult::completedResult(
+        "fold_1", {}, {}, {}, TrainingRunCompletionReason::COMPLETED, 1, 1, 1.0, member1Dir.string());
+    result0.ensembleGroup = "ragged_multi";
+    result1.ensembleGroup = "ragged_multi";
+    result0.savedModelNetworkName = "training_runs_ragged_multi_source_0";
+    result1.savedModelNetworkName = "training_runs_ragged_multi_source_1";
+
+    TrainingEnsembleResult ensemble;
+    ensemble.ensembleGroup = "ragged_multi";
+    ensemble.minSuccessfulModels = 2;
+    ensemble.members = {
+        TrainingEnsembleMemberResult{"fold_0", 1.0, TrainingRunStatus::COMPLETED},
+        TrainingEnsembleMemberResult{"fold_1", 1.0, TrainingRunStatus::COMPLETED},
+    };
+    ensemble.outputSignature = {TrainingRunOutputSignature{"predictions", {1}, "FP32"}};
+
+    TrainingRunsResult results({result0, result1}, {ensemble});
+    std::string savedEnsemblePath;
+    EXPECT_NO_THROW(savedEnsemblePath = results.saveEnsemble("ragged_multi", ensembleDir.string()));
+    EXPECT_EQ(savedEnsemblePath, ensembleDir.string());
+
+    Network loaded("ensemble_ragged_multi");
+    ASSERT_NO_THROW(loaded.load(ensembleDir.string()));
+    EXPECT_EQ(loaded.getInferenceNetworkInputNames(), (std::vector<std::string>{"history"}));
+    const std::vector<RaggedNetworkInputReference> raggedInputs = loaded.getExternalRaggedNetworkInputs();
+    ASSERT_EQ(raggedInputs.size(), 1u);
+    EXPECT_EQ(raggedInputs.front().name, "history");
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getBatchSize(), 4u);
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getMaxTotalValues(), 8u);
 
     std::filesystem::remove_all(root);
 }
@@ -2118,6 +2531,27 @@ TEST(TrainingRuns, MinSuccessfulModelsCancelsWhenFailureMakesEnsembleImpossible)
     EXPECT_EQ(ensemble.successfulModels(), 0u);
     EXPECT_EQ(ensemble.requiredSuccessfulModels(), 3u);
     EXPECT_FALSE(ensemble.hasEnoughSuccessfulModels());
+}
+
+TEST(TrainingRuns, FailedMemberReleasesPlacedNetworkBeforeNextSequentialRunStarts) {
+    auto state = std::make_shared<FailedPlacementReleaseState>();
+    auto failingExecutor = std::make_shared<PlaceThenFailExecutor>(state);
+    auto nextExecutor = std::make_shared<RequirePriorFailedPlacementReleasedExecutor>(state);
+    std::shared_ptr<Trainer> failingTrainer =
+        makeTrainer(std::make_shared<Network>("training-runs-release-failed-placement-0"), failingExecutor);
+    std::shared_ptr<Trainer> nextTrainer =
+        makeTrainer(std::make_shared<Network>("training-runs-release-failed-placement-1"), nextExecutor);
+
+    TrainingRuns runs({{"fold_0", failingTrainer}, {"fold_1", nextTrainer}},
+                      TrainingRunsFailurePolicy::CONTINUE,
+                      /*maxSummaryLogsPerSecond=*/0.0,
+                      /*maxParallelRuns=*/1);
+    TrainingRunsResult result = runs.fit(1);
+
+    EXPECT_EQ(result["fold_0"].status, TrainingRunStatus::FAILED);
+    EXPECT_EQ(result["fold_1"].status, TrainingRunStatus::COMPLETED);
+    EXPECT_TRUE(nextExecutor->observedReleasedPlacement);
+    EXPECT_TRUE(state->failedPlacementExpired());
 }
 
 TEST(TrainingRuns, ClassifiesOutOfMemoryAndCancelsSiblings) {

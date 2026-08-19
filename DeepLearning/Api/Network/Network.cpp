@@ -1,6 +1,7 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Layers/TrainingDropoutControllable.h"
 #include "Utilities/Expression/CudaKernelSecurity.h"
+#include "Utilities/Common/GpuMemoryDiagnostics.h"
 #include <optional>
 #include <algorithm>
 #include <cmath>
@@ -19,6 +20,7 @@
 #include "DeepLearning/Api/Parameter/Parameterizable.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
+#include <chrono>
 #include <cstdio>
 #include <exception>
 #include <fstream>
@@ -991,6 +993,10 @@ shared_ptr<PlacedNetwork> Network::place(uint32_t batchSize,
     }
 
     vector<ThorImplementation::StampedNetwork> stampedNetworks;
+    ThorImplementation::GpuMemoryDiagnosticsPlacementSession memoryDiagnostics(
+        "network=" + networkName + " batch_size=" + std::to_string(batchSize) +
+            " mode=" + (inferenceOnly ? std::string("inference") : std::string("training")),
+        devices);
     vector<shared_ptr<GradientUpdateStreamPool>> gradientUpdateStreamPools;
     gradientUpdateStreamPools.reserve(devices.size());
     for (int32_t device : devices) {
@@ -1492,15 +1498,29 @@ std::vector<std::string> Network::getRequiredNetworkInputNamesForOutputs(
         return {};
     }
 
-    // Use the same graph mode as the operation that will consume this boundary.
-    // Deployable output discovery passes inferenceOnly=true, while graph-loss and
-    // graph-metric composition passes false so label-, mask-, and threshold-only
-    // branches remain visible.
+    // Public boundary queries remain fail-fast: validate the requested graph mode
+    // before consulting the graph indexes. Internal report discovery validates once
+    // and reuses the same indexes for every exposed report.
     const StatusCode status = evaluateGraph(inferenceOnly);
     if (status != StatusCode::SUCCESS) {
         throw std::runtime_error("Unable to evaluate " + std::string(inferenceOnly ? "inference" : "training") +
                                  " graph while collecting required network input names for outputs:\n" +
                                  graphValidationFailureMessage(status));
+    }
+
+    return collectRequiredNetworkInputNamesForOutputsFromCurrentGraph(outputNames);
+}
+
+std::vector<std::string> Network::collectRequiredNetworkInputNamesForOutputsFromCurrentGraph(
+    const std::vector<std::string>& outputNames,
+    ReportDiscoveryTraversalCache* traversalCache) {
+    if (outputNames.empty()) {
+        return {};
+    }
+
+    ReportDiscoveryTraversalCache localTraversalCache;
+    if (traversalCache == nullptr) {
+        traversalCache = &localTraversalCache;
     }
 
     std::map<std::string, Tensor> outputTensorByName;
@@ -1513,10 +1533,18 @@ std::vector<std::string> Network::getRequiredNetworkInputNamesForOutputs(
         outputTensorByName[output->getName()] = output->getFeatureInput().value();
     }
 
-    std::set<std::string> requiredInputNames;
-    std::set<uint64_t> visitedLayerIds;
-    std::set<uint64_t> visitingLayerIds;
-    std::function<void(const Tensor&)> collectUpstreamInputs = [&](const Tensor& tensor) {
+    std::set<Tensor> visitingTensors;
+    std::function<const std::set<std::string>&(const Tensor&)> requiredInputsForTensor =
+        [&](const Tensor& tensor) -> const std::set<std::string>& {
+        auto memoIt = traversalCache->requiredInputNamesByTensor.find(tensor);
+        if (memoIt != traversalCache->requiredInputNamesByTensor.end()) {
+            return memoIt->second;
+        }
+        if (!visitingTensors.insert(tensor).second) {
+            throw std::runtime_error("Encountered a cycle while collecting required inputs for output-bounded subgraph.");
+        }
+
+        std::set<std::string> requiredInputNames;
         auto driverIt = apiTensorToApiDrivingLayer.find(tensor);
         if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
             throw std::runtime_error("Unable to find a driving layer while collecting required inputs for tensor " +
@@ -1527,29 +1555,28 @@ std::vector<std::string> Network::getRequiredNetworkInputNamesForOutputs(
         std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(driver);
         if (input != nullptr) {
             requiredInputNames.insert(logicalExternalInputName(input->getName()));
-            return;
-        }
-        if (std::dynamic_pointer_cast<NetworkOutput>(driver) != nullptr) {
+        } else if (std::dynamic_pointer_cast<NetworkOutput>(driver) != nullptr) {
             throw std::runtime_error("Encountered a NetworkOutput as a tensor driver while collecting required inputs.");
-        }
-
-        const uint64_t driverId = driver->getId();
-        if (visitedLayerIds.count(driverId) != 0) {
-            return;
-        }
-        if (!visitingLayerIds.insert(driverId).second) {
-            throw std::runtime_error("Encountered a cycle while collecting required inputs for output-bounded subgraph.");
-        }
-
-        auto inputsIt = apiLayerToApiInputTensors.find(driver);
-        if (inputsIt != apiLayerToApiInputTensors.end()) {
-            for (const Tensor& inputTensor : inputsIt->second) {
-                collectUpstreamInputs(inputTensor);
+        } else {
+            auto inputsIt = apiLayerToApiInputTensors.find(driver);
+            if (inputsIt != apiLayerToApiInputTensors.end()) {
+                for (const Tensor& inputTensor : inputsIt->second) {
+                    const std::set<std::string>& upstreamInputs = requiredInputsForTensor(inputTensor);
+                    requiredInputNames.insert(upstreamInputs.begin(), upstreamInputs.end());
+                }
             }
         }
 
-        visitingLayerIds.erase(driverId);
-        visitedLayerIds.insert(driverId);
+        visitingTensors.erase(tensor);
+        auto [insertedIt, inserted] = traversalCache->requiredInputNamesByTensor.emplace(tensor, std::move(requiredInputNames));
+        (void)inserted;
+        return insertedIt->second;
+    };
+
+    std::set<std::string> requiredInputNames;
+    auto addRequiredInputsForTensor = [&](const Tensor& tensor) {
+        const std::set<std::string>& tensorInputNames = requiredInputsForTensor(tensor);
+        requiredInputNames.insert(tensorInputNames.begin(), tensorInputNames.end());
     };
 
     for (const std::string& outputName : outputNames) {
@@ -1561,8 +1588,8 @@ std::vector<std::string> Network::getRequiredNetworkInputNamesForOutputs(
                 throw std::runtime_error("RaggedNetworkOutput '" + outputName +
                                          "' is missing one of its physical NetworkOutput components.");
             }
-            collectUpstreamInputs(valuesIt->second);
-            collectUpstreamInputs(offsetsIt->second);
+            addRequiredInputsForTensor(valuesIt->second);
+            addRequiredInputsForTensor(offsetsIt->second);
             continue;
         }
 
@@ -1571,7 +1598,7 @@ std::vector<std::string> Network::getRequiredNetworkInputNamesForOutputs(
             throw std::runtime_error("Unable to find NetworkOutput '" + outputName +
                                      "' while collecting required input names for network '" + getNetworkName() + "'.");
         }
-        collectUpstreamInputs(outputIt->second);
+        addRequiredInputsForTensor(outputIt->second);
     }
 
     std::vector<std::string> names;
@@ -1701,46 +1728,125 @@ std::vector<std::string> Network::getTrainingOnlyNetworkInputNames() {
     return names;
 }
 
+NetworkTrainingValidationSnapshot Network::validateTrainingGraphAndCollectReports() {
+    const auto reportValidationStart = std::chrono::steady_clock::now();
+    std::fprintf(stderr,
+                 "INFO Thor training graph/report validation starting: network=%s layers=%u\n",
+                 getNetworkName().c_str(),
+                 getNumLayers());
+    std::fflush(stderr);
+
+    const auto graphValidationStart = std::chrono::steady_clock::now();
+    const StatusCode validationStatus = evaluateGraph(/*inferenceOnly=*/false);
+    if (validationStatus != StatusCode::SUCCESS) {
+        throw std::runtime_error("Unable to evaluate training graph while collecting report metadata:\n" +
+                                 graphValidationFailureMessage(validationStatus));
+    }
+    const double graphValidationElapsedMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - graphValidationStart).count();
+    std::fprintf(stderr,
+                 "INFO Thor training graph validated: network=%s elapsed_ms=%.1f\n",
+                 getNetworkName().c_str(),
+                 graphValidationElapsedMs);
+    std::fflush(stderr);
+
+    NetworkTrainingValidationSnapshot snapshot;
+    ReportDiscoveryTraversalCache traversalCache;
+
+    const auto lossDiscoveryStart = std::chrono::steady_clock::now();
+    snapshot.reportableLosses = collectReportableLossesFromCurrentGraph(&traversalCache);
+    const double lossDiscoveryElapsedMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - lossDiscoveryStart).count();
+    std::fprintf(stderr,
+                 "INFO Thor reportable loss discovery completed: network=%s losses=%zu elapsed_ms=%.1f\n",
+                 getNetworkName().c_str(),
+                 snapshot.reportableLosses.size(),
+                 lossDiscoveryElapsedMs);
+    std::fflush(stderr);
+
+    const auto metricDiscoveryStart = std::chrono::steady_clock::now();
+    snapshot.reportableMetrics = collectReportableMetricsFromCurrentGraph(&traversalCache);
+    const double metricDiscoveryElapsedMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - metricDiscoveryStart).count();
+    const double reportValidationElapsedMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - reportValidationStart).count();
+    std::fprintf(stderr,
+                 "INFO Thor reportable metric discovery completed: network=%s metrics=%zu elapsed_ms=%.1f\n",
+                 getNetworkName().c_str(),
+                 snapshot.reportableMetrics.size(),
+                 metricDiscoveryElapsedMs);
+    std::fprintf(stderr,
+                 "INFO Thor training graph/report validation completed: network=%s losses=%zu metrics=%zu elapsed_ms=%.1f\n",
+                 getNetworkName().c_str(),
+                 snapshot.reportableLosses.size(),
+                 snapshot.reportableMetrics.size(),
+                 reportValidationElapsedMs);
+    std::fflush(stderr);
+    return snapshot;
+}
+
 std::vector<NetworkLossReference> Network::getReportableLosses() {
+    const StatusCode validationStatus = evaluateGraph(/*inferenceOnly=*/false);
+    if (validationStatus != StatusCode::SUCCESS) {
+        throw std::runtime_error("Unable to evaluate training graph while collecting reportable losses:\n" +
+                                 graphValidationFailureMessage(validationStatus));
+    }
+    ReportDiscoveryTraversalCache traversalCache;
+    return collectReportableLossesFromCurrentGraph(&traversalCache);
+}
+
+std::vector<NetworkLossReference> Network::collectReportableLossesFromCurrentGraph(
+    ReportDiscoveryTraversalCache* traversalCache) {
+    ReportDiscoveryTraversalCache localTraversalCache;
+    if (traversalCache == nullptr) {
+        traversalCache = &localTraversalCache;
+    }
     // Reportable loss discovery is based on actual Loss layers that the user
     // explicitly exposes through NetworkOutput.  A loss can remain reportable
     // for the source network even when its prediction tensor is an internal
     // hidden/intermediate tensor that cannot be remapped in a composed ensemble
     // evaluator.  Composition-time reporting decides whether that loss exists
     // for that composition.
-    rebuildApiGraphIndexes(/*inferenceOnly=*/false);
-
     auto sourceNetworkInputName = [&](const Tensor& tensor) -> std::optional<std::string> {
         std::set<Tensor> visiting;
         std::function<std::optional<std::string>(const Tensor&)> visit = [&](const Tensor& current) -> std::optional<std::string> {
+            auto memoIt = traversalCache->sourceNetworkInputNameByTensor.find(current);
+            if (memoIt != traversalCache->sourceNetworkInputNameByTensor.end()) {
+                return memoIt->second;
+            }
             if (visiting.count(current) != 0) {
                 return std::nullopt;
             }
             visiting.insert(current);
 
+            std::optional<std::string> result;
             auto driverIt = apiTensorToApiDrivingLayer.find(current);
             if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
                 visiting.erase(current);
+                traversalCache->sourceNetworkInputNameByTensor[current] = std::nullopt;
                 return std::nullopt;
             }
             std::shared_ptr<Layer> driver = driverIt->second;
             std::shared_ptr<NetworkInput> input = std::dynamic_pointer_cast<NetworkInput>(driver);
             if (input != nullptr) {
-                const std::string name = logicalExternalInputName(input->getName());
+                result = logicalExternalInputName(input->getName());
                 visiting.erase(current);
-                return name;
+                traversalCache->sourceNetworkInputNameByTensor[current] = result;
+                return result;
             }
             if (hasModelSpecificParameters(driver)) {
                 // A source-only report may clone pure input transforms from the
                 // reference graph, but it must not silently use one member's model
                 // parameters in place of an ensemble-averaged semantic source.
                 visiting.erase(current);
+                traversalCache->sourceNetworkInputNameByTensor[current] = std::nullopt;
                 return std::nullopt;
             }
 
             auto inputsIt = apiLayerToApiInputTensors.find(driver);
             if (inputsIt == apiLayerToApiInputTensors.end() || inputsIt->second.empty()) {
                 visiting.erase(current);
+                traversalCache->sourceNetworkInputNameByTensor[current] = std::nullopt;
                 return std::nullopt;
             }
             std::optional<std::string> found;
@@ -1751,11 +1857,13 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
                 }
                 if (found.has_value() && found.value() != candidate.value()) {
                     visiting.erase(current);
+                    traversalCache->sourceNetworkInputNameByTensor[current] = std::nullopt;
                     return std::nullopt;
                 }
                 found = candidate;
             }
             visiting.erase(current);
+            traversalCache->sourceNetworkInputNameByTensor[current] = found;
             return found;
         };
         return visit(tensor);
@@ -1785,34 +1893,46 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
     };
 
     std::map<uint64_t, std::vector<std::string>> lossNamesByLayerId;
-    auto addLossOutputNameForTensor = [&](const Tensor& tensor, const std::string& outputName) {
-        std::set<Tensor> visiting;
-        std::function<void(const Tensor&)> visit = [&](const Tensor& current) {
-            if (visiting.count(current) != 0) {
-                return;
-            }
-            visiting.insert(current);
-            auto driverIt = apiTensorToApiDrivingLayer.find(current);
-            if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
-                visiting.erase(current);
-                return;
-            }
+    std::map<Tensor, std::set<uint64_t>> reachableLossLayerIdsByTensor;
+    std::set<Tensor> reachableLossVisiting;
+    std::function<const std::set<uint64_t>&(const Tensor&)> reachableLossLayerIds =
+        [&](const Tensor& current) -> const std::set<uint64_t>& {
+        auto memoIt = reachableLossLayerIdsByTensor.find(current);
+        if (memoIt != reachableLossLayerIdsByTensor.end()) {
+            return memoIt->second;
+        }
+        if (!reachableLossVisiting.insert(current).second) {
+            static const std::set<uint64_t> noLosses;
+            return noLosses;
+        }
+
+        std::set<uint64_t> lossLayerIds;
+        auto driverIt = apiTensorToApiDrivingLayer.find(current);
+        if (driverIt != apiTensorToApiDrivingLayer.end() && driverIt->second != nullptr) {
             std::shared_ptr<Layer> driver = driverIt->second;
             std::shared_ptr<Loss> lossDriver = std::dynamic_pointer_cast<Loss>(driver);
             if (lossDriver != nullptr) {
-                addUniqueName(lossNamesByLayerId[lossDriver->getId()], outputName);
-                visiting.erase(current);
-                return;
-            }
-            auto inputsIt = apiLayerToApiInputTensors.find(driver);
-            if (inputsIt != apiLayerToApiInputTensors.end()) {
-                for (const Tensor& upstream : inputsIt->second) {
-                    visit(upstream);
+                lossLayerIds.insert(lossDriver->getId());
+            } else {
+                auto inputsIt = apiLayerToApiInputTensors.find(driver);
+                if (inputsIt != apiLayerToApiInputTensors.end()) {
+                    for (const Tensor& upstream : inputsIt->second) {
+                        const std::set<uint64_t>& upstreamLosses = reachableLossLayerIds(upstream);
+                        lossLayerIds.insert(upstreamLosses.begin(), upstreamLosses.end());
+                    }
                 }
             }
-            visiting.erase(current);
-        };
-        visit(tensor);
+        }
+
+        reachableLossVisiting.erase(current);
+        auto [insertedIt, inserted] = reachableLossLayerIdsByTensor.emplace(current, std::move(lossLayerIds));
+        (void)inserted;
+        return insertedIt->second;
+    };
+    auto addLossOutputNameForTensor = [&](const Tensor& tensor, const std::string& outputName) {
+        for (uint64_t lossLayerId : reachableLossLayerIds(tensor)) {
+            addUniqueName(lossNamesByLayerId[lossLayerId], outputName);
+        }
     };
 
     for (uint32_t i = 0; i < numLayers; ++i) {
@@ -1830,13 +1950,18 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
         addLossOutputNameForTensor(outputTensor.value(), output->getName());
     }
     auto predictionOutputNamesForTensor = [&](const Tensor& tensor) -> std::vector<std::string> {
-        std::vector<std::string> names;
         std::set<Tensor> visiting;
-        std::function<void(const Tensor&)> visit = [&](const Tensor& current) {
+        std::function<std::vector<std::string>(const Tensor&)> visit = [&](const Tensor& current) -> std::vector<std::string> {
+            auto memoIt = traversalCache->predictionOutputNamesByTensor.find(current);
+            if (memoIt != traversalCache->predictionOutputNamesByTensor.end()) {
+                return memoIt->second;
+            }
             if (visiting.count(current) != 0) {
-                return;
+                return {};
             }
             visiting.insert(current);
+
+            std::vector<std::string> names;
 
             auto outputIt = outputNamesByTensor.find(current);
             if (outputIt != outputNamesByTensor.end()) {
@@ -1844,31 +1969,37 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
                     addUniqueName(names, outputName);
                 }
                 visiting.erase(current);
-                return;
+                traversalCache->predictionOutputNamesByTensor[current] = names;
+                return names;
             }
 
             auto driverIt = apiTensorToApiDrivingLayer.find(current);
             if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
                 visiting.erase(current);
-                return;
+                traversalCache->predictionOutputNamesByTensor[current] = names;
+                return names;
             }
             std::shared_ptr<Layer> driver = driverIt->second;
             if (std::dynamic_pointer_cast<NetworkInput>(driver) != nullptr || std::dynamic_pointer_cast<Loss>(driver) != nullptr ||
                 std::dynamic_pointer_cast<Metric>(driver) != nullptr) {
                 visiting.erase(current);
-                return;
+                traversalCache->predictionOutputNamesByTensor[current] = names;
+                return names;
             }
 
             auto inputsIt = apiLayerToApiInputTensors.find(driver);
             if (inputsIt != apiLayerToApiInputTensors.end()) {
                 for (const Tensor& upstream : inputsIt->second) {
-                    visit(upstream);
+                    for (const std::string& outputName : visit(upstream)) {
+                        addUniqueName(names, outputName);
+                    }
                 }
             }
             visiting.erase(current);
+            traversalCache->predictionOutputNamesByTensor[current] = names;
+            return names;
         };
-        visit(tensor);
-        return names;
+        return visit(tensor);
     };
 
     std::vector<NetworkLossReference> references;
@@ -1969,7 +2100,7 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
     for (NetworkLossReference& reference : references) {
         auto [it, inserted] = requiredInputsByLossName.emplace(reference.lossName, std::vector<std::string>{});
         if (inserted) {
-            it->second = getRequiredNetworkInputNamesForOutputs({reference.lossName}, /*inferenceOnly=*/false);
+            it->second = collectRequiredNetworkInputNamesForOutputsFromCurrentGraph({reference.lossName}, traversalCache);
             std::sort(it->second.begin(), it->second.end());
         }
         reference.requiredInputNames = it->second;
@@ -2000,11 +2131,28 @@ std::vector<NetworkLossReference> Network::getReportableLosses() {
 }
 
 std::vector<NetworkMetricReference> Network::getReportableMetrics() {
-    rebuildApiGraphIndexes(/*inferenceOnly=*/false);
+    const StatusCode validationStatus = evaluateGraph(/*inferenceOnly=*/false);
+    if (validationStatus != StatusCode::SUCCESS) {
+        throw std::runtime_error("Unable to evaluate training graph while collecting reportable metrics:\n" +
+                                 graphValidationFailureMessage(validationStatus));
+    }
+    ReportDiscoveryTraversalCache traversalCache;
+    return collectReportableMetricsFromCurrentGraph(&traversalCache);
+}
 
+std::vector<NetworkMetricReference> Network::collectReportableMetricsFromCurrentGraph(
+    ReportDiscoveryTraversalCache* traversalCache) {
+    ReportDiscoveryTraversalCache localTraversalCache;
+    if (traversalCache == nullptr) {
+        traversalCache = &localTraversalCache;
+    }
     auto sourceNetworkInputName = [&](const Tensor& tensor) -> std::optional<std::string> {
         std::set<Tensor> visiting;
         std::function<std::optional<std::string>(const Tensor&)> visit = [&](const Tensor& current) -> std::optional<std::string> {
+            auto memoIt = traversalCache->sourceNetworkInputNameByTensor.find(current);
+            if (memoIt != traversalCache->sourceNetworkInputNameByTensor.end()) {
+                return memoIt->second;
+            }
             if (visiting.count(current) != 0) {
                 return std::nullopt;
             }
@@ -2013,6 +2161,7 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
             auto driverIt = apiTensorToApiDrivingLayer.find(current);
             if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
                 visiting.erase(current);
+                traversalCache->sourceNetworkInputNameByTensor[current] = std::nullopt;
                 return std::nullopt;
             }
             std::shared_ptr<Layer> driver = driverIt->second;
@@ -2020,6 +2169,7 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
             if (input != nullptr) {
                 const std::string name = logicalExternalInputName(input->getName());
                 visiting.erase(current);
+                traversalCache->sourceNetworkInputNameByTensor[current] = name;
                 return name;
             }
             if (hasModelSpecificParameters(driver)) {
@@ -2027,12 +2177,14 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
                 // reference graph, but it must not silently use one member's model
                 // parameters in place of an ensemble-averaged semantic source.
                 visiting.erase(current);
+                traversalCache->sourceNetworkInputNameByTensor[current] = std::nullopt;
                 return std::nullopt;
             }
 
             auto inputsIt = apiLayerToApiInputTensors.find(driver);
             if (inputsIt == apiLayerToApiInputTensors.end() || inputsIt->second.empty()) {
                 visiting.erase(current);
+                traversalCache->sourceNetworkInputNameByTensor[current] = std::nullopt;
                 return std::nullopt;
             }
             std::optional<std::string> found;
@@ -2043,11 +2195,13 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
                 }
                 if (found.has_value() && found.value() != candidate.value()) {
                     visiting.erase(current);
+                    traversalCache->sourceNetworkInputNameByTensor[current] = std::nullopt;
                     return std::nullopt;
                 }
                 found = candidate;
             }
             visiting.erase(current);
+            traversalCache->sourceNetworkInputNameByTensor[current] = found;
             return found;
         };
         return visit(tensor);
@@ -2077,34 +2231,46 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
     };
 
     std::map<uint64_t, std::vector<std::string>> metricNamesByLayerId;
-    auto addMetricOutputNameForTensor = [&](const Tensor& tensor, const std::string& outputName) {
-        std::set<Tensor> visiting;
-        std::function<void(const Tensor&)> visit = [&](const Tensor& current) {
-            if (visiting.count(current) != 0) {
-                return;
-            }
-            visiting.insert(current);
-            auto driverIt = apiTensorToApiDrivingLayer.find(current);
-            if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
-                visiting.erase(current);
-                return;
-            }
+    std::map<Tensor, std::set<uint64_t>> reachableMetricLayerIdsByTensor;
+    std::set<Tensor> reachableMetricVisiting;
+    std::function<const std::set<uint64_t>&(const Tensor&)> reachableMetricLayerIds =
+        [&](const Tensor& current) -> const std::set<uint64_t>& {
+        auto memoIt = reachableMetricLayerIdsByTensor.find(current);
+        if (memoIt != reachableMetricLayerIdsByTensor.end()) {
+            return memoIt->second;
+        }
+        if (!reachableMetricVisiting.insert(current).second) {
+            static const std::set<uint64_t> noMetrics;
+            return noMetrics;
+        }
+
+        std::set<uint64_t> metricLayerIds;
+        auto driverIt = apiTensorToApiDrivingLayer.find(current);
+        if (driverIt != apiTensorToApiDrivingLayer.end() && driverIt->second != nullptr) {
             std::shared_ptr<Layer> driver = driverIt->second;
             std::shared_ptr<Metric> metricDriver = std::dynamic_pointer_cast<Metric>(driver);
             if (metricDriver != nullptr) {
-                addUniqueName(metricNamesByLayerId[metricDriver->getId()], outputName);
-                visiting.erase(current);
-                return;
-            }
-            auto inputsIt = apiLayerToApiInputTensors.find(driver);
-            if (inputsIt != apiLayerToApiInputTensors.end()) {
-                for (const Tensor& upstream : inputsIt->second) {
-                    visit(upstream);
+                metricLayerIds.insert(metricDriver->getId());
+            } else {
+                auto inputsIt = apiLayerToApiInputTensors.find(driver);
+                if (inputsIt != apiLayerToApiInputTensors.end()) {
+                    for (const Tensor& upstream : inputsIt->second) {
+                        const std::set<uint64_t>& upstreamMetrics = reachableMetricLayerIds(upstream);
+                        metricLayerIds.insert(upstreamMetrics.begin(), upstreamMetrics.end());
+                    }
                 }
             }
-            visiting.erase(current);
-        };
-        visit(tensor);
+        }
+
+        reachableMetricVisiting.erase(current);
+        auto [insertedIt, inserted] = reachableMetricLayerIdsByTensor.emplace(current, std::move(metricLayerIds));
+        (void)inserted;
+        return insertedIt->second;
+    };
+    auto addMetricOutputNameForTensor = [&](const Tensor& tensor, const std::string& outputName) {
+        for (uint64_t metricLayerId : reachableMetricLayerIds(tensor)) {
+            addUniqueName(metricNamesByLayerId[metricLayerId], outputName);
+        }
     };
 
     for (uint32_t i = 0; i < numLayers; ++i) {
@@ -2123,13 +2289,18 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
     }
 
     auto predictionOutputNamesForTensor = [&](const Tensor& tensor) -> std::vector<std::string> {
-        std::vector<std::string> names;
         std::set<Tensor> visiting;
-        std::function<void(const Tensor&)> visit = [&](const Tensor& current) {
+        std::function<std::vector<std::string>(const Tensor&)> visit = [&](const Tensor& current) -> std::vector<std::string> {
+            auto memoIt = traversalCache->predictionOutputNamesByTensor.find(current);
+            if (memoIt != traversalCache->predictionOutputNamesByTensor.end()) {
+                return memoIt->second;
+            }
             if (visiting.count(current) != 0) {
-                return;
+                return {};
             }
             visiting.insert(current);
+
+            std::vector<std::string> names;
 
             auto outputIt = outputNamesByTensor.find(current);
             if (outputIt != outputNamesByTensor.end()) {
@@ -2137,31 +2308,37 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
                     addUniqueName(names, outputName);
                 }
                 visiting.erase(current);
-                return;
+                traversalCache->predictionOutputNamesByTensor[current] = names;
+                return names;
             }
 
             auto driverIt = apiTensorToApiDrivingLayer.find(current);
             if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {
                 visiting.erase(current);
-                return;
+                traversalCache->predictionOutputNamesByTensor[current] = names;
+                return names;
             }
             std::shared_ptr<Layer> driver = driverIt->second;
             if (std::dynamic_pointer_cast<NetworkInput>(driver) != nullptr || std::dynamic_pointer_cast<Loss>(driver) != nullptr ||
                 std::dynamic_pointer_cast<Metric>(driver) != nullptr) {
                 visiting.erase(current);
-                return;
+                traversalCache->predictionOutputNamesByTensor[current] = names;
+                return names;
             }
 
             auto inputsIt = apiLayerToApiInputTensors.find(driver);
             if (inputsIt != apiLayerToApiInputTensors.end()) {
                 for (const Tensor& upstream : inputsIt->second) {
-                    visit(upstream);
+                    for (const std::string& outputName : visit(upstream)) {
+                        addUniqueName(names, outputName);
+                    }
                 }
             }
             visiting.erase(current);
+            traversalCache->predictionOutputNamesByTensor[current] = names;
+            return names;
         };
-        visit(tensor);
-        return names;
+        return visit(tensor);
     };
 
     std::vector<NetworkMetricReference> references;
@@ -2237,7 +2414,7 @@ std::vector<NetworkMetricReference> Network::getReportableMetrics() {
     for (NetworkMetricReference& reference : references) {
         auto [it, inserted] = requiredInputsByMetricName.emplace(reference.metricName, std::vector<std::string>{});
         if (inserted) {
-            it->second = getRequiredNetworkInputNamesForOutputs({reference.metricName}, /*inferenceOnly=*/false);
+            it->second = collectRequiredNetworkInputNamesForOutputsFromCurrentGraph({reference.metricName}, traversalCache);
             std::sort(it->second.begin(), it->second.end());
         }
         reference.requiredInputNames = it->second;
@@ -2636,7 +2813,22 @@ void Network::rebuildApiGraphIndexes(bool inferenceOnly) {
 Network::StatusCode Network::evaluateGraph(bool inferenceOnly) {
     lastGraphValidationIssue.reset();
     graphValidationInferenceOnly = inferenceOnly;
+
+    constexpr size_t graphValidationProgressLogLayerThreshold = 100;
+    const bool logValidationProgress = network.size() >= graphValidationProgressLogLayerThreshold;
+    std::chrono::steady_clock::time_point stageStart;
+    if (logValidationProgress) {
+        std::cout << "INFO Thor API graph-index rebuild starting: network=" << networkName
+                  << " layers=" << network.size() << std::endl;
+        stageStart = std::chrono::steady_clock::now();
+    }
     rebuildApiGraphIndexes(inferenceOnly);
+    if (logValidationProgress) {
+        const double elapsedMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stageStart).count();
+        std::cout << "INFO Thor API graph-index rebuild completed: network=" << networkName
+                  << " elapsed_ms=" << elapsedMs << std::endl;
+    }
 
     StatusCode status;
     status = checkForDuplicateInOutPortNames();
@@ -2651,7 +2843,24 @@ Network::StatusCode Network::evaluateGraph(bool inferenceOnly) {
     if (status != StatusCode::SUCCESS)
         return status;
 
+    if (logValidationProgress) {
+        size_t candidateAnchors = 0;
+        for (const shared_ptr<Layer>& layer : network) {
+            if (layer != nullptr && layer->mustConnectAllInputsToDriveOutput()) {
+                ++candidateAnchors;
+            }
+        }
+        std::cout << "INFO Thor deadlock-cycle validation starting: network=" << networkName
+                  << " candidate_anchors=" << candidateAnchors << std::endl;
+        stageStart = std::chrono::steady_clock::now();
+    }
     status = checkForDeadlockCycles();
+    if (logValidationProgress) {
+        const double elapsedMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - stageStart).count();
+        std::cout << "INFO Thor deadlock-cycle validation completed: network=" << networkName
+                  << " elapsed_ms=" << elapsedMs << std::endl;
+    }
     if (status != StatusCode::SUCCESS)
         return status;
 
@@ -2855,12 +3064,25 @@ Network::StatusCode Network::checkForDanglingOutputs() {
  */
 Network::StatusCode Network::checkForDeadlockCycles() {
     using CycleStep = pair<Tensor, shared_ptr<Layer>>;
-    function<bool(const Tensor&, const shared_ptr<Layer>&, vector<CycleStep>&, set<uint64_t>&)> findPathToLayer;
+    function<bool(const Tensor&,
+                  const shared_ptr<Layer>&,
+                  vector<CycleStep>&,
+                  unordered_set<uint64_t>&,
+                  unordered_set<uint64_t>&)> findPathToLayer;
     findPathToLayer = [&](const Tensor& tensor,
                           const shared_ptr<Layer>& targetLayer,
                           vector<CycleStep>& path,
-                          set<uint64_t>& tensorsOnPath) -> bool {
-        if (!tensorsOnPath.insert(tensor.getId()).second) {
+                          unordered_set<uint64_t>& tensorsOnPath,
+                          unordered_set<uint64_t>& tensorsKnownNotToReachTarget) -> bool {
+        const uint64_t tensorId = tensor.getId();
+        if (tensorsKnownNotToReachTarget.count(tensorId) != 0) {
+            return false;
+        }
+        if (!tensorsOnPath.insert(tensorId).second) {
+            // We have reached a tensor that is already being explored on this DFS
+            // path.  The owning invocation will finish exploring its remaining
+            // outgoing edges, so revisiting it cannot reveal a new path to the
+            // target layer.
             return false;
         }
 
@@ -2875,7 +3097,11 @@ Network::StatusCode Network::checkForDeadlockCycles() {
                 auto outputsIt = apiLayerToApiOutputTensors.find(consumer);
                 if (outputsIt != apiLayerToApiOutputTensors.end()) {
                     for (const Tensor& output : outputsIt->second) {
-                        if (findPathToLayer(output, targetLayer, path, tensorsOnPath)) {
+                        if (findPathToLayer(output,
+                                            targetLayer,
+                                            path,
+                                            tensorsOnPath,
+                                            tensorsKnownNotToReachTarget)) {
                             return true;
                         }
                     }
@@ -2884,7 +3110,12 @@ Network::StatusCode Network::checkForDeadlockCycles() {
             }
         }
 
-        tensorsOnPath.erase(tensor.getId());
+        tensorsOnPath.erase(tensorId);
+        // This tensor has now been completely explored for this particular
+        // target layer.  On a reconvergent DAG, later paths can reuse that
+        // negative reachability result instead of enumerating the same entire
+        // downstream subgraph again.
+        tensorsKnownNotToReachTarget.insert(tensorId);
         return false;
     };
 
@@ -2898,10 +3129,19 @@ Network::StatusCode Network::checkForDeadlockCycles() {
             continue;
         }
 
+        // Reachability is target-specific: cache tensors proven not to reach
+        // this candidate anchor layer across all of the anchor's outputs.
+        // This keeps cycle validation linear in the reachable DAG for each
+        // anchor instead of proportional to the number of distinct paths.
+        unordered_set<uint64_t> tensorsKnownNotToReachTarget;
         for (const Tensor& output : outputsIt->second) {
             vector<CycleStep> path;
-            set<uint64_t> tensorsOnPath;
-            if (!findPathToLayer(output, layer, path, tensorsOnPath)) {
+            unordered_set<uint64_t> tensorsOnPath;
+            if (!findPathToLayer(output,
+                                 layer,
+                                 path,
+                                 tensorsOnPath,
+                                 tensorsKnownNotToReachTarget)) {
                 continue;
             }
 

@@ -67,19 +67,21 @@ TEST(BucketedCublasGemm, RowsABindingUsesSelectedCachedDescriptorAgainstFullCapa
                                                         BucketedCublasGemmRowBinding::RowsA,
                                                         CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP32));
 
-    EXPECT_EQ(gemm.getCapacityBuckets(), (std::vector<uint64_t>{8, 16, 32, 66}));
+    EXPECT_EQ(gemm.getCapacityBuckets(), (std::vector<uint64_t>{8, 16, 32, 64, 66}));
     EXPECT_EQ(gemm.getSelectedCapacityRows(0), 8U);
     EXPECT_EQ(gemm.getSelectedCapacityRows(7), 8U);
     EXPECT_EQ(gemm.getSelectedCapacityRows(9), 16U);
     EXPECT_EQ(gemm.getSelectedCapacityRows(20), 32U);
     EXPECT_EQ(gemm.getSelectedCapacityRows(32), 32U);
-    EXPECT_EQ(gemm.getSelectedCapacityRows(33), 66U);
+    EXPECT_EQ(gemm.getSelectedCapacityRows(33), 64U);
 
     const CublasKernelRequirement smallRequirement = gemm.getSelectedKernelRequirement(20);
     EXPECT_EQ(smallRequirement.kernelRequirement.rowsA, 32);
     EXPECT_EQ(smallRequirement.kernelRequirement.rowsB, static_cast<int>(kInner));
 
-    const CublasKernelRequirement fullRequirement = gemm.getSelectedKernelRequirement(33);
+    const CublasKernelRequirement largeRequirement = gemm.getSelectedKernelRequirement(33);
+    EXPECT_EQ(largeRequirement.kernelRequirement.rowsA, 64);
+    const CublasKernelRequirement fullRequirement = gemm.getSelectedKernelRequirement(65);
     EXPECT_EQ(fullRequirement.kernelRequirement.rowsA, static_cast<int>(kFullRows));
 
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU, 0);
@@ -146,10 +148,16 @@ TEST(BucketedCublasGemm, RowsABindingUsesSelectedCachedDescriptorAgainstFullCapa
     DAfter.copyFromAsync(DDevice, stream);
     stream.synchronize();
 
-    const float *afterFull = static_cast<const float *>(DAfter.getMemPtr());
-    for (uint64_t row = 0; row < kFullRows; ++row) {
+    const float *afterLarge = static_cast<const float *>(DAfter.getMemPtr());
+    for (uint64_t row = 0; row < 64; ++row) {
         for (uint64_t col = 0; col < kOutput; ++col) {
-            EXPECT_NEAR(afterFull[row * kOutput + col], referenceValue(AMem, BMem, row, col), 1.0e-4f);
+            EXPECT_NEAR(afterLarge[row * kOutput + col], referenceValue(AMem, BMem, row, col), 1.0e-4f);
+        }
+    }
+    for (uint64_t row = 64; row < kFullRows; ++row) {
+        for (uint64_t col = 0; col < kOutput; ++col) {
+            EXPECT_EQ(afterLarge[row * kOutput + col], kSentinel)
+                << "row " << row << " col " << col << " changed beyond the selected M=64 descriptor";
         }
     }
 }
@@ -185,7 +193,11 @@ TEST(BucketedCublasGemm, RowsAAndRowsBBindingBucketsTheRawReductionRowsTogether)
     EXPECT_EQ(smallRequirement.kernelRequirement.rowsB, 32);
     EXPECT_TRUE(smallRequirement.kernelRequirement.transposeA);
 
-    const BucketedCublasGemmShape fullShape = gemm.getSelectedShape(33);
+    const BucketedCublasGemmShape largeShape = gemm.getSelectedShape(33);
+    EXPECT_EQ(largeShape.rowsA, 64);
+    EXPECT_EQ(largeShape.rowsB, 64);
+
+    const BucketedCublasGemmShape fullShape = gemm.getSelectedShape(65);
     EXPECT_EQ(fullShape.rowsA, static_cast<int>(kFullRows));
     EXPECT_EQ(fullShape.rowsB, static_cast<int>(kFullRows));
 }

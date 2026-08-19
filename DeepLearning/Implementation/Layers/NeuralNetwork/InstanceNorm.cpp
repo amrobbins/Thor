@@ -1,4 +1,5 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/InstanceNorm.h"
+#include "Utilities/Common/GpuMemoryDiagnostics.h"
 
 #include "DeepLearning/Implementation/Initializers/ConstantInitializer.h"
 #include "Utilities/TensorOperations/DeepLearning/BatchNormFrontendHelpers.h"
@@ -58,6 +59,15 @@ void validateEpsilon(double epsilon) {
     if (!(epsilon > 0.0)) {
         throw runtime_error("InstanceNorm epsilon must be > 0.");
     }
+}
+
+optional<Tensor> allocateInstanceNormWorkspace(const TensorPlacement& placement, uint64_t requiredBytes) {
+    if (requiredBytes == 0) {
+        return nullopt;
+    }
+    reportGpuWorkspaceAllocationRequest("instancenorm_physical", placement.getDeviceNum(), requiredBytes);
+    ScopedGpuAllocationContext allocationContext("instancenorm_physical");
+    return Tensor(placement, TensorDescriptor(DataType::UINT8, {requiredBytes}), 256);
 }
 
 shared_ptr<PhysicalParameter> makeDefaultParameter(const string& name,
@@ -228,11 +238,15 @@ void InstanceNorm::compileImpl() {
     scratchDScale.clear();
     scratchDBias.clear();
     scratchErrorOutput.reset();
+    forwardWorkspaces.clear();
+    backwardWorkspaces.clear();
 
     saveMean.reserve(featureInputs.size());
     saveInvVariance.reserve(featureInputs.size());
     scratchDScale.reserve(featureInputs.size());
     scratchDBias.reserve(featureInputs.size());
+    forwardWorkspaces.reserve(featureInputs.size());
+    backwardWorkspaces.reserve(featureInputs.size());
 
     for (uint32_t i = 0; i < featureInputs.size(); ++i) {
         if (featureInputs[i].has_value()) {
@@ -252,6 +266,38 @@ void InstanceNorm::compileImpl() {
                 scratchErrorOutput = featureInputs[i].value().clone();
             }
         }
+
+        optional<Tensor> forwardWorkspace = nullopt;
+        optional<Tensor> backwardWorkspace = nullopt;
+        if (featureInputs[i].has_value() && featureOutputs[i].has_value()) {
+            const Tensor& in = featureInputs[i].value();
+            const Tensor& out = featureOutputs[i].value();
+
+            CudnnInstanceNormDescriptor forwardDescriptor;
+            forwardDescriptor.batchSize = in.getDimensions()[0];
+            forwardDescriptor.channelCount = channelCount;
+            forwardDescriptor.spatialElementCount = computeSpatialElementCount(in);
+            forwardDescriptor.inputDataType = in.getDataType();
+            forwardDescriptor.outputDataType = out.getDataType();
+            forwardDescriptor.parameterDataType = parameterDataType;
+            forwardDescriptor.computeDataType = DataType::FP32;
+            forwardDescriptor.epsilon = static_cast<float>(epsilon);
+            forwardDescriptor.training = !isInferenceOnly();
+            const uint64_t forwardWorkspaceBytes =
+                CudnnInstanceNorm::instance().forwardWorkspaceSizeInBytes(forwardDescriptor, placement.getDeviceNum());
+            forwardWorkspace = allocateInstanceNormWorkspace(placement, forwardWorkspaceBytes);
+
+            if (!isInferenceOnly() && errorInputs.size() > i && errorInputs[i].has_value()) {
+                CudnnInstanceNormDescriptor backwardDescriptor = forwardDescriptor;
+                backwardDescriptor.outputDataType = errorInputs[i].value().getDataType();
+                backwardDescriptor.training = true;
+                const uint64_t backwardWorkspaceBytes =
+                    CudnnInstanceNorm::instance().backwardWorkspaceSizeInBytes(backwardDescriptor, placement.getDeviceNum());
+                backwardWorkspace = allocateInstanceNormWorkspace(placement, backwardWorkspaceBytes);
+            }
+        }
+        forwardWorkspaces.emplace_back(std::move(forwardWorkspace));
+        backwardWorkspaces.emplace_back(std::move(backwardWorkspace));
     }
 }
 
@@ -261,6 +307,8 @@ void InstanceNorm::cleanup() {
     scratchDScale.clear();
     scratchDBias.clear();
     scratchErrorOutput.reset();
+    forwardWorkspaces.clear();
+    backwardWorkspaces.clear();
     Layer::cleanup();
 }
 
@@ -295,7 +343,8 @@ void InstanceNorm::computeFeatureOut(uint32_t connectionNumber) {
         args.invVariance = saveInvVariance[connectionNumber];
     }
 
-    CudnnInstanceNorm::instance().forward(descriptor, args, streams[connectionNumber]);
+    THOR_THROW_IF_FALSE(connectionNumber < forwardWorkspaces.size());
+    CudnnInstanceNorm::instance().forward(descriptor, args, forwardWorkspaces[connectionNumber], streams[connectionNumber]);
 }
 
 optional<Event> InstanceNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
@@ -370,7 +419,8 @@ optional<Event> InstanceNorm::computeErrorOutAccumulateWeightsGradienFused(uint3
     args.dscale = dscaleOutput;
     args.dbias = dbiasOutput;
 
-    CudnnInstanceNorm::instance().backward(descriptor, args, executionStream);
+    THOR_THROW_IF_FALSE(connectionNumber < backwardWorkspaces.size());
+    CudnnInstanceNorm::instance().backward(descriptor, args, backwardWorkspaces[connectionNumber], executionStream);
 
     if (needWeightsGradient && !clearWeightsGradientFirstIfFused) {
         launchAccumulateBatchNormGradientFp32(weightsGradient->getMemPtr<float>(),

@@ -756,11 +756,60 @@ TEST(CudaSourceEmitter, RaggedExtentRejectsMixedDenseOutputInOneFusedKernel) {
         {"dense", Expression::input("x.values", DataType::FP32, DataType::FP32) + Expression::constantScalar(1.0)},
     }).physicalOutputs();
     resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::UINT32});
+
+    // Exercise the emitter guard directly.  The planner now correctly keeps
+    // these two launch domains in separate stages, so asking the planner for
+    // stages and expecting one invalid stage would test obsolete behavior.
+    // Construct the invalid fused stage explicitly instead: one output uses
+    // the ragged active prefix while the other is dense over full capacity.
+    ASSERT_TRUE(physical.expr);
+    ASSERT_EQ(physical.outputs.size(), 2U);
+    PhysicalExecutionStage mixed_stage{
+        .kind = PhysicalExecutionStage::Kind::FusedKernel,
+        .expr = *physical.expr,
+        .input_value_ids = {},
+        .outputs = {
+            CompiledStageOutput{
+                .name = physical.outputs[0].name,
+                .local_node_idx = physical.outputs[0].node_idx,
+                .value_id = 0U,
+            },
+            CompiledStageOutput{
+                .name = physical.outputs[1].name,
+                .local_node_idx = physical.outputs[1].node_idx,
+                .value_id = 1U,
+            },
+        },
+    };
+
+    EXPECT_THROW((void)CudaSourceEmitter::emitFlat(mixed_stage, "mixed_ragged_dense_extent"), std::runtime_error);
+}
+
+TEST(EquationCompiler, RaggedExtentSeparatesMixedDenseAndRaggedTerminalOutputs) {
+    const RaggedTensorDescriptor descriptor(DataType::FP32, {}, 4, 12, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    auto physical = Expression::outputs({
+        {"ragged", ragged.relu().getValues()},
+        {"dense", Expression::input("x.values", DataType::FP32, DataType::FP32) + Expression::constantScalar(1.0)},
+    }).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::UINT32});
     auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
 
-    ASSERT_EQ(stages.size(), 1U);
-    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
-    EXPECT_THROW((void)CudaSourceEmitter::emitFlat(stages[0], "mixed_ragged_dense_extent"), std::runtime_error);
+    size_t ragged_output_stage = stages.size();
+    size_t dense_output_stage = stages.size();
+    for (size_t stage_idx = 0; stage_idx < stages.size(); ++stage_idx) {
+        const PhysicalExecutionStage& stage = stages[stage_idx];
+        ASSERT_EQ(stage.kind, PhysicalExecutionStage::Kind::FusedKernel);
+        EXPECT_NO_THROW((void)CudaSourceEmitter::emitFlat(stage, "separated_mixed_ragged_dense_extent"));
+        for (const CompiledStageOutput& output : stage.outputs) {
+            if (output.name == "ragged") ragged_output_stage = stage_idx;
+            if (output.name == "dense") dense_output_stage = stage_idx;
+        }
+    }
+
+    ASSERT_LT(ragged_output_stage, stages.size());
+    ASSERT_LT(dense_output_stage, stages.size());
+    EXPECT_NE(ragged_output_stage, dense_output_stage);
 }
 
 TEST(EquationCompiler, RaggedExtentRejectsImplicitDenseReductionFallback) {
@@ -878,4 +927,63 @@ TEST(EquationCompiler, RaggedTerminalOutputsWithDifferentRowWidthsUseSeparateFus
     EXPECT_EQ(width_four_stages, 1U);
     EXPECT_EQ(width_two_stages, 1U);
     EXPECT_EQ(strided_view_stages, 1U);
+}
+
+TEST(EquationCompiler, RaggedTerminalPointwiseWrappersWithDifferentRowWidthsUseSeparateFusedStages) {
+    const RaggedTensorDescriptor descriptor(DataType::FP32, {4}, 3, 8, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    const RaggedExpression wide = ragged.relu();
+    const RaggedExpression narrow = wide.sliceLastDimension(1, 2);
+
+    // The pointwise wrappers deliberately hide RAGGED_VALUEWISE_EXTENT below
+    // the terminal root.  Terminal fusion must still see the two distinct row
+    // widths; treating a non-marker root as "no ragged constraint" can merge
+    // these outputs because they share the same values/offsets dependencies.
+    const Expression wide_wrapped = wide.getValues() + Expression::constantScalar(1.0);
+    const Expression narrow_wrapped = narrow.getValues() + Expression::constantScalar(1.0);
+    auto physical = Expression::outputs({
+        {"wide", wide_wrapped},
+        {"narrow", narrow_wrapped},
+    }).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::UINT32});
+
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    // The planner is free to materialize the shared producer once before the
+    // two incompatible terminal launch domains.  What matters is that the
+    // named width-4 and width-2 outputs never land in the same fused stage and
+    // every resulting stage is independently emittable.
+    size_t wide_output_stage = stages.size();
+    size_t narrow_output_stage = stages.size();
+    for (size_t stage_idx = 0; stage_idx < stages.size(); ++stage_idx) {
+        const PhysicalExecutionStage& stage = stages[stage_idx];
+        ASSERT_EQ(stage.kind, PhysicalExecutionStage::Kind::FusedKernel);
+        EXPECT_NO_THROW((void)CudaSourceEmitter::emitFlat(stage, "ragged_terminal_pointwise_wrapper"));
+        for (const CompiledStageOutput& output : stage.outputs) {
+            if (output.name == "wide") wide_output_stage = stage_idx;
+            if (output.name == "narrow") narrow_output_stage = stage_idx;
+        }
+    }
+
+    ASSERT_LT(wide_output_stage, stages.size());
+    ASSERT_LT(narrow_output_stage, stages.size());
+    EXPECT_NE(wide_output_stage, narrow_output_stage);
+}
+
+TEST(EquationCompiler, RaggedTerminalPointwiseWrappersWithSameRowWidthStillShareFusedStage) {
+    const RaggedTensorDescriptor descriptor(DataType::FP32, {4}, 3, 8, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor).relu();
+    const Expression values = ragged.getValues();
+    auto physical = Expression::outputs({
+        {"plus_one", values + Expression::constantScalar(1.0)},
+        {"times_two", values * Expression::constantScalar(2.0)},
+    }).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::UINT32});
+
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    ASSERT_EQ(stages[0].outputs.size(), 2U);
+    EXPECT_NO_THROW((void)CudaSourceEmitter::emitFlat(stages[0], "ragged_terminal_same_width_pointwise_wrappers"));
 }

@@ -1,5 +1,8 @@
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
+#include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
+#include "DeepLearning/Api/Layers/Metrics/Mean.h"
+#include "DeepLearning/Api/Layers/Utility/Add.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/Stub.h"
@@ -41,6 +44,23 @@ class GraphValidationDiagnosticsTestNetwork : public Api::Network {
         apiLayerToApiInputTensors[target].push_back(outputTensor);
         return checkForDeadlockCycles();
     }
+};
+
+class CountingReportValidationNetwork : public Api::Network {
+   public:
+    using Api::Network::Network;
+
+    [[nodiscard]] uint32_t getTrainingValidationPasses() const { return trainingValidationPasses; }
+
+   private:
+    StatusCode checkForDuplicateInOutPortNames() override {
+        ++trainingValidationPasses;
+        // These tests build unique API names, so the duplicate-name check itself
+        // can be elided while still counting complete evaluateGraph() passes.
+        return StatusCode::SUCCESS;
+    }
+
+    uint32_t trainingValidationPasses = 0;
 };
 
 Impl::DynamicExpression makeTwoOutputExpression() {
@@ -225,4 +245,137 @@ TEST(GraphValidationDiagnostics, SuccessfulValidationClearsPreviousIssue) {
     (void)Api::Stub::Builder().network(invalidNetwork).inputTensor(dangling.getFeatureOutput().value()).build();
     EXPECT_EQ(invalidNetwork.evaluateGraphForTest(false), Api::Network::StatusCode::SUCCESS);
     EXPECT_TRUE(invalidNetwork.getLastGraphValidationError().empty());
+}
+
+TEST(GraphValidationDiagnostics, ReportableMetricDiscoveryValidatesGraphOnceForManyMetrics) {
+    CountingReportValidationNetwork network("reportable_metric_validation_once");
+    Api::NetworkInput values = Api::NetworkInput::Builder()
+                                   .network(network)
+                                   .name("values")
+                                   .dimensions({4})
+                                   .dataType(Impl::DataType::FP32)
+                                   .build();
+
+    for (int i = 0; i < 4; ++i) {
+        Api::Mean mean = Api::Mean::Builder().network(network).values(values.getFeatureOutput().value()).build();
+        Api::NetworkOutput::Builder()
+            .network(network)
+            .name("mean_" + std::to_string(i))
+            .inputTensor(mean.getMetric())
+            .build();
+    }
+
+    const std::vector<Api::NetworkMetricReference> metrics = network.getReportableMetrics();
+    EXPECT_EQ(metrics.size(), 4u);
+    EXPECT_EQ(network.getTrainingValidationPasses(), 1u);
+}
+
+TEST(GraphValidationDiagnostics, ReportableLossDiscoveryValidatesGraphOnceForManyLosses) {
+    CountingReportValidationNetwork network("reportable_loss_validation_once");
+    Api::NetworkInput predictions = Api::NetworkInput::Builder()
+                                        .network(network)
+                                        .name("predictions")
+                                        .dimensions({4})
+                                        .dataType(Impl::DataType::FP32)
+                                        .build();
+    Api::NetworkInput labels = Api::NetworkInput::Builder()
+                                   .network(network)
+                                   .name("labels")
+                                   .dimensions({4})
+                                   .dataType(Impl::DataType::FP32)
+                                   .build();
+    Api::NetworkOutput::Builder()
+        .network(network)
+        .name("prediction")
+        .inputTensor(predictions.getFeatureOutput().value())
+        .build();
+
+    for (int i = 0; i < 3; ++i) {
+        Api::MSE loss = Api::MSE::Builder()
+                            .network(network)
+                            .predictions(predictions.getFeatureOutput().value())
+                            .labels(labels.getFeatureOutput().value())
+                            .reportsBatchLoss()
+                            .build();
+        Api::NetworkOutput::Builder()
+            .network(network)
+            .name("mse_" + std::to_string(i))
+            .inputTensor(loss.getLoss())
+            .build();
+    }
+
+    const std::vector<Api::NetworkLossReference> losses = network.getReportableLosses();
+    EXPECT_EQ(losses.size(), 3u);
+    EXPECT_EQ(network.getTrainingValidationPasses(), 1u);
+}
+
+TEST(GraphValidationDiagnostics, DeadlockCycleValidationHandlesDeepReconvergentDagWithoutPathEnumeration) {
+    GraphValidationDiagnosticsTestNetwork network("deadlock_validation_reconvergent_dag");
+    Api::NetworkInput values = Api::NetworkInput::Builder()
+                                   .network(network)
+                                   .name("values")
+                                   .dimensions({4})
+                                   .dataType(Impl::DataType::FP32)
+                                   .build();
+
+    // Every Add is a potential deadlock-cycle anchor.  Starting at an early
+    // stage, the downstream graph contains exponentially many distinct paths
+    // but only linearly many tensors.  Deadlock validation must memoize tensors
+    // already proven unable to reach the current anchor instead of enumerating
+    // all of those paths.
+    Api::Tensor current = values.getFeatureOutput().value();
+    for (int stage = 0; stage < 22; ++stage) {
+        std::shared_ptr<Api::Activation> left =
+            Api::Relu::Builder().network(network).featureInput(current).build();
+        std::shared_ptr<Api::Activation> right =
+            Api::Relu::Builder().network(network).featureInput(current).build();
+        Api::Add joined = Api::Add::Builder()
+                              .network(network)
+                              .left(left->getFeatureOutput().value())
+                              .right(right->getFeatureOutput().value())
+                              .build();
+        current = joined.getFeatureOutput().value();
+    }
+    (void)Api::Stub::Builder().network(network).inputTensor(current).build();
+
+    EXPECT_EQ(network.evaluateGraphForTest(/*inferenceOnly=*/false), Api::Network::StatusCode::SUCCESS);
+}
+
+TEST(GraphValidationDiagnostics, ReportDiscoveryHandlesDeepReconvergentDagWithoutPathEnumeration) {
+    CountingReportValidationNetwork network("report_discovery_reconvergent_dag");
+    Api::NetworkInput values = Api::NetworkInput::Builder()
+                                   .network(network)
+                                   .name("values")
+                                   .dimensions({4})
+                                   .dataType(Impl::DataType::FP32)
+                                   .build();
+
+    // Each stage splits and reconverges. A recursion-stack-only traversal visits
+    // the prefix once per distinct path (2^N); memoized DAG traversal visits each
+    // tensor once. Keep this graph large enough to catch accidental path
+    // enumeration while remaining tiny after memoization.
+    Api::Tensor current = values.getFeatureOutput().value();
+    for (int stage = 0; stage < 22; ++stage) {
+        std::shared_ptr<Api::Activation> left =
+            Api::Relu::Builder().network(network).featureInput(current).build();
+        std::shared_ptr<Api::Activation> right =
+            Api::Relu::Builder().network(network).featureInput(current).build();
+        Api::Add joined = Api::Add::Builder()
+                              .network(network)
+                              .left(left->getFeatureOutput().value())
+                              .right(right->getFeatureOutput().value())
+                              .build();
+        current = joined.getFeatureOutput().value();
+    }
+
+    Api::Mean mean = Api::Mean::Builder().network(network).values(current).build();
+    Api::NetworkOutput::Builder().network(network).name("reconvergent_mean").inputTensor(mean.getMetric()).build();
+
+    const Api::NetworkTrainingValidationSnapshot snapshot = network.validateTrainingGraphAndCollectReports();
+    ASSERT_EQ(snapshot.reportableMetrics.size(), 1u);
+    EXPECT_EQ(snapshot.reportableMetrics[0].metricName, "reconvergent_mean");
+    ASSERT_TRUE(snapshot.reportableMetrics[0].inputSourceName.has_value());
+    EXPECT_EQ(snapshot.reportableMetrics[0].inputSourceName.value(), "values");
+    EXPECT_EQ(snapshot.reportableMetrics[0].requiredInputNames, (std::vector<std::string>{"values"}));
+    EXPECT_EQ(network.getTrainingValidationPasses(), 1u);
 }

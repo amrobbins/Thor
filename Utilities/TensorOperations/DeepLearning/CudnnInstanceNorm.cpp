@@ -1,5 +1,7 @@
 #include "Utilities/TensorOperations/DeepLearning/CudnnInstanceNorm.h"
 
+#include "Utilities/Common/CudnnExecutionWorkspace.h"
+
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
 
@@ -191,11 +193,7 @@ vector<int64_t> statsStrides(const CudnnInstanceNormDescriptor& descriptor) {
     return {checkedI64(descriptor.channelCount, "channelCount"), 1, 1, 1};
 }
 
-struct BuiltGraph {
-    shared_ptr<fe::graph::Graph> graph;
-    Tensor workspace;
-    int64_t workspaceBytes = 0;
-};
+using BuiltGraph = CudnnCachedExecutionPlan<fe::graph::Graph>;
 
 class InstanceNormGraphCache {
    public:
@@ -272,11 +270,6 @@ class InstanceNormGraphCache {
         }
 
         built.workspaceBytes = workspaceBytes;
-        if (workspaceBytes > 0) {
-            built.workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                                     TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(workspaceBytes)}),
-                                     256);
-        }
     }
 
     BuiltGraph buildForwardGraph(const CudnnInstanceNormDescriptor& descriptor, int gpuNum) {
@@ -443,7 +436,10 @@ CudnnInstanceNorm& CudnnInstanceNorm::instance() {
     return singleton;
 }
 
-void CudnnInstanceNorm::forward(const CudnnInstanceNormDescriptor& descriptor, const CudnnInstanceNormForwardArgs& args, Stream stream) {
+void CudnnInstanceNorm::forward(const CudnnInstanceNormDescriptor& descriptor,
+                                const CudnnInstanceNormForwardArgs& args,
+                                optional<Tensor>& workspace,
+                                Stream stream) {
     descriptor.validateForward();
     const int gpuNum = stream.getGpuNum();
     requireIoTensor(args.x, descriptor, descriptor.inputDataType, gpuNum, "x");
@@ -470,14 +466,18 @@ void CudnnInstanceNorm::forward(const CudnnInstanceNormDescriptor& descriptor, c
         insertTensor(variantPack, UID_INV_VARIANCE, args.invVariance.value());
     }
 
-    void* workspace = built.workspaceBytes > 0 ? built.workspace.getMemPtr<void>() : nullptr;
-    auto status = built.graph->execute(stream.getCudnnHandle(), variantPack, workspace);
+    const uint64_t requiredWorkspaceBytes = checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "InstanceNorm forward");
+    void* workspacePtr = cudnnExecutionWorkspacePointer(workspace, requiredWorkspaceBytes, gpuNum, "InstanceNorm forward");
+    auto status = built.graph->execute(stream.getCudnnHandle(), variantPack, workspacePtr);
     if (!status.is_good()) {
         throw runtime_error("Failed to execute cuDNN Frontend InstanceNorm graph: " + status.get_message());
     }
 }
 
-void CudnnInstanceNorm::backward(const CudnnInstanceNormDescriptor& descriptor, const CudnnInstanceNormBackwardArgs& args, Stream stream) {
+void CudnnInstanceNorm::backward(const CudnnInstanceNormDescriptor& descriptor,
+                                 const CudnnInstanceNormBackwardArgs& args,
+                                 optional<Tensor>& workspace,
+                                 Stream stream) {
     descriptor.validateBackward();
     const int gpuNum = stream.getGpuNum();
     requireIoTensor(args.dy, descriptor, descriptor.outputDataType, gpuNum, "dy");
@@ -501,16 +501,31 @@ void CudnnInstanceNorm::backward(const CudnnInstanceNormDescriptor& descriptor, 
     insertTensor(variantPack, UID_DSCALE, args.dscale);
     insertTensor(variantPack, UID_DBIAS, args.dbias);
 
-    void* workspace = built.workspaceBytes > 0 ? built.workspace.getMemPtr<void>() : nullptr;
-    auto status = built.graph->execute(stream.getCudnnHandle(), variantPack, workspace);
+    const uint64_t requiredWorkspaceBytes = checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "InstanceNorm backward");
+    void* workspacePtr = cudnnExecutionWorkspacePointer(workspace, requiredWorkspaceBytes, gpuNum, "InstanceNorm backward");
+    auto status = built.graph->execute(stream.getCudnnHandle(), variantPack, workspacePtr);
     if (!status.is_good()) {
         throw runtime_error("Failed to execute cuDNN Frontend InstanceNorm graph: " + status.get_message());
     }
 }
 
-void CudnnInstanceNorm::warmForward(const CudnnInstanceNormDescriptor& descriptor, int gpuNum) { (void)cache().getOrBuildForward(descriptor, gpuNum); }
+uint64_t CudnnInstanceNorm::forwardWorkspaceSizeInBytes(const CudnnInstanceNormDescriptor& descriptor, int gpuNum) {
+    const BuiltGraph& built = cache().getOrBuildForward(descriptor, gpuNum);
+    return checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "InstanceNorm forward");
+}
 
-void CudnnInstanceNorm::warmBackward(const CudnnInstanceNormDescriptor& descriptor, int gpuNum) { (void)cache().getOrBuildBackward(descriptor, gpuNum); }
+uint64_t CudnnInstanceNorm::backwardWorkspaceSizeInBytes(const CudnnInstanceNormDescriptor& descriptor, int gpuNum) {
+    const BuiltGraph& built = cache().getOrBuildBackward(descriptor, gpuNum);
+    return checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "InstanceNorm backward");
+}
+
+void CudnnInstanceNorm::warmForward(const CudnnInstanceNormDescriptor& descriptor, int gpuNum) {
+    (void)forwardWorkspaceSizeInBytes(descriptor, gpuNum);
+}
+
+void CudnnInstanceNorm::warmBackward(const CudnnInstanceNormDescriptor& descriptor, int gpuNum) {
+    (void)backwardWorkspaceSizeInBytes(descriptor, gpuNum);
+}
 
 void CudnnInstanceNorm::clearCache() { cache().clear(); }
 

@@ -2832,6 +2832,16 @@ Multiple windowed fields may reference the same persisted sequence.
         "early_completion_policies"_a.none() = nb::none(),
         "max_training_batches_per_epoch"_a.none() = nb::none());
     trainer.def(
+        "set_data",
+        [](Trainer& self, std::shared_ptr<Thor::TrainingData> data) {
+            if (data == nullptr) {
+                throw nb::value_error("Trainer.set_data requires data");
+            }
+            self.setTrainingData(std::move(data));
+        },
+        "data"_a,
+        "Replace this phase-backed Trainer's TrainingData recipe between fit calls while preserving model-state handoff.");
+    trainer.def(
         "save_model",
         [](Trainer& self, nb::object directory, bool overwrite, bool save_optimizer_state) {
             std::string path = pathStringFromPython(directory, "directory");

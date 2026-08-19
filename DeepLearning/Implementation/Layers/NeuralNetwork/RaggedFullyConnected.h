@@ -1,7 +1,9 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/TrainingDropoutControllable.h"
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace ThorImplementation {
@@ -14,7 +16,7 @@ namespace ThorImplementation {
 // consume that runtime extent directly and sanitize only the selected bucket
 // slack they are about to read. This wrapper therefore owns no inactive-tail
 // canonicalization or host active-row cache.
-class RaggedFullyConnected final : public CustomLayer {
+class RaggedFullyConnected final : public CustomLayer, public TrainingDropoutControllable {
    public:
     static constexpr const char* ROW_PARTITION_INPUT_NAME = "row_partition";
 
@@ -22,10 +24,20 @@ class RaggedFullyConnected final : public CustomLayer {
                          TensorPlacement placement,
                          std::vector<std::shared_ptr<PhysicalParameter>> physicalParameters,
                          bool inferenceOnly,
-                         int64_t stampedId = -1);
+                         int64_t stampedId = -1,
+                         bool useResidual = false,
+                         std::optional<DynamicExpressionVariantId> deterministicTrainingVariantId = std::nullopt,
+                         bool trainingDropoutEnabled = true);
+
+    void setTrainingDropoutEnabled(bool enabled) override;
+    [[nodiscard]] bool isTrainingDropoutEnabled() const override { return trainingDropoutEnabled; }
 
     std::string getType() override { return "RaggedFullyConnected"; }
     std::string getLayerType() override { return "RaggedFullyConnected"; }
+
+   private:
+    std::optional<DynamicExpressionVariantId> deterministicTrainingVariantId;
+    bool trainingDropoutEnabled = true;
 };
 
 }  // namespace ThorImplementation

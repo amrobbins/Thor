@@ -77,8 +77,20 @@ class CudnnAdaptiveLayerNorm {
    public:
     static CudnnAdaptiveLayerNorm& instance();
 
-    void forward(const CudnnAdaptiveLayerNormDescriptor& descriptor, const CudnnAdaptiveLayerNormForwardArgs& args, Stream stream);
-    void backward(const CudnnAdaptiveLayerNormDescriptor& descriptor, const CudnnAdaptiveLayerNormBackwardArgs& args, Stream stream);
+    void forward(const CudnnAdaptiveLayerNormDescriptor& descriptor,
+                 const CudnnAdaptiveLayerNormForwardArgs& args,
+                 std::optional<Tensor>& workspace,
+                 Stream stream);
+    void backward(const CudnnAdaptiveLayerNormDescriptor& descriptor,
+                  const CudnnAdaptiveLayerNormBackwardArgs& args,
+                  std::optional<Tensor>& workspace,
+                  Stream stream);
+
+    // Build/lookup the compatible cached graph and report its cuDNN execution
+    // workspace requirement. The returned byte count is immutable graph metadata;
+    // execution workspace itself belongs to the placed/stamped caller.
+    [[nodiscard]] uint64_t forwardWorkspaceSizeInBytes(const CudnnAdaptiveLayerNormDescriptor& descriptor, int gpuNum);
+    [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes(const CudnnAdaptiveLayerNormDescriptor& descriptor, int gpuNum);
 
     void warmForward(const CudnnAdaptiveLayerNormDescriptor& descriptor, int gpuNum);
     void warmBackward(const CudnnAdaptiveLayerNormDescriptor& descriptor, int gpuNum);

@@ -1,4 +1,6 @@
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
+
+#include "Utilities/Common/CudnnExecutionWorkspace.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnRaggedAttentionMetadata.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
@@ -586,11 +588,7 @@ fe::DataType_t toFrontendDataType(DataType dtype) {
     }
 }
 
-struct BuiltGraph {
-    shared_ptr<fe::graph::Graph> graph;
-    Tensor workspace;
-    int64_t workspaceBytes = 0;
-};
+using BuiltGraph = CudnnCachedExecutionPlan<fe::graph::Graph>;
 
 class AttentionGraphCache {
    public:
@@ -767,11 +765,6 @@ class AttentionGraphCache {
             throw runtime_error("Failed to query cuDNN Frontend SDPA workspace: " + status.get_message());
 
         built.workspaceBytes = workspaceBytes;
-        if (workspaceBytes > 0) {
-            built.workspace = Tensor(TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
-                                     TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(workspaceBytes)}),
-                                     256);
-        }
     }
 
     BuiltGraph buildForwardGraph(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
@@ -1126,9 +1119,14 @@ void insertOptionalTensor(unordered_map<int64_t, void*>& pack, int64_t uid, cons
         pack[uid] = const_cast<void*>(static_cast<const void*>(tensor.value().getMemPtr<void>()));
 }
 
-void executeGraph(BuiltGraph& built, unordered_map<int64_t, void*>& pack, Stream stream) {
-    void* workspace = built.workspaceBytes > 0 ? built.workspace.getMemPtr<void>() : nullptr;
-    auto status = built.graph->execute(stream.getCudnnHandle(), pack, workspace);
+void executeGraph(BuiltGraph& built,
+                  unordered_map<int64_t, void*>& pack,
+                  optional<Tensor>& workspace,
+                  Stream stream,
+                  string_view operationName) {
+    const uint64_t requiredBytes = checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, operationName);
+    void* workspacePointer = cudnnExecutionWorkspacePointer(workspace, requiredBytes, stream.getGpuNum(), operationName);
+    auto status = built.graph->execute(stream.getCudnnHandle(), pack, workspacePointer);
     if (!status.is_good())
         throw runtime_error("Failed to execute cuDNN Frontend SDPA graph: " + status.get_message());
 }
@@ -1407,6 +1405,7 @@ CudnnScaledDotProductAttention& CudnnScaledDotProductAttention::instance() {
 
 void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& descriptor,
                                              const CudnnAttentionForwardArgs& args,
+                                             optional<Tensor>& workspace,
                                              Stream stream) {
     CudnnAttentionDescriptor runtimeDescriptor = descriptorWithRuntimeBiasSpec(descriptor, args.bias, attentionForwardBiasDataType(descriptor));
     runtimeDescriptor.validateForward();
@@ -1526,11 +1525,12 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
         insertTensor(pack, UID_AMAX_O, args.amaxO.value());
     }
 
-    executeGraph(graph, pack, stream);
+    executeGraph(graph, pack, workspace, stream, "SDPA forward");
 }
 
 void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& descriptor,
                                               const CudnnAttentionBackwardArgs& args,
+                                              optional<Tensor>& workspace,
                                               Stream stream) {
     CudnnAttentionDescriptor runtimeDescriptor = descriptorWithRuntimeBiasSpec(descriptor, args.bias, attentionForwardBiasDataType(descriptor));
     runtimeDescriptor = descriptorWithRuntimeDBiasSpec(runtimeDescriptor, args.dBias);
@@ -1667,15 +1667,42 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& de
         insertTensor(pack, UID_AMAX_DP, args.amaxDP.value());
     }
 
-    executeGraph(graph, pack, stream);
+    executeGraph(graph, pack, workspace, stream, "SDPA backward");
+}
+
+uint64_t CudnnScaledDotProductAttention::forwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
+    const BuiltGraph& built = cache().getOrBuildForward(descriptor, gpuNum);
+    return checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "SDPA forward");
+}
+
+uint64_t CudnnScaledDotProductAttention::backwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
+    const BuiltGraph& built = cache().getOrBuildBackward(descriptor, gpuNum);
+    return checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "SDPA backward");
+}
+
+uint64_t CudnnScaledDotProductAttention::forwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor,
+                                                                     const CudnnAttentionForwardArgs& args,
+                                                                     int gpuNum) {
+    const CudnnAttentionDescriptor runtimeDescriptor =
+        descriptorWithRuntimeBiasSpec(descriptor, args.bias, attentionForwardBiasDataType(descriptor));
+    return forwardWorkspaceSizeInBytes(runtimeDescriptor, gpuNum);
+}
+
+uint64_t CudnnScaledDotProductAttention::backwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor,
+                                                                      const CudnnAttentionBackwardArgs& args,
+                                                                      int gpuNum) {
+    CudnnAttentionDescriptor runtimeDescriptor =
+        descriptorWithRuntimeBiasSpec(descriptor, args.bias, attentionForwardBiasDataType(descriptor));
+    runtimeDescriptor = descriptorWithRuntimeDBiasSpec(runtimeDescriptor, args.dBias);
+    return backwardWorkspaceSizeInBytes(runtimeDescriptor, gpuNum);
 }
 
 void CudnnScaledDotProductAttention::warmForward(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
-    (void)cache().getOrBuildForward(descriptor, gpuNum);
+    (void)forwardWorkspaceSizeInBytes(descriptor, gpuNum);
 }
 
 void CudnnScaledDotProductAttention::warmBackward(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
-    (void)cache().getOrBuildBackward(descriptor, gpuNum);
+    (void)backwardWorkspaceSizeInBytes(descriptor, gpuNum);
 }
 
 void CudnnScaledDotProductAttention::clearCache() { cache().clear(); }

@@ -224,10 +224,31 @@ class CudnnScaledDotProductAttention {
    public:
     static CudnnScaledDotProductAttention& instance();
 
-    void forward(const CudnnAttentionDescriptor& descriptor, const CudnnAttentionForwardArgs& args, Stream stream);
-    void backward(const CudnnAttentionDescriptor& descriptor, const CudnnAttentionBackwardArgs& args, Stream stream);
+    void forward(const CudnnAttentionDescriptor& descriptor,
+                 const CudnnAttentionForwardArgs& args,
+                 std::optional<Tensor>& workspace,
+                 Stream stream);
+    void backward(const CudnnAttentionDescriptor& descriptor,
+                  const CudnnAttentionBackwardArgs& args,
+                  std::optional<Tensor>& workspace,
+                  Stream stream);
 
     // Useful after shape inference / stamping when a model will repeatedly run the same attention shape.
+    // Build/lookup the compatible cached graph and report its cuDNN execution
+    // workspace requirement. The returned byte count is immutable graph metadata;
+    // execution workspace itself belongs to the placed/stamped caller.
+    [[nodiscard]] uint64_t forwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor, int gpuNum);
+    [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor, int gpuNum);
+    // Attention bias/dBias shapes may be runtime-bound and participate in the
+    // graph cache key. These overloads size the exact graph that forward/backward
+    // will execute for the supplied bindings.
+    [[nodiscard]] uint64_t forwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor,
+                                                       const CudnnAttentionForwardArgs& args,
+                                                       int gpuNum);
+    [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor,
+                                                        const CudnnAttentionBackwardArgs& args,
+                                                        int gpuNum);
+
     void warmForward(const CudnnAttentionDescriptor& descriptor, int gpuNum);
     void warmBackward(const CudnnAttentionDescriptor& descriptor, int gpuNum);
 

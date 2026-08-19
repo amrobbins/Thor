@@ -1,4 +1,5 @@
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Common/GpuMemoryDiagnostics.h"
 #include <optional>
 #include <array>
 #include <algorithm>
@@ -26,6 +27,19 @@ using namespace std;
 using DataType = ThorImplementation::DataType;
 
 namespace ThorImplementation {
+
+
+static std::optional<Tensor> allocateExpressionWorkspace(const TensorPlacement& placement,
+                                                         uint64_t workspace_bytes,
+                                                         std::string_view category,
+                                                         std::string_view detail) {
+    if (workspace_bytes == 0) {
+        return std::nullopt;
+    }
+    reportGpuWorkspaceAllocationRequest(category, placement.getDeviceNum(), workspace_bytes, detail);
+    ScopedGpuAllocationContext allocation_context(std::string(category) + ": " + std::string(detail));
+    return Tensor(placement, TensorDescriptor(DataType::UINT8, {workspace_bytes}));
+}
 
 static bool runtimeInputIsTensor(const RuntimeInputValue& value) { return std::holds_alternative<Tensor>(value); }
 static bool runtimeInputIsRuntimeScalar(const RuntimeInputValue& value) { return std::holds_alternative<float>(value); }
@@ -1324,6 +1338,7 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::LOGICAL_NOT:
             case ExprOp::CAST:
                 node_dims[i] = node_dims[node.lhs];
                 break;
@@ -1679,6 +1694,7 @@ static bool sameSubexpressionForMatmulEpilogue(const PhysicalExpression& expr,
                    (a.alpha_node == b.alpha_node || sameSubexpressionForMatmulEpilogue(expr, a.alpha_node, b.alpha_node, depth + 1)) &&
                    (a.beta_node == b.beta_node || sameSubexpressionForMatmulEpilogue(expr, a.beta_node, b.beta_node, depth + 1));
         case ExprOp::NORMCDF:
+        case ExprOp::LOGICAL_NOT:
             return sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1);
         case ExprOp::TAKE_ALONG_AXIS:
             return a.reduction_axes == b.reduction_axes &&
@@ -3722,6 +3738,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::LOGICAL_NOT:
             case ExprOp::CAST:
                 node_dims[i] = node_dims[node.lhs];
                 break;
@@ -4127,6 +4144,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::SQRT:
             case ExprOp::TANH:
             case ExprOp::NORMCDF:
+            case ExprOp::LOGICAL_NOT:
             case ExprOp::CAST:
                 node_dims[i] = node_dims[node.lhs];
                 break;
@@ -7769,10 +7787,8 @@ std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::s
     std::shared_ptr<BuiltConvolution> built =
         StampedEquation::buildConvolution(compiledStage, input, filter, output, stream, input.getPlacement().getDeviceNum());
 
-    std::optional<Tensor> workspace = std::nullopt;
-    if (built->workspace_bytes > 0) {
-        workspace = Tensor(input.getPlacement(), TensorDescriptor(DataType::UINT8, {built->workspace_bytes}));
-    }
+    std::optional<Tensor> workspace = allocateExpressionWorkspace(
+        input.getPlacement(), built->workspace_bytes, "convolution_forward", "input=" + input.getDescriptor().toString());
 
     return std::make_shared<StampedConvolution>(compiledStage, built, input, filter, output, stream, workspace);
 }
@@ -7821,10 +7837,8 @@ std::shared_ptr<StampedConvolutionBackward> FusedEquation::stampConvolutionBackw
     std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolutionBackward(
         compiledStage, input, grad_output, output, stream, input.getPlacement().getDeviceNum());
 
-    std::optional<Tensor> workspace = std::nullopt;
-    if (built->workspace_bytes > 0) {
-        workspace = Tensor(input.getPlacement(), TensorDescriptor(DataType::UINT8, {built->workspace_bytes}));
-    }
+    std::optional<Tensor> workspace = allocateExpressionWorkspace(
+        input.getPlacement(), built->workspace_bytes, "convolution_backward", "input=" + input.getDescriptor().toString());
 
     return std::make_shared<StampedConvolutionBackward>(compiledStage, built, input, grad_output, output, stream, workspace);
 }
@@ -7938,11 +7952,12 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                                       epilogue_aux,
                                                                       bgrad_output);
 
-    std::optional<Tensor> workspace = std::nullopt;
-    if (built->workspace_bytes > 0) {
-        TensorDescriptor workspaceDescriptor(DataType::UINT8, {built->workspace_bytes});
-        workspace = Tensor(lhs.getPlacement(), workspaceDescriptor);
-    }
+    std::optional<Tensor> workspace = allocateExpressionWorkspace(
+        lhs.getPlacement(),
+        built->workspace_bytes,
+        "matmul",
+        "lhs=" + lhs.getDescriptor().toString() + " rhs=" + rhs.getDescriptor().toString() +
+            " output=" + output.getDescriptor().toString());
 
     return make_shared<StampedMatmul>(compiledStage,
                                       built,
@@ -8086,11 +8101,12 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                                       epilogue_aux,
                                                                       bgrad_output);
 
-    std::optional<Tensor> workspace = std::nullopt;
-    if (built->workspace_bytes > 0) {
-        TensorDescriptor workspaceDescriptor(DataType::UINT8, {built->workspace_bytes});
-        workspace = Tensor(lhs.getPlacement(), workspaceDescriptor);
-    }
+    std::optional<Tensor> workspace = allocateExpressionWorkspace(
+        lhs.getPlacement(),
+        built->workspace_bytes,
+        "matmul",
+        "lhs=" + lhs.getDescriptor().toString() + " rhs=" + rhs.getDescriptor().toString() +
+            " output=" + output.getDescriptor().toString());
 
     std::optional<Tensor> alpha_device_scratch = std::nullopt;
     std::optional<Tensor> beta_device_scratch = std::nullopt;
@@ -10309,14 +10325,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                                              dropoutSeedTensor,
                                                                              dropoutOffsetTensor,
                                                                              dOTensor)) {
-                        if (!candidate_state->stats.isInitialized()) {
-                            const std::vector<uint64_t> o_dims = candidate_state->output.getDimensions();
-                            TensorDescriptor statsDescriptor(DataType::FP32,
-                                                             {o_dims.at(0), o_dims.at(1), o_dims.at(2), 1});
-                            candidate_state->stats = Tensor(candidate_state->output.getPlacement(), statsDescriptor);
-                        }
-                        candidate_state->retain_for_backward = true;
-                        savedForwardState = candidate_state;
+                        candidate_stage.attention->retainForwardStateForBackward();
+                        savedForwardState = candidate_stage.attention->getForwardState();
                         break;
                     }
                 }

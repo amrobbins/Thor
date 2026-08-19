@@ -64,6 +64,12 @@ class LayerNorm : public TrainableLayer {
     std::vector<Tensor> scratchDScale;
     std::vector<Tensor> scratchDBias;
     std::optional<Tensor> scratchErrorOutput;
+
+    // LayerNorm is a MultiConnectionLayer. Connections may execute on
+    // independent CUDA streams, so mutable cuDNN scratch must be owned per
+    // connection rather than by the globally shared graph cache.
+    std::vector<std::optional<Tensor>> forwardWorkspaces;
+    std::vector<std::optional<Tensor>> backwardWorkspaces;
 };
 
 }  // namespace ThorImplementation

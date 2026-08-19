@@ -28,6 +28,8 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 using namespace std;
@@ -125,6 +127,38 @@ Impl::DynamicExpression makeSerializableAffineExpression() {
     Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
     Impl::Expression y = x * 3.0f + 2.0f;
     Impl::ExpressionDefinition definition = Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"y", y}}));
+    return Impl::DynamicExpression::fromExpressionDefinition(definition);
+}
+
+Impl::DynamicExpression makeSerializableLogicalMaskExpression() {
+    Impl::Expression labels = Impl::Expression::input("labels", DataType::FP32, DataType::FP32);
+    Impl::Expression initial = Impl::Expression::input("initial_daily_units", DataType::FP32, DataType::FP32);
+    Impl::Expression zero = Impl::Expression::constantScalar(0.0);
+    Impl::Expression two = Impl::Expression::constantScalar(2.0);
+
+    Impl::Expression positive = labels > zero;
+    Impl::Expression initialPositive = initial > zero;
+    Impl::Expression spike = labels > (initial * two);
+
+    Impl::Expression notPositive = positive.logicalNot();
+    Impl::Expression positiveAndInitial = positive.logicalAnd(initialPositive);
+    Impl::Expression positiveOrInitial = positive.logicalOr(initialPositive);
+    Impl::Expression positiveAndNotInitial = positive.logicalAnd(initialPositive.logicalNot());
+    Impl::Expression typicalPositive = positive.logicalAnd(spike.logicalNot());
+
+    Impl::ExpressionDefinition definition = Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({
+        {"not_positive", notPositive},
+        {"positive_and_initial", positiveAndInitial},
+        {"positive_or_initial", positiveOrInitial},
+        {"positive_and_not_initial", positiveAndNotInitial},
+        {"not_positive_fp32", notPositive.cast(DataType::FP32)},
+        {"positive_and_initial_fp32", positiveAndInitial.cast(DataType::FP32)},
+        {"positive_or_initial_fp32", positiveOrInitial.cast(DataType::FP32)},
+        {"positive_and_not_initial_fp32", positiveAndNotInitial.cast(DataType::FP32)},
+        {"zero_mask", (labels == zero).cast(DataType::FP32)},
+        {"typical_positive_mask", typicalPositive.cast(DataType::FP32)},
+        {"spike_mask", spike.cast(DataType::FP32)},
+    }));
     return Impl::DynamicExpression::fromExpressionDefinition(definition);
 }
 
@@ -668,6 +702,206 @@ TEST(CustomLayerApi, SerializableExpressionDefinitionSaveLoadRoundTripPreservesE
     std::filesystem::remove_all(archiveDir);
 }
 
+
+TEST(CustomLayerApi, LogicalCompositionInfersShapesAndDTypesInsideCustomLayer) {
+    constexpr uint32_t numFeatures = 3;
+    Api::Network network("custom_layer_logical_composition_shape_dtype");
+    Api::NetworkInput labels =
+        Api::NetworkInput::Builder().network(network).name("labels_input").dimensions({numFeatures}).dataType(DataType::FP32).build();
+    Api::NetworkInput initial = Api::NetworkInput::Builder()
+                                    .network(network)
+                                    .name("initial_input")
+                                    .dimensions({numFeatures})
+                                    .dataType(DataType::FP32)
+                                    .build();
+
+    const vector<string> outputNames = {
+        "not_positive",
+        "positive_and_initial",
+        "positive_or_initial",
+        "positive_and_not_initial",
+        "not_positive_fp32",
+        "positive_and_initial_fp32",
+        "positive_or_initial_fp32",
+        "positive_and_not_initial_fp32",
+        "zero_mask",
+        "typical_positive_mask",
+        "spike_mask",
+    };
+
+    Api::CustomLayer custom = Api::CustomLayer::Builder()
+                                  .network(network)
+                                  .expression(makeSerializableLogicalMaskExpression())
+                                  .inputNames({"labels", "initial_daily_units"})
+                                  .outputNames(outputNames)
+                                  .inputInterface({{"labels", labels.getFeatureOutput().value()},
+                                                   {"initial_daily_units", initial.getFeatureOutput().value()}})
+                                  .build();
+
+    const vector<string> booleanOutputNames = {
+        "not_positive", "positive_and_initial", "positive_or_initial", "positive_and_not_initial"};
+    for (const string& name : booleanOutputNames) {
+        EXPECT_EQ(custom.getOutput(name).getDimensions(), (vector<uint64_t>{numFeatures})) << name;
+        EXPECT_EQ(custom.getOutput(name).getDataType(), DataType::BOOLEAN) << name;
+    }
+    const vector<string> fp32OutputNames = {"not_positive_fp32",
+                                             "positive_and_initial_fp32",
+                                             "positive_or_initial_fp32",
+                                             "positive_and_not_initial_fp32",
+                                             "zero_mask",
+                                             "typical_positive_mask",
+                                             "spike_mask"};
+    for (const string& name : fp32OutputNames) {
+        EXPECT_EQ(custom.getOutput(name).getDimensions(), (vector<uint64_t>{numFeatures})) << name;
+        EXPECT_EQ(custom.getOutput(name).getDataType(), DataType::FP32) << name;
+    }
+
+    const nlohmann::json json = custom.architectureJson();
+    ASSERT_FALSE(json.at("expression").is_null());
+    EXPECT_NE(json.at("expression").dump().find("logical_not"), string::npos);
+    EXPECT_NE(json.at("expression").dump().find("logical_and"), string::npos);
+    EXPECT_NE(json.at("expression").dump().find("logical_or"), string::npos);
+}
+
+TEST(CustomLayerApi, LogicalCompositionSaveLoadExecutesExpectedMasks) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Logical CustomLayer execution test requires a GPU";
+
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t numFeatures = 3;
+    const vector<float> labelsValues = {0.0f, 1.0f, 5.0f, -1.0f, 3.0f, 2.0f};
+    const vector<float> initialValues = {1.0f, 1.0f, 2.0f, 1.0f, 10.0f, 0.0f};
+
+    const vector<pair<string, vector<float>>> expectedOutputs = {
+        {"not_positive_fp32", {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f}},
+        {"positive_and_initial_fp32", {0.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f}},
+        {"positive_or_initial_fp32", {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f}},
+        {"positive_and_not_initial_fp32", {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}},
+        {"zero_mask", {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {"typical_positive_mask", {0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f}},
+        {"spike_mask", {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f}},
+    };
+
+    const string networkName = "custom_layer_logical_composition_save_load";
+    const filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput labels =
+            Api::NetworkInput::Builder().network(network).name("labels_input").dimensions({numFeatures}).dataType(DataType::FP32).build();
+        Api::NetworkInput initial = Api::NetworkInput::Builder()
+                                        .network(network)
+                                        .name("initial_input")
+                                        .dimensions({numFeatures})
+                                        .dataType(DataType::FP32)
+                                        .build();
+
+        const vector<string> outputNames = {
+            "not_positive",
+            "positive_and_initial",
+            "positive_or_initial",
+            "positive_and_not_initial",
+            "not_positive_fp32",
+            "positive_and_initial_fp32",
+            "positive_or_initial_fp32",
+            "positive_and_not_initial_fp32",
+            "zero_mask",
+            "typical_positive_mask",
+            "spike_mask",
+        };
+        Api::CustomLayer custom = Api::CustomLayer::Builder()
+                                      .network(network)
+                                      .expression(makeSerializableLogicalMaskExpression())
+                                      .inputNames({"labels", "initial_daily_units"})
+                                      .outputNames(outputNames)
+                                      .inputInterface({{"labels", labels.getFeatureOutput().value()},
+                                                       {"initial_daily_units", initial.getFeatureOutput().value()}})
+                                      .build();
+
+        for (const string& name : outputNames) {
+            Api::Tensor customOutput = custom.getOutput(name);
+            (void)Api::NetworkOutput::Builder()
+                .network(network)
+                .name(name)
+                .inputTensor(customOutput)
+                .dataType(customOutput.getDataType())
+                .build();
+        }
+
+        network.save(archiveDir.string(), true);
+
+        Api::Network loaded(networkName);
+        loaded.load(archiveDir.string());
+
+        shared_ptr<Api::NetworkInput> loadedLabels;
+        shared_ptr<Api::NetworkInput> loadedInitial;
+        shared_ptr<Api::CustomLayer> loadedCustom;
+        unordered_map<string, shared_ptr<Api::NetworkOutput>> loadedOutputs;
+        for (uint32_t i = 0; i < loaded.getNumLayers(); ++i) {
+            shared_ptr<Api::Layer> layer = loaded.getLayer(i);
+            if (auto input = dynamic_pointer_cast<Api::NetworkInput>(layer)) {
+                if (input->getName() == "labels_input")
+                    loadedLabels = input;
+                else if (input->getName() == "initial_input")
+                    loadedInitial = input;
+            } else if (auto customLayer = dynamic_pointer_cast<Api::CustomLayer>(layer)) {
+                loadedCustom = customLayer;
+            } else if (auto output = dynamic_pointer_cast<Api::NetworkOutput>(layer)) {
+                loadedOutputs.emplace(output->getName(), output);
+            }
+        }
+
+        ASSERT_NE(loadedLabels, nullptr);
+        ASSERT_NE(loadedInitial, nullptr);
+        ASSERT_NE(loadedCustom, nullptr);
+        for (const auto& [name, expected] : expectedOutputs) {
+            (void)expected;
+            ASSERT_TRUE(loadedOutputs.contains(name)) << name;
+        }
+
+        const nlohmann::json loadedJson = loadedCustom->architectureJson();
+        ASSERT_FALSE(loadedJson.at("expression").is_null());
+        EXPECT_NE(loadedJson.at("expression").dump().find("logical_not"), string::npos);
+        EXPECT_NE(loadedJson.at("expression").dump().find("logical_and"), string::npos);
+        EXPECT_NE(loadedJson.at("expression").dump().find("logical_or"), string::npos);
+
+        vector<Event> initDoneEvents;
+        shared_ptr<Api::PlacedNetwork> placed = loaded.place(batchSize, initDoneEvents, true);
+        synchronizeEvents(initDoneEvents);
+        ASSERT_NE(placed, nullptr);
+        auto& stamped = placed->getStampedNetwork(0);
+
+        auto physicalLabels = dynamic_pointer_cast<Impl::NetworkInput>(stamped.getPhysicalLayerFromApiLayer(loadedLabels->getId()));
+        auto physicalInitial = dynamic_pointer_cast<Impl::NetworkInput>(stamped.getPhysicalLayerFromApiLayer(loadedInitial->getId()));
+        ASSERT_NE(physicalLabels, nullptr);
+        ASSERT_NE(physicalInitial, nullptr);
+
+        unordered_map<string, shared_ptr<Impl::NetworkOutput>> physicalOutputs;
+        for (const auto& [name, apiOutput] : loadedOutputs) {
+            auto output = dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(apiOutput->getId()));
+            ASSERT_NE(output, nullptr) << name;
+            physicalOutputs.emplace(name, output);
+        }
+
+        Impl::Tensor labelsHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {batchSize, numFeatures}));
+        Impl::Tensor initialHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {batchSize, numFeatures}));
+        writeCpuTensor(labelsHost, labelsValues);
+        writeCpuTensor(initialHost, initialValues);
+
+        physicalLabels->forward(labelsHost, false, batchSize);
+        physicalInitial->forward(initialHost, false, batchSize);
+
+        for (const auto& [name, expected] : expectedOutputs) {
+            auto& output = physicalOutputs.at(name);
+            output->getOutputReadyEvent().synchronize();
+            expectAllClose(readCpuTensor(output->getFeatureOutput().value()), expected);
+        }
+    } catch (...) {
+        filesystem::remove_all(archiveDir);
+        throw;
+    }
+    filesystem::remove_all(archiveDir);
+}
 
 TEST(CustomLayerApi, ConditionalCudaExpressionSaveLoadRoundTripRunsBothBranches) {
     if (MachineEvaluator::instance().getNumGpus() == 0)

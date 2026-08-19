@@ -61,9 +61,13 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
               int64_t diagonalRightBound,
               bool useAlibiMask,
               std::optional<double> attentionScale,
-              float dropoutProbability,
+              float sdpaDropoutProbability,
               int64_t dropoutSeed,
               int64_t dropoutOffset,
+              float outputDropoutProbability,
+              int64_t outputDropoutSeed,
+              std::optional<Tensor> residualInput,
+              std::optional<RaggedTensor> raggedResidualInput,
               std::optional<Tensor> contextInput,
               std::optional<Tensor> scoreBiasInput,
               std::optional<Tensor> querySequenceLengthsInput,
@@ -89,6 +93,9 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
                           if (raggedFeatureInput.has_value()) {
                               names.insert("feature_input");
                               names.insert("query_row_partition");
+                              if (raggedResidualInput.has_value()) {
+                                  names.insert("residual_input");
+                              }
                               for (const auto& [name, tensor] : epilogueInputBindings) {
                                   (void)tensor;
                                   names.insert(name);
@@ -125,9 +132,13 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
           diagonalRightBound(diagonalRightBound),
           useAlibiMask(useAlibiMask),
           attentionScale(attentionScale),
-          dropoutProbability(dropoutProbability),
+          sdpaDropoutProbability(sdpaDropoutProbability),
           dropoutSeed(dropoutSeed),
           dropoutOffset(dropoutOffset),
+          outputDropoutProbability(outputDropoutProbability),
+          outputDropoutSeed(outputDropoutSeed),
+          residualInput(std::move(residualInput)),
+          raggedResidualInput(std::move(raggedResidualInput)),
           epilogue(std::move(epilogue)),
           epilogueInputBindings(std::move(epilogueInputBindings)),
           contextInput(std::move(contextInput)),
@@ -237,9 +248,21 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
     int64_t getDiagonalRightBound() const { return diagonalRightBound; }
     bool getUseAlibiMask() const { return useAlibiMask; }
     std::optional<double> getAttentionScale() const { return attentionScale; }
-    float getDropoutProbability() const { return dropoutProbability; }
-    int64_t getDropoutSeed() const { return dropoutSeed; }
-    int64_t getDropoutOffset() const { return dropoutOffset; }
+    // Canonical name: this is dropout on the SDPA probability matrix, not on
+    // the Attention output projection. getDropoutProbability() remains as a
+    // source-compatible alias for older callers.
+    float getSdpaDropoutProbability() const { return sdpaDropoutProbability; }
+    float getDropoutProbability() const { return getSdpaDropoutProbability(); }
+    int64_t getSdpaDropoutSeed() const { return dropoutSeed; }
+    int64_t getSdpaDropoutOffset() const { return dropoutOffset; }
+    // Backward-compatible aliases.
+    int64_t getDropoutSeed() const { return getSdpaDropoutSeed(); }
+    int64_t getDropoutOffset() const { return getSdpaDropoutOffset(); }
+    float getOutputDropoutProbability() const { return outputDropoutProbability; }
+    int64_t getOutputDropoutSeed() const { return outputDropoutSeed; }
+    std::optional<Tensor> getResidualInput() const { return residualInput; }
+    std::optional<RaggedTensor> getRaggedResidualInput() const { return raggedResidualInput; }
+    bool getUseResidual() const { return residualInput.has_value(); }
     std::optional<Tensor> getFeatureInput() const override { return getInputInterface().at("feature_input"); }
     std::optional<Tensor> getContextInput() const { return contextInput; }
     bool getUseCrossAttention() const { return contextInput.has_value(); }
@@ -298,9 +321,13 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
     int64_t diagonalRightBound;
     bool useAlibiMask;
     std::optional<double> attentionScale;
-    float dropoutProbability;
+    float sdpaDropoutProbability;
     int64_t dropoutSeed;
     int64_t dropoutOffset;
+    float outputDropoutProbability;
+    int64_t outputDropoutSeed;
+    std::optional<Tensor> residualInput;
+    std::optional<RaggedTensor> raggedResidualInput;
     const std::optional<ThorImplementation::Expression> epilogue;
     std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
@@ -440,26 +467,71 @@ class Attention::Builder {
 
     // SDPA attention-probability dropout. Applied only during training;
     // validation and inference execute a separately compiled no-dropout SDPA plan.
-    virtual Attention::Builder& dropoutProbability(float value) {
-        THOR_THROW_IF_FALSE(!this->_dropoutProbability.has_value());
-        this->_dropoutProbability = value;
+    virtual Attention::Builder& sdpaDropoutProbability(float value) {
+        THOR_THROW_IF_FALSE(!this->_sdpaDropoutProbability.has_value());
+        this->_sdpaDropoutProbability = value;
         return *this;
     }
 
-    virtual Attention::Builder& dropoutSeed(int64_t value) {
+    // Backward-compatible C++ alias. New code should use sdpaDropoutProbability().
+    virtual Attention::Builder& dropoutProbability(float value) { return sdpaDropoutProbability(value); }
+
+    virtual Attention::Builder& sdpaDropoutSeed(int64_t value) {
         THOR_THROW_IF_FALSE(!this->_dropoutSeed.has_value());
         this->_dropoutSeed = value;
         return *this;
     }
 
-    virtual Attention::Builder& dropoutOffset(int64_t value) {
+    virtual Attention::Builder& sdpaDropoutOffset(int64_t value) {
         THOR_THROW_IF_FALSE(!this->_dropoutOffset.has_value());
         this->_dropoutOffset = value;
         return *this;
     }
 
+    // Backward-compatible C++ aliases.
+    virtual Attention::Builder& dropoutSeed(int64_t value) { return sdpaDropoutSeed(value); }
+    virtual Attention::Builder& dropoutOffset(int64_t value) { return sdpaDropoutOffset(value); }
+
+    virtual Attention::Builder& sdpaDropout(float probability, int64_t seed, int64_t offset) {
+        return sdpaDropoutProbability(probability).sdpaDropoutSeed(seed).sdpaDropoutOffset(offset);
+    }
+
+    // Backward-compatible C++ convenience alias.
     virtual Attention::Builder& dropout(float probability, int64_t seed, int64_t offset) {
-        return dropoutProbability(probability).dropoutSeed(seed).dropoutOffset(offset);
+        return sdpaDropout(probability, seed, offset);
+    }
+
+    // Dropout on the post-projection Attention branch. When residualInput() is
+    // present, Attention guarantees residual + dropout(projected_output). Thor
+    // chooses GEMM+residual when this rate is inactive and a fused native
+    // dropout+residual post-op when it is active.
+    virtual Attention::Builder& outputDropoutProbability(float value) {
+        THOR_THROW_IF_FALSE(!this->_outputDropoutProbability.has_value());
+        this->_outputDropoutProbability = value;
+        return *this;
+    }
+
+    // Optional deterministic seed for output dropout. If omitted while output
+    // dropout is enabled, Thor chooses an independent per-layer seed at build time.
+    virtual Attention::Builder& outputDropoutSeed(int64_t value) {
+        THOR_THROW_IF_FALSE(!this->_outputDropoutSeed.has_value());
+        this->_outputDropoutSeed = value;
+        return *this;
+    }
+
+    virtual Attention::Builder& residualInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_residualInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedResidualInput.has_value());
+        this->_residualInput = input;
+        return *this;
+    }
+
+    virtual Attention::Builder& residualInput(RaggedTensor input) {
+        THOR_THROW_IF_FALSE(!this->_residualInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedResidualInput.has_value());
+        this->_raggedResidualInput = input;
+        this->_residualInput = input.getValues();
+        return *this;
     }
 
     virtual Attention::Builder& querySequenceLengthsInput(Tensor input) {
@@ -613,9 +685,13 @@ class Attention::Builder {
     std::optional<int64_t> _diagonalRightBound;
     std::optional<bool> _useAlibiMask;
     std::optional<double> _attentionScale;
-    std::optional<float> _dropoutProbability;
+    std::optional<float> _sdpaDropoutProbability;
     std::optional<int64_t> _dropoutSeed;
     std::optional<int64_t> _dropoutOffset;
+    std::optional<float> _outputDropoutProbability;
+    std::optional<int64_t> _outputDropoutSeed;
+    std::optional<Tensor> _residualInput;
+    std::optional<RaggedTensor> _raggedResidualInput;
     std::optional<Tensor> _querySequenceLengthsInput;
     std::optional<Tensor> _keyValueSequenceLengthsInput;
     std::optional<bool> _useRope;
