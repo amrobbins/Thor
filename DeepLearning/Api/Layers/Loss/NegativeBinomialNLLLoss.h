@@ -11,42 +11,42 @@
 
 namespace Thor {
 
-class GaussianNLLLoss : public Loss {
+class NegativeBinomialNLLLoss : public Loss {
    public:
     class Builder;
-    GaussianNLLLoss() {}
+    NegativeBinomialNLLLoss() {}
 
-    ~GaussianNLLLoss() override {}
+    ~NegativeBinomialNLLLoss() override {}
 
-    std::shared_ptr<Layer> clone() const override { return std::make_shared<GaussianNLLLoss>(*this); }
+    std::shared_ptr<Layer> clone() const override { return std::make_shared<NegativeBinomialNLLLoss>(*this); }
 
-    std::string getLayerType() const override { return "GaussianNLLLoss"; }
+    std::string getLayerType() const override { return "NegativeBinomialNLLLoss"; }
 
     Tensor getMean() const { return predictionsTensor; }
     Tensor getTarget() const { return labelsTensor; }
-    Tensor getVariance() const { return varianceTensor; }
-    bool getLogVariance() const { return logVariance; }
+    Tensor getDispersion() const { return dispersionTensor; }
+    bool getLogMean() const { return logMean; }
+    bool getLogDispersion() const { return logDispersion; }
+    float getEps() const { return eps; }
+
     std::vector<Tensor> getLossInputTensors() const override {
-        std::vector<Tensor> inputs{predictionsTensor, labelsTensor, varianceTensor};
+        std::vector<Tensor> inputs{predictionsTensor, labelsTensor, dispersionTensor};
         if (exampleWeightsTensor.has_value())
             inputs.push_back(exampleWeightsTensor.value());
         return inputs;
     }
 
     int getConnectionType(Tensor connectingTensor) const override {
-        if (connectingTensor == varianceTensor)
+        if (connectingTensor == dispersionTensor)
             return (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD;
         return Loss::getConnectionType(connectingTensor);
     }
 
     [[nodiscard]] std::optional<std::string> getInputPortName(const Tensor& inputTensor) const override {
-        if (varianceTensor.isInitialized() && inputTensor == varianceTensor)
-            return "variance";
+        if (dispersionTensor.isInitialized() && inputTensor == dispersionTensor)
+            return "dispersion";
         return Loss::getInputPortName(inputTensor);
     }
-
-    bool getFull() const { return full; }
-    float getEps() const { return eps; }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
@@ -66,7 +66,7 @@ class GaussianNLLLoss : public Loss {
         (void)drivingApiLayer;
         (void)connectingApiTensor;
         (void)inferenceOnly;
-        throw std::runtime_error("GaussianNLLLoss is a compound API loss and should not be stamped directly.");
+        throw std::runtime_error("NegativeBinomialNLLLoss is a compound API loss and should not be stamped directly.");
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
@@ -77,168 +77,159 @@ class GaussianNLLLoss : public Loss {
                                   .reportsBatchLoss()
                                   .getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
         }
-
-        uint64_t bytes = 4;
-        bytes += batchSize * predictionsTensor.getTotalSizeInBytes() * 2;
-        bytes += batchSize * labelsTensor.getTotalSizeInBytes();
-        bytes += batchSize * varianceTensor.getTotalSizeInBytes() * 2;
-        if (exampleWeightsTensor.has_value())
-            bytes += batchSize * exampleWeightsTensor.value().getTotalSizeInBytes();
-        bytes += batchSize * lossTensor.getTotalSizeInBytes();
-        return bytes + lossShaperBytes;
+        uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+        uint64_t dispersionBytes = batchSize * dispersionTensor.getTotalSizeInBytes() * 2;
+        return standardLossBytes + dispersionBytes + lossShaperBytes;
     }
 
-    Tensor varianceTensor;
-    bool logVariance = false;
-    bool full = false;
-    float eps = 1.0e-6f;
+    Tensor dispersionTensor;
+    bool logMean = true;
+    bool logDispersion = true;
+    float eps = 1.0e-8f;
 };
 
-class GaussianNLLLoss::Builder {
+class NegativeBinomialNLLLoss::Builder {
    public:
     virtual ~Builder() = default;
 
-    virtual GaussianNLLLoss build() {
+    virtual NegativeBinomialNLLLoss build() {
         THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_predictions.has_value());
+        THOR_THROW_IF_FALSE(_mean.has_value());
+        THOR_THROW_IF_FALSE(_dispersion.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_variance.has_value());
-        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        THOR_THROW_IF_FALSE(_predictions.value() != _variance.value());
-        THOR_THROW_IF_FALSE(_labels.value() != _variance.value());
+        THOR_THROW_IF_FALSE(_mean.value() != _dispersion.value());
+        THOR_THROW_IF_FALSE(_mean.value() != _labels.value());
+        THOR_THROW_IF_FALSE(_dispersion.value() != _labels.value());
         if (_exampleWeights.has_value()) {
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _predictions.value());
+            THOR_THROW_IF_FALSE(_exampleWeights.value() != _mean.value());
+            THOR_THROW_IF_FALSE(_exampleWeights.value() != _dispersion.value());
             THOR_THROW_IF_FALSE(_exampleWeights.value() != _labels.value());
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _variance.value());
         }
-        THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _variance.value().getDimensions());
+        THOR_THROW_IF_FALSE(!_mean.value().getDimensions().empty());
+        THOR_THROW_IF_FALSE(_mean.value().getDimensions() == _dispersion.value().getDimensions());
+        THOR_THROW_IF_FALSE(_mean.value().getDimensions() == _labels.value().getDimensions());
 
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
         if (!_lossDataType.has_value())
-            _lossDataType = _predictions.value().getDataType();
+            _lossDataType = _mean.value().getDataType();
         THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
 
-        float eps = _eps.value_or(1.0e-6f);
+        float eps = _eps.value_or(1.0e-8f);
         THOR_THROW_IF_FALSE(eps > 0.0f);
 
-        GaussianNLLLoss loss;
-        loss.predictionsTensor = _predictions.value();
+        NegativeBinomialNLLLoss loss;
+        loss.predictionsTensor = _mean.value();
+        loss.dispersionTensor = _dispersion.value();
         loss.labelsTensor = _labels.value();
-        loss.varianceTensor = _variance.value();
         loss.exampleWeightsTensor = _exampleWeights;
         loss.lossDataType = _lossDataType.value();
-
         loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         loss.lossShape = _lossShape.value();
-        loss.logVariance = _logVariance.value_or(false);
-        loss.full = _full.value_or(false);
+        loss.logMean = _logMean.value_or(true);
+        loss.logDispersion = _logDispersion.value_or(true);
         loss.eps = eps;
         loss.network = _network.value();
         loss.initialized = true;
-
         loss.buildSupportLayersAndAddToNetwork();
-
         return loss;
     }
 
-    virtual GaussianNLLLoss::Builder &network(Network &_network) {
+    virtual NegativeBinomialNLLLoss::Builder &network(Network &_network) {
         THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &predictions(Tensor _predictions) {
-        THOR_THROW_IF_FALSE(!this->_predictions.has_value());
-        THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
-        this->_predictions = _predictions;
+    virtual NegativeBinomialNLLLoss::Builder &mean(Tensor _mean) {
+        THOR_THROW_IF_FALSE(!this->_mean.has_value());
+        THOR_THROW_IF_FALSE(!_mean.getDimensions().empty());
+        this->_mean = _mean;
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &mean(Tensor _mean) { return predictions(_mean); }
+    virtual NegativeBinomialNLLLoss::Builder &predictions(Tensor _mean) { return mean(_mean); }
 
-    virtual GaussianNLLLoss::Builder &labels(Tensor _labels) {
+    virtual NegativeBinomialNLLLoss::Builder &dispersion(Tensor _dispersion) {
+        THOR_THROW_IF_FALSE(!this->_dispersion.has_value());
+        THOR_THROW_IF_FALSE(!_dispersion.getDimensions().empty());
+        this->_dispersion = _dispersion;
+        return *this;
+    }
+
+    virtual NegativeBinomialNLLLoss::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &target(Tensor _target) { return labels(_target); }
+    virtual NegativeBinomialNLLLoss::Builder &target(Tensor _target) { return labels(_target); }
 
-    virtual GaussianNLLLoss::Builder &variance(Tensor _variance) {
-        THOR_THROW_IF_FALSE(!this->_variance.has_value());
-        THOR_THROW_IF_FALSE(!_variance.getDimensions().empty());
-        this->_variance = _variance;
+    virtual NegativeBinomialNLLLoss::Builder &logMean(bool _logMean) {
+        THOR_THROW_IF_FALSE(!this->_logMean.has_value());
+        this->_logMean = _logMean;
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &logVariance(bool _logVariance) {
-        THOR_THROW_IF_FALSE(!this->_logVariance.has_value());
-        this->_logVariance = _logVariance;
+    virtual NegativeBinomialNLLLoss::Builder &logDispersion(bool _logDispersion) {
+        THOR_THROW_IF_FALSE(!this->_logDispersion.has_value());
+        this->_logDispersion = _logDispersion;
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &exampleWeights(Tensor _exampleWeights) {
+    virtual NegativeBinomialNLLLoss::Builder &exampleWeights(Tensor _exampleWeights) {
         THOR_THROW_IF_FALSE(!this->_exampleWeights.has_value());
         THOR_THROW_IF_FALSE(_exampleWeights.isInitialized());
         this->_exampleWeights = _exampleWeights;
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &full(bool _full) {
-        THOR_THROW_IF_FALSE(!this->_full.has_value());
-        this->_full = _full;
-        return *this;
-    }
-
-    virtual GaussianNLLLoss::Builder &eps(float _eps) {
+    virtual NegativeBinomialNLLLoss::Builder &eps(float _eps) {
         THOR_THROW_IF_FALSE(!this->_eps.has_value());
         THOR_THROW_IF_FALSE(_eps > 0.0f);
         this->_eps = _eps;
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &reportsBatchLoss() {
+    virtual NegativeBinomialNLLLoss::Builder &reportsBatchLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::BATCH;
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &reportsPerExampleLoss() {
+    virtual NegativeBinomialNLLLoss::Builder &reportsPerExampleLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::PER_EXAMPLE;
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &reportsPerOutputLoss() {
+    virtual NegativeBinomialNLLLoss::Builder &reportsPerOutputLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::PER_OUTPUT;
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &reportsNoLoss() {
+    virtual NegativeBinomialNLLLoss::Builder &reportsNoLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::NONE;
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &reportsRawLoss() {
+    virtual NegativeBinomialNLLLoss::Builder &reportsRawLoss() {
         THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
         _lossShape = LossShape::RAW;
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &lossWeight(float lossWeight) {
+    virtual NegativeBinomialNLLLoss::Builder &lossWeight(float lossWeight) {
         THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
         ThorImplementation::validateLossWeight(lossWeight);
         this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
         return *this;
     }
 
-    virtual GaussianNLLLoss::Builder &lossDataType(DataType _lossDataType) {
+    virtual NegativeBinomialNLLLoss::Builder &lossDataType(DataType _lossDataType) {
         THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
         THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
         this->_lossDataType = _lossDataType;
@@ -247,15 +238,15 @@ class GaussianNLLLoss::Builder {
 
    private:
     std::optional<Network *> _network;
-    std::optional<Tensor> _predictions;
+    std::optional<Tensor> _mean;
+    std::optional<Tensor> _dispersion;
     std::optional<Tensor> _labels;
-    std::optional<Tensor> _variance;
     std::optional<Tensor> _exampleWeights;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
     std::optional<float> _lossWeight;
-    std::optional<bool> _logVariance;
-    std::optional<bool> _full;
+    std::optional<bool> _logMean;
+    std::optional<bool> _logDispersion;
     std::optional<float> _eps;
 };
 

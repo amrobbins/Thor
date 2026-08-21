@@ -1,9 +1,9 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
 
-#include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 #include <optional>
@@ -22,7 +22,33 @@ class GammaNLLLoss : public Loss {
 
     std::string getLayerType() const override { return "GammaNLLLoss"; }
 
+    Tensor getMean() const { return predictionsTensor; }
+    Tensor getTarget() const { return labelsTensor; }
+    std::optional<Tensor> getDispersion() const { return dispersionTensor; }
+    bool getLogMean() const { return logMean; }
+    bool getLogDispersion() const { return logDispersion; }
     float getEps() const { return eps; }
+
+    std::vector<Tensor> getLossInputTensors() const override {
+        std::vector<Tensor> inputs{predictionsTensor, labelsTensor};
+        if (dispersionTensor.has_value())
+            inputs.push_back(dispersionTensor.value());
+        if (exampleWeightsTensor.has_value())
+            inputs.push_back(exampleWeightsTensor.value());
+        return inputs;
+    }
+
+    int getConnectionType(Tensor connectingTensor) const override {
+        if (dispersionTensor.has_value() && connectingTensor == dispersionTensor.value())
+            return (int)ThorImplementation::Loss::ConnectionType::FORWARD_BACKWARD;
+        return Loss::getConnectionType(connectingTensor);
+    }
+
+    [[nodiscard]] std::optional<std::string> getInputPortName(const Tensor& inputTensor) const override {
+        if (dispersionTensor.has_value() && inputTensor == dispersionTensor.value())
+            return "dispersion";
+        return Loss::getInputPortName(inputTensor);
+    }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
@@ -55,9 +81,13 @@ class GammaNLLLoss : public Loss {
         }
 
         uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
-        return standardLossBytes + lossShaperBytes;
+        uint64_t dispersionBytes = dispersionTensor.has_value() ? batchSize * dispersionTensor.value().getTotalSizeInBytes() * 2 : 0;
+        return standardLossBytes + dispersionBytes + lossShaperBytes;
     }
 
+    std::optional<Tensor> dispersionTensor;
+    bool logMean = false;
+    bool logDispersion = false;
     float eps = 1.0e-6f;
 };
 
@@ -70,8 +100,20 @@ class GammaNLLLoss::Builder {
         THOR_THROW_IF_FALSE(_predictions.has_value());
         THOR_THROW_IF_FALSE(_labels.has_value());
         THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+        if (_dispersion.has_value()) {
+            THOR_THROW_IF_FALSE(_dispersion.value() != _predictions.value());
+            THOR_THROW_IF_FALSE(_dispersion.value() != _labels.value());
+        }
+        if (_exampleWeights.has_value()) {
+            THOR_THROW_IF_FALSE(_exampleWeights.value() != _predictions.value());
+            THOR_THROW_IF_FALSE(_exampleWeights.value() != _labels.value());
+            if (_dispersion.has_value())
+                THOR_THROW_IF_FALSE(_exampleWeights.value() != _dispersion.value());
+        }
         THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
         THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+        if (_dispersion.has_value())
+            THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _dispersion.value().getDimensions());
 
         if (!_lossShape.has_value())
             _lossShape = LossShape::BATCH;
@@ -81,20 +123,24 @@ class GammaNLLLoss::Builder {
 
         float eps = _eps.value_or(1.0e-6f);
         THOR_THROW_IF_FALSE(eps > 0.0f);
+        THOR_THROW_IF_FALSE(!_logDispersion.value_or(false) || _dispersion.has_value());
 
         GammaNLLLoss loss;
         loss.predictionsTensor = _predictions.value();
         loss.labelsTensor = _labels.value();
+        loss.dispersionTensor = _dispersion;
+        loss.exampleWeightsTensor = _exampleWeights;
         loss.lossDataType = _lossDataType.value();
 
         loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         loss.lossShape = _lossShape.value();
+        loss.logMean = _logMean.value_or(false);
+        loss.logDispersion = _logDispersion.value_or(false);
         loss.eps = eps;
         loss.network = _network.value();
         loss.initialized = true;
 
         loss.buildSupportLayersAndAddToNetwork();
-
         return loss;
     }
 
@@ -121,6 +167,32 @@ class GammaNLLLoss::Builder {
     }
 
     virtual GammaNLLLoss::Builder &target(Tensor _target) { return labels(_target); }
+
+    virtual GammaNLLLoss::Builder &dispersion(Tensor _dispersion) {
+        THOR_THROW_IF_FALSE(!this->_dispersion.has_value());
+        THOR_THROW_IF_FALSE(!_dispersion.getDimensions().empty());
+        this->_dispersion = _dispersion;
+        return *this;
+    }
+
+    virtual GammaNLLLoss::Builder &logMean(bool _logMean) {
+        THOR_THROW_IF_FALSE(!this->_logMean.has_value());
+        this->_logMean = _logMean;
+        return *this;
+    }
+
+    virtual GammaNLLLoss::Builder &logDispersion(bool _logDispersion) {
+        THOR_THROW_IF_FALSE(!this->_logDispersion.has_value());
+        this->_logDispersion = _logDispersion;
+        return *this;
+    }
+
+    virtual GammaNLLLoss::Builder &exampleWeights(Tensor _exampleWeights) {
+        THOR_THROW_IF_FALSE(!this->_exampleWeights.has_value());
+        THOR_THROW_IF_FALSE(_exampleWeights.isInitialized());
+        this->_exampleWeights = _exampleWeights;
+        return *this;
+    }
 
     virtual GammaNLLLoss::Builder &eps(float _eps) {
         THOR_THROW_IF_FALSE(!this->_eps.has_value());
@@ -159,7 +231,7 @@ class GammaNLLLoss::Builder {
         return *this;
     }
 
-    virtual GammaNLLLoss::Builder & lossWeight(float lossWeight) {
+    virtual GammaNLLLoss::Builder &lossWeight(float lossWeight) {
         THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
         ThorImplementation::validateLossWeight(lossWeight);
         this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
@@ -177,9 +249,13 @@ class GammaNLLLoss::Builder {
     std::optional<Network *> _network;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
+    std::optional<Tensor> _dispersion;
+    std::optional<Tensor> _exampleWeights;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
     std::optional<float> _lossWeight;
+    std::optional<bool> _logMean;
+    std::optional<bool> _logDispersion;
     std::optional<float> _eps;
 };
 

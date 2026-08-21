@@ -2,6 +2,7 @@
 #include <nanobind/stl/optional.h>
 #include <cmath>
 #include <optional>
+#include <vector>
 
 #include "DeepLearning/Api/Layers/Loss/GammaNLLLoss.h"
 #include "DeepLearning/Api/Layers/Loss/TweedieLoss.h"
@@ -30,30 +31,30 @@ void validateReportedLossShape(LossShape reported_loss_shape, const string &loss
 bool isFloatingDType(DataType dtype) { return dtype == DataType::FP16 || dtype == DataType::FP32; }
 
 void setReportedLossShape(GammaNLLLoss::Builder &builder, LossShape reported_loss_shape) {
-    if (reported_loss_shape == LossShape::NONE) {
+    if (reported_loss_shape == LossShape::NONE)
         builder.reportsNoLoss();
-    } else if (reported_loss_shape == LossShape::BATCH) {
+    else if (reported_loss_shape == LossShape::BATCH)
         builder.reportsBatchLoss();
-    } else if (reported_loss_shape == LossShape::PER_OUTPUT) {
+    else if (reported_loss_shape == LossShape::PER_OUTPUT)
         builder.reportsPerOutputLoss();
-    } else if (reported_loss_shape == LossShape::PER_EXAMPLE) {
+    else if (reported_loss_shape == LossShape::PER_EXAMPLE)
         builder.reportsPerExampleLoss();
-    } else {
+    else {
         THOR_THROW_IF_FALSE(reported_loss_shape == LossShape::RAW);
         builder.reportsRawLoss();
     }
 }
 
 void setReportedLossShape(TweedieLoss::Builder &builder, LossShape reported_loss_shape) {
-    if (reported_loss_shape == LossShape::NONE) {
+    if (reported_loss_shape == LossShape::NONE)
         builder.reportsNoLoss();
-    } else if (reported_loss_shape == LossShape::BATCH) {
+    else if (reported_loss_shape == LossShape::BATCH)
         builder.reportsBatchLoss();
-    } else if (reported_loss_shape == LossShape::PER_OUTPUT) {
+    else if (reported_loss_shape == LossShape::PER_OUTPUT)
         builder.reportsPerOutputLoss();
-    } else if (reported_loss_shape == LossShape::PER_EXAMPLE) {
+    else if (reported_loss_shape == LossShape::PER_EXAMPLE)
         builder.reportsPerExampleLoss();
-    } else {
+    else {
         THOR_THROW_IF_FALSE(reported_loss_shape == LossShape::RAW);
         builder.reportsRawLoss();
     }
@@ -108,6 +109,51 @@ void validateTweedieArguments(const string &loss_name,
     }
 }
 
+void maybeSetGammaDispersion(GammaNLLLoss::Builder &builder,
+                             Tensor predictions,
+                             Tensor labels,
+                             optional<Tensor> dispersion,
+                             bool log_dispersion) {
+    if (!dispersion.has_value()) {
+        if (log_dispersion)
+            throw nb::value_error("GammaNLLLoss instance: log_dispersion=True requires dispersion.");
+        return;
+    }
+    if (dispersion.value() == predictions || dispersion.value() == labels)
+        throw nb::value_error("GammaNLLLoss instance: dispersion must be distinct from predictions and labels.");
+    if (dispersion.value().getDimensions() != predictions.getDimensions()) {
+        string error_message = "GammaNLLLoss instance: dispersion dimensions " + dispersion.value().getDescriptorString() +
+                               " must match predictions dimensions " + predictions.getDescriptorString();
+        throw nb::value_error(error_message.c_str());
+    }
+    if (!isFloatingDType(dispersion.value().getDataType()))
+        throw nb::value_error("GammaNLLLoss instance: dispersion must use fp16 or fp32 dtype.");
+    builder.dispersion(dispersion.value()).logDispersion(log_dispersion);
+}
+
+void maybeSetGammaExampleWeights(GammaNLLLoss::Builder &builder,
+                                 Tensor predictions,
+                                 Tensor labels,
+                                 optional<Tensor> dispersion,
+                                 optional<Tensor> example_weights) {
+    if (!example_weights.has_value())
+        return;
+    if (example_weights.value() == predictions || example_weights.value() == labels ||
+        (dispersion.has_value() && example_weights.value() == dispersion.value()))
+        throw nb::value_error("GammaNLLLoss instance: example_weights must be distinct from predictions, labels, and dispersion.");
+    if (!isFloatingDType(example_weights.value().getDataType()))
+        throw nb::value_error("GammaNLLLoss instance: example_weights must use fp16 or fp32 dtype.");
+    const vector<uint64_t>& dims = example_weights.value().getDimensions();
+    if (dims != vector<uint64_t>{1} && dims != predictions.getDimensions()) {
+        string error_message =
+            "GammaNLLLoss instance: example_weights dimensions must be [1] for per-example weights or match predictions. "
+            "example_weights tensor is " +
+            example_weights.value().getDescriptorString() + "; predictions tensor is " + predictions.getDescriptorString() + ".";
+        throw nb::value_error(error_message.c_str());
+    }
+    builder.exampleWeights(example_weights.value());
+}
+
 void maybeSetTweedieExampleWeights(TweedieLoss::Builder &builder,
                                    Tensor predictions,
                                    Tensor labels,
@@ -143,14 +189,25 @@ void bind_gamma_tweedie_losses(nb::module_ &losses) {
            float eps,
            optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
-           std::optional<float> loss_weight) {
+           optional<float> loss_weight,
+           optional<Tensor> dispersion,
+           bool log_mean,
+           bool log_dispersion,
+           optional<Tensor> example_weights) {
             const string loss_name = "GammaNLLLoss instance";
             validateMeanTargetLossArguments(loss_name, predictions, labels, loss_data_type, reported_loss_shape, eps);
 
             DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
             GammaNLLLoss::Builder builder;
-            builder.network(network).predictions(predictions).labels(labels).eps(eps).lossDataType(effectiveLossDataType)
+            builder.network(network)
+                .predictions(predictions)
+                .labels(labels)
+                .logMean(log_mean)
+                .eps(eps)
+                .lossDataType(effectiveLossDataType)
                 .lossWeight(loss_weight.value_or(1.0f));
+            maybeSetGammaDispersion(builder, predictions, labels, dispersion, log_dispersion);
+            maybeSetGammaExampleWeights(builder, predictions, labels, dispersion, example_weights);
             setReportedLossShape(builder, reported_loss_shape);
             GammaNLLLoss built = builder.build();
 
@@ -164,17 +221,32 @@ void bind_gamma_tweedie_losses(nb::module_ &losses) {
         "reported_loss_shape"_a = LossShape::BATCH,
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
+        "dispersion"_a.none() = nb::none(),
+        "log_mean"_a = false,
+        "log_dispersion"_a = false,
+        "example_weights"_a.none() = nb::none(),
         R"nbdoc(Construct a Gamma negative log-likelihood loss.)nbdoc");
 
+    gamma_nll_loss.def_prop_ro("dispersion", &GammaNLLLoss::getDispersion);
+    gamma_nll_loss.def_prop_ro("log_mean", &GammaNLLLoss::getLogMean);
+    gamma_nll_loss.def_prop_ro("log_dispersion", &GammaNLLLoss::getLogDispersion);
     gamma_nll_loss.def_prop_ro("eps", &GammaNLLLoss::getEps);
     gamma_nll_loss.attr("__doc__") = R"nbdoc(
-Gamma negative log-likelihood loss for positive mean predictions.
+Gamma negative log-likelihood loss in mean/dispersion parameterization.
 
-Predictions are per-element means and labels are targets. Predictions are
-clamped to at least eps for numerical stability. Target-independent constants
-are omitted. The raw loss is:
+Without dispersion, this preserves Thor's legacy unit-dispersion (shape=1)
+Gamma/exponential loss:
 
-    log(max(predictions, eps)) + labels / max(predictions, eps)
+    log(mean) + labels / mean
+
+When dispersion is supplied, Thor uses Var(Y) = dispersion * mean^2, with
+concentration = 1 / dispersion and scale = mean * dispersion, and evaluates
+the full per-element Gamma NLL. log_mean=True and log_dispersion=True allow
+unconstrained network heads to supply log-parameters directly.
+
+example_weights may be a [1] per-example weight tensor or match predictions for
+elementwise weighting. Weights scale the raw loss and all learned-parameter
+gradients before loss-shape reduction.
 )nbdoc";
 
     auto tweedie_loss = nb::class_<TweedieLoss, Loss>(losses, "TweedieLoss");
@@ -190,7 +262,7 @@ are omitted. The raw loss is:
            float eps,
            optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
-           std::optional<float> loss_weight,
+           optional<float> loss_weight,
            optional<Tensor> example_weights) {
             const string loss_name = "TweedieLoss instance";
             validateTweedieArguments(loss_name, predictions, labels, power, loss_data_type, reported_loss_shape, eps);
@@ -220,15 +292,17 @@ are omitted. The raw loss is:
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
         "example_weights"_a.none() = nb::none(),
-        R"nbdoc(Construct a Tweedie deviance loss.)nbdoc");
+        R"nbdoc(Construct a Tweedie unit-deviance loss.)nbdoc");
 
     tweedie_loss.def_prop_ro("power", &TweedieLoss::getPower);
     tweedie_loss.def_prop_ro("eps", &TweedieLoss::getEps);
     tweedie_loss.attr("__doc__") = R"nbdoc(
-Tweedie unit deviance loss for positive mean predictions.
+Tweedie unit-deviance loss for positive mean predictions.
 
-Predictions are per-element means and labels are targets. Predictions are
-clamped to at least eps for numerical stability. power selects the Tweedie
-variance power. Special cases are handled directly for power 0, 1, and 2.
+This is a Tweedie unit deviance objective, not a full normalized Tweedie
+negative log-likelihood. Predictions are per-element means and labels are
+targets. Predictions are clamped to at least eps for numerical stability.
+power selects the Tweedie variance power; powers 0, 1, and 2 use direct special
+cases.
 )nbdoc";
 }

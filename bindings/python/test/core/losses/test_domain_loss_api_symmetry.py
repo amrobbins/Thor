@@ -56,6 +56,27 @@ def _domain_loss_factories():
             id="distribution.gaussian_nll",
         ),
         pytest.param(
+            "distribution.laplace_nll",
+            lambda n, loss_weight: thor.losses.distribution.LaplaceNLLLoss(
+                n, _tensor([3]), _tensor([3]), _tensor([3]), True, 1.0e-8, _FP32, _RAW, loss_weight=loss_weight
+            ),
+            id="distribution.laplace_nll",
+        ),
+        pytest.param(
+            "distribution.student_t_nll",
+            lambda n, loss_weight: thor.losses.distribution.StudentTNLLLoss(
+                n, _tensor([3]), _tensor([3]), _tensor([3]), 4.0, _FP32, _RAW, loss_weight=loss_weight
+            ),
+            id="distribution.student_t_nll",
+        ),
+        pytest.param(
+            "distribution.negative_binomial_nll",
+            lambda n, loss_weight: thor.losses.distribution.NegativeBinomialNLLLoss(
+                n, _tensor([3]), _tensor([3]), _tensor([3]), True, True, 1.0e-8, _FP32, _RAW, loss_weight=loss_weight
+            ),
+            id="distribution.negative_binomial_nll",
+        ),
+        pytest.param(
             "distribution.gamma_nll",
             lambda n, loss_weight: thor.losses.distribution.GammaNLLLoss(
                 n, _tensor([3]), _tensor([3]), 1.0e-5, _FP32, _RAW, loss_weight=loss_weight

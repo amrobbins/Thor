@@ -4,8 +4,11 @@
 #include "DeepLearning/Api/Layers/Loss/ExpectileLoss.h"
 #include "DeepLearning/Api/Layers/Loss/GammaNLLLoss.h"
 #include "DeepLearning/Api/Layers/Loss/GaussianNLLLoss.h"
+#include "DeepLearning/Api/Layers/Loss/LaplaceNLLLoss.h"
+#include "DeepLearning/Api/Layers/Loss/StudentTNLLLoss.h"
 #include "DeepLearning/Api/Layers/Loss/HuberLoss.h"
 #include "DeepLearning/Api/Layers/Loss/PoissonNLLLoss.h"
+#include "DeepLearning/Api/Layers/Loss/NegativeBinomialNLLLoss.h"
 #include "DeepLearning/Api/Layers/Loss/MeanAbsoluteError.h"
 #include "DeepLearning/Api/Layers/Loss/MeanAbsolutePercentageError.h"
 #include "DeepLearning/Api/Layers/Loss/MeanPowerError.h"
@@ -221,6 +224,46 @@ TEST(PointwiseLossShapeContract, CorePointwiseLossesAcceptMultidimensionalPredic
                 .predictions(predictions)
                 .labels(labels)
                 .variance(variance)
+                .reportsRawLoss()
+                .build()
+                .getLoss();
+        });
+
+    expectMultidimensionalThreeInputRawLoss(
+        "multidimensional_laplace_nll",
+        [](Api::Network& network, Api::Tensor location, Api::Tensor labels, Api::Tensor scale) {
+            return Api::LaplaceNLLLoss::Builder()
+                .network(network)
+                .location(location)
+                .scale(scale)
+                .labels(labels)
+                .reportsRawLoss()
+                .build()
+                .getLoss();
+        });
+
+    expectMultidimensionalThreeInputRawLoss(
+        "multidimensional_student_t_nll",
+        [](Api::Network& network, Api::Tensor location, Api::Tensor labels, Api::Tensor logScale) {
+            return Api::StudentTNLLLoss::Builder()
+                .network(network)
+                .location(location)
+                .logScale(logScale)
+                .labels(labels)
+                .degreesOfFreedom(4.0f)
+                .reportsRawLoss()
+                .build()
+                .getLoss();
+        });
+
+    expectMultidimensionalThreeInputRawLoss(
+        "multidimensional_negative_binomial_nll",
+        [](Api::Network& network, Api::Tensor mean, Api::Tensor labels, Api::Tensor dispersion) {
+            return Api::NegativeBinomialNLLLoss::Builder()
+                .network(network)
+                .mean(mean)
+                .dispersion(dispersion)
+                .labels(labels)
                 .reportsRawLoss()
                 .build()
                 .getLoss();

@@ -269,3 +269,62 @@ def test_gaussian_nll_loss_save_load_round_trip_serializes_support_layers(tmp_pa
     loaded_arch = json.loads(loaded.get_architecture_json())
     assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "multi_input_custom_loss") == 1
     assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "loss_shaper") == 1
+
+
+def test_gaussian_nll_loss_accepts_log_variance_and_example_weights():
+    n = thor.Network("test_gaussian_log_variance_weights")
+    preds = _tensor_1d(4)
+    labels = _tensor_1d(4)
+    log_variance = _tensor_1d(4)
+    weights = _tensor_1d(1)
+
+    loss = thor.losses.distribution.GaussianNLLLoss(
+        n,
+        preds,
+        labels,
+        log_variance,
+        log_variance=True,
+        example_weights=weights,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+
+    assert loss.log_variance is True
+    assert loss.get_example_weights() == weights
+
+
+@pytest.mark.cuda
+def test_gaussian_nll_loss_log_variance_and_weights_match_reference():
+    predictions = np.array([[0.0, 1.0, -1.0], [2.0, -0.5, 0.25]], dtype=np.float32)
+    labels = np.array([[0.5, 0.25, -2.0], [1.0, 0.5, 0.0]], dtype=np.float32)
+    variance = np.array([[0.5, 2.0, 1.25], [3.0, 0.75, 0.2]], dtype=np.float32)
+    weights = np.array([[1.0, 0.0, 0.5], [0.25, 2.0, 1.0]], dtype=np.float32)
+    log_variance = np.log(variance).astype(np.float32)
+
+    n = thor.Network("test_gaussian_log_variance_weighted_forward")
+    dtype = thor.DataType.fp32
+    predictions_input = thor.layers.NetworkInput(n, "predictions", [3], dtype)
+    labels_input = thor.layers.NetworkInput(n, "labels", [3], dtype)
+    variance_input = thor.layers.NetworkInput(n, "log_variance", [3], dtype)
+    weights_input = thor.layers.NetworkInput(n, "weights", [3], dtype)
+    loss = thor.losses.distribution.GaussianNLLLoss(
+        n,
+        predictions_input.get_feature_output(),
+        labels_input.get_feature_output(),
+        variance_input.get_feature_output(),
+        log_variance=True,
+        example_weights=weights_input.get_feature_output(),
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    thor.layers.NetworkOutput(n, "loss", loss.get_loss(), dtype)
+    placed = n.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    outputs = placed.infer(
+        {
+            "predictions": _cpu_tensor(predictions, dtype),
+            "labels": _cpu_tensor(labels, dtype),
+            "log_variance": _cpu_tensor(log_variance, dtype),
+            "weights": _cpu_tensor(weights, dtype),
+        }
+    )
+
+    expected = _gaussian_nll_reference(predictions, labels, variance, False, 1.0e-6) * weights
+    np.testing.assert_allclose(np.array(outputs["loss"].numpy(), copy=True), expected, rtol=1e-5, atol=1e-6)

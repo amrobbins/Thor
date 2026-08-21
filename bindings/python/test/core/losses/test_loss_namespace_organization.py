@@ -25,7 +25,15 @@ _CORE_FLAT_LOSSES = [
 _DOMAIN_LOSSES = {
     "classification": ["BinaryFocalLoss", "CategoricalFocalLoss"],
     "detection": ["IoULoss", "GIoULoss", "DIoULoss", "CIoULoss"],
-    "distribution": ["PoissonNLLLoss", "GaussianNLLLoss", "GammaNLLLoss", "TweedieLoss"],
+    "distribution": [
+        "PoissonNLLLoss",
+        "GaussianNLLLoss",
+        "NegativeBinomialNLLLoss",
+        "LaplaceNLLLoss",
+        "StudentTNLLLoss",
+        "GammaNLLLoss",
+        "TweedieLoss",
+    ],
     "gan": [
         "HingeGANDiscriminatorLoss",
         "HingeGANGeneratorLoss",

@@ -1,12 +1,15 @@
-"""Distributional negative log-likelihood losses."""
+"""Distributional likelihood and deviance losses."""
 
 from __future__ import annotations
 
-from ..._thor.losses.distribution import GammaNLLLoss, GaussianNLLLoss, PoissonNLLLoss, TweedieLoss
+from ..._thor.losses.distribution import GammaNLLLoss, GaussianNLLLoss, LaplaceNLLLoss, NegativeBinomialNLLLoss, StudentTNLLLoss, PoissonNLLLoss, TweedieLoss
 
 __all__ = [
     "PoissonNLLLoss",
     "GaussianNLLLoss",
+    "NegativeBinomialNLLLoss",
+    "LaplaceNLLLoss",
+    "StudentTNLLLoss",
     "GammaNLLLoss",
     "TweedieLoss",
 ]

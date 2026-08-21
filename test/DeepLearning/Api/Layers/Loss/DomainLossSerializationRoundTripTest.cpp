@@ -7,6 +7,8 @@
 #include "DeepLearning/Api/Layers/Loss/FocalTverskyLoss.h"
 #include "DeepLearning/Api/Layers/Loss/GammaNLLLoss.h"
 #include "DeepLearning/Api/Layers/Loss/GaussianNLLLoss.h"
+#include "DeepLearning/Api/Layers/Loss/LaplaceNLLLoss.h"
+#include "DeepLearning/Api/Layers/Loss/StudentTNLLLoss.h"
 #include "DeepLearning/Api/Layers/Loss/HingeGANDiscriminatorLoss.h"
 #include "DeepLearning/Api/Layers/Loss/HingeGANGeneratorLoss.h"
 #include "DeepLearning/Api/Layers/Loss/InfoNCELoss.h"
@@ -15,6 +17,7 @@
 #include "DeepLearning/Api/Layers/Loss/ListNetLoss.h"
 #include "DeepLearning/Api/Layers/Loss/ListwiseSoftmaxCrossEntropyLoss.h"
 #include "DeepLearning/Api/Layers/Loss/MarginRankingLoss.h"
+#include "DeepLearning/Api/Layers/Loss/NegativeBinomialNLLLoss.h"
 #include "DeepLearning/Api/Layers/Loss/PoissonNLLLoss.h"
 #include "DeepLearning/Api/Layers/Loss/TripletLoss.h"
 #include "DeepLearning/Api/Layers/Loss/TverskyLoss.h"
@@ -247,17 +250,28 @@ DomainLossFixture addAllNewDomainLosses(Network& network) {
         rememberLoss(fixture, network, loss);
     }
     {
-        auto mean = fp32Input(network, "gamma_mean", {3});
+        auto mean = fp32Input(network, "gamma_log_mean", {3});
         auto target = fp32Input(network, "gamma_target", {3});
+        auto dispersion = fp32Input(network, "gamma_log_dispersion", {3});
+        auto exampleWeights = fp32Input(network, "gamma_example_weights", {1});
         GammaNLLLoss loss = GammaNLLLoss::Builder()
                                 .network(network)
                                 .mean(mean.getFeatureOutput().value())
                                 .target(target.getFeatureOutput().value())
+                                .dispersion(dispersion.getFeatureOutput().value())
+                                .exampleWeights(exampleWeights.getFeatureOutput().value())
+                                .logMean(true)
+                                .logDispersion(true)
                                 .eps(1.0e-4f)
                                 .reportsRawLoss()
                                 .lossDataType(DataType::FP32)
                                 .lossWeight(2.25f)
                                 .build();
+        json publicJson = loss.architectureJson();
+        EXPECT_TRUE(publicJson.at("log_mean").get<bool>());
+        EXPECT_TRUE(publicJson.at("log_dispersion").get<bool>());
+        EXPECT_TRUE(publicJson.contains("dispersion_tensor"));
+        EXPECT_TRUE(publicJson.contains("example_weights_tensor"));
         rememberLoss(fixture, network, loss);
     }
     {
@@ -296,18 +310,98 @@ DomainLossFixture addAllNewDomainLosses(Network& network) {
     {
         auto mean = fp32Input(network, "gaussian_mean", {3});
         auto target = fp32Input(network, "gaussian_target", {3});
-        auto variance = fp32Input(network, "gaussian_variance", {3});
+        auto logVariance = fp32Input(network, "gaussian_log_variance", {3});
+        auto exampleWeights = fp32Input(network, "gaussian_example_weights", {1});
         GaussianNLLLoss loss = GaussianNLLLoss::Builder()
                                    .network(network)
                                    .mean(mean.getFeatureOutput().value())
                                    .target(target.getFeatureOutput().value())
-                                   .variance(variance.getFeatureOutput().value())
+                                   .variance(logVariance.getFeatureOutput().value())
+                                   .exampleWeights(exampleWeights.getFeatureOutput().value())
+                                   .logVariance(true)
                                    .full(true)
                                    .eps(4.0e-4f)
                                    .reportsRawLoss()
                                    .lossDataType(DataType::FP32)
                                    .lossWeight(2.625f)
                                    .build();
+        json publicJson = loss.architectureJson();
+        EXPECT_TRUE(publicJson.at("log_variance").get<bool>());
+        EXPECT_TRUE(publicJson.contains("example_weights_tensor"));
+        rememberLoss(fixture, network, loss);
+    }
+    {
+        auto location = fp32Input(network, "laplace_location", {3});
+        auto logScale = fp32Input(network, "laplace_log_scale", {3});
+        auto target = fp32Input(network, "laplace_target", {3});
+        auto exampleWeights = fp32Input(network, "laplace_example_weights", {1});
+        LaplaceNLLLoss loss = LaplaceNLLLoss::Builder()
+                                  .network(network)
+                                  .location(location.getFeatureOutput().value())
+                                  .scale(logScale.getFeatureOutput().value())
+                                  .target(target.getFeatureOutput().value())
+                                  .exampleWeights(exampleWeights.getFeatureOutput().value())
+                                  .logScale(true)
+                                  .eps(5.0e-5f)
+                                  .reportsPerExampleLoss()
+                                  .lossDataType(DataType::FP32)
+                                  .lossWeight(2.65625f)
+                                  .build();
+        json publicJson = loss.architectureJson();
+        EXPECT_TRUE(publicJson.at("log_scale").get<bool>());
+        EXPECT_TRUE(publicJson.contains("scale_tensor"));
+        EXPECT_TRUE(publicJson.contains("example_weights_tensor"));
+        rememberLoss(fixture, network, loss);
+    }
+    {
+        auto location = fp32Input(network, "student_t_location", {3});
+        auto logScale = fp32Input(network, "student_t_log_scale", {3});
+        auto target = fp32Input(network, "student_t_target", {3});
+        auto logDegreesOfFreedom = fp32Input(network, "student_t_log_degrees_of_freedom", {3});
+        auto exampleWeights = fp32Input(network, "student_t_example_weights", {1});
+        StudentTNLLLoss loss = StudentTNLLLoss::Builder()
+                                   .network(network)
+                                   .location(location.getFeatureOutput().value())
+                                   .logScale(logScale.getFeatureOutput().value())
+                                   .target(target.getFeatureOutput().value())
+                                   .logDegreesOfFreedom(logDegreesOfFreedom.getFeatureOutput().value())
+                                   .minimumDegreesOfFreedom(2.0f)
+                                   .exampleWeights(exampleWeights.getFeatureOutput().value())
+                                   .reportsPerExampleLoss()
+                                   .lossDataType(DataType::FP32)
+                                   .lossWeight(2.671875f)
+                                   .build();
+        json publicJson = loss.architectureJson();
+        EXPECT_TRUE(publicJson.contains("log_scale_tensor"));
+        EXPECT_TRUE(publicJson.contains("log_degrees_of_freedom_tensor"));
+        EXPECT_FALSE(publicJson.contains("degrees_of_freedom"));
+        EXPECT_FLOAT_EQ(publicJson.at("minimum_degrees_of_freedom").get<float>(), 2.0f);
+        EXPECT_TRUE(publicJson.contains("example_weights_tensor"));
+        rememberLoss(fixture, network, loss);
+    }
+    {
+        auto logMean = fp32Input(network, "negative_binomial_log_mean", {3});
+        auto logDispersion = fp32Input(network, "negative_binomial_log_dispersion", {3});
+        auto labels = fp32Input(network, "negative_binomial_labels", {3});
+        auto exampleWeights = fp32Input(network, "negative_binomial_example_weights", {1});
+        NegativeBinomialNLLLoss loss = NegativeBinomialNLLLoss::Builder()
+                                           .network(network)
+                                           .mean(logMean.getFeatureOutput().value())
+                                           .dispersion(logDispersion.getFeatureOutput().value())
+                                           .labels(labels.getFeatureOutput().value())
+                                           .exampleWeights(exampleWeights.getFeatureOutput().value())
+                                           .logMean(true)
+                                           .logDispersion(true)
+                                           .eps(5.0e-5f)
+                                           .reportsPerExampleLoss()
+                                           .lossDataType(DataType::FP32)
+                                           .lossWeight(2.6875f)
+                                           .build();
+        json publicJson = loss.architectureJson();
+        EXPECT_TRUE(publicJson.at("log_mean").get<bool>());
+        EXPECT_TRUE(publicJson.at("log_dispersion").get<bool>());
+        EXPECT_TRUE(publicJson.contains("dispersion_tensor"));
+        EXPECT_TRUE(publicJson.contains("example_weights_tensor"));
         rememberLoss(fixture, network, loss);
     }
     {
@@ -538,7 +632,7 @@ TEST(DomainLossSerializationRoundTrip, NetworkSaveLoadPreservesSupportGraphsForN
     try {
         Network source(networkName);
         DomainLossFixture fixture = addAllNewDomainLosses(source);
-        ASSERT_EQ(fixture.numLosses, 27u);
+        ASSERT_EQ(fixture.numLosses, 30u);
         const json expectedSupportLayers = canonicalSupportLayers(source);
         ASSERT_FALSE(expectedSupportLayers.empty());
         source.save(archiveDir.string(), true);

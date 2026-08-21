@@ -8,6 +8,12 @@ Public API metadata source: **python __all__**.
 
 ::: thor.losses.distribution.GaussianNLLLoss
 
+::: thor.losses.distribution.NegativeBinomialNLLLoss
+
+::: thor.losses.distribution.LaplaceNLLLoss
+
+::: thor.losses.distribution.StudentTNLLLoss
+
 ::: thor.losses.distribution.GammaNLLLoss
 
 ::: thor.losses.distribution.TweedieLoss

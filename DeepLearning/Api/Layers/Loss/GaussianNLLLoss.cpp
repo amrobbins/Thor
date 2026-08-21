@@ -14,6 +14,7 @@ namespace {
 constexpr const char* kMeanName = "mean";
 constexpr const char* kTargetName = "target";
 constexpr const char* kVarianceName = "variance";
+constexpr const char* kExampleWeightsName = "example_weights";
 constexpr const char* kLossName = "loss";
 constexpr const char* kMeanGradientName = "mean_grad";
 constexpr const char* kVarianceGradientName = "variance_grad";
@@ -32,21 +33,59 @@ void validateGaussianDTypes(DataType meanDType, DataType targetDType, DataType v
     validateFloatingDType("variance", varianceDType);
 }
 
+void validateExampleWeights(Tensor mean, Tensor target, Tensor variance, std::optional<Tensor> exampleWeights) {
+    if (!exampleWeights.has_value())
+        return;
+    if (exampleWeights.value() == mean || exampleWeights.value() == target || exampleWeights.value() == variance)
+        throw runtime_error("GaussianNLLLoss example_weights tensor must be distinct from mean, target, and variance.");
+    validateFloatingDType("example_weights", exampleWeights.value().getDataType());
+    const vector<uint64_t>& dims = exampleWeights.value().getDimensions();
+    if (dims != vector<uint64_t>{1} && dims != mean.getDimensions()) {
+        throw runtime_error(
+            "GaussianNLLLoss example_weights dimensions must be [1] for per-example weights or match mean dimensions.");
+    }
+}
+
 ThorImplementation::Expression clampedVariance(const ThorImplementation::Expression& variance, float eps) {
     return variance.max(ThorImplementation::Expression(eps));
 }
 
-ThorImplementation::DynamicExpression makeGaussianNLLLossExpression(DataType lossDataType, bool full, float eps) {
+ThorImplementation::Expression gaussianLoss(const ThorImplementation::Expression& mean,
+                                            const ThorImplementation::Expression& target,
+                                            const ThorImplementation::Expression& varianceOrLogVariance,
+                                            bool logVariance,
+                                            bool full,
+                                            float eps) {
+    ThorImplementation::Expression diff = mean - target;
+    ThorImplementation::Expression loss = [&]() {
+        if (logVariance) {
+            return ThorImplementation::Expression(0.5) *
+                   (varianceOrLogVariance + diff * diff * (ThorImplementation::Expression(0.0) - varianceOrLogVariance).exp());
+        }
+        ThorImplementation::Expression safeVariance = clampedVariance(varianceOrLogVariance, eps);
+        return ThorImplementation::Expression(0.5) * (safeVariance.ln() + (diff * diff) / safeVariance);
+    }();
+    if (full)
+        loss = loss + ThorImplementation::Expression(0.5 * kLogTwoPi);
+    return loss;
+}
+
+ThorImplementation::DynamicExpression makeGaussianNLLLossExpression(DataType lossDataType,
+                                                                    bool logVariance,
+                                                                    bool full,
+                                                                    float eps,
+                                                                    bool weighted) {
     validateFloatingDType("loss", lossDataType);
 
     ThorImplementation::Expression mean = ThorImplementation::Expression::input(kMeanName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression target = ThorImplementation::Expression::input(kTargetName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression variance = ThorImplementation::Expression::input(kVarianceName, DataType::FP32, DataType::FP32);
-    ThorImplementation::Expression safeVariance = clampedVariance(variance, eps);
-    ThorImplementation::Expression diff = mean - target;
-    ThorImplementation::Expression loss = ThorImplementation::Expression(0.5) * (safeVariance.ln() + (diff * diff) / safeVariance);
-    if (full)
-        loss = loss + ThorImplementation::Expression(0.5 * kLogTwoPi);
+    ThorImplementation::Expression loss = gaussianLoss(mean, target, variance, logVariance, full, eps);
+    if (weighted) {
+        ThorImplementation::Expression exampleWeights =
+            ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+        loss = loss * exampleWeights;
+    }
     loss = loss.withOutputDType(lossDataType);
 
     ThorImplementation::ExpressionDefinition definition =
@@ -54,22 +93,46 @@ ThorImplementation::DynamicExpression makeGaussianNLLLossExpression(DataType los
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
-ThorImplementation::DynamicExpression makeGaussianNLLGradientExpression(DataType meanDType, DataType varianceDType, float eps) {
+ThorImplementation::DynamicExpression makeGaussianNLLGradientExpression(DataType meanDType,
+                                                                        DataType varianceDType,
+                                                                        bool logVariance,
+                                                                        float eps,
+                                                                        bool weighted) {
     validateFloatingDType("mean", meanDType);
     validateFloatingDType("variance", varianceDType);
 
     ThorImplementation::Expression mean = ThorImplementation::Expression::input(kMeanName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression target = ThorImplementation::Expression::input(kTargetName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression variance = ThorImplementation::Expression::input(kVarianceName, DataType::FP32, DataType::FP32);
-    ThorImplementation::Expression safeVariance = clampedVariance(variance, eps);
     ThorImplementation::Expression diff = mean - target;
     ThorImplementation::Expression scale(ThorImplementation::Loss::getLossScalingFactor());
 
-    ThorImplementation::Expression meanGradient = (diff / safeVariance * scale).withOutputDType(meanDType);
-    ThorImplementation::Expression varianceGradient =
-        (ThorImplementation::Expression(0.5) *
-         ((ThorImplementation::Expression(1.0) / safeVariance) - ((diff * diff) / (safeVariance * safeVariance))) * scale)
-            .withOutputDType(varianceDType);
+    ThorImplementation::Expression meanGradient = [&]() {
+        if (logVariance)
+            return diff * (ThorImplementation::Expression(0.0) - variance).exp();
+        ThorImplementation::Expression safeVariance = clampedVariance(variance, eps);
+        return diff / safeVariance;
+    }();
+
+    ThorImplementation::Expression varianceGradient = [&]() {
+        if (logVariance) {
+            return ThorImplementation::Expression(0.5) *
+                   (ThorImplementation::Expression(1.0) - diff * diff * (ThorImplementation::Expression(0.0) - variance).exp());
+        }
+        ThorImplementation::Expression safeVariance = clampedVariance(variance, eps);
+        return ThorImplementation::Expression(0.5) *
+               ((ThorImplementation::Expression(1.0) / safeVariance) - ((diff * diff) / (safeVariance * safeVariance)));
+    }();
+
+    if (weighted) {
+        ThorImplementation::Expression exampleWeights =
+            ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+        meanGradient = meanGradient * exampleWeights;
+        varianceGradient = varianceGradient * exampleWeights;
+    }
+
+    meanGradient = (meanGradient * scale).withOutputDType(meanDType);
+    varianceGradient = (varianceGradient * scale).withOutputDType(varianceDType);
 
     ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
         ThorImplementation::Expression::outputs({{kMeanGradientName, meanGradient}, {kVarianceGradientName, varianceGradient}}));
@@ -80,25 +143,29 @@ ThorImplementation::DynamicExpression makeGaussianNLLGradientExpression(DataType
 
 void GaussianNLLLoss::buildSupportLayersAndAddToNetwork() {
     validateGaussianDTypes(predictionsTensor.getDataType(), labelsTensor.getDataType(), varianceTensor.getDataType());
+    validateExampleWeights(predictionsTensor, labelsTensor, varianceTensor, exampleWeightsTensor);
     THOR_THROW_IF_FALSE(eps > 0.0f);
 
-    MultiInputCustomLoss rawGaussianNLLLoss = MultiInputCustomLoss::Builder()
-                                                  .network(*network)
-                                                  .lossExpression(makeGaussianNLLLossExpression(lossDataType, full, eps))
-                                                  .gradientExpression(makeGaussianNLLGradientExpression(predictionsTensor.getDataType(),
-                                                                                                        varianceTensor.getDataType(),
-                                                                                                        eps))
-                                                  .input(kMeanName, predictionsTensor, kMeanGradientName)
-                                                  .auxiliaryInput(kTargetName, labelsTensor)
-                                                  .input(kVarianceName, varianceTensor, kVarianceGradientName)
-                                                  .lossName(kLossName)
-                                                  .lossDataType(lossDataType)
-                                       .lossWeight(lossWeight.value_or(1.0f))
-                                                  .reportsRawLoss()
-                                                  .build();
+    MultiInputCustomLoss::Builder builder;
+    builder.network(*network)
+        .lossExpression(makeGaussianNLLLossExpression(lossDataType, logVariance, full, eps, exampleWeightsTensor.has_value()))
+        .gradientExpression(makeGaussianNLLGradientExpression(predictionsTensor.getDataType(),
+                                                              varianceTensor.getDataType(),
+                                                              logVariance,
+                                                              eps,
+                                                              exampleWeightsTensor.has_value()))
+        .input(kMeanName, predictionsTensor, std::string(kMeanGradientName))
+        .auxiliaryInput(kTargetName, labelsTensor)
+        .input(kVarianceName, varianceTensor, std::string(kVarianceGradientName))
+        .lossName(kLossName)
+        .lossDataType(lossDataType)
+        .lossWeight(lossWeight.value_or(1.0f))
+        .reportsRawLoss();
+    if (exampleWeightsTensor.has_value())
+        builder.auxiliaryInput(kExampleWeightsName, exampleWeightsTensor.value());
 
+    MultiInputCustomLoss rawGaussianNLLLoss = builder.build();
     lossShaperInput = rawGaussianNLLLoss.getLoss();
-
     finalizeLossReporting();
 }
 
@@ -107,6 +174,7 @@ json GaussianNLLLoss::architectureJson() const {
     j["layer_type"] = "gaussian_nll_loss";
     j["loss_shape"] = lossShape;
     j["variance_tensor"] = varianceTensor.architectureJson();
+    j["log_variance"] = logVariance;
     j["full"] = full;
     j["eps"] = eps;
     return j;
@@ -130,11 +198,16 @@ void GaussianNLLLoss::deserialize(const json& j, Network* network) {
     loss.lossDataType = j.at("loss_data_type").get<DataType>();
 
     loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
+    loss.logVariance = j.value("log_variance", false);
     loss.full = j.value("full", false);
     loss.eps = j.value("eps", 1.0e-6f);
     loss.predictionsTensor = predictions;
     loss.labelsTensor = labels;
     loss.varianceTensor = variance;
+    if (j.contains("example_weights_tensor")) {
+        originalTensorId = j["example_weights_tensor"].at("id").get<uint64_t>();
+        loss.exampleWeightsTensor = network->getApiTensorByOriginalId(originalTensorId);
+    }
     loss.network = network;
     loss.initialized = true;
     loss.buildSupportLayersAndAddToNetwork();

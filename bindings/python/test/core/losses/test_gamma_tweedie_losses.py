@@ -1,3 +1,4 @@
+import math
 import json
 
 import numpy as np
@@ -477,3 +478,88 @@ def test_tweedie_loss_weighted_save_load_round_trip_serializes_support_layers(tm
     loaded_arch = json.loads(loaded.get_architecture_json())
     assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "multi_input_custom_loss") == 1
     assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "loss_shaper") == 1
+
+
+def _gamma_mean_dispersion_reference(mean, labels, dispersion, eps):
+    mean = np.asarray(mean, dtype=np.float64)
+    labels = np.asarray(labels, dtype=np.float64)
+    safe_labels = np.maximum(labels, eps)
+    dispersion = np.asarray(dispersion, dtype=np.float64)
+    concentration = 1.0 / dispersion
+    lgamma = np.vectorize(math.lgamma)
+    return (
+        lgamma(concentration)
+        + concentration * (np.log(mean) + np.log(dispersion))
+        - (concentration - 1.0) * np.log(safe_labels)
+        + labels / (mean * dispersion)
+    ).astype(np.float32)
+
+
+def test_gamma_nll_loss_accepts_learned_dispersion_log_parameters_and_weights():
+    n = _net("test_gamma_generalized_api")
+    log_mean = _tensor_1d(4)
+    labels = _tensor_1d(4)
+    log_dispersion = _tensor_1d(4)
+    weights = _tensor_1d(1)
+
+    loss = thor.losses.distribution.GammaNLLLoss(
+        n,
+        log_mean,
+        labels,
+        dispersion=log_dispersion,
+        log_mean=True,
+        log_dispersion=True,
+        example_weights=weights,
+    )
+
+    assert loss.log_mean is True
+    assert loss.log_dispersion is True
+    assert loss.dispersion == log_dispersion
+    assert loss.get_example_weights() == weights
+
+
+def test_gamma_nll_loss_rejects_log_dispersion_without_dispersion_tensor():
+    n = _net("test_gamma_log_dispersion_requires_tensor")
+    mean = _tensor_1d(2)
+    labels = _tensor_1d(2)
+    with pytest.raises(ValueError, match=r"log_dispersion=True requires dispersion"):
+        thor.losses.distribution.GammaNLLLoss(n, mean, labels, log_dispersion=True)
+
+
+@pytest.mark.cuda
+def test_gamma_nll_loss_learned_log_dispersion_matches_reference():
+    eps = 1.0e-6
+    mean = np.array([[0.5, 1.25, 3.5], [2.0, 0.75, 4.0]], dtype=np.float32)
+    labels = np.array([[0.25, 1.0, 2.0], [3.0, 0.5, 5.0]], dtype=np.float32)
+    dispersion = np.array([[0.2, 0.5, 1.1], [0.75, 0.3, 0.6]], dtype=np.float32)
+    weights = np.array([[1.0, 0.5, 0.0], [1.5, 0.25, 1.0]], dtype=np.float32)
+
+    n = thor.Network("test_gamma_generalized_forward")
+    dtype = thor.DataType.fp32
+    mean_input = thor.layers.NetworkInput(n, "log_mean", [3], dtype)
+    labels_input = thor.layers.NetworkInput(n, "labels", [3], dtype)
+    dispersion_input = thor.layers.NetworkInput(n, "log_dispersion", [3], dtype)
+    weights_input = thor.layers.NetworkInput(n, "weights", [3], dtype)
+    loss = thor.losses.distribution.GammaNLLLoss(
+        n,
+        mean_input.get_feature_output(),
+        labels_input.get_feature_output(),
+        dispersion=dispersion_input.get_feature_output(),
+        log_mean=True,
+        log_dispersion=True,
+        example_weights=weights_input.get_feature_output(),
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    thor.layers.NetworkOutput(n, "loss", loss.get_loss(), dtype)
+    placed = n.place(2, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    outputs = placed.infer(
+        {
+            "log_mean": _cpu_tensor(np.log(mean), dtype),
+            "labels": _cpu_tensor(labels, dtype),
+            "log_dispersion": _cpu_tensor(np.log(dispersion), dtype),
+            "weights": _cpu_tensor(weights, dtype),
+        }
+    )
+
+    expected = _gamma_mean_dispersion_reference(mean, labels, dispersion, eps) * weights
+    np.testing.assert_allclose(np.array(outputs["loss"].numpy(), copy=True), expected, rtol=2e-5, atol=2e-5)

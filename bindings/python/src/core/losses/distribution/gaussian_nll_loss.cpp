@@ -1,6 +1,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <optional>
+#include <vector>
 
 #include "DeepLearning/Api/Layers/Loss/GaussianNLLLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -46,7 +47,7 @@ void validateGaussianNLLLossArguments(const string &loss_name,
                                       Tensor predictions,
                                       Tensor labels,
                                       Tensor variance,
-                                      std::optional<DataType> loss_data_type,
+                                      optional<DataType> loss_data_type,
                                       LossShape reported_loss_shape,
                                       float eps) {
     if (predictions.getDimensions().empty()) {
@@ -63,28 +64,40 @@ void validateGaussianNLLLossArguments(const string &loss_name,
                                " must match predictions dimensions " + predictions.getDescriptorString();
         throw nb::value_error(error_message.c_str());
     }
-    if (!isFloatingDType(predictions.getDataType())) {
-        string error_message = loss_name + ": predictions must use fp16 or fp32 dtype";
-        throw nb::value_error(error_message.c_str());
-    }
-    if (!isFloatingDType(labels.getDataType())) {
-        string error_message = loss_name + ": labels must use fp16 or fp32 dtype";
-        throw nb::value_error(error_message.c_str());
-    }
-    if (!isFloatingDType(variance.getDataType())) {
-        string error_message = loss_name + ": variance must use fp16 or fp32 dtype";
-        throw nb::value_error(error_message.c_str());
-    }
+    if (!isFloatingDType(predictions.getDataType()))
+        throw nb::value_error("GaussianNLLLoss instance: predictions must use fp16 or fp32 dtype");
+    if (!isFloatingDType(labels.getDataType()))
+        throw nb::value_error("GaussianNLLLoss instance: labels must use fp16 or fp32 dtype");
+    if (!isFloatingDType(variance.getDataType()))
+        throw nb::value_error("GaussianNLLLoss instance: variance must use fp16 or fp32 dtype");
     DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
-    if (!isFloatingDType(effectiveLossDataType)) {
-        string error_message = loss_name + ": loss_data_type must be fp16 or fp32";
-        throw nb::value_error(error_message.c_str());
-    }
-    if (eps <= 0.0f) {
-        string error_message = loss_name + ": eps must be greater than zero";
-        throw nb::value_error(error_message.c_str());
-    }
+    if (!isFloatingDType(effectiveLossDataType))
+        throw nb::value_error("GaussianNLLLoss instance: loss_data_type must be fp16 or fp32");
+    if (eps <= 0.0f)
+        throw nb::value_error("GaussianNLLLoss instance: eps must be greater than zero");
     validateReportedLossShape(reported_loss_shape, loss_name);
+}
+
+void maybeSetExampleWeights(GaussianNLLLoss::Builder &builder,
+                            Tensor predictions,
+                            Tensor labels,
+                            Tensor variance,
+                            optional<Tensor> example_weights) {
+    if (!example_weights.has_value())
+        return;
+    if (example_weights.value() == predictions || example_weights.value() == labels || example_weights.value() == variance)
+        throw nb::value_error("GaussianNLLLoss instance: example_weights must be distinct from predictions, labels, and variance.");
+    if (!isFloatingDType(example_weights.value().getDataType()))
+        throw nb::value_error("GaussianNLLLoss instance: example_weights must use fp16 or fp32 dtype.");
+    const vector<uint64_t>& dims = example_weights.value().getDimensions();
+    if (dims != vector<uint64_t>{1} && dims != predictions.getDimensions()) {
+        string error_message =
+            "GaussianNLLLoss instance: example_weights dimensions must be [1] for per-example weights or match predictions. "
+            "example_weights tensor is " +
+            example_weights.value().getDescriptorString() + "; predictions tensor is " + predictions.getDescriptorString() + ".";
+        throw nb::value_error(error_message.c_str());
+    }
+    builder.exampleWeights(example_weights.value());
 }
 }  // namespace
 
@@ -101,9 +114,11 @@ void bind_gaussian_nll_loss(nb::module_ &losses) {
            Tensor variance,
            bool full,
            float eps,
-           std::optional<DataType> loss_data_type,
+           optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
-           std::optional<float> loss_weight) {
+           optional<float> loss_weight,
+           bool log_variance,
+           optional<Tensor> example_weights) {
             const string loss_name = "GaussianNLLLoss instance";
             validateGaussianNLLLossArguments(loss_name, predictions, labels, variance, loss_data_type, reported_loss_shape, eps);
 
@@ -113,10 +128,12 @@ void bind_gaussian_nll_loss(nb::module_ &losses) {
                 .predictions(predictions)
                 .labels(labels)
                 .variance(variance)
+                .logVariance(log_variance)
                 .full(full)
                 .eps(eps)
                 .lossDataType(effectiveLossDataType)
                 .lossWeight(loss_weight.value_or(1.0f));
+            maybeSetExampleWeights(builder, predictions, labels, variance, example_weights);
             setReportedLossShape(builder, reported_loss_shape);
             GaussianNLLLoss built = builder.build();
 
@@ -132,21 +149,29 @@ void bind_gaussian_nll_loss(nb::module_ &losses) {
         "reported_loss_shape"_a = LossShape::BATCH,
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
+        "log_variance"_a = false,
+        "example_weights"_a.none() = nb::none(),
         R"nbdoc(Construct a Gaussian negative log-likelihood loss.)nbdoc");
 
     gaussian_nll_loss.def_prop_ro("variance", &GaussianNLLLoss::getVariance);
+    gaussian_nll_loss.def_prop_ro("log_variance", &GaussianNLLLoss::getLogVariance);
     gaussian_nll_loss.def_prop_ro("full", &GaussianNLLLoss::getFull);
     gaussian_nll_loss.def_prop_ro("eps", &GaussianNLLLoss::getEps);
 
     gaussian_nll_loss.attr("__doc__") = R"nbdoc(
 Gaussian negative log-likelihood loss.
 
-Predictions are means, labels are targets, and variance is the per-element
-variance tensor. Variance is clamped to at least eps for numerical stability.
-The raw loss is:
+predictions are means and labels are targets. By default variance contains a
+positive per-element variance and is clamped to at least eps. With
+log_variance=True, variance contains log(variance), so an unconstrained network
+head can be trained directly and the raw loss is evaluated as:
 
-    0.5 * (log(max(variance, eps)) + (predictions - labels)^2 / max(variance, eps))
+    0.5 * (log_variance + (predictions - labels)^2 * exp(-log_variance))
 
 If full is True, the constant 0.5 * log(2*pi) is included.
+
+example_weights may be a [1] per-example weight tensor or match predictions for
+elementwise weighting. Weights multiply the raw loss and both learned-parameter
+gradients before loss-shape reduction.
 )nbdoc";
 }
