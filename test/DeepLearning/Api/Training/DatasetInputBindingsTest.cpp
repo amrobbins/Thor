@@ -303,6 +303,7 @@ TEST(DatasetInputBindings, RaggedLogicalInputBindsOneDatasetFieldAndCarriesMater
                               .offsetsDataType(DataType::UINT64)
                               .trailingDimensions({})
                               .maxTotalValues(23)
+                              .maxValuesPerRow(7)
                               .batchSize(4)
                               .build();
 
@@ -318,6 +319,8 @@ TEST(DatasetInputBindings, RaggedLogicalInputBindsOneDatasetFieldAndCarriesMater
     EXPECT_EQ(requirement.raggedTensorDescriptor.value(), labels.getDescriptor());
     EXPECT_EQ(requirement.raggedTensorDescriptor->getOffsetsDataType(), DataType::UINT64);
     EXPECT_EQ(requirement.raggedTensorDescriptor->getMaxTotalValues(), 23u);
+    ASSERT_TRUE(requirement.raggedTensorDescriptor->hasMaxValuesPerRow());
+    EXPECT_EQ(requirement.raggedTensorDescriptor->getMaxValuesPerRow(), 7u);
     EXPECT_EQ(requirement.raggedTensorDescriptor->getBatchSize(), 4u);
 }
 

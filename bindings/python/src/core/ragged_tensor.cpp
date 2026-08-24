@@ -23,6 +23,13 @@ Construct a logical rank-1 ragged tensor from packed values and canonical row-pa
 has shape ``[batch_size + 1]`` with dtype ``uint32`` or ``uint64``. Offsets are
 structural metadata; they are not differentiable model values.
                )nbdoc");
+    ragged.def(nb::init<Tensor, Tensor, uint64_t>(),
+               "values"_a,
+               "offsets"_a,
+               "max_values_per_row"_a,
+               R"nbdoc(
+Construct a logical rank-1 ragged tensor from packed values and offsets with an explicit maximum logical row length.
+               )nbdoc");
     ragged.def(
         nb::init<DataType, const std::vector<uint64_t> &, uint64_t, uint64_t, DataType>(),
         "values_data_type"_a,
@@ -33,6 +40,17 @@ structural metadata; they are not differentiable model values.
         R"nbdoc(
 Construct a logical ragged tensor descriptor using Thor's canonical packed representation.
                )nbdoc");
+    ragged.def(
+        nb::init<DataType, const std::vector<uint64_t> &, uint64_t, uint64_t, uint64_t, DataType>(),
+        "values_data_type"_a,
+        "trailing_dimensions"_a,
+        "batch_size"_a,
+        "max_total_values"_a,
+        "max_values_per_row"_a,
+        "offsets_data_type"_a = ThorImplementation::kDefaultRowPartitionOffsetDataType,
+        R"nbdoc(
+Construct a logical ragged tensor descriptor with an explicit maximum logical row length.
+               )nbdoc");
 
     ragged.def_prop_ro("values", &RaggedTensor::getValues);
     ragged.def_prop_ro("offsets", &RaggedTensor::getOffsets);
@@ -41,6 +59,10 @@ Construct a logical ragged tensor descriptor using Thor's canonical packed repre
     ragged.def_prop_ro("trailing_dimensions", &RaggedTensor::getTrailingDimensions);
     ragged.def_prop_ro("batch_size", &RaggedTensor::getBatchSize);
     ragged.def_prop_ro("max_total_values", &RaggedTensor::getMaxTotalValues);
+    ragged.def_prop_ro("max_values_per_row", [](const RaggedTensor& value) -> nb::object {
+        if (!value.hasMaxValuesPerRow()) return nb::none();
+        return nb::int_(value.getMaxValuesPerRow());
+    });
     ragged.def_prop_ro("ragged_rank", &RaggedTensor::getRaggedRank);
     ragged.def("get_values", &RaggedTensor::getValues);
     ragged.def("get_offsets", &RaggedTensor::getOffsets);

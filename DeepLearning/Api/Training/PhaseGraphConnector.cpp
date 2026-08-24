@@ -122,15 +122,16 @@ Tensor ensureExternalInput(ComposedPhaseGraph& graph, const Network& sourceNetwo
         if (!foundExisting) {
             const ThorImplementation::RaggedTensorDescriptor descriptor =
                 sourceRagged->raggedTensor.getDescriptor();
-            destinationRagged = RaggedNetworkInput::Builder()
-                                    .network(*graph.network)
-                                    .name(sourceRagged->name)
-                                    .valuesDataType(descriptor.getValuesDataType())
-                                    .offsetsDataType(descriptor.getOffsetsDataType())
-                                    .trailingDimensions(descriptor.getTrailingDimensions())
-                                    .maxTotalValues(descriptor.getMaxTotalValues())
-                                    .batchSize(descriptor.getBatchSize())
-                                    .build();
+            RaggedNetworkInput::Builder builder = RaggedNetworkInput::Builder()
+                                                     .network(*graph.network)
+                                                     .name(sourceRagged->name)
+                                                     .valuesDataType(descriptor.getValuesDataType())
+                                                     .offsetsDataType(descriptor.getOffsetsDataType())
+                                                     .trailingDimensions(descriptor.getTrailingDimensions())
+                                                     .maxTotalValues(descriptor.getMaxTotalValues())
+                                                     .batchSize(descriptor.getBatchSize());
+            if (descriptor.hasMaxValuesPerRow()) builder.maxValuesPerRow(descriptor.getMaxValuesPerRow());
+            destinationRagged = builder.build();
         }
 
         graph.externalInputTensorsByName[sourceRagged->valuesInputName] = destinationRagged.getValues();

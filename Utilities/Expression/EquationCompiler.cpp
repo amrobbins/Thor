@@ -5,6 +5,7 @@
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
+#include "Utilities/TensorOperations/Ragged/RaggedConv1dWidthCapacity.h"
 
 #include "CudaSourceEmitter.h"
 
@@ -251,6 +252,8 @@ struct StageNodeKey {
     bool transpose_lhs = false;
     bool transpose_rhs = false;
     bool transpose_aux = false;
+    ConvolutionSpatial2d conv_spatial_2d{};
+    uint64_t conv_groups = 1;
     int32_t conv_stride_d = 1;
     int32_t conv_stride_h = 1;
     int32_t conv_stride_w = 1;
@@ -296,6 +299,13 @@ struct StageNodeKey {
     uint64_t ragged_runtime_max_active_values = 0;
     uint64_t ragged_runtime_elements_per_value = 1;
     bool segmented_broadcast_normalize_by_length = false;
+    uint64_t rms_norm_normalized_feature_count = 0;
+    uint64_t rms_norm_epsilon_bits = 0;
+    int32_t rms_norm_fused_activation = 0;
+    uint64_t rms_norm_packed_row_capacity = 0;
+    uint64_t layer_norm_normalized_feature_count = 0;
+    uint64_t layer_norm_epsilon_bits = 0;
+    uint64_t layer_norm_packed_row_capacity = 0;
 
     bool operator==(const StageNodeKey& other) const = default;
 };
@@ -315,6 +325,15 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<bool>{}(k.transpose_lhs));
         hashCombine(h, std::hash<bool>{}(k.transpose_rhs));
         hashCombine(h, std::hash<bool>{}(k.transpose_aux));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_2d.stride_h));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_2d.stride_w));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_2d.dilation_h));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_2d.dilation_w));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_2d.pre_padding_h));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_2d.post_padding_h));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_2d.pre_padding_w));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_2d.post_padding_w));
+        hashCombine(h, std::hash<uint64_t>{}(k.conv_groups));
         hashCombine(h, std::hash<int32_t>{}(k.conv_stride_d));
         hashCombine(h, std::hash<int32_t>{}(k.conv_stride_h));
         hashCombine(h, std::hash<int32_t>{}(k.conv_stride_w));
@@ -375,11 +394,21 @@ struct StageNodeKeyHash {
         if (k.op == ExprOp::RAGGED_VALUEWISE_EXTENT || k.op == ExprOp::SEGMENTED_BROADCAST ||
             k.op == ExprOp::SEGMENTED_REDUCE_SUM || k.op == ExprOp::SEGMENTED_REDUCE_MIN ||
             k.op == ExprOp::SEGMENTED_REDUCE_MAX || k.op == ExprOp::SEGMENTED_REDUCE_MEAN ||
-            k.op == ExprOp::MATMUL || k.op == ExprOp::RMSNORM) {
+            k.op == ExprOp::MATMUL || k.op == ExprOp::RMSNORM || k.op == ExprOp::LAYERNORM) {
             hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_batch_size));
             hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_max_active_values));
             hashCombine(h, std::hash<uint64_t>{}(k.ragged_runtime_elements_per_value));
             hashCombine(h, std::hash<bool>{}(k.segmented_broadcast_normalize_by_length));
+        }
+        if (k.op == ExprOp::RMSNORM) {
+            hashCombine(h, std::hash<uint64_t>{}(k.rms_norm_normalized_feature_count));
+            hashCombine(h, std::hash<uint64_t>{}(k.rms_norm_epsilon_bits));
+            hashCombine(h, std::hash<int32_t>{}(k.rms_norm_fused_activation));
+            hashCombine(h, std::hash<uint64_t>{}(k.rms_norm_packed_row_capacity));
+        } else if (k.op == ExprOp::LAYERNORM) {
+            hashCombine(h, std::hash<uint64_t>{}(k.layer_norm_normalized_feature_count));
+            hashCombine(h, std::hash<uint64_t>{}(k.layer_norm_epsilon_bits));
+            hashCombine(h, std::hash<uint64_t>{}(k.layer_norm_packed_row_capacity));
         }
         return h;
     }
@@ -412,6 +441,8 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.transpose_lhs = n.transpose_lhs;
     key.transpose_rhs = n.transpose_rhs;
     key.transpose_aux = n.transpose_aux;
+    key.conv_spatial_2d = n.conv_spatial_2d;
+    key.conv_groups = n.conv_groups;
     key.conv_stride_d = n.conv_stride_d;
     key.conv_stride_h = n.conv_stride_h;
     key.conv_stride_w = n.conv_stride_w;
@@ -452,11 +483,21 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT || n.op == ExprOp::SEGMENTED_BROADCAST ||
         n.op == ExprOp::SEGMENTED_REDUCE_SUM || n.op == ExprOp::SEGMENTED_REDUCE_MIN ||
         n.op == ExprOp::SEGMENTED_REDUCE_MAX || n.op == ExprOp::SEGMENTED_REDUCE_MEAN ||
-        n.op == ExprOp::MATMUL || n.op == ExprOp::RMSNORM) {
+        n.op == ExprOp::MATMUL || n.op == ExprOp::RMSNORM || n.op == ExprOp::LAYERNORM) {
         key.ragged_runtime_batch_size = n.ragged_runtime_batch_size;
         key.ragged_runtime_max_active_values = n.ragged_runtime_max_active_values;
         key.ragged_runtime_elements_per_value = n.ragged_runtime_elements_per_value;
         key.segmented_broadcast_normalize_by_length = n.segmented_broadcast_normalize_by_length;
+    }
+    if (n.op == ExprOp::RMSNORM) {
+        key.rms_norm_normalized_feature_count = n.rms_norm_normalized_feature_count;
+        key.rms_norm_epsilon_bits = scalarBits(n.rms_norm_epsilon);
+        key.rms_norm_fused_activation = static_cast<int32_t>(n.rms_norm_fused_activation);
+        key.rms_norm_packed_row_capacity = n.rms_norm_packed_row_capacity;
+    } else if (n.op == ExprOp::LAYERNORM) {
+        key.layer_norm_normalized_feature_count = n.layer_norm_normalized_feature_count;
+        key.layer_norm_epsilon_bits = scalarBits(n.layer_norm_epsilon);
+        key.layer_norm_packed_row_capacity = n.layer_norm_packed_row_capacity;
     }
 
     switch (n.op) {
@@ -663,7 +704,15 @@ static bool isSegmentedReduceOp(ExprOp op) {
            op == ExprOp::SEGMENTED_REDUCE_MAX || op == ExprOp::SEGMENTED_REDUCE_MEAN;
 }
 static bool isSegmentedBroadcastOp(ExprOp op) { return op == ExprOp::SEGMENTED_BROADCAST; }
+static bool isRaggedConv1dCausalOp(ExprOp op) { return op == ExprOp::RAGGED_CONV1D_CAUSAL; }
+static bool isRaggedConv1dCausalBackwardDataOp(ExprOp op) {
+    return op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA;
+}
+static bool isRaggedConv1dCausalBackwardFilterOp(ExprOp op) {
+    return op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER;
+}
 static bool isRmsNormOp(ExprOp op) { return op == ExprOp::RMSNORM; }
+static bool isLayerNormOp(ExprOp op) { return op == ExprOp::LAYERNORM; }
 static bool isRmsNormBackwardOp(ExprOp op) {
     return op == ExprOp::RMSNORM_BACKWARD_X || op == ExprOp::RMSNORM_BACKWARD_SCALE;
 }
@@ -682,9 +731,12 @@ static bool expressionHasIndexAwareOps(const PhysicalExpression& expr) {
 static bool isTransposeOp(ExprOp op) { return op == ExprOp::TRANSPOSE; }
 
 static bool isStageBoundaryOp(ExprOp op) {
-    return isReductionOp(op) || isSoftmaxOp(op) || isScanOp(op) || isSegmentedReduceOp(op) || isSegmentedBroadcastOp(op) || isRmsNormOp(op) || isRmsNormBackwardOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
-           isAttentionBackwardOp(op) || isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isScanMinMaxBackwardOp(op) || isEmbeddingLookupOp(op) ||
-           op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
+    return isReductionOp(op) || isSoftmaxOp(op) || isScanOp(op) || isSegmentedReduceOp(op) || isSegmentedBroadcastOp(op) ||
+           isRaggedConv1dCausalOp(op) || isRaggedConv1dCausalBackwardDataOp(op) ||
+           isRaggedConv1dCausalBackwardFilterOp(op) || isRmsNormOp(op) || isLayerNormOp(op) ||
+           isRmsNormBackwardOp(op) || isMatmulOp(op) || isAttentionOp(op) ||
+           isAttentionBackwardOp(op) || isConvolutionOp(op) || isReduceMinMaxBackwardOp(op) || isScanMinMaxBackwardOp(op) ||
+           isEmbeddingLookupOp(op) || op == ExprOp::STRIDED_VIEW || op == ExprOp::CUDA_KERNEL_OUTPUT;
 }
 
 static bool expressionHasStridedViewOp(const PhysicalExpression& expr) {
@@ -743,7 +795,7 @@ static std::optional<DirectRaggedRuntimeExtent> directRaggedRuntimeExtent(const 
     }
     const ExprNode& offsets = expr.nodes[marker.rhs];
     if (offsets.op != ExprOp::INPUT || offsets.input_slot >= expr.inputs.size()) {
-        throw std::runtime_error("Packed MATMUL/RMSNORM ragged runtime extent requires canonical direct-input offsets.");
+        throw std::runtime_error("Packed MATMUL/RMSNORM/LAYERNORM ragged runtime extent requires canonical direct-input offsets.");
     }
     if (marker.ragged_runtime_batch_size == 0 || marker.ragged_runtime_max_active_values == 0 ||
         marker.ragged_runtime_elements_per_value == 0) {
@@ -826,6 +878,10 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
         ragged_offsets_input_slot[node_idx] = dependency_offsets_slot;
         ambiguous_ragged_partition[node_idx] = ambiguous_partition;
         if (!depends) {
+            if (isRaggedConv1dCausalBackwardFilterOp(node.op)) {
+                throw std::runtime_error(
+                    "ragged Conv1D backward-filter requires retained ragged extents on both X and dY.");
+            }
             continue;
         }
 
@@ -888,6 +944,25 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
             continue;
         }
 
+        if (isLayerNormOp(node.op)) {
+            const std::optional<DirectRaggedRuntimeExtent> extent = directRaggedRuntimeExtent(expr, node.lhs);
+            if (!extent.has_value() || ambiguous_partition || !dependency_offsets_slot.has_value() ||
+                extent->offsets_input_slot != dependency_offsets_slot.value()) {
+                throw std::runtime_error(
+                    "packed LayerNorm must receive its row partition through a direct RAGGED_VALUEWISE_EXTENT feature operand.");
+            }
+            if (node.layer_norm_packed_row_capacity == 0 ||
+                extent->max_active_values != node.layer_norm_packed_row_capacity) {
+                throw std::runtime_error("packed LayerNorm row-partition metadata does not match its packed row capacity.");
+            }
+
+            // LayerNorm consumes the runtime extent at this stage boundary.
+            depends_on_ragged_extent[node_idx] = false;
+            ragged_offsets_input_slot[node_idx] = std::nullopt;
+            ambiguous_ragged_partition[node_idx] = false;
+            continue;
+        }
+
         if (isRmsNormBackwardOp(node.op) && node.rms_norm_packed_row_capacity != 0) {
             const std::optional<DirectRaggedRuntimeExtent> extent = directRaggedRuntimeExtent(expr, node.lhs);
             if (!extent.has_value() || ambiguous_partition || !dependency_offsets_slot.has_value() ||
@@ -901,6 +976,72 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
 
             // The bucketed cuDNN backward stage consumes the runtime extent. dY is
             // sanitized immediately before the physical read; dX slack is undefined.
+            depends_on_ragged_extent[node_idx] = false;
+            ragged_offsets_input_slot[node_idx] = std::nullopt;
+            ambiguous_ragged_partition[node_idx] = false;
+            continue;
+        }
+
+        if (isRaggedConv1dCausalBackwardDataOp(node.op)) {
+            // T9A dgrad is an explicit consumer of the output-gradient row domain.
+            // Its cuDNN backend reads a selected padded width, so the consumer
+            // sanitizes dY immediately before the physical read. The incoming
+            // ragged extent therefore terminates at this stage boundary and dX is
+            // re-wrapped explicitly by autodiff with its own RAGGED_VALUEWISE_EXTENT.
+            const auto nodeCarriesRaggedExtent = [&](uint32_t parent_idx) {
+                return parent_idx != UINT32_MAX && parent_idx < depends_on_ragged_extent.size() &&
+                       depends_on_ragged_extent[parent_idx];
+            };
+            const bool filter_carries_extent = nodeCarriesRaggedExtent(node.lhs);
+            const bool dy_carries_extent = nodeCarriesRaggedExtent(node.rhs);
+            const bool offsets_carry_extent = nodeCarriesRaggedExtent(node.aux);
+            const std::optional<uint32_t> stage_offsets_slot = directInputSlot(expr, node.aux);
+            const std::optional<uint32_t> dy_offsets_slot =
+                dy_carries_extent ? ragged_offsets_input_slot.at(node.rhs) : std::nullopt;
+            const bool dy_partition_ambiguous =
+                dy_carries_extent && ambiguous_ragged_partition.at(node.rhs);
+            if (filter_carries_extent || offsets_carry_extent || !dy_carries_extent ||
+                dy_partition_ambiguous || !dy_offsets_slot.has_value() || !stage_offsets_slot.has_value() ||
+                dy_offsets_slot.value() != stage_offsets_slot.value()) {
+                throw std::runtime_error(
+                    "ragged Conv1D backward-data dY must be the only implicit ragged extent and must carry the same "
+                    "row partition as the explicit offsets input.");
+            }
+
+            depends_on_ragged_extent[node_idx] = false;
+            ragged_offsets_input_slot[node_idx] = std::nullopt;
+            ambiguous_ragged_partition[node_idx] = false;
+            continue;
+        }
+
+        if (isRaggedConv1dCausalBackwardFilterOp(node.op)) {
+            // T9B wgrad is a tail-observing consumer of both saved X and dY.
+            // Both numeric operands must carry the same unambiguous canonical
+            // row partition as the explicit offsets input. The dense dW output
+            // does not carry a ragged runtime extent.
+            const auto nodeCarriesRaggedExtent = [&](uint32_t parent_idx) {
+                return parent_idx != UINT32_MAX && parent_idx < depends_on_ragged_extent.size() &&
+                       depends_on_ragged_extent[parent_idx];
+            };
+            const bool x_carries_extent = nodeCarriesRaggedExtent(node.lhs);
+            const bool dy_carries_extent = nodeCarriesRaggedExtent(node.rhs);
+            const bool offsets_carry_extent = nodeCarriesRaggedExtent(node.aux);
+            const std::optional<uint32_t> stage_offsets_slot = directInputSlot(expr, node.aux);
+            const std::optional<uint32_t> x_offsets_slot =
+                x_carries_extent ? ragged_offsets_input_slot.at(node.lhs) : std::nullopt;
+            const std::optional<uint32_t> dy_offsets_slot =
+                dy_carries_extent ? ragged_offsets_input_slot.at(node.rhs) : std::nullopt;
+            const bool x_partition_ambiguous = x_carries_extent && ambiguous_ragged_partition.at(node.lhs);
+            const bool dy_partition_ambiguous = dy_carries_extent && ambiguous_ragged_partition.at(node.rhs);
+            if (!x_carries_extent || !dy_carries_extent || offsets_carry_extent || x_partition_ambiguous ||
+                dy_partition_ambiguous || !x_offsets_slot.has_value() || !dy_offsets_slot.has_value() ||
+                !stage_offsets_slot.has_value() || x_offsets_slot.value() != stage_offsets_slot.value() ||
+                dy_offsets_slot.value() != stage_offsets_slot.value()) {
+                throw std::runtime_error(
+                    "ragged Conv1D backward-filter X and dY must both carry the same unambiguous row partition as "
+                    "the explicit offsets input.");
+            }
+
             depends_on_ragged_extent[node_idx] = false;
             ragged_offsets_input_slot[node_idx] = std::nullopt;
             ambiguous_ragged_partition[node_idx] = false;
@@ -1317,6 +1458,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "SEG_BROADCAST";
         case ExprOp::RMSNORM:
             return "RMSNORM";
+        case ExprOp::LAYERNORM:
+            return "LAYERNORM";
         case ExprOp::RMSNORM_BACKWARD_X:
             return "RMSNORM_BW_X";
         case ExprOp::RMSNORM_BACKWARD_SCALE:
@@ -1349,6 +1492,12 @@ static const char* fusedOpTag(ExprOp op) {
             return "CONV3D_BWD_DATA";
         case ExprOp::CONV3D_BACKWARD_FILTER:
             return "CONV3D_BWD_FILTER";
+        case ExprOp::RAGGED_CONV1D_CAUSAL:
+            return "RAGGED_CONV1D_CAUSAL";
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA:
+            return "RAGGED_CONV1D_CAUSAL_BWD_DATA";
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER:
+            return "RAGGED_CONV1D_CAUSAL_BWD_FILTER";
         default:
             throw std::runtime_error("Unsupported op in fusedRegionSignature, value: " + to_string((int)op));
     }
@@ -1544,6 +1693,26 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                  ",mode=" + std::to_string(static_cast<int>(node.scan_mode)) +
                  ",axis=" + std::to_string(node.scan_axis) +
                  ",reverse=" + std::to_string(node.scan_reverse ? 1 : 0) + ")";
+        } else if (isRaggedConv1dCausalOp(node.op) || isRaggedConv1dCausalBackwardDataOp(node.op) ||
+                   isRaggedConv1dCausalBackwardFilterOp(node.op)) {
+            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
+            const std::string aux = fusedRegionSignatureRec(expr, node.aux);
+            const char* lhs_label = isRaggedConv1dCausalOp(node.op) ? "values" :
+                                    (isRaggedConv1dCausalBackwardDataOp(node.op) ? "filter" : "input");
+            const char* rhs_label = isRaggedConv1dCausalOp(node.op) ? "filter" : "gradOutput";
+            s = std::string(fusedOpTag(node.op)) + "(" + lhs_label + "=" + lhs + "," + rhs_label + "=" + rhs + ",offsets=" + aux +
+                ",batch=" + std::to_string(node.ragged_runtime_batch_size) +
+                ",maxActive=" + std::to_string(node.ragged_runtime_max_active_values) +
+                ",maxPerRow=" + std::to_string(node.ragged_runtime_max_values_per_row) +
+                ",elementsPerValue=" + std::to_string(node.ragged_runtime_elements_per_value) +
+                ",inC=" + std::to_string(node.ragged_conv1d_input_channels) +
+                ",outC=" + std::to_string(node.ragged_conv1d_output_channels) +
+                ",kernel=" + std::to_string(node.ragged_conv1d_kernel_width) +
+                ",groups=" + std::to_string(node.ragged_conv1d_groups) +
+                ",stride=" + std::to_string(node.ragged_conv_spatial_1d.stride) +
+                ",pre=" + std::to_string(node.ragged_conv_spatial_1d.pre_padding) +
+                ",post=" + std::to_string(node.ragged_conv_spatial_1d.post_padding) +
+                ",dilation=" + std::to_string(node.ragged_conv_spatial_1d.dilation) + ")";
         } else if (isRmsNormOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",scale=" + rhs +
@@ -1551,6 +1720,13 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 ",epsilon=" + std::to_string(scalarBits(node.rms_norm_epsilon)) +
                 ",fused=" + std::string(toString(node.rms_norm_fused_activation)) +
                 ",packedRowsCapacity=" + std::to_string(node.rms_norm_packed_row_capacity) + ")";
+        } else if (isLayerNormOp(node.op)) {
+            const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
+            const std::string aux = fusedRegionSignatureRec(expr, node.aux);
+            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",scale=" + rhs + ",bias=" + aux +
+                ",hidden=" + std::to_string(node.layer_norm_normalized_feature_count) +
+                ",epsilon=" + std::to_string(scalarBits(node.layer_norm_epsilon)) +
+                ",packedRowsCapacity=" + std::to_string(node.layer_norm_packed_row_capacity) + ")";
         } else if (isRmsNormBackwardOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
             const std::string aux = fusedRegionSignatureRec(expr, node.aux);
@@ -1654,9 +1830,22 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
             s += ")";
         } else if (isConvolutionOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",sh=" + std::to_string(node.conv_stride_h) +
-                ",sw=" + std::to_string(node.conv_stride_w) + ",ph=" + std::to_string(node.conv_pad_h) +
-                ",pw=" + std::to_string(node.conv_pad_w) + ")";
+            if (node.op == ExprOp::CONV2D || node.op == ExprOp::CONV2D_BACKWARD_DATA || node.op == ExprOp::CONV2D_BACKWARD_FILTER) {
+                s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs +
+                    ",sh=" + std::to_string(node.conv_spatial_2d.stride_h) +
+                    ",sw=" + std::to_string(node.conv_spatial_2d.stride_w) +
+                    ",preH=" + std::to_string(node.conv_spatial_2d.pre_padding_h) +
+                    ",postH=" + std::to_string(node.conv_spatial_2d.post_padding_h) +
+                    ",preW=" + std::to_string(node.conv_spatial_2d.pre_padding_w) +
+                    ",postW=" + std::to_string(node.conv_spatial_2d.post_padding_w) +
+                    ",dh=" + std::to_string(node.conv_spatial_2d.dilation_h) +
+                    ",dw=" + std::to_string(node.conv_spatial_2d.dilation_w) +
+                    ",groups=" + std::to_string(node.conv_groups) + ")";
+            } else {
+                s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",sh=" + std::to_string(node.conv_stride_h) +
+                    ",sw=" + std::to_string(node.conv_stride_w) + ",ph=" + std::to_string(node.conv_pad_h) +
+                    ",pw=" + std::to_string(node.conv_pad_w) + ")";
+            }
         } else {
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",axes=" + uintVecSignature(node.reduction_axes) +
                 ",squeeze=" + uintVecSignature(node.squeeze_axes) + ")";
@@ -1987,6 +2176,52 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     return compiled;
 }
 
+shared_ptr<CompiledEquation> EquationCompiler::compilePaddedRaggedPointwiseStage(
+    const PhysicalExecutionStage& stage,
+    const EquationSignature& sig,
+    const std::vector<PaddedRaggedPointwiseInputAccess>& input_access,
+    uint64_t batch_size,
+    uint64_t channels) {
+    if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
+        throw std::runtime_error("compilePaddedRaggedPointwiseStage called on non-fused stage.");
+    }
+    if (input_access.size() != stage.expr.inputs.size()) {
+        throw std::runtime_error("Padded-ragged pointwise input-access metadata does not match stage inputs.");
+    }
+    ensureCudaContextCurrent(sig.device_num);
+
+    std::string canonical = canonicalize(stage);
+    canonical += "|t8b_padded_pointwise:B=" + std::to_string(batch_size) + ";C=" + std::to_string(channels) + ";access=";
+    for (PaddedRaggedPointwiseInputAccess access : input_access) {
+        canonical += std::to_string(static_cast<unsigned int>(access));
+        canonical += ',';
+    }
+    EquationCacheKey key(canonical, sig, true);
+    if (shared_ptr<CompiledEquation> hit = cacheLookup(key)) {
+        return hit;
+    }
+
+    std::vector<NamedInput::Kind> input_kinds;
+    input_kinds.reserve(stage.expr.inputs.size());
+    for (const NamedInput& input : stage.expr.inputs) {
+        input_kinds.push_back(input.kind);
+    }
+    const std::vector<DataType> input_dtypes = collectCompiledInputDTypes(stage.expr);
+    const std::vector<DataType> output_dtypes = collectCompiledOutputDTypes(stage);
+    const std::string kernel_name = "padded_ragged_pointwise";
+    const std::string cuda_src =
+        CudaSourceEmitter::emitPaddedRaggedPointwise(stage, input_access, batch_size, channels, kernel_name);
+    vector<char> ltoir = compileToLtoIr(cuda_src, kernel_name, sig);
+    vector<char> cubin = linkToCubin(ltoir, sig);
+    auto compiled = loadCubin(key, cubin, kernel_name, input_kinds, input_dtypes, output_dtypes, sig.device_num);
+    compiled->launch_kind = CompiledEquation::LaunchKind::Flat;
+    compiled->elements_per_thread = 1;
+    compiled->uses_uint32_numel_arg = true;
+    compiled->uses_device_runtime_extent = false;
+    cacheInsert(key, compiled);
+    return compiled;
+}
+
 shared_ptr<CompiledReduction> EquationCompiler::compileReduction(const PhysicalExpression& expr) {
     if (expr.numInputs() != 1) {
         throw std::runtime_error("Reduction stage must have exactly one input.");
@@ -2186,6 +2421,284 @@ shared_ptr<CompiledSegmentedBroadcast> EquationCompiler::compileSegmentedBroadca
                                                    node.segmented_broadcast_normalize_by_length);
 }
 
+shared_ptr<CompiledRaggedConv1dCausal> EquationCompiler::compileRaggedConv1dCausal(const PhysicalExpression& expr) {
+    if (expr.numInputs() != 3) {
+        throw std::runtime_error("Ragged causal Conv1D stage must have exactly values, filter, and offsets inputs.");
+    }
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("Ragged causal Conv1D stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isRaggedConv1dCausalOp(node.op)) {
+        throw std::runtime_error("Ragged causal Conv1D stage output node has the wrong op.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX ||
+        node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size() || node.aux >= expr.nodes.size()) {
+        throw std::runtime_error("Ragged causal Conv1D node is missing values, filter, or offsets input.");
+    }
+
+    const ExprNode& values = expr.nodes[node.lhs];
+    const ExprNode& filter = expr.nodes[node.rhs];
+    const ExprNode& offsets = expr.nodes[node.aux];
+    if (values.op != ExprOp::INPUT || filter.op != ExprOp::INPUT || offsets.op != ExprOp::INPUT) {
+        throw std::runtime_error("Ragged causal Conv1D stage operands must be local INPUT nodes.");
+    }
+    auto inputDtypeForPlanning = [](const ExprNode& input, const char* label) -> DataType {
+        // Runtime compilation has input_tensor_dtype after tensor binding. Structural
+        // compiler inspection may happen earlier, when an INPUT still carries only
+        // its declared output_dtype. Prefer the bound dtype when present so runtime
+        // behavior is unchanged; otherwise use the declared logical dtype.
+        if (input.input_tensor_dtype.has_value()) {
+            return input.input_tensor_dtype.value();
+        }
+        if (input.output_dtype.has_value()) {
+            return input.output_dtype.value();
+        }
+        throw std::runtime_error(std::string("Ragged causal Conv1D ") + label + " input is missing dtype.");
+    };
+    const DataType valuesDtype = inputDtypeForPlanning(values, "values");
+    const DataType filterDtype = inputDtypeForPlanning(filter, "filter");
+    const DataType offsetsDtype = inputDtypeForPlanning(offsets, "offsets");
+    if (!node.output_dtype.has_value() || !node.compute_dtype.has_value()) {
+        throw std::runtime_error("Ragged causal Conv1D stage is missing output or compute dtype.");
+    }
+    if (!isCanonicalRowPartitionOffsetDataType(offsetsDtype)) {
+        throw std::runtime_error("Ragged causal Conv1D offsets dtype must be UINT32 or UINT64.");
+    }
+    auto t7r6FrontendValueDTypeSupported = [](DataType dtype) {
+        return dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32;
+    };
+    const DataType outputDtype = node.output_dtype.value();
+    const DataType computeDtype = node.compute_dtype.value();
+    if (!t7r6FrontendValueDTypeSupported(valuesDtype) || !t7r6FrontendValueDTypeSupported(filterDtype) ||
+        !t7r6FrontendValueDTypeSupported(outputDtype)) {
+        throw std::runtime_error(
+            "Ragged causal Conv1D uses the padded cuDNN Frontend backend and currently supports only FP16, BF16, "
+            "and FP32 value/filter/output dtypes; no alternate convolution backend is used.");
+    }
+    if (!convolutionComputeDTypeIsCompatibleWithTensorDTypes({valuesDtype, filterDtype, outputDtype}, computeDtype)) {
+        throw std::runtime_error(
+            "Ragged causal Conv1D received an unsupported cuDNN compute dtype for the tensor dtypes; "
+            "no alternate convolution backend is used.");
+    }
+    if (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
+        node.ragged_runtime_max_values_per_row == 0 ||
+        node.ragged_runtime_max_values_per_row > node.ragged_runtime_max_active_values ||
+        node.ragged_conv1d_input_channels == 0 || node.ragged_conv1d_output_channels == 0 ||
+        node.ragged_conv1d_kernel_width == 0 || node.ragged_conv1d_groups == 0 ||
+        node.ragged_conv1d_input_channels % node.ragged_conv1d_groups != 0 ||
+        node.ragged_conv1d_output_channels % node.ragged_conv1d_groups != 0) {
+        throw std::runtime_error("Ragged causal Conv1D node is missing logical geometry metadata.");
+    }
+    if (node.ragged_conv_spatial_1d.stride != 1 || node.ragged_conv_spatial_1d.dilation <= 0) {
+        throw std::runtime_error("Ragged causal Conv1D requires stride=1 and positive dilation.");
+    }
+    const ConvolutionSpatial1d expected =
+        ConvolutionSpatial1d::causal(node.ragged_conv1d_kernel_width, 1, node.ragged_conv_spatial_1d.dilation);
+    if (node.ragged_conv_spatial_1d.pre_padding != expected.pre_padding ||
+        node.ragged_conv_spatial_1d.post_padding != expected.post_padding) {
+        throw std::runtime_error("Ragged causal Conv1D stage carries non-causal padding.");
+    }
+
+    return make_shared<CompiledRaggedConv1dCausal>(valuesDtype,
+                                                   filterDtype,
+                                                   node.output_dtype.value(),
+                                                   node.compute_dtype.value(),
+                                                   offsetsDtype,
+                                                   node.ragged_runtime_batch_size,
+                                                   node.ragged_runtime_max_active_values,
+                                                   node.ragged_runtime_max_values_per_row,
+                                                   node.ragged_conv1d_input_channels,
+                                                   node.ragged_conv1d_output_channels,
+                                                   node.ragged_conv1d_kernel_width,
+                                                   node.ragged_conv1d_groups,
+                                                   node.ragged_conv_spatial_1d.dilation);
+}
+
+shared_ptr<CompiledRaggedConv1dCausalBackwardData> EquationCompiler::compileRaggedConv1dCausalBackwardData(
+    const PhysicalExpression& expr) {
+    if (expr.numInputs() != 3) {
+        throw std::runtime_error(
+            "Ragged causal Conv1D backward-data stage must have exactly filter, grad_output, and offsets inputs.");
+    }
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("Ragged causal Conv1D backward-data stage output_node is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isRaggedConv1dCausalBackwardDataOp(node.op)) {
+        throw std::runtime_error("Ragged causal Conv1D backward-data stage output node has the wrong op.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX ||
+        node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size() || node.aux >= expr.nodes.size()) {
+        throw std::runtime_error("Ragged causal Conv1D backward-data node is missing filter, grad_output, or offsets input.");
+    }
+
+    const ExprNode& filter = expr.nodes[node.lhs];
+    const ExprNode& grad_output = expr.nodes[node.rhs];
+    const ExprNode& offsets = expr.nodes[node.aux];
+    if (filter.op != ExprOp::INPUT || grad_output.op != ExprOp::INPUT || offsets.op != ExprOp::INPUT) {
+        throw std::runtime_error("Ragged causal Conv1D backward-data stage operands must be local INPUT nodes.");
+    }
+    auto inputDtypeForPlanning = [](const ExprNode& input, const char* label) -> DataType {
+        if (input.input_tensor_dtype.has_value()) {
+            return input.input_tensor_dtype.value();
+        }
+        if (input.output_dtype.has_value()) {
+            return input.output_dtype.value();
+        }
+        throw std::runtime_error(std::string("Ragged causal Conv1D backward-data ") + label + " input is missing dtype.");
+    };
+    const DataType filterDtype = inputDtypeForPlanning(filter, "filter");
+    const DataType gradOutputDtype = inputDtypeForPlanning(grad_output, "grad_output");
+    const DataType offsetsDtype = inputDtypeForPlanning(offsets, "offsets");
+    if (!node.output_dtype.has_value() || !node.compute_dtype.has_value()) {
+        throw std::runtime_error("Ragged causal Conv1D backward-data stage is missing output or compute dtype.");
+    }
+    if (!isCanonicalRowPartitionOffsetDataType(offsetsDtype)) {
+        throw std::runtime_error("Ragged causal Conv1D backward-data offsets dtype must be UINT32 or UINT64.");
+    }
+    auto frontendValueDTypeSupported = [](DataType dtype) {
+        return dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32;
+    };
+    const DataType outputDtype = node.output_dtype.value();
+    const DataType computeDtype = node.compute_dtype.value();
+    if (!frontendValueDTypeSupported(filterDtype) || !frontendValueDTypeSupported(gradOutputDtype) ||
+        !frontendValueDTypeSupported(outputDtype)) {
+        throw std::runtime_error(
+            "Ragged causal Conv1D backward-data uses the padded cuDNN Frontend backend and currently supports only "
+            "FP16, BF16, and FP32 filter/gradient dtypes; no alternate convolution backend is used.");
+    }
+    if (!convolutionComputeDTypeIsCompatibleWithTensorDTypes({filterDtype, gradOutputDtype, outputDtype}, computeDtype)) {
+        throw std::runtime_error(
+            "Ragged causal Conv1D backward-data received an unsupported cuDNN compute dtype for the tensor dtypes; "
+            "no alternate convolution backend is used.");
+    }
+    if (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
+        node.ragged_runtime_max_values_per_row == 0 ||
+        node.ragged_runtime_max_values_per_row > node.ragged_runtime_max_active_values ||
+        node.ragged_conv1d_input_channels == 0 || node.ragged_conv1d_output_channels == 0 ||
+        node.ragged_conv1d_kernel_width == 0 || node.ragged_conv1d_groups == 0 ||
+        node.ragged_conv1d_input_channels % node.ragged_conv1d_groups != 0 ||
+        node.ragged_conv1d_output_channels % node.ragged_conv1d_groups != 0) {
+        throw std::runtime_error("Ragged causal Conv1D backward-data node is missing logical geometry metadata.");
+    }
+    if (node.ragged_runtime_elements_per_value != node.ragged_conv1d_input_channels) {
+        throw std::runtime_error(
+            "Ragged causal Conv1D backward-data output extent must match the input-channel count.");
+    }
+    if (node.ragged_conv_spatial_1d.stride != 1 || node.ragged_conv_spatial_1d.dilation <= 0) {
+        throw std::runtime_error("Ragged causal Conv1D backward-data requires stride=1 and positive dilation.");
+    }
+    const ConvolutionSpatial1d expected =
+        ConvolutionSpatial1d::causal(node.ragged_conv1d_kernel_width, 1, node.ragged_conv_spatial_1d.dilation);
+    if (node.ragged_conv_spatial_1d.pre_padding != expected.pre_padding ||
+        node.ragged_conv_spatial_1d.post_padding != expected.post_padding) {
+        throw std::runtime_error("Ragged causal Conv1D backward-data stage carries non-causal padding.");
+    }
+
+    return make_shared<CompiledRaggedConv1dCausalBackwardData>(filterDtype,
+                                                               gradOutputDtype,
+                                                               outputDtype,
+                                                               computeDtype,
+                                                               offsetsDtype,
+                                                               node.ragged_runtime_batch_size,
+                                                               node.ragged_runtime_max_active_values,
+                                                               node.ragged_runtime_max_values_per_row,
+                                                               node.ragged_conv1d_input_channels,
+                                                               node.ragged_conv1d_output_channels,
+                                                               node.ragged_conv1d_kernel_width,
+                                                               node.ragged_conv1d_groups,
+                                                               node.ragged_conv_spatial_1d.dilation);
+}
+
+shared_ptr<CompiledRaggedConv1dCausalBackwardFilter> EquationCompiler::compileRaggedConv1dCausalBackwardFilter(
+    const PhysicalExpression& expr) {
+    if (expr.numInputs() != 3) {
+        throw std::runtime_error(
+            "Ragged causal Conv1D backward-filter stage must have exactly input, grad_output, and offsets inputs.");
+    }
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("Ragged causal Conv1D backward-filter stage output_node is out of range.");
+    }
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isRaggedConv1dCausalBackwardFilterOp(node.op)) {
+        throw std::runtime_error("Ragged causal Conv1D backward-filter stage output node has the wrong op.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX ||
+        node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size() || node.aux >= expr.nodes.size()) {
+        throw std::runtime_error("Ragged causal Conv1D backward-filter node is missing input, grad_output, or offsets input.");
+    }
+    const ExprNode& input = expr.nodes[node.lhs];
+    const ExprNode& grad_output = expr.nodes[node.rhs];
+    const ExprNode& offsets = expr.nodes[node.aux];
+    if (input.op != ExprOp::INPUT || grad_output.op != ExprOp::INPUT || offsets.op != ExprOp::INPUT) {
+        throw std::runtime_error("Ragged causal Conv1D backward-filter stage operands must be local INPUT nodes.");
+    }
+    auto inputDtypeForPlanning = [](const ExprNode& operand, const char* label) -> DataType {
+        if (operand.input_tensor_dtype.has_value()) return operand.input_tensor_dtype.value();
+        if (operand.output_dtype.has_value()) return operand.output_dtype.value();
+        throw std::runtime_error(std::string("Ragged causal Conv1D backward-filter ") + label + " input is missing dtype.");
+    };
+    const DataType inputDtype = inputDtypeForPlanning(input, "X");
+    const DataType gradOutputDtype = inputDtypeForPlanning(grad_output, "grad_output");
+    const DataType offsetsDtype = inputDtypeForPlanning(offsets, "offsets");
+    if (!node.output_dtype.has_value() || !node.compute_dtype.has_value()) {
+        throw std::runtime_error("Ragged causal Conv1D backward-filter stage is missing output or compute dtype.");
+    }
+    if (!isCanonicalRowPartitionOffsetDataType(offsetsDtype)) {
+        throw std::runtime_error("Ragged causal Conv1D backward-filter offsets dtype must be UINT32 or UINT64.");
+    }
+    auto frontendValueDTypeSupported = [](DataType dtype) {
+        return dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32;
+    };
+    const DataType outputDtype = node.output_dtype.value();
+    const DataType computeDtype = node.compute_dtype.value();
+    if (!frontendValueDTypeSupported(inputDtype) || !frontendValueDTypeSupported(gradOutputDtype) ||
+        !frontendValueDTypeSupported(outputDtype)) {
+        throw std::runtime_error(
+            "Ragged causal Conv1D backward-filter uses the padded cuDNN Frontend backend and currently supports only "
+            "FP16, BF16, and FP32 X/dY/dW dtypes; no alternate convolution backend is used.");
+    }
+    if (!convolutionComputeDTypeIsCompatibleWithTensorDTypes({inputDtype, gradOutputDtype, outputDtype}, computeDtype)) {
+        throw std::runtime_error(
+            "Ragged causal Conv1D backward-filter received an unsupported cuDNN compute dtype for the tensor dtypes; "
+            "no alternate convolution backend is used.");
+    }
+    if (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
+        node.ragged_runtime_max_values_per_row == 0 ||
+        node.ragged_runtime_max_values_per_row > node.ragged_runtime_max_active_values ||
+        node.ragged_conv1d_input_channels == 0 || node.ragged_conv1d_output_channels == 0 ||
+        node.ragged_conv1d_kernel_width == 0 || node.ragged_conv1d_groups == 0 ||
+        node.ragged_conv1d_input_channels % node.ragged_conv1d_groups != 0 ||
+        node.ragged_conv1d_output_channels % node.ragged_conv1d_groups != 0) {
+        throw std::runtime_error("Ragged causal Conv1D backward-filter node is missing logical geometry metadata.");
+    }
+    if (node.ragged_conv_spatial_1d.stride != 1 || node.ragged_conv_spatial_1d.dilation <= 0) {
+        throw std::runtime_error("Ragged causal Conv1D backward-filter requires stride=1 and positive dilation.");
+    }
+    const ConvolutionSpatial1d expected =
+        ConvolutionSpatial1d::causal(node.ragged_conv1d_kernel_width, 1, node.ragged_conv_spatial_1d.dilation);
+    if (node.ragged_conv_spatial_1d.pre_padding != expected.pre_padding ||
+        node.ragged_conv_spatial_1d.post_padding != expected.post_padding) {
+        throw std::runtime_error("Ragged causal Conv1D backward-filter stage carries non-causal padding.");
+    }
+    return make_shared<CompiledRaggedConv1dCausalBackwardFilter>(inputDtype,
+                                                                 gradOutputDtype,
+                                                                 outputDtype,
+                                                                 computeDtype,
+                                                                 offsetsDtype,
+                                                                 node.ragged_runtime_batch_size,
+                                                                 node.ragged_runtime_max_active_values,
+                                                                 node.ragged_runtime_max_values_per_row,
+                                                                 node.ragged_conv1d_input_channels,
+                                                                 node.ragged_conv1d_output_channels,
+                                                                 node.ragged_conv1d_kernel_width,
+                                                                 node.ragged_conv1d_groups,
+                                                                 node.ragged_conv_spatial_1d.dilation);
+}
+
 shared_ptr<CompiledScan> EquationCompiler::compileScan(const PhysicalExpression& expr) {
     if (expr.output_node >= expr.nodes.size()) {
         throw std::runtime_error("Scan stage output_node is out of range.");
@@ -2378,6 +2891,85 @@ shared_ptr<CompiledRmsNorm> EquationCompiler::compileRmsNorm(const PhysicalExpre
     descriptor.epsilon = static_cast<float>(compiled->epsilon);
     descriptor.training = false;
     descriptor.fusedActivation = compiled->fused_activation;
+    descriptor.debugName = compiled->debug_name;
+    descriptor.validateForward();
+    return compiled;
+}
+
+
+shared_ptr<CompiledLayerNorm> EquationCompiler::compileLayerNorm(const PhysicalExpression& expr) {
+    if (expr.numInputs() != 3 && expr.numInputs() != 4) {
+        throw std::runtime_error(
+            "LayerNorm stage must have feature input, scale, and bias, plus optional structural row-partition offsets.");
+    }
+    if (expr.output_node >= expr.nodes.size()) {
+        throw std::runtime_error("LayerNorm stage output_node is out of range.");
+    }
+    const ExprNode& node = expr.nodes[expr.output_node];
+    if (!isLayerNormOp(node.op) || node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX ||
+        node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size() || node.aux >= expr.nodes.size()) {
+        throw std::runtime_error("LayerNorm stage output is missing input, scale, or bias.");
+    }
+    const ExprNode& input_node = expr.nodes[node.lhs];
+    const ExprNode& scale_node = expr.nodes[node.rhs];
+    const ExprNode& bias_node = expr.nodes[node.aux];
+    if (input_node.op != ExprOp::INPUT || scale_node.op != ExprOp::INPUT || bias_node.op != ExprOp::INPUT ||
+        !input_node.input_tensor_dtype.has_value() || !scale_node.input_tensor_dtype.has_value() ||
+        !bias_node.input_tensor_dtype.has_value()) {
+        throw std::runtime_error("LayerNorm stage numeric operands must be resolved local INPUT nodes.");
+    }
+    if (!node.output_dtype.has_value() || !node.compute_dtype.has_value() ||
+        node.layer_norm_normalized_feature_count == 0 || !(node.layer_norm_epsilon > 0.0)) {
+        throw std::runtime_error("LayerNorm stage is missing valid dtype/normalized-feature/epsilon metadata.");
+    }
+    if (node.layer_norm_packed_row_capacity != 0) {
+        if (node.ragged_runtime_offsets_input_slot == UINT32_MAX || node.ragged_runtime_batch_size == 0 ||
+            node.ragged_runtime_max_active_values != node.layer_norm_packed_row_capacity ||
+            node.ragged_runtime_offsets_input_slot >= expr.inputs.size()) {
+            throw std::runtime_error("Packed LayerNorm stage is missing its explicit row-partition runtime binding.");
+        }
+        bool found_offsets = false;
+        for (const ExprNode& candidate : expr.nodes) {
+            if (candidate.op == ExprOp::INPUT && candidate.input_slot == node.ragged_runtime_offsets_input_slot) {
+                if (!candidate.input_tensor_dtype.has_value() ||
+                    !isCanonicalRowPartitionOffsetDataType(candidate.input_tensor_dtype.value())) {
+                    throw std::runtime_error("Packed LayerNorm row-partition offsets input has unsupported dtype.");
+                }
+                found_offsets = true;
+                break;
+            }
+        }
+        if (!found_offsets) {
+            throw std::runtime_error("Packed LayerNorm row-partition slot does not reference a local INPUT node.");
+        }
+    } else if (node.ragged_runtime_offsets_input_slot != UINT32_MAX) {
+        throw std::runtime_error("Dense LayerNorm stage unexpectedly carries a row-partition runtime binding.");
+    }
+
+    auto compiled = make_shared<CompiledLayerNorm>();
+    compiled->normalized_feature_count = node.layer_norm_normalized_feature_count;
+    compiled->packed_row_capacity = node.layer_norm_packed_row_capacity;
+    compiled->ragged_offsets_input_slot = node.ragged_runtime_offsets_input_slot;
+    compiled->ragged_batch_size = node.ragged_runtime_batch_size;
+    compiled->epsilon = node.layer_norm_epsilon;
+    compiled->input_dtype = input_node.input_tensor_dtype.value();
+    compiled->scale_dtype = scale_node.input_tensor_dtype.value();
+    compiled->bias_dtype = bias_node.input_tensor_dtype.value();
+    compiled->output_dtype = node.output_dtype.value();
+    compiled->compute_dtype = toSupportedComputeDType(node.op, node.compute_dtype.value());
+
+    CudnnLayerNormDescriptor descriptor;
+    descriptor.outerSize = 1;
+    descriptor.normalizedFeatureCount = compiled->normalized_feature_count;
+    descriptor.inputDataType = compiled->input_dtype;
+    descriptor.outputDataType = compiled->output_dtype;
+    if (compiled->scale_dtype != compiled->bias_dtype) {
+        throw std::runtime_error("LayerNorm scale and bias must use the same parameter dtype.");
+    }
+    descriptor.parameterDataType = compiled->scale_dtype;
+    descriptor.computeDataType = compiled->compute_dtype;
+    descriptor.epsilon = static_cast<float>(compiled->epsilon);
+    descriptor.training = false;
     descriptor.debugName = compiled->debug_name;
     descriptor.validateForward();
     return compiled;
@@ -3294,6 +3886,9 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
     if (!node.compute_dtype.has_value()) {
         throw std::runtime_error("Convolution forward node missing resolved compute_dtype.");
     }
+    if ((node.op == ExprOp::CONV2D || node.op == ExprOp::CONV3D) && node.conv_groups == 0) {
+        throw std::runtime_error("Convolution forward node groups must be positive.");
+    }
 
     const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
     const DataType supported_filter_dtype = toSupportedInputDType(node.op, filter_node.input_tensor_dtype.value());
@@ -3312,8 +3907,11 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
                                  "FP8, BF16, and FP32 tensors require FP32 compute; FP16 tensors support FP16 or FP32 compute.");
     }
 
-    return make_shared<CompiledConvolution>(node.op == ExprOp::CONV3D,
-                                            node.conv_stride_d,
+    if (node.op == ExprOp::CONV2D) {
+        return make_shared<CompiledConvolution>(
+            node.conv_spatial_2d, supported_input_dtype, supported_filter_dtype, output_dtype, compute_dtype, node.conv_groups);
+    }
+    return make_shared<CompiledConvolution>(node.conv_stride_d,
                                             node.conv_stride_h,
                                             node.conv_stride_w,
                                             node.conv_pad_d,
@@ -3322,7 +3920,8 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
                                             supported_input_dtype,
                                             supported_filter_dtype,
                                             output_dtype,
-                                            compute_dtype);
+                                            compute_dtype,
+                                            node.conv_groups);
 }
 
 shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBackward(const PhysicalExpression& expr) {
@@ -3365,6 +3964,9 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
     if (!node.compute_dtype.has_value()) {
         throw std::runtime_error("Convolution backward node missing resolved compute_dtype.");
     }
+    if (isConvolutionBackwardOp(node.op) && node.conv_groups == 0) {
+        throw std::runtime_error("Convolution backward node groups must be positive.");
+    }
 
     const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
     const DataType supported_grad_output_dtype = toSupportedInputDType(node.op, grad_node.input_tensor_dtype.value());
@@ -3383,6 +3985,16 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
                                  "FP8, BF16, and FP32 tensors require FP32 compute; FP16 tensors support FP16 or FP32 compute.");
     }
 
+    if (node.op == ExprOp::CONV2D_BACKWARD_DATA || node.op == ExprOp::CONV2D_BACKWARD_FILTER) {
+        return make_shared<CompiledConvolutionBackward>(node.op,
+                                                        node.conv_spatial_2d,
+                                                        supported_input_dtype,
+                                                        supported_grad_output_dtype,
+                                                        output_dtype,
+                                                        compute_dtype,
+                                                        node.fill_dims,
+                                                        node.conv_groups);
+    }
     return make_shared<CompiledConvolutionBackward>(node.op,
                                                     node.conv_stride_d,
                                                     node.conv_stride_h,
@@ -3394,7 +4006,8 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
                                                     supported_grad_output_dtype,
                                                     output_dtype,
                                                     compute_dtype,
-                                                    node.fill_dims);
+                                                    node.fill_dims,
+                                                    node.conv_groups);
 }
 
 shared_ptr<CompiledReduceMinMaxBackward> EquationCompiler::compileReduceMinMaxBackward(const PhysicalExpression& expr) {
@@ -4358,6 +4971,229 @@ static PhysicalExecutionStage buildSegmentedBroadcastStage(const PhysicalExpress
     };
 }
 
+static PhysicalExecutionStage buildRaggedConv1dCausalStage(
+    const PhysicalExpression& expr,
+    uint32_t node_idx,
+    uint32_t output_value_id,
+    const std::string& output_name,
+    const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes.at(node_idx);
+    if (!isRaggedConv1dCausalOp(node.op)) {
+        throw std::runtime_error("buildRaggedConv1dCausalStage called on non-ragged-Conv1D node.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX ||
+        node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size() || node.aux >= expr.nodes.size()) {
+        throw std::runtime_error("Ragged causal Conv1D node missing values, filter, or offsets input.");
+    }
+
+    auto resolve_stage_parent = [&](uint32_t parent_idx, const char* what) -> std::pair<uint32_t, DataType> {
+        const ExprNode& parent = expr.nodes[parent_idx];
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            if (!parent.output_dtype.has_value()) {
+                throw std::runtime_error(std::string("Ragged causal Conv1D ") + what + " parent is missing output dtype.");
+            }
+            return {out_it->second, parent.output_dtype.value()};
+        }
+        if (parent.op == ExprOp::INPUT) {
+            // Stage planning is also used as a structural inspection surface before
+            // runtime dtype resolution.  In that case INPUT has its declared/logical
+            // output dtype but not yet the dtype of the tensor that will eventually be
+            // bound to the root slot.  Prefer the actual bound dtype once resolution
+            // has populated it; otherwise use the declared output dtype as the
+            // planning-time storage dtype.  Normal execution always resolves root
+            // input dtypes before EquationCompiler::compile(), so the fallback is only
+            // relevant to pre-resolution stage inspection.
+            const std::optional<DataType> input_dtype =
+                parent.input_tensor_dtype.has_value() ? parent.input_tensor_dtype : parent.output_dtype;
+            if (!input_dtype.has_value()) {
+                throw std::runtime_error(std::string("Ragged causal Conv1D ") + what + " input is missing dtype.");
+            }
+            return {parent.input_slot, input_dtype.value()};
+        }
+        throw std::runtime_error(std::string("Missing materialized value for ragged causal Conv1D ") + what + ".");
+    };
+
+    const auto [values_value_id, values_dtype] = resolve_stage_parent(node.lhs, "values");
+    const auto [filter_value_id, filter_dtype] = resolve_stage_parent(node.rhs, "filter");
+    const auto [offsets_value_id, offsets_dtype] = resolve_stage_parent(node.aux, "offsets");
+
+    PhysicalExpression stage_expr;
+    auto append_input = [&](uint32_t slot, DataType dtype) {
+        stage_expr.inputs.push_back(NamedInput{"__arg" + std::to_string(slot), slot});
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = slot;
+        input_node.input_tensor_dtype = dtype;
+        input_node.output_dtype = dtype;
+        input_node.compute_dtype = dtype;
+        input_node.backward_output_dtype = dtype;
+        input_node.backward_compute_dtype = dtype;
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
+    append_input(0, values_dtype);
+    append_input(1, filter_dtype);
+    append_input(2, offsets_dtype);
+
+    ExprNode conv = node;
+    conv.lhs = 0;
+    conv.rhs = 1;
+    conv.aux = 2;
+    const uint32_t local_node_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+    stage_expr.nodes.push_back(std::move(conv));
+    stage_expr.output_node = local_node_idx;
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::RaggedConv1dCausal,
+        .expr = std::move(stage_expr),
+        .input_value_ids = {values_value_id, filter_value_id, offsets_value_id},
+        .outputs = {CompiledStageOutput{.name = output_name, .local_node_idx = local_node_idx, .value_id = output_value_id}},
+    };
+}
+
+static PhysicalExecutionStage buildRaggedConv1dCausalBackwardDataStage(
+    const PhysicalExpression& expr,
+    uint32_t node_idx,
+    uint32_t output_value_id,
+    const std::string& output_name,
+    const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes.at(node_idx);
+    if (!isRaggedConv1dCausalBackwardDataOp(node.op)) {
+        throw std::runtime_error("buildRaggedConv1dCausalBackwardDataStage called on the wrong op.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX ||
+        node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size() || node.aux >= expr.nodes.size()) {
+        throw std::runtime_error("Ragged causal Conv1D backward-data node missing filter, grad_output, or offsets input.");
+    }
+
+    auto resolve_stage_parent = [&](uint32_t parent_idx, const char* what) -> std::pair<uint32_t, DataType> {
+        const ExprNode& parent = expr.nodes[parent_idx];
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            if (!parent.output_dtype.has_value()) {
+                throw std::runtime_error(std::string("Ragged causal Conv1D backward-data ") + what +
+                                         " parent is missing output dtype.");
+            }
+            return {out_it->second, parent.output_dtype.value()};
+        }
+        if (parent.op == ExprOp::INPUT) {
+            const std::optional<DataType> input_dtype =
+                parent.input_tensor_dtype.has_value() ? parent.input_tensor_dtype : parent.output_dtype;
+            if (!input_dtype.has_value()) {
+                throw std::runtime_error(std::string("Ragged causal Conv1D backward-data ") + what +
+                                         " input is missing dtype.");
+            }
+            return {parent.input_slot, input_dtype.value()};
+        }
+        throw std::runtime_error(std::string("Missing materialized value for ragged causal Conv1D backward-data ") + what + ".");
+    };
+
+    const auto [filter_value_id, filter_dtype] = resolve_stage_parent(node.lhs, "filter");
+    const auto [grad_output_value_id, grad_output_dtype] = resolve_stage_parent(node.rhs, "grad_output");
+    const auto [offsets_value_id, offsets_dtype] = resolve_stage_parent(node.aux, "offsets");
+
+    PhysicalExpression stage_expr;
+    auto append_input = [&](uint32_t slot, DataType dtype) {
+        stage_expr.inputs.push_back(NamedInput{"__arg" + std::to_string(slot), slot});
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = slot;
+        input_node.input_tensor_dtype = dtype;
+        input_node.output_dtype = dtype;
+        input_node.compute_dtype = dtype;
+        input_node.backward_output_dtype = dtype;
+        input_node.backward_compute_dtype = dtype;
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
+    append_input(0, filter_dtype);
+    append_input(1, grad_output_dtype);
+    append_input(2, offsets_dtype);
+
+    ExprNode dgrad = node;
+    dgrad.lhs = 0;
+    dgrad.rhs = 1;
+    dgrad.aux = 2;
+    const uint32_t local_node_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+    stage_expr.nodes.push_back(std::move(dgrad));
+    stage_expr.output_node = local_node_idx;
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::RaggedConv1dCausalBackwardData,
+        .expr = std::move(stage_expr),
+        .input_value_ids = {filter_value_id, grad_output_value_id, offsets_value_id},
+        .outputs = {CompiledStageOutput{.name = output_name, .local_node_idx = local_node_idx, .value_id = output_value_id}},
+    };
+}
+
+static PhysicalExecutionStage buildRaggedConv1dCausalBackwardFilterStage(
+    const PhysicalExpression& expr,
+    uint32_t node_idx,
+    uint32_t output_value_id,
+    const std::string& output_name,
+    const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes.at(node_idx);
+    if (!isRaggedConv1dCausalBackwardFilterOp(node.op)) {
+        throw std::runtime_error("buildRaggedConv1dCausalBackwardFilterStage called on the wrong op.");
+    }
+    auto resolve_stage_parent = [&](uint32_t parent_idx, const char* what) -> std::pair<uint32_t, DataType> {
+        if (parent_idx == UINT32_MAX || parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error(std::string("Ragged causal Conv1D backward-filter missing ") + what + ".");
+        }
+        const ExprNode& parent = expr.nodes[parent_idx];
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            if (!parent.output_dtype.has_value()) {
+                throw std::runtime_error(std::string("Ragged causal Conv1D backward-filter ") + what +
+                                         " parent is missing output dtype.");
+            }
+            return {out_it->second, parent.output_dtype.value()};
+        }
+        if (parent.op == ExprOp::INPUT) {
+            const std::optional<DataType> dtype =
+                parent.input_tensor_dtype.has_value() ? parent.input_tensor_dtype : parent.output_dtype;
+            if (!dtype.has_value()) {
+                throw std::runtime_error(std::string("Ragged causal Conv1D backward-filter ") + what +
+                                         " input is missing dtype.");
+            }
+            return {parent.input_slot, dtype.value()};
+        }
+        throw std::runtime_error(std::string("Missing materialized value for ragged causal Conv1D backward-filter ") + what + ".");
+    };
+    const auto [input_value_id, input_dtype] = resolve_stage_parent(node.lhs, "input");
+    const auto [grad_output_value_id, grad_output_dtype] = resolve_stage_parent(node.rhs, "grad_output");
+    const auto [offsets_value_id, offsets_dtype] = resolve_stage_parent(node.aux, "offsets");
+
+    PhysicalExpression stage_expr;
+    auto append_input = [&](uint32_t slot, DataType dtype) {
+        stage_expr.inputs.push_back(NamedInput{"__arg" + std::to_string(slot), slot});
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = slot;
+        input_node.input_tensor_dtype = dtype;
+        input_node.output_dtype = dtype;
+        input_node.compute_dtype = dtype;
+        input_node.backward_output_dtype = dtype;
+        input_node.backward_compute_dtype = dtype;
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
+    append_input(0, input_dtype);
+    append_input(1, grad_output_dtype);
+    append_input(2, offsets_dtype);
+    ExprNode wgrad = node;
+    wgrad.lhs = 0;
+    wgrad.rhs = 1;
+    wgrad.aux = 2;
+    const uint32_t local_node_idx = static_cast<uint32_t>(stage_expr.nodes.size());
+    stage_expr.nodes.push_back(std::move(wgrad));
+    stage_expr.output_node = local_node_idx;
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::RaggedConv1dCausalBackwardFilter,
+        .expr = std::move(stage_expr),
+        .input_value_ids = {input_value_id, grad_output_value_id, offsets_value_id},
+        .outputs = {CompiledStageOutput{.name = output_name, .local_node_idx = local_node_idx, .value_id = output_value_id}},
+    };
+}
+
 static PhysicalExecutionStage buildScanStage(const PhysicalExpression& expr,
                                             const std::vector<RequestedStageOutput>& requested_outputs,
                                             const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
@@ -4683,6 +5519,100 @@ static PhysicalExecutionStage buildRmsNormStage(const PhysicalExpression& expr,
 
     return PhysicalExecutionStage{
         .kind = PhysicalExecutionStage::Kind::RmsNorm,
+        .expr = std::move(stage_expr),
+        .input_value_ids = std::move(input_value_ids),
+        .outputs = std::move(stage_outputs),
+    };
+}
+
+
+static PhysicalExecutionStage buildLayerNormStage(
+    const PhysicalExpression& expr,
+    uint32_t node_idx,
+    uint32_t output_value_id,
+    const std::string& output_name,
+    const std::unordered_map<uint32_t, uint32_t>& node_output_value_id) {
+    const ExprNode& node = expr.nodes[node_idx];
+    if (!isLayerNormOp(node.op)) {
+        throw std::runtime_error("buildLayerNormStage called on non-LayerNorm node.");
+    }
+    if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX ||
+        node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size() || node.aux >= expr.nodes.size()) {
+        throw std::runtime_error("LayerNorm node is missing input, scale, or bias.");
+    }
+
+    PhysicalExpression stage_expr;
+    std::vector<uint32_t> input_value_ids;
+    input_value_ids.reserve(4);
+    auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
+
+    auto add_local_input = [&](uint32_t parent_idx, uint32_t local_slot, bool structural_input = false) {
+        const ExprNode& parent = expr.nodes[parent_idx];
+        uint32_t value_id = UINT32_MAX;
+        std::optional<DataType> actual_input_dtype = std::nullopt;
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            value_id = out_it->second;
+            actual_input_dtype = parent.output_dtype;
+        } else if (parent.op == ExprOp::INPUT) {
+            value_id = parent.input_slot;
+            actual_input_dtype = parent.input_tensor_dtype;
+        } else {
+            throw std::runtime_error("Missing value id for LayerNorm input.");
+        }
+        if (!actual_input_dtype.has_value() || !parent.output_dtype.has_value()) {
+            throw std::runtime_error("LayerNorm input parent is missing resolved dtype metadata.");
+        }
+        input_value_ids.push_back(value_id);
+        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot), local_slot, NamedInput::Kind::Tensor});
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = local_slot;
+        input_node.input_tensor_dtype = actual_input_dtype.value();
+        input_node.output_dtype = parent.output_dtype;
+        if (structural_input) {
+            input_node.compute_dtype = actual_input_dtype.value();
+            input_node.backward_output_dtype = actual_input_dtype.value();
+            input_node.backward_compute_dtype = actual_input_dtype.value();
+        } else {
+            input_node.compute_dtype = parent.compute_dtype.value_or(
+                defaultComputeDType(actual_input_dtype.value(), parent.output_dtype.value()));
+            input_node.backward_output_dtype = parent.backward_output_dtype.value_or(parent.output_dtype.value());
+            input_node.backward_compute_dtype = parent.backward_compute_dtype.value_or(input_node.compute_dtype.value());
+        }
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
+
+    const std::optional<DirectRaggedRuntimeExtent> ragged_extent = directRaggedRuntimeExtent(expr, node.lhs);
+    add_local_input(ragged_extent.has_value() ? ragged_extent->values_node : node.lhs, 0);
+    add_local_input(node.rhs, 1);
+    add_local_input(node.aux, 2);
+    if (ragged_extent.has_value()) {
+        add_local_input(ragged_extent->offsets_node, 3, true);
+    }
+
+    ExprNode layer_norm = node;
+    layer_norm.lhs = 0;
+    layer_norm.rhs = 1;
+    layer_norm.aux = 2;
+    if (ragged_extent.has_value()) {
+        layer_norm.ragged_runtime_offsets_input_slot = 3;
+        layer_norm.ragged_runtime_batch_size = ragged_extent->batch_size;
+        layer_norm.ragged_runtime_max_active_values = ragged_extent->max_active_values;
+        layer_norm.ragged_runtime_elements_per_value = ragged_extent->elements_per_value;
+    }
+    stage_expr.nodes.push_back(std::move(layer_norm));
+    stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
+
+    std::vector<CompiledStageOutput> stage_outputs;
+    stage_outputs.push_back(CompiledStageOutput{
+        .name = output_name,
+        .local_node_idx = stage_expr.output_node,
+        .value_id = output_value_id,
+    });
+
+    return PhysicalExecutionStage{
+        .kind = PhysicalExecutionStage::Kind::LayerNorm,
         .expr = std::move(stage_expr),
         .input_value_ids = std::move(input_value_ids),
         .outputs = std::move(stage_outputs),
@@ -6407,6 +7337,11 @@ static std::vector<uint32_t> computeNodeUseCounts(const PhysicalExpression& expr
             bump(node.rhs);
             bump(node.aux);
         }
+        if (node.op == ExprOp::RAGGED_CONV1D_CAUSAL || node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA ||
+            node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER) {
+            bump(node.rhs);
+            bump(node.aux);
+        }
         if (node.op == ExprOp::GEMM || node.op == ExprOp::ATTENTION_BACKWARD_Q || node.op == ExprOp::ATTENTION_BACKWARD_K ||
             node.op == ExprOp::ATTENTION_BACKWARD_V || node.op == ExprOp::ATTENTION_BACKWARD_BIAS) {
             bump(node.aux);
@@ -7122,7 +8057,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 lhs_dependency_idx = peelExplicitTransposeChain(expr, root.lhs, ignored);
                 rhs_dependency_idx = peelExplicitTransposeChain(expr, root.rhs, ignored);
             }
-            if (isMatmulOp(root.op) || isRmsNormOp(root.op)) {
+            if (isMatmulOp(root.op) || isRmsNormOp(root.op) || isLayerNormOp(root.op)) {
                 if (const auto extent = directRaggedRuntimeExtent(expr, lhs_dependency_idx); extent.has_value()) {
                     lhs_dependency_idx = extent->values_node;
                 }
@@ -7143,12 +8078,16 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
             if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
                 root.op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
-                isRmsNormBackwardOp(root.op) || isConvolutionOp(root.op)) {
+                isLayerNormOp(root.op) || isRmsNormBackwardOp(root.op) || isConvolutionOp(root.op) ||
+                isRaggedConv1dCausalBackwardDataOp(root.op) ||
+                isRaggedConv1dCausalBackwardFilterOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs");
                 }
             }
-            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isRmsNormBackwardOp(root.op)) {
+            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isLayerNormOp(root.op) || isRmsNormBackwardOp(root.op) ||
+                isRaggedConv1dCausalBackwardDataOp(root.op) ||
+                isRaggedConv1dCausalBackwardFilterOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux");
             }
             if (root.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD ||
@@ -7250,12 +8189,22 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 planned.stages.push_back(buildSegmentedReductionStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isSegmentedBroadcastOp(root.op)) {
                 planned.stages.push_back(buildSegmentedBroadcastStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isRaggedConv1dCausalOp(root.op)) {
+                planned.stages.push_back(buildRaggedConv1dCausalStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isRaggedConv1dCausalBackwardDataOp(root.op)) {
+                planned.stages.push_back(
+                    buildRaggedConv1dCausalBackwardDataStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isRaggedConv1dCausalBackwardFilterOp(root.op)) {
+                planned.stages.push_back(
+                    buildRaggedConv1dCausalBackwardFilterStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isScanOp(root.op)) {
                 planned.stages.push_back(buildScanStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isSoftmaxOp(root.op)) {
                 planned.stages.push_back(buildSoftmaxStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isRmsNormOp(root.op)) {
                 planned.stages.push_back(buildRmsNormStage(expr, root_idx, stage_out_id, "", node_output_value_id));
+            } else if (isLayerNormOp(root.op)) {
+                planned.stages.push_back(buildLayerNormStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isRmsNormBackwardOp(root.op)) {
                 planned.stages.push_back(buildRmsNormBackwardStage(expr, root_idx, stage_out_id, "", node_output_value_id));
             } else if (isMatmulOp(root.op)) {
@@ -7548,7 +8497,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 lhs_dependency_idx = peelExplicitTransposeChain(expr, root.lhs, ignored);
                 rhs_dependency_idx = peelExplicitTransposeChain(expr, root.rhs, ignored);
             }
-            if (isMatmulOp(root.op) || isRmsNormOp(root.op)) {
+            if (isMatmulOp(root.op) || isRmsNormOp(root.op) || isLayerNormOp(root.op)) {
                 if (const auto extent = directRaggedRuntimeExtent(expr, lhs_dependency_idx); extent.has_value()) {
                     lhs_dependency_idx = extent->values_node;
                 }
@@ -7569,12 +8518,16 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
             if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
                 root.op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
-                isRmsNormBackwardOp(root.op) || isConvolutionOp(root.op)) {
+                isLayerNormOp(root.op) || isRmsNormBackwardOp(root.op) || isConvolutionOp(root.op) ||
+                isRaggedConv1dCausalBackwardDataOp(root.op) ||
+                isRaggedConv1dCausalBackwardFilterOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs");
                 }
             }
-            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isRmsNormBackwardOp(root.op)) {
+            if (isAttentionOp(root.op) || isAttentionBackwardOp(root.op) || isLayerNormOp(root.op) || isRmsNormBackwardOp(root.op) ||
+                isRaggedConv1dCausalBackwardDataOp(root.op) ||
+                isRaggedConv1dCausalBackwardFilterOp(root.op)) {
                 ensureBoundaryParentEmitted(root.aux, "aux");
             }
             if (root.op == ExprOp::SEGMENTED_SCAN_MIN_BACKWARD || root.op == ExprOp::SEGMENTED_SCAN_MAX_BACKWARD ||
@@ -7686,6 +8639,15 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isSegmentedBroadcastOp(root.op)) {
                 planned.stages.push_back(
                     buildSegmentedBroadcastStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isRaggedConv1dCausalOp(root.op)) {
+                planned.stages.push_back(
+                    buildRaggedConv1dCausalStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isRaggedConv1dCausalBackwardDataOp(root.op)) {
+                planned.stages.push_back(buildRaggedConv1dCausalBackwardDataStage(
+                    expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isRaggedConv1dCausalBackwardFilterOp(root.op)) {
+                planned.stages.push_back(buildRaggedConv1dCausalBackwardFilterStage(
+                    expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isScanOp(root.op)) {
                 planned.stages.push_back(
                     buildScanStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -7695,6 +8657,9 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             } else if (isRmsNormOp(root.op)) {
                 planned.stages.push_back(
                     buildRmsNormStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
+            } else if (isLayerNormOp(root.op)) {
+                planned.stages.push_back(
+                    buildLayerNormStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
             } else if (isRmsNormBackwardOp(root.op)) {
                 planned.stages.push_back(
                     buildRmsNormBackwardStage(expr, named_output.node_idx, stage_out_id, named_output.name, node_output_value_id));
@@ -7902,6 +8867,21 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
     PlannedExecution planned = planExecution(outputs);
     compiled->stages.reserve(planned.stages.size());
 
+    auto registerPaddedRaggedRepresentation = [&](uint32_t value_id,
+                                                  uint32_t offsets_value_id,
+                                                  const CompiledPaddedRaggedSequenceLayout& layout) {
+        CompiledPaddedRaggedValueRepresentation representation;
+        representation.offsets_value_id = offsets_value_id;
+        representation.layout = layout;
+        representation.width_capacities = makeRaggedConv1dWidthCapacities(layout.max_values_per_row);
+        const uint64_t key = paddedRaggedRepresentationKey(value_id, offsets_value_id);
+        auto [it, inserted] = compiled->padded_ragged_values.emplace(key, representation);
+        if (!inserted && it->second != representation) {
+            throw std::runtime_error(
+                "A logical Expression value was assigned conflicting padded-ragged physical representations.");
+        }
+    };
+
     for (const PhysicalExecutionStage& stage : planned.stages) {
         std::shared_ptr<CompiledEquation> flat;
         std::shared_ptr<CompiledReduction> reduction;
@@ -7956,6 +8936,48 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
                 compiled->stages.emplace_back(segmented_broadcast, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
+            case PhysicalExecutionStage::Kind::RaggedConv1dCausal: {
+                std::shared_ptr<CompiledRaggedConv1dCausal> ragged_conv1d = compileRaggedConv1dCausal(stage.expr);
+                compiled->stages.emplace_back(ragged_conv1d, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                if (stage.input_value_ids.size() != 3 || stage.outputs.size() != 1) {
+                    throw std::runtime_error(
+                        "RaggedConv1dCausal compiler stage must have values, filter, offsets, and one output.");
+                }
+                const uint32_t offsets_value_id = stage.input_value_ids[2];
+                registerPaddedRaggedRepresentation(
+                    stage.input_value_ids[0], offsets_value_id, ragged_conv1d->padded_input_layout);
+                registerPaddedRaggedRepresentation(
+                    stage.outputs[0].value_id, offsets_value_id, ragged_conv1d->padded_output_layout);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::RaggedConv1dCausalBackwardData: {
+                std::shared_ptr<CompiledRaggedConv1dCausalBackwardData> dgrad =
+                    compileRaggedConv1dCausalBackwardData(stage.expr);
+                compiled->stages.emplace_back(dgrad, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                if (stage.input_value_ids.size() != 3 || stage.outputs.size() != 1) {
+                    throw std::runtime_error(
+                        "RaggedConv1dCausalBackwardData compiler stage must have filter, grad_output, offsets, and one output.");
+                }
+                const uint32_t offsets_value_id = stage.input_value_ids[2];
+                registerPaddedRaggedRepresentation(
+                    stage.input_value_ids[1], offsets_value_id, dgrad->padded_grad_output_layout);
+                registerPaddedRaggedRepresentation(stage.outputs[0].value_id, offsets_value_id, dgrad->padded_output_layout);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::RaggedConv1dCausalBackwardFilter: {
+                std::shared_ptr<CompiledRaggedConv1dCausalBackwardFilter> wgrad =
+                    compileRaggedConv1dCausalBackwardFilter(stage.expr);
+                compiled->stages.emplace_back(wgrad, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                if (stage.input_value_ids.size() != 3 || stage.outputs.size() != 1) {
+                    throw std::runtime_error(
+                        "RaggedConv1dCausalBackwardFilter compiler stage must have input, grad_output, offsets, and one output.");
+                }
+                const uint32_t offsets_value_id = stage.input_value_ids[2];
+                registerPaddedRaggedRepresentation(stage.input_value_ids[0], offsets_value_id, wgrad->padded_input_layout);
+                registerPaddedRaggedRepresentation(
+                    stage.input_value_ids[1], offsets_value_id, wgrad->padded_grad_output_layout);
+                break;
+            }
             case PhysicalExecutionStage::Kind::Scan: {
                 std::shared_ptr<CompiledScan> scan = compileScan(stage.expr);
                 compiled->stages.emplace_back(stage.expr, scan, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
@@ -7969,6 +8991,11 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             case PhysicalExecutionStage::Kind::RmsNorm: {
                 std::shared_ptr<CompiledRmsNorm> rms_norm = compileRmsNorm(stage.expr);
                 compiled->stages.emplace_back(rms_norm, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
+                break;
+            }
+            case PhysicalExecutionStage::Kind::LayerNorm: {
+                std::shared_ptr<CompiledLayerNorm> layer_norm = compileLayerNorm(stage.expr);
+                compiled->stages.emplace_back(layer_norm, stage.input_value_ids, stage.outputs, stage.parameter_fan_overrides);
                 break;
             }
             case PhysicalExecutionStage::Kind::RmsNormBackward: {
@@ -8027,6 +9054,425 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
                 throw std::runtime_error("Unknown stage kind in EquationCompiler::compile(PhysicalOutputs).");
         }
     }
+
+    // T8A: a pure RAGGED_VALUEWISE_EXTENT stage is metadata, not a
+    // physical value transform. When its values operand already has a retained
+    // padded representation, propagate that representation through the marker
+    // so stamping can elide the identity kernel and defer packed materialization
+    // until a genuine representation boundary.
+    for (const CompiledExecutionStage& stage : compiled->stages) {
+        if (stage.kind != CompiledExecutionStage::Kind::FusedKernel || stage.outputs.size() != 1 ||
+            stage.input_value_ids.empty()) {
+            continue;
+        }
+        if (stage.outputs[0].local_node_idx >= stage.expr.nodes.size()) {
+            continue;
+        }
+        const ExprNode& marker = stage.expr.nodes[stage.outputs[0].local_node_idx];
+        if (marker.op != ExprOp::RAGGED_VALUEWISE_EXTENT || marker.lhs >= stage.expr.nodes.size() ||
+            marker.rhs >= stage.expr.nodes.size()) {
+            continue;
+        }
+        size_t non_input_nodes = 0;
+        for (const ExprNode& node : stage.expr.nodes) {
+            if (node.op != ExprOp::INPUT) {
+                ++non_input_nodes;
+            }
+        }
+        if (non_input_nodes != 1) {
+            continue;
+        }
+        const ExprNode& values_input = stage.expr.nodes[marker.lhs];
+        const ExprNode& offsets_input = stage.expr.nodes[marker.rhs];
+        if (values_input.op != ExprOp::INPUT || offsets_input.op != ExprOp::INPUT ||
+            values_input.input_slot >= stage.input_value_ids.size() || offsets_input.input_slot >= stage.input_value_ids.size()) {
+            continue;
+        }
+        const uint32_t source_value_id = stage.input_value_ids[values_input.input_slot];
+        const uint32_t offsets_value_id = stage.input_value_ids[offsets_input.input_slot];
+        const uint64_t source_key = paddedRaggedRepresentationKey(source_value_id, offsets_value_id);
+        auto source_it = compiled->padded_ragged_values.find(source_key);
+        if (source_it == compiled->padded_ragged_values.end()) {
+            continue;
+        }
+        CompiledPaddedRaggedValueRepresentation propagated = source_it->second;
+        const uint64_t output_key = paddedRaggedRepresentationKey(stage.outputs[0].value_id, offsets_value_id);
+        auto existing_it = compiled->padded_ragged_values.find(output_key);
+        if (existing_it == compiled->padded_ragged_values.end()) {
+            compiled->padded_ragged_values.emplace(output_key, std::move(propagated));
+        } else if (existing_it->second != propagated) {
+            throw std::runtime_error("T8A extent-marker output already has a conflicting padded-ragged representation.");
+        }
+    }
+
+    // T8B: retain padded-ragged physical values through shape-preserving fused
+    // valuewise regions that are semantically connected to a ragged Conv1D.
+    //
+    // Representation *capability* alone is not enough to anchor a stage: a
+    // packed root may feed both a ragged branch and an ordinary dense branch.
+    // The seed therefore comes from a candidate output that is already a
+    // Conv1D padded value (including a Conv1D input produced by the candidate),
+    // or from an explicit RAGGED_VALUEWISE_EXTENT output marker. We then walk
+    // backward only through candidate fused producers. Runtime stamping still
+    // validates actual operand shapes, so bias/scalar producer branches that
+    // are reached by this conservative graph walk simply remain packed.
+    struct T8bFusedInfo {
+        std::optional<uint32_t> marker_offsets_value_id;
+        uint64_t marker_elements_per_value = 0;
+    };
+    auto t8bValuewiseOp = [](ExprOp op) {
+        switch (op) {
+            case ExprOp::INPUT:
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+            case ExprOp::SCALAR_FP:
+            case ExprOp::ADD:
+            case ExprOp::SUB:
+            case ExprOp::MUL:
+            case ExprOp::DIV:
+            case ExprOp::POW:
+            case ExprOp::EQUAL:
+            case ExprOp::NOT_EQUAL:
+            case ExprOp::LESS:
+            case ExprOp::LESS_EQUAL:
+            case ExprOp::GREATER:
+            case ExprOp::GREATER_EQUAL:
+            case ExprOp::LOGICAL_AND:
+            case ExprOp::LOGICAL_OR:
+            case ExprOp::LOGICAL_NOT:
+            case ExprOp::CAST:
+            case ExprOp::WHERE:
+            case ExprOp::NEG:
+            case ExprOp::ABS:
+            case ExprOp::CEIL:
+            case ExprOp::FLOOR:
+            case ExprOp::ROUND:
+            case ExprOp::TRUNC:
+            case ExprOp::SIN:
+            case ExprOp::COS:
+            case ExprOp::TAN:
+            case ExprOp::ASIN:
+            case ExprOp::ACOS:
+            case ExprOp::ATAN:
+            case ExprOp::SINH:
+            case ExprOp::COSH:
+            case ExprOp::ASINH:
+            case ExprOp::ACOSH:
+            case ExprOp::ATANH:
+            case ExprOp::ERF:
+            case ExprOp::ERFC:
+            case ExprOp::ERFCX:
+            case ExprOp::ERFINV:
+            case ExprOp::ERFCINV:
+            case ExprOp::TGAMMA:
+            case ExprOp::LGAMMA:
+            case ExprOp::DIGAMMA:
+            case ExprOp::EXP:
+            case ExprOp::EXPM1:
+            case ExprOp::EXP2:
+            case ExprOp::EXP10:
+            case ExprOp::LN:
+            case ExprOp::LOG1P:
+            case ExprOp::LOG2:
+            case ExprOp::LOG10:
+            case ExprOp::SQRT:
+            case ExprOp::TANH:
+            case ExprOp::NORMCDF:
+            case ExprOp::MIN:
+            case ExprOp::MAX:
+            case ExprOp::MIN_GRAD_LEFT:
+            case ExprOp::MIN_GRAD_RIGHT:
+            case ExprOp::MAX_GRAD_LEFT:
+            case ExprOp::MAX_GRAD_RIGHT:
+            case ExprOp::RAGGED_VALUEWISE_EXTENT:
+                return true;
+            default:
+                return false;
+        }
+    };
+
+    std::vector<std::optional<T8bFusedInfo>> t8b_info(compiled->stages.size());
+    std::unordered_map<uint32_t, uint32_t> t8b_candidate_producer_by_value_id;
+    for (uint32_t stage_idx = 0; stage_idx < compiled->stages.size(); ++stage_idx) {
+        const CompiledExecutionStage& stage = compiled->stages[stage_idx];
+        if (stage.kind != CompiledExecutionStage::Kind::FusedKernel || !stage.flat || stage.outputs.size() != 1) {
+            continue;
+        }
+        bool supported = true;
+        size_t value_ops = 0;
+        for (const ExprNode& node : stage.expr.nodes) {
+            if (!t8bValuewiseOp(node.op)) {
+                supported = false;
+                break;
+            }
+            if (node.op != ExprOp::INPUT && node.op != ExprOp::RUNTIME_SCALAR &&
+                node.op != ExprOp::TENSOR_RUNTIME_SCALAR && node.op != ExprOp::SCALAR_FP &&
+                node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
+                ++value_ops;
+            }
+        }
+        // A pure extent marker remains T8A metadata and must not turn into a
+        // physical pointwise launch.
+        if (!supported || value_ops == 0) {
+            continue;
+        }
+
+        T8bFusedInfo info;
+        for (const CompiledStageOutput& output : stage.outputs) {
+            if (output.local_node_idx >= stage.expr.nodes.size()) {
+                supported = false;
+                break;
+            }
+            const ExprNode& marker = stage.expr.nodes[output.local_node_idx];
+            if (marker.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
+                continue;
+            }
+            if (marker.rhs >= stage.expr.nodes.size()) {
+                supported = false;
+                break;
+            }
+            const ExprNode& offsets_input = stage.expr.nodes[marker.rhs];
+            if (offsets_input.op != ExprOp::INPUT || offsets_input.input_slot >= stage.input_value_ids.size() ||
+                marker.ragged_runtime_elements_per_value == 0) {
+                supported = false;
+                break;
+            }
+            const uint32_t offsets_value_id = stage.input_value_ids[offsets_input.input_slot];
+            if (!info.marker_offsets_value_id.has_value()) {
+                info.marker_offsets_value_id = offsets_value_id;
+                info.marker_elements_per_value = marker.ragged_runtime_elements_per_value;
+            } else if (info.marker_offsets_value_id.value() != offsets_value_id ||
+                       info.marker_elements_per_value != marker.ragged_runtime_elements_per_value) {
+                supported = false;
+                break;
+            }
+        }
+        if (!supported) {
+            continue;
+        }
+        t8b_info[stage_idx] = info;
+        for (const CompiledStageOutput& output : stage.outputs) {
+            t8b_candidate_producer_by_value_id.emplace(output.value_id, stage_idx);
+        }
+    }
+
+    auto sameT8bStructuralLayout = [](const CompiledPaddedRaggedValueRepresentation& lhs,
+                                      const CompiledPaddedRaggedValueRepresentation& rhs) {
+        return lhs.offsets_value_id == rhs.offsets_value_id &&
+               lhs.layout.offset_dtype == rhs.layout.offset_dtype &&
+               lhs.layout.batch_size == rhs.layout.batch_size &&
+               lhs.layout.max_total_values == rhs.layout.max_total_values &&
+               lhs.layout.max_values_per_row == rhs.layout.max_values_per_row &&
+               lhs.layout.channels == rhs.layout.channels &&
+               lhs.width_capacities == rhs.width_capacities;
+    };
+    auto representationWithDType = [](const CompiledPaddedRaggedValueRepresentation& anchor, DataType dtype) {
+        CompiledPaddedRaggedValueRepresentation result = anchor;
+        result.layout.values_dtype = dtype;
+        return result;
+    };
+    auto representationForValueAndOffsets = [&](uint32_t value_id, uint32_t offsets_value_id)
+        -> std::optional<CompiledPaddedRaggedValueRepresentation> {
+        auto it = compiled->padded_ragged_values.find(paddedRaggedRepresentationKey(value_id, offsets_value_id));
+        if (it == compiled->padded_ragged_values.end()) {
+            return std::nullopt;
+        }
+        return it->second;
+    };
+    auto uniqueOutputSeed = [&](const CompiledExecutionStage& stage)
+        -> std::optional<CompiledPaddedRaggedValueRepresentation> {
+        std::optional<CompiledPaddedRaggedValueRepresentation> seed;
+        for (const CompiledStageOutput& output : stage.outputs) {
+            const uint64_t prefix = static_cast<uint64_t>(output.value_id) << 32U;
+            for (const auto& [key, representation] : compiled->padded_ragged_values) {
+                if ((key & 0xffffffff00000000ULL) != prefix) {
+                    continue;
+                }
+                if (!seed.has_value()) {
+                    seed = representation;
+                } else if (!sameT8bStructuralLayout(seed.value(), representation)) {
+                    // One logical output participates in multiple incompatible
+                    // row partitions. Keep this producer packed and let each
+                    // downstream ragged region establish its own entry adapter.
+                    return std::nullopt;
+                }
+            }
+        }
+        return seed;
+    };
+
+    struct T8bDesiredStage {
+        uint32_t offsets_value_id = UINT32_MAX;
+        CompiledPaddedRaggedValueRepresentation anchor;
+        bool blocked = false;
+    };
+    std::vector<std::optional<T8bDesiredStage>> desired(compiled->stages.size());
+    auto offsetsInputIsStructuralOnly = [](const CompiledExecutionStage& stage, uint32_t offsets_value_id) {
+        std::unordered_set<uint32_t> offsets_input_nodes;
+        for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+            const ExprNode& node = stage.expr.nodes[node_idx];
+            if (node.op == ExprOp::INPUT && node.input_slot < stage.input_value_ids.size() &&
+                stage.input_value_ids[node.input_slot] == offsets_value_id) {
+                offsets_input_nodes.insert(node_idx);
+            }
+        }
+        for (const ExprNode& node : stage.expr.nodes) {
+            const bool structural_marker_rhs =
+                node.op == ExprOp::RAGGED_VALUEWISE_EXTENT && offsets_input_nodes.contains(node.rhs);
+            if (offsets_input_nodes.contains(node.lhs) || offsets_input_nodes.contains(node.aux) ||
+                (offsets_input_nodes.contains(node.rhs) && !structural_marker_rhs)) {
+                return false;
+            }
+        }
+        return true;
+    };
+    auto mergeDesired = [&](uint32_t stage_idx, const CompiledPaddedRaggedValueRepresentation& anchor) {
+        if (stage_idx >= desired.size() || !t8b_info[stage_idx].has_value()) {
+            return false;
+        }
+        const CompiledExecutionStage& stage = compiled->stages[stage_idx];
+        if (!offsetsInputIsStructuralOnly(stage, anchor.offsets_value_id)) {
+            return false;
+        }
+        const T8bFusedInfo& info = t8b_info[stage_idx].value();
+        if (info.marker_offsets_value_id.has_value() && info.marker_offsets_value_id.value() != anchor.offsets_value_id) {
+            return false;
+        }
+        if (info.marker_elements_per_value != 0 && info.marker_elements_per_value != anchor.layout.channels) {
+            return false;
+        }
+        if (!desired[stage_idx].has_value()) {
+            desired[stage_idx] = T8bDesiredStage{anchor.offsets_value_id, anchor, false};
+            return true;
+        }
+        T8bDesiredStage& existing = desired[stage_idx].value();
+        if (existing.blocked) {
+            return false;
+        }
+        if (!sameT8bStructuralLayout(existing.anchor, anchor)) {
+            // Valid graph, but this fused producer feeds incompatible ragged
+            // partitions. It is a representation boundary, not an error.
+            existing.blocked = true;
+            return true;
+        }
+        return false;
+    };
+
+    // Seed from outputs that were already assigned a padded representation by
+    // Conv1D/T8A. A root input may have such capability too, but roots are never
+    // candidate stage outputs, which avoids accidentally converting an ordinary
+    // dense branch just because the same input also feeds a ragged Conv1D.
+    for (uint32_t stage_idx = 0; stage_idx < compiled->stages.size(); ++stage_idx) {
+        if (!t8b_info[stage_idx].has_value()) {
+            continue;
+        }
+        const CompiledExecutionStage& stage = compiled->stages[stage_idx];
+        std::optional<CompiledPaddedRaggedValueRepresentation> seed = uniqueOutputSeed(stage);
+        if (!seed.has_value() && t8b_info[stage_idx]->marker_offsets_value_id.has_value()) {
+            const uint32_t offsets_value_id = t8b_info[stage_idx]->marker_offsets_value_id.value();
+            for (uint32_t input_value_id : stage.input_value_ids) {
+                std::optional<CompiledPaddedRaggedValueRepresentation> candidate =
+                    representationForValueAndOffsets(input_value_id, offsets_value_id);
+                if (!candidate.has_value()) {
+                    continue;
+                }
+                if (!seed.has_value()) {
+                    seed = candidate;
+                } else if (!sameT8bStructuralLayout(seed.value(), candidate.value())) {
+                    seed.reset();
+                    break;
+                }
+            }
+        }
+        if (seed.has_value()) {
+            (void)mergeDesired(stage_idx, seed.value());
+        }
+    }
+
+    // Walk backward through candidate pointwise producers so a chain immediately
+    // before Conv1D can remain in the same physical region. The propagated
+    // representation is only a capability; stamping still checks the actual
+    // tensor shape and leaves bias/scalar producer branches packed.
+    auto propagateDesiredT8bBackward = [&]() {
+        bool any_changed = false;
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (uint32_t stage_idx = 0; stage_idx < compiled->stages.size(); ++stage_idx) {
+                if (!desired[stage_idx].has_value() || desired[stage_idx]->blocked) {
+                    continue;
+                }
+                const CompiledExecutionStage& stage = compiled->stages[stage_idx];
+                for (uint32_t input_value_id : stage.input_value_ids) {
+                    auto producer_it = t8b_candidate_producer_by_value_id.find(input_value_id);
+                    if (producer_it == t8b_candidate_producer_by_value_id.end()) {
+                        continue;
+                    }
+                    const bool merged = mergeDesired(producer_it->second, desired[stage_idx]->anchor);
+                    changed |= merged;
+                    any_changed |= merged;
+                }
+            }
+        }
+        return any_changed;
+    };
+    (void)propagateDesiredT8bBackward();
+
+    // Materialize the T8B-only compatibility region. Normalization is an explicit
+    // representation boundary because the current cuDNN RMSNorm/LayerNorm plans reject
+    // the strided normalized feature dimension exposed by retained [B,C,1,W] storage.
+    auto materializeDesiredT8bCapabilities = [&]() {
+        bool changed = false;
+        for (uint32_t stage_idx = 0; stage_idx < compiled->stages.size(); ++stage_idx) {
+            if (!desired[stage_idx].has_value() || desired[stage_idx]->blocked) continue;
+            const CompiledExecutionStage& stage = compiled->stages[stage_idx];
+            const T8bDesiredStage& stage_desired = desired[stage_idx].value();
+            for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+                CompiledPaddedRaggedValueRepresentation representation =
+                    representationWithDType(stage_desired.anchor, stage.outputDType(output_idx));
+                const uint64_t key =
+                    paddedRaggedRepresentationKey(stage.outputs[output_idx].value_id, stage_desired.offsets_value_id);
+                auto existing_it = compiled->padded_ragged_values.find(key);
+                if (existing_it == compiled->padded_ragged_values.end()) {
+                    compiled->padded_ragged_values.emplace(key, std::move(representation));
+                    changed = true;
+                } else if (existing_it->second != representation) {
+                    throw std::runtime_error(
+                        "T8B retained pointwise output has a conflicting padded-ragged representation.");
+                }
+            }
+        }
+        return changed;
+    };
+    (void)materializeDesiredT8bCapabilities();
+
+    auto insertT8bRepresentation = [&](uint32_t value_id,
+                                       const CompiledPaddedRaggedValueRepresentation& representation) {
+        const uint64_t key = paddedRaggedRepresentationKey(value_id, representation.offsets_value_id);
+        auto [it, inserted] = compiled->padded_ragged_values.emplace(key, representation);
+        if (!inserted && it->second != representation) {
+            throw std::runtime_error(
+                "T8B encountered conflicting padded-ragged physical representations for one logical value.");
+        }
+    };
+
+    for (uint32_t stage_idx = 0; stage_idx < compiled->stages.size(); ++stage_idx) {
+        if (!desired[stage_idx].has_value() || desired[stage_idx]->blocked) {
+            continue;
+        }
+        const CompiledExecutionStage& stage = compiled->stages[stage_idx];
+        const T8bDesiredStage& stage_desired = desired[stage_idx].value();
+        if (stage.flat->input_dtypes.size() != stage.input_value_ids.size()) {
+            throw std::runtime_error("T8B fused stage input dtype metadata is inconsistent.");
+        }
+        for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
+            insertT8bRepresentation(
+                stage.outputs[output_idx].value_id,
+                representationWithDType(stage_desired.anchor, stage.outputDType(output_idx)));
+        }
+        compiled->padded_ragged_fused_stage_offsets.emplace(stage_idx, stage_desired.offsets_value_id);
+    }
+
 
     compiled->final_outputs = std::move(planned.final_outputs);
     compiled->value_aliases = std::move(planned.value_aliases);

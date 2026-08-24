@@ -28,10 +28,14 @@ def _only_layer_architecture(n: thor.Network, layer_type: str):
     return layers[0]
 
 
-def _conv2d_output_shape(chw, k: int, fh: int, fw: int, sh: int = 1, sw: int = 1, ph: int = 0, pw: int = 0):
+def _conv2d_output_shape(
+        chw, k: int, fh: int, fw: int, sh: int = 1, sw: int = 1, padding=(0, 0, 0, 0), dh: int = 1, dw: int = 1):
     _, h, w = chw
-    oh = (h + 2 * ph - fh) // sh + 1
-    ow = (w + 2 * pw - fw) // sw + 1
+    top, bottom, left, right = padding
+    effective_h = dh * (fh - 1) + 1
+    effective_w = dw * (fw - 1) + 1
+    oh = (h + top + bottom - effective_h) // sh + 1
+    ow = (w + left + right - effective_w) // sw + 1
     return [k, oh, ow]
 
 
@@ -47,7 +51,6 @@ def _assert_parameter_shape(arch, name: str, shape):
     assert arch["parameters"][name]["trainable"] is True
     assert arch["parameters"][name]["training_enabled"] is True
 
-
 def test_conv2d_constructs_defaults_architecture_parameters_and_output_shape_dtype():
     n = _net()
     x = _chw_input(n, 3, 32, 32, thor.DataType.fp16)
@@ -62,15 +65,24 @@ def test_conv2d_constructs_defaults_architecture_parameters_and_output_shape_dty
 
     arch = _only_layer_architecture(n, "convolution_2d")
     assert arch["factory"] == "learning"
+    assert arch["version"] == "4.0.0"
     assert arch["layer_type"] == "convolution_2d"
     assert arch["data_layout"] == "NCHW"
     assert arch["filter_height"] == 3
     assert arch["filter_width"] == 3
     assert arch["vertical_stride"] == 1
     assert arch["horizontal_stride"] == 1
-    assert arch["vertical_padding"] == 0
-    assert arch["horizontal_padding"] == 0
+    assert arch["padding_mode"] == "valid"
+    assert arch["padding_top"] == 0
+    assert arch["padding_bottom"] == 0
+    assert arch["padding_left"] == 0
+    assert arch["padding_right"] == 0
+    assert "vertical_padding" not in arch
+    assert "horizontal_padding" not in arch
+    assert arch["vertical_dilation"] == 1
+    assert arch["horizontal_dilation"] == 1
     assert arch["num_output_channels"] == 16
+    assert arch["groups"] == 1
     assert arch["has_bias"] is True
     assert arch["activation"]["layer_type"] == "gelu"
     assert arch["epilogue"] is None
@@ -83,10 +95,10 @@ def test_conv2d_constructs_defaults_architecture_parameters_and_output_shape_dty
 @pytest.mark.parametrize(
     ("input_shape", "num_output_channels", "filter_shape", "stride", "padding"),
     [
-        ((1, 5, 7), 2, (1, 1), (1, 1), (0, 0)),
-        ((3, 8, 9), 4, (3, 2), (1, 2), (1, 0)),
-        ((2, 11, 13), 5, (4, 5), (2, 3), (2, 1)),
-        ((4, 6, 6), 7, (5, 5), (1, 1), (2, 2)),
+        ((1, 5, 7), 2, (1, 1), (1, 1), (0, 0, 0, 0)),
+        ((3, 8, 9), 4, (3, 2), (1, 2), (1, 2, 0, 1)),
+        ((2, 11, 13), 5, (4, 5), (2, 3), (2, 1, 1, 3)),
+        ((4, 6, 6), 7, (5, 5), (1, 1), (2, 2, 2, 2)),
     ],
 )
 def test_conv2d_output_shape_matches_convolution_formula(input_shape, num_output_channels, filter_shape, stride, padding):
@@ -94,7 +106,7 @@ def test_conv2d_output_shape_matches_convolution_formula(input_shape, num_output
     x = _chw_input(n, *input_shape, dtype=thor.DataType.fp16)
     fh, fw = filter_shape
     sh, sw = stride
-    ph, pw = padding
+    top, bottom, left, right = padding
 
     conv = thor.layers.Convolution2d(
         n,
@@ -104,19 +116,130 @@ def test_conv2d_output_shape_matches_convolution_formula(input_shape, num_output
         filter_width=fw,
         vertical_stride=sh,
         horizontal_stride=sw,
-        vertical_padding=ph,
-        horizontal_padding=pw,
+        padding=padding,
         activation=None,
     )
 
-    assert conv.get_feature_output().get_dimensions() == _conv2d_output_shape(input_shape, num_output_channels, fh, fw, sh, sw, ph, pw)
+    assert conv.get_feature_output().get_dimensions() == _conv2d_output_shape(
+        input_shape, num_output_channels, fh, fw, sh, sw, padding)
     arch = _only_layer_architecture(n, "convolution_2d")
     assert arch["filter_height"] == fh
     assert arch["filter_width"] == fw
     assert arch["vertical_stride"] == sh
     assert arch["horizontal_stride"] == sw
-    assert arch["vertical_padding"] == ph
-    assert arch["horizontal_padding"] == pw
+    assert arch["padding_mode"] == "explicit"
+    assert arch["padding_top"] == top
+    assert arch["padding_bottom"] == bottom
+    assert arch["padding_left"] == left
+    assert arch["padding_right"] == right
+
+
+@pytest.mark.parametrize("dilation", [2, (2, 3), [3, 2]])
+def test_conv2d_dilation_updates_output_shape_and_architecture(dilation):
+    n = _net("test_net_conv2d_dilation")
+    x = _chw_input(n, 3, 11, 13, thor.DataType.fp16)
+    dh, dw = (dilation, dilation) if isinstance(dilation, int) else dilation
+
+    conv = thor.layers.Convolution2d(
+        n,
+        x,
+        num_output_channels=5,
+        filter_height=3,
+        filter_width=2,
+        vertical_stride=2,
+        horizontal_stride=1,
+        padding=(1, 1, 2, 2),
+        activation=None,
+        dilation=dilation,
+    )
+
+    assert conv.get_feature_output().get_dimensions() == _conv2d_output_shape(
+        (3, 11, 13), 5, 3, 2, 2, 1, (1, 1, 2, 2), dh, dw)
+    arch = _only_layer_architecture(n, "convolution_2d")
+    assert arch["vertical_dilation"] == dh
+    assert arch["horizontal_dilation"] == dw
+
+
+@pytest.mark.parametrize("dilation", [0, (0, 1), (1, 0), (1,), (1, 2, 3), "2"])
+def test_conv2d_rejects_invalid_dilation(dilation):
+    n = _net("test_net_conv2d_bad_dilation")
+    x = _chw_input(n, 3, 8, 8, thor.DataType.fp16)
+    with pytest.raises((TypeError, ValueError)):
+        thor.layers.Convolution2d(n, x, 4, 3, 3, dilation=dilation)
+
+
+@pytest.mark.parametrize("padding", [0, (1, 1), (1, 1, 1), (1, 1, 1, 1, 1), (-1, 0, 0, 0), "bogus", "explicit"])
+def test_conv2d_rejects_invalid_padding(padding):
+    n = _net("test_net_conv2d_bad_padding")
+    x = _chw_input(n, 3, 8, 8, thor.DataType.fp16)
+    with pytest.raises((TypeError, ValueError)):
+        thor.layers.Convolution2d(n, x, 4, 3, 3, padding=padding)
+
+
+@pytest.mark.parametrize(
+    ("input_shape", "filter_shape", "stride", "dilation", "expected_padding", "expected_shape"),
+    [
+        ((2, 7, 9), (4, 4), (1, 1), (1, 1), (1, 2, 1, 2), [3, 7, 9]),
+        ((2, 8, 9), (3, 3), (2, 2), (1, 1), (0, 1, 1, 1), [3, 4, 5]),
+        ((2, 9, 10), (3, 2), (1, 1), (2, 3), (2, 2, 1, 2), [3, 9, 10]),
+        ((2, 10, 11), (4, 3), (2, 3), (2, 2), (2, 3, 1, 2), [3, 5, 4]),
+    ],
+)
+def test_conv2d_same_upper_is_stride_dilation_and_odd_padding_aware(
+        input_shape, filter_shape, stride, dilation, expected_padding, expected_shape):
+    n = _net("test_net_conv2d_same_upper")
+    x = _chw_input(n, *input_shape, dtype=thor.DataType.fp16)
+    fh, fw = filter_shape
+    sh, sw = stride
+    dh, dw = dilation
+
+    conv = thor.layers.Convolution2d(
+        n,
+        x,
+        num_output_channels=3,
+        filter_height=fh,
+        filter_width=fw,
+        vertical_stride=sh,
+        horizontal_stride=sw,
+        dilation=(dh, dw),
+        padding="same",
+        activation=None,
+    )
+
+    assert conv.get_feature_output().get_dimensions() == expected_shape
+    arch = _only_layer_architecture(n, "convolution_2d")
+    assert arch["padding_mode"] == "same_upper"
+    assert (
+        arch["padding_top"],
+        arch["padding_bottom"],
+        arch["padding_left"],
+        arch["padding_right"],
+    ) == expected_padding
+
+def test_conv2d_valid_string_matches_default_and_explicit_zero_padding():
+    configs = []
+    for name, padding in (("default", None), ("valid", "valid"), ("explicit", (0, 0, 0, 0))):
+        n = _net(f"test_net_conv2d_valid_{name}")
+        x = _chw_input(n, 2, 8, 9, thor.DataType.fp16)
+        kwargs = {} if padding is None else {"padding": padding}
+        conv = thor.layers.Convolution2d(
+            n, x, 3, 3, 2, vertical_stride=2, horizontal_stride=1, activation=None, **kwargs)
+        configs.append((conv.get_feature_output().get_dimensions(), _only_layer_architecture(n, "convolution_2d")))
+
+    assert configs[0][0] == configs[1][0] == configs[2][0]
+    assert configs[0][1]["padding_mode"] == "valid"
+    assert configs[1][1]["padding_mode"] == "valid"
+    assert configs[2][1]["padding_mode"] == "explicit"
+    for _, arch in configs:
+        assert (arch["padding_top"], arch["padding_bottom"], arch["padding_left"], arch["padding_right"]) == (0, 0, 0, 0)
+
+def test_conv2d_legacy_symmetric_padding_keywords_are_not_supported():
+    n = _net("test_net_conv2d_no_legacy_padding")
+    x = _chw_input(n, 3, 8, 8, thor.DataType.fp16)
+    with pytest.raises(TypeError):
+        thor.layers.Convolution2d(n, x, 4, 3, 3, vertical_padding=1)
+    with pytest.raises(TypeError):
+        thor.layers.Convolution2d(n, x, 4, 3, 3, horizontal_padding=1)
 
 
 @pytest.mark.parametrize(("dtype_name", "dtype"), _floating_convolution_dtypes())
@@ -130,8 +253,7 @@ def test_conv2d_accepts_cudnn_frontend_floating_dtype_footprint_at_api_boundary(
         num_output_channels=4,
         filter_height=3,
         filter_width=3,
-        vertical_padding=1,
-        horizontal_padding=1,
+        padding=(1, 1, 1, 1),
         activation=None,
     )
 
@@ -145,7 +267,7 @@ def test_conv2d_has_bias_controls_architecture_and_parameter_set(has_bias: bool)
     n = _net(f"test_net_conv2d_bias_{has_bias}")
     x = _chw_input(n, 3, 8, 8)
 
-    conv = thor.layers.Convolution2d(n, x, 4, 3, 3, vertical_padding=1, horizontal_padding=1, has_bias=has_bias, activation=None)
+    conv = thor.layers.Convolution2d(n, x, 4, 3, 3, padding=(1, 1, 1, 1), has_bias=has_bias, activation=None)
 
     assert conv.get_feature_output().get_dimensions() == [4, 8, 8]
     arch = _only_layer_architecture(n, "convolution_2d")
@@ -155,7 +277,6 @@ def test_conv2d_has_bias_controls_architecture_and_parameter_set(has_bias: bool)
         _assert_parameter_shape(arch, "biases", [4])
     else:
         assert "biases" not in arch["parameters"]
-
 
 def test_conv2d_omitted_activation_defaults_to_gelu_and_none_disables_activation():
     default_net = _net("test_net_conv2d_default_activation")
@@ -170,7 +291,6 @@ def test_conv2d_omitted_activation_defaults_to_gelu_and_none_disables_activation
     linear_arch = _only_layer_architecture(linear_net, "convolution_2d")
     assert linear_arch["activation"] is None
 
-
 def test_conv2d_accepts_stitched_activation_without_extra_api_layer():
     n = _net("test_net_conv2d_tanh")
     x = _chw_input(n, 3, 8, 8, thor.DataType.fp16)
@@ -183,8 +303,7 @@ def test_conv2d_accepts_stitched_activation_without_extra_api_layer():
         filter_width=3,
         vertical_stride=1,
         horizontal_stride=1,
-        vertical_padding=1,
-        horizontal_padding=1,
+        padding=(1, 1, 1, 1),
         has_bias=True,
         activation=thor.activations.Tanh(),
     )
@@ -195,7 +314,6 @@ def test_conv2d_accepts_stitched_activation_without_extra_api_layer():
     arch = _only_layer_architecture(n, "convolution_2d")
     assert arch["activation"]["layer_type"] == "tanh"
     assert len(_layers(n, "tanh")) == 0
-
 
 def test_conv2d_accepts_custom_initializers_and_serializes_parameter_initializers():
     n = _net("test_net_conv2d_initializers")
@@ -209,8 +327,7 @@ def test_conv2d_accepts_custom_initializers_and_serializes_parameter_initializer
         4,
         3,
         3,
-        vertical_padding=1,
-        horizontal_padding=1,
+        padding=(1, 1, 1, 1),
         weights_initializer=weights_initializer,
         biases_initializer=biases_initializer,
         activation=None,
@@ -219,7 +336,6 @@ def test_conv2d_accepts_custom_initializers_and_serializes_parameter_initializer
     arch = _only_layer_architecture(n, "convolution_2d")
     assert arch["parameters"]["weights"]["initializer"] is not None
     assert arch["parameters"]["biases"]["initializer"] is not None
-
 
 def test_conv2d_accepts_epilogue_expression_and_serializes_it():
     n = thor.Network("test_net_conv2d_epilogue")
@@ -237,8 +353,7 @@ def test_conv2d_accepts_epilogue_expression_and_serializes_it():
         num_output_channels=4,
         filter_height=3,
         filter_width=3,
-        vertical_padding=1,
-        horizontal_padding=1,
+        padding=(1, 1, 1, 1),
         activation=None,
         epilogue=epilogue,
     )
@@ -262,7 +377,6 @@ def test_conv2d_epilogue_input_accepts_default_and_explicit_dtypes(output_dtype,
     epilogue_input = thor.layers.Convolution2d.epilogue_input(**kwargs)
     assert epilogue_input is not None
 
-
 def test_conv2d_accepts_multi_input_epilogue_and_serializes_auxiliary_bindings():
     n = thor.Network("test_net_conv2d_multi_input_epilogue")
     x = _chw_input(n, 3, 8, 8, thor.DataType.fp16, name="x")
@@ -285,8 +399,7 @@ def test_conv2d_accepts_multi_input_epilogue_and_serializes_auxiliary_bindings()
         num_output_channels=4,
         filter_height=3,
         filter_width=3,
-        vertical_padding=1,
-        horizontal_padding=1,
+        padding=(1, 1, 1, 1),
         has_bias=False,
         activation=None,
         epilogue=epilogue,
@@ -309,14 +422,12 @@ def test_conv2d_epilogue_aux_input_rejects_reserved_names(bad_name):
     with pytest.raises(Exception):
         thor.layers.Convolution2d.epilogue_aux_input(bad_name)
 
-
 def test_conv2d_rejects_feature_input_wrong_rank():
     n = _net("test_net_conv2d_bad_rank")
     x = thor.Tensor([32, 32], thor.DataType.fp16)
 
     with pytest.raises(ValueError, match=r"feature_input must be a 3D CHW tensor"):
         thor.layers.Convolution2d(n, x, 16, 3, 3)
-
 
 def test_conv2d_rejects_zero_or_invalid_params():
     n = _net("test_net_conv2d_bad_params")
@@ -337,7 +448,6 @@ def test_conv2d_rejects_zero_or_invalid_params():
     with pytest.raises(ValueError, match=r"vertical_stride and horizontal_stride must be >= 1"):
         thor.layers.Convolution2d(n, x, 8, 3, 3, 1, 0)
 
-
 def test_conv2d_rejects_filter_larger_than_padded_input_by_axis_and_accepts_when_padding_makes_it_fit():
     n = _net("test_net_conv2d_filter_fit")
     x = _chw_input(n, 3, 4, 4)
@@ -356,13 +466,11 @@ def test_conv2d_rejects_filter_larger_than_padded_input_by_axis_and_accepts_when
         filter_width=5,
         vertical_stride=1,
         horizontal_stride=1,
-        vertical_padding=1,
-        horizontal_padding=1,
+        padding=(1, 1, 1, 1),
         activation=None,
     )
     assert isinstance(conv, thor.layers.Convolution2d)
     assert conv.get_feature_output().get_dimensions() == [8, 2, 2]
-
 
 def test_conv2d_rejects_wrong_types_and_arity():
     n = _net("test_net_conv2d_wrong_types")
@@ -389,10 +497,31 @@ def test_conv2d_rejects_wrong_types_and_arity():
     with pytest.raises(TypeError):
         thor.layers.Convolution2d(n, x, 8, 3, 3, weights_initializer=123)
 
-
 def test_conv2d_rejects_wrong_epilogue_type():
     n = _net("test_net_conv2d_bad_epilogue")
     x = _chw_input(n, 3, 8, 8)
 
     with pytest.raises(TypeError, match=r"argument 'epilogue'.*thor\.physical\.Expression or None"):
         thor.layers.Convolution2d(n, x, 4, 3, 3, epilogue=123)
+
+
+def test_conv2d_grouped_and_depthwise_parameter_shapes():
+    n = _net("test_conv2d_grouped")
+    x = _chw_input(n, 8, 12, 12, thor.DataType.fp16)
+    thor.layers.Convolution2d(n, x, 12, 3, 3, groups=4, activation=None)
+    arch = _only_layer_architecture(n, "convolution_2d")
+    assert arch["groups"] == 4
+    assert arch["parameters"]["weights"]["shape"] == [12, 2, 3, 3]
+
+    n2 = _net("test_conv2d_depthwise")
+    x2 = _chw_input(n2, 8, 12, 12, thor.DataType.fp16)
+    thor.layers.Convolution2d(n2, x2, 8, 3, 3, groups=8, padding="same", activation=None)
+    assert _only_layer_architecture(n2, "convolution_2d")["parameters"]["weights"]["shape"] == [8, 1, 3, 3]
+
+
+@pytest.mark.parametrize("groups", [0, 3, 5])
+def test_conv2d_rejects_invalid_groups(groups):
+    n = _net(f"test_conv2d_bad_groups_{groups}")
+    x = _chw_input(n, 8, 12, 12, thor.DataType.fp16)
+    with pytest.raises(ValueError, match="groups"):
+        thor.layers.Convolution2d(n, x, 12, 3, 3, groups=groups)

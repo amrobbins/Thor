@@ -174,7 +174,8 @@ vector<float> conv3dForwardReference(const vector<float>& input,
                                      uint64_t padD,
                                      uint64_t padH,
                                      uint64_t padW,
-                                     bool hasBias) {
+                                     bool hasBias,
+                                     uint64_t groups = 1) {
     const uint64_t OD = convOutputDim(D, strideD, Z, padD);
     const uint64_t OH = convOutputDim(H, strideH, R, padH);
     const uint64_t OW = convOutputDim(W, strideW, S, padW);
@@ -186,7 +187,12 @@ vector<float> conv3dForwardReference(const vector<float>& input,
                 for (uint64_t oh = 0; oh < OH; ++oh) {
                     for (uint64_t ow = 0; ow < OW; ++ow) {
                         float acc = hasBias ? biases[k] : 0.0f;
-                        for (uint64_t c = 0; c < C; ++c) {
+                        const uint64_t channelsPerGroup = C / groups;
+                        const uint64_t outputsPerGroup = K / groups;
+                        const uint64_t group = k / outputsPerGroup;
+                        const uint64_t channelBegin = group * channelsPerGroup;
+                        for (uint64_t cLocal = 0; cLocal < channelsPerGroup; ++cLocal) {
+                            const uint64_t c = channelBegin + cLocal;
                             for (uint64_t z = 0; z < Z; ++z) {
                                 const int64_t id = static_cast<int64_t>(od * strideD + z) - static_cast<int64_t>(padD);
                                 if (id < 0 || id >= static_cast<int64_t>(D))
@@ -200,7 +206,7 @@ vector<float> conv3dForwardReference(const vector<float>& input,
                                         if (iw < 0 || iw >= static_cast<int64_t>(W))
                                             continue;
                                         acc += input[ncdhwIndex(n, c, id, ih, iw, C, D, H, W)] *
-                                               weights[convolutionFilterIndex(k, c, z, r, s, C, Z, R, S)];
+                                               weights[convolutionFilterIndex(k, cLocal, z, r, s, channelsPerGroup, Z, R, S)];
                                     }
                                 }
                             }
@@ -230,7 +236,8 @@ vector<float> conv3dErrorReference(const vector<float>& errorInput,
                                    uint64_t strideW,
                                    uint64_t padD,
                                    uint64_t padH,
-                                   uint64_t padW) {
+                                   uint64_t padW,
+                                   uint64_t groups = 1) {
     const uint64_t OD = convOutputDim(D, strideD, Z, padD);
     const uint64_t OH = convOutputDim(H, strideH, R, padH);
     const uint64_t OW = convOutputDim(W, strideW, S, padW);
@@ -242,7 +249,12 @@ vector<float> conv3dErrorReference(const vector<float>& errorInput,
                 for (uint64_t oh = 0; oh < OH; ++oh) {
                     for (uint64_t ow = 0; ow < OW; ++ow) {
                         const float dy = errorInput[ncdhwIndex(n, k, od, oh, ow, K, OD, OH, OW)];
-                        for (uint64_t c = 0; c < C; ++c) {
+                        const uint64_t channelsPerGroup = C / groups;
+                        const uint64_t outputsPerGroup = K / groups;
+                        const uint64_t group = k / outputsPerGroup;
+                        const uint64_t channelBegin = group * channelsPerGroup;
+                        for (uint64_t cLocal = 0; cLocal < channelsPerGroup; ++cLocal) {
+                            const uint64_t c = channelBegin + cLocal;
                             for (uint64_t z = 0; z < Z; ++z) {
                                 const int64_t id = static_cast<int64_t>(od * strideD + z) - static_cast<int64_t>(padD);
                                 if (id < 0 || id >= static_cast<int64_t>(D))
@@ -256,7 +268,7 @@ vector<float> conv3dErrorReference(const vector<float>& errorInput,
                                         if (iw < 0 || iw >= static_cast<int64_t>(W))
                                             continue;
                                         errorOutput[ncdhwIndex(n, c, id, ih, iw, C, D, H, W)] +=
-                                            dy * weights[convolutionFilterIndex(k, c, z, r, s, C, Z, R, S)];
+                                            dy * weights[convolutionFilterIndex(k, cLocal, z, r, s, channelsPerGroup, Z, R, S)];
                                     }
                                 }
                             }
@@ -285,14 +297,20 @@ vector<float> conv3dWeightGradReference(const vector<float>& input,
                                         uint64_t strideW,
                                         uint64_t padD,
                                         uint64_t padH,
-                                        uint64_t padW) {
+                                        uint64_t padW,
+                                        uint64_t groups = 1) {
     const uint64_t OD = convOutputDim(D, strideD, Z, padD);
     const uint64_t OH = convOutputDim(H, strideH, R, padH);
     const uint64_t OW = convOutputDim(W, strideW, S, padW);
-    vector<float> grad(K * C * Z * R * S, 0.0f);
+    const uint64_t channelsPerGroup = C / groups;
+    const uint64_t outputsPerGroup = K / groups;
+    vector<float> grad(K * channelsPerGroup * Z * R * S, 0.0f);
 
     for (uint64_t k = 0; k < K; ++k) {
-        for (uint64_t c = 0; c < C; ++c) {
+        const uint64_t group = k / outputsPerGroup;
+        const uint64_t channelBegin = group * channelsPerGroup;
+        for (uint64_t cLocal = 0; cLocal < channelsPerGroup; ++cLocal) {
+            const uint64_t c = channelBegin + cLocal;
             for (uint64_t z = 0; z < Z; ++z) {
                 for (uint64_t r = 0; r < R; ++r) {
                     for (uint64_t s = 0; s < S; ++s) {
@@ -316,7 +334,7 @@ vector<float> conv3dWeightGradReference(const vector<float>& input,
                                 }
                             }
                         }
-                        grad[kcdhwIndex(k, c, z, r, s, C, Z, R, S)] = acc;
+                        grad[kcdhwIndex(k, cLocal, z, r, s, channelsPerGroup, Z, R, S)] = acc;
                     }
                 }
             }
@@ -604,6 +622,7 @@ TEST(Convolution3dApi, StampsAsPhysicalCustomLayerAllocatesParametersAndSerializ
     ASSERT_TRUE(j.contains("parameters"));
     ASSERT_TRUE(j.at("parameters").contains("weights"));
     ASSERT_TRUE(j.at("parameters").contains("biases"));
+    EXPECT_EQ(j.at("groups").get<uint32_t>(), 1u);
     ASSERT_TRUE(j.at("parameters").at("weights").contains("optimizer_override"));
     ASSERT_TRUE(j.at("parameters").at("biases").contains("optimizer_override"));
 
@@ -629,6 +648,7 @@ TEST(Convolution3dApi, ThreePassForwardBackwardWithSgdUpdatesWeightsAndBiases) {
     constexpr uint32_t H = 3;
     constexpr uint32_t W = 3;
     constexpr uint32_t K = 8;
+    constexpr uint32_t groups = 2;
     constexpr uint32_t Z = 2;
     constexpr uint32_t R = 2;
     constexpr uint32_t S = 2;
@@ -644,7 +664,7 @@ TEST(Convolution3dApi, ThreePassForwardBackwardWithSgdUpdatesWeightsAndBiases) {
     constexpr float learningRate = 0.1f;
     const DataType dataType = DataType::FP16;
 
-    vector<float> currentWeights = makeDeterministicValues(K * C * Z * R * S, 3);
+    vector<float> currentWeights = makeDeterministicValues(K * (C / groups) * Z * R * S, 3);
     vector<float> currentBiases = makeDeterministicValues(K, 5);
 
     const vector<vector<float>> inputsByPass = makeDeterministicPassValues(batchSize * C * D * H * W, 11, 3);
@@ -670,6 +690,7 @@ TEST(Convolution3dApi, ThreePassForwardBackwardWithSgdUpdatesWeightsAndBiases) {
                                   .depthPadding(padD)
                                   .verticalPadding(padH)
                                   .horizontalPadding(padW)
+                                  .groups(groups)
                                   .hasBias(true)
                                   .weightsOptimizer(weightsSgd)
                                   .biasesOptimizer(biasesSgd)
@@ -684,6 +705,8 @@ TEST(Convolution3dApi, ThreePassForwardBackwardWithSgdUpdatesWeightsAndBiases) {
                                     .build();
 
     PlacedConvolution3dFixture fixture = placeSingleConvolution3dNetwork(network, input, output, conv, batchSize, false);
+    EXPECT_EQ(fixture.physicalConvolution->getParameter("weights")->getStorage().value().getDimensions(),
+              (vector<uint64_t>{K, C / groups, Z, R, S}));
     ASSERT_TRUE(fixture.physicalConvolution->getGradientUpdateStream().has_value());
     Stream stream = fixture.physicalConvolution->getStreams()[0];
     Stream gradientStream = fixture.physicalConvolution->getGradientUpdateStream().value();
@@ -715,7 +738,8 @@ TEST(Convolution3dApi, ThreePassForwardBackwardWithSgdUpdatesWeightsAndBiases) {
                                                                      padD,
                                                                      padH,
                                                                      padW,
-                                                                     true);
+                                                                     true,
+                                                                     groups);
         expectAllClose(actualForward, expectedForward, 1e-1f, 1e-1f, "pass " + to_string(pass) + " feature out");
 
         ASSERT_GT(fixture.physicalConvolution->getErrorInputs().size(), 0u);
@@ -742,9 +766,9 @@ TEST(Convolution3dApi, ThreePassForwardBackwardWithSgdUpdatesWeightsAndBiases) {
         gradientStream.synchronize();
 
         const vector<float> expectedErrorOut = conv3dErrorReference(
-            errorsByPass[pass], currentWeights, batchSize, C, D, H, W, K, Z, R, S, strideD, strideH, strideW, padD, padH, padW);
+            errorsByPass[pass], currentWeights, batchSize, C, D, H, W, K, Z, R, S, strideD, strideH, strideW, padD, padH, padW, groups);
         const vector<float> expectedWeightsGrad = conv3dWeightGradReference(
-            inputsByPass[pass], errorsByPass[pass], batchSize, C, D, H, W, K, Z, R, S, strideD, strideH, strideW, padD, padH, padW);
+            inputsByPass[pass], errorsByPass[pass], batchSize, C, D, H, W, K, Z, R, S, strideD, strideH, strideW, padD, padH, padW, groups);
         const vector<float> expectedBiasesGrad = conv3dBiasGradReference(errorsByPass[pass], batchSize, K, OD, OH, OW);
         currentWeights = sgdUpdatedReference(currentWeights, expectedWeightsGrad, batchSize, learningRate);
         currentBiases = sgdUpdatedReference(currentBiases, expectedBiasesGrad, batchSize, learningRate);
@@ -762,13 +786,14 @@ TEST(Convolution3dApi, ArchitectureSaveLoadRoundTripPreservesConfigurationAndDes
     constexpr uint32_t H = 3;
     constexpr uint32_t W = 3;
     constexpr uint32_t K = 8;
+    constexpr uint32_t groups = 4;
     constexpr uint32_t Z = 2;
     constexpr uint32_t R = 2;
     constexpr uint32_t S = 2;
     const DataType dataType = DataType::FP16;
 
     const vector<float> inputValues = makeDeterministicValues(batchSize * C * D * H * W, 31);
-    const vector<float> weightValues = makeDeterministicValues(K * C * Z * R * S, 37);
+    const vector<float> weightValues = makeDeterministicValues(K * (C / groups) * Z * R * S, 37);
     const vector<float> biasValues = makeDeterministicValues(K, 41);
 
     const string networkName = "conv3d_arch_round_trip";
@@ -788,6 +813,7 @@ TEST(Convolution3dApi, ArchitectureSaveLoadRoundTripPreservesConfigurationAndDes
                                       .depthPadding(0)
                                       .verticalPadding(0)
                                       .horizontalPadding(0)
+                                      .groups(groups)
                                       .hasBias(true)
                                       .noActivation()
                                       .build();
@@ -816,6 +842,10 @@ TEST(Convolution3dApi, ArchitectureSaveLoadRoundTripPreservesConfigurationAndDes
         EXPECT_EQ(j.at("filter_height").get<uint32_t>(), R);
         EXPECT_EQ(j.at("filter_width").get<uint32_t>(), S);
         EXPECT_EQ(j.at("num_output_channels").get<uint32_t>(), K);
+        EXPECT_EQ(j.at("groups").get<uint32_t>(), groups);
+        EXPECT_EQ(j.at("parameters").at("weights").at("shape").get<vector<uint64_t>>(),
+                  (vector<uint64_t>{K, C / groups, Z, R, S}));
+        EXPECT_EQ(loadedConv->getGroups(), groups);
         EXPECT_TRUE(j.at("has_bias").get<bool>());
         EXPECT_TRUE(j.at("activation").is_null());
 
@@ -831,7 +861,7 @@ TEST(Convolution3dApi, ArchitectureSaveLoadRoundTripPreservesConfigurationAndDes
 
         const vector<float> actual = runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
         const vector<float> expected =
-            conv3dForwardReference(inputValues, weightValues, biasValues, batchSize, C, D, H, W, K, Z, R, S, 1, 1, 1, 0, 0, 0, true);
+            conv3dForwardReference(inputValues, weightValues, biasValues, batchSize, C, D, H, W, K, Z, R, S, 1, 1, 1, 0, 0, 0, true, groups);
         expectAllClose(actual, expected, 1e-1f, 1e-1f, "loaded conv3d output");
     } catch (...) {
         filesystem::remove_all(archiveDir);

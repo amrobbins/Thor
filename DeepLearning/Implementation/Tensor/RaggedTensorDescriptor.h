@@ -29,6 +29,18 @@ class RaggedTensorDescriptor {
           raggedRank(raggedRank) {
         construct();
     }
+    RaggedTensorDescriptor(DataType valuesDataType,
+                           const std::vector<uint64_t> &trailingDimensions,
+                           uint64_t batchSize,
+                           uint64_t maxTotalValues,
+                           uint64_t maxValuesPerRow,
+                           DataType offsetsDataType = kDefaultRowPartitionOffsetDataType,
+                           uint32_t raggedRank = 1)
+        : valuesDescriptor(valuesDataType, makeValuesDimensions(maxTotalValues, trailingDimensions)),
+          rowPartition(batchSize, maxTotalValues, offsetsDataType, maxValuesPerRow),
+          raggedRank(raggedRank) {
+        construct();
+    }
 
     TensorDescriptor getValuesDescriptor() const { return valuesDescriptor; }
     TensorDescriptor getOffsetsDescriptor() const { return rowPartition.getOffsetsDescriptor(); }
@@ -38,6 +50,9 @@ class RaggedTensorDescriptor {
     DataType getOffsetsDataType() const { return rowPartition.getOffsetsDataType(); }
     uint64_t getBatchSize() const { return rowPartition.getBatchSize(); }
     uint64_t getMaxTotalValues() const { return rowPartition.getMaxTotalValues(); }
+    bool hasMaxValuesPerRow() const { return rowPartition.hasMaxValuesPerRow(); }
+    uint64_t getMaxValuesPerRow() const { return rowPartition.getMaxValuesPerRow(); }
+    uint64_t getMaxValuesPerRowOrZero() const { return rowPartition.getMaxValuesPerRowOrZero(); }
     uint32_t getRaggedRank() const { return raggedRank; }
 
     std::vector<uint64_t> getValuesDimensions() const { return valuesDescriptor.getDimensions(); }

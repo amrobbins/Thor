@@ -127,6 +127,37 @@ TEST(LineStatsReporter, FormatsAlignedStatsLineWithoutAnsi) {
     EXPECT_EQ(line, alignedColorStatsLineWithoutAnsi());
 }
 
+TEST(LineStatsReporter, ReportsWindowedDevicePersistingL2Telemetry) {
+    TrainingStatsSnapshot stats = makeStats(65.0);
+    stats.deviceDatasetStorage.requested = DeviceDatasetStorage::BEST_EFFORT;
+    stats.deviceDatasetStorage.attempted = true;
+    stats.deviceDatasetStorage.used = true;
+    stats.deviceDatasetStorage.reason = "compact_windowed_residency";
+    stats.deviceDatasetStorage.windowedDeviceCache = WindowedDeviceCacheReport{
+        .requested = WindowedDeviceCache::AUTO,
+        .attempted = true,
+        .used = true,
+        .reason = "enabled",
+        .eligibleSources = 2,
+        .activeSources = 2,
+        .eligibleSourceBytes = 8192,
+        .budgetBytes = 32768,
+        .maxAccessPolicyWindowBytes = 16384,
+        .activeUniqueBytes = 8192,
+        .hitRatio = 1.0f,
+    };
+
+    const std::string line = LineStatsReporter::formatStatsLine(stats);
+    EXPECT_NE(line.find("window_l2_policy=auto"), std::string::npos);
+    EXPECT_NE(line.find("window_l2=enabled"), std::string::npos);
+    EXPECT_NE(line.find("window_l2_sources=2/2"), std::string::npos);
+    EXPECT_NE(line.find("window_l2_source_bytes=8192"), std::string::npos);
+    EXPECT_NE(line.find("window_l2_budget_bytes=32768"), std::string::npos);
+    EXPECT_NE(line.find("window_l2_max_window_bytes=16384"), std::string::npos);
+    EXPECT_NE(line.find("window_l2_active_hot_bytes=8192"), std::string::npos);
+    EXPECT_NE(line.find("window_l2_hit_ratio=1.000"), std::string::npos);
+}
+
 TEST(LineStatsReporter, FormatsFlopsRateWithFixedFiveCharacterNumber) {
     TrainingStatsSnapshot stats = makeStats(65.0);
 

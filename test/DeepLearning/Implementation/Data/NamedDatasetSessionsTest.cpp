@@ -280,14 +280,16 @@ Thor::DatasetFieldMaterializationRequirements raggedRequirements(
     const Thor::FileDataset &dataset,
     uint64_t batchSize,
     uint64_t maxTotalValues,
-    DataType offsetsDataType) {
+    DataType offsetsDataType,
+    uint64_t maxValuesPerRow = 0) {
     const Thor::DatasetField &field = dataset.getField("labels");
+    const RaggedTensorDescriptor descriptor = maxValuesPerRow == 0
+        ? RaggedTensorDescriptor(DataType::INT32, {}, batchSize, maxTotalValues, offsetsDataType)
+        : RaggedTensorDescriptor(DataType::INT32, {}, batchSize, maxTotalValues, maxValuesPerRow, offsetsDataType);
     Thor::DatasetFieldMaterializationRequirements requirements;
     requirements.emplace(
         field.id,
-        Thor::DatasetFieldMaterializationRequirement::ragged(
-            field.id,
-            RaggedTensorDescriptor(DataType::INT32, {}, batchSize, maxTotalValues, offsetsDataType)));
+        Thor::DatasetFieldMaterializationRequirement::ragged(field.id, descriptor));
     return requirements;
 }
 
@@ -728,7 +730,8 @@ Thor::DeviceDatasetSessionDescription deviceSessionDescription(
 
 std::shared_ptr<Thor::TrainingData> trainingDataFor(
     const TestIndexedNamedBatchSession& session,
-    Thor::DeviceDatasetStorage storage) {
+    Thor::DeviceDatasetStorage storage,
+    Thor::WindowedDeviceCache windowedDeviceCache = Thor::WindowedDeviceCache::AUTO) {
     const std::string datasetName = session.getDatasetName().empty()
                                         ? "dataset"
                                         : session.getDatasetName();
@@ -739,7 +742,9 @@ std::shared_ptr<Thor::TrainingData> trainingDataFor(
             session.getBatchSize(),
             session.getRandomizeTrain(),
             session.getRandomSeed()),
-        Thor::DatasetAccessPolicy{.deviceStorage = storage},
+        Thor::DatasetAccessPolicy{
+            .deviceStorage = storage,
+            .windowedDeviceCache = windowedDeviceCache},
         datasetName);
 }
 
@@ -748,9 +753,10 @@ Thor::DeviceDatasetStorageSelection selectDeviceStorage(
     Thor::DeviceDatasetStorage storage,
     TensorPlacement placement,
     uint64_t batchQueueDepth,
-    std::optional<uint64_t> availableBytesOverride = std::nullopt) {
+    std::optional<uint64_t> availableBytesOverride = std::nullopt,
+    Thor::WindowedDeviceCache windowedDeviceCache = Thor::WindowedDeviceCache::AUTO) {
     std::shared_ptr<Thor::TrainingData> data =
-        trainingDataFor(*sourceSession, storage);
+        trainingDataFor(*sourceSession, storage, windowedDeviceCache);
     return Thor::selectDeviceDatasetStorageSession(
         sourceSession,
         *data,
@@ -1580,7 +1586,7 @@ TEST(IndexedNamedBatchSessionTest, MaterializesLogicalRaggedBatchesForBothCanoni
         std::shared_ptr<Thor::FileDataset> dataset = Thor::FileDataset::open(datasetPath);
         Thor::DatasetSplitManifest splits(*dataset, vector<uint64_t>{2, 1, 4}, vector<uint64_t>{0}, vector<uint64_t>{3});
         Thor::DatasetFieldMaterializationRequirements requirements =
-            raggedRequirements(*dataset, 3, 6, offsetsDataType);
+            raggedRequirements(*dataset, 3, 6, offsetsDataType, 3);
 
         TestIndexedNamedBatchSession session(
             dataset, std::move(splits), Thor::BatchPolicy(3, false), 2, requirements);
@@ -1597,6 +1603,7 @@ TEST(IndexedNamedBatchSessionTest, MaterializesLogicalRaggedBatchesForBothCanoni
         const RaggedTensor &labels = batch.getRaggedTensor("labels");
         EXPECT_EQ(labels.getDescriptor(), requirements.begin()->second.raggedTensorDescriptor.value());
         EXPECT_EQ(labels.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(5));
+        EXPECT_EQ(labels.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(3));
         EXPECT_EQ(raggedOffsetsAsUint64(labels), (vector<uint64_t>{0, 3, 3, 5}));
         EXPECT_EQ(activeRaggedInt32Values(labels), (vector<int32_t>{30, 31, 32, 50, 51}));
         lease.reset();
@@ -1680,6 +1687,7 @@ TEST(IndexedNamedBatchSessionTest, ExactRaggedTailUsesEmptyPhysicalTailRowsAndRe
     EXPECT_EQ(batchNum, 0u);
     const RaggedTensor &firstLabels = first.get().getRaggedTensor("labels");
     EXPECT_EQ(firstLabels.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(2));
+    EXPECT_EQ(firstLabels.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(2));
     EXPECT_EQ(raggedOffsetsAsUint64(firstLabels), (vector<uint64_t>{0, 2, 2}));
     EXPECT_EQ(activeRaggedInt32Values(firstLabels), (vector<int32_t>{10, 11}));
     // Recycle this queue-depth-one buffer. The next materialization must install
@@ -1692,6 +1700,7 @@ TEST(IndexedNamedBatchSessionTest, ExactRaggedTailUsesEmptyPhysicalTailRowsAndRe
     EXPECT_EQ(tail.get().getValidExampleCount().value(), 1u);
     const RaggedTensor &tailLabels = tail.get().getRaggedTensor("labels");
     EXPECT_EQ(tailLabels.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(3));
+    EXPECT_EQ(tailLabels.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(3));
     EXPECT_EQ(raggedOffsetsAsUint64(tailLabels), (vector<uint64_t>{0, 3, 3}));
     EXPECT_EQ(activeRaggedInt32Values(tailLabels), (vector<int32_t>{30, 31, 32}));
     tail.reset();
@@ -1700,6 +1709,7 @@ TEST(IndexedNamedBatchSessionTest, ExactRaggedTailUsesEmptyPhysicalTailRowsAndRe
     EXPECT_EQ(batchNum, 0u);
     const RaggedTensor &nextEpochLabels = nextEpoch.get().getRaggedTensor("labels");
     EXPECT_EQ(nextEpochLabels.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(2));
+    EXPECT_EQ(nextEpochLabels.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(2));
     EXPECT_EQ(raggedOffsetsAsUint64(nextEpochLabels), (vector<uint64_t>{0, 2, 2}));
     nextEpoch.reset();
 
@@ -3737,7 +3747,26 @@ TEST(DeviceResidentFileNamedBatchSessionTest, RaggedWindowedSourceIsResidentOnce
     ASSERT_NE(residentSession, nullptr);
     ASSERT_TRUE(selection.report.used);
     EXPECT_EQ(selection.report.reason, "compact_file_residency");
+    EXPECT_EQ(selection.report.windowedDeviceCache.requested,
+              Thor::WindowedDeviceCache::AUTO);
+    EXPECT_TRUE(selection.report.windowedDeviceCache.attempted);
+    EXPECT_EQ(selection.report.windowedDeviceCache.eligibleSources, 1u);
+    EXPECT_EQ(selection.report.windowedDeviceCache.eligibleSourceBytes,
+              sourceValues.size() * sizeof(int32_t));
+    if (selection.report.windowedDeviceCache.used) {
+        EXPECT_EQ(selection.report.windowedDeviceCache.activeSources, 1u);
+        EXPECT_EQ(selection.report.windowedDeviceCache.reason, "enabled");
+        EXPECT_GT(selection.report.windowedDeviceCache.hitRatio, 0.0f);
+        EXPECT_LE(selection.report.windowedDeviceCache.hitRatio, 1.0f);
+    }
     EXPECT_TRUE(residentSession->getDeviceDataset()->hasCompactRaggedField("history"));
+    const auto historySourceAccess =
+        residentSession->getDeviceDataset()->compactWindowSourceAccessForField("history");
+    ASSERT_TRUE(historySourceAccess.has_value());
+    EXPECT_EQ(historySourceAccess->sourceName, "history_source");
+    EXPECT_EQ(historySourceAccess->bytes, sourceValues.size() * sizeof(int32_t));
+    ASSERT_NE(historySourceAccess->base, nullptr);
+    EXPECT_EQ(residentSession->getDeviceDataset()->compactWindowSourceAccesses().size(), 1u);
 
     const Thor::DatasetMaterializationDescription description =
         Thor::describeDatasetMaterialization(*dataset);
@@ -3823,7 +3852,15 @@ TEST(DeviceResidentFileNamedBatchSessionTest, RaggedResidentBatchesMatchFileBack
         ASSERT_NE(residentSession, nullptr);
         ASSERT_TRUE(selection.report.used);
         EXPECT_EQ(selection.report.reason, "compact_file_residency");
+        EXPECT_EQ(selection.report.windowedDeviceCache.requested,
+                  Thor::WindowedDeviceCache::AUTO);
+        EXPECT_FALSE(selection.report.windowedDeviceCache.attempted);
+        EXPECT_FALSE(selection.report.windowedDeviceCache.used);
+        EXPECT_EQ(selection.report.windowedDeviceCache.eligibleSources, 0u);
+        EXPECT_TRUE(selection.report.windowedDeviceCache.reason.empty());
         EXPECT_TRUE(residentSession->getDeviceDataset()->hasCompactRaggedField("labels"));
+        EXPECT_FALSE(
+            residentSession->getDeviceDataset()->compactWindowSourceAccessForField("labels").has_value());
         EXPECT_EQ(
             residentSession->getBatchTensorPlacement("labels"),
             TensorPlacement(TensorPlacement::MemDevices::GPU, 0));
@@ -3864,6 +3901,9 @@ TEST(DeviceResidentFileNamedBatchSessionTest, RaggedResidentBatchesMatchFileBack
             EXPECT_EQ(
                 residentLabels.getRowPartitionRuntime().getHostActiveValueCountIfAvailable(),
                 sourceLabels.getHostActiveValueCountIfAvailable());
+            ASSERT_TRUE(sourceLabels.getHostMaxActiveRowLengthIfAvailable().has_value());
+            EXPECT_EQ(residentLabels.getHostMaxActiveRowLengthIfAvailable(),
+                      sourceLabels.getHostMaxActiveRowLengthIfAvailable());
             expectRaggedInt32Equal(residentLabels, sourceLabels);
         }
 
@@ -3897,6 +3937,8 @@ TEST(DeviceResidentFileNamedBatchSessionTest, RaggedResidentBatchesMatchFileBack
         EXPECT_EQ(
             residentValidationLabels.getRowPartitionRuntime().getHostActiveValueCountIfAvailable(),
             sourceValidationLabels.getHostActiveValueCountIfAvailable());
+        EXPECT_EQ(residentValidationLabels.getHostMaxActiveRowLengthIfAvailable(),
+                  sourceValidationLabels.getHostMaxActiveRowLengthIfAvailable());
         expectRaggedInt32Equal(residentValidationLabels, sourceValidationLabels);
         sourceValidation.reset();
         residentValidation.reset();
@@ -4032,6 +4074,7 @@ TEST(DeviceResidentFileNamedBatchSessionTest, RaggedResidentAllEmptyBatchHasZero
     EXPECT_EQ(raggedOffsetsAsUint64(labels), (vector<uint64_t>{0, 0, 0}));
     ASSERT_TRUE(labels.getHostActiveValueCountIfAvailable().has_value());
     EXPECT_EQ(labels.getHostActiveValueCountIfAvailable().value(), 0u);
+    EXPECT_EQ(labels.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(0));
     EXPECT_EQ(
         labels.getRowPartitionRuntime().getHostActiveValueCountIfAvailable(),
         std::optional<uint64_t>(0));
@@ -4270,6 +4313,28 @@ TEST(DeviceResidentFileNamedBatchSessionTest, ReturnsCompactDeviceWindowReferenc
         tensorValuesOnHost(deviceBatch.getTensor("dense")),
         tensorValues(sourceBatch.getTensor("dense")));
 
+    const auto historyAccess = resident->compactWindowSourceAccessForField("history");
+    ASSERT_TRUE(historyAccess.has_value());
+    const auto historyPolicy =
+        deviceBatch.getDeviceBatchReference("history").getAccessPolicy();
+    const auto maskPolicy =
+        deviceBatch.getDeviceBatchReference("history_mask").getAccessPolicy();
+    EXPECT_FALSE(maskPolicy.has_value());
+    const auto l2Telemetry = Thor::DeviceWindowL2CacheManager::instance().telemetry(0);
+    if (l2Telemetry.available && l2Telemetry.budgetBytes > 0 &&
+        historyAccess->bytes <= l2Telemetry.maxAccessPolicyWindowBytes) {
+        ASSERT_TRUE(historyPolicy.has_value());
+        EXPECT_EQ(historyPolicy->deviceNum, 0);
+        EXPECT_EQ(historyPolicy->tensorId, historyAccess->tensorId);
+        EXPECT_EQ(historyPolicy->base, historyAccess->base);
+        EXPECT_EQ(historyPolicy->bytes, historyAccess->bytes);
+        EXPECT_GT(historyPolicy->persistingHitRatio, 0.0f);
+        EXPECT_LE(historyPolicy->persistingHitRatio, 1.0f);
+        EXPECT_EQ(historyPolicy->generation, l2Telemetry.generation);
+    } else {
+        EXPECT_FALSE(historyPolicy.has_value());
+    }
+
     Tensor materializedHistory = materializeDeviceBatchReference(
         deviceBatch.getDeviceBatchReference("history"));
     Tensor materializedMask = materializeDeviceBatchReference(
@@ -4306,6 +4371,192 @@ TEST(DeviceResidentFileNamedBatchSessionTest, ReturnsCompactDeviceWindowReferenc
               uint8TensorValuesOnHost(sourceTail.getTensor("history_mask")));
     sourceBatchLease.reset();
     deviceBatchLease.reset();
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentNamedDatasetTest, ExposesOnlyPayloadWindowSourcesAsL2CacheCandidates) {
+    requireCudaDevice("CUDA device is required for compact window source access tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("device_resident_window_source_access");
+    DatasetLayout layout = materializerWindowedLayout();
+    writeWindowedMaterializerDataset(datasetPath);
+
+    TestIndexedNamedBatchSession sourceSession(
+        datasetPath,
+        layout,
+        {2, 0, 1},
+        {},
+        vector<uint64_t>{},
+        2,
+        1,
+        false,
+        std::nullopt);
+    const Thor::DatasetMaterializationDescription description =
+        materializationDescription(sourceSession);
+    const TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+
+    auto resident = DeviceResidentNamedDataset::fromCompactFileDataset(
+        description,
+        gpuPlacement,
+        std::set<string>{"dense", "history", "history_mask"});
+
+    const auto historyAccess = resident->compactWindowSourceAccessForField("history");
+    ASSERT_TRUE(historyAccess.has_value());
+    EXPECT_EQ(historyAccess->sourceName, "history_source");
+    EXPECT_NE(historyAccess->tensorId, 0u);
+    EXPECT_NE(historyAccess->base, nullptr);
+    EXPECT_EQ(historyAccess->bytes, 4u * sizeof(float));
+
+    EXPECT_FALSE(resident->compactWindowSourceAccessForField("history_mask").has_value());
+    EXPECT_FALSE(resident->compactWindowSourceAccessForField("dense").has_value());
+    EXPECT_FALSE(resident->compactWindowSourceAccessForField("missing").has_value());
+
+    const auto accesses = resident->compactWindowSourceAccesses();
+    ASSERT_EQ(accesses.size(), 1u);
+    EXPECT_EQ(accesses.front(), historyAccess.value());
+
+    auto maskOnlyResident = DeviceResidentNamedDataset::fromCompactFileDataset(
+        description,
+        gpuPlacement,
+        std::set<string>{"history_mask"});
+    EXPECT_TRUE(maskOnlyResident->hasCompactWindowField("history_mask"));
+    EXPECT_FALSE(
+        maskOnlyResident->compactWindowSourceAccessForField("history_mask").has_value());
+    EXPECT_TRUE(maskOnlyResident->compactWindowSourceAccesses().empty());
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentNamedDatasetTest, DeduplicatesL2CacheCandidatesByCompactWindowSource) {
+    requireCudaDevice("CUDA device is required for shared compact window source access tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("device_resident_shared_window_source_access");
+    DatasetLayout layout = sharedWindowSourceLayout();
+    writeSharedWindowSourceDataset(datasetPath);
+
+    TestIndexedNamedBatchSession sourceSession(
+        datasetPath,
+        layout,
+        {0, 1},
+        {},
+        vector<uint64_t>{},
+        2,
+        1,
+        false,
+        std::nullopt);
+    const Thor::DatasetMaterializationDescription description =
+        materializationDescription(sourceSession);
+    auto resident = DeviceResidentNamedDataset::fromCompactFileDataset(
+        description,
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+        std::set<string>{"examples", "labels"});
+
+    const auto examplesAccess = resident->compactWindowSourceAccessForField("examples");
+    const auto labelsAccess = resident->compactWindowSourceAccessForField("labels");
+    ASSERT_TRUE(examplesAccess.has_value());
+    ASSERT_TRUE(labelsAccess.has_value());
+    EXPECT_EQ(examplesAccess.value(), labelsAccess.value());
+    EXPECT_EQ(examplesAccess->sourceName, "tokens");
+    EXPECT_EQ(examplesAccess->bytes, 7u);
+
+    const auto accesses = resident->compactWindowSourceAccesses();
+    ASSERT_EQ(accesses.size(), 1u);
+    EXPECT_EQ(accesses.front(), examplesAccess.value());
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceResidentNamedDatasetTest, DenseAndRaggedWindowsShareOneResidentSourceAndL2Candidate) {
+    requireCudaDevice("CUDA device is required for shared dense/ragged window source tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("device_resident_shared_dense_ragged_window_source");
+    DatasetLayout layout = DatasetLayout::fromTensorShapes(
+        {},
+        vector<DatasetLayout::WindowedTensorSourceShape>{
+            DatasetLayout::WindowedTensorSourceShape(
+                "history_source", {}, DataType::INT32, DataType::UINT64)},
+        vector<DatasetLayout::WindowedTensorShape>{
+            DatasetLayout::WindowedTensorShape(
+                "dense_history", {3}, "history_source", DataType::INT64)},
+        {},
+        vector<DatasetLayout::RaggedWindowedTensorShape>{
+            DatasetLayout::RaggedWindowedTensorShape(
+                "ragged_history", "history_source", DataType::INT64)});
+
+    DatasetWriter writer(datasetPath, layout, 8, 2, true);
+    uint64_t sourceKey = 7;
+    vector<int32_t> sourceValues{10, 11, 12, 13, 14, 15};
+    writer.writeWindowSource(
+        "history_source",
+        DatasetWriter::WindowedTensorSourceView{
+            .dataType = DataType::INT32,
+            .key = &sourceKey,
+            .startIndex = 0,
+            .dimensions = {sourceValues.size()},
+            .data = sourceValues.data(),
+            .numBytes = sourceValues.size() * sizeof(int32_t)});
+
+    vector<uint64_t> keys{sourceKey, sourceKey};
+    vector<int64_t> denseStarts{0, 1};
+    vector<int64_t> raggedStarts{1, 2};
+    vector<uint64_t> raggedLengths{3, 2};
+    const map<string, DatasetWriter::WindowedTensorReferenceBatchView> denseReferences{
+        {"dense_history",
+         DatasetWriter::WindowedTensorReferenceBatchView{
+             .keyDataType = DataType::UINT64,
+             .indexDataType = DataType::INT64,
+             .keys = keys.data(),
+             .starts = denseStarts.data(),
+             .count = keys.size()}}};
+    const map<string, DatasetWriter::RaggedTensorBatchView> raggedReferences{
+        {"ragged_history",
+         DatasetWriter::RaggedTensorBatchView{
+             .dataType = DataType::INT32,
+             .count = keys.size(),
+             .storageMode = DatasetWriter::RaggedTensorBatchView::StorageMode::WINDOW_REFERENCE,
+             .keyDataType = DataType::UINT64,
+             .indexDataType = DataType::INT64,
+             .keys = keys.data(),
+             .starts = raggedStarts.data(),
+             .lengths = raggedLengths.data()}}};
+    writer.writeIndexedExamples({}, denseReferences, raggedReferences);
+    writer.close();
+
+    std::shared_ptr<Thor::FileDataset> dataset = Thor::FileDataset::open(datasetPath);
+    const Thor::DatasetMaterializationDescription description =
+        Thor::describeDatasetMaterialization(*dataset);
+    const std::set<string> requested{"dense_history", "ragged_history"};
+    const uint64_t estimatedBytes =
+        DeviceResidentNamedDataset::estimateCompactFileDatasetBytes(description, requested);
+    auto resident = DeviceResidentNamedDataset::fromCompactFileDataset(
+        description,
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+        requested);
+
+    EXPECT_EQ(resident->totalBytes(), estimatedBytes);
+    EXPECT_EQ(resident->compactSourceBytes(), sourceValues.size() * sizeof(int32_t));
+    EXPECT_GT(resident->compactMetadataBytes(), 0u);
+
+    const auto denseAccess =
+        resident->compactWindowSourceAccessForField("dense_history");
+    const auto raggedAccess =
+        resident->compactWindowSourceAccessForField("ragged_history");
+    ASSERT_TRUE(denseAccess.has_value());
+    ASSERT_TRUE(raggedAccess.has_value());
+    EXPECT_EQ(denseAccess.value(), raggedAccess.value());
+    EXPECT_EQ(denseAccess->sourceName, "history_source");
+    EXPECT_EQ(denseAccess->bytes, sourceValues.size() * sizeof(int32_t));
+
+    const auto accesses = resident->compactWindowSourceAccesses();
+    ASSERT_EQ(accesses.size(), 1u);
+    EXPECT_EQ(accesses.front(), denseAccess.value());
 
     std::filesystem::remove_all(datasetPath);
 }
@@ -4434,6 +4685,17 @@ TEST(DeviceDatasetStorageSelection, WindowResidencyFallsBackToHybridWhenDirectRe
 
     EXPECT_TRUE(selection.report.used);
     EXPECT_EQ(selection.report.reason, "compact_windowed_residency");
+    EXPECT_EQ(selection.report.windowedDeviceCache.requested,
+              Thor::WindowedDeviceCache::AUTO);
+    EXPECT_TRUE(selection.report.windowedDeviceCache.attempted);
+    EXPECT_EQ(selection.report.windowedDeviceCache.eligibleSources, 1u);
+    EXPECT_GT(selection.report.windowedDeviceCache.eligibleSourceBytes, 0u);
+    if (selection.report.windowedDeviceCache.used) {
+        EXPECT_EQ(selection.report.windowedDeviceCache.activeSources, 1u);
+        EXPECT_EQ(selection.report.windowedDeviceCache.reason, "enabled");
+        EXPECT_GT(selection.report.windowedDeviceCache.hitRatio, 0.0f);
+        EXPECT_LE(selection.report.windowedDeviceCache.hitRatio, 1.0f);
+    }
     EXPECT_EQ(selection.report.residentBytes, windowResidentBytes);
     EXPECT_EQ(selection.report.requiredBytes, windowRequiredBytes);
     auto residentSession =
@@ -4456,6 +4718,61 @@ TEST(DeviceDatasetStorageSelection, WindowResidencyFallsBackToHybridWhenDirectRe
     BatchLease lease = selection.session->leaseBatch(ExampleType::TRAIN, batchNum);
     EXPECT_TRUE(lease.get().isTensor("dense"));
     EXPECT_TRUE(lease.get().isDeviceBatchReference("history"));
+    lease.reset();
+
+    std::filesystem::remove_all(datasetPath);
+}
+
+TEST(DeviceDatasetStorageSelection, WindowedDeviceCacheOffLeavesCompactWindowReferencesUnhinted) {
+    requireCudaDevice("CUDA device is required for window L2 policy tests.");
+    ScopedEnvVar scopedBackend("THOR_IO_BACKEND", "pread_buffered");
+    Thor::resetDeviceDatasetMemoryReservationsForTesting();
+
+    const std::filesystem::path datasetPath =
+        makeTempDatasetPath("device_storage_window_l2_off");
+    DatasetLayout layout = denseAffineWindowLayout();
+    writeDenseAffineWindowDataset(datasetPath);
+
+    auto sourceSession = std::make_shared<TestIndexedNamedBatchSession>(
+        datasetPath,
+        layout,
+        vector<uint64_t>{0, 1},
+        vector<uint64_t>{},
+        vector<uint64_t>{},
+        2,
+        1,
+        false,
+        std::nullopt);
+    const Thor::DatasetMaterializationDescription description =
+        materializationDescription(*sourceSession);
+    const uint64_t residentBytes =
+        DeviceResidentNamedDataset::estimateCompactFileDatasetBytes(
+            description,
+            std::set<string>{"history"});
+    const uint64_t requiredBytes = residentBytes + 2u * sizeof(uint64_t);
+
+    Thor::DeviceDatasetStorageSelection selection = selectDeviceStorage(
+        sourceSession,
+        Thor::DeviceDatasetStorage::STRICT_WINDOWED_ONLY,
+        TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+        1,
+        ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES + requiredBytes,
+        Thor::WindowedDeviceCache::OFF);
+
+    ASSERT_TRUE(selection.report.used);
+    EXPECT_EQ(selection.report.windowedDeviceCache.requested,
+              Thor::WindowedDeviceCache::OFF);
+    EXPECT_FALSE(selection.report.windowedDeviceCache.attempted);
+    EXPECT_FALSE(selection.report.windowedDeviceCache.used);
+    EXPECT_EQ(selection.report.windowedDeviceCache.eligibleSources, 1u);
+    EXPECT_GT(selection.report.windowedDeviceCache.eligibleSourceBytes, 0u);
+    EXPECT_EQ(selection.report.windowedDeviceCache.reason, "disabled_by_policy");
+
+    uint64_t batchNum = 99;
+    BatchLease lease = selection.session->leaseBatch(ExampleType::TRAIN, batchNum);
+    ASSERT_TRUE(lease.get().isDeviceBatchReference("history"));
+    EXPECT_FALSE(
+        lease.get().getDeviceBatchReference("history").getAccessPolicy().has_value());
     lease.reset();
 
     std::filesystem::remove_all(datasetPath);

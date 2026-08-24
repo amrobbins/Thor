@@ -83,6 +83,7 @@ def test_ragged_network_input_returns_one_logical_ragged_tensor():
         max_total_values=64,
         batch_size=8,
         offsets_data_type=thor.DataType.uint64,
+        max_values_per_row=12,
     )
 
     assert isinstance(labels, thor.RaggedTensor)
@@ -92,6 +93,7 @@ def test_ragged_network_input_returns_one_logical_ragged_tensor():
     assert labels.offsets_data_type == thor.DataType.uint64
     assert labels.batch_size == 8
     assert labels.max_total_values == 64
+    assert labels.max_values_per_row == 12
 
 
 def test_ragged_network_input_rejects_invalid_shape_contract():
@@ -114,4 +116,15 @@ def test_ragged_network_input_rejects_invalid_shape_contract():
             [4, 0],
             max_total_values=64,
             batch_size=8,
+        )
+
+    with pytest.raises((ValueError, RuntimeError)):
+        thor.layers.RaggedNetworkInput(
+            n,
+            "labels3",
+            thor.DataType.fp16,
+            [4],
+            max_total_values=64,
+            batch_size=8,
+            max_values_per_row=65,
         )

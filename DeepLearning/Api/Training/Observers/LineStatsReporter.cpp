@@ -396,6 +396,40 @@ void appendPlainDeviceDatasetStorage(LineBuffer& out, const DeviceDatasetStorage
         out.append(",materialization_s=");
         out.append(formatFixedString(report.materializationSeconds, 3).c_str());
     }
+    const WindowedDeviceCacheReport& l2 = report.windowedDeviceCache;
+    if (l2.attempted || l2.used || !l2.reason.empty() || l2.eligibleSources > 0) {
+        out.append(",window_l2_policy=");
+        out.append(windowedDeviceCacheName(l2.requested));
+        out.append(",window_l2=");
+        out.append(l2.reason.empty() ? (l2.used ? "enabled" : "not_used")
+                                    : l2.reason.c_str());
+        if (l2.eligibleSources > 0) {
+            out.append(",window_l2_sources=");
+            out.append(formatUnsigned(l2.activeSources).c_str());
+            out.append('/');
+            out.append(formatUnsigned(l2.eligibleSources).c_str());
+        }
+        if (l2.eligibleSourceBytes > 0) {
+            out.append(",window_l2_source_bytes=");
+            out.append(formatUnsigned(l2.eligibleSourceBytes).c_str());
+        }
+        if (l2.budgetBytes > 0) {
+            out.append(",window_l2_budget_bytes=");
+            out.append(formatUnsigned(l2.budgetBytes).c_str());
+        }
+        if (l2.maxAccessPolicyWindowBytes > 0) {
+            out.append(",window_l2_max_window_bytes=");
+            out.append(formatUnsigned(l2.maxAccessPolicyWindowBytes).c_str());
+        }
+        if (l2.activeUniqueBytes > 0) {
+            out.append(",window_l2_active_hot_bytes=");
+            out.append(formatUnsigned(l2.activeUniqueBytes).c_str());
+        }
+        if (l2.used) {
+            out.append(",window_l2_hit_ratio=");
+            out.append(formatFixedString(l2.hitRatio, 3).c_str());
+        }
+    }
 }
 
 void appendColorDeviceDatasetStorage(LineBuffer& out, const DeviceDatasetStorageReport& report) {
@@ -438,6 +472,40 @@ void appendColorDeviceDatasetStorage(LineBuffer& out, const DeviceDatasetStorage
     if (report.materializationSeconds > 0.0) {
         out.append(",materialization_s=");
         out.append(formatFixedString(report.materializationSeconds, 3).c_str());
+    }
+    const WindowedDeviceCacheReport& l2 = report.windowedDeviceCache;
+    if (l2.attempted || l2.used || !l2.reason.empty() || l2.eligibleSources > 0) {
+        out.append(",window_l2_policy=");
+        out.append(windowedDeviceCacheName(l2.requested));
+        out.append(",window_l2=");
+        out.append(l2.reason.empty() ? (l2.used ? "enabled" : "not_used")
+                                    : l2.reason.c_str());
+        if (l2.eligibleSources > 0) {
+            out.append(",window_l2_sources=");
+            out.append(formatUnsigned(l2.activeSources).c_str());
+            out.append('/');
+            out.append(formatUnsigned(l2.eligibleSources).c_str());
+        }
+        if (l2.eligibleSourceBytes > 0) {
+            out.append(",window_l2_source_bytes=");
+            out.append(formatUnsigned(l2.eligibleSourceBytes).c_str());
+        }
+        if (l2.budgetBytes > 0) {
+            out.append(",window_l2_budget_bytes=");
+            out.append(formatUnsigned(l2.budgetBytes).c_str());
+        }
+        if (l2.maxAccessPolicyWindowBytes > 0) {
+            out.append(",window_l2_max_window_bytes=");
+            out.append(formatUnsigned(l2.maxAccessPolicyWindowBytes).c_str());
+        }
+        if (l2.activeUniqueBytes > 0) {
+            out.append(",window_l2_active_hot_bytes=");
+            out.append(formatUnsigned(l2.activeUniqueBytes).c_str());
+        }
+        if (l2.used) {
+            out.append(",window_l2_hit_ratio=");
+            out.append(formatFixedString(l2.hitRatio, 3).c_str());
+        }
     }
     out.append(Ansi::reset);
 }

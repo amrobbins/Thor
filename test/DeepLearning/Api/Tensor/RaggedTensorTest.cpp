@@ -52,7 +52,7 @@ TEST(RaggedTensorApi, RejectsInvalidOffsets) {
 }
 
 TEST(RaggedTensorApi, ArchitectureJsonRoundTrips) {
-    RaggedTensor original(DataType::FP32, {8}, 4, 13, DataType::UINT64);
+    RaggedTensor original(DataType::FP32, {8}, 4, 13, 7, DataType::UINT64);
 
     json architecture = original.architectureJson();
     RaggedTensor copy = RaggedTensor::deserialize(architecture);
@@ -62,6 +62,8 @@ TEST(RaggedTensorApi, ArchitectureJsonRoundTrips) {
     EXPECT_EQ(copy.getOriginalId(), original.getId());
     EXPECT_EQ(copy.getBatchSize(), original.getBatchSize());
     EXPECT_EQ(copy.getMaxTotalValues(), original.getMaxTotalValues());
+    ASSERT_TRUE(copy.hasMaxValuesPerRow());
+    EXPECT_EQ(copy.getMaxValuesPerRow(), 7u);
     EXPECT_EQ(copy.getValuesDataType(), original.getValuesDataType());
     EXPECT_EQ(copy.getOffsetsDataType(), original.getOffsetsDataType());
     EXPECT_EQ(copy.getValuesDimensions(), original.getValuesDimensions());
@@ -75,9 +77,36 @@ TEST(RaggedTensorApi, ArchitectureJsonContainsStructureButNoRuntimeCacheState) {
 
     EXPECT_EQ(architecture.at("batch_size"), 4u);
     EXPECT_EQ(architecture.at("max_total_values"), 13u);
+    EXPECT_FALSE(architecture.contains("max_values_per_row"));
     EXPECT_FALSE(architecture.contains("host_active_value_count"));
     EXPECT_FALSE(architecture.contains("row_partition_runtime"));
     EXPECT_FALSE(architecture.contains("runtime_extent"));
+}
+
+TEST(RaggedTensorApi, MaxValuesPerRowIsOptionalStructuralMetadataAndRoundTrips) {
+    RaggedTensor ragged(DataType::FP32, {8}, 4, 23, 7, DataType::UINT64);
+
+    ASSERT_TRUE(ragged.hasMaxValuesPerRow());
+    EXPECT_EQ(ragged.getMaxValuesPerRow(), 7u);
+    EXPECT_EQ(ragged.getMaxTotalValues(), 23u);
+    json architecture = ragged.architectureJson();
+    EXPECT_EQ(architecture.at("max_values_per_row"), 7u);
+
+    RaggedTensor loaded = RaggedTensor::deserialize(architecture);
+    ASSERT_TRUE(loaded.hasMaxValuesPerRow());
+    EXPECT_EQ(loaded.getMaxValuesPerRow(), 7u);
+}
+
+TEST(RaggedTensorApi, LegacyVersionWithoutMaxValuesPerRowStillLoads) {
+    RaggedTensor original(DataType::FP32, {8}, 4, 23, DataType::UINT64);
+    json legacy = original.architectureJson();
+    legacy["version"] = "1.0.0";
+    legacy.erase("max_values_per_row");
+
+    RaggedTensor loaded = RaggedTensor::deserialize(legacy);
+    EXPECT_FALSE(loaded.hasMaxValuesPerRow());
+    EXPECT_EQ(loaded.getBatchSize(), 4u);
+    EXPECT_EQ(loaded.getMaxTotalValues(), 23u);
 }
 
 TEST(RaggedTensorApi, DeserializeRejectsMetadataMismatch) {

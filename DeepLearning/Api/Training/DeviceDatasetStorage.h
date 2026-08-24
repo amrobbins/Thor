@@ -1,5 +1,7 @@
 #pragma once
 
+#include "DeepLearning/Api/Training/WindowedDeviceCache.h"
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -34,6 +36,7 @@ struct DeviceDatasetStorageReport {
     bool residentConstructionJoined = false;
     bool residentConstructionStarted = false;
     double materializationSeconds = 0.0;
+    WindowedDeviceCacheReport windowedDeviceCache{};
 };
 
 }  // namespace Thor

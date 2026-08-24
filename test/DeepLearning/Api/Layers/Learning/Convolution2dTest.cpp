@@ -211,6 +211,69 @@ vector<float> conv2dForwardReference(const vector<float>& inputValues,
     return readCpuTensor(outputTensor);
 }
 
+
+vector<float> conv2dForwardReferenceGeneral(const vector<float>& inputValues,
+                                            const vector<float>& weightValues,
+                                            uint64_t batchSize,
+                                            uint32_t numInputChannels,
+                                            uint32_t inputH,
+                                            uint32_t inputW,
+                                            uint32_t numOutputChannels,
+                                            uint32_t filterH,
+                                            uint32_t filterW,
+                                            uint32_t strideH,
+                                            uint32_t strideW,
+                                            uint32_t dilationH,
+                                            uint32_t dilationW,
+                                            uint32_t paddingTop,
+                                            uint32_t paddingBottom,
+                                            uint32_t paddingLeft,
+                                            uint32_t paddingRight) {
+    const uint32_t effectiveH = dilationH * (filterH - 1) + 1;
+    const uint32_t effectiveW = dilationW * (filterW - 1) + 1;
+    const uint32_t outputH = 1 + (inputH + paddingTop + paddingBottom - effectiveH) / strideH;
+    const uint32_t outputW = 1 + (inputW + paddingLeft + paddingRight - effectiveW) / strideW;
+    vector<float> output(batchSize * numOutputChannels * outputH * outputW, 0.0f);
+
+    auto inputIndex = [=](uint64_t n, uint32_t c, uint32_t h, uint32_t w) {
+        return ((n * numInputChannels + c) * inputH + h) * inputW + w;
+    };
+    auto weightIndex = [=](uint32_t k, uint32_t c, uint32_t r, uint32_t col) {
+        return ((k * numInputChannels + c) * filterH + r) * filterW + col;
+    };
+    auto outputIndex = [=](uint64_t n, uint32_t k, uint32_t h, uint32_t w) {
+        return ((n * numOutputChannels + k) * outputH + h) * outputW + w;
+    };
+
+    for (uint64_t n = 0; n < batchSize; ++n) {
+        for (uint32_t k = 0; k < numOutputChannels; ++k) {
+            for (uint32_t oh = 0; oh < outputH; ++oh) {
+                for (uint32_t ow = 0; ow < outputW; ++ow) {
+                    float sum = 0.0f;
+                    for (uint32_t c = 0; c < numInputChannels; ++c) {
+                        for (uint32_t r = 0; r < filterH; ++r) {
+                            const int64_t ih = static_cast<int64_t>(oh * strideH + r * dilationH) -
+                                               static_cast<int64_t>(paddingTop);
+                            if (ih < 0 || ih >= static_cast<int64_t>(inputH))
+                                continue;
+                            for (uint32_t col = 0; col < filterW; ++col) {
+                                const int64_t iw = static_cast<int64_t>(ow * strideW + col * dilationW) -
+                                                   static_cast<int64_t>(paddingLeft);
+                                if (iw < 0 || iw >= static_cast<int64_t>(inputW))
+                                    continue;
+                                sum += inputValues[inputIndex(n, c, static_cast<uint32_t>(ih), static_cast<uint32_t>(iw))] *
+                                       weightValues[weightIndex(k, c, r, col)];
+                            }
+                        }
+                    }
+                    output[outputIndex(n, k, oh, ow)] = sum;
+                }
+            }
+        }
+    }
+    return output;
+}
+
 vector<float> conv2dErrorReference(const vector<float>& errorInputValues,
                                    const vector<float>& weightValues,
                                    uint64_t batchSize,
@@ -373,8 +436,7 @@ TEST(Convolution2dApi, Bf16PlacedFilterMutationChangesExecutionWithoutRebinding)
                                   .numOutputChannels(1)
                                   .filterHeight(1)
                                   .filterWidth(1)
-                                  .verticalPadding(0)
-                                  .horizontalPadding(0)
+                                  .padding(0, 0, 0, 0)
                                   .hasBias(false)
                                   .noActivation()
                                   .build();
@@ -424,8 +486,7 @@ TEST(Convolution2dApi, PlacedSaveLoadRoundTripRestoresBf16FilterBytesAndExecutio
                                       .numOutputChannels(1)
                                       .filterHeight(1)
                                       .filterWidth(1)
-                                      .verticalPadding(0)
-                                      .horizontalPadding(0)
+                                      .padding(0, 0, 0, 0)
                                       .hasBias(true)
                                       .noActivation()
                                       .build();
@@ -485,7 +546,7 @@ TEST(Convolution2dApi, PlacedSaveLoadRoundTripRestoresBf16FilterBytesAndExecutio
     filesystem::remove_all(archiveDir);
 }
 
-TEST(Convolution2dApi, DefaultsToSamePaddingGeluActivationAndCanDisableActivation) {
+TEST(Convolution2dApi, DefaultsToNoPaddingGeluActivationAndCanDisableActivation) {
     Api::Network defaultNetwork("conv2dDefaults");
     Api::NetworkInput defaultInput =
         Api::NetworkInput::Builder().network(defaultNetwork).name("input").dimensions({3, 8, 10}).dataType(DataType::FP16).build();
@@ -498,13 +559,19 @@ TEST(Convolution2dApi, DefaultsToSamePaddingGeluActivationAndCanDisableActivatio
                                          .build();
 
     ASSERT_TRUE(defaultConv.isInitialized());
-    EXPECT_EQ(defaultConv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{4, 8, 10}));
+    EXPECT_EQ(defaultConv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{4, 6, 6}));
     const json defaultJson = defaultConv.architectureJson();
     ASSERT_TRUE(defaultJson.contains("activation"));
     ASSERT_FALSE(defaultJson.at("activation").is_null());
     EXPECT_EQ(defaultJson.at("activation").at("layer_type").get<string>(), "gelu");
-    EXPECT_EQ(defaultJson.at("vertical_padding").get<uint32_t>(), 1u);
-    EXPECT_EQ(defaultJson.at("horizontal_padding").get<uint32_t>(), 2u);
+    EXPECT_EQ(defaultConv.getPaddingMode(), Api::ConvolutionPaddingMode::VALID);
+    EXPECT_EQ(defaultJson.at("padding_mode").get<string>(), "valid");
+    EXPECT_EQ(defaultJson.at("padding_top").get<uint32_t>(), 0u);
+    EXPECT_EQ(defaultJson.at("padding_bottom").get<uint32_t>(), 0u);
+    EXPECT_EQ(defaultJson.at("padding_left").get<uint32_t>(), 0u);
+    EXPECT_EQ(defaultJson.at("padding_right").get<uint32_t>(), 0u);
+    EXPECT_EQ(defaultJson.at("vertical_dilation").get<uint32_t>(), 1u);
+    EXPECT_EQ(defaultJson.at("horizontal_dilation").get<uint32_t>(), 1u);
 
     Api::Network explicitNetwork("conv2dExplicit");
     Api::NetworkInput explicitInput =
@@ -517,17 +584,233 @@ TEST(Convolution2dApi, DefaultsToSamePaddingGeluActivationAndCanDisableActivatio
                                           .filterWidth(2)
                                           .verticalStride(2)
                                           .horizontalStride(2)
-                                          .verticalPadding(1)
-                                          .horizontalPadding(0)
+                                          .padding(1, 2, 3, 0)
                                           .hasBias(true)
                                           .noActivation()
                                           .build();
 
-    EXPECT_EQ(explicitConv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{5, 4, 4}));
+    EXPECT_EQ(explicitConv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{5, 4, 5}));
+    EXPECT_EQ(explicitConv.getPaddingMode(), Api::ConvolutionPaddingMode::EXPLICIT);
+    EXPECT_EQ(explicitConv.getPaddingTop(), 1u);
+    EXPECT_EQ(explicitConv.getPaddingBottom(), 2u);
+    EXPECT_EQ(explicitConv.getPaddingLeft(), 3u);
+    EXPECT_EQ(explicitConv.getPaddingRight(), 0u);
     const json explicitJson = explicitConv.architectureJson();
     ASSERT_TRUE(explicitJson.contains("activation"));
     EXPECT_TRUE(explicitJson.at("activation").is_null());
     EXPECT_TRUE(explicitJson.at("has_bias").get<bool>());
+    EXPECT_EQ(explicitJson.at("padding_mode").get<string>(), "explicit");
+    EXPECT_EQ(explicitJson.at("padding_top").get<uint32_t>(), 1u);
+    EXPECT_EQ(explicitJson.at("padding_bottom").get<uint32_t>(), 2u);
+    EXPECT_EQ(explicitJson.at("padding_left").get<uint32_t>(), 3u);
+    EXPECT_EQ(explicitJson.at("padding_right").get<uint32_t>(), 0u);
+}
+
+TEST(Convolution2dApi, DilationUsesEffectiveKernelAndSerializes) {
+    Api::Network network("conv2dDilation");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({3, 11, 13}).dataType(DataType::FP16).build();
+
+    Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .numOutputChannels(5)
+                                  .filterHeight(3)
+                                  .filterWidth(2)
+                                  .verticalStride(2)
+                                  .horizontalStride(1)
+                                  .verticalDilation(2)
+                                  .horizontalDilation(3)
+                                  .padding(1, 1, 2, 2)
+                                  .noActivation()
+                                  .build();
+
+    // Effective kernel is 5x4, so output is floor((11+2-5)/2)+1 by (13+4-4)+1.
+    EXPECT_EQ(conv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{5, 5, 14}));
+    EXPECT_EQ(conv.getVerticalDilation(), 2u);
+    EXPECT_EQ(conv.getHorizontalDilation(), 3u);
+    const json arch = conv.architectureJson();
+    EXPECT_EQ(arch.at("vertical_dilation").get<uint32_t>(), 2u);
+    EXPECT_EQ(arch.at("horizontal_dilation").get<uint32_t>(), 3u);
+}
+
+
+TEST(Convolution2dApi, RejectsZeroDilation) {
+    Api::Network network("conv2dZeroDilation");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({2, 9, 11}).dataType(DataType::FP16).build();
+
+    EXPECT_THROW(Api::Convolution2d::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numOutputChannels(4)
+                     .filterHeight(3)
+                     .filterWidth(3)
+                     .verticalDilation(0),
+                 exception);
+    EXPECT_THROW(Api::Convolution2d::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numOutputChannels(4)
+                     .filterHeight(3)
+                     .filterWidth(3)
+                     .horizontalDilation(0),
+                 exception);
+    EXPECT_THROW(Api::Convolution2d::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numOutputChannels(4)
+                     .filterHeight(3)
+                     .filterWidth(3)
+                     .dilation(0),
+                 exception);
+}
+
+TEST(Convolution2dApi, SameUpperSupportsOddPaddingStrideAndDilation) {
+    Api::Network network("conv2dModernSame");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({2, 10, 11}).dataType(DataType::FP16).build();
+
+    Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .numOutputChannels(4)
+                                  .filterHeight(4)
+                                  .filterWidth(3)
+                                  .verticalStride(2)
+                                  .horizontalStride(3)
+                                  .verticalDilation(2)
+                                  .horizontalDilation(2)
+                                  .samePadding()
+                                  .noActivation()
+                                  .build();
+
+    EXPECT_EQ(conv.getPaddingMode(), Api::ConvolutionPaddingMode::SAME_UPPER);
+    EXPECT_EQ(conv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{4, 5, 4}));
+    EXPECT_EQ(conv.getPaddingTop(), 2u);
+    EXPECT_EQ(conv.getPaddingBottom(), 3u);
+    EXPECT_EQ(conv.getPaddingLeft(), 1u);
+    EXPECT_EQ(conv.getPaddingRight(), 2u);
+
+    const json arch = conv.architectureJson();
+    EXPECT_EQ(arch.at("padding_mode").get<string>(), "same_upper");
+    EXPECT_EQ(arch.at("padding_top").get<uint32_t>(), 2u);
+    EXPECT_EQ(arch.at("padding_bottom").get<uint32_t>(), 3u);
+    EXPECT_EQ(arch.at("padding_left").get<uint32_t>(), 1u);
+    EXPECT_EQ(arch.at("padding_right").get<uint32_t>(), 2u);
+    EXPECT_EQ(arch.at("vertical_dilation").get<uint32_t>(), 2u);
+    EXPECT_EQ(arch.at("horizontal_dilation").get<uint32_t>(), 2u);
+}
+
+
+TEST(Convolution2dApi, SameUpperStrideDilationForwardMatchesIndependentReference) {
+    constexpr uint32_t batchSize = 1;
+    constexpr uint32_t C = 1;
+    constexpr uint32_t H = 5;
+    constexpr uint32_t W = 6;
+    constexpr uint32_t K = 1;
+    constexpr uint32_t R = 4;
+    constexpr uint32_t S = 2;
+    constexpr uint32_t strideH = 2;
+    constexpr uint32_t strideW = 2;
+    constexpr uint32_t dilationH = 1;
+    constexpr uint32_t dilationW = 2;
+    constexpr uint32_t paddingTop = 1;
+    constexpr uint32_t paddingBottom = 2;
+    constexpr uint32_t paddingLeft = 0;
+    constexpr uint32_t paddingRight = 1;
+
+    const vector<float> inputValues = {
+        1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f,
+        7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f,
+        13.0f, 14.0f, 15.0f, 16.0f, 17.0f, 18.0f,
+        19.0f, 20.0f, 21.0f, 22.0f, 23.0f, 24.0f,
+        25.0f, 26.0f, 27.0f, 28.0f, 29.0f, 30.0f,
+    };
+    const vector<float> weights = {0.25f, -0.5f, 0.75f, 0.5f, -0.25f, 1.0f, 0.125f, -0.375f};
+
+    Api::Network network("conv2dSameUpperNumerical");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({C, H, W}).dataType(DataType::FP16).build();
+    Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .numOutputChannels(K)
+                                  .filterHeight(R)
+                                  .filterWidth(S)
+                                  .verticalStride(strideH)
+                                  .horizontalStride(strideW)
+                                  .verticalDilation(dilationH)
+                                  .horizontalDilation(dilationW)
+                                  .samePadding()
+                                  .hasBias(false)
+                                  .noActivation()
+                                  .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(conv.getFeatureOutput().value())
+                                    .dataType(DataType::FP16)
+                                    .build();
+
+    ASSERT_EQ(conv.getPaddingTop(), paddingTop);
+    ASSERT_EQ(conv.getPaddingBottom(), paddingBottom);
+    ASSERT_EQ(conv.getPaddingLeft(), paddingLeft);
+    ASSERT_EQ(conv.getPaddingRight(), paddingRight);
+    ASSERT_EQ(conv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{K, 3, 3}));
+
+    PlacedConvolution2dFixture fixture = placeSingleConvolution2dNetwork(network, input, output, conv, batchSize, true);
+    Stream stream = fixture.physicalConvolution->getStreams()[0];
+    setParameterTensor(fixture.physicalConvolution->getParameter("weights"), weights, stream);
+    stream.synchronize();
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {batchSize, C, H, W}));
+    writeCpuTensor(featureInHost, inputValues);
+    const vector<float> actual = runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+    const vector<float> expected = conv2dForwardReferenceGeneral(inputValues,
+                                                                 weights,
+                                                                 batchSize,
+                                                                 C,
+                                                                 H,
+                                                                 W,
+                                                                 K,
+                                                                 R,
+                                                                 S,
+                                                                 strideH,
+                                                                 strideW,
+                                                                 dilationH,
+                                                                 dilationW,
+                                                                 paddingTop,
+                                                                 paddingBottom,
+                                                                 paddingLeft,
+                                                                 paddingRight);
+    expectAllClose(actual, expected, 7e-2f, 7e-2f, "SAME_UPPER stride+dilation forward");
+}
+
+TEST(Convolution2dApi, ValidPaddingIsExplicitFirstClassMode) {
+    Api::Network network("conv2dValidMode");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({2, 8, 9}).dataType(DataType::FP16).build();
+
+    Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .numOutputChannels(3)
+                                  .filterHeight(3)
+                                  .filterWidth(2)
+                                  .verticalStride(2)
+                                  .validPadding()
+                                  .noActivation()
+                                  .build();
+
+    EXPECT_EQ(conv.getPaddingMode(), Api::ConvolutionPaddingMode::VALID);
+    EXPECT_EQ(conv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{3, 3, 8}));
+    const json arch = conv.architectureJson();
+    EXPECT_EQ(arch.at("padding_mode").get<string>(), "valid");
+    EXPECT_EQ(arch.at("padding_top").get<uint32_t>(), 0u);
+    EXPECT_EQ(arch.at("padding_bottom").get<uint32_t>(), 0u);
+    EXPECT_EQ(arch.at("padding_left").get<uint32_t>(), 0u);
+    EXPECT_EQ(arch.at("padding_right").get<uint32_t>(), 0u);
 }
 
 TEST(Convolution2dApi, MultiInputEpilogueSerializesAuxiliaryBindings) {
@@ -545,8 +828,7 @@ TEST(Convolution2dApi, MultiInputEpilogueSerializesAuxiliaryBindings) {
                                   .numOutputChannels(4)
                                   .filterHeight(3)
                                   .filterWidth(3)
-                                  .verticalPadding(1)
-                                  .horizontalPadding(1)
+                                  .padding(1, 1, 1, 1)
                                   .hasBias(false)
                                   .noActivation()
                                   .epilogueInput("residual", residual.getFeatureOutput().value())
@@ -590,8 +872,7 @@ TEST(Convolution2dApi, MultiInputEpilogueRunsForwardResidualAdd) {
                                   .numOutputChannels(1)
                                   .filterHeight(1)
                                   .filterWidth(1)
-                                  .verticalPadding(0)
-                                  .horizontalPadding(0)
+                                  .padding(0, 0, 0, 0)
                                   .hasBias(false)
                                   .noActivation()
                                   .epilogueInput("residual", residual.getFeatureOutput().value())
@@ -706,8 +987,7 @@ TEST(Convolution2dApi, MultiInputEpilogueRunsForwardBackwardResidualAddAndUpdate
                                   .filterWidth(S)
                                   .verticalStride(strideH)
                                   .horizontalStride(strideW)
-                                  .verticalPadding(padH)
-                                  .horizontalPadding(padW)
+                                  .padding(padH, padH, padW, padW)
                                   .hasBias(false)
                                   .weightsOptimizer(weightsSgd)
                                   .noActivation()
@@ -811,8 +1091,7 @@ TEST(Convolution2dApi, MultiInputEpilogueRejectsMissingOrInvalidAuxiliaryBinding
                      .numOutputChannels(4)
                      .filterHeight(3)
                      .filterWidth(3)
-                     .verticalPadding(1)
-                     .horizontalPadding(1)
+                     .padding(1, 1, 1, 1)
                      .hasBias(false)
                      .noActivation()
                      .epilogue(convOutput + residualInput)
@@ -825,8 +1104,7 @@ TEST(Convolution2dApi, MultiInputEpilogueRejectsMissingOrInvalidAuxiliaryBinding
                      .numOutputChannels(4)
                      .filterHeight(3)
                      .filterWidth(3)
-                     .verticalPadding(1)
-                     .horizontalPadding(1)
+                     .padding(1, 1, 1, 1)
                      .hasBias(false)
                      .noActivation()
                      .epilogueInput("residual", wrongResidual.getFeatureOutput().value())
@@ -849,8 +1127,7 @@ TEST(Convolution2dApi, StampsAsPhysicalCustomLayerAllocatesParametersAndSerializ
                                   .numOutputChannels(2)
                                   .filterHeight(3)
                                   .filterWidth(3)
-                                  .verticalPadding(0)
-                                  .horizontalPadding(0)
+                                  .padding(0, 0, 0, 0)
                                   .hasBias(true)
                                   .weightsOptimizer(weightsSgd)
                                   .biasesOptimizer(biasesSgd)
@@ -930,8 +1207,7 @@ TEST(Convolution2dApi, ThreePassForwardBackwardWithSgdUpdatesWeightsAndBiases) {
                                   .filterWidth(S)
                                   .verticalStride(strideH)
                                   .horizontalStride(strideW)
-                                  .verticalPadding(padH)
-                                  .horizontalPadding(padW)
+                                  .padding(padH, padH, padW, padW)
                                   .hasBias(true)
                                   .weightsOptimizer(weightsSgd)
                                   .biasesOptimizer(biasesSgd)
@@ -1028,8 +1304,7 @@ TEST(Convolution2dApi, ArchitectureSaveLoadRoundTripPreservesConfigurationAndDes
                                       .numOutputChannels(K)
                                       .filterHeight(R)
                                       .filterWidth(S)
-                                      .verticalPadding(0)
-                                      .horizontalPadding(0)
+                                      .validPadding()
                                       .hasBias(true)
                                       .noActivation()
                                       .build();
@@ -1057,6 +1332,8 @@ TEST(Convolution2dApi, ArchitectureSaveLoadRoundTripPreservesConfigurationAndDes
         EXPECT_EQ(j.at("filter_height").get<uint32_t>(), R);
         EXPECT_EQ(j.at("filter_width").get<uint32_t>(), S);
         EXPECT_EQ(j.at("num_output_channels").get<uint32_t>(), K);
+        EXPECT_EQ(loadedConv->getPaddingMode(), Api::ConvolutionPaddingMode::VALID);
+        EXPECT_EQ(j.at("padding_mode").get<string>(), "valid");
         EXPECT_TRUE(j.at("has_bias").get<bool>());
         EXPECT_TRUE(j.at("activation").is_null());
 
@@ -1074,6 +1351,141 @@ TEST(Convolution2dApi, ArchitectureSaveLoadRoundTripPreservesConfigurationAndDes
         const vector<float> expected =
             conv2dForwardReference(inputValues, weightValues, biasValues, batchSize, C, H, W, K, R, S, 1, 1, 0, 0, true);
         expectAllClose(actual, expected, 7e-2f, 7e-2f, "loaded conv2d output");
+    } catch (...) {
+        filesystem::remove_all(archiveDir);
+        throw;
+    }
+    filesystem::remove_all(archiveDir);
+}
+
+TEST(Convolution2dApi, AsymmetricPaddingSaveLoadRoundTripPreservesAllFourSides) {
+    const string networkName = "conv2d_asymmetric_padding_round_trip";
+    filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("input")
+                                      .dimensions({4, 7, 8})
+                                      .dataType(DataType::FP16)
+                                      .build();
+        Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                      .network(network)
+                                      .featureInput(input.getFeatureOutput().value())
+                                      .numOutputChannels(6)
+                                      .filterHeight(3)
+                                      .filterWidth(4)
+                                      .padding(1, 2, 3, 0)
+                                      .groups(2)
+                                      .noActivation()
+                                      .build();
+        Api::NetworkOutput::Builder()
+            .network(network)
+            .name("output")
+            .inputTensor(conv.getFeatureOutput().value())
+            .dataType(DataType::FP16)
+            .build();
+
+        const json source = conv.architectureJson();
+        EXPECT_EQ(source.at("version").get<string>(), "4.0.0");
+        EXPECT_EQ(source.at("padding_mode").get<string>(), "explicit");
+        EXPECT_EQ(source.at("padding_top").get<uint32_t>(), 1u);
+        EXPECT_EQ(source.at("padding_bottom").get<uint32_t>(), 2u);
+        EXPECT_EQ(source.at("padding_left").get<uint32_t>(), 3u);
+        EXPECT_EQ(source.at("padding_right").get<uint32_t>(), 0u);
+        EXPECT_EQ(source.at("groups").get<uint32_t>(), 2u);
+        EXPECT_EQ(source.at("parameters").at("weights").at("shape"), json::array({6, 2, 3, 4}));
+        EXPECT_FALSE(source.contains("vertical_padding"));
+        EXPECT_FALSE(source.contains("horizontal_padding"));
+
+        network.save(archiveDir.string(), true);
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+        shared_ptr<Api::Convolution2d> loadedConv = findOnlyLayerOfType<Api::Convolution2d>(loadedNetwork);
+        ASSERT_NE(loadedConv, nullptr);
+
+        EXPECT_EQ(loadedConv->getPaddingMode(), Api::ConvolutionPaddingMode::EXPLICIT);
+        EXPECT_EQ(loadedConv->getPaddingTop(), 1u);
+        EXPECT_EQ(loadedConv->getPaddingBottom(), 2u);
+        EXPECT_EQ(loadedConv->getPaddingLeft(), 3u);
+        EXPECT_EQ(loadedConv->getPaddingRight(), 0u);
+        EXPECT_EQ(loadedConv->getGroups(), 2u);
+        const json loaded = loadedConv->architectureJson();
+        EXPECT_EQ(loaded.at("version").get<string>(), "4.0.0");
+        EXPECT_EQ(loaded.at("padding_mode").get<string>(), "explicit");
+        EXPECT_EQ(loaded.at("padding_top").get<uint32_t>(), 1u);
+        EXPECT_EQ(loaded.at("padding_bottom").get<uint32_t>(), 2u);
+        EXPECT_EQ(loaded.at("padding_left").get<uint32_t>(), 3u);
+        EXPECT_EQ(loaded.at("padding_right").get<uint32_t>(), 0u);
+        EXPECT_EQ(loaded.at("groups").get<uint32_t>(), 2u);
+        EXPECT_EQ(loaded.at("parameters").at("weights").at("shape"), json::array({6, 2, 3, 4}));
+        EXPECT_FALSE(loaded.contains("vertical_padding"));
+        EXPECT_FALSE(loaded.contains("horizontal_padding"));
+    } catch (...) {
+        filesystem::remove_all(archiveDir);
+        throw;
+    }
+    filesystem::remove_all(archiveDir);
+}
+
+TEST(Convolution2dApi, SameUpperSaveLoadRoundTripPreservesSemanticModeAndResolvedSides) {
+    const string networkName = "conv2d_same_upper_round_trip";
+    filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("input")
+                                      .dimensions({2, 10, 11})
+                                      .dataType(DataType::FP16)
+                                      .build();
+        Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                      .network(network)
+                                      .featureInput(input.getFeatureOutput().value())
+                                      .numOutputChannels(3)
+                                      .filterHeight(4)
+                                      .filterWidth(3)
+                                      .verticalStride(2)
+                                      .horizontalStride(3)
+                                      .verticalDilation(2)
+                                      .horizontalDilation(2)
+                                      .samePadding()
+                                      .noActivation()
+                                      .build();
+        Api::NetworkOutput::Builder()
+            .network(network)
+            .name("output")
+            .inputTensor(conv.getFeatureOutput().value())
+            .dataType(DataType::FP16)
+            .build();
+
+        ASSERT_EQ(conv.getPaddingMode(), Api::ConvolutionPaddingMode::SAME_UPPER);
+        ASSERT_EQ(conv.getPaddingTop(), 2u);
+        ASSERT_EQ(conv.getPaddingBottom(), 3u);
+        ASSERT_EQ(conv.getPaddingLeft(), 1u);
+        ASSERT_EQ(conv.getPaddingRight(), 2u);
+
+        network.save(archiveDir.string(), true);
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+        shared_ptr<Api::Convolution2d> loadedConv = findOnlyLayerOfType<Api::Convolution2d>(loadedNetwork);
+        ASSERT_NE(loadedConv, nullptr);
+
+        EXPECT_EQ(loadedConv->getPaddingMode(), Api::ConvolutionPaddingMode::SAME_UPPER);
+        EXPECT_EQ(loadedConv->getPaddingTop(), 2u);
+        EXPECT_EQ(loadedConv->getPaddingBottom(), 3u);
+        EXPECT_EQ(loadedConv->getPaddingLeft(), 1u);
+        EXPECT_EQ(loadedConv->getPaddingRight(), 2u);
+        const json loaded = loadedConv->architectureJson();
+        EXPECT_EQ(loaded.at("padding_mode").get<string>(), "same_upper");
+        EXPECT_EQ(loaded.at("padding_top").get<uint32_t>(), 2u);
+        EXPECT_EQ(loaded.at("padding_bottom").get<uint32_t>(), 3u);
+        EXPECT_EQ(loaded.at("padding_left").get<uint32_t>(), 1u);
+        EXPECT_EQ(loaded.at("padding_right").get<uint32_t>(), 2u);
     } catch (...) {
         filesystem::remove_all(archiveDir);
         throw;

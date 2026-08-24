@@ -993,16 +993,36 @@ def test_training_data_owns_device_access_policy(tmp_path):
         device_storage="strict-windowed-only",
     )
 
+    cache_off_data = thor.data.TrainingData(
+        dataset=dataset,
+        splits=splits,
+        batching=batching,
+        device_storage="strict-windowed-only",
+        windowed_device_cache="off",
+    )
+
     assert default_data.device_storage == thor.data.DeviceDatasetStorage.OFF
+    assert default_data.windowed_device_cache == thor.data.WindowedDeviceCache.AUTO
     assert strict_data.device_storage == thor.data.DeviceDatasetStorage.STRICT
+    assert strict_data.windowed_device_cache == thor.data.WindowedDeviceCache.AUTO
     assert (
         strict_windowed_only_data.device_storage
         == thor.data.DeviceDatasetStorage.STRICT_WINDOWED_ONLY
     )
+    assert cache_off_data.windowed_device_cache == thor.data.WindowedDeviceCache.OFF
     assert not hasattr(thor.training.TrainerFitOptions(), "device_dataset_storage")
 
     policy = thor.data.DatasetAccessPolicy()
     assert policy.device_storage == thor.data.DeviceDatasetStorage.BEST_EFFORT
+    assert policy.windowed_device_cache == thor.data.WindowedDeviceCache.AUTO
+    policy.windowed_device_cache = "off"
+    assert policy.windowed_device_cache == thor.data.WindowedDeviceCache.OFF
+    policy.windowed_device_cache = thor.data.WindowedDeviceCache.REQUIRED
+    assert policy.windowed_device_cache == thor.data.WindowedDeviceCache.REQUIRED
+    policy.windowed_device_cache = "auto"
+    assert policy.windowed_device_cache == thor.data.WindowedDeviceCache.AUTO
+    with pytest.raises(ValueError, match="windowed_device_cache"):
+        policy.windowed_device_cache = "sometimes"
     policy.device_storage = "strict_windowed_only"
     assert policy.device_storage == thor.data.DeviceDatasetStorage.STRICT_WINDOWED_ONLY
     policy.device_storage = "off"

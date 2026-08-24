@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -37,6 +38,19 @@ struct CudnnLayerNormDescriptor {
     float epsilon = 1.0e-5f;
     bool training = true;
     std::string debugName = "thor_layer_norm";
+
+
+    // Optional explicit cuDNN 4-D physical view. When unset, Thor uses the
+    // legacy contiguous [outer, hidden, 1, 1] view. T8C uses this to expose
+    // retained padded ragged storage directly as [B,C,1,W], with statistics
+    // [B,1,1,W], so normalization is per timestep across channels without a
+    // transpose/materialization. All six fields must be set together.
+    std::optional<std::array<int64_t, 4>> ioDimensions;
+    std::optional<std::array<int64_t, 4>> ioStrides;
+    std::optional<std::array<int64_t, 4>> parameterDimensions;
+    std::optional<std::array<int64_t, 4>> parameterStrides;
+    std::optional<std::array<int64_t, 4>> statsDimensions;
+    std::optional<std::array<int64_t, 4>> statsStrides;
 
     void validateForward() const;
     void validateBackward() const;

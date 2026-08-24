@@ -204,6 +204,8 @@ class Tensor {
     void invalidatePayloadDerivedRuntimeMetadata() {
         THOR_THROW_IF_FALSE(!uninitialized());
         backingMemory->rowPartitionHostActiveValueCount.reset();
+        backingMemory->rowPartitionHostMaxActiveRowLength.reset();
+        backingMemory->rowPartitionHostOffsets.reset();
     }
 
     void setRowPartitionHostActiveValueCount(uint64_t activeValueCount) {
@@ -218,6 +220,30 @@ class Tensor {
         THOR_THROW_IF_FALSE(!uninitialized());
         return backingMemory->rowPartitionHostActiveValueCount;
     }
+    void setRowPartitionHostMaxActiveRowLength(uint64_t maxActiveRowLength) {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        backingMemory->rowPartitionHostMaxActiveRowLength = maxActiveRowLength;
+    }
+    void clearRowPartitionHostMaxActiveRowLength() {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        backingMemory->rowPartitionHostMaxActiveRowLength.reset();
+    }
+    [[nodiscard]] std::optional<uint64_t> getRowPartitionHostMaxActiveRowLength() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        return backingMemory->rowPartitionHostMaxActiveRowLength;
+    }
+    void setRowPartitionHostOffsets(std::vector<uint64_t> hostOffsets) {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        backingMemory->rowPartitionHostOffsets = std::move(hostOffsets);
+    }
+    void clearRowPartitionHostOffsets() {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        backingMemory->rowPartitionHostOffsets.reset();
+    }
+    [[nodiscard]] std::optional<std::vector<uint64_t>> getRowPartitionHostOffsets() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        return backingMemory->rowPartitionHostOffsets;
+    }
 
     TensorPlacement placement;
     struct BackingMemory {
@@ -230,6 +256,8 @@ class Tensor {
         void *mem = nullptr;
         bool cpuMemPinnedViaCudaHostRegister = false;
         std::optional<uint64_t> rowPartitionHostActiveValueCount;
+        std::optional<uint64_t> rowPartitionHostMaxActiveRowLength;
+        std::optional<std::vector<uint64_t>> rowPartitionHostOffsets;
     };
 
     std::shared_ptr<BackingMemory> backingMemory;

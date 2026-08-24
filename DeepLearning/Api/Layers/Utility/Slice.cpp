@@ -63,7 +63,7 @@ Slice Slice::Builder::build() {
         outputValueDimensions.push_back(_raggedFeatureInput->getMaxTotalValues());
         outputValueDimensions.insert(outputValueDimensions.end(), outputDimensions.begin(), outputDimensions.end());
         Tensor outputValues(_featureInput->getDataType(), outputValueDimensions);
-        slice.raggedFeatureOutput = RaggedTensor(outputValues, _raggedFeatureInput->getOffsets());
+        slice.raggedFeatureOutput = _raggedFeatureInput->withValues(outputValues);
         slice.featureInput = _raggedFeatureInput->getValues();
         slice.featureOutput = outputValues;
     } else {
@@ -301,7 +301,9 @@ void Slice::deserialize(const json& j, Network* network) {
         const uint64_t offsetsId = inputJson.at("offsets").at("id").get<uint64_t>();
         Tensor values = network->getApiTensorByOriginalId(valuesId);
         Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
-        RaggedTensor raggedInput(values, offsets);
+        RaggedTensor raggedInput = inputJson.contains("max_values_per_row")
+            ? RaggedTensor(values, offsets, inputJson.at("max_values_per_row").get<uint64_t>())
+            : RaggedTensor(values, offsets);
         if (raggedInput.getBatchSize() != inputJson.at("batch_size").get<uint64_t>() ||
             raggedInput.getMaxTotalValues() != inputJson.at("max_total_values").get<uint64_t>()) {
             throw std::runtime_error("Slice serialized ragged input metadata does not match reconstructed tensors.");
@@ -316,7 +318,7 @@ void Slice::deserialize(const json& j, Network* network) {
         }
 
         Tensor outputValues = Tensor::deserialize(j.at("feature_output"));
-        RaggedTensor raggedOutput(outputValues, offsets);
+        RaggedTensor raggedOutput = raggedInput.withValues(outputValues);
         std::vector<uint64_t> expectedTrailing = trailingDimensions;
         expectedTrailing[axis] = length;
         if (raggedOutput.getTrailingDimensions() != expectedTrailing || outputValues.getDataType() != values.getDataType()) {

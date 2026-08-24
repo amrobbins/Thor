@@ -30,6 +30,8 @@ Public API metadata source: **generated .pyi**.
 
 ::: thor.layers.Concatenate
 
+::: thor.layers.Convolution1d
+
 ::: thor.layers.Convolution2d
 
 ::: thor.layers.Convolution3d

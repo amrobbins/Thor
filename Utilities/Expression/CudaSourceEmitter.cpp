@@ -6858,6 +6858,102 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
     return ss.str();
 }
 
+std::string CudaSourceEmitter::emitPaddedRaggedPointwise(
+    const PhysicalExecutionStage& stage,
+    const std::vector<PaddedRaggedPointwiseInputAccess>& input_access,
+    uint64_t batch_size,
+    uint64_t channels,
+    const std::string& kernel_name) {
+    if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
+        throw runtime_error("emitPaddedRaggedPointwise called on non-fused stage.");
+    }
+    if (stage.outputs.empty()) {
+        throw runtime_error("Padded-ragged pointwise stage requires at least one output.");
+    }
+    if (input_access.size() != stage.expr.inputs.size()) {
+        throw runtime_error("Padded-ragged pointwise input-access metadata does not match expression inputs.");
+    }
+    if (batch_size == 0 || channels == 0 || batch_size > UINT32_MAX || channels > UINT32_MAX ||
+        batch_size > static_cast<uint64_t>(UINT32_MAX) / channels) {
+        throw runtime_error("Padded-ragged pointwise B*C geometry must fit uint32_t device indexing.");
+    }
+
+    const std::vector<DataType> input_dtypes = collectInputSlotDTypes(stage.expr);
+    const std::vector<DataType> output_dtypes = collectOutputDTypes(stage);
+    std::ostringstream ss;
+    emitRequiredHeaders(stage.expr, ss);
+
+    ss << "extern \"C\" __global__\n";
+    ss << "void " << kernel_name << "(";
+    bool first_arg = true;
+    for (uint32_t i = 0; i < input_dtypes.size(); ++i) {
+        if (!first_arg) ss << ", ";
+        first_arg = false;
+        if (stage.expr.inputs[i].kind == NamedInput::Kind::RuntimeScalarFp32) {
+            ss << scalarStorageType(input_dtypes[i]) << " in" << i;
+        } else {
+            ss << "const " << scalarStorageType(input_dtypes[i]) << "* in" << i;
+        }
+    }
+    for (uint32_t i = 0; i < output_dtypes.size(); ++i) {
+        if (!first_arg) ss << ", ";
+        first_arg = false;
+        ss << scalarStorageType(output_dtypes[i]) << "* out" << i;
+    }
+    if (!first_arg) ss << ", ";
+    ss << "unsigned int numel) {\n";
+    ss << "  const unsigned int idx = static_cast<unsigned int>(blockIdx.x) * static_cast<unsigned int>(blockDim.x) + "
+          "static_cast<unsigned int>(threadIdx.x);\n";
+    ss << "  if (idx >= numel || numel == 0U) return;\n";
+    ss << "  constexpr unsigned int PADDED_BATCH = " << static_cast<uint32_t>(batch_size) << "U;\n";
+    ss << "  constexpr unsigned int PADDED_CHANNELS = " << static_cast<uint32_t>(channels) << "U;\n";
+    ss << "  constexpr unsigned int PADDED_ROW_CHANNELS = PADDED_BATCH * PADDED_CHANNELS;\n";
+    ss << "  const unsigned int width = numel / PADDED_ROW_CHANNELS;\n";
+    ss << "  if (width == 0U || width * PADDED_ROW_CHANNELS != numel) return;\n";
+    ss << "  const unsigned int channel = (idx / width) % PADDED_CHANNELS;\n";
+
+    auto input_value = [&](uint32_t input_slot) -> std::string {
+        if (input_slot >= input_access.size()) {
+            throw runtime_error("Padded-ragged pointwise input slot is out of range.");
+        }
+        switch (input_access[input_slot]) {
+            case PaddedRaggedPointwiseInputAccess::PaddedValue:
+                return "in" + std::to_string(input_slot) + "[idx]";
+            case PaddedRaggedPointwiseInputAccess::ChannelBroadcast:
+                return "in" + std::to_string(input_slot) + "[channel]";
+            case PaddedRaggedPointwiseInputAccess::ScalarTensor:
+                return "in" + std::to_string(input_slot) + "[0]";
+            case PaddedRaggedPointwiseInputAccess::MetadataTensor:
+                return "in" + std::to_string(input_slot) + "[0]";
+        }
+        throw runtime_error("Unknown padded-ragged pointwise input access mode.");
+    };
+
+    for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
+        const ExprNode& node = stage.expr.nodes[node_idx];
+        if (node.op == ExprOp::INPUT && node.input_slot < input_access.size() &&
+            input_access[node.input_slot] == PaddedRaggedPointwiseInputAccess::MetadataTensor) {
+            continue;
+        }
+        if (!shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+            continue;
+        }
+        emitScalarNodeSuffixed(ss, stage.expr, node_idx, "idx", "", "  ", "", 0, input_value);
+    }
+
+    for (uint32_t out_idx = 0; out_idx < stage.outputs.size(); ++out_idx) {
+        const CompiledStageOutput& output = stage.outputs[out_idx];
+        if (output.local_node_idx >= stage.expr.nodes.size()) {
+            throw runtime_error("Padded-ragged pointwise output node is out of range.");
+        }
+        const DataType output_dtype = requireNodeOutputDType(stage.expr.nodes[output.local_node_idx]);
+        ss << "  out" << out_idx << "[idx] = "
+           << emitResolvedScalarValueExprSuffixed(stage.expr, output.local_node_idx, output_dtype, "") << ";\n";
+    }
+    ss << "}\n";
+    return ss.str();
+}
+
 std::string CudaSourceEmitter::ref(uint32_t idx) { return "t" + to_string(idx); }
 
 static std::string emitTiledTransposeMaterializedSpecializedBroadcast(const CompiledExecutionStage& stage,

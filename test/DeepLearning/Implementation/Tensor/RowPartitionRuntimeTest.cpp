@@ -3,6 +3,7 @@
 #include "gtest/gtest.h"
 
 #include <cstdint>
+#include <vector>
 
 using namespace ThorImplementation;
 
@@ -60,11 +61,15 @@ TEST(RowPartitionRuntime, CpuOffsetsRemainSemanticSourceWhenExplicitHostCacheIsA
     ASSERT_TRUE(partition.describesSamePartition(independent));
     ASSERT_TRUE(partition.sharesRuntimeStateWith(independent));
     ASSERT_EQ(partition.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(5));
+    ASSERT_EQ(partition.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(3));
+    ASSERT_EQ(partition.requireHostMaxActiveRowLength(), 3u);
 
     // With no explicit host cache, CPU offsets remain the source of truth.
     rawOffsets[3] = 7;
     ASSERT_EQ(alias.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(7));
     ASSERT_EQ(alias.requireHostActiveValueCount(), 7u);
+    ASSERT_EQ(alias.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(4));
+    ASSERT_EQ(alias.requireHostMaxActiveRowLength(), 4u);
 
     // An explicit cache must agree with inspectable CPU offsets. It is a cache of
     // the semantic terminal offset, never an independent source of truth.
@@ -96,6 +101,76 @@ TEST(RowPartitionRuntime, ExplicitHostCacheIsSharedAndValidatedAgainstCapacity) 
     partition.setHostActiveValueCount(4);
     ASSERT_EQ(alias.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(4));
     EXPECT_THROW(partition.setHostActiveValueCount(maxTotalValues + 1), std::logic_error);
+}
+
+TEST(RowPartitionRuntime, CompleteHostOffsetsAreOptionalSharedStructuralMetadata) {
+    constexpr uint64_t batchSize = 3;
+    constexpr uint64_t maxTotalValues = 9;
+    Tensor offsets(TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+                   TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    const RowPartitionDescriptor descriptor(batchSize, maxTotalValues, DataType::UINT32);
+    RowPartitionRuntime first(offsets, descriptor);
+    RowPartitionRuntime second(offsets, descriptor);
+
+    EXPECT_FALSE(first.getHostOffsetsIfAvailable().has_value());
+    first.setHostOffsets({0, 2, 2, 7});
+    EXPECT_EQ(second.getHostOffsetsIfAvailable(), std::optional<std::vector<uint64_t>>(std::vector<uint64_t>{0, 2, 2, 7}));
+    EXPECT_EQ(second.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(7));
+    EXPECT_EQ(second.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(5));
+    EXPECT_THROW(second.setHostActiveValueCount(6), std::logic_error);
+
+    second.clearHostOffsets();
+    EXPECT_FALSE(first.getHostOffsetsIfAvailable().has_value());
+    // Clearing the richer metadata need not discard the independently useful
+    // terminal-offset cache.
+    EXPECT_EQ(first.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(7));
+    EXPECT_EQ(first.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(5));
+}
+
+TEST(RowPartitionRuntime, HostMaxActiveRowLengthIsIndependentScalarMetadataAndRespectsStructuralBound) {
+    constexpr uint64_t batchSize = 3;
+    constexpr uint64_t maxTotalValues = 12;
+    constexpr uint64_t maxValuesPerRow = 5;
+    Tensor offsets(TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
+                   TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    const RowPartitionDescriptor descriptor(batchSize, maxTotalValues, DataType::UINT32, maxValuesPerRow);
+    RowPartitionRuntime first(offsets, descriptor);
+    RowPartitionRuntime second(offsets, descriptor);
+
+    EXPECT_TRUE(first.hasMaxValuesPerRow());
+    EXPECT_EQ(first.getMaxValuesPerRow(), maxValuesPerRow);
+    EXPECT_FALSE(first.getHostMaxActiveRowLengthIfAvailable().has_value());
+    EXPECT_THROW((void)first.requireHostMaxActiveRowLength(), std::runtime_error);
+
+    first.setHostMaxActiveRowLength(4);
+    EXPECT_EQ(second.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(4));
+    EXPECT_EQ(second.requireHostMaxActiveRowLength(), 4u);
+    EXPECT_THROW(first.setHostMaxActiveRowLength(maxValuesPerRow + 1), std::logic_error);
+
+    second.clearHostMaxActiveRowLength();
+    EXPECT_FALSE(first.getHostMaxActiveRowLengthIfAvailable().has_value());
+}
+
+TEST(RowPartitionRuntime, CpuCompleteHostOffsetsRemainCheckedAgainstSemanticPayload) {
+    constexpr uint64_t batchSize = 3;
+    constexpr uint64_t maxTotalValues = 9;
+    Tensor offsets(TensorPlacement(TensorPlacement::MemDevices::CPU),
+                   TensorDescriptor(DataType::UINT64, {batchSize + 1}));
+    uint64_t* raw = offsets.getMemPtr<uint64_t>();
+    raw[0] = 0;
+    raw[1] = 2;
+    raw[2] = 5;
+    raw[3] = 7;
+
+    RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batchSize, maxTotalValues, DataType::UINT64));
+    EXPECT_EQ(partition.getHostOffsetsIfAvailable(), std::optional<std::vector<uint64_t>>(std::vector<uint64_t>{0, 2, 5, 7}));
+    EXPECT_THROW(partition.setHostOffsets({0, 2, 4, 7}), std::logic_error);
+    partition.setHostOffsets({0, 2, 5, 7});
+
+    raw[2] = 6;
+    EXPECT_THROW((void)partition.getHostOffsetsIfAvailable(), std::logic_error);
+    partition.clearHostOffsets();
+    EXPECT_EQ(partition.getHostOffsetsIfAvailable(), std::optional<std::vector<uint64_t>>(std::vector<uint64_t>{0, 2, 6, 7}));
 }
 
 TEST(RowPartitionRuntime, ConstructorRequiresDescriptorMatchingOffsetsTensor) {
@@ -145,9 +220,11 @@ TEST(RowPartitionRuntime, GenericTensorCopyDoesNotPropagateRuntimeCache) {
 
     RowPartitionRuntime sourcePartition(sourceOffsets, descriptor);
     RowPartitionRuntime destinationPartition(destinationOffsets, descriptor);
-    sourcePartition.setHostActiveValueCount(4);
-    destinationPartition.setHostActiveValueCount(2);
+    sourcePartition.setHostOffsets({0, 1, 4});
+    destinationPartition.setHostOffsets({0, 1, 2});
     ASSERT_EQ(destinationPartition.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(2));
+    ASSERT_EQ(destinationPartition.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(1));
+    ASSERT_TRUE(destinationPartition.getHostOffsetsIfAvailable().has_value());
 
     Stream stream(0);
     destinationOffsets.copyFromAsync(sourceOffsets, stream);
@@ -156,7 +233,11 @@ TEST(RowPartitionRuntime, GenericTensorCopyDoesNotPropagateRuntimeCache) {
     // A generic payload mutation must invalidate any cache attached to the
     // destination allocation. It must never copy source partition metadata.
     EXPECT_FALSE(destinationPartition.getHostActiveValueCountIfAvailable().has_value());
+    EXPECT_FALSE(destinationPartition.getHostMaxActiveRowLengthIfAvailable().has_value());
+    EXPECT_FALSE(destinationPartition.getHostOffsetsIfAvailable().has_value());
     EXPECT_EQ(sourcePartition.requireHostActiveValueCount(), 4u);
+    EXPECT_EQ(sourcePartition.requireHostMaxActiveRowLength(), 3u);
+    EXPECT_EQ(sourcePartition.requireHostOffsets(), (std::vector<uint64_t>{0, 1, 4}));
 }
 
 TEST(RowPartitionRuntime, TensorMutationHooksInvalidateCachedPartitionState) {
@@ -173,12 +254,17 @@ TEST(RowPartitionRuntime, TensorMutationHooksInvalidateCachedPartitionState) {
     RowPartitionRuntime partition(
         offsets, RowPartitionDescriptor(batchSize, maxTotalValues, DataType::UINT64));
     partition.setHostActiveValueCount(4);
+    partition.setHostMaxActiveRowLength(2);
     ASSERT_EQ(partition.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(4));
+    ASSERT_EQ(partition.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(2));
 
     offsets.setElement<uint64_t>({batchSize}, 5);
     EXPECT_EQ(partition.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(5));
+    EXPECT_EQ(partition.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(3));
 
     partition.setHostActiveValueCount(5);
+    partition.setHostMaxActiveRowLength(3);
     offsets.memset(0);
     EXPECT_EQ(partition.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(0));
+    EXPECT_EQ(partition.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(0));
 }

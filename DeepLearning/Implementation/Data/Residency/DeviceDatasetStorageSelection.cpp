@@ -584,6 +584,8 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
                     ThorImplementation::BatchSessionRuntimeAccess::getTailMode(*sourceSession));
                 report.used = true;
                 report.reason = successReason;
+                report.windowedDeviceCache =
+                    effectiveSession->getWindowedDeviceCacheReport();
                 report.examples = acquisition.lease->getNumExamples();
                 report.requiredBytes = attemptRequiredBytes;
                 applyAcquisitionTelemetry(
@@ -596,6 +598,8 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
                 return DeviceDatasetStorageSelection{
                     effectiveSession,
                     std::move(report)};
+            } catch (const WindowedDeviceCacheRequiredError &) {
+                throw;
             } catch (const DeviceDatasetResidencyAdmissionError &e) {
                 failure.reason = "insufficient_device_memory";
                 failure.availableBytes = availableBytesOverride.has_value()
@@ -786,8 +790,10 @@ DatasetMaterializationDescription describeDatasetMaterialization(
 DeviceDatasetSessionDescription describeDeviceDatasetSession(
     const DatasetSplitManifest& splits,
     const BatchPolicy& batching,
-    const DatasetFieldMaterializationRequirements& fieldRequirements) {
-    return DeviceDatasetSessionDescription(splits, batching, fieldRequirements);
+    const DatasetFieldMaterializationRequirements& fieldRequirements,
+    WindowedDeviceCache windowedDeviceCache) {
+    return DeviceDatasetSessionDescription(
+        splits, batching, fieldRequirements, windowedDeviceCache);
 }
 
 DeviceDatasetSessionDescription describeDeviceDatasetSession(
@@ -796,7 +802,8 @@ DeviceDatasetSessionDescription describeDeviceDatasetSession(
     return describeDeviceDatasetSession(
         trainingData.getSplits(),
         trainingData.getBatching(),
-        fieldRequirements);
+        fieldRequirements,
+        trainingData.getAccessPolicy().windowedDeviceCache);
 }
 
 DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
@@ -827,6 +834,8 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
         trainingData.getAccessPolicy().deviceStorage;
     DeviceDatasetStorageReport report;
     report.requested = requested;
+    report.windowedDeviceCache.requested =
+        trainingData.getAccessPolicy().windowedDeviceCache;
 
     if (requested == DeviceDatasetStorage::OFF) {
         return DeviceDatasetStorageSelection{sourceSession, report};
@@ -846,7 +855,8 @@ DeviceDatasetStorageSelection selectDeviceDatasetStorageSession(
         describeDeviceDatasetSession(
             sessionSplits,
             trainingData.getBatching(),
-            sourceSession->getDatasetFieldMaterializationRequirements());
+            sourceSession->getDatasetFieldMaterializationRequirements(),
+            trainingData.getAccessPolicy().windowedDeviceCache);
 
     report.examples = datasetDescription->numExamples;
     if (requested == DeviceDatasetStorage::STRICT_WINDOWED_ONLY &&

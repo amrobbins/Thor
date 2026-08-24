@@ -15,9 +15,11 @@ class ConvWeightsParameter : public PhysicalParameter {
                          bool trainingEnabled,
                          uint32_t numOutputChannels,
                          uint32_t filterWidth,
-                         uint32_t filterHeight)
+                         uint32_t filterHeight,
+                         uint32_t groups)
         : PhysicalParameter(name, trainable),
           numOutputChannels(numOutputChannels),
+          groups(groups),
           filterWidth(filterWidth),
           filterHeight(filterHeight),
           storageDataType(storageDataType) {}
@@ -31,12 +33,17 @@ class ConvWeightsParameter : public PhysicalParameter {
             throw std::runtime_error("Convolution2d weights require 4D NCHW feature input tensor.");
         }
 
-        TensorDescriptor descriptor(resolvedDataType, {numOutputChannels, inputDims[1], filterHeight, filterWidth});
+        if (groups == 0 || inputDims[1] % groups != 0 || numOutputChannels % groups != 0)
+            throw std::runtime_error(
+                "Convolution2d parameter storage requires input/output channels divisible by groups.");
+        TensorDescriptor descriptor(
+            resolvedDataType, {numOutputChannels, inputDims[1] / groups, filterHeight, filterWidth});
         storage = Tensor(inputTensor.getPlacement(), descriptor);
     }
 
    private:
     const uint32_t numOutputChannels;
+    const uint32_t groups;
     const uint32_t filterWidth;
     const uint32_t filterHeight;
     const std::optional<DataType> storageDataType;
@@ -66,28 +73,26 @@ class ConvBiasesParameter : public PhysicalParameter {
 
 Convolution2d::Convolution2d(uint32_t filterWidth,
                              uint32_t filterHeight,
-                             uint32_t filterHorizontalStride,
-                             uint32_t filterVerticalStride,
-                             uint32_t leftAndRightPadWidth,
-                             uint32_t topAndBottomPadHeight,
+                             ConvolutionSpatial2d spatial,
                              uint32_t numOutputChannels,
                              bool hasBias,
                              std::optional<DataType> weightsDataType,
                              const TensorPlacement& placement,
                              bool inferenceOnly,
-                             int64_t stampedId)
+                             int64_t stampedId,
+                             uint32_t groups)
     : CustomLayer(
-          buildExpression(hasBias, filterVerticalStride, filterHorizontalStride, topAndBottomPadHeight, leftAndRightPadWidth, placement),
+          buildExpression(hasBias, groups, spatial, placement),
           placement,
-          defineParameters(numOutputChannels, hasBias, filterWidth, filterHeight, weightsDataType),
+          defineParameters(numOutputChannels, hasBias, filterWidth, filterHeight, weightsDataType, groups),
           inferenceOnly,
           stampedId) {}
 
 DynamicExpression Convolution2d::buildExpression(
-    bool hasBias, uint32_t strideH, uint32_t strideW, uint32_t padH, uint32_t padW, const TensorPlacement& placement) {
-    return DynamicExpression([hasBias, strideH, strideW, padH, padW, placement](const DynamicExpression::TensorMap& inputs,
-                                                                                const DynamicExpression::TensorMap& outputs,
-                                                                                Stream& stream) -> DynamicExpressionBuild {
+    bool hasBias, uint32_t groups, ConvolutionSpatial2d spatial, const TensorPlacement& placement) {
+    return DynamicExpression([hasBias, groups, spatial, placement](const DynamicExpression::TensorMap& inputs,
+                                                           const DynamicExpression::TensorMap& outputs,
+                                                           Stream& stream) -> DynamicExpressionBuild {
         (void)stream;
 
         const Tensor& featureInputTensor = inputs.at("feature_input");
@@ -100,13 +105,24 @@ DynamicExpression Convolution2d::buildExpression(
         if (wTensor.getDimensions().size() != 4) {
             throw std::runtime_error("Convolution2d expects weights to be 4D KCRS.");
         }
-        if (featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1]) {
-            throw std::runtime_error("Convolution2d input channels must match weight channels.");
+        if (groups == 0 || featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1] * groups ||
+            wTensor.getDimensions()[0] % groups != 0) {
+            throw std::runtime_error("Convolution2d grouped channel geometry is invalid.");
         }
         THOR_THROW_IF_FALSE(featureInputTensor.getPlacement() == placement);
 
-        const uint64_t expectedOutputRows = (featureInputTensor.getDimensions()[2] + 2 * padH - wTensor.getDimensions()[2]) / strideH + 1;
-        const uint64_t expectedOutputCols = (featureInputTensor.getDimensions()[3] + 2 * padW - wTensor.getDimensions()[3]) / strideW + 1;
+        const uint64_t effectiveFilterRows =
+            static_cast<uint64_t>(spatial.dilation_h) * (wTensor.getDimensions()[2] - 1ULL) + 1ULL;
+        const uint64_t effectiveFilterCols =
+            static_cast<uint64_t>(spatial.dilation_w) * (wTensor.getDimensions()[3] - 1ULL) + 1ULL;
+        const uint64_t expectedOutputRows =
+            (featureInputTensor.getDimensions()[2] + spatial.pre_padding_h + spatial.post_padding_h - effectiveFilterRows) /
+                spatial.stride_h +
+            1;
+        const uint64_t expectedOutputCols =
+            (featureInputTensor.getDimensions()[3] + spatial.pre_padding_w + spatial.post_padding_w - effectiveFilterCols) /
+                spatial.stride_w +
+            1;
 
         if (outputs.contains("feature_output")) {
             const Tensor& featureOutputTensor = outputs.at("feature_output");
@@ -127,7 +143,7 @@ DynamicExpression Convolution2d::buildExpression(
         auto fin = Expression::input("feature_input");
         auto w = Expression::input("weights", weightsDType, weightsDType);
 
-        Expression fout = Expression::conv2d(fin, w, strideH, strideW, padH, padW, DataType::FP32, std::nullopt);
+        Expression fout = Expression::conv2d(fin, w, spatial, DataType::FP32, std::nullopt, groups);
 
         if (hasBias) {
             const Tensor& bTensor = inputs.at("biases");
@@ -158,10 +174,12 @@ std::vector<std::shared_ptr<PhysicalParameter>> Convolution2d::defineParameters(
                                                                                 bool hasBias,
                                                                                 uint32_t filterWidth,
                                                                                 uint32_t filterHeight,
-                                                                                std::optional<DataType> weightsDataType) {
+                                                                                std::optional<DataType> weightsDataType,
+                                                                                uint32_t groups) {
     std::vector<std::shared_ptr<PhysicalParameter>> parameters;
     parameters.push_back(
-        std::make_shared<ConvWeightsParameter>("weights", weightsDataType, true, true, numOutputChannels, filterWidth, filterHeight));
+        std::make_shared<ConvWeightsParameter>(
+            "weights", weightsDataType, true, true, numOutputChannels, filterWidth, filterHeight, groups));
     if (hasBias) {
         parameters.push_back(std::make_shared<ConvBiasesParameter>("biases", weightsDataType, true, true, numOutputChannels));
     }

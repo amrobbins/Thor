@@ -10,11 +10,32 @@ namespace Thor {
 
 namespace {
 
+const char* convolutionPaddingModeName(ConvolutionPaddingMode mode) {
+    switch (mode) {
+        case ConvolutionPaddingMode::VALID:
+            return "valid";
+        case ConvolutionPaddingMode::SAME_UPPER:
+            return "same_upper";
+        case ConvolutionPaddingMode::EXPLICIT:
+            return "explicit";
+    }
+    THOR_THROW_IF_FALSE(false);
+    return "invalid";
+}
+
+ConvolutionPaddingMode convolutionPaddingModeFromName(const std::string& name) {
+    if (name == "valid")
+        return ConvolutionPaddingMode::VALID;
+    if (name == "same_upper")
+        return ConvolutionPaddingMode::SAME_UPPER;
+    if (name == "explicit")
+        return ConvolutionPaddingMode::EXPLICIT;
+    throw runtime_error("Unsupported Convolution2d padding_mode: " + name);
+}
+
 ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
-                                                                   uint32_t strideH,
-                                                                   uint32_t strideW,
-                                                                   uint32_t padH,
-                                                                   uint32_t padW,
+                                                                   uint32_t groups,
+                                                                   ThorImplementation::ConvolutionSpatial2d spatial,
                                                                    ThorImplementation::TensorPlacement placement,
                                                                    std::shared_ptr<Thor::Activation> activation,
                                                                    std::optional<ThorImplementation::Expression> epilogue,
@@ -35,10 +56,8 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
 
     return DynamicExpression(std::move(expectedInputNames), {"feature_output"},
                              [hasBias,
-                              strideH,
-                              strideW,
-                              padH,
-                              padW,
+                              groups,
+                              spatial,
                               placement,
                               activation = std::move(activation),
                               epilogue,
@@ -58,13 +77,24 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
         if (wTensor.getDimensions().size() != 4) {
             throw std::runtime_error("Convolution2d expects weights to be 4D KCRS.");
         }
-        if (featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1]) {
-            throw std::runtime_error("Convolution2d input channels must match weight channels.");
+        if (groups == 0 || featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1] * groups ||
+            wTensor.getDimensions()[0] % groups != 0) {
+            throw std::runtime_error("Convolution2d grouped channel geometry is invalid.");
         }
         THOR_THROW_IF_FALSE(featureInputTensor.getPlacement() == placement);
 
-        const uint64_t expectedOutputRows = (featureInputTensor.getDimensions()[2] + 2 * padH - wTensor.getDimensions()[2]) / strideH + 1;
-        const uint64_t expectedOutputCols = (featureInputTensor.getDimensions()[3] + 2 * padW - wTensor.getDimensions()[3]) / strideW + 1;
+        const uint64_t effectiveFilterRows =
+            static_cast<uint64_t>(spatial.dilation_h) * (wTensor.getDimensions()[2] - 1ULL) + 1ULL;
+        const uint64_t effectiveFilterCols =
+            static_cast<uint64_t>(spatial.dilation_w) * (wTensor.getDimensions()[3] - 1ULL) + 1ULL;
+        const uint64_t expectedOutputRows =
+            (featureInputTensor.getDimensions()[2] + spatial.pre_padding_h + spatial.post_padding_h - effectiveFilterRows) /
+                spatial.stride_h +
+            1;
+        const uint64_t expectedOutputCols =
+            (featureInputTensor.getDimensions()[3] + spatial.pre_padding_w + spatial.post_padding_w - effectiveFilterCols) /
+                spatial.stride_w +
+            1;
         std::optional<ImplDataType> featureOutputDType = std::nullopt;
 
         if (outputs.contains("feature_output")) {
@@ -87,7 +117,7 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
         auto fin = Expression::input("feature_input");
         auto w = Expression::input("weights", weightsDType, weightsDType);
 
-        Expression fout = Expression::conv2d(fin, w, strideH, strideW, padH, padW, ImplDataType::FP32, featureOutputDType);
+        Expression fout = Expression::conv2d(fin, w, spatial, ImplDataType::FP32, featureOutputDType, groups);
 
         if (hasBias) {
             const Tensor& bTensor = inputs.at("biases");
@@ -273,8 +303,7 @@ std::shared_ptr<ThorImplementation::Layer> Convolution2d::stamp(ThorImplementati
     }
 
     std::shared_ptr<ThorImplementation::CustomLayer> physicalConvolution2d = std::make_shared<ThorImplementation::CustomLayer>(
-        buildConvolution2dExpression(
-            hasBias, verticalStride, horizontalStride, verticalPadding, horizontalPadding, placement, activation, epilogue, epilogueAuxInputNames()),
+        buildConvolution2dExpression(hasBias, groups, spatial, placement, activation, epilogue, epilogueAuxInputNames()),
         [&]() {
             std::vector<std::string> inputNames = {"feature_input"};
             std::vector<std::string> auxNames = epilogueAuxInputNames();
@@ -297,15 +326,30 @@ void Convolution2d::buildSupportLayersAndAddToNetwork(Network* network) {
         .numOutputChannels(numOutputChannels)
         .filterHeight(filterHeight)
         .filterWidth(filterWidth)
-        .verticalStride(verticalStride)
-        .horizontalStride(horizontalStride)
-        .verticalPadding(verticalPadding)
-        .horizontalPadding(horizontalPadding)
+        .groups(groups)
+        .verticalStride(static_cast<uint32_t>(spatial.stride_h))
+        .horizontalStride(static_cast<uint32_t>(spatial.stride_w))
+        .verticalDilation(static_cast<uint32_t>(spatial.dilation_h))
+        .horizontalDilation(static_cast<uint32_t>(spatial.dilation_w))
         .hasBias(hasBias)
         .weightsInitializer(weightsInitializer)
         .biasInitializer(biasInitializer)
         .weightsOptimizer(weightsOptimizer)
         .biasesOptimizer(biasesOptimizer);
+    switch (paddingMode) {
+        case ConvolutionPaddingMode::VALID:
+            convolution2dBuilder.validPadding();
+            break;
+        case ConvolutionPaddingMode::SAME_UPPER:
+            convolution2dBuilder.samePadding();
+            break;
+        case ConvolutionPaddingMode::EXPLICIT:
+            convolution2dBuilder.padding(static_cast<uint32_t>(spatial.pre_padding_h),
+                                         static_cast<uint32_t>(spatial.post_padding_h),
+                                         static_cast<uint32_t>(spatial.pre_padding_w),
+                                         static_cast<uint32_t>(spatial.post_padding_w));
+            break;
+    }
     if (activation != nullptr) {
         convolution2dBuilder.activation(std::dynamic_pointer_cast<Activation>(activation->clone()));
     } else {
@@ -378,11 +422,17 @@ json Convolution2d::architectureJson() const {
     j["data_layout"] = "NCHW";
     j["filter_width"] = filterWidth;
     j["filter_height"] = filterHeight;
-    j["horizontal_stride"] = horizontalStride;
-    j["vertical_stride"] = verticalStride;
-    j["horizontal_padding"] = horizontalPadding;
-    j["vertical_padding"] = verticalPadding;
+    j["horizontal_stride"] = static_cast<uint32_t>(spatial.stride_w);
+    j["vertical_stride"] = static_cast<uint32_t>(spatial.stride_h);
+    j["horizontal_dilation"] = static_cast<uint32_t>(spatial.dilation_w);
+    j["vertical_dilation"] = static_cast<uint32_t>(spatial.dilation_h);
+    j["padding_mode"] = convolutionPaddingModeName(paddingMode);
+    j["padding_top"] = static_cast<uint32_t>(spatial.pre_padding_h);
+    j["padding_bottom"] = static_cast<uint32_t>(spatial.post_padding_h);
+    j["padding_left"] = static_cast<uint32_t>(spatial.pre_padding_w);
+    j["padding_right"] = static_cast<uint32_t>(spatial.post_padding_w);
     j["num_output_channels"] = numOutputChannels;
+    j["groups"] = groups;
     j["has_bias"] = hasBias;
     if (activation != nullptr) {
         j["activation"] = activation->architectureJson();
@@ -432,7 +482,7 @@ json Convolution2d::serialize(thor_file::TarWriter& archiveWriter,
 }
 
 void Convolution2d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
-    if (j.at("version").get<std::string>() != "1.0.0")
+    if (j.at("version").get<std::string>() != "4.0.0")
         throw runtime_error("Unsupported version in Convolution2d::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "convolution_2d")
         throw runtime_error("Layer type mismatch in Convolution2d::deserialize: " + j.at("layer_type").get<std::string>());
@@ -467,11 +517,34 @@ void Convolution2d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
     Convolution2d convolution2d(epilogue, epilogueInputBindings);
     convolution2d.filterWidth = j.at("filter_width").get<uint32_t>();
     convolution2d.filterHeight = j.at("filter_height").get<uint32_t>();
-    convolution2d.horizontalStride = j.at("horizontal_stride").get<uint32_t>();
-    convolution2d.verticalStride = j.at("vertical_stride").get<uint32_t>();
-    convolution2d.horizontalPadding = j.at("horizontal_padding").get<uint32_t>();
-    convolution2d.verticalPadding = j.at("vertical_padding").get<uint32_t>();
+    convolution2d.spatial.stride_h = j.at("vertical_stride").get<int32_t>();
+    convolution2d.spatial.stride_w = j.at("horizontal_stride").get<int32_t>();
+    convolution2d.paddingMode = convolutionPaddingModeFromName(j.at("padding_mode").get<std::string>());
+    convolution2d.spatial.pre_padding_h = j.at("padding_top").get<int32_t>();
+    convolution2d.spatial.post_padding_h = j.at("padding_bottom").get<int32_t>();
+    convolution2d.spatial.pre_padding_w = j.at("padding_left").get<int32_t>();
+    convolution2d.spatial.post_padding_w = j.at("padding_right").get<int32_t>();
+    convolution2d.spatial.dilation_h = j.at("vertical_dilation").get<int32_t>();
+    convolution2d.spatial.dilation_w = j.at("horizontal_dilation").get<int32_t>();
+    if (convolution2d.spatial.stride_h <= 0 || convolution2d.spatial.stride_w <= 0) {
+        throw runtime_error("Convolution2d serialized stride must be positive.");
+    }
+    if (convolution2d.spatial.dilation_h <= 0 || convolution2d.spatial.dilation_w <= 0) {
+        throw runtime_error("Convolution2d serialized dilation must be positive.");
+    }
+    if (convolution2d.spatial.pre_padding_h < 0 || convolution2d.spatial.post_padding_h < 0 ||
+        convolution2d.spatial.pre_padding_w < 0 || convolution2d.spatial.post_padding_w < 0) {
+        throw runtime_error("Convolution2d serialized padding must be non-negative.");
+    }
+    if (convolution2d.paddingMode == ConvolutionPaddingMode::VALID &&
+        (convolution2d.spatial.pre_padding_h != 0 || convolution2d.spatial.post_padding_h != 0 ||
+         convolution2d.spatial.pre_padding_w != 0 || convolution2d.spatial.post_padding_w != 0)) {
+        throw runtime_error("Convolution2d serialized VALID padding must resolve to zero padding.");
+    }
     convolution2d.numOutputChannels = j.at("num_output_channels").get<uint32_t>();
+    convolution2d.groups = j.at("groups").get<uint32_t>();
+    if (convolution2d.groups == 0)
+        throw runtime_error("Convolution2d serialized groups must be positive.");
     convolution2d.hasBias = j.at("has_bias").get<bool>();
 
     if (j.contains("activation") && !j.at("activation").is_null()) {
@@ -482,6 +555,31 @@ void Convolution2d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
         uint64_t originalTensorId = inputJson.at("id").get<uint64_t>();
         convolution2d.featureInputs.push_back(network->getApiTensorByOriginalId(originalTensorId));
         convolution2d.standaloneLayerFeatureInputs.push_back(convolution2d.featureInputs.back());
+    }
+    if (convolution2d.featureInputs.empty() ||
+        convolution2d.featureInputs.front().getDimensions()[0] % convolution2d.groups != 0 ||
+        convolution2d.numOutputChannels % convolution2d.groups != 0)
+        throw runtime_error("Convolution2d serialized grouped channel geometry is invalid.");
+    if (convolution2d.paddingMode == ConvolutionPaddingMode::SAME_UPPER) {
+        if (convolution2d.featureInputs.empty()) {
+            throw runtime_error("Convolution2d serialized SAME_UPPER padding requires at least one feature input.");
+        }
+        const auto [expectedTop, expectedBottom] = Convolution2d::Builder::computeSamePadding(
+            static_cast<uint32_t>(convolution2d.featureInputs.front().getDimensions()[1]),
+            static_cast<uint32_t>(convolution2d.spatial.stride_h),
+            convolution2d.filterHeight,
+            static_cast<uint32_t>(convolution2d.spatial.dilation_h));
+        const auto [expectedLeft, expectedRight] = Convolution2d::Builder::computeSamePadding(
+            static_cast<uint32_t>(convolution2d.featureInputs.front().getDimensions()[2]),
+            static_cast<uint32_t>(convolution2d.spatial.stride_w),
+            convolution2d.filterWidth,
+            static_cast<uint32_t>(convolution2d.spatial.dilation_w));
+        if (convolution2d.spatial.pre_padding_h != static_cast<int32_t>(expectedTop) ||
+            convolution2d.spatial.post_padding_h != static_cast<int32_t>(expectedBottom) ||
+            convolution2d.spatial.pre_padding_w != static_cast<int32_t>(expectedLeft) ||
+            convolution2d.spatial.post_padding_w != static_cast<int32_t>(expectedRight)) {
+            throw runtime_error("Convolution2d serialized SAME_UPPER padding does not match its input shape, stride, dilation, and filter.");
+        }
     }
     for (const json& outputJson : j.at("outputs")) {
         Tensor output = Tensor::deserialize(outputJson, archiveReader.get());

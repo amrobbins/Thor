@@ -10,6 +10,7 @@
 using ThorImplementation::DataType;
 using ThorImplementation::RaggedTensor;
 using ThorImplementation::RaggedTensorDescriptor;
+using ThorImplementation::RowPartitionRuntime;
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorDescriptor;
 using ThorImplementation::TensorPlacement;
@@ -313,11 +314,10 @@ DeviceResidentNamedBatchSession::allocateBatchStorage() const {
         if (!requirement.raggedTensorDescriptor.has_value()) continue;
         const Thor::DatasetField &field = dataset->getSchema().getField(fieldId);
         const RaggedTensorDescriptor &descriptor = requirement.raggedTensorDescriptor.value();
-        storage.raggedTensors.emplace(
-            field.name,
-            RaggedTensor(
-                Tensor(dataset->getPlacement(), descriptor.getValuesDescriptor()),
-                Tensor(dataset->getPlacement(), descriptor.getOffsetsDescriptor())));
+        Tensor values(dataset->getPlacement(), descriptor.getValuesDescriptor());
+        Tensor offsets(dataset->getPlacement(), descriptor.getOffsetsDescriptor());
+        RowPartitionRuntime rowPartition(offsets, descriptor.getRowPartition());
+        storage.raggedTensors.emplace(field.name, RaggedTensor(values, rowPartition));
     }
     return storage;
 }
@@ -430,14 +430,15 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
     for (const auto &[fieldId, requirement] : fieldRequirements) {
         if (!requirement.raggedTensorDescriptor.has_value()) continue;
         const Thor::DatasetField &field = dataset->getSchema().getField(fieldId);
-        const uint64_t activeRows = dataset->validateSnapshotRaggedBatchCapacity(
+        const RaggedBatchExtent extent = dataset->validateSnapshotRaggedBatchCapacity(
             field.name,
             runtime.rowIndicesHost,
             validExampleCount,
-            requirement.raggedTensorDescriptor->getMaxTotalValues());
-        storage.raggedTensors.at(field.name)
-            .getRowPartitionRuntime()
-            .setHostActiveValueCount(activeRows);
+            requirement.raggedTensorDescriptor->getMaxTotalValues(),
+            requirement.raggedTensorDescriptor->getMaxValuesPerRowOrZero());
+        RowPartitionRuntime& rowPartition = storage.raggedTensors.at(field.name).getRowPartitionRuntime();
+        rowPartition.setHostActiveValueCount(extent.activeValueCount);
+        rowPartition.setHostMaxActiveRowLength(extent.maxActiveRowLength);
     }
 
     runtime.rowIndicesDevice.copyFromAsync(

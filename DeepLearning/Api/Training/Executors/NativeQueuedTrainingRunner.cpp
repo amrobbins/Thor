@@ -3306,12 +3306,26 @@ NativeQueuedStartupState startNativeQueuedTrainingWithMemoryAdmissionRetry(
                         attempt.deviceDatasetStorageReport.reason =
                             "named_validation_population_fallback:" +
                             namedValidationFallbackReason;
+                        if (attempt.deviceDatasetStorageReport.windowedDeviceCache.attempted) {
+                            attempt.deviceDatasetStorageReport.windowedDeviceCache.used = false;
+                            attempt.deviceDatasetStorageReport.windowedDeviceCache.activeSources = 0;
+                            attempt.deviceDatasetStorageReport.windowedDeviceCache.hitRatio = 0.0f;
+                            attempt.deviceDatasetStorageReport.windowedDeviceCache.reason =
+                                "device_dataset_fallback";
+                        }
                     }
                 }
             } else if (forceSourceSession) {
                 attempt.deviceDatasetStorageReport.used = false;
                 attempt.deviceDatasetStorageReport.reason =
                     "startup_memory_fallback";
+                if (attempt.deviceDatasetStorageReport.windowedDeviceCache.attempted) {
+                    attempt.deviceDatasetStorageReport.windowedDeviceCache.used = false;
+                    attempt.deviceDatasetStorageReport.windowedDeviceCache.activeSources = 0;
+                    attempt.deviceDatasetStorageReport.windowedDeviceCache.hitRatio = 0.0f;
+                    attempt.deviceDatasetStorageReport.windowedDeviceCache.reason =
+                        "device_dataset_fallback";
+                }
             }
 
             request.cancellationToken.throwIfCancellationRequested();

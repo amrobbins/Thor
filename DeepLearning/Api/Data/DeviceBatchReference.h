@@ -5,9 +5,31 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <utility>
 
 namespace Thor {
+
+/**
+ * Optional device-memory access hint carried with a DeviceBatchReference.
+ *
+ * The hint is deliberately descriptive rather than CUDA-owning: the
+ * materializer identifies the repeatedly-read source allocation and its
+ * current device-wide persisting-L2 assignment, while NetworkInput owns the
+ * processing stream on which that policy can be applied.  generation changes
+ * whenever the shared device budget is rebalanced; Stream includes it in the
+ * access-policy cache key so steady-state batches avoid redundant CUDA calls.
+ */
+struct DeviceBatchAccessPolicy {
+    int deviceNum = -1;
+    uint64_t tensorId = 0;
+    const void *base = nullptr;
+    uint64_t bytes = 0;
+    float persistingHitRatio = 0.0f;
+    uint64_t generation = 0;
+
+    bool operator==(const DeviceBatchAccessPolicy &rhs) const = default;
+};
 
 /**
  * Type-erased description of one device-resident batch field.
@@ -24,6 +46,13 @@ class DeviceBatchMaterializer {
 
     [[nodiscard]] virtual ThorImplementation::TensorDescriptor getOutputDescriptor() const = 0;
     [[nodiscard]] virtual ThorImplementation::TensorPlacement getOutputPlacement() const = 0;
+
+    // Most device references have no special source-access policy. Compact
+    // window materializers override this when their immutable source has an
+    // active persisting-L2 lease.
+    [[nodiscard]] virtual std::optional<DeviceBatchAccessPolicy> getAccessPolicy() const {
+        return std::nullopt;
+    }
 
     virtual void enqueueMaterialization(
         ThorImplementation::Tensor& destination,
@@ -62,6 +91,10 @@ class DeviceBatchReference {
     [[nodiscard]] ThorImplementation::TensorPlacement getOutputPlacement() const {
         THOR_THROW_IF_FALSE(isInitialized());
         return materializer->getOutputPlacement();
+    }
+    [[nodiscard]] std::optional<DeviceBatchAccessPolicy> getAccessPolicy() const {
+        THOR_THROW_IF_FALSE(isInitialized());
+        return materializer->getAccessPolicy();
     }
 
     void enqueueMaterialization(ThorImplementation::Tensor& destination,

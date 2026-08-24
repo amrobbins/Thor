@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -28,8 +29,28 @@ class Stream;
  * metadata. Direct/window outputs are deferred references; ragged outputs are
  * gathered into reusable batch-capacity buffers for the selected rows.
  */
+struct RaggedBatchExtent {
+    uint64_t activeValueCount = 0;
+    uint64_t maxActiveRowLength = 0;
+
+    bool operator==(const RaggedBatchExtent&) const = default;
+};
+
 class DeviceResidentNamedDataset {
    public:
+    // Stable for the lifetime of this immutable resident dataset. The access
+    // describes only the compact immutable source payload read by dense or
+    // source-backed ragged window materialization; reference/sequence metadata
+    // and generated masks are intentionally not L2 cache candidates here.
+    struct CompactWindowSourceAccess {
+        std::string sourceName;
+        uint64_t tensorId = 0;
+        const void *base = nullptr;
+        uint64_t bytes = 0;
+
+        bool operator==(const CompactWindowSourceAccess &rhs) const = default;
+    };
+
     [[nodiscard]] static std::shared_ptr<DeviceResidentNamedDataset> fromSnapshot(
         const MaterializedNamedDatasetSnapshot &snapshot,
         ThorImplementation::TensorPlacement devicePlacement);
@@ -63,14 +84,25 @@ class DeviceResidentNamedDataset {
     [[nodiscard]] bool hasCompactWindowField(const std::string &name) const;
     [[nodiscard]] bool hasCompactRaggedField(const std::string &name) const;
     [[nodiscard]] bool hasSnapshotRaggedField(const std::string &name) const;
+    // Dense window payloads and source-backed ragged window fields resolve to
+    // their shared compact source allocation. A dense mask-only field returns
+    // nullopt because its materialization kernel does not dereference the source
+    // payload. Ordinary direct/ragged fields likewise have no compact window
+    // source access.
+    [[nodiscard]] std::optional<CompactWindowSourceAccess>
+    compactWindowSourceAccessForField(const std::string &fieldName) const;
+    // Returns one entry per unique source allocation referenced by at least one
+    // exposed dense window payload or source-backed ragged window field.
+    [[nodiscard]] std::vector<CompactWindowSourceAccess> compactWindowSourceAccesses() const;
     [[nodiscard]] const ThorImplementation::Tensor &field(Thor::DatasetFieldId id) const;
     [[nodiscard]] const ThorImplementation::Tensor &tensor(const std::string &name) const;
 
-    [[nodiscard]] uint64_t validateCompactRaggedBatchCapacity(
+    [[nodiscard]] RaggedBatchExtent validateCompactRaggedBatchCapacity(
         const std::string &fieldName,
         const ThorImplementation::Tensor &rowIndicesHost,
         uint64_t logicalRows,
-        uint64_t maxTotalValues) const;
+        uint64_t maxTotalValues,
+        uint64_t maxValuesPerRow = 0) const;
 
     void enqueueCompactRaggedFieldMaterialization(
         const std::string &fieldName,
@@ -79,11 +111,12 @@ class DeviceResidentNamedDataset {
         ThorImplementation::RaggedTensor &destination,
         Stream &stream) const;
 
-    [[nodiscard]] uint64_t validateSnapshotRaggedBatchCapacity(
+    [[nodiscard]] RaggedBatchExtent validateSnapshotRaggedBatchCapacity(
         const std::string &fieldName,
         const ThorImplementation::Tensor &rowIndicesHost,
         uint64_t logicalRows,
-        uint64_t maxTotalValues) const;
+        uint64_t maxTotalValues,
+        uint64_t maxValuesPerRow = 0) const;
 
     void enqueueSnapshotRaggedFieldMaterialization(
         const std::string &fieldName,
@@ -105,6 +138,8 @@ class DeviceResidentNamedDataset {
 
     struct CompactRaggedFieldStorage {
         DatasetLayout::RaggedTensorSpec spec;
+        // Owned only by ordinary ragged fields. Source-backed ragged windows
+        // read the canonical CompactWindowSourceStorage::bytes allocation.
         ThorImplementation::Tensor values;
         std::vector<uint64_t> valueCounts;
     };

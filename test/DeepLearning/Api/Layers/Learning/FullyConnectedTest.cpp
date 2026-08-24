@@ -769,6 +769,7 @@ TEST(FullyConnectedApi, RaggedDropOutToFcLeavesInactiveCapacityToTheFcConsumer) 
                                                      /*validationPass=*/false,
                                                      Impl::RowPartitionDescriptor(logicalBatchSize, fullRows, DataType::UINT32),
                                                      activeRows,
+                                                     std::nullopt,
                                                      logicalBatchSize);
     physicalValuesInput->forward(valuesHost, false, logicalBatchSize);
     physicalOutput->getOutputReadyEvent().synchronize();

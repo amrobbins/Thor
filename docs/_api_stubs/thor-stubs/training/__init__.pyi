@@ -64,6 +64,43 @@ class DeviceDatasetStorageReport:
     @property
     def materialization_seconds(self) -> float: ...
 
+    @property
+    def windowed_device_cache(self) -> WindowedDeviceCacheReport: ...
+
+class WindowedDeviceCacheReport:
+    @property
+    def requested(self) -> thor.data.WindowedDeviceCache: ...
+
+    @property
+    def attempted(self) -> bool: ...
+
+    @property
+    def used(self) -> bool: ...
+
+    @property
+    def reason(self) -> str: ...
+
+    @property
+    def eligible_sources(self) -> int: ...
+
+    @property
+    def active_sources(self) -> int: ...
+
+    @property
+    def eligible_source_bytes(self) -> int: ...
+
+    @property
+    def budget_bytes(self) -> int: ...
+
+    @property
+    def max_access_policy_window_bytes(self) -> int: ...
+
+    @property
+    def active_unique_bytes(self) -> int: ...
+
+    @property
+    def hit_ratio(self) -> float: ...
+
 EarlyCompletionPolicy: TypeAlias = TrainingEarlyCompletionPolicy
 
 EarlyCompletionRule: TypeAlias = TrainingRunsEarlyCompletionRule
@@ -696,6 +733,6 @@ class TrainingStep:
     @staticmethod
     def deserialize(architecture_json: str) -> TrainingStep: ...
 
-__all__: list = ['DatasetInputBindings', 'DeviceDatasetStorageReport', 'EarlyCompletionPolicy', 'EarlyCompletionRule', 'GradientClearPolicy', 'RestartCondition', 'RestartPolicy', 'StepExecutable', 'Trainer', 'TrainerFitOptions', 'TrainingEarlyCompletionPolicy', 'TrainingEnsembleMemberResult', 'TrainingEnsembleResult', 'TrainingEventPhase', 'TrainingInputBinding', 'TrainingNamedMetricResult', 'TrainingPhase', 'TrainingProgram', 'TrainingRestartCondition', 'TrainingRestartPolicy', 'TrainingRunCompletionReason', 'TrainingRunInputSignature', 'TrainingRunOutputSignature', 'TrainingRunResult', 'TrainingRuns', 'TrainingRunsEarlyCompletionPolicy', 'TrainingRunsEarlyCompletionRule', 'TrainingRunsFailurePolicy', 'TrainingRunsRestartCondition', 'TrainingRunsRestartPolicy', 'TrainingRunsResult', 'TrainingRunStatus', 'TrainingStatsSnapshot', 'TrainingStep', 'make_k_fold_run_specs', 'training_runs_from_k_fold_split']
+__all__: list = ['DatasetInputBindings', 'DeviceDatasetStorageReport', 'WindowedDeviceCacheReport', 'EarlyCompletionPolicy', 'EarlyCompletionRule', 'GradientClearPolicy', 'RestartCondition', 'RestartPolicy', 'StepExecutable', 'Trainer', 'TrainerFitOptions', 'TrainingEarlyCompletionPolicy', 'TrainingEnsembleMemberResult', 'TrainingEnsembleResult', 'TrainingEventPhase', 'TrainingInputBinding', 'TrainingNamedMetricResult', 'TrainingPhase', 'TrainingProgram', 'TrainingRestartCondition', 'TrainingRestartPolicy', 'TrainingRunCompletionReason', 'TrainingRunInputSignature', 'TrainingRunOutputSignature', 'TrainingRunResult', 'TrainingRuns', 'TrainingRunsEarlyCompletionPolicy', 'TrainingRunsEarlyCompletionRule', 'TrainingRunsFailurePolicy', 'TrainingRunsRestartCondition', 'TrainingRunsRestartPolicy', 'TrainingRunsResult', 'TrainingRunStatus', 'TrainingStatsSnapshot', 'TrainingStep', 'make_k_fold_run_specs', 'training_runs_from_k_fold_split']
 
 def __dir__() -> list[str]: ...

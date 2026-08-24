@@ -75,6 +75,7 @@ def test_conv3d_constructs_defaults_architecture_parameters_and_output_shape_dty
     assert arch["vertical_padding"] == 0
     assert arch["horizontal_padding"] == 0
     assert arch["num_output_channels"] == 6
+    assert arch["groups"] == 1
     assert arch["has_bias"] is True
     assert arch["activation"]["layer_type"] == "gelu"
     assert arch["epilogue"] is None
@@ -82,6 +83,38 @@ def test_conv3d_constructs_defaults_architecture_parameters_and_output_shape_dty
     assert len(arch["outputs"]) == 1
     _assert_parameter_shape(arch, "weights", [6, 3, 3, 3, 3])
     _assert_parameter_shape(arch, "biases", [6])
+
+
+def test_conv3d_groups_partition_channels_and_weight_shape():
+    n = _net("test_net_conv3d_groups")
+    x = _cdhw_input(n, 8, 5, 7, 7, thor.DataType.fp16)
+
+    conv = thor.layers.Convolution3d(
+        n,
+        x,
+        num_output_channels=12,
+        filter_depth=3,
+        filter_height=3,
+        filter_width=3,
+        depth_padding=1,
+        vertical_padding=1,
+        horizontal_padding=1,
+        groups=4,
+        activation=None,
+    )
+
+    assert conv.get_feature_output().get_dimensions() == [12, 5, 7, 7]
+    arch = _only_layer_architecture(n, "convolution_3d")
+    assert arch["groups"] == 4
+    _assert_parameter_shape(arch, "weights", [12, 2, 3, 3, 3])
+
+
+@pytest.mark.parametrize(("channels", "outputs", "groups"), [(8, 12, 0), (7, 12, 4), (8, 10, 4)])
+def test_conv3d_rejects_invalid_group_geometry(channels: int, outputs: int, groups: int):
+    n = _net(f"test_net_conv3d_bad_groups_{channels}_{outputs}_{groups}")
+    x = _cdhw_input(n, channels, 5, 5, 5)
+    with pytest.raises(ValueError, match="groups must divide both input and output channels"):
+        thor.layers.Convolution3d(n, x, outputs, 3, 3, 3, groups=groups)
 
 
 @pytest.mark.parametrize(

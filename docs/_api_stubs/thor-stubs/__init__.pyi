@@ -184,9 +184,21 @@ class RaggedTensor:
         """
 
     @overload
+    def __init__(self, values: Tensor, offsets: Tensor, max_values_per_row: int) -> None:
+        """
+        Construct a logical rank-1 ragged tensor from packed values and offsets with an explicit maximum logical row length.
+        """
+
+    @overload
     def __init__(self, values_data_type: DataType, trailing_dimensions: Sequence[int], batch_size: int, max_total_values: int, offsets_data_type: DataType = DataType.uint32) -> None:
         """
         Construct a logical ragged tensor descriptor using Thor's canonical packed representation.
+        """
+
+    @overload
+    def __init__(self, values_data_type: DataType, trailing_dimensions: Sequence[int], batch_size: int, max_total_values: int, max_values_per_row: int, offsets_data_type: DataType = DataType.uint32) -> None:
+        """
+        Construct a logical ragged tensor descriptor with an explicit maximum logical row length.
         """
 
     @property
@@ -209,6 +221,9 @@ class RaggedTensor:
 
     @property
     def max_total_values(self) -> int: ...
+
+    @property
+    def max_values_per_row(self) -> object: ...
 
     @property
     def ragged_rank(self) -> int: ...

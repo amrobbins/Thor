@@ -16,9 +16,11 @@ class Conv3dWeightsParameter : public PhysicalParameter {
                            uint32_t numOutputChannels,
                            uint32_t filterWidth,
                            uint32_t filterHeight,
-                           uint32_t filterDepth)
+                           uint32_t filterDepth,
+                           uint32_t groups)
         : PhysicalParameter(name, trainable),
           numOutputChannels(numOutputChannels),
+          groups(groups),
           filterWidth(filterWidth),
           filterHeight(filterHeight),
           filterDepth(filterDepth),
@@ -33,12 +35,16 @@ class Conv3dWeightsParameter : public PhysicalParameter {
             throw std::runtime_error("Convolution3d weights require 5D NCDHW feature input tensor.");
         }
 
-        TensorDescriptor descriptor(resolvedDataType, {numOutputChannels, inputDims[1], filterDepth, filterHeight, filterWidth});
+        if (groups == 0 || inputDims[1] % groups != 0 || numOutputChannels % groups != 0)
+            throw std::runtime_error("Convolution3d parameter storage requires input/output channels divisible by groups.");
+        TensorDescriptor descriptor(
+            resolvedDataType, {numOutputChannels, inputDims[1] / groups, filterDepth, filterHeight, filterWidth});
         storage = Tensor(inputTensor.getPlacement(), descriptor);
     }
 
    private:
     const uint32_t numOutputChannels;
+    const uint32_t groups;
     const uint32_t filterWidth;
     const uint32_t filterHeight;
     const uint32_t filterDepth;
@@ -81,8 +87,10 @@ Convolution3d::Convolution3d(uint32_t filterWidth,
                              std::optional<DataType> weightsDataType,
                              const TensorPlacement& placement,
                              bool inferenceOnly,
-                             int64_t stampedId)
+                             int64_t stampedId,
+                             uint32_t groups)
     : CustomLayer(buildExpression(hasBias,
+                                  groups,
                                   filterDepthStride,
                                   filterVerticalStride,
                                   filterHorizontalStride,
@@ -91,11 +99,12 @@ Convolution3d::Convolution3d(uint32_t filterWidth,
                                   leftAndRightPadWidth,
                                   placement),
                   placement,
-                  defineParameters(numOutputChannels, hasBias, filterWidth, filterHeight, filterDepth, weightsDataType),
+                  defineParameters(numOutputChannels, hasBias, filterWidth, filterHeight, filterDepth, weightsDataType, groups),
                   inferenceOnly,
                   stampedId) {}
 
 DynamicExpression Convolution3d::buildExpression(bool hasBias,
+                                                 uint32_t groups,
                                                  uint32_t strideD,
                                                  uint32_t strideH,
                                                  uint32_t strideW,
@@ -103,7 +112,7 @@ DynamicExpression Convolution3d::buildExpression(bool hasBias,
                                                  uint32_t padH,
                                                  uint32_t padW,
                                                  const TensorPlacement& placement) {
-    return DynamicExpression([hasBias, strideD, strideH, strideW, padD, padH, padW, placement](
+    return DynamicExpression([hasBias, groups, strideD, strideH, strideW, padD, padH, padW, placement](
                                  const DynamicExpression::TensorMap& inputs,
                                  const DynamicExpression::TensorMap& outputs,
                                  Stream& stream) -> DynamicExpressionBuild {
@@ -119,8 +128,9 @@ DynamicExpression Convolution3d::buildExpression(bool hasBias,
         if (wTensor.getDimensions().size() != 5) {
             throw std::runtime_error("Convolution3d expects weights to be 5D KCDHW.");
         }
-        if (featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1]) {
-            throw std::runtime_error("Convolution3d input channels must match weight channels.");
+        if (groups == 0 || featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1] * groups ||
+            wTensor.getDimensions()[0] % groups != 0) {
+            throw std::runtime_error("Convolution3d grouped channel geometry is invalid.");
         }
         THOR_THROW_IF_FALSE(featureInputTensor.getPlacement() == placement);
 
@@ -151,7 +161,8 @@ DynamicExpression Convolution3d::buildExpression(bool hasBias,
         auto fin = Expression::input("feature_input");
         auto w = Expression::input("weights", weightsDType, weightsDType);
 
-        Expression fout = Expression::conv3d(fin, w, strideD, strideH, strideW, padD, padH, padW, DataType::FP32, std::nullopt);
+        Expression fout =
+            Expression::conv3d(fin, w, strideD, strideH, strideW, padD, padH, padW, DataType::FP32, std::nullopt, groups);
 
         if (hasBias) {
             const Tensor& bTensor = inputs.at("biases");
@@ -183,10 +194,11 @@ std::vector<std::shared_ptr<PhysicalParameter>> Convolution3d::defineParameters(
                                                                                 uint32_t filterWidth,
                                                                                 uint32_t filterHeight,
                                                                                 uint32_t filterDepth,
-                                                                                std::optional<DataType> weightsDataType) {
+                                                                                std::optional<DataType> weightsDataType,
+                                                                                uint32_t groups) {
     std::vector<std::shared_ptr<PhysicalParameter>> parameters;
     parameters.push_back(std::make_shared<Conv3dWeightsParameter>(
-        "weights", weightsDataType, true, true, numOutputChannels, filterWidth, filterHeight, filterDepth));
+        "weights", weightsDataType, true, true, numOutputChannels, filterWidth, filterHeight, filterDepth, groups));
     if (hasBias) {
         parameters.push_back(std::make_shared<Conv3dBiasesParameter>("biases", weightsDataType, true, true, numOutputChannels));
     }

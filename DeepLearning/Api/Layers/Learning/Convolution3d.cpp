@@ -12,6 +12,7 @@ namespace Thor {
 namespace {
 
 ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
+                                                                    uint32_t groups,
                                                                     uint32_t strideD,
                                                                     uint32_t strideH,
                                                                     uint32_t strideW,
@@ -38,6 +39,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
 
     return DynamicExpression(std::move(expectedInputNames), {"feature_output"},
                              [hasBias,
+                              groups,
                               strideD,
                               strideH,
                               strideW,
@@ -63,8 +65,9 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
         if (wTensor.getDimensions().size() != 5) {
             throw std::runtime_error("Convolution3d expects weights to be 5D KCDHW.");
         }
-        if (featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1]) {
-            throw std::runtime_error("Convolution3d input channels must match weight channels.");
+        if (groups == 0 || featureInputTensor.getDimensions()[1] != wTensor.getDimensions()[1] * groups ||
+            wTensor.getDimensions()[0] % groups != 0) {
+            throw std::runtime_error("Convolution3d grouped channel geometry is invalid.");
         }
         THOR_THROW_IF_FALSE(featureInputTensor.getPlacement() == placement);
 
@@ -97,7 +100,8 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
         auto fin = Expression::input("feature_input");
         auto w = Expression::input("weights", weightsDType, weightsDType);
 
-        Expression fout = Expression::conv3d(fin, w, strideD, strideH, strideW, padD, padH, padW, ImplDataType::FP32, featureOutputDType);
+        Expression fout =
+            Expression::conv3d(fin, w, strideD, strideH, strideW, padD, padH, padW, ImplDataType::FP32, featureOutputDType, groups);
 
         if (hasBias) {
             const Tensor& bTensor = inputs.at("biases");
@@ -291,6 +295,7 @@ std::shared_ptr<ThorImplementation::Layer> Convolution3d::stamp(ThorImplementati
 
     std::shared_ptr<ThorImplementation::CustomLayer> physicalConvolution3d = std::make_shared<ThorImplementation::CustomLayer>(
         buildConvolution3dExpression(hasBias,
+                                     groups,
                                      depthStride,
                                      verticalStride,
                                      horizontalStride,
@@ -334,6 +339,7 @@ void Convolution3d::buildSupportLayersAndAddToNetwork(Network* network) {
         .depthPadding(depthPadding)
         .verticalPadding(verticalPadding)
         .horizontalPadding(horizontalPadding)
+        .groups(groups)
         .hasBias(hasBias)
         .weightsInitializer(weightsInitializer)
         .biasInitializer(biasInitializer)
@@ -391,6 +397,7 @@ json Convolution3d::architectureJson() const {
     j["vertical_padding"] = verticalPadding;
     j["depth_padding"] = depthPadding;
     j["num_output_channels"] = numOutputChannels;
+    j["groups"] = groups;
     j["has_bias"] = hasBias;
     if (activation != nullptr) {
         j["activation"] = activation->architectureJson();
@@ -481,6 +488,9 @@ void Convolution3d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
     convolution3d.verticalPadding = j.at("vertical_padding").get<uint32_t>();
     convolution3d.depthPadding = j.at("depth_padding").get<uint32_t>();
     convolution3d.numOutputChannels = j.at("num_output_channels").get<uint32_t>();
+    convolution3d.groups = j.value("groups", uint32_t{1});
+    if (convolution3d.groups == 0)
+        throw runtime_error("Convolution3d serialized groups must be positive.");
     convolution3d.hasBias = j.at("has_bias").get<bool>();
 
     if (j.contains("activation") && !j.at("activation").is_null()) {
@@ -499,6 +509,12 @@ void Convolution3d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
     }
     if (convolution3d.featureInputs.size() != convolution3d.featureOutputs.size()) {
         throw runtime_error("Convolution3d deserialize expected equal numbers of inputs and outputs.");
+    }
+    for (const Tensor& input : convolution3d.featureInputs) {
+        if (input.getDimensions().empty() || input.getDimensions()[0] % convolution3d.groups != 0 ||
+            convolution3d.numOutputChannels % convolution3d.groups != 0) {
+            throw runtime_error("Convolution3d serialized groups must divide input and output channels.");
+        }
     }
     for (uint32_t i = 0; i < convolution3d.featureInputs.size(); ++i) {
         convolution3d.outputTensorFromInputTensor[convolution3d.featureInputs[i]] = convolution3d.featureOutputs[i];

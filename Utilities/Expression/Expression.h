@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Expression/ConvolutionSpatial.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 #include "Utilities/Expression/CudaKernelSecurity.h"
@@ -127,6 +128,7 @@ enum class ExprOp : uint16_t {
     REDUCE_NORM2,
     SCAN,
     RMSNORM,
+    LAYERNORM,
     RMSNORM_BACKWARD_X,
     RMSNORM_BACKWARD_SCALE,
     ATTENTION,
@@ -141,10 +143,13 @@ enum class ExprOp : uint16_t {
     SEGMENTED_REDUCE_MIN,
     SEGMENTED_REDUCE_MAX,
     RAGGED_VALUEWISE_EXTENT,
+    RAGGED_CONV1D_CAUSAL,
+    RAGGED_CONV1D_CAUSAL_BACKWARD_DATA,
     SEGMENTED_REDUCE_MEAN,
     SEGMENTED_BROADCAST,
     SEGMENTED_REDUCE_MIN_BACKWARD,
     SEGMENTED_REDUCE_MAX_BACKWARD,
+    RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER,
 };
 
 enum class RotaryScalingKind : uint8_t {
@@ -247,6 +252,13 @@ struct ExprNode {
     uint32_t matmul_epilogue_aux = UINT32_MAX;
     MatmulPackedRowBinding matmul_packed_row_binding = MatmulPackedRowBinding::None;
     uint64_t matmul_packed_row_capacity = 0;
+    ConvolutionSpatial2d conv_spatial_2d{};
+    uint64_t conv_groups = 1;
+    ConvolutionSpatial1d ragged_conv_spatial_1d{};
+    uint64_t ragged_conv1d_input_channels = 0;
+    uint64_t ragged_conv1d_output_channels = 0;
+    uint64_t ragged_conv1d_kernel_width = 0;
+    uint64_t ragged_conv1d_groups = 1;
     int32_t conv_stride_d = 1;
     int32_t conv_stride_h = 1;
     int32_t conv_stride_w = 1;
@@ -325,6 +337,12 @@ struct ExprNode {
     // execution selects a cached row-capacity bucket from that domain.
     uint64_t rms_norm_packed_row_capacity = 0;
 
+    uint64_t layer_norm_normalized_feature_count = 0;
+    double layer_norm_epsilon = 1.0e-5;
+    // Non-zero only for packed ragged values. Like RMSNorm, LayerNorm views
+    // each logical value as one normalization sample across its channel tail.
+    uint64_t layer_norm_packed_row_capacity = 0;
+
     bool embedding_has_padding_index = false;
     uint64_t embedding_padding_index = 0;
 
@@ -335,10 +353,11 @@ struct ExprNode {
 
     // Ragged runtime-extent metadata. RAGGED_VALUEWISE_EXTENT uses rhs as the canonical offsets tensor; explicit segmented stages carry the same extent for autodiff.
     // ragged_runtime_offsets_input_slot is compiler-lowered stage metadata for packed
-    // MATMUL/RMSNORM and is UINT32_MAX on ordinary user-authored expression nodes.
+    // MATMUL/RMSNORM/LAYERNORM and is UINT32_MAX on ordinary user-authored expression nodes.
     uint32_t ragged_runtime_offsets_input_slot = UINT32_MAX;
     uint64_t ragged_runtime_batch_size = 0;
     uint64_t ragged_runtime_max_active_values = 0;
+    uint64_t ragged_runtime_max_values_per_row = 0;
     uint64_t ragged_runtime_elements_per_value = 1;
     bool segmented_broadcast_normalize_by_length = false;
 
@@ -784,6 +803,24 @@ class Expression {
         return rmsNorm(*this, scale, normalized_feature_count, epsilon, compute_dtype, output_dtype, packed_row_capacity);
     }
 
+    [[nodiscard]] static Expression layerNorm(const Expression& input,
+                                              const Expression& scale,
+                                              const Expression& bias,
+                                              uint64_t normalized_feature_count,
+                                              double epsilon = 1.0e-5,
+                                              std::optional<DataType> compute_dtype = std::nullopt,
+                                              std::optional<DataType> output_dtype = std::nullopt,
+                                              std::optional<uint64_t> packed_row_capacity = std::nullopt);
+    [[nodiscard]] Expression layerNorm(const Expression& scale,
+                                       const Expression& bias,
+                                       uint64_t normalized_feature_count,
+                                       double epsilon = 1.0e-5,
+                                       std::optional<DataType> compute_dtype = std::nullopt,
+                                       std::optional<DataType> output_dtype = std::nullopt,
+                                       std::optional<uint64_t> packed_row_capacity = std::nullopt) const {
+        return layerNorm(*this, scale, bias, normalized_feature_count, epsilon, compute_dtype, output_dtype, packed_row_capacity);
+    }
+
     [[nodiscard]] static Expression embeddingLookup(const Expression& indices,
                                                     const Expression& weights,
                                                     std::optional<uint64_t> padding_index = std::nullopt,
@@ -930,14 +967,18 @@ class Expression {
         return scaledDotProductAttention(q, k, v, bias, q_seq_len, kv_seq_len, std::move(options));
     }
 
+    [[nodiscard]] static Expression conv1d(const Expression& input,
+                                           const Expression& filter,
+                                           ConvolutionSpatial1d spatial = {},
+                                           std::optional<DataType> compute_dtype = std::nullopt,
+                                           std::optional<DataType> output_dtype = std::nullopt,
+                                           uint64_t groups = 1);
     [[nodiscard]] static Expression conv2d(const Expression& input,
                                            const Expression& filter,
-                                           int32_t stride_h = 1,
-                                           int32_t stride_w = 1,
-                                           int32_t pad_h = 0,
-                                           int32_t pad_w = 0,
+                                           ConvolutionSpatial2d spatial,
                                            std::optional<DataType> compute_dtype = std::nullopt,
-                                           std::optional<DataType> output_dtype = std::nullopt);
+                                           std::optional<DataType> output_dtype = std::nullopt,
+                                           uint64_t groups = 1);
     [[nodiscard]] static Expression conv3d(const Expression& input,
                                            const Expression& filter,
                                            int32_t stride_d = 1,
@@ -947,7 +988,8 @@ class Expression {
                                            int32_t pad_h = 0,
                                            int32_t pad_w = 0,
                                            std::optional<DataType> compute_dtype = std::nullopt,
-                                           std::optional<DataType> output_dtype = std::nullopt);
+                                           std::optional<DataType> output_dtype = std::nullopt,
+                                           uint64_t groups = 1);
 
     [[nodiscard]] Expression reduction(ExprOp op,
                                        const std::vector<uint64_t>& reduction_axes,

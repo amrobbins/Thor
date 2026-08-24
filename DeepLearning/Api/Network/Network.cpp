@@ -1235,12 +1235,15 @@ void Network::appendRaggedNetworkBoundaryJson(json& modelJson) const {
         modelJson["ragged_network_inputs"] = json::array();
         for (const auto& [name, record] : raggedNetworkInputs) {
             (void)name;
-            modelJson["ragged_network_inputs"].push_back(json{{"version", "1.0.0"},
-                                                             {"name", record.name},
-                                                             {"values_input_name", record.valuesInputName},
-                                                             {"offsets_input_name", record.offsetsInputName},
-                                                             {"values_tensor_id", record.raggedTensor.getValues().getId()},
-                                                             {"offsets_tensor_id", record.raggedTensor.getOffsets().getId()}});
+            json entry{{"version", "1.1.0"},
+                       {"name", record.name},
+                       {"values_input_name", record.valuesInputName},
+                       {"offsets_input_name", record.offsetsInputName},
+                       {"values_tensor_id", record.raggedTensor.getValues().getId()},
+                       {"offsets_tensor_id", record.raggedTensor.getOffsets().getId()}};
+            if (record.raggedTensor.hasMaxValuesPerRow())
+                entry["max_values_per_row"] = record.raggedTensor.getMaxValuesPerRow();
+            modelJson["ragged_network_inputs"].push_back(std::move(entry));
         }
     }
 
@@ -1248,12 +1251,15 @@ void Network::appendRaggedNetworkBoundaryJson(json& modelJson) const {
         modelJson["ragged_network_outputs"] = json::array();
         for (const auto& [name, record] : raggedNetworkOutputs) {
             (void)name;
-            modelJson["ragged_network_outputs"].push_back(json{{"version", "1.0.0"},
-                                                              {"name", record.name},
-                                                              {"values_output_name", record.valuesOutputName},
-                                                              {"offsets_output_name", record.offsetsOutputName},
-                                                              {"values_tensor_id", record.raggedTensor.getValues().getId()},
-                                                              {"offsets_tensor_id", record.raggedTensor.getOffsets().getId()}});
+            json entry{{"version", "1.1.0"},
+                       {"name", record.name},
+                       {"values_output_name", record.valuesOutputName},
+                       {"offsets_output_name", record.offsetsOutputName},
+                       {"values_tensor_id", record.raggedTensor.getValues().getId()},
+                       {"offsets_tensor_id", record.raggedTensor.getOffsets().getId()}};
+            if (record.raggedTensor.hasMaxValuesPerRow())
+                entry["max_values_per_row"] = record.raggedTensor.getMaxValuesPerRow();
+            modelJson["ragged_network_outputs"].push_back(std::move(entry));
         }
     }
 }
@@ -1387,8 +1393,9 @@ void Network::load(const string &directory,
             throw runtime_error("\"ragged_network_inputs\" is not a JSON array");
         }
         for (const json& raggedInputJson : raggedInputs) {
-            if (raggedInputJson.at("version").get<string>() != "1.0.0") {
-                throw runtime_error("Unsupported ragged_network_inputs version: " + raggedInputJson.at("version").get<string>());
+            const string raggedInputVersion = raggedInputJson.at("version").get<string>();
+            if (raggedInputVersion != "1.0.0" && raggedInputVersion != "1.1.0") {
+                throw runtime_error("Unsupported ragged_network_inputs version: " + raggedInputVersion);
             }
             const string name = raggedInputJson.at("name").get<string>();
             const string valuesInputName = raggedInputJson.at("values_input_name").get<string>();
@@ -1397,7 +1404,10 @@ void Network::load(const string &directory,
             const uint64_t offsetsTensorId = raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
             Tensor values = getApiTensorByOriginalId(valuesTensorId);
             Tensor offsets = getApiTensorByOriginalId(offsetsTensorId);
-            registerRaggedNetworkInput(name, RaggedTensor(values, offsets), valuesInputName, offsetsInputName);
+            RaggedTensor raggedTensor = raggedInputJson.contains("max_values_per_row")
+                ? RaggedTensor(values, offsets, raggedInputJson.at("max_values_per_row").get<uint64_t>())
+                : RaggedTensor(values, offsets);
+            registerRaggedNetworkInput(name, raggedTensor, valuesInputName, offsetsInputName);
         }
     }
 
@@ -1408,8 +1418,9 @@ void Network::load(const string &directory,
             throw runtime_error("\"ragged_network_outputs\" is not a JSON array");
         }
         for (const json& raggedOutputJson : raggedOutputs) {
-            if (raggedOutputJson.at("version").get<string>() != "1.0.0") {
-                throw runtime_error("Unsupported ragged_network_outputs version: " + raggedOutputJson.at("version").get<string>());
+            const string raggedOutputVersion = raggedOutputJson.at("version").get<string>();
+            if (raggedOutputVersion != "1.0.0" && raggedOutputVersion != "1.1.0") {
+                throw runtime_error("Unsupported ragged_network_outputs version: " + raggedOutputVersion);
             }
             const string name = raggedOutputJson.at("name").get<string>();
             const string valuesOutputName = raggedOutputJson.at("values_output_name").get<string>();
@@ -1420,7 +1431,10 @@ void Network::load(const string &directory,
 
             Tensor values = getApiTensorByOriginalId(valuesTensorId);
             Tensor offsets = getApiTensorByOriginalId(offsetsTensorId);
-            registerRaggedNetworkOutput(name, RaggedTensor(values, offsets), valuesOutputName, offsetsOutputName);
+            RaggedTensor raggedTensor = raggedOutputJson.contains("max_values_per_row")
+                ? RaggedTensor(values, offsets, raggedOutputJson.at("max_values_per_row").get<uint64_t>())
+                : RaggedTensor(values, offsets);
+            registerRaggedNetworkOutput(name, raggedTensor, valuesOutputName, offsetsOutputName);
         }
     }
 }

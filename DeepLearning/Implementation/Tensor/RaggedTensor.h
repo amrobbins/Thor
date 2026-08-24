@@ -7,6 +7,7 @@
 #include "Utilities/TensorOperations/Ragged/RuntimeExtent.h"
 
 #include <utility>
+#include <vector>
 
 namespace ThorImplementation {
 
@@ -56,6 +57,8 @@ class RaggedTensor {
     DataType getOffsetsDataType() const { return getRowPartitionRuntime().getOffsetsDataType(); }
     uint64_t getBatchSize() const { return getRowPartitionRuntime().getBatchSize(); }
     uint64_t getMaxTotalValues() const { return getRowPartitionRuntime().getMaxTotalValues(); }
+    bool hasMaxValuesPerRow() const { return getRowPartitionRuntime().hasMaxValuesPerRow(); }
+    uint64_t getMaxValuesPerRow() const { return getRowPartitionRuntime().getMaxValuesPerRow(); }
     uint32_t getRaggedRank() const { return getDescriptor().getRaggedRank(); }
     TensorPlacement getPlacement() const {
         THOR_THROW_IF_FALSE(initialized);
@@ -63,6 +66,12 @@ class RaggedTensor {
     }
 
     [[nodiscard]] std::optional<uint64_t> getHostActiveValueCountIfAvailable() const;
+    [[nodiscard]] std::optional<uint64_t> getHostMaxActiveRowLengthIfAvailable() const {
+        return getRowPartitionRuntime().getHostMaxActiveRowLengthIfAvailable();
+    }
+    [[nodiscard]] std::optional<std::vector<uint64_t>> getHostOffsetsIfAvailable() const {
+        return getRowPartitionRuntime().getHostOffsetsIfAvailable();
+    }
     RaggedRuntimeExtent getRuntimeExtent() const;
     RaggedRuntimeExtent getRuntimeExtent(uint64_t elementsPerValue) const;
 

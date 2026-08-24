@@ -1,5 +1,6 @@
 from .._thor.training import DatasetInputBindings
 from .._thor.training import DeviceDatasetStorageReport
+from .._thor.training import WindowedDeviceCacheReport
 from .._thor.training import EarlyCompletionPolicy
 from .._thor.training import EarlyCompletionRule
 from .._thor.training import GradientClearPolicy
@@ -39,6 +40,7 @@ from ._kfold import training_runs_from_k_fold_split
 __all__ = [
     "DatasetInputBindings",
     "DeviceDatasetStorageReport",
+    "WindowedDeviceCacheReport",
     "EarlyCompletionPolicy",
     "EarlyCompletionRule",
     "GradientClearPolicy",

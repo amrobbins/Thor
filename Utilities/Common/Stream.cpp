@@ -71,6 +71,16 @@ struct Stream::HostFunctionFailureState {
 };
 
 struct Stream::State {
+    struct PersistingL2AccessPolicyState {
+        const void *base = nullptr;
+        uint64_t bytes = 0;
+        float hitRatio = 0.0f;
+        uint64_t sourceIdentity = 0;
+        uint64_t policyGeneration = 0;
+
+        bool operator==(const PersistingL2AccessPolicyState &rhs) const = default;
+    };
+
     State(int gpuNum, uint64_t id) : gpuNum(gpuNum), id(id) {}
 
     ~State() noexcept {
@@ -131,6 +141,13 @@ struct Stream::State {
 
     mutex libraryHandleMutex;
     HostFunctionFailureState hostFunctionFailureState;
+
+    // Access-policy-window configuration is host-side stream state. Stream
+    // handles are copyable and share State, so cache it here rather than in a
+    // particular caller such as NetworkInput. The mutex keeps concurrent
+    // handles from racing the CUDA attribute update and the cached key.
+    mutex persistingL2AccessPolicyMutex;
+    optional<PersistingL2AccessPolicyState> persistingL2AccessPolicy;
 
     uint64_t id;
     bool processLifetime = false;
@@ -369,6 +386,63 @@ cudnnHandle_t Stream::getCudnnHandle() const {
 cudaStream_t Stream::getStream() const {
     THOR_THROW_IF_FALSE(!uninitialized());
     return state->cudaStream;
+}
+
+ThorImplementation::PersistingL2OperationResult Stream::trySetPersistingL2AccessPolicyWindow(
+    const void *base,
+    uint64_t bytes,
+    float hitRatio,
+    uint64_t sourceIdentity,
+    uint64_t policyGeneration) const {
+    if (uninitialized()) {
+        return ThorImplementation::PersistingL2OperationResult{
+            .status = ThorImplementation::PersistingL2OperationStatus::INVALID_ARGUMENT,
+            .cuda_status = cudaErrorInvalidResourceHandle,
+            .detail = "Stream is uninitialized",
+        };
+    }
+
+    const State::PersistingL2AccessPolicyState requested{
+        .base = base,
+        .bytes = bytes,
+        .hitRatio = hitRatio,
+        .sourceIdentity = sourceIdentity,
+        .policyGeneration = policyGeneration,
+    };
+
+    lock_guard<mutex> lock(state->persistingL2AccessPolicyMutex);
+    if (state->persistingL2AccessPolicy.has_value() &&
+        state->persistingL2AccessPolicy.value() == requested) {
+        return ThorImplementation::PersistingL2OperationResult{};
+    }
+
+    ThorImplementation::PersistingL2OperationResult result =
+        ThorImplementation::trySetPersistingL2AccessPolicyWindow(
+            state->gpuNum, state->cudaStream, base, bytes, hitRatio);
+    if (result.succeeded())
+        state->persistingL2AccessPolicy = requested;
+    return result;
+}
+
+ThorImplementation::PersistingL2OperationResult Stream::tryClearPersistingL2AccessPolicyWindow() const {
+    if (uninitialized()) {
+        return ThorImplementation::PersistingL2OperationResult{
+            .status = ThorImplementation::PersistingL2OperationStatus::INVALID_ARGUMENT,
+            .cuda_status = cudaErrorInvalidResourceHandle,
+            .detail = "Stream is uninitialized",
+        };
+    }
+
+    lock_guard<mutex> lock(state->persistingL2AccessPolicyMutex);
+    if (!state->persistingL2AccessPolicy.has_value())
+        return ThorImplementation::PersistingL2OperationResult{};
+
+    ThorImplementation::PersistingL2OperationResult result =
+        ThorImplementation::tryClearPersistingL2AccessPolicyWindow(
+            state->gpuNum, state->cudaStream);
+    if (result.succeeded())
+        state->persistingL2AccessPolicy.reset();
+    return result;
 }
 
 cublasHandle_t Stream::getCublasHandle() const {

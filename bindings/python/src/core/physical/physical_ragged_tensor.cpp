@@ -14,6 +14,10 @@ void bind_physical_ragged_tensor(nb::module_& physical) {
     ragged.def_prop_ro("offsets", &ThorImplementation::RaggedTensor::getOffsets);
     ragged.def_prop_ro("batch_size", &ThorImplementation::RaggedTensor::getBatchSize);
     ragged.def_prop_ro("max_total_values", &ThorImplementation::RaggedTensor::getMaxTotalValues);
+    ragged.def_prop_ro("max_values_per_row", [](const ThorImplementation::RaggedTensor& value) -> nb::object {
+        if (!value.hasMaxValuesPerRow()) return nb::none();
+        return nb::int_(value.getMaxValuesPerRow());
+    });
     ragged.def_prop_ro("values_data_type", &ThorImplementation::RaggedTensor::getValuesDataType);
     ragged.def_prop_ro("offsets_data_type", &ThorImplementation::RaggedTensor::getOffsetsDataType);
     ragged.def("get_values", &ThorImplementation::RaggedTensor::getValues);

@@ -3,12 +3,15 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 
+#include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
 using ThorImplementation::DataType;
 using ThorImplementation::RaggedTensor;
 using ThorImplementation::RaggedTensorDescriptor;
+using ThorImplementation::RowPartitionRuntime;
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorDescriptor;
 using ThorImplementation::TensorPlacement;
@@ -65,11 +68,13 @@ class CompactResidentFieldMaterializer final : public Thor::DeviceBatchMateriali
         std::shared_ptr<const DeviceResidentNamedDataset> dataset,
         std::string fieldName,
         std::shared_ptr<const DeviceResidentFileSelectionState> selection,
-        TensorDescriptor outputDescriptor)
+        TensorDescriptor outputDescriptor,
+        std::shared_ptr<const Thor::DeviceWindowL2CacheLease> l2CacheLease)
         : dataset(std::move(dataset)),
           fieldName(std::move(fieldName)),
           selection(std::move(selection)),
-          outputDescriptor(std::move(outputDescriptor)) {
+          outputDescriptor(std::move(outputDescriptor)),
+          l2CacheLease(std::move(l2CacheLease)) {
         THOR_THROW_IF_FALSE(this->dataset != nullptr);
         THOR_THROW_IF_FALSE(this->dataset->hasCompactField(this->fieldName));
         THOR_THROW_IF_FALSE(!this->dataset->hasCompactRaggedField(this->fieldName));
@@ -79,6 +84,20 @@ class CompactResidentFieldMaterializer final : public Thor::DeviceBatchMateriali
 
     TensorDescriptor getOutputDescriptor() const override { return outputDescriptor; }
     TensorPlacement getOutputPlacement() const override { return dataset->getPlacement(); }
+
+    std::optional<Thor::DeviceBatchAccessPolicy> getAccessPolicy() const override {
+        if (l2CacheLease == nullptr) return std::nullopt;
+        const Thor::DeviceWindowL2CacheLeaseSnapshot snapshot = l2CacheLease->snapshot();
+        if (!snapshot.active()) return std::nullopt;
+        return Thor::DeviceBatchAccessPolicy{
+            .deviceNum = snapshot.deviceNum,
+            .tensorId = snapshot.tensorId,
+            .base = snapshot.base,
+            .bytes = snapshot.bytes,
+            .persistingHitRatio = snapshot.hitRatio,
+            .generation = snapshot.generation,
+        };
+    }
 
     void enqueueMaterialization(
         Tensor &destination,
@@ -100,6 +119,7 @@ class CompactResidentFieldMaterializer final : public Thor::DeviceBatchMateriali
     std::string fieldName;
     std::shared_ptr<const DeviceResidentFileSelectionState> selection;
     TensorDescriptor outputDescriptor;
+    std::shared_ptr<const Thor::DeviceWindowL2CacheLease> l2CacheLease;
 };
 
 uint64_t batchesFor(uint64_t numExamples, uint64_t batchSize) {
@@ -273,6 +293,8 @@ DeviceResidentFileNamedBatchSession::DeviceResidentFileNamedBatchSession(
         }
     }
 
+    initializeWindowL2CacheLeases();
+
     initializeSplit(ExampleType::TRAIN, splits.getSharedTrain(),
                     this->sessionDescription.getBatching().getRandomizeTrain(),
                     this->sessionDescription.getBatching().getRandomSeed());
@@ -304,6 +326,172 @@ void DeviceResidentFileNamedBatchSession::cancel() {
     if (cancelled.exchange(true, std::memory_order_acq_rel)) return;
     for (auto &entry : splitRuntimes) {
         if (entry.second != nullptr) entry.second->notEmpty.notify_all();
+    }
+}
+
+void DeviceResidentFileNamedBatchSession::initializeWindowL2CacheLeases() {
+    THOR_THROW_IF_FALSE(residentDataset);
+    const TensorPlacement placement = residentDataset->getPlacement();
+    THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
+    const int deviceNum = placement.getDeviceNum();
+    const Thor::WindowedDeviceCache policy = sessionDescription.getWindowedDeviceCache();
+
+    windowedDeviceCacheReport = Thor::WindowedDeviceCacheReport{};
+    windowedDeviceCacheReport.requested = policy;
+
+    std::map<uint64_t, DeviceResidentNamedDataset::CompactWindowSourceAccess>
+        uniqueSources;
+    auto addWindowSourceForField = [&](const std::string &fieldName) {
+        const std::optional<DeviceResidentNamedDataset::CompactWindowSourceAccess> access =
+            residentDataset->compactWindowSourceAccessForField(fieldName);
+        if (!access.has_value()) return;
+        uniqueSources.emplace(access->tensorId, access.value());
+    };
+    for (const std::string &fieldName : residentReferenceFieldNames) {
+        addWindowSourceForField(fieldName);
+    }
+    for (const std::string &fieldName : raggedFieldNames) {
+        addWindowSourceForField(fieldName);
+    }
+
+    windowedDeviceCacheReport.eligibleSources =
+        static_cast<uint64_t>(uniqueSources.size());
+    for (const auto &[tensorId, access] : uniqueSources) {
+        (void)tensorId;
+        if (windowedDeviceCacheReport.eligibleSourceBytes >
+            std::numeric_limits<uint64_t>::max() - access.bytes) {
+            windowedDeviceCacheReport.eligibleSourceBytes =
+                std::numeric_limits<uint64_t>::max();
+        } else {
+            windowedDeviceCacheReport.eligibleSourceBytes += access.bytes;
+        }
+    }
+    if (uniqueSources.empty()) {
+        // Ordinary ragged fields and ordinary device tensors are not part of
+        // the window-source persisting-L2 policy.
+        return;
+    }
+    if (policy == Thor::WindowedDeviceCache::OFF) {
+        windowedDeviceCacheReport.reason = "disabled_by_policy";
+        return;
+    }
+
+    windowedDeviceCacheReport.attempted = true;
+    std::string firstFailureReason;
+    auto statusReason = [](Thor::DeviceWindowL2CacheLeaseStatus status) {
+        switch (status) {
+            case Thor::DeviceWindowL2CacheLeaseStatus::ACTIVE:
+                return std::string("enabled");
+            case Thor::DeviceWindowL2CacheLeaseStatus::UNSUPPORTED:
+                return std::string("unsupported");
+            case Thor::DeviceWindowL2CacheLeaseStatus::SOURCE_TOO_LARGE:
+                return std::string("source_too_large");
+            case Thor::DeviceWindowL2CacheLeaseStatus::INVALID_ARGUMENT:
+                return std::string("invalid_argument");
+            case Thor::DeviceWindowL2CacheLeaseStatus::CUDA_ERROR:
+                return std::string("cuda_error");
+        }
+        return std::string("unknown");
+    };
+
+    for (const auto &[tensorId, access] : uniqueSources) {
+        Thor::DeviceWindowL2CacheLease lease =
+            Thor::DeviceWindowL2CacheManager::instance().acquire(
+                Thor::DeviceWindowL2CacheSource{
+                    .deviceNum = deviceNum,
+                    .tensorId = tensorId,
+                    .base = access.base,
+                    .bytes = access.bytes,
+                });
+        const Thor::DeviceWindowL2CacheLeaseSnapshot snapshot = lease.snapshot();
+        if (!snapshot.active()) {
+            if (firstFailureReason.empty()) {
+                firstFailureReason = statusReason(snapshot.status);
+            }
+            if (policy == Thor::WindowedDeviceCache::REQUIRED) {
+                std::string message =
+                    "Required persisting-L2 cache could not be enabled for compact window source '" +
+                    access.sourceName + "': " + firstFailureReason;
+                if (!snapshot.detail.empty()) message += ": " + snapshot.detail;
+                throw Thor::WindowedDeviceCacheRequiredError(message);
+            }
+            continue;
+        }
+        windowL2CacheLeases.emplace(
+            tensorId,
+            std::make_shared<Thor::DeviceWindowL2CacheLease>(std::move(lease)));
+    }
+
+    const Thor::DeviceWindowL2CacheManager::Telemetry telemetry =
+        Thor::DeviceWindowL2CacheManager::instance().telemetry(deviceNum);
+    windowedDeviceCacheReport.budgetBytes = telemetry.budgetBytes;
+    windowedDeviceCacheReport.maxAccessPolicyWindowBytes =
+        telemetry.maxAccessPolicyWindowBytes;
+    windowedDeviceCacheReport.activeUniqueBytes = telemetry.activeUniqueBytes;
+
+    float minHitRatio = 1.0f;
+    for (const auto &[tensorId, lease] : windowL2CacheLeases) {
+        (void)tensorId;
+        const Thor::DeviceWindowL2CacheLeaseSnapshot snapshot = lease->snapshot();
+        if (!snapshot.active()) continue;
+        ++windowedDeviceCacheReport.activeSources;
+        minHitRatio = std::min(minHitRatio, snapshot.hitRatio);
+    }
+    windowedDeviceCacheReport.used = windowedDeviceCacheReport.activeSources != 0;
+    windowedDeviceCacheReport.hitRatio =
+        windowedDeviceCacheReport.used ? minHitRatio : 0.0f;
+    if (windowedDeviceCacheReport.activeSources ==
+        windowedDeviceCacheReport.eligibleSources) {
+        windowedDeviceCacheReport.reason = "enabled";
+    } else if (windowedDeviceCacheReport.activeSources != 0) {
+        windowedDeviceCacheReport.reason =
+            firstFailureReason.empty() ? "partial"
+                                       : "partial_" + firstFailureReason;
+    } else {
+        windowedDeviceCacheReport.reason =
+            firstFailureReason.empty() ? "unavailable" : firstFailureReason;
+    }
+}
+
+std::shared_ptr<const Thor::DeviceWindowL2CacheLease>
+DeviceResidentFileNamedBatchSession::windowL2CacheLeaseForField(
+    const std::string &fieldName) const {
+    const std::optional<DeviceResidentNamedDataset::CompactWindowSourceAccess> access =
+        residentDataset->compactWindowSourceAccessForField(fieldName);
+    if (!access.has_value()) return nullptr;
+    const auto found = windowL2CacheLeases.find(access->tensorId);
+    if (found == windowL2CacheLeases.end()) return nullptr;
+    return found->second;
+}
+
+void DeviceResidentFileNamedBatchSession::applyWindowL2CachePolicyForField(
+    const std::string &fieldName,
+    Stream &stream) const {
+    const std::shared_ptr<const Thor::DeviceWindowL2CacheLease> lease =
+        windowL2CacheLeaseForField(fieldName);
+    if (lease == nullptr) {
+        (void)stream.tryClearPersistingL2AccessPolicyWindow();
+        return;
+    }
+
+    const Thor::DeviceWindowL2CacheLeaseSnapshot snapshot = lease->snapshot();
+    if (!snapshot.active() || snapshot.deviceNum != stream.getGpuNum()) {
+        (void)stream.tryClearPersistingL2AccessPolicyWindow();
+        return;
+    }
+
+    const ThorImplementation::PersistingL2OperationResult result =
+        stream.trySetPersistingL2AccessPolicyWindow(
+            snapshot.base,
+            snapshot.bytes,
+            snapshot.hitRatio,
+            snapshot.tensorId,
+            snapshot.generation);
+    if (!result.succeeded()) {
+        // Persisting L2 is an optimization. Never let a late stream-attribute
+        // failure invalidate an otherwise valid device-resident batch, and do
+        // not leave a stale policy from a previously gathered source active.
+        (void)stream.tryClearPersistingL2AccessPolicyWindow();
     }
 }
 
@@ -387,7 +575,8 @@ DeviceResidentFileNamedBatchSession::allocateRaggedSlot(uint64_t slotIndex) cons
         const RaggedTensorDescriptor &descriptor = requirement.raggedTensorDescriptor.value();
         Tensor values(residentDataset->getPlacement(), descriptor.getValuesDescriptor());
         Tensor offsets(residentDataset->getPlacement(), descriptor.getOffsetsDescriptor());
-        slot->raggedTensors.emplace(field.name, RaggedTensor(values, offsets));
+        RowPartitionRuntime rowPartition(offsets, descriptor.getRowPartition());
+        slot->raggedTensors.emplace(field.name, RaggedTensor(values, rowPartition));
     }
     return slot;
 }
@@ -556,14 +745,15 @@ Batch DeviceResidentFileNamedBatchSession::acquireBatch(
                 const Thor::DatasetField &field = datasetDescription.schema.getField(fieldName);
                 const RaggedTensorDescriptor &descriptor =
                     fieldRequirements.at(field.id).raggedTensorDescriptor.value();
-                const uint64_t activeRows = residentDataset->validateCompactRaggedBatchCapacity(
+                const RaggedBatchExtent extent = residentDataset->validateCompactRaggedBatchCapacity(
                     fieldName,
                     selectionSlot->state->rowIndicesHost,
                     validExampleCount,
-                    descriptor.getMaxTotalValues());
-                raggedSlot->raggedTensors.at(fieldName)
-                    .getRowPartitionRuntime()
-                    .setHostActiveValueCount(activeRows);
+                    descriptor.getMaxTotalValues(),
+                    descriptor.getMaxValuesPerRowOrZero());
+                RowPartitionRuntime& rowPartition = raggedSlot->raggedTensors.at(fieldName).getRowPartitionRuntime();
+                rowPartition.setHostActiveValueCount(extent.activeValueCount);
+                rowPartition.setHostMaxActiveRowLength(extent.maxActiveRowLength);
             }
         }
 
@@ -576,6 +766,7 @@ Batch DeviceResidentFileNamedBatchSession::acquireBatch(
             runtime.raggedGatherStream.waitEvent(selectionSlot->state->rowsReadyEvent);
             for (const std::string &fieldName : raggedFieldNames) {
                 RaggedTensor &ragged = raggedSlot->raggedTensors.at(fieldName);
+                applyWindowL2CachePolicyForField(fieldName, runtime.raggedGatherStream);
                 residentDataset->enqueueCompactRaggedFieldMaterialization(
                     fieldName,
                     selectionSlot->state->rowIndicesDevice,
@@ -600,7 +791,11 @@ Batch DeviceResidentFileNamedBatchSession::acquireBatch(
             }
             std::shared_ptr<const Thor::DeviceBatchMaterializer> materializer =
                 std::make_shared<CompactResidentFieldMaterializer>(
-                    residentDataset.getShared(), spec.name, selectionSlot->state, outputDescriptor);
+                    residentDataset.getShared(),
+                    spec.name,
+                    selectionSlot->state,
+                    outputDescriptor,
+                    windowL2CacheLeaseForField(spec.name));
             batch.insert(
                 spec.name,
                 Thor::DeviceBatchReference(

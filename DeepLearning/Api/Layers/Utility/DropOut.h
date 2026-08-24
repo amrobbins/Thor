@@ -131,7 +131,7 @@ class DropOut::Builder {
         dropOut.featureOutput = _featureInput.value().clone();
         if (_raggedFeatureInput.has_value()) {
             dropOut.raggedFeatureInput = _raggedFeatureInput.value();
-            dropOut.raggedFeatureOutput = RaggedTensor(dropOut.featureOutput.value(), _raggedFeatureInput->getOffsets());
+            dropOut.raggedFeatureOutput = _raggedFeatureInput->withValues(dropOut.featureOutput.value());
         }
         dropOut.dropProportion = _dropProportion.value();
         dropOut.initialized = true;

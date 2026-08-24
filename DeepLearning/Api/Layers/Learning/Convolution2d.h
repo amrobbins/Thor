@@ -14,6 +14,7 @@
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution2d.h"
 #include "Utilities/Exceptions.h"
+#include "Utilities/Expression/ConvolutionSpatial.h"
 #include <optional>
 #include <set>
 #include <string>
@@ -21,6 +22,12 @@
 #include <unordered_map>
 
 namespace Thor {
+
+enum class ConvolutionPaddingMode {
+    VALID,
+    SAME_UPPER,
+    EXPLICIT,
+};
 
 class Convolution2d : public TrainableLayer {
    public:
@@ -36,12 +43,19 @@ class Convolution2d : public TrainableLayer {
 
     virtual uint32_t getFilterHeight() { return filterHeight; }
     virtual uint32_t getFilterWidth() { return filterWidth; }
-    virtual uint32_t getVerticalStride() { return verticalStride; }
-    virtual uint32_t getHorizontalStride() { return horizontalStride; }
-    virtual uint32_t getVerticalPadding() { return verticalPadding; }
-    virtual uint32_t getHoriztonalPadding() { return horizontalPadding; }
+    virtual uint32_t getGroups() const { return groups; }
+    virtual uint32_t getVerticalStride() { return static_cast<uint32_t>(spatial.stride_h); }
+    virtual uint32_t getHorizontalStride() { return static_cast<uint32_t>(spatial.stride_w); }
+    virtual uint32_t getVerticalDilation() { return static_cast<uint32_t>(spatial.dilation_h); }
+    virtual uint32_t getHorizontalDilation() { return static_cast<uint32_t>(spatial.dilation_w); }
+    virtual uint32_t getPaddingTop() { return static_cast<uint32_t>(spatial.pre_padding_h); }
+    virtual uint32_t getPaddingBottom() { return static_cast<uint32_t>(spatial.post_padding_h); }
+    virtual uint32_t getPaddingLeft() { return static_cast<uint32_t>(spatial.pre_padding_w); }
+    virtual uint32_t getPaddingRight() { return static_cast<uint32_t>(spatial.post_padding_w); }
+    virtual ConvolutionPaddingMode getPaddingMode() const { return paddingMode; }
 
     std::string getLayerType() const override { return "Convolution2d"; }
+    std::string getLayerVersion() const override { return "4.0.0"; }
 
     nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                              Stream stream,
@@ -163,10 +177,9 @@ class Convolution2d : public TrainableLayer {
     uint32_t numOutputChannels;
     uint32_t filterHeight;
     uint32_t filterWidth;
-    uint32_t verticalStride;
-    uint32_t horizontalStride;
-    uint32_t verticalPadding;
-    uint32_t horizontalPadding;
+    uint32_t groups = 1;
+    ThorImplementation::ConvolutionSpatial2d spatial;
+    ConvolutionPaddingMode paddingMode = ConvolutionPaddingMode::VALID;
     bool hasBias;
     std::shared_ptr<Initializer> weightsInitializer;
     std::shared_ptr<Initializer> biasInitializer;
@@ -210,14 +223,15 @@ class Convolution2d::Builder {
             _verticalStride = 1;
         if (!_horizontalStride.has_value())
             _horizontalStride = 1;
-        if (!_verticalPadding.has_value())
-            _computeVerticalSamePadding = true;
-        else if (!_computeVerticalSamePadding.has_value())
-            _computeVerticalSamePadding = false;
-        if (!_horizontalPadding.has_value())
-            _computeHorizontalSamePadding = true;
-        else if (!_computeHorizontalSamePadding.has_value())
-            _computeHorizontalSamePadding = false;
+        if (!_verticalDilation.has_value())
+            _verticalDilation = 1;
+        if (!_horizontalDilation.has_value())
+            _horizontalDilation = 1;
+        if (!_groups.has_value())
+            _groups = 1;
+        // Unspecified padding is VALID/no padding. SAME and EXPLICIT must be requested explicitly.
+        if (!_paddingMode.has_value())
+            _paddingMode = ConvolutionPaddingMode::VALID;
         if (!_hasBias.has_value())
             _hasBias = false;
         if (_weightsInitializer == nullptr)
@@ -248,34 +262,56 @@ class Convolution2d::Builder {
         convolution2d.numOutputChannels = _numOutputChannels.value();
         convolution2d.filterHeight = _filterHeight.value();
         convolution2d.filterWidth = _filterWidth.value();
-        convolution2d.verticalStride = _verticalStride.value();
-        convolution2d.horizontalStride = _horizontalStride.value();
-        if (_computeVerticalSamePadding.value()) {
-            THOR_THROW_IF_FALSE(convolution2d.verticalStride == 1);
-            convolution2d.verticalPadding = computeSamePadding(
-                convolution2d.featureInputs[0].getDimensions()[1], convolution2d.verticalStride, convolution2d.filterHeight);
-        } else {
-            convolution2d.verticalPadding = _verticalPadding.value();
+        convolution2d.groups = _groups.value();
+        convolution2d.spatial.stride_h = static_cast<int32_t>(_verticalStride.value());
+        convolution2d.spatial.stride_w = static_cast<int32_t>(_horizontalStride.value());
+        convolution2d.spatial.dilation_h = static_cast<int32_t>(_verticalDilation.value());
+        convolution2d.spatial.dilation_w = static_cast<int32_t>(_horizontalDilation.value());
+        convolution2d.paddingMode = _paddingMode.value();
+        switch (convolution2d.paddingMode) {
+            case ConvolutionPaddingMode::VALID:
+                convolution2d.spatial.pre_padding_h = 0;
+                convolution2d.spatial.post_padding_h = 0;
+                convolution2d.spatial.pre_padding_w = 0;
+                convolution2d.spatial.post_padding_w = 0;
+                break;
+            case ConvolutionPaddingMode::SAME_UPPER: {
+                const auto [paddingTop, paddingBottom] =
+                    computeSamePadding(convolution2d.featureInputs[0].getDimensions()[1],
+                                       static_cast<uint32_t>(convolution2d.spatial.stride_h),
+                                       convolution2d.filterHeight,
+                                       static_cast<uint32_t>(convolution2d.spatial.dilation_h));
+                const auto [paddingLeft, paddingRight] =
+                    computeSamePadding(convolution2d.featureInputs[0].getDimensions()[2],
+                                       static_cast<uint32_t>(convolution2d.spatial.stride_w),
+                                       convolution2d.filterWidth,
+                                       static_cast<uint32_t>(convolution2d.spatial.dilation_w));
+                convolution2d.spatial.pre_padding_h = static_cast<int32_t>(paddingTop);
+                convolution2d.spatial.post_padding_h = static_cast<int32_t>(paddingBottom);
+                convolution2d.spatial.pre_padding_w = static_cast<int32_t>(paddingLeft);
+                convolution2d.spatial.post_padding_w = static_cast<int32_t>(paddingRight);
+                break;
+            }
+            case ConvolutionPaddingMode::EXPLICIT:
+                convolution2d.spatial.pre_padding_h = static_cast<int32_t>(_paddingTop.value());
+                convolution2d.spatial.post_padding_h = static_cast<int32_t>(_paddingBottom.value());
+                convolution2d.spatial.pre_padding_w = static_cast<int32_t>(_paddingLeft.value());
+                convolution2d.spatial.post_padding_w = static_cast<int32_t>(_paddingRight.value());
+                break;
         }
-        if (_computeHorizontalSamePadding.value()) {
-            THOR_THROW_IF_FALSE(convolution2d.horizontalStride == 1);
-            convolution2d.horizontalPadding = computeSamePadding(
-                convolution2d.featureInputs[0].getDimensions()[2], convolution2d.horizontalStride, convolution2d.filterWidth);
-        } else {
-            convolution2d.horizontalPadding = _horizontalPadding.value();
-        }
-
-        THOR_THROW_IF_FALSE(convolution2d.verticalPadding < convolution2d.filterHeight);
-        THOR_THROW_IF_FALSE(convolution2d.horizontalPadding < convolution2d.filterWidth);
 
         uint32_t outputHeight = computeOutputDimension(convolution2d.featureInputs[0].getDimensions()[1],
-                                                       convolution2d.verticalStride,
+                                                       static_cast<uint32_t>(convolution2d.spatial.stride_h),
                                                        convolution2d.filterHeight,
-                                                       convolution2d.verticalPadding);
+                                                       static_cast<uint32_t>(convolution2d.spatial.pre_padding_h),
+                                                       static_cast<uint32_t>(convolution2d.spatial.post_padding_h),
+                                                       static_cast<uint32_t>(convolution2d.spatial.dilation_h));
         uint32_t outputWidth = computeOutputDimension(convolution2d.featureInputs[0].getDimensions()[2],
-                                                      convolution2d.horizontalStride,
+                                                      static_cast<uint32_t>(convolution2d.spatial.stride_w),
                                                       convolution2d.filterWidth,
-                                                      convolution2d.horizontalPadding);
+                                                      static_cast<uint32_t>(convolution2d.spatial.pre_padding_w),
+                                                      static_cast<uint32_t>(convolution2d.spatial.post_padding_w),
+                                                      static_cast<uint32_t>(convolution2d.spatial.dilation_w));
 
         convolution2d.hasBias = _hasBias.value();
         convolution2d.weightsInitializer = _weightsInitializer->clone();
@@ -294,10 +330,15 @@ class Convolution2d::Builder {
         const DataType convolutionDataType = convolution2d.featureInputs.front().getDataType();
         const DataType weightsDataType = convolutionDataType;
         const uint64_t inputChannels = convolution2d.featureInputs.front().getDimensions()[0];
+        if (inputChannels % convolution2d.groups != 0 || convolution2d.numOutputChannels % convolution2d.groups != 0)
+            throw std::invalid_argument("Convolution2d requires input and output channels divisible by groups.");
 
         ParameterSpecification::Builder weightsParameterBuilder;
         weightsParameterBuilder.name("weights")
-            .shape({convolution2d.numOutputChannels, inputChannels, convolution2d.filterHeight, convolution2d.filterWidth})
+            .shape({convolution2d.numOutputChannels,
+                    inputChannels / convolution2d.groups,
+                    convolution2d.filterHeight,
+                    convolution2d.filterWidth})
             .dtype(weightsDataType)
             .initializer(convolution2d.weightsInitializer)
             .trainable(true);
@@ -377,6 +418,13 @@ class Convolution2d::Builder {
         return *this;
     }
 
+    virtual Convolution2d::Builder &groups(uint32_t value) {
+        THOR_THROW_IF_FALSE(value > 0);
+        THOR_THROW_IF_FALSE(!this->_groups.has_value());
+        this->_groups = value;
+        return *this;
+    }
+
     virtual Convolution2d::Builder &verticalStride(uint32_t _verticalStride) {
         THOR_THROW_IF_FALSE(_verticalStride != 0);
         THOR_THROW_IF_FALSE(!this->_verticalStride.has_value());
@@ -391,55 +439,48 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    virtual Convolution2d::Builder &verticalPadding(uint32_t _verticalPadding) {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
-        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.has_value());
-        this->_verticalPadding = _verticalPadding;
+    virtual Convolution2d::Builder &verticalDilation(uint32_t _verticalDilation) {
+        THOR_THROW_IF_FALSE(_verticalDilation != 0);
+        THOR_THROW_IF_FALSE(!this->_verticalDilation.has_value());
+        this->_verticalDilation = _verticalDilation;
         return *this;
     }
 
-    virtual Convolution2d::Builder &horizontalPadding(uint32_t _horizontalPadding) {
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
-        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.has_value());
-        this->_horizontalPadding = _horizontalPadding;
+    virtual Convolution2d::Builder &horizontalDilation(uint32_t _horizontalDilation) {
+        THOR_THROW_IF_FALSE(_horizontalDilation != 0);
+        THOR_THROW_IF_FALSE(!this->_horizontalDilation.has_value());
+        this->_horizontalDilation = _horizontalDilation;
+        return *this;
+    }
+
+    virtual Convolution2d::Builder &dilation(uint32_t dilation) {
+        THOR_THROW_IF_FALSE(dilation != 0);
+        THOR_THROW_IF_FALSE(!this->_verticalDilation.has_value());
+        THOR_THROW_IF_FALSE(!this->_horizontalDilation.has_value());
+        this->_verticalDilation = dilation;
+        this->_horizontalDilation = dilation;
+        return *this;
+    }
+
+    virtual Convolution2d::Builder &validPadding() {
+        THOR_THROW_IF_FALSE(!_paddingMode.has_value());
+        _paddingMode = ConvolutionPaddingMode::VALID;
         return *this;
     }
 
     virtual Convolution2d::Builder &samePadding() {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
-        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.has_value());
-        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.has_value());
-        this->_verticalPadding = 0;
-        this->_horizontalPadding = 0;
-        this->_computeHorizontalSamePadding = true;
-        this->_computeVerticalSamePadding = true;
+        THOR_THROW_IF_FALSE(!_paddingMode.has_value());
+        _paddingMode = ConvolutionPaddingMode::SAME_UPPER;
         return *this;
     }
 
-    virtual Convolution2d::Builder &verticalSamePadding() {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
-        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.has_value());
-        this->_verticalPadding = 0;
-        this->_computeVerticalSamePadding = true;
-        return *this;
-    }
-
-    virtual Convolution2d::Builder &horizontalSamePadding() {
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
-        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.has_value());
-        this->_horizontalPadding = 0;
-        this->_computeHorizontalSamePadding = true;
-        return *this;
-    }
-
-    virtual Convolution2d::Builder &noPadding() {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
-        THOR_THROW_IF_FALSE(!this->_computeVerticalSamePadding.has_value());
-        THOR_THROW_IF_FALSE(!this->_computeHorizontalSamePadding.has_value());
-        this->_verticalPadding = 0;
-        this->_horizontalPadding = 0;
+    virtual Convolution2d::Builder &padding(uint32_t top, uint32_t bottom, uint32_t left, uint32_t right) {
+        THOR_THROW_IF_FALSE(!_paddingMode.has_value());
+        _paddingTop = top;
+        _paddingBottom = bottom;
+        _paddingLeft = left;
+        _paddingRight = right;
+        _paddingMode = ConvolutionPaddingMode::EXPLICIT;
         return *this;
     }
 
@@ -549,23 +590,39 @@ class Convolution2d::Builder {
         return *this;
     }
 
-    static uint32_t computeOutputDimension(uint32_t inputSize, uint32_t stride, uint32_t filterSize, uint32_t padding) {
-        THOR_THROW_IF_FALSE(filterSize <= inputSize + 2 * padding);
+    static uint32_t computeOutputDimension(uint32_t inputSize,
+                                           uint32_t stride,
+                                           uint32_t filterSize,
+                                           uint32_t prePadding,
+                                           uint32_t postPadding,
+                                           uint32_t dilation = 1) {
         THOR_THROW_IF_FALSE(stride > 0);
-        return 1 + (((inputSize + 2 * padding) - filterSize) / stride);
+        THOR_THROW_IF_FALSE(dilation > 0);
+        const uint64_t effectiveFilter = static_cast<uint64_t>(dilation) * (filterSize - 1ULL) + 1ULL;
+        const uint64_t paddedInput = static_cast<uint64_t>(inputSize) + prePadding + postPadding;
+        THOR_THROW_IF_FALSE(effectiveFilter <= paddedInput);
+        return static_cast<uint32_t>(1ULL + (paddedInput - effectiveFilter) / stride);
     }
 
-    // outputSize = 1 + (((inputSize+ 2*padding) - filterSize) / filterStride);
-    // padding = ((outputSize - 1) * filterStride + filterSize - inputSize) / 2
-    // where outputSize == inputSize, so
-    // padding = ((inputSize - 1) * filterStride + filterSize - inputSize) / 2
-    // = ((filterStride-1)*inputSize - filterStride + filterSize) / 2
-    static uint32_t computeSamePadding(uint32_t inputSize, uint32_t stride, uint32_t filterSize) {
-        if (((stride - 1) * inputSize - stride + filterSize) % 2 == 1)
-            throw std::invalid_argument(
-                "Can't compute SAME padding: required total padding is odd, but this implementation requires equal padding on both sides.");
+    static std::pair<uint32_t, uint32_t> computeSamePadding(
+        uint32_t inputSize, uint32_t stride, uint32_t filterSize, uint32_t dilation = 1) {
+        THOR_THROW_IF_FALSE(inputSize > 0);
+        THOR_THROW_IF_FALSE(stride > 0);
+        THOR_THROW_IF_FALSE(filterSize > 0);
+        THOR_THROW_IF_FALSE(dilation > 0);
 
-        return ((stride - 1) * inputSize - stride + filterSize) / 2;
+        const uint64_t outputSize =
+            (static_cast<uint64_t>(inputSize) + static_cast<uint64_t>(stride) - 1ULL) / static_cast<uint64_t>(stride);
+        const uint64_t effectiveFilter =
+            static_cast<uint64_t>(dilation) * (static_cast<uint64_t>(filterSize) - 1ULL) + 1ULL;
+        const uint64_t coveredInput =
+            outputSize > 0 ? (outputSize - 1ULL) * static_cast<uint64_t>(stride) + effectiveFilter : 0ULL;
+        const uint64_t totalPadding =
+            coveredInput > static_cast<uint64_t>(inputSize) ? coveredInput - static_cast<uint64_t>(inputSize) : 0ULL;
+
+        const uint32_t prePadding = static_cast<uint32_t>(totalPadding / 2ULL);
+        const uint32_t postPadding = static_cast<uint32_t>(totalPadding - prePadding);
+        return {prePadding, postPadding};
     }
 
    private:
@@ -574,12 +631,16 @@ class Convolution2d::Builder {
     std::optional<uint32_t> _numOutputChannels;
     std::optional<uint32_t> _filterHeight;
     std::optional<uint32_t> _filterWidth;
+    std::optional<uint32_t> _groups;
     std::optional<uint32_t> _verticalStride;
     std::optional<uint32_t> _horizontalStride;
-    std::optional<bool> _computeVerticalSamePadding;
-    std::optional<bool> _computeHorizontalSamePadding;
-    std::optional<uint32_t> _verticalPadding;
-    std::optional<uint32_t> _horizontalPadding;
+    std::optional<uint32_t> _verticalDilation;
+    std::optional<uint32_t> _horizontalDilation;
+    std::optional<ConvolutionPaddingMode> _paddingMode;
+    std::optional<uint32_t> _paddingTop;
+    std::optional<uint32_t> _paddingBottom;
+    std::optional<uint32_t> _paddingLeft;
+    std::optional<uint32_t> _paddingRight;
     std::optional<bool> _hasBias;
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasesInitializer;

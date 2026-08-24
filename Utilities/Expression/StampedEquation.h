@@ -25,6 +25,7 @@
 #include "Utilities/Expression/ExecutionDiagnostics.h"
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnLayerNorm.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
@@ -270,6 +271,25 @@ struct CompiledRmsNorm {
     [[nodiscard]] CudnnRmsNormDescriptor descriptorFor(const Tensor& input, const Tensor& scale, const Tensor& output) const;
 };
 
+struct CompiledLayerNorm {
+    uint64_t normalized_feature_count = 0;
+    uint64_t packed_row_capacity = 0;
+    uint32_t ragged_offsets_input_slot = UINT32_MAX;
+    uint64_t ragged_batch_size = 0;
+    double epsilon = 1.0e-5;
+    DataType input_dtype = DataType::FP16;
+    DataType scale_dtype = DataType::FP32;
+    DataType bias_dtype = DataType::FP32;
+    DataType output_dtype = DataType::FP16;
+    DataType compute_dtype = DataType::FP32;
+    std::string debug_name = "thor_expr_layer_norm";
+
+    [[nodiscard]] CudnnLayerNormDescriptor descriptorFor(const Tensor& input,
+                                                         const Tensor& scale,
+                                                         const Tensor& bias,
+                                                         const Tensor& output) const;
+};
+
 struct CompiledRmsNormBackward {
     uint64_t normalized_feature_count = 0;
     uint64_t packed_row_capacity = 0;
@@ -397,9 +417,14 @@ struct CompiledAttentionBackward {
 struct BuiltConvolution {
     bool use_cudnn_frontend = false;
     std::shared_ptr<cudnn_frontend::graph::Graph> frontend_graph;
-    // Placement-time autotuning saves the measured execution plan and exact workspace size here.
-    // Runtime execution must use this saved plan directly rather than re-running cuDNN heuristics.
+    // Placement-time autotuning ranks candidates on a scratch graph. Thor then recreates the
+    // fastest remaining candidate exactly by (engine id, knob choices), proves that pristine graph
+    // against an independent mathematical convolution reference, and retains that same graph for
+    // runtime. A plan that has not passed correctness validation is never executable.
+    bool correctness_validated = false;
     int64_t selected_plan_index = -1;
+    int64_t selected_engine_id = -1;
+    std::vector<std::pair<int64_t, int64_t>> selected_knobs;
     size_t workspace_bytes = 0;
 
     BuiltConvolution() = default;
@@ -643,6 +668,174 @@ class StampedSegmentedBroadcast {
     Stream stream;
 };
 
+struct RaggedConv1dStageDiagnostic {
+    uint32_t stage_index = 0;
+    uint64_t active_values = 0;
+    uint64_t selected_width_capacity = 0;
+    uint64_t input_padded_value_bytes = 0;
+    uint64_t output_padded_value_bytes = 0;
+    uint64_t allocated_padded_value_bytes = 0;
+    uint64_t cudnn_workspace_bytes = 0;
+    uint64_t width_capacity_count = 0;
+    uint64_t prebuilt_cudnn_plan_count = 0;
+    // Thor never constructs im2col/unfold storage for the padded path. cuDNN's
+    // opaque execution-plan workspace is reported separately above.
+    uint64_t explicit_unfold_workspace_bytes = 0;
+};
+
+class PaddedRaggedSequence;
+struct RaggedConv1dPaddedForwardState;
+struct RaggedConv1dPaddedBackwardDataState;
+struct RaggedConv1dPaddedBackwardFilterState;
+
+// T8A representation-boundary adapters. Packing establishes the selected
+// [B,C,1,W] view and canonicalizes the entry tail to zero. Unpacking exports
+// only logical active values and never reads or writes the undefined padded tail.
+class StampedPaddedRaggedPack {
+   public:
+    StampedPaddedRaggedPack(CompiledPaddedRaggedSequenceLayout layout,
+                            std::vector<uint64_t> width_capacities,
+                            const Tensor& packed_values,
+                            std::shared_ptr<PaddedRaggedSequence> padded_values,
+                            const Stream& stream);
+
+    void run();
+    void runOn(Stream& run_stream) const;
+    uint32_t gpuNum() const { return packed_values.getPlacement().getDeviceNum(); }
+
+   private:
+    CompiledPaddedRaggedSequenceLayout layout;
+    std::vector<uint64_t> width_capacities;
+    Tensor packed_values;
+    std::shared_ptr<PaddedRaggedSequence> padded_values;
+    Stream stream;
+};
+
+class StampedPaddedRaggedUnpack {
+   public:
+    StampedPaddedRaggedUnpack(std::shared_ptr<PaddedRaggedSequence> padded_values,
+                              Tensor packed_values,
+                              const Stream& stream);
+
+    void run();
+    void runOn(Stream& run_stream) const;
+    uint32_t gpuNum() const { return packed_values.getPlacement().getDeviceNum(); }
+
+   private:
+    std::shared_ptr<PaddedRaggedSequence> padded_values;
+    mutable Tensor packed_values;
+    Stream stream;
+};
+
+// T8B retained padded-ragged valuewise execution. The compiled CUDA kernel is
+// width-generic and pre-stamped once for every placement-defined W; runtime only
+// selects the already-built invocation for the current retained region width.
+// Padded inputs preserve undefined tails; no producer-side tail canonicalization
+// is performed here.
+class StampedPaddedRaggedPointwise {
+   public:
+    StampedPaddedRaggedPointwise(std::shared_ptr<CompiledEquation> compiled,
+                                 std::vector<std::string> input_names,
+                                 std::vector<PaddedRaggedPointwiseInputAccess> input_access,
+                                 std::vector<RuntimeInputValue> static_inputs,
+                                 std::vector<std::shared_ptr<PaddedRaggedSequence>> padded_inputs,
+                                 std::vector<std::shared_ptr<PaddedRaggedSequence>> padded_outputs,
+                                 std::vector<uint64_t> width_capacities,
+                                 const Stream& stream);
+
+    void run();
+    void runOn(Stream& run_stream) const;
+    void runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const;
+    [[nodiscard]] uint32_t gpuNum() const;
+    [[nodiscard]] bool requiresRuntimeScalars() const;
+    [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
+    [[nodiscard]] size_t preStampedWidthCount() const { return invocation_by_width.size(); }
+    // Used only while capturing a conditional CUDA graph after the retained
+    // region has selected its current placement-defined W.
+    [[nodiscard]] const StampedEquation& currentInvocationForCapture() const;
+
+   private:
+    std::shared_ptr<CompiledEquation> compiled;
+    std::vector<std::string> input_names;
+    std::vector<RuntimeInputValue> static_inputs;
+    std::vector<std::shared_ptr<PaddedRaggedSequence>> padded_inputs;
+    std::vector<std::shared_ptr<PaddedRaggedSequence>> padded_outputs;
+    std::unordered_map<uint64_t, std::shared_ptr<StampedEquation>> invocation_by_width;
+    Stream stream;
+};
+
+class StampedRaggedConv1dCausal {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const;
+
+    [[nodiscard]] RaggedConv1dStageDiagnostic diagnostic() const;
+
+    StampedRaggedConv1dCausal(std::shared_ptr<CompiledRaggedConv1dCausal> compiled,
+                              std::shared_ptr<PaddedRaggedSequence> padded_input,
+                              const Tensor& filter,
+                              const Tensor& row_offsets,
+                              std::shared_ptr<PaddedRaggedSequence> padded_output,
+                              const Stream& stream);
+
+   private:
+    const std::shared_ptr<CompiledRaggedConv1dCausal> compiled_ragged_conv1d_causal;
+    const Tensor filter;
+    const Tensor row_offsets;
+    Stream stream;
+    mutable std::shared_ptr<RaggedConv1dPaddedForwardState> padded_forward_state;
+};
+
+class StampedRaggedConv1dCausalBackwardData {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const;
+
+    [[nodiscard]] RaggedConv1dStageDiagnostic diagnostic() const;
+
+    StampedRaggedConv1dCausalBackwardData(std::shared_ptr<CompiledRaggedConv1dCausalBackwardData> compiled,
+                                          const Tensor& filter,
+                                          std::shared_ptr<PaddedRaggedSequence> padded_grad_output,
+                                          const Tensor& row_offsets,
+                                          std::shared_ptr<PaddedRaggedSequence> padded_output,
+                                          const Stream& stream);
+
+   private:
+    const std::shared_ptr<CompiledRaggedConv1dCausalBackwardData> compiled_ragged_conv1d_causal_backward_data;
+    const Tensor filter;
+    const Tensor row_offsets;
+    Stream stream;
+    mutable std::shared_ptr<RaggedConv1dPaddedBackwardDataState> padded_backward_data_state;
+};
+
+class StampedRaggedConv1dCausalBackwardFilter {
+   public:
+    void run();
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const;
+
+    [[nodiscard]] RaggedConv1dStageDiagnostic diagnostic() const;
+
+    StampedRaggedConv1dCausalBackwardFilter(std::shared_ptr<CompiledRaggedConv1dCausalBackwardFilter> compiled,
+                                            std::shared_ptr<PaddedRaggedSequence> padded_input,
+                                            std::shared_ptr<PaddedRaggedSequence> padded_grad_output,
+                                            const Tensor& row_offsets,
+                                            const Tensor& output,
+                                            const Stream& stream);
+
+   private:
+    const std::shared_ptr<CompiledRaggedConv1dCausalBackwardFilter> compiled_ragged_conv1d_causal_backward_filter;
+    const Tensor row_offsets;
+    mutable Tensor output;
+    Stream stream;
+    mutable std::shared_ptr<RaggedConv1dPaddedBackwardFilterState> padded_backward_filter_state;
+};
+
 class StampedScan {
    public:
     void run();
@@ -716,6 +909,30 @@ struct RmsNormForwardState {
     bool has_valid_state = false;
     uint64_t packed_active_rows = 0;
     uint64_t packed_selected_rows = 0;
+};
+
+class StampedLayerNorm {
+   public:
+    void run() { runOn(stream); }
+    void runOn(Stream& run_stream) const;
+    uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
+    Tensor getOutputTensor() const { return output; }
+
+    StampedLayerNorm(std::shared_ptr<CompiledLayerNorm> compiled,
+                     Tensor input,
+                     Tensor scale,
+                     Tensor bias,
+                     Tensor output,
+                     const Stream& stream);
+
+   private:
+    const std::shared_ptr<CompiledLayerNorm> compiled_layer_norm;
+    const Tensor input;
+    const Tensor scale;
+    const Tensor bias;
+    Tensor output;
+    Stream stream;
+    mutable std::optional<Tensor> workspace;
 };
 
 class StampedRmsNorm {
@@ -1257,9 +1474,15 @@ struct StampedExecutionStage {
         ArgMinMax,
         SegmentedReduction,
         SegmentedBroadcast,
+        PaddedRaggedPack,
+        PaddedRaggedPointwise,
+        RaggedConv1dCausal,
+        RaggedConv1dCausalBackwardData,
+        PaddedRaggedUnpack,
         Scan,
         Softmax,
         RmsNorm,
+        LayerNorm,
         RmsNormBackward,
         EmbeddingLookup,
         Matmul,
@@ -1271,7 +1494,8 @@ struct StampedExecutionStage {
         ConvolutionBackward,
         ReduceMinMaxBackward,
         ScanMinMaxBackward,
-        Conditional
+        Conditional,
+        RaggedConv1dCausalBackwardFilter
     };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
@@ -1287,12 +1511,26 @@ struct StampedExecutionStage {
                 return "SegmentedReduction";
             case Kind::SegmentedBroadcast:
                 return "SegmentedBroadcast";
+            case Kind::PaddedRaggedPack:
+                return "PaddedRaggedPack";
+            case Kind::PaddedRaggedPointwise:
+                return "PaddedRaggedPointwise";
+            case Kind::RaggedConv1dCausal:
+                return "RaggedConv1dCausal";
+            case Kind::RaggedConv1dCausalBackwardData:
+                return "RaggedConv1dCausalBackwardData";
+            case Kind::RaggedConv1dCausalBackwardFilter:
+                return "RaggedConv1dCausalBackwardFilter";
+            case Kind::PaddedRaggedUnpack:
+                return "PaddedRaggedUnpack";
             case Kind::Scan:
                 return "Scan";
             case Kind::Softmax:
                 return "Softmax";
             case Kind::RmsNorm:
                 return "RmsNorm";
+            case Kind::LayerNorm:
+                return "LayerNorm";
             case Kind::RmsNormBackward:
                 return "RmsNormBackward";
             case Kind::EmbeddingLookup:
@@ -1333,9 +1571,16 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<StampedSegmentedReduction> segmented_reduction = nullptr;
     const std::shared_ptr<StampedSegmentedBroadcast> segmented_broadcast = nullptr;
+    const std::shared_ptr<StampedPaddedRaggedPack> padded_ragged_pack = nullptr;
+    const std::shared_ptr<StampedPaddedRaggedPointwise> padded_ragged_pointwise = nullptr;
+    const std::shared_ptr<StampedRaggedConv1dCausal> ragged_conv1d_causal = nullptr;
+    const std::shared_ptr<StampedRaggedConv1dCausalBackwardData> ragged_conv1d_causal_backward_data = nullptr;
+    const std::shared_ptr<StampedRaggedConv1dCausalBackwardFilter> ragged_conv1d_causal_backward_filter = nullptr;
+    const std::shared_ptr<StampedPaddedRaggedUnpack> padded_ragged_unpack = nullptr;
     const std::shared_ptr<StampedScan> scan = nullptr;
     const std::shared_ptr<StampedSoftmax> softmax = nullptr;
     const std::shared_ptr<StampedRmsNorm> rms_norm = nullptr;
+    const std::shared_ptr<StampedLayerNorm> layer_norm = nullptr;
     const std::shared_ptr<StampedRmsNormBackward> rms_norm_backward = nullptr;
     const std::shared_ptr<StampedEmbeddingLookup> embedding_lookup = nullptr;
     const std::shared_ptr<StampedMatmul> matmul = nullptr;
@@ -1402,6 +1647,62 @@ struct StampedExecutionStage {
           flop_count(flop_count),
           segmented_broadcast(segmented_broadcast) {}
 
+    explicit StampedExecutionStage(const std::shared_ptr<StampedPaddedRaggedPack>& padded_ragged_pack,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::PaddedRaggedPack),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(padded_ragged_pack->gpuNum()),
+          flop_count(flop_count),
+          padded_ragged_pack(padded_ragged_pack) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedPaddedRaggedPointwise>& padded_ragged_pointwise,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::PaddedRaggedPointwise),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(padded_ragged_pointwise->gpuNum()),
+          flop_count(flop_count),
+          padded_ragged_pointwise(padded_ragged_pointwise) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedRaggedConv1dCausal>& ragged_conv1d_causal,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::RaggedConv1dCausal),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(ragged_conv1d_causal->gpuNum()),
+          flop_count(flop_count),
+          ragged_conv1d_causal(ragged_conv1d_causal) {}
+
+    explicit StampedExecutionStage(
+        const std::shared_ptr<StampedRaggedConv1dCausalBackwardData>& ragged_conv1d_causal_backward_data,
+        std::vector<uint32_t> dependency_stage_indices = {},
+        uint64_t flop_count = 0)
+        : kind(Kind::RaggedConv1dCausalBackwardData),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(ragged_conv1d_causal_backward_data->gpuNum()),
+          flop_count(flop_count),
+          ragged_conv1d_causal_backward_data(ragged_conv1d_causal_backward_data) {}
+
+    explicit StampedExecutionStage(
+        const std::shared_ptr<StampedRaggedConv1dCausalBackwardFilter>& ragged_conv1d_causal_backward_filter,
+        std::vector<uint32_t> dependency_stage_indices = {},
+        uint64_t flop_count = 0)
+        : kind(Kind::RaggedConv1dCausalBackwardFilter),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(ragged_conv1d_causal_backward_filter->gpuNum()),
+          flop_count(flop_count),
+          ragged_conv1d_causal_backward_filter(ragged_conv1d_causal_backward_filter) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedPaddedRaggedUnpack>& padded_ragged_unpack,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::PaddedRaggedUnpack),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(padded_ragged_unpack->gpuNum()),
+          flop_count(flop_count),
+          padded_ragged_unpack(padded_ragged_unpack) {}
+
     explicit StampedExecutionStage(const std::shared_ptr<StampedScan>& scan,
                                    std::vector<uint32_t> dependency_stage_indices = {},
                                    uint64_t flop_count = 0)
@@ -1429,6 +1730,15 @@ struct StampedExecutionStage {
           gpu_num(rms_norm->gpuNum()),
           flop_count(flop_count),
           rms_norm(rms_norm) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedLayerNorm>& layer_norm,
+                                   std::vector<uint32_t> dependency_stage_indices = {},
+                                   uint64_t flop_count = 0)
+        : kind(Kind::LayerNorm),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(layer_norm->gpuNum()),
+          flop_count(flop_count),
+          layer_norm(layer_norm) {}
 
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedRmsNormBackward>& rms_norm_backward,
@@ -1544,6 +1854,15 @@ struct StampedExecutionStage {
    public:
     [[nodiscard]] uint64_t flopCount() const { return flop_count; }
 
+    // Thor gives operation-local cuDNN Frontend convolution plans stamping-stream
+    // affinity so plan/workspace/autotuning state remains within one execution domain.
+    // This is Thor's ownership/scheduling policy, not a claim that cuDNN plans are
+    // intrinsically bound to the handle used while constructing them.
+    [[nodiscard]] bool requiresStampedStream() const {
+        return kind == Kind::Convolution || kind == Kind::ConvolutionBackward || kind == Kind::RaggedConv1dCausal ||
+               kind == Kind::RaggedConv1dCausalBackwardData || kind == Kind::RaggedConv1dCausalBackwardFilter;
+    }
+
     void runOn(Stream& run_stream) const { runOn(run_stream, {}); }
 
     void runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
@@ -1571,6 +1890,27 @@ struct StampedExecutionStage {
         } else if (kind == Kind::SegmentedBroadcast) {
             THOR_THROW_IF_FALSE(segmented_broadcast != nullptr);
             segmented_broadcast->runOn(run_stream);
+        } else if (kind == Kind::PaddedRaggedPack) {
+            THOR_THROW_IF_FALSE(padded_ragged_pack != nullptr);
+            padded_ragged_pack->runOn(run_stream);
+        } else if (kind == Kind::PaddedRaggedPointwise) {
+            THOR_THROW_IF_FALSE(padded_ragged_pointwise != nullptr);
+            if (runtime_scalars.empty())
+                padded_ragged_pointwise->runOn(run_stream);
+            else
+                padded_ragged_pointwise->runOn(run_stream, runtime_scalars);
+        } else if (kind == Kind::RaggedConv1dCausal) {
+            THOR_THROW_IF_FALSE(ragged_conv1d_causal != nullptr);
+            ragged_conv1d_causal->runOn(run_stream);
+        } else if (kind == Kind::RaggedConv1dCausalBackwardData) {
+            THOR_THROW_IF_FALSE(ragged_conv1d_causal_backward_data != nullptr);
+            ragged_conv1d_causal_backward_data->runOn(run_stream);
+        } else if (kind == Kind::RaggedConv1dCausalBackwardFilter) {
+            THOR_THROW_IF_FALSE(ragged_conv1d_causal_backward_filter != nullptr);
+            ragged_conv1d_causal_backward_filter->runOn(run_stream);
+        } else if (kind == Kind::PaddedRaggedUnpack) {
+            THOR_THROW_IF_FALSE(padded_ragged_unpack != nullptr);
+            padded_ragged_unpack->runOn(run_stream);
         } else if (kind == Kind::Scan) {
             THOR_THROW_IF_FALSE(scan != nullptr);
             scan->runOn(run_stream);
@@ -1580,6 +1920,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::RmsNorm) {
             THOR_THROW_IF_FALSE(rms_norm != nullptr);
             rms_norm->runOn(run_stream);
+        } else if (kind == Kind::LayerNorm) {
+            THOR_THROW_IF_FALSE(layer_norm != nullptr);
+            layer_norm->runOn(run_stream);
         } else if (kind == Kind::RmsNormBackward) {
             THOR_THROW_IF_FALSE(rms_norm_backward != nullptr);
             rms_norm_backward->runOn(run_stream);
@@ -1719,6 +2062,8 @@ class StampedExecutionPlan {
         return out;
     }
 
+    [[nodiscard]] std::vector<uint32_t> stageLaneIndices() const { return execution_schedule.stage_lane_indices; }
+
     [[nodiscard]] std::vector<StampedMatmulStageDiagnostic> matmulStageDiagnostics() const {
         std::vector<StampedMatmulStageDiagnostic> out;
         for (size_t stage_index = 0; stage_index < steps.size(); ++stage_index) {
@@ -1759,6 +2104,52 @@ class StampedExecutionPlan {
                 diagnostic->stage_index = static_cast<uint32_t>(stage_index);
                 out.push_back(diagnostic.value());
             }
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::vector<size_t> paddedRaggedPointwisePreStampedWidthCounts() const {
+        std::vector<size_t> out;
+        for (const StampedExecutionStage& step : steps) {
+            if (step.kind != StampedExecutionStage::Kind::PaddedRaggedPointwise) {
+                continue;
+            }
+            if (!step.padded_ragged_pointwise) {
+                throw std::runtime_error("Padded ragged pointwise execution stage is missing its stamped operation.");
+            }
+            out.push_back(step.padded_ragged_pointwise->preStampedWidthCount());
+        }
+        return out;
+    }
+
+    [[nodiscard]] std::vector<RaggedConv1dStageDiagnostic> raggedConv1dStageDiagnostics() const {
+        std::vector<RaggedConv1dStageDiagnostic> out;
+        for (size_t stage_index = 0; stage_index < steps.size(); ++stage_index) {
+            const StampedExecutionStage& step = steps[stage_index];
+            if (step.kind != StampedExecutionStage::Kind::RaggedConv1dCausal &&
+                step.kind != StampedExecutionStage::Kind::RaggedConv1dCausalBackwardData &&
+                step.kind != StampedExecutionStage::Kind::RaggedConv1dCausalBackwardFilter) {
+                continue;
+            }
+            RaggedConv1dStageDiagnostic diagnostic;
+            if (step.kind == StampedExecutionStage::Kind::RaggedConv1dCausal) {
+                if (!step.ragged_conv1d_causal) {
+                    throw std::runtime_error("Ragged Conv1D execution stage is missing its stamped operation.");
+                }
+                diagnostic = step.ragged_conv1d_causal->diagnostic();
+            } else if (step.kind == StampedExecutionStage::Kind::RaggedConv1dCausalBackwardData) {
+                if (!step.ragged_conv1d_causal_backward_data) {
+                    throw std::runtime_error("Ragged Conv1D backward-data stage is missing its stamped operation.");
+                }
+                diagnostic = step.ragged_conv1d_causal_backward_data->diagnostic();
+            } else {
+                if (!step.ragged_conv1d_causal_backward_filter) {
+                    throw std::runtime_error("Ragged Conv1D backward-filter stage is missing its stamped operation.");
+                }
+                diagnostic = step.ragged_conv1d_causal_backward_filter->diagnostic();
+            }
+            diagnostic.stage_index = static_cast<uint32_t>(stage_index);
+            out.push_back(std::move(diagnostic));
         }
         return out;
     }

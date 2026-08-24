@@ -2,6 +2,7 @@
 
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
+#include <nanobind/stl/optional.h>
 
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -21,7 +22,8 @@ void bind_ragged_network_input(nb::module_ &m) {
            const std::vector<uint64_t> &trailingDimensions,
            uint64_t maxTotalValues,
            uint64_t batchSize,
-           DataType offsetsDataType) {
+           DataType offsetsDataType,
+           std::optional<uint64_t> maxValuesPerRow) {
             if (name.empty()) {
                 throw nb::value_error("RaggedNetworkInput name must not be empty.");
             }
@@ -33,15 +35,16 @@ void bind_ragged_network_input(nb::module_ &m) {
                     throw nb::value_error("RaggedNetworkInput trailing_dimensions must contain only positive dimensions.");
                 }
             }
-            return RaggedNetworkInput::Builder()
+            RaggedNetworkInput::Builder builder = RaggedNetworkInput::Builder()
                 .network(network)
                 .name(name)
                 .valuesDataType(valuesDataType)
                 .offsetsDataType(offsetsDataType)
                 .trailingDimensions(trailingDimensions)
                 .maxTotalValues(maxTotalValues)
-                .batchSize(batchSize)
-                .build();
+                .batchSize(batchSize);
+            if (maxValuesPerRow.has_value()) builder.maxValuesPerRow(maxValuesPerRow.value());
+            return builder.build();
         },
         "network"_a,
         "name"_a,
@@ -50,6 +53,7 @@ void bind_ragged_network_input(nb::module_ &m) {
         "max_total_values"_a,
         "batch_size"_a,
         "offsets_data_type"_a = DataType::UINT32,
+        "max_values_per_row"_a = nb::none(),
         R"nbdoc(
 Create one logical external ragged network input and return its ``thor.RaggedTensor`` handle.
 

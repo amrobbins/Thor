@@ -25,10 +25,17 @@ class RaggedTensor {
    public:
     RaggedTensor() = default;
     RaggedTensor(Tensor values, Tensor offsets);
+    RaggedTensor(Tensor values, Tensor offsets, uint64_t maxValuesPerRow);
     RaggedTensor(DataType valuesDataType,
                  const std::vector<uint64_t> &trailingDimensions,
                  uint64_t batchSize,
                  uint64_t maxTotalValues,
+                 DataType offsetsDataType = ThorImplementation::kDefaultRowPartitionOffsetDataType);
+    RaggedTensor(DataType valuesDataType,
+                 const std::vector<uint64_t> &trailingDimensions,
+                 uint64_t batchSize,
+                 uint64_t maxTotalValues,
+                 uint64_t maxValuesPerRow,
                  DataType offsetsDataType = ThorImplementation::kDefaultRowPartitionOffsetDataType);
 
     bool isInitialized() const { return initialized; }
@@ -50,6 +57,8 @@ class RaggedTensor {
         THOR_THROW_IF_FALSE(initialized);
         return offsets;
     }
+
+    RaggedTensor withValues(Tensor newValues) const;
 
     DataType getValuesDataType() const {
         THOR_THROW_IF_FALSE(initialized);
@@ -76,6 +85,14 @@ class RaggedTensor {
         THOR_THROW_IF_FALSE(initialized);
         return maxTotalValues;
     }
+    bool hasMaxValuesPerRow() const {
+        THOR_THROW_IF_FALSE(initialized);
+        return maxValuesPerRow != 0;
+    }
+    uint64_t getMaxValuesPerRow() const {
+        THOR_THROW_IF_FALSE(hasMaxValuesPerRow());
+        return maxValuesPerRow;
+    }
     uint32_t getRaggedRank() const {
         THOR_THROW_IF_FALSE(initialized);
         return 1;
@@ -91,7 +108,7 @@ class RaggedTensor {
     nlohmann::json serialize(thor_file::TarWriter &archiveWriter) const;
     static RaggedTensor deserialize(const nlohmann::json &j, thor_file::TarReader *archiveReader = nullptr);
 
-    std::string getVersion() const { return "1.0.0"; }
+    std::string getVersion() const { return "1.1.0"; }
 
    private:
     static bool offsetsDataTypeValid(DataType dataType) {
@@ -108,6 +125,7 @@ class RaggedTensor {
     Tensor offsets;
     uint64_t batchSize = 0;
     uint64_t maxTotalValues = 0;
+    uint64_t maxValuesPerRow = 0;
     bool initialized = false;
 };
 

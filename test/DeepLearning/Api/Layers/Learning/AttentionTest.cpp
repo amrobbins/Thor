@@ -314,6 +314,7 @@ void forwardPhysicalRowPartitionOffsets(Impl::NetworkInput& physicalRaggedOffset
         /*validationPass=*/false,
         Impl::RowPartitionDescriptor(batchSize, maxTotalValues, offsets.getDataType()),
         activeRows,
+        std::nullopt,
         batchSize);
 }
 

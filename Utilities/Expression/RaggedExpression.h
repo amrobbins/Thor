@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -41,6 +42,8 @@ class RaggedExpression {
     [[nodiscard]] DataType getOffsetsDataType() const { return getDescriptor().getOffsetsDataType(); }
     [[nodiscard]] uint64_t getBatchSize() const { return getDescriptor().getBatchSize(); }
     [[nodiscard]] uint64_t getMaxTotalValues() const { return getDescriptor().getMaxTotalValues(); }
+    [[nodiscard]] bool hasMaxValuesPerRow() const { return getDescriptor().hasMaxValuesPerRow(); }
+    [[nodiscard]] uint64_t getMaxValuesPerRow() const { return getDescriptor().getMaxValuesPerRow(); }
     [[nodiscard]] std::vector<uint64_t> getValuesDimensions() const { return getDescriptor().getValuesDimensions(); }
     [[nodiscard]] std::vector<uint64_t> getTrailingDimensions() const { return getDescriptor().getTrailingDimensions(); }
 
@@ -57,6 +60,38 @@ class RaggedExpression {
     [[nodiscard]] RaggedExpression sliceTrailingDimension(uint64_t trailing_axis, uint64_t start, uint64_t length) const;
     [[nodiscard]] RaggedExpression sliceLastDimension(uint64_t start, uint64_t length) const;
     [[nodiscard]] RaggedExpression cast(DataType output_dtype) const;
+    // Normalize channels independently at each logical timestep while preserving
+    // the row partition. Normalization is currently an explicit representation
+    // boundary for retained padded Conv1D regions: the current cuDNN normalization
+    // plans reject the strided channel dimension of [B,C,1,W] storage.
+    [[nodiscard]] RaggedExpression rmsNorm(const Expression& scale,
+                                           double epsilon = 1.0e-5,
+                                           std::optional<DataType> compute_dtype = std::nullopt,
+                                           std::optional<DataType> output_dtype = std::nullopt) const;
+    [[nodiscard]] RaggedExpression layerNorm(const Expression& scale,
+                                             const Expression& bias,
+                                             double epsilon = 1.0e-5,
+                                             std::optional<DataType> compute_dtype = std::nullopt,
+                                             std::optional<DataType> output_dtype = std::nullopt) const;
+
+    // Logical ragged causal Conv1D. Each row is convolved independently; packed
+    // adjacency across row boundaries is never temporal adjacency. The current
+    // executable lowering supports stride=1 causal geometry through one padded
+    // cuDNN batch selected from the placement-built width-capacity family.
+    [[nodiscard]] RaggedExpression conv1d(const Expression& filter,
+                                          uint64_t output_channels,
+                                          uint64_t kernel_width,
+                                          ConvolutionSpatial1d spatial,
+                                          std::optional<DataType> compute_dtype = std::nullopt,
+                                          std::optional<DataType> output_dtype = std::nullopt,
+                                          uint64_t groups = 1) const;
+    [[nodiscard]] RaggedExpression causalConv1d(const Expression& filter,
+                                                uint64_t output_channels,
+                                                uint64_t kernel_width,
+                                                int32_t dilation = 1,
+                                                std::optional<DataType> compute_dtype = std::nullopt,
+                                                std::optional<DataType> output_dtype = std::nullopt,
+                                                uint64_t groups = 1) const;
 
     [[nodiscard]] RaggedExpression operator+(const RaggedExpression& other) const;
     [[nodiscard]] RaggedExpression operator-(const RaggedExpression& other) const;

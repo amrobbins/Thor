@@ -5,6 +5,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
 
+#include <array>
 #include <cstddef>
 #include <limits>
 #include <mutex>
@@ -142,29 +143,37 @@ void insertTensor(unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor
     pack[uid] = const_cast<void*>(static_cast<const void*>(tensor.getMemPtr<void>()));
 }
 
+vector<int64_t> explicitOr(const optional<array<int64_t, 4>>& value, array<int64_t, 4> fallback) {
+    const array<int64_t, 4>& chosen = value.has_value() ? value.value() : fallback;
+    return vector<int64_t>(chosen.begin(), chosen.end());
+}
+
 vector<int64_t> ioDims(const CudnnLayerNormDescriptor& descriptor) {
-    return {checkedI64(descriptor.outerSize, "outerSize"), checkedI64(descriptor.normalizedFeatureCount, "normalizedFeatureCount"), 1, 1};
+    return explicitOr(descriptor.ioDimensions,
+                      {checkedI64(descriptor.outerSize, "outerSize"), checkedI64(descriptor.normalizedFeatureCount, "normalizedFeatureCount"), 1, 1});
 }
 
 vector<int64_t> ioStrides(const CudnnLayerNormDescriptor& descriptor) {
     const int64_t hidden = checkedI64(descriptor.normalizedFeatureCount, "normalizedFeatureCount");
-    return {hidden, 1, hidden, hidden};
+    return explicitOr(descriptor.ioStrides, {hidden, 1, hidden, hidden});
 }
 
 vector<int64_t> parameterDims(const CudnnLayerNormDescriptor& descriptor) {
-    return {1, checkedI64(descriptor.normalizedFeatureCount, "normalizedFeatureCount"), 1, 1};
+    return explicitOr(descriptor.parameterDimensions, {1, checkedI64(descriptor.normalizedFeatureCount, "normalizedFeatureCount"), 1, 1});
 }
 
 vector<int64_t> parameterStrides(const CudnnLayerNormDescriptor& descriptor) {
     const int64_t hidden = checkedI64(descriptor.normalizedFeatureCount, "normalizedFeatureCount");
-    return {hidden, 1, hidden, hidden};
+    return explicitOr(descriptor.parameterStrides, {hidden, 1, hidden, hidden});
 }
 
 vector<int64_t> statsDims(const CudnnLayerNormDescriptor& descriptor) {
-    return {checkedI64(descriptor.outerSize, "outerSize"), 1, 1, 1};
+    return explicitOr(descriptor.statsDimensions, {checkedI64(descriptor.outerSize, "outerSize"), 1, 1, 1});
 }
 
-vector<int64_t> statsStrides(const CudnnLayerNormDescriptor&) { return {1, 1, 1, 1}; }
+vector<int64_t> statsStrides(const CudnnLayerNormDescriptor& descriptor) {
+    return explicitOr(descriptor.statsStrides, {1, 1, 1, 1});
+}
 
 using BuiltGraph = CudnnCachedExecutionPlan<fe::graph::Graph>;
 
@@ -347,12 +356,69 @@ LayerNormGraphCache& cache() {
     return instance;
 }
 
+void validateExplicitPhysicalLayout(const CudnnLayerNormDescriptor& descriptor) {
+    const bool any = descriptor.ioDimensions.has_value() || descriptor.ioStrides.has_value() ||
+                     descriptor.parameterDimensions.has_value() || descriptor.parameterStrides.has_value() ||
+                     descriptor.statsDimensions.has_value() || descriptor.statsStrides.has_value();
+    const bool all = descriptor.ioDimensions.has_value() && descriptor.ioStrides.has_value() &&
+                     descriptor.parameterDimensions.has_value() && descriptor.parameterStrides.has_value() &&
+                     descriptor.statsDimensions.has_value() && descriptor.statsStrides.has_value();
+    if (any != all) {
+        throwInvalidLayerNorm("explicit physical layout requires io/parameter/stats dimensions and strides together");
+    }
+    if (!all) return;
+
+    auto checkedProduct = [&](const array<int64_t, 4>& dims, string_view what) -> uint64_t {
+        uint64_t product = 1;
+        for (int64_t dim : dims) {
+            if (dim <= 0) throwInvalidLayerNorm(string(what) + " dimensions must be positive");
+            const uint64_t u = static_cast<uint64_t>(dim);
+            if (product > numeric_limits<uint64_t>::max() / u) throwInvalidLayerNorm(string(what) + " element count overflows uint64_t");
+            product *= u;
+        }
+        return product;
+    };
+    auto validateStrides = [&](const array<int64_t, 4>& strides, string_view what) {
+        for (int64_t stride : strides) if (stride <= 0) throwInvalidLayerNorm(string(what) + " strides must be positive");
+    };
+
+    const uint64_t io_count = checkedProduct(descriptor.ioDimensions.value(), "IO");
+    const uint64_t parameter_count = checkedProduct(descriptor.parameterDimensions.value(), "parameter");
+    const uint64_t stats_count = checkedProduct(descriptor.statsDimensions.value(), "stats");
+    validateStrides(descriptor.ioStrides.value(), "IO");
+    validateStrides(descriptor.parameterStrides.value(), "parameter");
+    validateStrides(descriptor.statsStrides.value(), "stats");
+    if (io_count != checkedMul(descriptor.outerSize, descriptor.normalizedFeatureCount, "IO"))
+        throwInvalidLayerNorm("explicit IO dimensions do not match outerSize*normalizedFeatureCount");
+    if (parameter_count != descriptor.normalizedFeatureCount)
+        throwInvalidLayerNorm("explicit parameter dimensions do not match normalizedFeatureCount");
+    if (stats_count != descriptor.outerSize)
+        throwInvalidLayerNorm("explicit stats dimensions do not match outerSize");
+}
+
+string physicalLayoutCacheSuffix(const CudnnLayerNormDescriptor& descriptor) {
+    if (!descriptor.ioDimensions.has_value()) return ":layout=contiguous";
+    ostringstream out;
+    auto append = [&](string_view label, const array<int64_t, 4>& values) {
+        out << ':' << label << '=';
+        for (size_t i = 0; i < values.size(); ++i) { if (i) out << ','; out << values[i]; }
+    };
+    append("iod", descriptor.ioDimensions.value());
+    append("ios", descriptor.ioStrides.value());
+    append("pd", descriptor.parameterDimensions.value());
+    append("ps", descriptor.parameterStrides.value());
+    append("sd", descriptor.statsDimensions.value());
+    append("ss", descriptor.statsStrides.value());
+    return out.str();
+}
+
 }  // namespace
 
 void CudnnLayerNormDescriptor::validateForward() const {
     checkedI64(outerSize, "outerSize");
     checkedI64(normalizedFeatureCount, "normalizedFeatureCount");
     (void)checkedMul(outerSize, normalizedFeatureCount, "IO");
+    validateExplicitPhysicalLayout(*this);
     if (!isSupportedLayerNormIoDtype(inputDataType)) {
         throwInvalidLayerNorm("inputDataType must be fp16, bf16, or fp32; got " + dtypeName(inputDataType));
     }
@@ -378,6 +444,7 @@ string CudnnLayerNormDescriptor::cacheKey(string_view passName, int gpuNum) cons
         << ":in=" << static_cast<int>(inputDataType) << ":out=" << static_cast<int>(outputDataType)
         << ":param=" << static_cast<int>(parameterDataType) << ":compute=" << static_cast<int>(computeDataType)
         << ":eps=" << epsilon << ":training=" << training;
+    out << physicalLayoutCacheSuffix(*this);
     return out.str();
 }
 

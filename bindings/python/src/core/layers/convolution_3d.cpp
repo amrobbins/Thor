@@ -130,7 +130,8 @@ void bind_convolution_3d(nb::module_ &m) {
            shared_ptr<Initializer> weights_initializer,
            shared_ptr<Initializer> biases_initializer,
            nb::object epilogue,
-           nb::object epilogue_inputs) {
+           nb::object epilogue_inputs,
+           uint32_t groups) {
             const auto &dims = featureInput.getDimensions();
             if (dims.size() != 4) {
                 string msg = "Convolution3d instance: feature_input must be a 4D CDHW tensor (no batch) but tensor format is " +
@@ -151,6 +152,8 @@ void bind_convolution_3d(nb::module_ &m) {
             if (numOutputChannels == 0) {
                 throw nb::value_error("Convolution3d instance: num_output_channels must be > 0.");
             }
+            if (groups == 0 || C % groups != 0 || numOutputChannels % groups != 0)
+                throw nb::value_error("Convolution3d instance: groups must divide both input and output channels.");
             if (filterDepth == 0 || filterHeight == 0 || filterWidth == 0) {
                 throw nb::value_error("Convolution3d instance: filter_depth, filter_height, and filter_width must be >= 1.");
             }
@@ -180,6 +183,7 @@ void bind_convolution_3d(nb::module_ &m) {
                 .depthStride(depthStride)
                 .verticalStride(verticalStride)
                 .horizontalStride(horizontalStride)
+                .groups(groups)
                 .hasBias(hasBias);
 
             applyPythonActivation(builder, activation);
@@ -211,7 +215,8 @@ void bind_convolution_3d(nb::module_ &m) {
         "weights_initializer"_a = nb::none(),
         "biases_initializer"_a = nb::none(),
         "epilogue"_a.none() = nb::none(),
-        "epilogue_inputs"_a.none() = nb::none());
+        "epilogue_inputs"_a.none() = nb::none(),
+        "groups"_a = 1);
 
     convolution_3d.def_static(
         "epilogue_input",
@@ -250,7 +255,8 @@ void bind_convolution_3d(nb::module_ &m) {
         Omitted activation defaults to ``thor.activations.Gelu()``; pass
         ``None`` to keep the layer linear.
         The API tensor layout is CDHW; the physical implementation adds the
-        batch dimension and uses NCDHW. Activations are stitched into the
+        batch dimension and uses NCDHW. ``groups`` partitions input and output
+        channels using standard grouped-convolution semantics. Activations are stitched into the
         expression before the implementation CustomLayer is constructed.
         ``epilogue`` may be a ``thor.physical.Expression`` built from
         ``Convolution3d.epilogue_input()`` and is applied after activation.

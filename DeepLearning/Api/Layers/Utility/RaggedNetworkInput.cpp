@@ -33,6 +33,10 @@ RaggedTensor RaggedNetworkInput::Builder::build() {
     THOR_THROW_IF_FALSE(maxTotalValues_.has_value());
     THOR_THROW_IF_FALSE(batchSize_.has_value());
     THOR_THROW_IF_FALSE(maxTotalValues_.value() > 0);
+    if (maxValuesPerRow_.has_value()) {
+        THOR_THROW_IF_FALSE(maxValuesPerRow_.value() > 0);
+        THOR_THROW_IF_FALSE(maxValuesPerRow_.value() <= maxTotalValues_.value());
+    }
     THOR_THROW_IF_FALSE(batchSize_.value() <= UINT64_MAX - 1);
     THOR_THROW_IF_FALSE(ThorImplementation::RowPartitionDescriptor::isValidOffsetsDataType(offsetsDataType_));
 
@@ -55,7 +59,9 @@ RaggedTensor RaggedNetworkInput::Builder::build() {
                                     .dimensionsIncludeBatch(true)
                                     .build();
 
-    RaggedTensor raggedTensor(valuesInput.getFeatureOutput().value(), offsetsInput.getFeatureOutput().value());
+    RaggedTensor raggedTensor = maxValuesPerRow_.has_value()
+        ? RaggedTensor(valuesInput.getFeatureOutput().value(), offsetsInput.getFeatureOutput().value(), maxValuesPerRow_.value())
+        : RaggedTensor(valuesInput.getFeatureOutput().value(), offsetsInput.getFeatureOutput().value());
     network_.value()->registerRaggedNetworkInput(name_.value(), raggedTensor, valuesInputName, offsetsInputName);
     return raggedTensor;
 }
@@ -96,6 +102,12 @@ RaggedNetworkInput::Builder& RaggedNetworkInput::Builder::trailingDimensions(con
 RaggedNetworkInput::Builder& RaggedNetworkInput::Builder::maxTotalValues(uint64_t maxTotalValues) {
     THOR_THROW_IF_FALSE(maxTotalValues > 0);
     maxTotalValues_ = maxTotalValues;
+    return *this;
+}
+
+RaggedNetworkInput::Builder& RaggedNetworkInput::Builder::maxValuesPerRow(uint64_t maxValuesPerRow) {
+    THOR_THROW_IF_FALSE(maxValuesPerRow > 0);
+    maxValuesPerRow_ = maxValuesPerRow;
     return *this;
 }
 

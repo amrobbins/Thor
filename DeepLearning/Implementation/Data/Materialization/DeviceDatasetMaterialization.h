@@ -5,6 +5,7 @@
 #include "DeepLearning/Api/Data/DatasetSplitManifest.h"
 #include "DeepLearning/Api/Data/DatasetSchema.h"
 #include "DeepLearning/Api/Data/DatasetLayout.h"
+#include "DeepLearning/Api/Training/WindowedDeviceCache.h"
 
 #include <cstdint>
 #include <filesystem>
@@ -51,21 +52,26 @@ struct DatasetMaterializationDescription {
  */
 class DeviceDatasetSessionDescription {
    public:
-    DeviceDatasetSessionDescription(DatasetSplitManifest splits,
-                                    BatchPolicy batching,
-                                    DatasetFieldMaterializationRequirements fieldRequirements = {})
+    DeviceDatasetSessionDescription(
+        DatasetSplitManifest splits,
+        BatchPolicy batching,
+        DatasetFieldMaterializationRequirements fieldRequirements = {},
+        WindowedDeviceCache windowedDeviceCache = WindowedDeviceCache::AUTO)
         : splits(std::move(splits)),
           batching(std::move(batching)),
-          fieldRequirements(std::move(fieldRequirements)) {}
+          fieldRequirements(std::move(fieldRequirements)),
+          windowedDeviceCache(windowedDeviceCache) {}
 
     [[nodiscard]] const DatasetSplitManifest &getSplits() const { return splits; }
     [[nodiscard]] const BatchPolicy &getBatching() const { return batching; }
     [[nodiscard]] const DatasetFieldMaterializationRequirements& getFieldRequirements() const { return fieldRequirements; }
+    [[nodiscard]] WindowedDeviceCache getWindowedDeviceCache() const { return windowedDeviceCache; }
 
    private:
     DatasetSplitManifest splits;
     BatchPolicy batching;
     DatasetFieldMaterializationRequirements fieldRequirements;
+    WindowedDeviceCache windowedDeviceCache = WindowedDeviceCache::AUTO;
 };
 
 }  // namespace Thor

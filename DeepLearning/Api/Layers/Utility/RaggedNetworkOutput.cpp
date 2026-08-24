@@ -35,7 +35,11 @@ RaggedNetworkOutput RaggedNetworkOutput::Builder::build() {
     RaggedNetworkOutput result;
     result.name_ = name_.value();
     result.input_ = input_.value();
-    result.output_ = RaggedTensor(valuesOutput.getFeatureOutput().value(), offsetsOutput.getFeatureOutput().value());
+    result.output_ = input_->hasMaxValuesPerRow()
+        ? RaggedTensor(valuesOutput.getFeatureOutput().value(),
+                       offsetsOutput.getFeatureOutput().value(),
+                       input_->getMaxValuesPerRow())
+        : RaggedTensor(valuesOutput.getFeatureOutput().value(), offsetsOutput.getFeatureOutput().value());
     network_.value()->registerRaggedNetworkOutput(
         result.name_, result.output_, valuesOutputName, offsetsOutputName);
     return result;

@@ -6,11 +6,13 @@
 #include <memory>
 #include <atomic>
 #include <mutex>
+#include <optional>
 #include <utility>
 #include <vector>
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
+#include "Utilities/Common/PersistingL2Cache.h"
 
 #pragma GCC diagnostic ignored "-Wsign-compare"
 #include "gtest/gtest.h"
@@ -153,6 +155,51 @@ class CopyTensorDeviceBatchMaterializer : public Thor::DeviceBatchMaterializer {
    private:
     Tensor source;
     mutable std::atomic<uint32_t> enqueueCount{0};
+};
+
+class AccessPolicyInspectingDeviceBatchMaterializer : public Thor::DeviceBatchMaterializer {
+   public:
+    AccessPolicyInspectingDeviceBatchMaterializer(
+        Tensor source,
+        std::optional<Thor::DeviceBatchAccessPolicy> accessPolicy,
+        bool clearPolicyAfterInspection = false)
+        : source(std::move(source)),
+          accessPolicy(std::move(accessPolicy)),
+          clearPolicyAfterInspection(clearPolicyAfterInspection) {}
+
+    TensorDescriptor getOutputDescriptor() const override { return source.getDescriptor(); }
+    TensorPlacement getOutputPlacement() const override { return source.getPlacement(); }
+    std::optional<Thor::DeviceBatchAccessPolicy> getAccessPolicy() const override {
+        return accessPolicy;
+    }
+
+    void enqueueMaterialization(Tensor& destination, Stream& destinationStream) const override {
+        observedAttribute = {};
+        observedStatus = cudaStreamGetAttribute(
+            destinationStream.getStream(),
+            cudaStreamAttributeAccessPolicyWindow,
+            &observedAttribute);
+        inspected = true;
+        if (clearPolicyAfterInspection) {
+            clearResult = ThorImplementation::tryClearPersistingL2AccessPolicyWindow(
+                destinationStream.getGpuNum(), destinationStream.getStream());
+        }
+        destination.copyFromAsync(source, destinationStream);
+    }
+
+    bool didInspect() const { return inspected; }
+    cudaError_t getObservedStatus() const { return observedStatus; }
+    const cudaStreamAttrValue &getObservedAttribute() const { return observedAttribute; }
+    const ThorImplementation::PersistingL2OperationResult &getClearResult() const { return clearResult; }
+
+   private:
+    Tensor source;
+    std::optional<Thor::DeviceBatchAccessPolicy> accessPolicy;
+    bool clearPolicyAfterInspection = false;
+    mutable bool inspected = false;
+    mutable cudaError_t observedStatus = cudaErrorUnknown;
+    mutable cudaStreamAttrValue observedAttribute{};
+    mutable ThorImplementation::PersistingL2OperationResult clearResult{};
 };
 
 class GatedCopyTensorDeviceBatchMaterializer : public Thor::DeviceBatchMaterializer {
@@ -629,6 +676,143 @@ TEST(NetworkInput, PassThroughRejectsDescriptorOrPlacementMismatch) {
     EXPECT_ANY_THROW(NetworkInput(gpuPlacement, DataType::FP32, descriptor.getDimensions(), NetworkInput::Mode::PassThrough, gpuWrongShape));
 }
 
+TEST(NetworkInput, DeviceReferenceAppliesAndClearsMaterializerAccessPolicyBeforeMaterialization) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput access-policy test requires a GPU";
+    }
+
+    const ThorImplementation::PersistingL2Capabilities capabilities =
+        ThorImplementation::queryPersistingL2Capabilities(0);
+    if (!capabilities.query_succeeded || !capabilities.supported) {
+        GTEST_SKIP() << "persisting L2 unavailable: " << capabilities.detail;
+    }
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+    Stream setupStream(0);
+    Tensor source = makeFilledGpuTensor(descriptor, 6.0f, setupStream);
+    setupStream.synchronize();
+    const uint64_t sourceBytes = source.getDescriptor().getArraySizeInBytes();
+    if (capabilities.max_access_policy_window_bytes < sourceBytes) {
+        GTEST_SKIP() << "device access-policy window is smaller than the test source";
+    }
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+    input.configureBatchInputSource(
+        Thor::BatchFieldSourceDescription::deviceReference(gpuPlacement));
+    input.preallocateInputSlots(1);
+
+    const Thor::DeviceBatchAccessPolicy policy{
+        .deviceNum = 0,
+        .tensorId = source.getTensorId(),
+        .base = source.getMemPtr<void>(),
+        .bytes = sourceBytes,
+        .persistingHitRatio = 0.75f,
+        .generation = 3,
+    };
+    auto withPolicy = std::make_shared<AccessPolicyInspectingDeviceBatchMaterializer>(
+        source, policy);
+    input.forward(Thor::DeviceBatchReference(withPolicy, 1), false, 1);
+    ASSERT_TRUE(withPolicy->didInspect());
+    ASSERT_EQ(withPolicy->getObservedStatus(), cudaSuccess);
+    const cudaStreamAttrValue &applied = withPolicy->getObservedAttribute();
+    EXPECT_EQ(applied.accessPolicyWindow.base_ptr, source.getMemPtr<void>());
+    EXPECT_EQ(applied.accessPolicyWindow.num_bytes, sourceBytes);
+    EXPECT_FLOAT_EQ(applied.accessPolicyWindow.hitRatio, 0.75f);
+    EXPECT_EQ(applied.accessPolicyWindow.hitProp, cudaAccessPropertyPersisting);
+    EXPECT_EQ(applied.accessPolicyWindow.missProp, cudaAccessPropertyStreaming);
+
+    auto withoutPolicy = std::make_shared<AccessPolicyInspectingDeviceBatchMaterializer>(
+        source, std::nullopt);
+    input.forward(Thor::DeviceBatchReference(withoutPolicy, 1), false, 1);
+    ASSERT_TRUE(withoutPolicy->didInspect());
+    ASSERT_EQ(withoutPolicy->getObservedStatus(), cudaSuccess);
+    EXPECT_EQ(withoutPolicy->getObservedAttribute().accessPolicyWindow.num_bytes, 0u);
+
+    capture.synchronize();
+    expectAllEqual(capture.readCapture(0), 6.0f);
+    expectAllEqual(capture.readCapture(1), 6.0f);
+}
+
+TEST(NetworkInput, DeviceReferenceAccessPolicyCacheRefreshesWhenManagerGenerationChanges) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput access-policy cache test requires a GPU";
+    }
+
+    const ThorImplementation::PersistingL2Capabilities capabilities =
+        ThorImplementation::queryPersistingL2Capabilities(0);
+    if (!capabilities.query_succeeded || !capabilities.supported) {
+        GTEST_SKIP() << "persisting L2 unavailable: " << capabilities.detail;
+    }
+
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    TensorDescriptor descriptor(DataType::FP32, {4});
+    Stream setupStream(0);
+    Tensor source = makeFilledGpuTensor(descriptor, 7.0f, setupStream);
+    setupStream.synchronize();
+    const uint64_t sourceBytes = source.getDescriptor().getArraySizeInBytes();
+    if (capabilities.max_access_policy_window_bytes < sourceBytes) {
+        GTEST_SKIP() << "device access-policy window is smaller than the test source";
+    }
+
+    NetworkInput input(gpuPlacement, DataType::FP32, descriptor.getDimensions());
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+    input.configureBatchInputSource(
+        Thor::BatchFieldSourceDescription::deviceReference(gpuPlacement));
+    input.preallocateInputSlots(1);
+
+    Thor::DeviceBatchAccessPolicy policy{
+        .deviceNum = 0,
+        .tensorId = source.getTensorId(),
+        .base = source.getMemPtr<void>(),
+        .bytes = sourceBytes,
+        .persistingHitRatio = 0.75f,
+        .generation = 21,
+    };
+
+    // First application installs the window. The materializer then clears the
+    // raw CUDA attribute behind Stream's back, leaving only Stream's cached
+    // key. That gives this test a direct way to distinguish no-op vs refresh.
+    auto first = std::make_shared<AccessPolicyInspectingDeviceBatchMaterializer>(
+        source, policy, true);
+    input.forward(Thor::DeviceBatchReference(first, 1), false, 1);
+    ASSERT_TRUE(first->didInspect());
+    ASSERT_EQ(first->getObservedStatus(), cudaSuccess);
+    EXPECT_EQ(first->getObservedAttribute().accessPolicyWindow.base_ptr, source.getMemPtr<void>());
+    EXPECT_EQ(first->getObservedAttribute().accessPolicyWindow.num_bytes, sourceBytes);
+    ASSERT_TRUE(first->getClearResult().succeeded()) << first->getClearResult().detail;
+
+    // An identical source/generation is cached, so NetworkInput should not
+    // issue another cudaStreamSetAttribute call. The raw attribute therefore
+    // remains cleared for this test probe.
+    auto sameGeneration = std::make_shared<AccessPolicyInspectingDeviceBatchMaterializer>(
+        source, policy);
+    input.forward(Thor::DeviceBatchReference(sameGeneration, 1), false, 1);
+    ASSERT_TRUE(sameGeneration->didInspect());
+    ASSERT_EQ(sameGeneration->getObservedStatus(), cudaSuccess);
+    EXPECT_EQ(sameGeneration->getObservedAttribute().accessPolicyWindow.num_bytes, 0u);
+
+    // A device-wide manager rebalance increments generation. Even if this
+    // source's region and ratio happen to be unchanged, the new generation
+    // must force a refresh of the stream attribute.
+    ++policy.generation;
+    auto nextGeneration = std::make_shared<AccessPolicyInspectingDeviceBatchMaterializer>(
+        source, policy);
+    input.forward(Thor::DeviceBatchReference(nextGeneration, 1), false, 1);
+    ASSERT_TRUE(nextGeneration->didInspect());
+    ASSERT_EQ(nextGeneration->getObservedStatus(), cudaSuccess);
+    EXPECT_EQ(nextGeneration->getObservedAttribute().accessPolicyWindow.base_ptr, source.getMemPtr<void>());
+    EXPECT_EQ(nextGeneration->getObservedAttribute().accessPolicyWindow.num_bytes, sourceBytes);
+    EXPECT_FLOAT_EQ(nextGeneration->getObservedAttribute().accessPolicyWindow.hitRatio, 0.75f);
+
+    capture.synchronize();
+    expectAllEqual(capture.readCapture(0), 7.0f);
+    expectAllEqual(capture.readCapture(1), 7.0f);
+    expectAllEqual(capture.readCapture(2), 7.0f);
+}
 
 TEST(NetworkInput, DeviceReferenceUsesReferenceRingAndMaterializesDirectlyIntoFeatureOutput) {
     if (MachineEvaluator::instance().getNumGpus() == 0) {
@@ -839,7 +1023,6 @@ TEST(NetworkInput, ReferenceSourceIsConsumedBeforeDownstreamProcessingCompletes)
     capture.synchronize();
     expectAllEqual(capture.readCapture(0), 9.0f);
 }
-
 
 TEST(NetworkInput, SharedReferenceSourceWaitsForEveryInputMaterialization) {
     if (MachineEvaluator::instance().getNumGpus() == 0) {

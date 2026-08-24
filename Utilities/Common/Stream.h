@@ -5,6 +5,7 @@
 #include "Event.h"
 #include "ScopedGpu.h"
 #include "Utilities/Common/HostFunctionArgs.h"
+#include "Utilities/Common/PersistingL2Cache.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 
 #include <cudnn.h>
@@ -69,6 +70,25 @@ class Stream {
     cudnnHandle_t getCudnnHandle() const;
 
     cudaStream_t getStream() const;
+
+    // Non-throwing CUDA persisting-L2 access-policy helpers. These only
+    // configure this stream; they do not decide which allocations should be
+    // cached or reserve device-wide L2 capacity.
+    // sourceIdentity and policyGeneration are opaque cache-key components for
+    // callers that own a higher-level policy. Repeating an identical request
+    // on the same shared stream state is a no-op after the first successful
+    // CUDA update. Changing the source, geometry, hit ratio, identity, or
+    // generation forces the stream attribute to be refreshed.
+    [[nodiscard]] ThorImplementation::PersistingL2OperationResult trySetPersistingL2AccessPolicyWindow(
+        const void* base,
+        uint64_t bytes,
+        float hitRatio,
+        uint64_t sourceIdentity = 0,
+        uint64_t policyGeneration = 0) const;
+
+    // Repeated clears are likewise cached: once this Stream state knows the
+    // window is disabled, no CUDA call is issued until a later successful set.
+    [[nodiscard]] ThorImplementation::PersistingL2OperationResult tryClearPersistingL2AccessPolicyWindow() const;
 
     cublasHandle_t getCublasHandle() const;
 

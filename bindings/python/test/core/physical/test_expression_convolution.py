@@ -169,12 +169,20 @@ def _copy_to_host_fp32(device_tensor: PhysicalTensor, stream: Stream) -> np.ndar
 
 
 def _conv2d_output_shape(
-        x_shape: tuple[int, int, int, int], w_shape: tuple[int, int, int, int], stride_h: int, stride_w: int,
-        pad_h: int, pad_w: int) -> tuple[int, int, int, int]:
+        x_shape: tuple[int, int, int, int],
+        w_shape: tuple[int, int, int, int],
+        stride_h: int,
+        stride_w: int,
+        pad_h: int,
+        pad_w: int,
+        dilation_h: int = 1,
+        dilation_w: int = 1) -> tuple[int, int, int, int]:
     n, _, h, width = x_shape
     k, _, r, s = w_shape
-    out_h = (h + 2 * pad_h - r) // stride_h + 1
-    out_w = (width + 2 * pad_w - s) // stride_w + 1
+    effective_r = dilation_h * (r - 1) + 1
+    effective_s = dilation_w * (s - 1) + 1
+    out_h = (h + 2 * pad_h - effective_r) // stride_h + 1
+    out_w = (width + 2 * pad_w - effective_s) // stride_w + 1
     return n, k, out_h, out_w
 
 
@@ -184,7 +192,10 @@ def _conv2d_nchw_ref(
         stride_h: int = 1,
         stride_w: int = 1,
         pad_h: int = 0,
-        pad_w: int = 0) -> np.ndarray:
+        pad_w: int = 0,
+        dilation_h: int = 1,
+        dilation_w: int = 1,
+        padding=None) -> np.ndarray:
     """Reference matching Thor conv2d semantics: cross-correlation with natural KCRS filter order."""
     x32 = x.astype(np.float32)
     w32 = w.astype(np.float32)
@@ -193,10 +204,13 @@ def _conv2d_nchw_ref(
     k, c2, r, s = w32.shape
     assert c == c2
 
-    out_h = (h + 2 * pad_h - r) // stride_h + 1
-    out_w = (width + 2 * pad_w - s) // stride_w + 1
+    top, bottom, left, right = padding if padding is not None else (pad_h, pad_h, pad_w, pad_w)
+    effective_r = dilation_h * (r - 1) + 1
+    effective_s = dilation_w * (s - 1) + 1
+    out_h = (h + top + bottom - effective_r) // stride_h + 1
+    out_w = (width + left + right - effective_s) // stride_w + 1
 
-    xpad = np.pad(x32, ((0, 0), (0, 0), (pad_h, pad_h), (pad_w, pad_w)))
+    xpad = np.pad(x32, ((0, 0), (0, 0), (top, bottom), (left, right)))
 
     out = np.zeros((n, k, out_h, out_w), dtype=np.float32)
     for ni in range(n):
@@ -205,9 +219,15 @@ def _conv2d_nchw_ref(
                 ih = oh * stride_h
                 for ow in range(out_w):
                     iw = ow * stride_w
-                    window = xpad[ni, :, ih:ih + r, iw:iw + s]
+                    window = xpad[
+                        ni,
+                        :,
+                        ih:ih + dilation_h * (r - 1) + 1:dilation_h,
+                        iw:iw + dilation_w * (s - 1) + 1:dilation_w,
+                    ]
                     out[ni, ko, oh, ow] = np.sum(window * w32[ko])
     return out
+
 
 def _conv2d_grads_ref(
         x: np.ndarray,
@@ -216,7 +236,10 @@ def _conv2d_grads_ref(
         stride_h: int = 1,
         stride_w: int = 1,
         pad_h: int = 0,
-        pad_w: int = 0) -> tuple[np.ndarray, np.ndarray]:
+        pad_w: int = 0,
+        dilation_h: int = 1,
+        dilation_w: int = 1,
+        padding=None) -> tuple[np.ndarray, np.ndarray]:
     x32 = x.astype(np.float32)
     w32 = w.astype(np.float32)
     grad32 = grad.astype(np.float32)
@@ -225,7 +248,8 @@ def _conv2d_grads_ref(
     k, c2, r, s = w32.shape
     assert c == c2
 
-    xpad = np.pad(x32, ((0, 0), (0, 0), (pad_h, pad_h), (pad_w, pad_w)))
+    top, bottom, left, right = padding if padding is not None else (pad_h, pad_h, pad_w, pad_w)
+    xpad = np.pad(x32, ((0, 0), (0, 0), (top, bottom), (left, right)))
     xpad_grad = np.zeros_like(xpad, dtype=np.float32)
     w_grad = np.zeros_like(w32, dtype=np.float32)
 
@@ -237,26 +261,21 @@ def _conv2d_grads_ref(
                 for ow in range(out_w):
                     iw = ow * stride_w
                     g = grad32[ni, ko, oh, ow]
-                    x_window = xpad[ni, :, ih:ih + r, iw:iw + s]
-                    xpad_grad[ni, :, ih:ih + r, iw:iw + s] += g * w32[ko]
+                    h_stop = ih + dilation_h * (r - 1) + 1
+                    w_stop = iw + dilation_w * (s - 1) + 1
+                    x_window = xpad[ni, :, ih:h_stop:dilation_h, iw:w_stop:dilation_w]
+                    xpad_grad[ni, :, ih:h_stop:dilation_h, iw:w_stop:dilation_w] += g * w32[ko]
                     w_grad[ko] += g * x_window
 
-    h_slice = slice(None) if pad_h == 0 else slice(pad_h, pad_h + h)
-    w_slice = slice(None) if pad_w == 0 else slice(pad_w, pad_w + width)
+    h_slice = slice(top, top + h)
+    w_slice = slice(left, left + width)
     x_grad = xpad_grad[:, :, h_slice, w_slice]
     return x_grad, w_grad
 
 
-
 def _conv3d_output_shape(
-        x_shape: tuple[int, int, int, int, int],
-        w_shape: tuple[int, int, int, int, int],
-        stride_d: int,
-        stride_h: int,
-        stride_w: int,
-        pad_d: int,
-        pad_h: int,
-        pad_w: int) -> tuple[int, int, int, int, int]:
+        x_shape: tuple[int, int, int, int, int], w_shape: tuple[int, int, int, int, int], stride_d: int, stride_h: int,
+        stride_w: int, pad_d: int, pad_h: int, pad_w: int) -> tuple[int, int, int, int, int]:
     n, _, d, h, width = x_shape
     k, _, t, r, s = w_shape
     out_d = (d + 2 * pad_d - t) // stride_d + 1
@@ -273,14 +292,18 @@ def _conv3d_ncdhw_ref(
         stride_w: int = 1,
         pad_d: int = 0,
         pad_h: int = 0,
-        pad_w: int = 0) -> np.ndarray:
+        pad_w: int = 0,
+        groups: int = 1) -> np.ndarray:
     """Reference matching Thor conv3d semantics: cross-correlation with natural KCTRS filter order."""
     x32 = x.astype(np.float32)
     w32 = w.astype(np.float32)
 
     n, c, depth, h, width = x32.shape
-    k, c2, t, r, s = w32.shape
-    assert c == c2
+    k, c_per_group, t, r, s = w32.shape
+    assert groups > 0
+    assert c % groups == 0
+    assert k % groups == 0
+    assert c_per_group == c // groups
 
     out_d = (depth + 2 * pad_d - t) // stride_d + 1
     out_h = (h + 2 * pad_h - r) // stride_h + 1
@@ -291,13 +314,16 @@ def _conv3d_ncdhw_ref(
     out = np.zeros((n, k, out_d, out_h, out_w), dtype=np.float32)
     for ni in range(n):
         for ko in range(k):
+            group = ko // (k // groups)
+            c_begin = group * c_per_group
+            c_end = c_begin + c_per_group
             for od in range(out_d):
                 id_ = od * stride_d
                 for oh in range(out_h):
                     ih = oh * stride_h
                     for ow in range(out_w):
                         iw = ow * stride_w
-                        window = xpad[ni, :, id_:id_ + t, ih:ih + r, iw:iw + s]
+                        window = xpad[ni, c_begin:c_end, id_:id_ + t, ih:ih + r, iw:iw + s]
                         out[ni, ko, od, oh, ow] = np.sum(window * w32[ko])
     return out
 
@@ -311,14 +337,18 @@ def _conv3d_grads_ref(
         stride_w: int = 1,
         pad_d: int = 0,
         pad_h: int = 0,
-        pad_w: int = 0) -> tuple[np.ndarray, np.ndarray]:
+        pad_w: int = 0,
+        groups: int = 1) -> tuple[np.ndarray, np.ndarray]:
     x32 = x.astype(np.float32)
     w32 = w.astype(np.float32)
     grad32 = grad.astype(np.float32)
 
     n, c, depth, h, width = x32.shape
-    k, c2, t, r, s = w32.shape
-    assert c == c2
+    k, c_per_group, t, r, s = w32.shape
+    assert groups > 0
+    assert c % groups == 0
+    assert k % groups == 0
+    assert c_per_group == c // groups
 
     xpad = np.pad(x32, ((0, 0), (0, 0), (pad_d, pad_d), (pad_h, pad_h), (pad_w, pad_w)))
     xpad_grad = np.zeros_like(xpad, dtype=np.float32)
@@ -327,6 +357,9 @@ def _conv3d_grads_ref(
     _, _, out_d, out_h, out_w = grad32.shape
     for ni in range(n):
         for ko in range(k):
+            group = ko // (k // groups)
+            c_begin = group * c_per_group
+            c_end = c_begin + c_per_group
             for od in range(out_d):
                 id_ = od * stride_d
                 for oh in range(out_h):
@@ -334,8 +367,8 @@ def _conv3d_grads_ref(
                     for ow in range(out_w):
                         iw = ow * stride_w
                         g = grad32[ni, ko, od, oh, ow]
-                        x_window = xpad[ni, :, id_:id_ + t, ih:ih + r, iw:iw + s]
-                        xpad_grad[ni, :, id_:id_ + t, ih:ih + r, iw:iw + s] += g * w32[ko]
+                        x_window = xpad[ni, c_begin:c_end, id_:id_ + t, ih:ih + r, iw:iw + s]
+                        xpad_grad[ni, c_begin:c_end, id_:id_ + t, ih:ih + r, iw:iw + s] += g * w32[ko]
                         w_grad[ko] += g * x_window
 
     if pad_d == 0:
@@ -362,11 +395,20 @@ def _conv2d_loss_with_upstream_ref(
         stride_h: int = 1,
         stride_w: int = 1,
         pad_h: int = 0,
-        pad_w: int = 0) -> float:
+        pad_w: int = 0,
+        dilation_h: int = 1,
+        dilation_w: int = 1,
+        padding=None) -> float:
     return float(
         np.sum(
-            _conv2d_nchw_ref(x, w, stride_h=stride_h, stride_w=stride_w, pad_h=pad_h, pad_w=pad_w) *
-            grad.astype(np.float32)))
+            _conv2d_nchw_ref(
+                x,
+                w,
+                stride_h=stride_h,
+                stride_w=stride_w,
+                padding=padding if padding is not None else (pad_h, pad_h, pad_w, pad_w),
+                dilation_h=dilation_h,
+                dilation_w=dilation_w) * grad.astype(np.float32)))
 
 
 def _finite_difference_conv2d_grads(
@@ -377,7 +419,10 @@ def _finite_difference_conv2d_grads(
         stride_w: int = 1,
         pad_h: int = 0,
         pad_w: int = 0,
-        eps: float = 1e-2) -> tuple[np.ndarray, np.ndarray]:
+        dilation_h: int = 1,
+        dilation_w: int = 1,
+        eps: float = 1e-2,
+        padding=None) -> tuple[np.ndarray, np.ndarray]:
     x32 = x.astype(np.float32).copy()
     w32 = w.astype(np.float32).copy()
     grad32 = grad.astype(np.float32)
@@ -391,9 +436,23 @@ def _finite_difference_conv2d_grads(
         xp[idx] += eps
         xm[idx] -= eps
         lp = _conv2d_loss_with_upstream_ref(
-            xp, w32, grad32, stride_h=stride_h, stride_w=stride_w, pad_h=pad_h, pad_w=pad_w)
+            xp,
+            w32,
+            grad32,
+            stride_h=stride_h,
+            stride_w=stride_w,
+            padding=padding if padding is not None else (pad_h, pad_h, pad_w, pad_w),
+            dilation_h=dilation_h,
+            dilation_w=dilation_w)
         lm = _conv2d_loss_with_upstream_ref(
-            xm, w32, grad32, stride_h=stride_h, stride_w=stride_w, pad_h=pad_h, pad_w=pad_w)
+            xm,
+            w32,
+            grad32,
+            stride_h=stride_h,
+            stride_w=stride_w,
+            padding=padding if padding is not None else (pad_h, pad_h, pad_w, pad_w),
+            dilation_h=dilation_h,
+            dilation_w=dilation_w)
         x_grad[idx] = (lp - lm) / (2.0 * eps)
 
     for idx in np.ndindex(*w32.shape):
@@ -402,9 +461,23 @@ def _finite_difference_conv2d_grads(
         wp[idx] += eps
         wm[idx] -= eps
         lp = _conv2d_loss_with_upstream_ref(
-            x32, wp, grad32, stride_h=stride_h, stride_w=stride_w, pad_h=pad_h, pad_w=pad_w)
+            x32,
+            wp,
+            grad32,
+            stride_h=stride_h,
+            stride_w=stride_w,
+            padding=padding if padding is not None else (pad_h, pad_h, pad_w, pad_w),
+            dilation_h=dilation_h,
+            dilation_w=dilation_w)
         lm = _conv2d_loss_with_upstream_ref(
-            x32, wm, grad32, stride_h=stride_h, stride_w=stride_w, pad_h=pad_h, pad_w=pad_w)
+            x32,
+            wm,
+            grad32,
+            stride_h=stride_h,
+            stride_w=stride_w,
+            padding=padding if padding is not None else (pad_h, pad_h, pad_w, pad_w),
+            dilation_h=dilation_h,
+            dilation_w=dilation_w)
         w_grad[idx] = (lp - lm) / (2.0 * eps)
 
     return x_grad, w_grad
@@ -419,7 +492,7 @@ def _conv_pointwise_loss_with_upstream_ref(
         stride_w: int = 1,
         pad_h: int = 0,
         pad_w: int = 0) -> float:
-    conv = _conv2d_nchw_ref(x, w, stride_h=stride_h, stride_w=stride_w, pad_h=pad_h, pad_w=pad_w)
+    conv = _conv2d_nchw_ref(x, w, stride_h=stride_h, stride_w=stride_w, padding=(pad_h, pad_h, pad_w, pad_w))
     y = np.exp(conv + b.astype(np.float32))
     return float(np.sum(y * grad.astype(np.float32)))
 
@@ -504,9 +577,9 @@ def test_conv3d_binding_exists_and_returns_expression():
         (0, 1, 1, 0, 0, 0, "stride must be positive"),
         (1, 0, 1, 0, 0, 0, "stride must be positive"),
         (1, 1, 0, 0, 0, 0, "stride must be positive"),
-        (1, 1, 1, -1, 0, 0, "padding must be non-negative"),
-        (1, 1, 1, 0, -1, 0, "padding must be non-negative"),
-        (1, 1, 1, 0, 0, -1, "padding must be non-negative"),
+        (1, 1, 1, -1, 0, 0, "non-negative"),
+        (1, 1, 1, 0, -1, 0, "non-negative"),
+        (1, 1, 1, 0, 0, -1, "non-negative"),
     ],
 )
 def test_conv3d_invalid_stride_or_padding_rejected(
@@ -590,7 +663,8 @@ def test_conv3d_backward_numerical_cudnn_frontend(dtype: thor.DataType, rtol: fl
     w_np = np.linspace(-0.20, 0.35, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape).astype(storage_dtype)
     grad_np = np.linspace(-0.40, 0.45, num=np.prod(y_shape), dtype=np.float32).reshape(y_shape).astype(storage_dtype)
 
-    expected_x, expected_w = _conv3d_grads_ref(x_np, w_np, grad_np, stride_d=1, stride_h=1, stride_w=1, pad_d=1, pad_h=1, pad_w=1)
+    expected_x, expected_w = _conv3d_grads_ref(
+        x_np, w_np, grad_np, stride_d=1, stride_h=1, stride_w=1, pad_d=1, pad_h=1, pad_w=1)
     expected_x = expected_x.astype(storage_dtype).astype(np.float32)
     expected_w = expected_w.astype(storage_dtype).astype(np.float32)
 
@@ -611,20 +685,295 @@ def test_conv3d_backward_numerical_cudnn_frontend(dtype: thor.DataType, rtol: fl
     np.testing.assert_allclose(got_w, expected_w, rtol=rtol, atol=atol)
 
 
-@pytest.mark.parametrize(
-    ("stride_h", "stride_w", "pad_h", "pad_w", "match"),
-    [
-        (0, 1, 0, 0, "stride must be positive"),
-        (1, 0, 0, 0, "stride must be positive"),
-        (1, 1, -1, 0, "padding must be non-negative"),
-        (1, 1, 0, -1, "padding must be non-negative"),
-    ],
-)
-def test_conv2d_invalid_stride_or_padding_rejected(stride_h: int, stride_w: int, pad_h: int, pad_w: int, match: str):
+@pytest.mark.cuda
+def test_conv3d_grouped_forward_and_backward_match_independent_reference():
+    groups = 2
+    upstream_name = "__grad_output"
     x = ex.input("x")
     w = ex.input("w")
-    with pytest.raises(RuntimeError, match=match):
-        ex.conv2d(x, w, stride_h=stride_h, stride_w=stride_w, pad_h=pad_h, pad_w=pad_w)
+    out = ex.conv3d(
+        x, w, stride_d=1, stride_h=1, stride_w=1, pad_d=1, pad_h=1, pad_w=1, output_dtype=thor.DataType.fp32, groups=groups)
+
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x", "w"], error_input_name=upstream_name)
+
+    x_shape = (1, 4, 3, 4, 4)
+    w_shape = (6, 2, 2, 3, 3)
+    y_shape = _conv3d_output_shape(x_shape, w_shape, 1, 1, 1, 1, 1, 1)
+    x_np = np.linspace(-0.35, 0.40, num=np.prod(x_shape), dtype=np.float32).reshape(x_shape)
+    w_np = np.linspace(-0.25, 0.30, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape)
+    grad_np = np.linspace(-0.40, 0.45, num=np.prod(y_shape), dtype=np.float32).reshape(y_shape)
+
+    expected_y = _conv3d_ncdhw_ref(x_np, w_np, pad_d=1, pad_h=1, pad_w=1, groups=groups)
+    expected_x, expected_w = _conv3d_grads_ref(x_np, w_np, grad_np, pad_d=1, pad_h=1, pad_w=1, groups=groups)
+
+    stream = Stream(gpu_num=0)
+    fwd = fwd_eq.stamp({"x": _host_to_gpu(x_np, thor.DataType.fp32, stream), "w": _host_to_gpu(w_np, thor.DataType.fp32, stream)}, stream)
+    fwd.run()
+    np.testing.assert_allclose(_copy_to_host_fp32(fwd.output(), stream), expected_y, rtol=1e-4, atol=1e-4)
+
+    bwd = bwd_eq.stamp(
+        {
+            "x": _host_to_gpu(x_np, thor.DataType.fp32, stream),
+            "w": _host_to_gpu(w_np, thor.DataType.fp32, stream),
+            upstream_name: _host_to_gpu(grad_np, thor.DataType.fp32, stream),
+        },
+        stream,
+    )
+    bwd.run()
+    np.testing.assert_allclose(_copy_to_host_fp32(bwd.output("x_grad"), stream), expected_x, rtol=2e-4, atol=2e-4)
+    np.testing.assert_allclose(_copy_to_host_fp32(bwd.output("w_grad"), stream), expected_w, rtol=2e-4, atol=2e-4)
+
+
+def test_conv3d_rejects_zero_groups():
+    x = ex.input("x")
+    w = ex.input("w")
+    with pytest.raises(RuntimeError, match="groups must be positive"):
+        ex.conv3d(x, w, groups=0)
+
+
+@pytest.mark.parametrize(
+    ("stride_h", "stride_w", "padding", "error_type", "match"),
+    [
+        (0, 1, (0, 0, 0, 0), RuntimeError, "stride must be positive"),
+        (1, 0, (0, 0, 0, 0), RuntimeError, "stride must be positive"),
+        (1, 1, (-1, 0, 0, 0), ValueError, "non-negative"),
+        (1, 1, (0, -1, 0, 0), ValueError, "non-negative"),
+        (1, 1, (0, 0, -1, 0), ValueError, "non-negative"),
+        (1, 1, (0, 0, 0, -1), ValueError, "non-negative"),
+    ],
+)
+def test_conv2d_invalid_stride_or_padding_rejected(
+        stride_h: int, stride_w: int, padding: tuple[int, int, int, int], error_type: type[Exception], match: str):
+    x = ex.input("x")
+    w = ex.input("w")
+    with pytest.raises(error_type, match=match):
+        ex.conv2d(x, w, stride_h=stride_h, stride_w=stride_w, padding=padding)
+
+
+def test_conv2d_legacy_pad_h_pad_w_keywords_are_not_supported():
+    x = ex.input("x")
+    w = ex.input("w")
+    with pytest.raises(TypeError):
+        ex.conv2d(x, w, pad_h=1)
+    with pytest.raises(TypeError):
+        ex.conv2d(x, w, pad_w=1)
+
+
+@pytest.mark.cuda
+def test_conv2d_asymmetric_padding_python_surface_matches_reference():
+    dtype = thor.DataType.fp32
+    x = ex.input("x")
+    w = ex.input("w")
+    padding = (1, 2, 3, 0)
+    out = ex.conv2d(x, w, padding=padding, output_dtype=dtype)
+    eq = ex.compile(out, device_num=0)
+
+    x_shape = (1, 1, 4, 5)
+    w_shape = (2, 1, 2, 3)
+    x_np = np.linspace(-0.3, 0.4, num=np.prod(x_shape), dtype=np.float32).reshape(x_shape)
+    w_np = np.linspace(-0.2, 0.25, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape)
+    expected = _conv2d_nchw_ref(x_np, w_np, padding=padding)
+
+    stream = Stream(gpu_num=0)
+    stamped = eq.stamp({
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "w": _host_to_gpu(w_np, dtype, stream)
+    }, stream)
+    stamped.run()
+    got = _copy_to_host_fp32(stamped.output(), stream)
+
+    np.testing.assert_allclose(got, expected, rtol=5e-4, atol=5e-4)
+
+
+@pytest.mark.parametrize(("dilation_h", "dilation_w"), [(0, 1), (1, 0), (-1, 1), (1, -1)])
+def test_conv2d_invalid_dilation_rejected(dilation_h: int, dilation_w: int):
+    x = ex.input("x")
+    w = ex.input("w")
+    with pytest.raises(RuntimeError, match="dilation must be positive"):
+        ex.conv2d(x, w, dilation_h=dilation_h, dilation_w=dilation_w)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    ("dilation_h", "dilation_w", "stride_h", "stride_w", "pad_h", "pad_w"),
+    [
+        pytest.param(2, 2, 1, 1, 2, 2, id="dilation_2x2"),
+        pytest.param(2, 3, 1, 1, 2, 3, id="mixed_dilation_2x3"),
+        pytest.param(2, 2, 2, 1, 1, 2, id="stride_and_dilation"),
+    ],
+)
+def test_conv2d_dilation_forward_numerical_fp32(
+        dilation_h: int, dilation_w: int, stride_h: int, stride_w: int, pad_h: int, pad_w: int):
+    dtype = thor.DataType.fp32
+    x = ex.input("x")
+    w = ex.input("w")
+    out = ex.conv2d(
+        x,
+        w,
+        stride_h=stride_h,
+        stride_w=stride_w,
+        padding=(pad_h, pad_h, pad_w, pad_w),
+        dilation_h=dilation_h,
+        dilation_w=dilation_w,
+        output_dtype=dtype)
+    eq = ex.compile(out, device_num=0)
+
+    x_shape = (1, 2, 8, 9)
+    w_shape = (3, 2, 3, 2)
+    x_np = np.linspace(-0.35, 0.40, num=np.prod(x_shape), dtype=np.float32).reshape(x_shape)
+    w_np = np.linspace(-0.20, 0.25, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape)
+    expected = _conv2d_nchw_ref(
+        x_np,
+        w_np,
+        stride_h=stride_h,
+        stride_w=stride_w,
+        padding=(pad_h, pad_h, pad_w, pad_w),
+        dilation_h=dilation_h,
+        dilation_w=dilation_w)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "w": _host_to_gpu(w_np, dtype, stream),
+    }
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host_fp32(stamped.output(), stream)
+
+    assert got.shape == _conv2d_output_shape(x_shape, w_shape, stride_h, stride_w, pad_h, pad_w, dilation_h, dilation_w)
+    np.testing.assert_allclose(got, expected, rtol=5e-4, atol=5e-4)
+
+
+@pytest.mark.cuda
+def test_conv2d_dilation_backward_data_and_filter_numerical_fp32():
+    dtype = thor.DataType.fp32
+    upstream_name = "__grad_output"
+    dilation_h, dilation_w = 2, 3
+    stride_h, stride_w = 1, 1
+    pad_h, pad_w = 2, 3
+
+    x = ex.input("x")
+    w = ex.input("w")
+    out = ex.conv2d(
+        x,
+        w,
+        stride_h=stride_h,
+        stride_w=stride_w,
+        padding=(pad_h, pad_h, pad_w, pad_w),
+        dilation_h=dilation_h,
+        dilation_w=dilation_w,
+        output_dtype=dtype)
+    fwd_eq = ex.compile(out, device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x", "w"], error_input_name=upstream_name)
+
+    x_shape = (1, 1, 6, 7)
+    w_shape = (2, 1, 2, 2)
+    y_shape = _conv2d_output_shape(x_shape, w_shape, stride_h, stride_w, pad_h, pad_w, dilation_h, dilation_w)
+    x_np = np.linspace(-0.25, 0.30, num=np.prod(x_shape), dtype=np.float32).reshape(x_shape)
+    w_np = np.linspace(-0.20, 0.35, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape)
+    grad_np = np.linspace(-0.40, 0.45, num=np.prod(y_shape), dtype=np.float32).reshape(y_shape)
+
+    expected_x, expected_w = _conv2d_grads_ref(
+        x_np,
+        w_np,
+        grad_np,
+        stride_h=stride_h,
+        stride_w=stride_w,
+        padding=(pad_h, pad_h, pad_w, pad_w),
+        dilation_h=dilation_h,
+        dilation_w=dilation_w)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "w": _host_to_gpu(w_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    stamped.run()
+
+    got_x = _copy_to_host_fp32(stamped.output("x_grad"), stream)
+    got_w = _copy_to_host_fp32(stamped.output("w_grad"), stream)
+    np.testing.assert_allclose(got_x, expected_x, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(got_w, expected_w, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    ("dtype", "rtol", "atol"),
+    [
+        pytest.param(thor.DataType.fp16, 7e-2, 7e-2, id="fp16"),
+        pytest.param(thor.DataType.bf16, 1.5e-1, 1.5e-1, id="bf16"),
+        pytest.param(thor.DataType.fp32, 5e-4, 5e-4, id="fp32"),
+    ],
+)
+def test_conv2d_dilation_forward_numerical_float_dtypes(dtype: thor.DataType, rtol: float, atol: float):
+    dilation_h, dilation_w = 2, 3
+    pad_h, pad_w = 2, 3
+    x = ex.input("x")
+    w = ex.input("w")
+    out = ex.conv2d(
+        x,
+        w,
+        stride_h=1,
+        stride_w=1,
+        padding=(pad_h, pad_h, pad_w, pad_w),
+        dilation_h=dilation_h,
+        dilation_w=dilation_w,
+        output_dtype=dtype)
+    eq = ex.compile(out, device_num=0)
+
+    x_shape = (1, 2, 6, 7)
+    w_shape = (3, 2, 2, 2)
+    storage_dtype = _numpy_storage_dtype(dtype)
+    x_np = np.linspace(-0.35, 0.40, num=np.prod(x_shape), dtype=np.float32).reshape(x_shape).astype(storage_dtype)
+    w_np = np.linspace(-0.20, 0.25, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape).astype(storage_dtype)
+    expected = _conv2d_nchw_ref(
+        x_np, w_np, padding=(pad_h, pad_h, pad_w, pad_w), dilation_h=dilation_h, dilation_w=dilation_w)
+    expected = expected.astype(storage_dtype).astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "w": _host_to_gpu(w_np, dtype, stream),
+    }
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host_fp32(stamped.output(), stream)
+
+    assert got.shape == _conv2d_output_shape(x_shape, w_shape, 1, 1, pad_h, pad_w, dilation_h, dilation_w)
+    np.testing.assert_allclose(got, expected, rtol=rtol, atol=atol)
+
+
+@pytest.mark.cuda
+def test_conv2d_dilation_with_pointwise_epilogue_numerical_fp16():
+    dtype = thor.DataType.fp16
+    x = ex.input("x")
+    w = ex.input("w")
+    b = ex.input("b")
+    conv = ex.conv2d(x, w, padding=(2, 2, 2, 2), dilation_h=2, dilation_w=2, output_dtype=dtype)
+    out = (conv + b) * 0.5
+    eq = ex.compile(out, device_num=0)
+
+    x_shape = (1, 2, 5, 5)
+    w_shape = (3, 2, 3, 3)
+    x_np = np.linspace(-0.25, 0.30, num=np.prod(x_shape), dtype=np.float32).reshape(x_shape).astype(np.float16)
+    w_np = np.linspace(-0.20, 0.20, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape).astype(np.float16)
+    b_np = np.array([0.10, -0.05, 0.02], dtype=np.float32).reshape(1, 3, 1, 1).astype(np.float16)
+    conv_ref = _conv2d_nchw_ref(x_np, w_np, padding=(2, 2, 2, 2), dilation_h=2, dilation_w=2)
+    expected = ((conv_ref + b_np.astype(np.float32)) * 0.5).astype(np.float16).astype(np.float32)
+
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        "w": _host_to_gpu(w_np, dtype, stream),
+        "b": _host_to_gpu(b_np, dtype, stream),
+    }
+    stamped = eq.stamp(inputs_gpu, stream)
+    stamped.run()
+    got = _copy_to_host_fp32(stamped.output(), stream)
+    np.testing.assert_allclose(got, expected, rtol=FP16_RTOL, atol=FP16_ATOL)
 
 
 @pytest.mark.cuda
@@ -639,7 +988,7 @@ def test_conv2d_invalid_stride_or_padding_rejected(stride_h: int, stride_w: int,
 def test_conv2d_forward_numerical_cudnn_frontend_float_dtypes(dtype: thor.DataType, rtol: float, atol: float):
     x = ex.input("x")
     w = ex.input("w")
-    out = ex.conv2d(x, w, stride_h=1, stride_w=1, pad_h=1, pad_w=1, output_dtype=dtype)
+    out = ex.conv2d(x, w, stride_h=1, stride_w=1, padding=(1, 1, 1, 1), output_dtype=dtype)
     eq = ex.compile(out, device_num=0)
 
     x_shape = (1, 4, 4, 4)
@@ -647,7 +996,7 @@ def test_conv2d_forward_numerical_cudnn_frontend_float_dtypes(dtype: thor.DataTy
     storage_dtype = _numpy_storage_dtype(dtype)
     x_np = np.linspace(-0.35, 0.40, num=np.prod(x_shape), dtype=np.float32).reshape(x_shape).astype(storage_dtype)
     w_np = np.linspace(-0.20, 0.25, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape).astype(storage_dtype)
-    expected = _conv2d_nchw_ref(x_np, w_np, stride_h=1, stride_w=1, pad_h=1, pad_w=1)
+    expected = _conv2d_nchw_ref(x_np, w_np, stride_h=1, stride_w=1, padding=(1, 1, 1, 1))
     expected = expected.astype(storage_dtype).astype(np.float32)
 
     stream = Stream(gpu_num=0)
@@ -678,7 +1027,7 @@ def test_conv2d_backward_numerical_cudnn_frontend_float_dtypes(dtype: thor.DataT
 
     x = ex.input("x")
     w = ex.input("w")
-    out = ex.conv2d(x, w, stride_h=1, stride_w=1, pad_h=1, pad_w=1, output_dtype=dtype)
+    out = ex.conv2d(x, w, stride_h=1, stride_w=1, padding=(1, 1, 1, 1), output_dtype=dtype)
 
     fwd_eq = ex.compile(out, device_num=0)
     bwd_eq = fwd_eq.compile_backward(["x", "w"], error_input_name=upstream_name)
@@ -692,7 +1041,7 @@ def test_conv2d_backward_numerical_cudnn_frontend_float_dtypes(dtype: thor.DataT
     w_np = np.linspace(-0.20, 0.35, num=np.prod(w_shape), dtype=np.float32).reshape(w_shape).astype(storage_dtype)
     grad_np = np.linspace(-0.40, 0.45, num=np.prod(y_shape), dtype=np.float32).reshape(y_shape).astype(storage_dtype)
 
-    expected_x, expected_w = _conv2d_grads_ref(x_np, w_np, grad_np, stride_h=1, stride_w=1, pad_h=1, pad_w=1)
+    expected_x, expected_w = _conv2d_grads_ref(x_np, w_np, grad_np, stride_h=1, stride_w=1, padding=(1, 1, 1, 1))
     expected_x = expected_x.astype(storage_dtype).astype(np.float32)
     expected_w = expected_w.astype(storage_dtype).astype(np.float32)
 
@@ -724,8 +1073,7 @@ def test_conv2d_forward_numerical_fp16(case: dict):
         w,
         stride_h=case["stride_h"],
         stride_w=case["stride_w"],
-        pad_h=case["pad_h"],
-        pad_w=case["pad_w"],
+        padding=(case["pad_h"], case["pad_h"], case["pad_w"], case["pad_w"]),
     )
     eq = ex.compile(out, device_num=0)
 
@@ -738,8 +1086,7 @@ def test_conv2d_forward_numerical_fp16(case: dict):
         w_np,
         stride_h=case["stride_h"],
         stride_w=case["stride_w"],
-        pad_h=case["pad_h"],
-        pad_w=case["pad_w"],
+        padding=(case["pad_h"], case["pad_h"], case["pad_w"], case["pad_w"]),
     )
 
     stream = Stream(gpu_num=0)
@@ -764,14 +1111,14 @@ def test_conv2d_followed_by_finite_pointwise_broadcast_numerical_fp16():
     w = ex.input("w")
     b = ex.input("b")
 
-    out = (ex.conv2d(x, w, stride_h=1, stride_w=1, pad_h=1, pad_w=1) + b) * 0.5 - 0.125
+    out = (ex.conv2d(x, w, stride_h=1, stride_w=1, padding=(1, 1, 1, 1)) + b) * 0.5 - 0.125
     eq = ex.compile(out, device_num=0)
 
     x_np = np.linspace(-0.25, 0.30, num=1 * 2 * 4 * 4, dtype=np.float32).reshape(1, 2, 4, 4).astype(np.float16)
     w_np = np.linspace(-0.20, 0.20, num=3 * 2 * 3 * 3, dtype=np.float32).reshape(3, 2, 3, 3).astype(np.float16)
     b_np = np.array([0.10, -0.05, 0.02], dtype=np.float32).reshape(1, 3, 1, 1).astype(np.float16)
 
-    conv_ref = _conv2d_nchw_ref(x_np, w_np, stride_h=1, stride_w=1, pad_h=1, pad_w=1)
+    conv_ref = _conv2d_nchw_ref(x_np, w_np, stride_h=1, stride_w=1, padding=(1, 1, 1, 1))
     expected = ((conv_ref + b_np.astype(np.float32)) * 0.5 - 0.125).astype(np.float16).astype(np.float32)
 
     stream = Stream(gpu_num=0)
@@ -795,14 +1142,14 @@ def test_conv2d_followed_by_exp_matches_fp16_overflow_semantics():
     w = ex.input("w")
     b = ex.input("b")
 
-    out = ex.exp(ex.conv2d(x, w, stride_h=1, stride_w=1, pad_h=1, pad_w=1) + b)
+    out = ex.exp(ex.conv2d(x, w, stride_h=1, stride_w=1, padding=(1, 1, 1, 1)) + b)
     eq = ex.compile(out, device_num=0)
 
     x_np = ((np.arange(1 * 2 * 4 * 4, dtype=np.float32).reshape(1, 2, 4, 4) - 8.0) / 20.0).astype(np.float16)
     w_np = ((np.arange(3 * 2 * 3 * 3, dtype=np.float32).reshape(3, 2, 3, 3) - 10.0) / 30.0).astype(np.float16)
     b_np = np.array([0.1, -0.2, 0.05], dtype=np.float32).reshape(1, 3, 1, 1).astype(np.float16)
 
-    conv_ref = _conv2d_nchw_ref(x_np, w_np, stride_h=1, stride_w=1, pad_h=1, pad_w=1)
+    conv_ref = _conv2d_nchw_ref(x_np, w_np, stride_h=1, stride_w=1, padding=(1, 1, 1, 1))
     expected = _fp16_exp_expected(conv_ref + b_np.astype(np.float32))
 
     stream = Stream(gpu_num=0)
@@ -824,7 +1171,7 @@ def test_conv2d_followed_by_exp_matches_fp16_overflow_semantics():
 def test_conv2d_parameter_fan_override_filter(case: dict):
     x = ex.input("x")
     w = ex.input("w")
-    out = ex.conv2d(x, w, stride_h=1, stride_w=1, pad_h=1, pad_w=1)
+    out = ex.conv2d(x, w, stride_h=1, stride_w=1, padding=(1, 1, 1, 1))
     eq = ex.compile(out, device_num=0)
 
     stream = Stream(gpu_num=0)
@@ -854,8 +1201,7 @@ def test_conv2d_backward_numerical_fp16(case: dict):
         w,
         stride_h=case["stride_h"],
         stride_w=case["stride_w"],
-        pad_h=case["pad_h"],
-        pad_w=case["pad_w"],
+        padding=(case["pad_h"], case["pad_h"], case["pad_w"], case["pad_w"]),
     )
 
     fwd_eq = ex.compile(out, device_num=0)
@@ -904,7 +1250,7 @@ def test_conv2d_backward_through_pointwise_chain_numerical_fp16():
     x = ex.input("x")
     w = ex.input("w")
     b = ex.input("b")
-    out = ex.exp(ex.conv2d(x, w, stride_h=1, stride_w=1, pad_h=0, pad_w=0) + b)
+    out = ex.exp(ex.conv2d(x, w, stride_h=1, stride_w=1, padding=(0, 0, 0, 0)) + b)
 
     fwd_eq = ex.compile(out, device_num=0)
     bwd_eq = fwd_eq.compile_backward(["x", "w", "b"], error_input_name=upstream_name)

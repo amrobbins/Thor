@@ -43,6 +43,7 @@ using TensorScalarBinding = ThorImplementation::TensorScalarBinding;
 using AttentionTensorLayout = ThorImplementation::AttentionTensorLayout;
 using AttentionMaskKind = ThorImplementation::AttentionMaskKind;
 using AttentionOptions = ThorImplementation::AttentionOptions;
+using ConvolutionSpatial2d = ThorImplementation::ConvolutionSpatial2d;
 using ScanOp = ThorImplementation::ScanOp;
 using RotaryScalingKind = ThorImplementation::RotaryScalingKind;
 using RotaryPositionEmbeddingOptions = ThorImplementation::RotaryPositionEmbeddingOptions;
@@ -91,6 +92,28 @@ std::optional<DataType> optionalDataTypeFromPython(const nb::object& obj, std::s
         return std::nullopt;
     }
     return pybind::castOrTypeError<DataType>(obj, context, "thor.DataType or None", false);
+}
+
+std::array<int32_t, 4> conv2dPaddingFromPython(const nb::object& padding) {
+    if (!nb::isinstance<nb::sequence>(padding) || nb::isinstance<nb::str>(padding)) {
+        throw nb::type_error(
+            "Expression.conv2d() argument 'padding': expected a length-4 sequence[int] ordered as (top, bottom, left, right).");
+    }
+    nb::sequence seq = pybind::castOrTypeError<nb::sequence>(
+        padding, "Expression.conv2d() argument 'padding'", "length-4 sequence[int]", false);
+    if (nb::len(seq) != 4) {
+        throw nb::value_error(
+            "Expression.conv2d(): padding must contain exactly four values ordered as (top, bottom, left, right).");
+    }
+    std::array<int32_t, 4> values{};
+    for (size_t i = 0; i < values.size(); ++i) {
+        values[i] = pybind::castOrTypeError<int32_t>(
+            seq[i], "Expression.conv2d() argument 'padding'", "non-negative int", false);
+        if (values[i] < 0) {
+            throw nb::value_error("Expression.conv2d(): padding values must be non-negative.");
+        }
+    }
+    return values;
 }
 
 Expression expressionFromPython(nb::handle obj, std::string_view context) {
@@ -949,22 +972,34 @@ Shorthand for ``self.transpose()``.
            const Expression& w,
            int32_t stride_h,
            int32_t stride_w,
-           int32_t pad_h,
-           int32_t pad_w,
+           nb::object padding,
            nb::object output_dtype_obj,
-           nb::object compute_dtype_obj) {
+           nb::object compute_dtype_obj,
+           int32_t dilation_h,
+           int32_t dilation_w) {
             std::optional<DataType> output_dtype = optionalDataTypeFromPython(output_dtype_obj, "output_dtype argument");
             std::optional<DataType> compute_dtype = optionalDataTypeFromPython(compute_dtype_obj, "compute_dtype argument");
-            return Expression::conv2d(x, w, stride_h, stride_w, pad_h, pad_w, compute_dtype, output_dtype);
+            const auto paddingValues = conv2dPaddingFromPython(padding);
+            ConvolutionSpatial2d spatial;
+            spatial.stride_h = stride_h;
+            spatial.stride_w = stride_w;
+            spatial.dilation_h = dilation_h;
+            spatial.dilation_w = dilation_w;
+            spatial.pre_padding_h = paddingValues[0];
+            spatial.post_padding_h = paddingValues[1];
+            spatial.pre_padding_w = paddingValues[2];
+            spatial.post_padding_w = paddingValues[3];
+            return Expression::conv2d(x, w, spatial, compute_dtype, output_dtype);
         },
         "x"_a,
         "w"_a,
         "stride_h"_a = 1,
         "stride_w"_a = 1,
-        "pad_h"_a = 0,
-        "pad_w"_a = 0,
+        "padding"_a = nb::make_tuple(0, 0, 0, 0),
         "output_dtype"_a.none() = nb::none(),
-        "compute_dtype"_a.none() = nb::none());
+        "compute_dtype"_a.none() = nb::none(),
+        "dilation_h"_a = 1,
+        "dilation_w"_a = 1);
 
     expr.def_static(
         "conv3d",
@@ -977,10 +1012,11 @@ Shorthand for ``self.transpose()``.
            int32_t pad_h,
            int32_t pad_w,
            nb::object output_dtype_obj,
-           nb::object compute_dtype_obj) {
+           nb::object compute_dtype_obj,
+           uint64_t groups) {
             std::optional<DataType> output_dtype = optionalDataTypeFromPython(output_dtype_obj, "output_dtype argument");
             std::optional<DataType> compute_dtype = optionalDataTypeFromPython(compute_dtype_obj, "compute_dtype argument");
-            return Expression::conv3d(x, w, stride_d, stride_h, stride_w, pad_d, pad_h, pad_w, compute_dtype, output_dtype);
+            return Expression::conv3d(x, w, stride_d, stride_h, stride_w, pad_d, pad_h, pad_w, compute_dtype, output_dtype, groups);
         },
         "x"_a,
         "w"_a,
@@ -991,7 +1027,8 @@ Shorthand for ``self.transpose()``.
         "pad_h"_a = 0,
         "pad_w"_a = 0,
         "output_dtype"_a.none() = nb::none(),
-        "compute_dtype"_a.none() = nb::none());
+        "compute_dtype"_a.none() = nb::none(),
+        "groups"_a = 1);
 
     expr.def_static(
         "matmul",

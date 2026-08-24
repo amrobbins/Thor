@@ -350,6 +350,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "scan";
         case ExprOp::RMSNORM:
             return "rmsnorm";
+        case ExprOp::LAYERNORM:
+            return "layernorm";
         case ExprOp::RMSNORM_BACKWARD_X:
             return "rmsnorm_backward_x";
         case ExprOp::RMSNORM_BACKWARD_SCALE:
@@ -386,6 +388,12 @@ std::string exprOpExternalName(ExprOp op) {
             return "segmented_reduce_max_backward";
         case ExprOp::RAGGED_VALUEWISE_EXTENT:
             return "ragged_valuewise_extent";
+        case ExprOp::RAGGED_CONV1D_CAUSAL:
+            return "ragged_conv1d_causal";
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA:
+            return "ragged_conv1d_causal_backward_data";
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER:
+            return "ragged_conv1d_causal_backward_filter";
         default:
             throw std::runtime_error("Unknown ExprOp.");
     }
@@ -507,6 +515,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"reduce_norm2", ExprOp::REDUCE_NORM2},
         {"scan", ExprOp::SCAN},
         {"rmsnorm", ExprOp::RMSNORM},
+        {"layernorm", ExprOp::LAYERNORM},
         {"rmsnorm_backward_x", ExprOp::RMSNORM_BACKWARD_X},
         {"rmsnorm_backward_scale", ExprOp::RMSNORM_BACKWARD_SCALE},
         {"attention", ExprOp::ATTENTION},
@@ -525,6 +534,9 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"segmented_reduce_min_backward", ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD},
         {"segmented_reduce_max_backward", ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD},
         {"ragged_valuewise_extent", ExprOp::RAGGED_VALUEWISE_EXTENT},
+        {"ragged_conv1d_causal", ExprOp::RAGGED_CONV1D_CAUSAL},
+        {"ragged_conv1d_causal_backward_data", ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA},
+        {"ragged_conv1d_causal_backward_filter", ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER},
     };
 
     auto it = lookup.find(op);
@@ -614,6 +626,10 @@ uint64_t fnv1a64(const std::string& text) {
     return hash;
 }
 
+bool isConv2dExpressionOp(ExprOp op) {
+    return op == ExprOp::CONV2D || op == ExprOp::CONV2D_BACKWARD_DATA || op == ExprOp::CONV2D_BACKWARD_FILTER;
+}
+
 std::string hex64(uint64_t value) {
     std::ostringstream ss;
     ss << std::hex << std::setw(16) << std::setfill('0') << value;
@@ -641,11 +657,29 @@ json exprNodeToJson(const ExprNode& node) {
     j["matmul_packed_row_binding"] = static_cast<int>(node.matmul_packed_row_binding);
     j["matmul_packed_row_capacity"] = node.matmul_packed_row_capacity;
     j["conv_stride_d"] = node.conv_stride_d;
-    j["conv_stride_h"] = node.conv_stride_h;
-    j["conv_stride_w"] = node.conv_stride_w;
+    j["conv_stride_h"] = isConv2dExpressionOp(node.op) ? node.conv_spatial_2d.stride_h : node.conv_stride_h;
+    j["conv_stride_w"] = isConv2dExpressionOp(node.op) ? node.conv_spatial_2d.stride_w : node.conv_stride_w;
     j["conv_pad_d"] = node.conv_pad_d;
-    j["conv_pad_h"] = node.conv_pad_h;
-    j["conv_pad_w"] = node.conv_pad_w;
+    j["conv_groups"] = node.conv_groups;
+    j["ragged_conv_stride"] = node.ragged_conv_spatial_1d.stride;
+    j["ragged_conv_dilation"] = node.ragged_conv_spatial_1d.dilation;
+    j["ragged_conv_pre_padding"] = node.ragged_conv_spatial_1d.pre_padding;
+    j["ragged_conv_post_padding"] = node.ragged_conv_spatial_1d.post_padding;
+    j["ragged_conv1d_input_channels"] = node.ragged_conv1d_input_channels;
+    j["ragged_conv1d_output_channels"] = node.ragged_conv1d_output_channels;
+    j["ragged_conv1d_kernel_width"] = node.ragged_conv1d_kernel_width;
+    j["ragged_conv1d_groups"] = node.ragged_conv1d_groups;
+    if (isConv2dExpressionOp(node.op)) {
+        j["conv_pre_padding_h"] = node.conv_spatial_2d.pre_padding_h;
+        j["conv_post_padding_h"] = node.conv_spatial_2d.post_padding_h;
+        j["conv_pre_padding_w"] = node.conv_spatial_2d.pre_padding_w;
+        j["conv_post_padding_w"] = node.conv_spatial_2d.post_padding_w;
+        j["conv_dilation_h"] = node.conv_spatial_2d.dilation_h;
+        j["conv_dilation_w"] = node.conv_spatial_2d.dilation_w;
+    } else {
+        j["conv_pad_h"] = node.conv_pad_h;
+        j["conv_pad_w"] = node.conv_pad_w;
+    }
     j["softmax_algorithm"] = static_cast<int>(node.softmax_algorithm);
     j["softmax_mode"] = static_cast<int>(node.softmax_mode);
     j["attention_q_layout"] = static_cast<int>(node.attention_q_layout);
@@ -705,6 +739,9 @@ json exprNodeToJson(const ExprNode& node) {
     j["rms_norm_epsilon"] = node.rms_norm_epsilon;
     j["rms_norm_fused_activation"] = toString(node.rms_norm_fused_activation);
     j["rms_norm_packed_row_capacity"] = node.rms_norm_packed_row_capacity;
+    j["layer_norm_normalized_feature_count"] = node.layer_norm_normalized_feature_count;
+    j["layer_norm_epsilon"] = node.layer_norm_epsilon;
+    j["layer_norm_packed_row_capacity"] = node.layer_norm_packed_row_capacity;
     j["embedding_has_padding_index"] = node.embedding_has_padding_index;
     j["embedding_padding_index"] = node.embedding_padding_index;
     j["scan_op"] = scanOpToString(node.scan_op);
@@ -713,6 +750,7 @@ json exprNodeToJson(const ExprNode& node) {
     j["scan_reverse"] = node.scan_reverse;
     j["ragged_runtime_batch_size"] = node.ragged_runtime_batch_size;
     j["ragged_runtime_max_active_values"] = node.ragged_runtime_max_active_values;
+    j["ragged_runtime_max_values_per_row"] = node.ragged_runtime_max_values_per_row;
     j["ragged_runtime_elements_per_value"] = node.ragged_runtime_elements_per_value;
     j["segmented_broadcast_normalize_by_length"] = node.segmented_broadcast_normalize_by_length;
     setOptionalDTypeJson(j, "input_tensor_dtype", node.input_tensor_dtype);
@@ -737,6 +775,32 @@ json exprNodeToJson(const ExprNode& node) {
 ExprNode exprNodeFromJson(const json& j) {
     ExprNode node;
     node.op = exprOpFromExternalName(j.at("op").get<std::string>());
+    if (node.op == ExprOp::RAGGED_CONV1D_CAUSAL || node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA ||
+        node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER) {
+        constexpr const char* required_fields[] = {
+            "ragged_conv_stride",
+            "ragged_conv_dilation",
+            "ragged_conv_pre_padding",
+            "ragged_conv_post_padding",
+            "ragged_conv1d_input_channels",
+            "ragged_conv1d_output_channels",
+            "ragged_conv1d_kernel_width",
+            "ragged_conv1d_groups",
+            "ragged_runtime_batch_size",
+            "ragged_runtime_max_active_values",
+            "ragged_runtime_max_values_per_row",
+            "ragged_runtime_elements_per_value",
+            "output_dtype",
+            "compute_dtype",
+        };
+        for (const char* field : required_fields) {
+            if (!j.contains(field)) {
+                throw std::runtime_error(
+                    std::string("Serialized ragged causal Conv1D requires current field '") + field +
+                    "'; legacy convolution serialization is not supported.");
+            }
+        }
+    }
     node.lhs = j.value("lhs", UINT32_MAX);
     node.rhs = j.value("rhs", UINT32_MAX);
     node.aux = j.value("aux", UINT32_MAX);
@@ -755,11 +819,73 @@ ExprNode exprNodeFromJson(const json& j) {
     node.matmul_packed_row_binding = static_cast<MatmulPackedRowBinding>(j.value("matmul_packed_row_binding", 0));
     node.matmul_packed_row_capacity = j.value("matmul_packed_row_capacity", uint64_t{0});
     node.conv_stride_d = j.value("conv_stride_d", 1);
-    node.conv_stride_h = j.value("conv_stride_h", 1);
-    node.conv_stride_w = j.value("conv_stride_w", 1);
     node.conv_pad_d = j.value("conv_pad_d", 0);
-    node.conv_pad_h = j.value("conv_pad_h", 0);
-    node.conv_pad_w = j.value("conv_pad_w", 0);
+    node.ragged_conv_spatial_1d.stride = j.value("ragged_conv_stride", 1);
+    node.ragged_conv_spatial_1d.dilation = j.value("ragged_conv_dilation", 1);
+    node.ragged_conv_spatial_1d.pre_padding = j.value("ragged_conv_pre_padding", 0);
+    node.ragged_conv_spatial_1d.post_padding = j.value("ragged_conv_post_padding", 0);
+    node.ragged_conv1d_input_channels = j.value("ragged_conv1d_input_channels", uint64_t{0});
+    node.ragged_conv1d_output_channels = j.value("ragged_conv1d_output_channels", uint64_t{0});
+    node.ragged_conv1d_kernel_width = j.value("ragged_conv1d_kernel_width", uint64_t{0});
+    node.ragged_conv1d_groups = j.value("ragged_conv1d_groups", uint64_t{1});
+    if (node.op == ExprOp::RAGGED_CONV1D_CAUSAL || node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA ||
+        node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER) {
+        if (node.ragged_conv_spatial_1d.stride != 1 || node.ragged_conv_spatial_1d.dilation <= 0 ||
+            node.ragged_conv1d_input_channels == 0 || node.ragged_conv1d_output_channels == 0 || node.ragged_conv1d_kernel_width == 0 ||
+            node.ragged_conv1d_groups == 0 || node.ragged_conv1d_input_channels % node.ragged_conv1d_groups != 0 ||
+            node.ragged_conv1d_output_channels % node.ragged_conv1d_groups != 0) {
+            throw std::runtime_error("Serialized ragged causal Conv1D metadata is invalid.");
+        }
+        const ConvolutionSpatial1d causal = ConvolutionSpatial1d::causal(
+            node.ragged_conv1d_kernel_width, 1, node.ragged_conv_spatial_1d.dilation);
+        if (node.ragged_conv_spatial_1d != causal) {
+            throw std::runtime_error("Serialized ragged Conv1D must use stride-1 causal padding.");
+        }
+    }
+    if (isConv2dExpressionOp(node.op)) {
+        if (!j.contains("conv_pre_padding_h") || !j.contains("conv_post_padding_h") ||
+            !j.contains("conv_pre_padding_w") || !j.contains("conv_post_padding_w") || !j.contains("conv_groups")) {
+            throw std::runtime_error(
+                "Serialized Conv2D expression requires current explicit pre/post padding and groups fields; "
+                "legacy convolution serialization is not supported.");
+        }
+        node.conv_groups = j.at("conv_groups").get<uint64_t>();
+        if (node.conv_groups == 0) {
+            throw std::runtime_error("Serialized Conv2D expression groups must be positive.");
+        }
+        node.conv_spatial_2d.stride_h = j.at("conv_stride_h").get<int32_t>();
+        node.conv_spatial_2d.stride_w = j.at("conv_stride_w").get<int32_t>();
+        node.conv_spatial_2d.dilation_h = j.at("conv_dilation_h").get<int32_t>();
+        node.conv_spatial_2d.dilation_w = j.at("conv_dilation_w").get<int32_t>();
+        node.conv_spatial_2d.pre_padding_h = j.at("conv_pre_padding_h").get<int32_t>();
+        node.conv_spatial_2d.post_padding_h = j.at("conv_post_padding_h").get<int32_t>();
+        node.conv_spatial_2d.pre_padding_w = j.at("conv_pre_padding_w").get<int32_t>();
+        node.conv_spatial_2d.post_padding_w = j.at("conv_post_padding_w").get<int32_t>();
+        if (node.conv_spatial_2d.stride_h <= 0 || node.conv_spatial_2d.stride_w <= 0) {
+            throw std::runtime_error("Serialized Conv2D expression stride must be positive.");
+        }
+        if (node.conv_spatial_2d.dilation_h <= 0 || node.conv_spatial_2d.dilation_w <= 0) {
+            throw std::runtime_error("Serialized Conv2D expression dilation must be positive.");
+        }
+        if (node.conv_spatial_2d.pre_padding_h < 0 || node.conv_spatial_2d.post_padding_h < 0 ||
+            node.conv_spatial_2d.pre_padding_w < 0 || node.conv_spatial_2d.post_padding_w < 0) {
+            throw std::runtime_error("Serialized Conv2D expression padding must be non-negative.");
+        }
+    } else {
+        node.conv_stride_h = j.value("conv_stride_h", 1);
+        node.conv_stride_w = j.value("conv_stride_w", 1);
+        node.conv_pad_h = j.value("conv_pad_h", 0);
+        node.conv_pad_w = j.value("conv_pad_w", 0);
+        if (node.op == ExprOp::CONV3D || node.op == ExprOp::CONV3D_BACKWARD_DATA || node.op == ExprOp::CONV3D_BACKWARD_FILTER) {
+            if (!j.contains("conv_groups")) {
+                throw std::runtime_error("Serialized Conv3D expression requires current groups field.");
+            }
+            node.conv_groups = j.at("conv_groups").get<uint64_t>();
+            if (node.conv_groups == 0) {
+                throw std::runtime_error("Serialized Conv3D expression groups must be positive.");
+            }
+        }
+    }
     node.softmax_algorithm = static_cast<cudnnSoftmaxAlgorithm_t>(j.value("softmax_algorithm", static_cast<int>(CUDNN_SOFTMAX_ACCURATE)));
     node.softmax_mode = static_cast<cudnnSoftmaxMode_t>(j.value("softmax_mode", static_cast<int>(CUDNN_SOFTMAX_MODE_CHANNEL)));
     node.attention_q_layout =
@@ -825,6 +951,9 @@ ExprNode exprNodeFromJson(const json& j) {
                                          ? cudnnRmsNormFusedActivationFromString(j.at("rms_norm_fused_activation").get<std::string>())
                                          : CudnnRmsNormFusedActivation::NONE;
     node.rms_norm_packed_row_capacity = j.value("rms_norm_packed_row_capacity", uint64_t{0});
+    node.layer_norm_normalized_feature_count = j.value("layer_norm_normalized_feature_count", uint64_t{0});
+    node.layer_norm_epsilon = j.value("layer_norm_epsilon", 1.0e-5);
+    node.layer_norm_packed_row_capacity = j.value("layer_norm_packed_row_capacity", uint64_t{0});
     node.embedding_has_padding_index = j.value("embedding_has_padding_index", false);
     node.embedding_padding_index = j.value("embedding_padding_index", uint64_t{0});
     node.scan_op = scanOpFromString(j.value("scan_op", std::string("sum")));
@@ -833,6 +962,7 @@ ExprNode exprNodeFromJson(const json& j) {
     node.scan_reverse = j.value("scan_reverse", false);
     node.ragged_runtime_batch_size = j.value("ragged_runtime_batch_size", uint64_t{0});
     node.ragged_runtime_max_active_values = j.value("ragged_runtime_max_active_values", uint64_t{0});
+    node.ragged_runtime_max_values_per_row = j.value("ragged_runtime_max_values_per_row", uint64_t{0});
     node.ragged_runtime_elements_per_value = j.value("ragged_runtime_elements_per_value", uint64_t{1});
     node.segmented_broadcast_normalize_by_length = j.value("segmented_broadcast_normalize_by_length", false);
     parseOptionalDTypeField(j, "input_tensor_dtype", node.input_tensor_dtype);
@@ -1087,8 +1217,16 @@ std::string opName(ExprOp op) {
             return "SEG_REDUCE_MAX_BW";
         case ExprOp::RAGGED_VALUEWISE_EXTENT:
             return "RAGGED_VALUEWISE_EXTENT";
+        case ExprOp::RAGGED_CONV1D_CAUSAL:
+            return "RAGGED_CONV1D_CAUSAL";
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA:
+            return "RAGGED_CONV1D_CAUSAL_BWD_DATA";
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER:
+            return "RAGGED_CONV1D_CAUSAL_BWD_FILTER";
         case ExprOp::RMSNORM:
             return "RMSNORM";
+        case ExprOp::LAYERNORM:
+            return "LAYERNORM";
         case ExprOp::RMSNORM_BACKWARD_X:
             return "RMSNORM_BW_X";
         case ExprOp::RMSNORM_BACKWARD_SCALE:
@@ -1365,6 +1503,27 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             break;
         }
 
+        case ExprOp::RAGGED_CONV1D_CAUSAL:
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA:
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER: {
+            std::string a = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string b = canonicalizeNode(expr, n.rhs, memo, memoReady);
+            std::string c = canonicalizeNode(expr, n.aux, memo, memoReady);
+            out = opName(n.op) + "(" + a + "," + b + "," + c +
+                  ";stride=" + std::to_string(n.ragged_conv_spatial_1d.stride) +
+                  ";dilation=" + std::to_string(n.ragged_conv_spatial_1d.dilation) +
+                  ";left=" + std::to_string(n.ragged_conv_spatial_1d.pre_padding) +
+                  ";right=" + std::to_string(n.ragged_conv_spatial_1d.post_padding) +
+                  ";inC=" + std::to_string(n.ragged_conv1d_input_channels) +
+                  ";outC=" + std::to_string(n.ragged_conv1d_output_channels) +
+                  ";kernel=" + std::to_string(n.ragged_conv1d_kernel_width) +
+                  ";groups=" + std::to_string(n.ragged_conv1d_groups) +
+                  ";batch=" + std::to_string(n.ragged_runtime_batch_size) +
+                  ";maxActive=" + std::to_string(n.ragged_runtime_max_active_values) +
+                  ";maxPerRow=" + std::to_string(n.ragged_runtime_max_values_per_row) + ")";
+            break;
+        }
+
         case ExprOp::ADD:
         case ExprOp::SUB:
         case ExprOp::MUL:
@@ -1432,11 +1591,21 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 if (n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
                     out += ";sD=" + std::to_string(n.conv_stride_d);
                     out += ";pD=" + std::to_string(n.conv_pad_d);
+                    out += ";sH=" + std::to_string(n.conv_stride_h);
+                    out += ";sW=" + std::to_string(n.conv_stride_w);
+                    out += ";pH=" + std::to_string(n.conv_pad_h);
+                    out += ";pW=" + std::to_string(n.conv_pad_w);
+                } else {
+                    out += ";sH=" + std::to_string(n.conv_spatial_2d.stride_h);
+                    out += ";sW=" + std::to_string(n.conv_spatial_2d.stride_w);
+                    out += ";preH=" + std::to_string(n.conv_spatial_2d.pre_padding_h);
+                    out += ";postH=" + std::to_string(n.conv_spatial_2d.post_padding_h);
+                    out += ";preW=" + std::to_string(n.conv_spatial_2d.pre_padding_w);
+                    out += ";postW=" + std::to_string(n.conv_spatial_2d.post_padding_w);
+                    out += ";dH=" + std::to_string(n.conv_spatial_2d.dilation_h);
+                    out += ";dW=" + std::to_string(n.conv_spatial_2d.dilation_w);
                 }
-                out += ";sH=" + std::to_string(n.conv_stride_h);
-                out += ";sW=" + std::to_string(n.conv_stride_w);
-                out += ";pH=" + std::to_string(n.conv_pad_h);
-                out += ";pW=" + std::to_string(n.conv_pad_w);
+                out += ";groups=" + std::to_string(n.conv_groups);
                 if (!n.fill_dims.empty()) {
                     out += ";shape=";
                     for (size_t i = 0; i < n.fill_dims.size(); ++i) {
@@ -1446,6 +1615,18 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                     }
                 }
             }
+            out += ")";
+            break;
+        }
+
+        case ExprOp::LAYERNORM: {
+            std::string x = canonicalizeNode(expr, n.lhs, memo, memoReady);
+            std::string scale = canonicalizeNode(expr, n.rhs, memo, memoReady);
+            std::string bias = canonicalizeNode(expr, n.aux, memo, memoReady);
+            out = opName(n.op) + "(" + x + "," + scale + "," + bias;
+            out += ";hidden=" + std::to_string(n.layer_norm_normalized_feature_count);
+            out += ";epsilon=" + formatFloatCanonical(n.layer_norm_epsilon);
+            out += ";packedRowsCapacity=" + std::to_string(n.layer_norm_packed_row_capacity);
             out += ")";
             break;
         }
@@ -1611,6 +1792,9 @@ std::string canonicalize(const PhysicalExecutionStage& stage) {
             break;
         case PhysicalExecutionStage::Kind::ArgMinMax:
             ss << "argminmax";
+            break;
+        case PhysicalExecutionStage::Kind::RaggedConv1dCausal:
+            ss << "ragged_conv1d_causal";
             break;
         case PhysicalExecutionStage::Kind::Scan:
             ss << "scan";
@@ -1989,6 +2173,25 @@ void ExpressionDefinition::validate() const {
         }
         if ((node.op == ExprOp::GEMM) && node.beta_node != UINT32_MAX && node.beta_node >= node_index_u32) {
             throw std::runtime_error("ExpressionDefinition GEMM beta_node must reference an earlier node.");
+        }
+        if (node.op == ExprOp::RAGGED_CONV1D_CAUSAL || node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA ||
+            node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER) {
+            const uint64_t expected_elements_per_value =
+                node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA ? node.ragged_conv1d_input_channels
+                                                                      : node.ragged_conv1d_output_channels;
+            if (node.ragged_conv_spatial_1d.stride != 1 || node.ragged_conv_spatial_1d.dilation <= 0 ||
+                node.ragged_conv1d_input_channels == 0 || node.ragged_conv1d_output_channels == 0 ||
+                node.ragged_conv1d_kernel_width == 0 || node.ragged_runtime_batch_size == 0 ||
+                node.ragged_runtime_max_active_values == 0 || node.ragged_runtime_max_values_per_row == 0 ||
+                node.ragged_runtime_max_values_per_row > node.ragged_runtime_max_active_values ||
+                node.ragged_runtime_elements_per_value != expected_elements_per_value) {
+                throw std::runtime_error("ExpressionDefinition ragged causal Conv1D metadata is invalid.");
+            }
+            const ConvolutionSpatial1d causal = ConvolutionSpatial1d::causal(
+                node.ragged_conv1d_kernel_width, 1, node.ragged_conv_spatial_1d.dilation);
+            if (node.ragged_conv_spatial_1d != causal) {
+                throw std::runtime_error("ExpressionDefinition ragged Conv1D must use stride-1 causal padding.");
+            }
         }
         if (node.matmul_packed_row_binding != MatmulPackedRowBinding::None) {
             if (node.op != ExprOp::MATMUL || node.matmul_packed_row_capacity == 0) {
@@ -2556,6 +2759,7 @@ bool Expression::isBinaryOp(const ExprOp op) {
 bool Expression::isTernaryOp(const ExprOp op) {
     switch (op) {
         case ExprOp::GEMM:
+        case ExprOp::LAYERNORM:
         case ExprOp::RMSNORM_BACKWARD_X:
         case ExprOp::RMSNORM_BACKWARD_SCALE:
         case ExprOp::ATTENTION:
@@ -2567,6 +2771,9 @@ bool Expression::isTernaryOp(const ExprOp op) {
         case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD:
         case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
         case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
+        case ExprOp::RAGGED_CONV1D_CAUSAL:
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA:
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER:
         case ExprOp::WHERE:
             return true;
         default:
@@ -4173,6 +4380,35 @@ Expression Expression::rmsNorm(const Expression& input,
     return out;
 }
 
+Expression Expression::layerNorm(const Expression& input,
+                                 const Expression& scale,
+                                 const Expression& bias,
+                                 uint64_t normalized_feature_count,
+                                 double epsilon,
+                                 std::optional<DataType> compute_dtype,
+                                 std::optional<DataType> output_dtype,
+                                 std::optional<uint64_t> packed_row_capacity) {
+    if (normalized_feature_count == 0) {
+        throw std::invalid_argument("Expression::layerNorm normalized_feature_count must be non-zero.");
+    }
+    if (!(epsilon > 0.0)) {
+        throw std::invalid_argument("Expression::layerNorm epsilon must be > 0.");
+    }
+    Expression out = ternaryOp(input, scale, bias, ExprOp::LAYERNORM);
+    ExprNode& node = out.expr->nodes[out.nodeIndex];
+    node.layer_norm_normalized_feature_count = normalized_feature_count;
+    node.layer_norm_epsilon = epsilon;
+    if (packed_row_capacity.has_value()) {
+        if (packed_row_capacity.value() == 0) {
+            throw std::invalid_argument("Expression::layerNorm packed_row_capacity must be non-zero when specified.");
+        }
+        node.layer_norm_packed_row_capacity = packed_row_capacity.value();
+    }
+    node.compute_dtype = compute_dtype.value_or(DataType::FP32);
+    if (output_dtype.has_value()) node.output_dtype = output_dtype.value();
+    return out;
+}
+
 Expression Expression::mish() const { return *this * this->softplus().tanh(); }
 
 Expression Expression::relu6() const { return this->max(Expression(0.0)).min(Expression(6.0)); }
@@ -5009,27 +5245,66 @@ Expression Expression::scaledDotProductAttention(const Expression& q,
         q, k, v, &bias, &q_seq_len, &kv_seq_len, nullptr, nullptr, nullptr, nullptr, &dropout_seed, &dropout_offset, std::move(options));
 }
 
+Expression Expression::conv1d(const Expression& input,
+                              const Expression& filter,
+                              ConvolutionSpatial1d spatial,
+                              std::optional<DataType> compute_dtype,
+                              std::optional<DataType> output_dtype,
+                              uint64_t groups) {
+    if (spatial.stride <= 0)
+        throw std::runtime_error("conv1d stride must be positive.");
+    if (spatial.dilation <= 0)
+        throw std::runtime_error("conv1d dilation must be positive.");
+    if (spatial.pre_padding < 0 || spatial.post_padding < 0)
+        throw std::runtime_error("conv1d padding must be non-negative.");
+    if (groups == 0)
+        throw std::runtime_error("conv1d groups must be positive.");
+
+    ConvolutionSpatial2d spatial2d;
+    spatial2d.stride_h = 1;
+    spatial2d.stride_w = spatial.stride;
+    spatial2d.dilation_h = 1;
+    spatial2d.dilation_w = spatial.dilation;
+    spatial2d.pre_padding_h = 0;
+    spatial2d.post_padding_h = 0;
+    spatial2d.pre_padding_w = spatial.pre_padding;
+    spatial2d.post_padding_w = spatial.post_padding;
+
+    // [N,C,W] -> [N,C,1,W] and [K,C,R] -> [K,C,1,R]. Use RESHAPE rather
+    // than UNSQUEEZE/SQUEEZE because dense RESHAPE is a compiler-recognized
+    // storage alias. 0 copies the corresponding source extent and max() is the
+    // single inferred extent, so no runtime dimensions need to be known while
+    // the expression graph is authored.
+    constexpr uint64_t copy_dim = 0;
+    constexpr uint64_t infer_dim = std::numeric_limits<uint64_t>::max();
+    const Expression input2d = input.reshape({copy_dim, copy_dim, 1, infer_dim});
+    const Expression filter2d = filter.reshape({copy_dim, copy_dim, 1, infer_dim});
+    const Expression output2d = Expression::conv2d(input2d, filter2d, spatial2d, compute_dtype, output_dtype, groups);
+    return output2d.reshape({copy_dim, copy_dim, infer_dim});
+}
+
 Expression Expression::conv2d(const Expression& input,
                               const Expression& filter,
-                              int32_t stride_h,
-                              int32_t stride_w,
-                              int32_t pad_h,
-                              int32_t pad_w,
+                              ConvolutionSpatial2d spatial,
                               std::optional<DataType> compute_dtype,
-                              std::optional<DataType> output_dtype) {
-    if (stride_h <= 0 || stride_w <= 0) {
+                              std::optional<DataType> output_dtype,
+                              uint64_t groups) {
+    if (spatial.stride_h <= 0 || spatial.stride_w <= 0) {
         throw std::runtime_error("conv2d stride must be positive.");
     }
-    if (pad_h < 0 || pad_w < 0) {
+    if (spatial.dilation_h <= 0 || spatial.dilation_w <= 0) {
+        throw std::runtime_error("conv2d dilation must be positive.");
+    }
+    if (spatial.pre_padding_h < 0 || spatial.post_padding_h < 0 || spatial.pre_padding_w < 0 || spatial.post_padding_w < 0) {
         throw std::runtime_error("conv2d padding must be non-negative.");
     }
-
+    if (groups == 0) {
+        throw std::runtime_error("conv2d groups must be positive.");
+    }
     Expression out = binaryOp(input, filter, ExprOp::CONV2D);
     ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.conv_stride_h = stride_h;
-    node.conv_stride_w = stride_w;
-    node.conv_pad_h = pad_h;
-    node.conv_pad_w = pad_w;
+    node.conv_spatial_2d = spatial;
+    node.conv_groups = groups;
     if (compute_dtype.has_value()) {
         node.compute_dtype = compute_dtype.value();
     }
@@ -5048,12 +5323,16 @@ Expression Expression::conv3d(const Expression& input,
                               int32_t pad_h,
                               int32_t pad_w,
                               std::optional<DataType> compute_dtype,
-                              std::optional<DataType> output_dtype) {
+                              std::optional<DataType> output_dtype,
+                              uint64_t groups) {
     if (stride_d <= 0 || stride_h <= 0 || stride_w <= 0) {
         throw std::runtime_error("conv3d stride must be positive.");
     }
     if (pad_d < 0 || pad_h < 0 || pad_w < 0) {
         throw std::runtime_error("conv3d padding must be non-negative.");
+    }
+    if (groups == 0) {
+        throw std::runtime_error("conv3d groups must be positive.");
     }
 
     Expression out = binaryOp(input, filter, ExprOp::CONV3D);
@@ -5064,6 +5343,7 @@ Expression Expression::conv3d(const Expression& input,
     node.conv_pad_d = pad_d;
     node.conv_pad_h = pad_h;
     node.conv_pad_w = pad_w;
+    node.conv_groups = groups;
     if (compute_dtype.has_value()) {
         node.compute_dtype = compute_dtype.value();
     }

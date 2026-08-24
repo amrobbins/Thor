@@ -21,6 +21,13 @@ class CudaSourceEmitter {
     static std::string emitFlat(const PhysicalExpression& expr, const std::string& kernel_name, bool use_uint32_index_math = true);
     static std::string emitFlat(const PhysicalExecutionStage& stage, const std::string& kernel_name, bool use_uint32_index_math = true);
 
+    static std::string emitPaddedRaggedPointwise(
+        const PhysicalExecutionStage& stage,
+        const std::vector<PaddedRaggedPointwiseInputAccess>& input_access,
+        uint64_t batch_size,
+        uint64_t channels,
+        const std::string& kernel_name);
+
     static std::string emitSpecializedBroadcast(const CompiledExecutionStage& stage,
                                                 const std::vector<SpecializedBroadcastGroup>& groups,
                                                 const std::string& kernel_name);

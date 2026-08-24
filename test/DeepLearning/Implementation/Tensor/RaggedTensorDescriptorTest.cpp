@@ -17,10 +17,24 @@ TEST(RaggedTensorDescriptor, ConstructsFromShapeMetadata) {
     EXPECT_EQ(descriptor.getOffsetsDataType(), DataType::UINT32);
     EXPECT_EQ(descriptor.getBatchSize(), 3u);
     EXPECT_EQ(descriptor.getMaxTotalValues(), 11u);
+    EXPECT_FALSE(descriptor.hasMaxValuesPerRow());
+    EXPECT_EQ(descriptor.getMaxValuesPerRowOrZero(), 0u);
     EXPECT_EQ(descriptor.getRaggedRank(), 1u);
     EXPECT_EQ(descriptor.getValuesDimensions(), (vector<uint64_t>{11, 16, 4}));
     EXPECT_EQ(descriptor.getTrailingDimensions(), (vector<uint64_t>{16, 4}));
     EXPECT_EQ(descriptor.getOffsetsDescriptor().getDimensions(), (vector<uint64_t>{4}));
+}
+
+TEST(RaggedTensorDescriptor, OptionalMaxValuesPerRowIsIndependentFromPackedCapacity) {
+    RaggedTensorDescriptor descriptor(DataType::FP32, {8}, 4, 23, 7, DataType::UINT32);
+
+    EXPECT_EQ(descriptor.getBatchSize(), 4u);
+    EXPECT_EQ(descriptor.getMaxTotalValues(), 23u);
+    ASSERT_TRUE(descriptor.hasMaxValuesPerRow());
+    EXPECT_EQ(descriptor.getMaxValuesPerRow(), 7u);
+    EXPECT_EQ(descriptor.getMaxValuesPerRowOrZero(), 7u);
+
+    EXPECT_THROW((RowPartitionDescriptor(4, 23, DataType::UINT32, 24)), logic_error);
 }
 
 TEST(RaggedTensorDescriptor, SupportsScalarValues) {

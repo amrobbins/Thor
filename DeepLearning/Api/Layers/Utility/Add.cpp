@@ -66,7 +66,7 @@ Add Add::Builder::build() {
         add.featureInputs = {_raggedLeft->getValues(), _raggedRight->getValues(), _raggedLeft->getOffsets()};
         Tensor outputValues(_raggedLeft->getValuesDataType(), _raggedLeft->getValuesDimensions());
         add.featureOutputs = {outputValues};
-        add.raggedOutput = RaggedTensor(outputValues, _raggedLeft->getOffsets());
+        add.raggedOutput = _raggedLeft->withValues(outputValues);
     } else {
         requireCompatibleDense(_left.value(), _right.value());
         add.featureInputs = {_left.value(), _right.value()};
@@ -219,13 +219,15 @@ void Add::deserialize(const json& j, Network* network) {
         auto restoreRagged = [&](const json& r) {
             Tensor values = network->getApiTensorByOriginalId(r.at("values").at("id").get<uint64_t>());
             Tensor offsets = network->getApiTensorByOriginalId(r.at("offsets").at("id").get<uint64_t>());
-            return RaggedTensor(values, offsets);
+            return r.contains("max_values_per_row")
+                ? RaggedTensor(values, offsets, r.at("max_values_per_row").get<uint64_t>())
+                : RaggedTensor(values, offsets);
         };
         add.raggedLeft = restoreRagged(j.at("ragged_left"));
         add.raggedRight = restoreRagged(j.at("ragged_right"));
         requireCompatibleRagged(add.raggedLeft.value(), add.raggedRight.value());
         Tensor outputValues = Tensor::deserialize(j.at("feature_output"));
-        add.raggedOutput = RaggedTensor(outputValues, add.raggedLeft->getOffsets());
+        add.raggedOutput = add.raggedLeft->withValues(outputValues);
         const json& outputJson = j.at("ragged_output");
         if (outputJson.at("offsets").at("id").get<uint64_t>() !=
                 j.at("ragged_left").at("offsets").at("id").get<uint64_t>() ||

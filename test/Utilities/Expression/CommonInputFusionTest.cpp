@@ -354,6 +354,34 @@ TEST(EquationCompiler, RmsNormIsOwnBoundaryStageAndCompilesDescriptor) {
     EXPECT_EQ(compiled->fused_activation, CudnnRmsNormFusedActivation::NONE);
 }
 
+TEST(EquationCompiler, LayerNormIsOwnBoundaryStageAndCompilesDescriptor) {
+    auto x = Expression::input("x", DataType::FP16, DataType::FP16);
+    auto scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+    auto bias = Expression::input("bias", DataType::FP32, DataType::FP32);
+    auto y = Expression::layerNorm(x, scale, bias, 32, 1.0e-5, DataType::FP32, DataType::FP16);
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP16, DataType::FP32, DataType::FP32});
+
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::LayerNorm);
+    ASSERT_EQ(stages[0].outputs.size(), 1);
+
+    const ExprNode& node = stages[0].expr.nodes.at(stages[0].outputs[0].local_node_idx);
+    EXPECT_EQ(node.op, ExprOp::LAYERNORM);
+    EXPECT_EQ(node.layer_norm_normalized_feature_count, 32U);
+
+    auto compiled = EquationCompiler::compileLayerNorm(stages[0].expr);
+    ASSERT_NE(compiled, nullptr);
+    EXPECT_EQ(compiled->normalized_feature_count, 32U);
+    EXPECT_EQ(compiled->input_dtype, DataType::FP16);
+    EXPECT_EQ(compiled->scale_dtype, DataType::FP32);
+    EXPECT_EQ(compiled->bias_dtype, DataType::FP32);
+    EXPECT_EQ(compiled->output_dtype, DataType::FP16);
+    EXPECT_EQ(compiled->compute_dtype, DataType::FP32);
+}
+
 TEST(EquationCompiler, DenseRmsNormAutodiffCompilesOneCudnnBackwardStageForDxAndDscale) {
     for (DataType io_dtype : {DataType::FP16, DataType::BF16, DataType::FP32}) {
         auto x = Expression::input("x", io_dtype, io_dtype);

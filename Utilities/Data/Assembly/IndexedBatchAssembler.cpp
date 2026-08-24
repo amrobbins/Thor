@@ -13,6 +13,7 @@
 
 using ThorImplementation::RaggedTensor;
 using ThorImplementation::RaggedTensorDescriptor;
+using ThorImplementation::RowPartitionRuntime;
 using ThorImplementation::Tensor;
 using ThorImplementation::TensorDescriptor;
 using ThorImplementation::TensorPlacement;
@@ -915,6 +916,7 @@ void IndexedBatchAssembler::materializeRaggedBatch(IndexedDatasetReader::Session
         const uint64_t storedValueCount = spec.storedValueCount();
         const uint64_t maxTotalValues = descriptor.getMaxTotalValues();
         uint64_t activeValueCount = 0;
+        std::vector<uint64_t> hostOffsets(batchSize + 1, 0);
         writeRaggedOffset(offsets.getMemPtr(), descriptor.getOffsetsDataType(), 0, 0);
 
         for (uint64_t row = 0; row < logicalRows; ++row) {
@@ -925,6 +927,12 @@ void IndexedBatchAssembler::materializeRaggedBatch(IndexedDatasetReader::Session
                     "IndexedBatchAssembler ragged field '" + spec.name + "' row " + std::to_string(row) +
                     " references values outside the sidecar.");
             }
+            if (descriptor.hasMaxValuesPerRow() && reference.valueCount > descriptor.getMaxValuesPerRow()) {
+                throw std::runtime_error(
+                    "IndexedBatchAssembler ragged field '" + spec.name + "' row " + std::to_string(row) +
+                    " has length " + std::to_string(reference.valueCount) +
+                    ", exceeding maxValuesPerRow=" + std::to_string(descriptor.getMaxValuesPerRow()) + ".");
+            }
             const uint64_t nextActiveValueCount = checkedAddUint64(
                 activeValueCount, reference.valueCount, "IndexedBatchAssembler ragged active value count");
             if (nextActiveValueCount > maxTotalValues) {
@@ -934,9 +942,11 @@ void IndexedBatchAssembler::materializeRaggedBatch(IndexedDatasetReader::Session
                     ", exceeding maxTotalValues=" + std::to_string(maxTotalValues) + ".");
             }
             activeValueCount = nextActiveValueCount;
+            hostOffsets.at(static_cast<size_t>(row + 1)) = activeValueCount;
             writeRaggedOffset(offsets.getMemPtr(), descriptor.getOffsetsDataType(), row + 1, activeValueCount);
         }
         for (uint64_t row = logicalRows; row < batchSize; ++row) {
+            hostOffsets.at(static_cast<size_t>(row + 1)) = activeValueCount;
             writeRaggedOffset(offsets.getMemPtr(), descriptor.getOffsetsDataType(), row + 1, activeValueCount);
         }
 
@@ -982,10 +992,11 @@ void IndexedBatchAssembler::materializeRaggedBatch(IndexedDatasetReader::Session
         THOR_THROW_IF_FALSE(destinationValue == activeValueCount);
 
         // This is the row-partition production boundary for indexed CPU batches.
-        // Offsets remain the semantic source of truth; publish offsets[B] into the
-        // shared runtime cache so downstream host-dispatched ragged operations do
-        // not need to rediscover or attach this state to the packed values tensor.
-        ragged.getRowPartitionRuntime().setHostActiveValueCount(activeValueCount);
+        // Offsets remain the semantic source of truth; publish the already-known
+        // complete host mirror without a device-to-host synchronization. Publishing
+        // the full mirror also derives both scalar dispatch caches: offsets[B] as
+        // active_value_count and the largest adjacent-offset delta as max_active_row_length.
+        ragged.getRowPartitionRuntime().setHostOffsets(std::move(hostOffsets));
     }
 }
 
@@ -1132,7 +1143,8 @@ bool IndexedBatchAssembler::startNextBatch() {
         }
         THOR_THROW_IF_FALSE(values.getDescriptor() == descriptor.getValuesDescriptor());
         THOR_THROW_IF_FALSE(offsets.getDescriptor() == descriptor.getOffsetsDescriptor());
-        batchState->raggedTensors.emplace(name, RaggedTensor(values, offsets));
+        RowPartitionRuntime rowPartition(offsets, descriptor.getRowPartition());
+        batchState->raggedTensors.emplace(name, RaggedTensor(values, rowPartition));
     }
     for (uint8_t *basePointer : batchState->tensorBasePointers) {
         if (basePointer == nullptr) {
@@ -1412,7 +1424,8 @@ void IndexedBatchAssembler::acquireBatch(std::map<std::string, Tensor> &tensors,
         }
         THOR_THROW_IF_FALSE(values.getDescriptor() == descriptor.getValuesDescriptor());
         THOR_THROW_IF_FALSE(offsets.getDescriptor() == descriptor.getOffsetsDescriptor());
-        raggedTensors.emplace(name, RaggedTensor(values, offsets));
+        RowPartitionRuntime rowPartition(offsets, descriptor.getRowPartition());
+        raggedTensors.emplace(name, RaggedTensor(values, rowPartition));
     }
     statsGetBatchTensorUnloadWaitNanoseconds.fetch_add(diagnosticElapsedNanoseconds(tensorUnloadStart), std::memory_order_relaxed);
     THOR_THROW_IF_FALSE(readyBatch.batchNum == nextBatchToDeliver);

@@ -17,6 +17,7 @@ EXPECTED_DATA_API = {
     "DatasetSplitManifest",
     "DatasetWriter",
     "DeviceDatasetStorage",
+    "WindowedDeviceCache",
     "ExampleIndexRange",
     "ExampleIndexSet",
     "FileDataset",
@@ -43,6 +44,7 @@ EXPECTED_DATA_API = {
 EXPECTED_TRAINING_API = {
     "DatasetInputBindings",
     "DeviceDatasetStorageReport",
+    "WindowedDeviceCacheReport",
     "EarlyCompletionPolicy",
     "EarlyCompletionRule",
     "GradientClearPolicy",

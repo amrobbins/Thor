@@ -664,7 +664,9 @@ std::map<std::string, InferenceOutputValue> PlacedNetwork::inferLogical(const Ba
         if (logicalOutputs.contains(output.name)) {
             throw std::runtime_error("PlacedNetwork::inferLogical found duplicate logical output name '" + output.name + "'.");
         }
-        logicalOutputs.emplace(output.name, ThorImplementation::RaggedTensor(valuesIt->second, offsetsIt->second));
+        ThorImplementation::RowPartitionRuntime rowPartition(
+            offsetsIt->second, output.raggedTensor.getDescriptor().getRowPartition());
+        logicalOutputs.emplace(output.name, ThorImplementation::RaggedTensor(valuesIt->second, rowPartition));
     }
 
     return logicalOutputs;

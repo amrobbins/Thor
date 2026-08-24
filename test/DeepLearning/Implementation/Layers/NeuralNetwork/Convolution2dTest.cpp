@@ -27,6 +27,22 @@ namespace {
 TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
 TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
 
+ConvolutionSpatial2d makeSpatial2d(uint32_t strideH,
+                                   uint32_t strideW,
+                                   uint32_t paddingTop,
+                                   uint32_t paddingBottom,
+                                   uint32_t paddingLeft,
+                                   uint32_t paddingRight) {
+    ConvolutionSpatial2d spatial;
+    spatial.stride_h = static_cast<int32_t>(strideH);
+    spatial.stride_w = static_cast<int32_t>(strideW);
+    spatial.pre_padding_h = static_cast<int32_t>(paddingTop);
+    spatial.post_padding_h = static_cast<int32_t>(paddingBottom);
+    spatial.pre_padding_w = static_cast<int32_t>(paddingLeft);
+    spatial.post_padding_w = static_cast<int32_t>(paddingRight);
+    return spatial;
+}
+
 uint64_t tensorNumel(const Tensor& tensor) {
     uint64_t numel = 1;
     for (uint64_t d : tensor.getDimensions())
@@ -549,7 +565,14 @@ TEST(Convolution2d, ParameterNamesAndShapesWithBias) {
 
     TensorDescriptor featureInDescriptor(dataType, {batchSize, numInputChannels, inputH, inputW});
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
-    Convolution2d conv(filterW, filterH, 1, 1, 0, 0, numOutputChannels, true, std::nullopt, gpuPlacement, false);
+    Convolution2d conv(filterW,
+                       filterH,
+                       makeSpatial2d(/* strideH */ 1, /* strideW */ 1, /* top */ 0, /* bottom */ 0, /* left */ 0, /* right */ 0),
+                       numOutputChannels,
+                       true,
+                       std::nullopt,
+                       gpuPlacement,
+                       false);
     NetworkOutput no(cpuPlacement);
 
     attachAdam(conv, true);
@@ -593,7 +616,14 @@ TEST(Convolution2d, DirectForwardConnectionNumericalWithBias) {
     writeCpuTensor(featureIn_h, inputValues);
 
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
-    Convolution2d conv(filterW, filterH, strideW, strideH, padW, padH, numOutputChannels, true, std::nullopt, gpuPlacement, false);
+    Convolution2d conv(filterW,
+                       filterH,
+                       makeSpatial2d(strideH, strideW, padH, padH, padW, padW),
+                       numOutputChannels,
+                       true,
+                       std::nullopt,
+                       gpuPlacement,
+                       false);
     NetworkOutput no(cpuPlacement);
 
     attachAdam(conv, true);
@@ -652,7 +682,14 @@ TEST(Convolution2d, DirectForwardConnectionNumericalWithoutBiasStrideAndPadding)
     writeCpuTensor(featureIn_h, inputValues);
 
     NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
-    Convolution2d conv(filterW, filterH, strideW, strideH, padW, padH, numOutputChannels, false, std::nullopt, gpuPlacement, false);
+    Convolution2d conv(filterW,
+                       filterH,
+                       makeSpatial2d(strideH, strideW, padH, padH, padW, padW),
+                       numOutputChannels,
+                       false,
+                       std::nullopt,
+                       gpuPlacement,
+                       false);
     NetworkOutput no(cpuPlacement);
 
     attachAdam(conv, false);
@@ -720,7 +757,14 @@ TEST(Convolution2d, DirectBackwardConnectionNumerical) {
 
         NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
         GradientRivet gr1, gr2;
-        Convolution2d conv(filterW, filterH, strideW, strideH, padW, padH, numOutputChannels, hasBias, std::nullopt, gpuPlacement, false);
+        Convolution2d conv(filterW,
+                           filterH,
+                           makeSpatial2d(strideH, strideW, padH, padH, padW, padW),
+                           numOutputChannels,
+                           hasBias,
+                           std::nullopt,
+                           gpuPlacement,
+                           false);
         NetworkOutput no(cpuPlacement);
 
         shared_ptr<Adam> adamWeights = make_shared<Adam>(3000, 0.001f, 0.9f, 0.999f, 1e-7f);
@@ -907,7 +951,14 @@ TEST(Convolution2d, DirectBackwardConnectionNumericalThreePasses) {
 
         NetworkInput ni(gpuPlacement, dataType, featureInDescriptor.getDimensions());
         GradientRivet gr1, gr2;
-        Convolution2d conv(filterW, filterH, strideW, strideH, padW, padH, numOutputChannels, hasBias, std::nullopt, gpuPlacement, false);
+        Convolution2d conv(filterW,
+                           filterH,
+                           makeSpatial2d(strideH, strideW, padH, padH, padW, padW),
+                           numOutputChannels,
+                           hasBias,
+                           std::nullopt,
+                           gpuPlacement,
+                           false);
         NetworkOutput no(cpuPlacement);
 
         shared_ptr<Adam> adamWeights = make_shared<Adam>(3000, 0.001f, 0.9f, 0.999f, 1e-7f);

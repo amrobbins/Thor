@@ -99,3 +99,36 @@ TEST(CudnnRmsNormDescriptor, ParsesFusedActivationAliases) {
     EXPECT_STREQ(toString(CudnnRmsNormFusedActivation::SWISH), "swish");
     EXPECT_THROW(cudnnRmsNormFusedActivationFromString("relu"), std::invalid_argument);
 }
+
+TEST(CudnnRmsNormDescriptor, ExplicitPhysicalLayoutParticipatesInValidationAndCacheIdentity) {
+    CudnnRmsNormDescriptor descriptor = makeDescriptor();
+    descriptor.training = false;
+    descriptor.outerSize = 15;
+    descriptor.normalizedFeatureCount = 4;
+    descriptor.ioDimensions = std::array<int64_t, 4>{3, 4, 1, 5};
+    descriptor.ioStrides = std::array<int64_t, 4>{20, 5, 5, 1};
+    descriptor.parameterDimensions = std::array<int64_t, 4>{1, 4, 1, 1};
+    descriptor.parameterStrides = std::array<int64_t, 4>{4, 1, 4, 4};
+    descriptor.statsDimensions = std::array<int64_t, 4>{3, 1, 1, 5};
+    descriptor.statsStrides = std::array<int64_t, 4>{5, 5, 5, 1};
+    EXPECT_NO_THROW(descriptor.validateForward());
+
+    const std::string explicit_key = descriptor.cacheKey("forward", 0);
+    CudnnRmsNormDescriptor contiguous = descriptor;
+    contiguous.ioDimensions.reset();
+    contiguous.ioStrides.reset();
+    contiguous.parameterDimensions.reset();
+    contiguous.parameterStrides.reset();
+    contiguous.statsDimensions.reset();
+    contiguous.statsStrides.reset();
+    EXPECT_NO_THROW(contiguous.validateForward());
+    EXPECT_NE(explicit_key, contiguous.cacheKey("forward", 0));
+
+    CudnnRmsNormDescriptor partial = descriptor;
+    partial.statsStrides.reset();
+    EXPECT_THROW(partial.validateForward(), std::invalid_argument);
+
+    CudnnRmsNormDescriptor wrong_io = descriptor;
+    wrong_io.ioDimensions = std::array<int64_t, 4>{3, 4, 1, 4};
+    EXPECT_THROW(wrong_io.validateForward(), std::invalid_argument);
+}

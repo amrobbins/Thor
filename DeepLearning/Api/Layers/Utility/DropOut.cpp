@@ -81,7 +81,9 @@ void DropOut::deserialize(const json &j, Network *network) {
         }
         Tensor values = network->getApiTensorByOriginalId(valuesId);
         Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
-        RaggedTensor raggedInput(values, offsets);
+        RaggedTensor raggedInput = inputJson.contains("max_values_per_row")
+            ? RaggedTensor(values, offsets, inputJson.at("max_values_per_row").get<uint64_t>())
+            : RaggedTensor(values, offsets);
         if (raggedInput.getBatchSize() != inputJson.at("batch_size").get<uint64_t>() ||
             raggedInput.getMaxTotalValues() != inputJson.at("max_total_values").get<uint64_t>()) {
             throw runtime_error("DropOut serialized ragged input metadata does not match reconstructed tensors.");
@@ -94,7 +96,7 @@ void DropOut::deserialize(const json &j, Network *network) {
         if (outputValues.getDimensions() != values.getDimensions() || outputValues.getDataType() != values.getDataType()) {
             throw runtime_error("DropOut serialized ragged output descriptor must match its input values descriptor.");
         }
-        RaggedTensor raggedOutput(outputValues, offsets);
+        RaggedTensor raggedOutput = raggedInput.withValues(outputValues);
         const json& outputJson = j.at("ragged_feature_output");
         if (outputJson.at("values").at("id").get<uint64_t>() != j.at("feature_output").at("id").get<uint64_t>() ||
             outputJson.at("offsets").at("id").get<uint64_t>() != offsetsId ||

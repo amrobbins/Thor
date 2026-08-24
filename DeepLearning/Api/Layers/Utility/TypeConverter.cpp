@@ -39,7 +39,7 @@ TypeConverter TypeConverter::Builder::build() {
 
     if (_raggedFeatureInput.has_value()) {
         typeConverter.raggedFeatureInput = _raggedFeatureInput.value();
-        typeConverter.raggedFeatureOutput = RaggedTensor(outputValues, _raggedFeatureInput->getOffsets());
+        typeConverter.raggedFeatureOutput = _raggedFeatureInput->withValues(outputValues);
         typeConverter.featureInputs = {_raggedFeatureInput->getValues(), _raggedFeatureInput->getOffsets()};
     } else {
         typeConverter.featureInputs = {_featureInput.value()};
@@ -236,14 +236,16 @@ void TypeConverter::deserialize(const json &j, Network *network) {
         const uint64_t offsetsId = inputJson.at("offsets").at("id").get<uint64_t>();
         Tensor values = network->getApiTensorByOriginalId(valuesId);
         Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
-        RaggedTensor raggedInput(values, offsets);
+        RaggedTensor raggedInput = inputJson.contains("max_values_per_row")
+            ? RaggedTensor(values, offsets, inputJson.at("max_values_per_row").get<uint64_t>())
+            : RaggedTensor(values, offsets);
         if (raggedInput.getBatchSize() != inputJson.at("batch_size").get<uint64_t>() ||
             raggedInput.getMaxTotalValues() != inputJson.at("max_total_values").get<uint64_t>()) {
             throw runtime_error("TypeConverter serialized ragged input metadata does not match reconstructed tensors.");
         }
 
         Tensor outputValues = Tensor::deserialize(j.at("feature_output"));
-        RaggedTensor raggedOutput(outputValues, offsets);
+        RaggedTensor raggedOutput = raggedInput.withValues(outputValues);
         const json& outputJson = j.at("ragged_feature_output");
         if (outputJson.at("values").at("id").get<uint64_t>() != j.at("feature_output").at("id").get<uint64_t>()) {
             throw runtime_error("TypeConverter serialized ragged output values must match feature_output.");

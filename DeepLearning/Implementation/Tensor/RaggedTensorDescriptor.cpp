@@ -13,7 +13,13 @@ std::vector<uint64_t> RaggedTensorDescriptor::getTrailingDimensions() const {
 std::string RaggedTensorDescriptor::toString() const {
     std::ostringstream out;
     out << "RaggedTensorDescriptor(ragged_rank=" << raggedRank << ", batch_size=" << getBatchSize()
-        << ", max_total_values=" << getMaxTotalValues() << ", values_data_type="
+        << ", max_total_values=" << getMaxTotalValues();
+    if (hasMaxValuesPerRow()) {
+        out << ", max_values_per_row=" << getMaxValuesPerRow();
+    } else {
+        out << ", max_values_per_row=unspecified";
+    }
+    out << ", values_data_type="
         << TensorDescriptor::getElementTypeName(getValuesDataType()) << ", offsets_data_type="
         << TensorDescriptor::getElementTypeName(getOffsetsDataType()) << ", values_dimensions=[";
     const std::vector<uint64_t> dimensions = valuesDescriptor.getDimensions();

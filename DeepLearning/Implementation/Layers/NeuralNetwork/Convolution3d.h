@@ -26,7 +26,8 @@ class Convolution3d : public CustomLayer {
                   std::optional<DataType> weightsDataType,
                   const TensorPlacement& placement,
                   bool inferenceOnly,
-                  int64_t stampedId = -1);
+                  int64_t stampedId = -1,
+                  uint32_t groups = 1);
 
     std::string getLayerType() override { return "Convolution3d"; }
 
@@ -44,10 +45,12 @@ class Convolution3d : public CustomLayer {
                                                                              uint32_t filterWidth,
                                                                              uint32_t filterHeight,
                                                                              uint32_t filterDepth,
-                                                                             std::optional<DataType> weightsDataType);
+                                                                             std::optional<DataType> weightsDataType,
+                                                                             uint32_t groups);
 
    private:
     static DynamicExpression buildExpression(bool hasBias,
+                                             uint32_t groups,
                                              uint32_t strideD,
                                              uint32_t strideH,
                                              uint32_t strideW,

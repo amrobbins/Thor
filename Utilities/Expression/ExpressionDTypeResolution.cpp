@@ -49,13 +49,16 @@ static bool isRmsNormBackwardOp(ExprOp op) {
 }
 
 static bool isReductionComputeOp(ExprOp op) {
-    return isReductionOp(op) || op == ExprOp::RMSNORM || isRmsNormBackwardOp(op) || op == ExprOp::ATTENTION ||
+    return isReductionOp(op) || op == ExprOp::RMSNORM || op == ExprOp::LAYERNORM || isRmsNormBackwardOp(op) ||
+           op == ExprOp::ATTENTION ||
            isAttentionBackwardOp(op) || op == ExprOp::ROPE;
 }
 static bool isMatmulOp(ExprOp op) { return op == ExprOp::MATMUL || op == ExprOp::GEMM; }
 static bool isConvolutionOp(ExprOp op) {
     return op == ExprOp::CONV2D || op == ExprOp::CONV3D || op == ExprOp::CONV2D_BACKWARD_DATA ||
-           op == ExprOp::CONV2D_BACKWARD_FILTER || op == ExprOp::CONV3D_BACKWARD_DATA || op == ExprOp::CONV3D_BACKWARD_FILTER;
+           op == ExprOp::CONV2D_BACKWARD_FILTER || op == ExprOp::CONV3D_BACKWARD_DATA || op == ExprOp::CONV3D_BACKWARD_FILTER ||
+           op == ExprOp::RAGGED_CONV1D_CAUSAL || op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA ||
+           op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER;
 }
 static bool isComparisonOp(ExprOp op) {
     return op == ExprOp::EQUAL || op == ExprOp::NOT_EQUAL || op == ExprOp::LESS || op == ExprOp::LESS_EQUAL ||
@@ -414,6 +417,20 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
         return resolved_output_dtypes[node.lhs];
     }
 
+    if (node.op == ExprOp::RAGGED_CONV1D_CAUSAL || node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA ||
+        node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size() ||
+            node.aux >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("ragged Conv1D node has parent index out of range in resolveNodeLogicalInputDType.");
+        }
+        const DataType offsets_dtype = resolved_output_dtypes[node.aux];
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
+            throw std::runtime_error("ragged Conv1D offsets must have UINT32 or UINT64 dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(offsets_dtype));
+        }
+        return promoteTensorValueDTypes(resolved_output_dtypes[node.lhs], resolved_output_dtypes[node.rhs]);
+    }
+
     if (node.op == ExprOp::TAKE_ALONG_AXIS) {
         if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
             throw std::runtime_error("take_along_axis node has parent index out of range in resolveNodeLogicalInputDType.");
@@ -644,6 +661,21 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         return node.output_dtype.has_value() ? node.output_dtype.value() : resolved_output_dtypes[node.lhs];
     }
 
+    if (node.op == ExprOp::RAGGED_CONV1D_CAUSAL || node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA ||
+        node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size() ||
+            node.aux >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("ragged Conv1D node has parent index out of range in resolveNodeOutputDType.");
+        }
+        const DataType offsets_dtype = resolved_output_dtypes[node.aux];
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
+            throw std::runtime_error("ragged Conv1D offsets must have UINT32 or UINT64 dtype, received: " +
+                                     TensorDescriptor::getElementTypeName(offsets_dtype));
+        }
+        const DataType default_output = promoteTensorValueDTypes(resolved_output_dtypes[node.lhs], resolved_output_dtypes[node.rhs]);
+        return node.output_dtype.has_value() ? node.output_dtype.value() : default_output;
+    }
+
     if (node.op == ExprOp::TAKE_ALONG_AXIS) {
         if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
             throw std::runtime_error("take_along_axis node has parent index out of range in resolveNodeOutputDType.");
@@ -657,9 +689,9 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         return node.output_dtype.has_value() ? node.output_dtype.value() : input_dtype;
     }
 
-    if (node.op == ExprOp::RMSNORM) {
+    if (node.op == ExprOp::RMSNORM || node.op == ExprOp::LAYERNORM) {
         if (node.lhs >= resolved_output_dtypes.size()) {
-            throw std::runtime_error("RMSNorm node has input index out of range in resolveNodeOutputDType.");
+            throw std::runtime_error("Normalization node has input index out of range in resolveNodeOutputDType.");
         }
         const DataType input_dtype = resolved_output_dtypes[node.lhs];
         return node.output_dtype.has_value() ? node.output_dtype.value() : input_dtype;
@@ -966,6 +998,14 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
             // The offsets operand controls launch extent only. It is structural
             // metadata and never participates in value dtype propagation.
             propagate_to_parent(node.lhs);
+        } else if (node.op == ExprOp::RAGGED_CONV1D_CAUSAL ||
+                   node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA ||
+                   node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER) {
+            // Ragged convolution numeric operands participate in compute dtype propagation. Canonical
+            // offsets are structural row-boundary metadata and must never inherit
+            // the materialized floating-point compute requirement.
+            propagate_to_parent(node.lhs);
+            propagate_to_parent(node.rhs);
         } else if (isSegmentedReduceOp(node.op)) {
             // Segment offsets are structural metadata; reduction compute dtype
             // propagates only through values.

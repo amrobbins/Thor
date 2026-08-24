@@ -40,9 +40,12 @@ struct CompiledExecutionStage {
         ArgMinMax,
         SegmentedReduction,
         SegmentedBroadcast,
+        RaggedConv1dCausal,
+        RaggedConv1dCausalBackwardData,
         Scan,
         Softmax,
         RmsNorm,
+        LayerNorm,
         RmsNormBackward,
         EmbeddingLookup,
         Matmul,
@@ -52,7 +55,8 @@ struct CompiledExecutionStage {
         Convolution,
         ConvolutionBackward,
         ReduceMinMaxBackward,
-        ScanMinMaxBackward
+        ScanMinMaxBackward,
+        RaggedConv1dCausalBackwardFilter
     };
     static std::string kindToString(const Kind kind) {
         switch (kind) {
@@ -68,12 +72,20 @@ struct CompiledExecutionStage {
                 return "SegmentedReduction";
             case Kind::SegmentedBroadcast:
                 return "SegmentedBroadcast";
+            case Kind::RaggedConv1dCausal:
+                return "RaggedConv1dCausal";
+            case Kind::RaggedConv1dCausalBackwardData:
+                return "RaggedConv1dCausalBackwardData";
+            case Kind::RaggedConv1dCausalBackwardFilter:
+                return "RaggedConv1dCausalBackwardFilter";
             case Kind::Scan:
                 return "Scan";
             case Kind::Softmax:
                 return "Softmax";
             case Kind::RmsNorm:
                 return "RmsNorm";
+            case Kind::LayerNorm:
+                return "LayerNorm";
             case Kind::RmsNormBackward:
                 return "RmsNormBackward";
             case Kind::EmbeddingLookup:
@@ -110,9 +122,13 @@ struct CompiledExecutionStage {
     const std::shared_ptr<CompiledArgMinMax> arg_minmax = nullptr;
     const std::shared_ptr<CompiledSegmentedReduction> segmented_reduction = nullptr;
     const std::shared_ptr<CompiledSegmentedBroadcast> segmented_broadcast = nullptr;
+    const std::shared_ptr<CompiledRaggedConv1dCausal> ragged_conv1d_causal = nullptr;
+    const std::shared_ptr<CompiledRaggedConv1dCausalBackwardData> ragged_conv1d_causal_backward_data = nullptr;
+    const std::shared_ptr<CompiledRaggedConv1dCausalBackwardFilter> ragged_conv1d_causal_backward_filter = nullptr;
     const std::shared_ptr<CompiledScan> scan = nullptr;
     const std::shared_ptr<CompiledSoftmax> softmax = nullptr;
     const std::shared_ptr<CompiledRmsNorm> rms_norm = nullptr;
+    const std::shared_ptr<CompiledLayerNorm> layer_norm = nullptr;
     const std::shared_ptr<CompiledRmsNormBackward> rms_norm_backward = nullptr;
     const std::shared_ptr<CompiledEmbeddingLookup> embedding_lookup = nullptr;
     const std::shared_ptr<CompiledMatmul> matmul = nullptr;
@@ -170,6 +186,24 @@ struct CompiledExecutionStage {
                 }
                 return segmented_broadcast->output_dtype;
 
+            case Kind::RaggedConv1dCausal:
+                if (!ragged_conv1d_causal) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing ragged Conv1D stage.");
+                }
+                return ragged_conv1d_causal->output_dtype;
+
+            case Kind::RaggedConv1dCausalBackwardData:
+                if (!ragged_conv1d_causal_backward_data) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing ragged Conv1D backward-data stage.");
+                }
+                return ragged_conv1d_causal_backward_data->output_dtype;
+
+            case Kind::RaggedConv1dCausalBackwardFilter:
+                if (!ragged_conv1d_causal_backward_filter) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing ragged Conv1D backward-filter stage.");
+                }
+                return ragged_conv1d_causal_backward_filter->output_dtype;
+
             case Kind::Scan: {
                 if (!scan) {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing scan stage.");
@@ -194,6 +228,12 @@ struct CompiledExecutionStage {
                     throw std::runtime_error("CompiledExecutionStage::outputDType missing RMSNorm stage.");
                 }
                 return rms_norm->output_dtype;
+
+            case Kind::LayerNorm:
+                if (!layer_norm) {
+                    throw std::runtime_error("CompiledExecutionStage::outputDType missing LayerNorm stage.");
+                }
+                return layer_norm->output_dtype;
 
             case Kind::RmsNormBackward:
                 if (!rms_norm_backward) {
@@ -340,6 +380,36 @@ struct CompiledExecutionStage {
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
 
+    CompiledExecutionStage(const std::shared_ptr<CompiledRaggedConv1dCausal>& ragged_conv1d_causal,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::RaggedConv1dCausal),
+          ragged_conv1d_causal(ragged_conv1d_causal),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledRaggedConv1dCausalBackwardData>& ragged_conv1d_causal_backward_data,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::RaggedConv1dCausalBackwardData),
+          ragged_conv1d_causal_backward_data(ragged_conv1d_causal_backward_data),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledRaggedConv1dCausalBackwardFilter>& ragged_conv1d_causal_backward_filter,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::RaggedConv1dCausalBackwardFilter),
+          ragged_conv1d_causal_backward_filter(ragged_conv1d_causal_backward_filter),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
     CompiledExecutionStage(const PhysicalExpression& expr,
                            const std::shared_ptr<CompiledScan>& scan,
                            std::vector<uint32_t> input_value_ids,
@@ -368,6 +438,16 @@ struct CompiledExecutionStage {
                            std::vector<ParameterFanOverride> parameter_fan_overrides = {})
         : kind(Kind::RmsNorm),
           rms_norm(rms_norm),
+          input_value_ids(std::move(input_value_ids)),
+          outputs(std::move(outputs)),
+          parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
+
+    CompiledExecutionStage(const std::shared_ptr<CompiledLayerNorm>& layer_norm,
+                           std::vector<uint32_t> input_value_ids,
+                           std::vector<CompiledStageOutput> outputs,
+                           std::vector<ParameterFanOverride> parameter_fan_overrides = {})
+        : kind(Kind::LayerNorm),
+          layer_norm(layer_norm),
           input_value_ids(std::move(input_value_ids)),
           outputs(std::move(outputs)),
           parameter_fan_overrides(std::move(parameter_fan_overrides)) {}
@@ -487,6 +567,30 @@ struct CompiledValueAlias {
     uint64_t element_offset = 0;
 };
 
+// T8A compiler-level physical representation for a logical packed ragged value.
+// The logical API remains [max_total_values, C] plus canonical offsets. While a
+// compatible region is executing, the value may remain materialized as exactly
+// one dense [B,C,1,W] allocation, where W is selected from width_capacities.
+// Only each row's active prefix is semantically valid. The inactive [L_i,W)
+// tail is deliberately undefined; consumers that can observe it are responsible
+// for canonicalizing the region they read before doing so.
+struct CompiledPaddedRaggedValueRepresentation {
+    uint32_t offsets_value_id = UINT32_MAX;
+    CompiledPaddedRaggedSequenceLayout layout;
+    std::vector<uint64_t> width_capacities;
+
+    bool operator==(const CompiledPaddedRaggedValueRepresentation& other) const = default;
+};
+
+// A packed logical value may legally participate in more than one ragged row
+// partition before it enters a retained region, so representation capability is
+// keyed by both the value and its canonical offsets identity. Conv1D-produced
+// values normally have one authoritative key, while packed roots may have more
+// than one placement-time capability.
+[[nodiscard]] constexpr uint64_t paddedRaggedRepresentationKey(uint32_t value_id, uint32_t offsets_value_id) {
+    return (static_cast<uint64_t>(value_id) << 32U) | static_cast<uint64_t>(offsets_value_id);
+}
+
 struct CompiledOutputs {
     EquationSignature signature;
     bool broadcast_support = false;
@@ -494,6 +598,11 @@ struct CompiledOutputs {
     std::vector<CompiledExecutionStage> stages;
     std::vector<CompiledStageOutput> final_outputs;
     std::vector<CompiledValueAlias> value_aliases;
+    std::unordered_map<uint64_t, CompiledPaddedRaggedValueRepresentation> padded_ragged_values;
+    // T8B fused stages that are proven shape-preserving/valuewise and belong to
+    // a retained padded region anchored by at least one ragged Conv1D. The map
+    // value is the canonical offsets value id for the region.
+    std::unordered_map<uint32_t, uint32_t> padded_ragged_fused_stage_offsets;
 };
 
 struct RuntimeDTypeKey {
@@ -716,6 +825,14 @@ class FusedEquation {
                                                                const std::optional<Tensor>& preallocatedOutput,
                                                                const Stream& stream,
                                                                const std::optional<Tensor>& rowPartitionOffsets = std::nullopt) const;
+
+    [[nodiscard]] std::shared_ptr<StampedLayerNorm> stampLayerNorm(
+        const std::shared_ptr<CompiledLayerNorm>& compiledStage,
+        Tensor& input,
+        Tensor& scale,
+        Tensor& bias,
+        const std::optional<Tensor>& preallocatedOutput,
+        const Stream& stream) const;
 
     [[nodiscard]] std::shared_ptr<StampedRmsNormBackward> stampRmsNormBackward(
         const std::shared_ptr<CompiledRmsNormBackward>& compiledStage,

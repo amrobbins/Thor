@@ -15,6 +15,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,10 +27,16 @@ namespace {
 
 class CopyTensorDeviceBatchMaterializer : public Api::DeviceBatchMaterializer {
    public:
-    explicit CopyTensorDeviceBatchMaterializer(Impl::Tensor source) : source(std::move(source)) {}
+    explicit CopyTensorDeviceBatchMaterializer(
+        Impl::Tensor source,
+        std::optional<Api::DeviceBatchAccessPolicy> accessPolicy = std::nullopt)
+        : source(std::move(source)), accessPolicy(std::move(accessPolicy)) {}
 
     Impl::TensorDescriptor getOutputDescriptor() const override { return source.getDescriptor(); }
     Impl::TensorPlacement getOutputPlacement() const override { return source.getPlacement(); }
+    std::optional<Api::DeviceBatchAccessPolicy> getAccessPolicy() const override {
+        return accessPolicy;
+    }
 
     void enqueueMaterialization(Impl::Tensor& destination, Stream& destinationStream) const override {
         destination.copyFromAsync(source, destinationStream);
@@ -37,6 +44,7 @@ class CopyTensorDeviceBatchMaterializer : public Api::DeviceBatchMaterializer {
 
    private:
     Impl::Tensor source;
+    std::optional<Api::DeviceBatchAccessPolicy> accessPolicy;
 };
 
 void synchronizeEvents(std::vector<Event>& events) {
@@ -58,6 +66,31 @@ std::vector<float> readTensor(Impl::Tensor tensor) {
 }
 
 }  // namespace
+
+
+TEST(DeviceBatchReference, ForwardsOptionalMaterializerAccessPolicy) {
+    const Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
+    Impl::Tensor source(cpuPlacement, Impl::TensorDescriptor(Impl::DataType::FP32, {4}));
+    const Api::DeviceBatchAccessPolicy expected{
+        .deviceNum = 3,
+        .tensorId = source.getTensorId(),
+        .base = source.getMemPtr<void>(),
+        .bytes = source.getArraySizeInBytes(),
+        .persistingHitRatio = 0.625f,
+        .generation = 9,
+    };
+
+    Api::DeviceBatchReference withPolicy(
+        std::make_shared<CopyTensorDeviceBatchMaterializer>(source, expected),
+        1);
+    ASSERT_TRUE(withPolicy.getAccessPolicy().has_value());
+    EXPECT_EQ(withPolicy.getAccessPolicy().value(), expected);
+
+    Api::DeviceBatchReference withoutPolicy(
+        std::make_shared<CopyTensorDeviceBatchMaterializer>(source),
+        1);
+    EXPECT_FALSE(withoutPolicy.getAccessPolicy().has_value());
+}
 
 TEST(DeviceBatchReference, PlacedNetworkDispatchesReferenceBatchThroughNamedInput) {
     if (MachineEvaluator::instance().getNumGpus() == 0) {

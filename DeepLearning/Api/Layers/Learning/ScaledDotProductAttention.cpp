@@ -1115,7 +1115,9 @@ void ScaledDotProductAttention::deserialize(std::shared_ptr<thor_file::TarReader
             throw std::runtime_error(std::string("ScaledDotProductAttention deserialize malformed ") + field + ".");
         Tensor values = network->getApiTensorByOriginalId(r.at("values").at("id").get<uint64_t>());
         Tensor offsets = network->getApiTensorByOriginalId(r.at("offsets").at("id").get<uint64_t>());
-        return RaggedTensor(values, offsets);
+        return r.contains("max_values_per_row")
+            ? RaggedTensor(values, offsets, r.at("max_values_per_row").get<uint64_t>())
+            : RaggedTensor(values, offsets);
     };
     std::optional<RaggedTensor> queryRaggedInput = std::nullopt;
     std::optional<RaggedTensor> keyRaggedInput = std::nullopt;

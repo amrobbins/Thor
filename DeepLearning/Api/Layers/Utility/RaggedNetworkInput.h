@@ -31,6 +31,7 @@ class RaggedNetworkInput::Builder {
     virtual RaggedNetworkInput::Builder& offsetsDataType(DataType dataType);
     virtual RaggedNetworkInput::Builder& trailingDimensions(const std::vector<uint64_t>& dimensions);
     virtual RaggedNetworkInput::Builder& maxTotalValues(uint64_t maxTotalValues);
+    virtual RaggedNetworkInput::Builder& maxValuesPerRow(uint64_t maxValuesPerRow);
     virtual RaggedNetworkInput::Builder& batchSize(uint64_t batchSize);
 
    private:
@@ -40,6 +41,7 @@ class RaggedNetworkInput::Builder {
     DataType offsetsDataType_ = DataType::UINT32;
     std::vector<uint64_t> trailingDimensions_;
     std::optional<uint64_t> maxTotalValues_;
+    std::optional<uint64_t> maxValuesPerRow_;
     std::optional<uint64_t> batchSize_;
 };
 

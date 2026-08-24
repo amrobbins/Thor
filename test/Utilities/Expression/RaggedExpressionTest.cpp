@@ -8,6 +8,7 @@
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
+#include "Utilities/TensorOperations/Ragged/PaddedRaggedSequence.h"
 
 #include "cuda_runtime.h"
 
@@ -33,7 +34,12 @@ RaggedTensorDescriptor makeDescriptor(DataType values_dtype = DataType::FP32,
                                       uint64_t batch_size = 3,
                                       uint64_t max_total_values = 9,
                                       DataType offsets_dtype = DataType::UINT32) {
-    return RaggedTensorDescriptor(values_dtype, trailing_dimensions, batch_size, max_total_values, offsets_dtype);
+    return RaggedTensorDescriptor(values_dtype,
+                                  trailing_dimensions,
+                                  batch_size,
+                                  max_total_values,
+                                  max_total_values,
+                                  offsets_dtype);
 }
 
 ExprNode outputNode(const Expression& expression) {
@@ -180,6 +186,193 @@ void expectNear(const std::vector<float>& actual, const std::vector<float>& expe
     for (size_t i = 0; i < actual.size(); ++i) {
         EXPECT_NEAR(actual[i], expected[i], atol) << "index " << i;
     }
+}
+
+void expectNearRelative(const std::vector<float>& actual,
+                        const std::vector<float>& expected,
+                        float atol,
+                        float rtol) {
+    ASSERT_EQ(actual.size(), expected.size());
+    for (size_t i = 0; i < actual.size(); ++i) {
+        const float tolerance = std::max(atol, rtol * std::fabs(expected[i]));
+        EXPECT_NEAR(actual[i], expected[i], tolerance) << "index " << i;
+    }
+}
+
+std::vector<float> cpuRaggedCausalConv1d(const std::vector<float>& packed_values,
+                                           const std::vector<uint64_t>& offsets,
+                                           const std::vector<float>& filter,
+                                           uint64_t max_total_values,
+                                           uint64_t input_channels,
+                                           uint64_t output_channels,
+                                           uint64_t kernel_width,
+                                           uint64_t dilation,
+                                           float inactive_sentinel,
+                                           uint64_t groups = 1) {
+    if (packed_values.size() != max_total_values * input_channels) {
+        throw std::runtime_error("cpuRaggedCausalConv1d packed-value size mismatch.");
+    }
+    if (groups == 0 || input_channels % groups != 0 || output_channels % groups != 0) {
+        throw std::runtime_error("cpuRaggedCausalConv1d invalid group geometry.");
+    }
+    const uint64_t input_channels_per_group = input_channels / groups;
+    const uint64_t output_channels_per_group = output_channels / groups;
+    if (filter.size() != output_channels * input_channels_per_group * kernel_width) {
+        throw std::runtime_error("cpuRaggedCausalConv1d filter size mismatch.");
+    }
+    if (offsets.empty()) {
+        throw std::runtime_error("cpuRaggedCausalConv1d requires canonical row offsets.");
+    }
+
+    std::vector<float> output(max_total_values * output_channels, inactive_sentinel);
+    for (size_t row = 0; row + 1 < offsets.size(); ++row) {
+        const uint64_t begin = offsets[row];
+        const uint64_t end = offsets[row + 1];
+        if (begin > end || end > max_total_values) {
+            throw std::runtime_error("cpuRaggedCausalConv1d offsets exceed packed capacity.");
+        }
+        const uint64_t row_length = end - begin;
+        for (uint64_t timestep = 0; timestep < row_length; ++timestep) {
+            for (uint64_t output_channel = 0; output_channel < output_channels; ++output_channel) {
+                float accumulator = 0.0F;
+                for (uint64_t filter_position = 0; filter_position < kernel_width; ++filter_position) {
+                    const uint64_t lag = (kernel_width - 1 - filter_position) * dilation;
+                    if (timestep < lag) {
+                        continue;
+                    }
+                    const uint64_t source_value = begin + timestep - lag;
+                    const uint64_t group = output_channel / output_channels_per_group;
+                    const uint64_t input_channel_begin = group * input_channels_per_group;
+                    for (uint64_t input_channel_in_group = 0; input_channel_in_group < input_channels_per_group;
+                         ++input_channel_in_group) {
+                        const uint64_t input_channel = input_channel_begin + input_channel_in_group;
+                        const size_t input_index = source_value * input_channels + input_channel;
+                        const size_t filter_index =
+                            (output_channel * input_channels_per_group + input_channel_in_group) * kernel_width +
+                            filter_position;
+                        accumulator += packed_values.at(input_index) * filter.at(filter_index);
+                    }
+                }
+                output.at((begin + timestep) * output_channels + output_channel) = accumulator;
+            }
+        }
+    }
+    return output;
+}
+
+std::vector<float> cpuRaggedCausalConv1dDgrad(const std::vector<float>& packed_grad_output,
+                                                const std::vector<uint64_t>& offsets,
+                                                const std::vector<float>& filter,
+                                                uint64_t max_total_values,
+                                                uint64_t input_channels,
+                                                uint64_t output_channels,
+                                                uint64_t kernel_width,
+                                                uint64_t dilation,
+                                                float inactive_sentinel,
+                                                uint64_t groups = 1) {
+    if (packed_grad_output.size() != max_total_values * output_channels) {
+        throw std::runtime_error("cpuRaggedCausalConv1dDgrad packed dY size mismatch.");
+    }
+    if (groups == 0 || input_channels % groups != 0 || output_channels % groups != 0) {
+        throw std::runtime_error("cpuRaggedCausalConv1dDgrad invalid group geometry.");
+    }
+    const uint64_t input_channels_per_group = input_channels / groups;
+    const uint64_t output_channels_per_group = output_channels / groups;
+    if (filter.size() != output_channels * input_channels_per_group * kernel_width) {
+        throw std::runtime_error("cpuRaggedCausalConv1dDgrad filter size mismatch.");
+    }
+
+    std::vector<float> output(max_total_values * input_channels, inactive_sentinel);
+    for (size_t row = 0; row + 1 < offsets.size(); ++row) {
+        const uint64_t begin = offsets[row];
+        const uint64_t end = offsets[row + 1];
+        if (begin > end || end > max_total_values) {
+            throw std::runtime_error("cpuRaggedCausalConv1dDgrad offsets exceed packed capacity.");
+        }
+        for (uint64_t value = begin; value < end; ++value) {
+            for (uint64_t input_channel = 0; input_channel < input_channels; ++input_channel) {
+                output[value * input_channels + input_channel] = 0.0F;
+            }
+        }
+        const uint64_t row_length = end - begin;
+        for (uint64_t timestep = 0; timestep < row_length; ++timestep) {
+            for (uint64_t output_channel = 0; output_channel < output_channels; ++output_channel) {
+                const float dy = packed_grad_output[(begin + timestep) * output_channels + output_channel];
+                const uint64_t group = output_channel / output_channels_per_group;
+                const uint64_t input_channel_begin = group * input_channels_per_group;
+                for (uint64_t filter_position = 0; filter_position < kernel_width; ++filter_position) {
+                    const uint64_t lag = (kernel_width - 1 - filter_position) * dilation;
+                    if (timestep < lag) {
+                        continue;
+                    }
+                    const uint64_t source_value = begin + timestep - lag;
+                    for (uint64_t input_channel_in_group = 0; input_channel_in_group < input_channels_per_group;
+                         ++input_channel_in_group) {
+                        const uint64_t input_channel = input_channel_begin + input_channel_in_group;
+                        const size_t filter_index =
+                            (output_channel * input_channels_per_group + input_channel_in_group) * kernel_width +
+                            filter_position;
+                        output[source_value * input_channels + input_channel] += dy * filter[filter_index];
+                    }
+                }
+            }
+        }
+    }
+    return output;
+}
+
+std::vector<float> cpuRaggedCausalConv1dWgrad(const std::vector<float>& packed_values,
+                                                const std::vector<float>& packed_grad_output,
+                                                const std::vector<uint64_t>& offsets,
+                                                uint64_t max_total_values,
+                                                uint64_t input_channels,
+                                                uint64_t output_channels,
+                                                uint64_t kernel_width,
+                                                uint64_t dilation,
+                                                uint64_t groups = 1) {
+    if (packed_values.size() != max_total_values * input_channels) {
+        throw std::runtime_error("cpuRaggedCausalConv1dWgrad packed X size mismatch.");
+    }
+    if (packed_grad_output.size() != max_total_values * output_channels) {
+        throw std::runtime_error("cpuRaggedCausalConv1dWgrad packed dY size mismatch.");
+    }
+    if (groups == 0 || input_channels % groups != 0 || output_channels % groups != 0) {
+        throw std::runtime_error("cpuRaggedCausalConv1dWgrad invalid group geometry.");
+    }
+    const uint64_t input_channels_per_group = input_channels / groups;
+    const uint64_t output_channels_per_group = output_channels / groups;
+    std::vector<float> dw(output_channels * input_channels_per_group * kernel_width, 0.0F);
+    for (size_t row = 0; row + 1 < offsets.size(); ++row) {
+        const uint64_t begin = offsets[row];
+        const uint64_t end = offsets[row + 1];
+        if (begin > end || end > max_total_values) {
+            throw std::runtime_error("cpuRaggedCausalConv1dWgrad offsets exceed packed capacity.");
+        }
+        const uint64_t row_length = end - begin;
+        for (uint64_t timestep = 0; timestep < row_length; ++timestep) {
+            for (uint64_t output_channel = 0; output_channel < output_channels; ++output_channel) {
+                const float dy = packed_grad_output[(begin + timestep) * output_channels + output_channel];
+                const uint64_t group = output_channel / output_channels_per_group;
+                const uint64_t input_channel_begin = group * input_channels_per_group;
+                for (uint64_t filter_position = 0; filter_position < kernel_width; ++filter_position) {
+                    const uint64_t lag = (kernel_width - 1 - filter_position) * dilation;
+                    if (timestep < lag) {
+                        continue;
+                    }
+                    const uint64_t source_value = begin + timestep - lag;
+                    for (uint64_t input_channel_in_group = 0; input_channel_in_group < input_channels_per_group;
+                         ++input_channel_in_group) {
+                        const uint64_t input_channel = input_channel_begin + input_channel_in_group;
+                        const size_t filter_index =
+                            (output_channel * input_channels_per_group + input_channel_in_group) * kernel_width +
+                            filter_position;
+                        dw[filter_index] += packed_values[source_value * input_channels + input_channel] * dy;
+                    }
+                }
+            }
+        }
+    }
+    return dw;
 }
 
 std::vector<float> cpuSegmentSoftmax(const std::vector<float>& values,
@@ -423,6 +616,56 @@ Tensor runExpressionOutput(const Expression& expression,
     stream.synchronize();
     return plan.output(output_name);
 }
+
+std::vector<float> denseRowByRowCausalConv1d(const std::vector<float>& packed_values,
+                                             const std::vector<uint64_t>& offsets,
+                                             const Tensor& gpu_filter,
+                                             uint64_t max_total_values,
+                                             uint64_t input_channels,
+                                             uint64_t output_channels,
+                                             uint64_t kernel_width,
+                                             uint64_t dilation,
+                                             float inactive_sentinel,
+                                             Stream& stream,
+                                             uint64_t groups = 1) {
+    std::vector<float> packed_output(max_total_values * output_channels, inactive_sentinel);
+    const ConvolutionSpatial1d spatial = ConvolutionSpatial1d::causal(kernel_width, 1, static_cast<int32_t>(dilation));
+    const Expression dense_input_expr = Expression::input("dense_input", DataType::FP32, DataType::FP32);
+    const Expression dense_filter_expr = Expression::input("dense_filter", DataType::FP32, DataType::FP32);
+    const Expression dense_output_expr =
+        Expression::conv1d(dense_input_expr, dense_filter_expr, spatial, DataType::FP32, DataType::FP32, groups);
+
+    for (size_t row = 0; row + 1 < offsets.size(); ++row) {
+        const uint64_t begin = offsets[row];
+        const uint64_t end = offsets[row + 1];
+        const uint64_t width = end - begin;
+        if (width == 0) {
+            continue;
+        }
+        std::vector<float> ncw(input_channels * width, 0.0F);
+        for (uint64_t c = 0; c < input_channels; ++c) {
+            for (uint64_t t = 0; t < width; ++t) {
+                ncw[c * width + t] = packed_values[(begin + t) * input_channels + c];
+            }
+        }
+        Tensor gpu_row = makeGpuTensor<float>({1, input_channels, width}, ncw, stream);
+        Tensor gpu_row_output = runExpressionOutput(dense_output_expr,
+                                                    {{"dense_input", gpu_row}, {"dense_filter", gpu_filter}},
+                                                    "dense_output",
+                                                    stream);
+        const std::vector<float> row_output = copyToCpuValues(gpu_row_output, stream);
+        if (row_output.size() != output_channels * width) {
+            throw std::runtime_error("denseRowByRowCausalConv1d output size mismatch.");
+        }
+        for (uint64_t t = 0; t < width; ++t) {
+            for (uint64_t k = 0; k < output_channels; ++k) {
+                packed_output[(begin + t) * output_channels + k] = row_output[k * width + t];
+            }
+        }
+    }
+    return packed_output;
+}
+
 
 Tensor runBackwardOutput(const Expression& forward_expression,
                          const std::unordered_map<std::string, Tensor>& inputs,
@@ -2365,5 +2608,2972 @@ TEST(RaggedExpression, RaggedAttentionBackwardConsumesMatchingQueryExtentOnUpstr
         FAIL() << "Expected ragged Attention backward to reject dO carrying the KV partition.";
     } catch (const std::runtime_error& error) {
         EXPECT_NE(std::string(error.what()).find("same row partition as the query/output domain"), std::string::npos);
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dPreservesRowPartitionAndRecordsLogicalContract) {
+    const RaggedTensorDescriptor descriptor = makeDescriptor(DataType::FP32, {3}, 4, 13, DataType::UINT64);
+    const RaggedExpression input = RaggedExpression::input("tokens", descriptor);
+    const Expression filter = Expression::input("filter", std::nullopt, DataType::FP32);
+
+    const RaggedExpression output = input.causalConv1d(filter, 5, 3, 2, DataType::FP32, DataType::FP32);
+
+    EXPECT_EQ(output.getDescriptor().getRowPartition(), input.getDescriptor().getRowPartition());
+    EXPECT_TRUE(output.getOffsets().isSameLogicalNode(input.getOffsets()));
+    EXPECT_EQ(output.getTrailingDimensions(), (std::vector<uint64_t>{5}));
+    EXPECT_EQ(output.getValuesDimensions(), (std::vector<uint64_t>{13, 5}));
+    EXPECT_EQ(output.getRuntimeExtent().maxActiveValues, 13ULL);
+    EXPECT_EQ(output.getRuntimeExtent().elementsPerValue, 5ULL);
+    EXPECT_EQ(output.getMetadataInputNames(), (std::set<std::string>{"tokens.offsets"}));
+    EXPECT_EQ(output.getDifferentiableInputNames(), (std::set<std::string>{"filter", "tokens.values"}));
+
+    const MarkedValueNodes marked = markedValueNodes(output.getValues());
+    const ExprNode& node = marked.values;
+    ASSERT_EQ(node.op, ExprOp::RAGGED_CONV1D_CAUSAL);
+    EXPECT_EQ(node.ragged_conv_spatial_1d.stride, 1);
+    EXPECT_EQ(node.ragged_conv_spatial_1d.dilation, 2);
+    EXPECT_EQ(node.ragged_conv_spatial_1d.pre_padding, 4);
+    EXPECT_EQ(node.ragged_conv_spatial_1d.post_padding, 0);
+    EXPECT_EQ(node.ragged_conv1d_input_channels, 3ULL);
+    EXPECT_EQ(node.ragged_conv1d_output_channels, 5ULL);
+    EXPECT_EQ(node.ragged_conv1d_kernel_width, 3ULL);
+    EXPECT_EQ(node.ragged_runtime_batch_size, 4ULL);
+    EXPECT_EQ(node.ragged_runtime_max_active_values, 13ULL);
+    EXPECT_EQ(node.ragged_runtime_max_values_per_row, 13ULL);
+    EXPECT_EQ(node.ragged_runtime_elements_per_value, 5ULL);
+}
+
+TEST(RaggedExpression, CausalConv1dRequiresPlacementTimeMaxValuesPerRow) {
+    const RaggedTensorDescriptor descriptor(
+        DataType::FP32, {3}, 4, 13, DataType::UINT32);
+    ASSERT_FALSE(descriptor.hasMaxValuesPerRow());
+    const RaggedExpression input = RaggedExpression::input("tokens", descriptor);
+    const Expression filter = Expression::input("filter", std::nullopt, DataType::FP32);
+
+    try {
+        (void)input.causalConv1d(filter, 5, 3, 1, DataType::FP32, DataType::FP32);
+        FAIL() << "Expected ragged Conv1D to require max_values_per_row for placement.";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string(error.what()).find("max_values_per_row"), std::string::npos);
+    }
+}
+
+TEST(RaggedExpression, Conv1dT6ARejectsNonCausalOrStridedGeometry) {
+    const RaggedExpression input = RaggedExpression::input("tokens", makeDescriptor(DataType::FP32, {3}, 2, 8));
+    const Expression filter = Expression::input("filter");
+
+    EXPECT_THROW((void)input.conv1d(filter, 4, 3, ConvolutionSpatial1d::valid()), std::invalid_argument);
+    EXPECT_THROW((void)input.conv1d(filter, 4, 3, ConvolutionSpatial1d::sameUpper(8, 3)), std::invalid_argument);
+    EXPECT_THROW((void)input.conv1d(filter, 4, 3, ConvolutionSpatial1d::causal(3, 2, 1)), std::invalid_argument);
+    EXPECT_THROW((void)input.conv1d(filter, 0, 3, ConvolutionSpatial1d::causal(3)), std::invalid_argument);
+    EXPECT_THROW((void)input.conv1d(filter, 4, 0, ConvolutionSpatial1d::valid()), std::invalid_argument);
+
+    const RaggedExpression rank_two_trailing =
+        RaggedExpression::input("matrix", makeDescriptor(DataType::FP32, {2, 3}, 2, 8));
+    EXPECT_THROW((void)rank_two_trailing.causalConv1d(filter, 4, 3), std::invalid_argument);
+}
+
+TEST(RaggedExpression, CausalConv1dPhysicalSerializationRoundTripsLogicalMetadata) {
+    const RaggedExpression input = RaggedExpression::input("tokens", makeDescriptor(DataType::FP16, {8}, 3, 11, DataType::UINT32));
+    const Expression filter = Expression::input("filter", std::nullopt, DataType::FP16);
+    const RaggedExpression output = input.causalConv1d(filter, 12, 5, 3, DataType::FP32, DataType::FP16, 4);
+
+    const ExpressionDefinition definition =
+        ExpressionDefinition::fromOutputs(Expression::outputs({{"y", output.getValues()}}));
+    const nlohmann::json payload = definition.architectureJson();
+
+    bool found = false;
+    for (const auto& node : payload.at("nodes")) {
+        if (node.at("op").get<std::string>() != "ragged_conv1d_causal") {
+            continue;
+        }
+        found = true;
+        EXPECT_EQ(node.at("ragged_conv_stride").get<int32_t>(), 1);
+        EXPECT_EQ(node.at("ragged_conv_dilation").get<int32_t>(), 3);
+        EXPECT_EQ(node.at("ragged_conv_pre_padding").get<int32_t>(), 12);
+        EXPECT_EQ(node.at("ragged_conv_post_padding").get<int32_t>(), 0);
+        EXPECT_EQ(node.at("ragged_conv1d_input_channels").get<uint64_t>(), 8ULL);
+        EXPECT_EQ(node.at("ragged_conv1d_output_channels").get<uint64_t>(), 12ULL);
+        EXPECT_EQ(node.at("ragged_conv1d_kernel_width").get<uint64_t>(), 5ULL);
+        EXPECT_EQ(node.at("ragged_conv1d_groups").get<uint64_t>(), 4ULL);
+        EXPECT_EQ(node.at("ragged_runtime_batch_size").get<uint64_t>(), 3ULL);
+        EXPECT_EQ(node.at("ragged_runtime_max_active_values").get<uint64_t>(), 11ULL);
+        EXPECT_EQ(node.at("ragged_runtime_max_values_per_row").get<uint64_t>(), 11ULL);
+        EXPECT_EQ(node.at("ragged_runtime_elements_per_value").get<uint64_t>(), 12ULL);
+    }
+    ASSERT_TRUE(found);
+
+    const ExpressionDefinition loaded = ExpressionDefinition::deserialize(payload);
+    EXPECT_EQ(loaded.architectureJson(), payload);
+    EXPECT_EQ(loaded.canonical_hash, definition.canonical_hash);
+
+    // Convolution serialization is intentionally current-schema-only. Do not
+    // silently synthesize placement geometry from an older aggregate bound.
+    nlohmann::json legacyPayload = payload;
+    for (auto& node : legacyPayload.at("nodes")) {
+        if (node.at("op").get<std::string>() == "ragged_conv1d_causal") {
+            node.erase("ragged_runtime_max_values_per_row");
+        }
+    }
+    try {
+        (void)ExpressionDefinition::deserialize(legacyPayload);
+        FAIL() << "Expected legacy ragged Conv1D serialization to be rejected.";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("legacy convolution serialization is not supported"), std::string::npos);
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dCanonicalIdentityIncludesDilationAndKernelGeometry) {
+    // Four channels keeps the grouped=2 identity variant structurally valid;
+    // this test is about canonical identity, not invalid-group validation.
+    const RaggedExpression input = RaggedExpression::input("tokens", makeDescriptor(DataType::FP32, {4}, 2, 8));
+    const Expression filter = Expression::input("filter");
+    const RaggedExpression d1 = input.causalConv1d(filter, 4, 3, 1);
+    const RaggedExpression d2 = input.causalConv1d(filter, 4, 3, 2);
+    const RaggedExpression k5 = input.causalConv1d(filter, 4, 5, 1);
+    const RaggedExpression grouped = input.causalConv1d(filter, 4, 3, 1, DataType::FP32, DataType::FP32, 2);
+
+    const std::string c1 = canonicalize(d1.getValues().expression());
+    const std::string c2 = canonicalize(d2.getValues().expression());
+    const std::string c3 = canonicalize(k5.getValues().expression());
+    const std::string c4 = canonicalize(grouped.getValues().expression());
+    EXPECT_NE(c1, c2);
+    EXPECT_NE(c1, c3);
+    EXPECT_NE(c1, c4);
+    EXPECT_NE(c1.find("RAGGED_CONV1D_CAUSAL"), std::string::npos);
+    EXPECT_NE(c2.find("dilation=2"), std::string::npos);
+    EXPECT_NE(c4.find("groups=2"), std::string::npos);
+}
+
+TEST(RaggedExpression, CausalConv1dRejectsNonDivisibleGroupedChannelGeometry) {
+    const Expression filter = Expression::input("filter");
+
+    const RaggedExpression invalid_input_channels =
+        RaggedExpression::input("tokens3", makeDescriptor(DataType::FP32, {3}, 2, 8));
+    EXPECT_THROW((void)invalid_input_channels.causalConv1d(
+                     filter, 4, 3, 1, DataType::FP32, DataType::FP32, 2),
+                 std::invalid_argument);
+
+    const RaggedExpression invalid_output_channels =
+        RaggedExpression::input("tokens4", makeDescriptor(DataType::FP32, {4}, 2, 8));
+    EXPECT_THROW((void)invalid_output_channels.causalConv1d(
+                     filter, 3, 3, 1, DataType::FP32, DataType::FP32, 2),
+                 std::invalid_argument);
+}
+
+TEST(RaggedExpression, CausalConv1dT9AAutodiffBuildsOnlyInputGradientAndTreatsOffsetsAsStructural) {
+    const RaggedExpression input =
+        RaggedExpression::input("tokens", makeDescriptor(DataType::FP32, {3}, 2, 8, DataType::UINT32));
+    const Expression filter = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression output = input.causalConv1d(filter, 4, 3, 2, DataType::FP32, DataType::FP32);
+    const PhysicalOutputs forward = Expression::outputs({{"y", output.getValues()}}).physicalOutputs();
+
+    const std::unordered_map<std::string, std::vector<uint64_t>> dims{
+        {"tokens.values", {8, 3}},
+        {"tokens.offsets", {3}},
+        {"filter", {4, 3, 3}},
+    };
+
+    PhysicalOutputs backward = buildBackwardOutputs(forward, {"tokens.values"}, std::nullopt, dims);
+    resolveRaggedBackwardTestDTypes(backward, DataType::UINT32);
+    EXPECT_TRUE(containsOp(backward, ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA));
+    EXPECT_FALSE(containsOp(backward, ExprOp::CONV2D_BACKWARD_FILTER));
+    EXPECT_FALSE(containsOp(backward, ExprOp::CONV3D_BACKWARD_FILTER));
+
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(backward);
+    EXPECT_TRUE(std::any_of(stages.begin(), stages.end(), [](const PhysicalExecutionStage& stage) {
+        return stage.kind == PhysicalExecutionStage::Kind::RaggedConv1dCausalBackwardData;
+    }));
+
+    EXPECT_THROW((void)buildBackwardOutputs(forward, {"tokens.offsets"}, std::nullopt, dims), std::runtime_error);
+}
+
+TEST(RaggedExpression, CausalConv1dT9BAutodiffBuildsWeightGradientAndSupportsMixedDgradWgrad) {
+    const RaggedExpression input =
+        RaggedExpression::input("tokens", makeDescriptor(DataType::FP32, {4}, 3, 13, DataType::UINT32));
+    const Expression filter = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression output = input.causalConv1d(filter, 6, 3, 2, DataType::FP32, DataType::FP32, 2);
+    const PhysicalOutputs forward = Expression::outputs({{"y", output.getValues()}}).physicalOutputs();
+    const std::unordered_map<std::string, std::vector<uint64_t>> dims{
+        {"tokens.values", {13, 4}},
+        {"tokens.offsets", {4}},
+        {"filter", {6, 2, 3}},
+    };
+
+    PhysicalOutputs wgrad_only = buildBackwardOutputs(forward, {"filter"}, std::nullopt, dims);
+    resolveRaggedBackwardTestDTypes(wgrad_only, DataType::UINT32);
+    EXPECT_TRUE(containsOp(wgrad_only, ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER));
+    EXPECT_FALSE(containsOp(wgrad_only, ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA));
+    const std::vector<PhysicalExecutionStage> wgrad_stages = EquationCompiler::splitAtReductionBoundaries(wgrad_only);
+    EXPECT_TRUE(std::any_of(wgrad_stages.begin(), wgrad_stages.end(), [](const PhysicalExecutionStage& stage) {
+        return stage.kind == PhysicalExecutionStage::Kind::RaggedConv1dCausalBackwardFilter;
+    }));
+
+    PhysicalOutputs mixed = buildBackwardOutputs(forward, {"tokens.values", "filter"}, std::nullopt, dims);
+    resolveRaggedBackwardTestDTypes(mixed, DataType::UINT32);
+    EXPECT_TRUE(containsOp(mixed, ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA));
+    EXPECT_TRUE(containsOp(mixed, ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER));
+}
+
+TEST(RaggedExpression, CausalConv1dT9ACompilerCarriesPaddedDgradLayouts) {
+    const RaggedExpression input =
+        RaggedExpression::input("tokens", makeDescriptor(DataType::FP16, {4}, 3, 13, DataType::UINT64));
+    const Expression filter = Expression::input("filter", std::nullopt, DataType::FP16);
+    const RaggedExpression output =
+        input.causalConv1d(filter, 8, 3, 2, DataType::FP32, DataType::FP16, 2);
+    const PhysicalOutputs forward = Expression::outputs({{"y", output.getValues()}}).physicalOutputs();
+    const std::unordered_map<std::string, std::vector<uint64_t>> dims{
+        {"tokens.values", {13, 4}},
+        {"tokens.offsets", {4}},
+        {"filter", {8, 2, 3}},
+    };
+    PhysicalOutputs backward = buildBackwardOutputs(forward, {"tokens.values"}, std::nullopt, dims);
+    resolveRaggedBackwardTestDTypes(backward, DataType::UINT64);
+
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(backward);
+    const auto stage_it = std::find_if(stages.begin(), stages.end(), [](const PhysicalExecutionStage& stage) {
+        return stage.kind == PhysicalExecutionStage::Kind::RaggedConv1dCausalBackwardData;
+    });
+    ASSERT_NE(stage_it, stages.end());
+    const auto compiled = EquationCompiler::compileRaggedConv1dCausalBackwardData(stage_it->expr);
+    ASSERT_NE(compiled, nullptr);
+    EXPECT_EQ(compiled->filter_dtype, DataType::FP16);
+    EXPECT_EQ(compiled->grad_output_dtype, DataType::FP16);
+    EXPECT_EQ(compiled->output_dtype, DataType::FP16);
+    EXPECT_EQ(compiled->compute_dtype, DataType::FP32);
+    EXPECT_EQ(compiled->offset_dtype, DataType::UINT64);
+    EXPECT_EQ(compiled->groups, 2u);
+    EXPECT_EQ(compiled->padded_grad_output_layout.channels, 8u);
+    EXPECT_EQ(compiled->padded_output_layout.channels, 4u);
+    EXPECT_EQ(compiled->padded_grad_output_layout.max_values_per_row, 13u);
+    EXPECT_EQ(compiled->padded_output_layout.max_values_per_row, 13u);
+}
+
+TEST(RaggedExpression, CausalConv1dT9BCompilerCarriesTwoPaddedInputsAndDenseWeightGradient) {
+    const RaggedExpression input =
+        RaggedExpression::input("tokens", makeDescriptor(DataType::BF16, {4}, 3, 13, DataType::UINT64));
+    const Expression filter = Expression::input("filter", std::nullopt, DataType::BF16);
+    const RaggedExpression output =
+        input.causalConv1d(filter, 8, 3, 2, DataType::FP32, DataType::BF16, 2);
+    const PhysicalOutputs forward = Expression::outputs({{"y", output.getValues()}}).physicalOutputs();
+    const std::unordered_map<std::string, std::vector<uint64_t>> dims{
+        {"tokens.values", {13, 4}},
+        {"tokens.offsets", {4}},
+        {"filter", {8, 2, 3}},
+    };
+    PhysicalOutputs backward = buildBackwardOutputs(forward, {"filter"}, std::nullopt, dims);
+    resolveRaggedBackwardTestDTypes(backward, DataType::UINT64);
+
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(backward);
+    const auto stage_it = std::find_if(stages.begin(), stages.end(), [](const PhysicalExecutionStage& stage) {
+        return stage.kind == PhysicalExecutionStage::Kind::RaggedConv1dCausalBackwardFilter;
+    });
+    ASSERT_NE(stage_it, stages.end());
+    const auto compiled = EquationCompiler::compileRaggedConv1dCausalBackwardFilter(stage_it->expr);
+    ASSERT_NE(compiled, nullptr);
+    EXPECT_EQ(compiled->input_dtype, DataType::BF16);
+    EXPECT_EQ(compiled->grad_output_dtype, DataType::BF16);
+    EXPECT_EQ(compiled->output_dtype, DataType::BF16);
+    EXPECT_EQ(compiled->compute_dtype, DataType::FP32);
+    EXPECT_EQ(compiled->offset_dtype, DataType::UINT64);
+    EXPECT_EQ(compiled->groups, 2u);
+    EXPECT_EQ(compiled->padded_input_layout.channels, 4u);
+    EXPECT_EQ(compiled->padded_grad_output_layout.channels, 8u);
+    EXPECT_EQ(compiled->padded_input_layout.max_values_per_row, 13u);
+    EXPECT_EQ(compiled->padded_grad_output_layout.max_values_per_row, 13u);
+}
+
+TEST(RaggedExpression, CausalConv1dCompilerLowersToDedicatedRaggedConvStage) {
+    const RaggedExpression input = RaggedExpression::input("tokens", makeDescriptor(DataType::FP32, {3}, 2, 8));
+    const Expression filter = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression output = input.causalConv1d(filter, 4, 3, 1, DataType::FP32, DataType::FP32);
+    const PhysicalOutputs physical = Expression::outputs({{"y", output.getValues()}}).physicalOutputs();
+
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    ASSERT_GE(stages.size(), 1U);
+    EXPECT_TRUE(std::any_of(stages.begin(), stages.end(), [](const PhysicalExecutionStage& stage) {
+        return stage.kind == PhysicalExecutionStage::Kind::RaggedConv1dCausal;
+    }));
+}
+
+TEST(RaggedExpression, CausalConv1dCompilerCarriesT7R2PaddedInputAndOutputLayouts) {
+    const RaggedExpression input =
+        RaggedExpression::input("tokens", makeDescriptor(DataType::FP16, {3}, 4, 13, DataType::UINT64));
+    const Expression filter = Expression::input("filter", std::nullopt, DataType::FP16);
+    const RaggedExpression output =
+        input.causalConv1d(filter, 5, 3, 2, DataType::FP32, DataType::FP16);
+    const PhysicalOutputs physical = Expression::outputs({{"y", output.getValues()}}).physicalOutputs();
+
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    const auto stage_it = std::find_if(stages.begin(), stages.end(), [](const PhysicalExecutionStage& stage) {
+        return stage.kind == PhysicalExecutionStage::Kind::RaggedConv1dCausal;
+    });
+    ASSERT_NE(stage_it, stages.end());
+
+    const std::shared_ptr<CompiledRaggedConv1dCausal> compiled =
+        EquationCompiler::compileRaggedConv1dCausal(stage_it->expr);
+    ASSERT_NE(compiled, nullptr);
+    EXPECT_EQ(compiled->padded_input_layout.values_dtype, DataType::FP16);
+    EXPECT_EQ(compiled->padded_input_layout.offset_dtype, DataType::UINT64);
+    EXPECT_EQ(compiled->padded_input_layout.batch_size, 4u);
+    EXPECT_EQ(compiled->padded_input_layout.max_total_values, 13u);
+    EXPECT_EQ(compiled->padded_input_layout.max_values_per_row, 13u);
+    EXPECT_EQ(compiled->max_values_per_row, 13u);
+    EXPECT_EQ(compiled->padded_input_layout.channels, 3u);
+    EXPECT_EQ(compiled->padded_output_layout.values_dtype, DataType::FP16);
+    EXPECT_EQ(compiled->padded_output_layout.offset_dtype, DataType::UINT64);
+    EXPECT_EQ(compiled->padded_output_layout.batch_size, 4u);
+    EXPECT_EQ(compiled->padded_output_layout.max_total_values, 13u);
+    EXPECT_EQ(compiled->padded_output_layout.max_values_per_row, 13u);
+    EXPECT_EQ(compiled->padded_output_layout.channels, 5u);
+}
+
+TEST(RaggedExpression, CausalConv1dCompilerSignatureIncludesAllOperandsAndGeometry) {
+    const RaggedTensorDescriptor descriptor = makeDescriptor(DataType::FP32, {4}, 2, 8, DataType::UINT32);
+    const Expression values = Expression::input("values", std::nullopt, DataType::FP32);
+    const Expression offsets_a = Expression::input("offsets_a", std::nullopt, DataType::UINT32);
+    const Expression offsets_b = Expression::input("offsets_b", std::nullopt, DataType::UINT32);
+    const Expression filter_a = Expression::input("filter_a", std::nullopt, DataType::FP32);
+    const Expression filter_b = Expression::input("filter_b", std::nullopt, DataType::FP32);
+    const RaggedExpression input_a(values, offsets_a, descriptor);
+    const RaggedExpression input_b(values, offsets_b, descriptor);
+
+    const RaggedExpression base = input_a.causalConv1d(filter_a, 4, 3, 1, DataType::FP32, DataType::FP32);
+    const RaggedExpression different_dilation = input_a.causalConv1d(filter_a, 4, 3, 2, DataType::FP32, DataType::FP32);
+    const RaggedExpression different_filter = input_a.causalConv1d(filter_b, 4, 3, 1, DataType::FP32, DataType::FP32);
+    const RaggedExpression different_offsets = input_b.causalConv1d(filter_a, 4, 3, 1, DataType::FP32, DataType::FP32);
+    const RaggedExpression different_groups = input_a.causalConv1d(filter_a, 4, 3, 1, DataType::FP32, DataType::FP32, 2);
+    const PhysicalOutputs physical = Expression::outputs({{"base", base.getValues()},
+                                                          {"dilation", different_dilation.getValues()},
+                                                          {"filter", different_filter.getValues()},
+                                                          {"offsets", different_offsets.getValues()},
+                                                          {"groups", different_groups.getValues()}})
+                                         .physicalOutputs();
+
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    const size_t ragged_conv_stages = std::count_if(stages.begin(), stages.end(), [](const PhysicalExecutionStage& stage) {
+        return stage.kind == PhysicalExecutionStage::Kind::RaggedConv1dCausal;
+    });
+    EXPECT_EQ(ragged_conv_stages, 5U);
+}
+
+TEST(RaggedExpression, CausalConv1dCompilerPreservesRequestedComputeDtypeForCudnnBackend) {
+    const RaggedExpression input = RaggedExpression::input("tokens", makeDescriptor(DataType::FP16, {3}, 2, 8));
+    const Expression filter = Expression::input("filter", std::nullopt, DataType::FP16);
+    const RaggedExpression output = input.causalConv1d(filter, 4, 3, 1, DataType::FP16, DataType::FP16);
+    const PhysicalOutputs physical = Expression::outputs({{"y", output.getValues()}}).physicalOutputs();
+
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    const auto stage_it = std::find_if(stages.begin(), stages.end(), [](const PhysicalExecutionStage& stage) {
+        return stage.kind == PhysicalExecutionStage::Kind::RaggedConv1dCausal;
+    });
+    ASSERT_NE(stage_it, stages.end());
+
+    const std::shared_ptr<CompiledRaggedConv1dCausal> compiled =
+        EquationCompiler::compileRaggedConv1dCausal(stage_it->expr);
+    ASSERT_NE(compiled, nullptr);
+    EXPECT_EQ(compiled->input_dtype, DataType::FP16);
+    EXPECT_EQ(compiled->filter_dtype, DataType::FP16);
+    EXPECT_EQ(compiled->output_dtype, DataType::FP16);
+    EXPECT_EQ(compiled->compute_dtype, DataType::FP16);
+}
+
+TEST(RaggedExpression, CausalConv1dT7R6RejectsUnsupportedCudnnValueDtypeWithoutFallback) {
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 8;
+    constexpr uint64_t input_channels = 2;
+    constexpr uint64_t output_channels = 2;
+    constexpr uint64_t kernel_width = 3;
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP64, {input_channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP64);
+    const RaggedExpression result =
+        input.causalConv1d(filter_expr, output_channels, kernel_width, 1, DataType::FP64, DataType::FP64);
+    const PhysicalOutputs physical = Expression::outputs({{"y", result.getValues()}}).physicalOutputs();
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    const auto stage_it = std::find_if(stages.begin(), stages.end(), [](const PhysicalExecutionStage& stage) {
+        return stage.kind == PhysicalExecutionStage::Kind::RaggedConv1dCausal;
+    });
+    ASSERT_NE(stage_it, stages.end());
+
+    try {
+        (void)EquationCompiler::compileRaggedConv1dCausal(stage_it->expr);
+        FAIL() << "Expected ragged Conv1D to reject a value dtype unsupported by its cuDNN backend.";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("no alternate convolution backend"), std::string::npos);
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dForwardRespectsRowsAndPoisonedCapacity) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 4;
+    constexpr uint64_t max_total_values = 11;
+    constexpr uint64_t input_channels = 2;
+    constexpr uint64_t output_channels = 2;
+    constexpr uint64_t kernel_width = 3;
+    constexpr uint64_t dilation = 1;
+    constexpr float inactive_sentinel = 777.0F;
+
+    const std::vector<uint32_t> offsets32{0, 3, 3, 7, 9};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    // The last value of rows 0 and 2 is deliberately enormous. A kernel that
+    // treats packed adjacency as temporal adjacency will contaminate the first
+    // output of the next non-empty row. The final two capacity values are also
+    // poisoned and must never be consumed or written.
+    const std::vector<float> values{
+        1.0F, 2.0F,
+        3.0F, 4.0F,
+        -5000.0F, 6000.0F,
+        1.5F, -2.0F,
+        2.0F, -3.0F,
+        4.0F, 5.0F,
+        7000.0F, -8000.0F,
+        -1.0F, 0.5F,
+        8.0F, 9.0F,
+        12345.0F, -12345.0F,
+        22222.0F, -22222.0F,
+    };
+    const std::vector<float> filter{
+        0.25F, -0.5F, 1.0F,
+        2.0F, 0.5F, -1.0F,
+        -0.75F, 0.25F, 0.5F,
+        1.25F, -0.5F, 0.75F,
+    };
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, input_channels}, values, stream);
+    Tensor gpu_filter = makeGpuTensor<float>({output_channels, input_channels, kernel_width}, filter, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(gpu_offsets,
+                                  RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostActiveValueCount(offsets.back());
+    partition.setHostMaxActiveRowLength(4);
+    Tensor output_storage = makeGpuTensor<float>(
+        {max_total_values, output_channels},
+        std::vector<float>(max_total_values * output_channels, inactive_sentinel),
+        stream);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {input_channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression result =
+        input.causalConv1d(filter_expr, output_channels, kernel_width, dilation, DataType::FP32, DataType::FP32);
+
+    const Tensor actual_tensor = runExpressionOutput(result.getValues(),
+                                                     {{"tokens.values", gpu_values},
+                                                      {"tokens.offsets", gpu_offsets},
+                                                      {"filter", gpu_filter}},
+                                                     "y",
+                                                     stream,
+                                                     output_storage);
+    const std::vector<float> actual = copyToCpuValues(actual_tensor, stream);
+    const std::vector<float> expected = cpuRaggedCausalConv1d(values,
+                                                              offsets,
+                                                              filter,
+                                                              max_total_values,
+                                                              input_channels,
+                                                              output_channels,
+                                                              kernel_width,
+                                                              dilation,
+                                                              inactive_sentinel);
+    expectNear(actual, expected, 1.0e-5F);
+}
+
+TEST(RaggedExpression, CausalConv1dForwardSupportsDilationAndUint64Offsets) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 12;
+    constexpr uint64_t input_channels = 1;
+    constexpr uint64_t output_channels = 1;
+    constexpr uint64_t kernel_width = 3;
+    constexpr uint64_t dilation = 2;
+    constexpr float inactive_sentinel = -333.0F;
+
+    const std::vector<uint64_t> offsets{0, 5, 7, 10};
+    const std::vector<float> values{
+        1.0F, 2.0F, 3.0F, 4.0F, 5000.0F,
+        1.5F, -6000.0F,
+        2.0F, 3.0F, 4.0F,
+        12345.0F, -12345.0F,
+    };
+    const std::vector<float> filter{2.0F, -1.0F, 0.5F};
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, input_channels}, values, stream);
+    Tensor gpu_filter = makeGpuTensor<float>({output_channels, input_channels, kernel_width}, filter, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint64_t>({batch_size + 1}, offsets, stream);
+    RowPartitionRuntime partition(gpu_offsets,
+                                  RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT64, max_total_values));
+    partition.setHostActiveValueCount(offsets.back());
+    partition.setHostMaxActiveRowLength(5);
+    Tensor output_storage = makeGpuTensor<float>(
+        {max_total_values, output_channels},
+        std::vector<float>(max_total_values * output_channels, inactive_sentinel),
+        stream);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {input_channels}, batch_size, max_total_values, DataType::UINT64));
+    const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression result =
+        input.causalConv1d(filter_expr, output_channels, kernel_width, dilation, DataType::FP32, DataType::FP32);
+
+    const Tensor actual_tensor = runExpressionOutput(result.getValues(),
+                                                     {{"tokens.values", gpu_values},
+                                                      {"tokens.offsets", gpu_offsets},
+                                                      {"filter", gpu_filter}},
+                                                     "y",
+                                                     stream,
+                                                     output_storage);
+    const std::vector<float> actual = copyToCpuValues(actual_tensor, stream);
+    const std::vector<float> expected = cpuRaggedCausalConv1d(values,
+                                                              offsets,
+                                                              filter,
+                                                              max_total_values,
+                                                              input_channels,
+                                                              output_channels,
+                                                              kernel_width,
+                                                              dilation,
+                                                              inactive_sentinel);
+    expectNear(actual, expected, 1.0e-5F);
+}
+
+TEST(RaggedExpression, CausalConv1dForwardSupportsFp16Bf16AndFp32) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 6;
+    constexpr uint64_t input_channels = 2;
+    constexpr uint64_t output_channels = 2;
+    constexpr uint64_t kernel_width = 2;
+    constexpr uint64_t dilation = 1;
+
+    const std::vector<uint32_t> offsets32{0, 3, 5};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    const std::vector<float> values{
+        1.0F, -2.0F,
+        3.0F, 0.5F,
+        4.0F, -5.0F,
+        2.0F, 1.0F,
+        -1.5F, 3.0F,
+        12.0F, -12.0F,
+    };
+    const std::vector<float> filter{
+        0.5F, 1.0F,
+        -0.25F, 0.75F,
+        1.25F, -0.5F,
+        0.5F, 0.25F,
+    };
+    const std::vector<float> expected = cpuRaggedCausalConv1d(values,
+                                                              offsets,
+                                                              filter,
+                                                              max_total_values,
+                                                              input_channels,
+                                                              output_channels,
+                                                              kernel_width,
+                                                              dilation,
+                                                              0.0F);
+
+    Stream stream(0);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(gpu_offsets,
+                                  RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostActiveValueCount(offsets.back());
+    partition.setHostMaxActiveRowLength(3);
+    for (DataType dtype : {DataType::FP16, DataType::BF16, DataType::FP32}) {
+        SCOPED_TRACE(TensorDescriptor::getElementTypeName(dtype));
+        Tensor gpu_values = makeGpuTensorFromFloats({max_total_values, input_channels}, values, dtype, stream);
+        Tensor gpu_filter = makeGpuTensorFromFloats({output_channels, input_channels, kernel_width}, filter, dtype, stream);
+
+        const RaggedExpression input =
+            RaggedExpression::input("tokens", makeDescriptor(dtype, {input_channels}, batch_size, max_total_values, DataType::UINT32));
+        const Expression filter_expr = Expression::input("filter", std::nullopt, dtype);
+        const RaggedExpression result =
+            input.causalConv1d(filter_expr, output_channels, kernel_width, dilation, DataType::FP32, dtype);
+
+        const Tensor actual_tensor = runExpressionOutput(result.getValues(),
+                                                         {{"tokens.values", gpu_values},
+                                                          {"tokens.offsets", gpu_offsets},
+                                                          {"filter", gpu_filter}},
+                                                         "y",
+                                                         stream);
+        const std::vector<float> actual = copyToCpuFloatValues(actual_tensor, stream);
+        const size_t active_elements = static_cast<size_t>(offsets.back() * output_channels);
+        ASSERT_GE(actual.size(), active_elements);
+        for (size_t i = 0; i < active_elements; ++i) {
+            EXPECT_NEAR(actual[i], expected[i], dtype == DataType::FP32 ? 1.0e-5F : 3.0e-2F) << "index " << i;
+        }
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dRuntimeFailsLoudlyWhenProducerOmitsMaxActiveRowLength) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 6;
+    constexpr uint64_t input_channels = 1;
+    constexpr uint64_t output_channels = 1;
+    const std::vector<float> values{1.0F, 2.0F, 3.0F, 4.0F, 99.0F, 99.0F};
+    const std::vector<uint32_t> offsets{0, 2, 4};
+    const std::vector<float> filter{0.5F, 1.0F};
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, input_channels}, values, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets, stream);
+    Tensor gpu_filter = makeGpuTensor<float>({output_channels, input_channels, 2}, filter, stream);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {input_channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression result =
+        input.causalConv1d(filter_expr, output_channels, 2, 1, DataType::FP32, DataType::FP32);
+    FusedEquation equation =
+        FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"tokens.values", gpu_values},
+                                                {"tokens.offsets", gpu_offsets},
+                                                {"filter", gpu_filter}},
+                                               stream);
+
+    try {
+        plan.run();
+        FAIL() << "Expected ragged Conv1D to reject missing max_active_row_length metadata.";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("max_active_row_length"), std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("implicit device-to-host"), std::string::npos);
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT7R2PaddedCudnnMatchesIndependentDenseRows) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 5;
+    constexpr uint64_t max_total_values = 24;
+    constexpr uint64_t input_channels = 2;
+    constexpr uint64_t output_channels = 3;
+    constexpr uint64_t kernel_width = 3;
+    constexpr uint64_t dilation = 2;
+    constexpr float inactive_sentinel = -9191.0F;
+
+    const std::vector<uint32_t> offsets32{0, 3, 3, 8, 10, 19};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    std::vector<float> values(max_total_values * input_channels, 77777.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < input_channels; ++channel) {
+            values[value * input_channels + channel] =
+                static_cast<float>((value + 1) * (channel == 0 ? 0.25 : -0.375));
+        }
+    }
+    // Make row ends extremely distinctive. Packed-adjacency leakage would be obvious.
+    values[(offsets[1] - 1) * input_channels + 0] = 5000.0F;
+    values[(offsets[3] - 1) * input_channels + 1] = -7000.0F;
+    values[(offsets[4] - 1) * input_channels + 0] = 9000.0F;
+
+    const std::vector<float> filter{
+        0.25F, -0.5F, 1.0F,
+        -0.75F, 0.5F, 0.125F,
+        1.25F, -0.25F, 0.75F,
+        0.5F, 0.25F, -1.0F,
+        -0.375F, 0.625F, 0.5F,
+        0.875F, -0.125F, 0.25F,
+    };
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, input_channels}, values, stream);
+    Tensor gpu_filter = makeGpuTensor<float>({output_channels, input_channels, kernel_width}, filter, stream);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {input_channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression result =
+        input.causalConv1d(filter_expr, output_channels, kernel_width, dilation, DataType::FP32, DataType::FP32);
+
+    // T7R2 requires only scalar dispatch metadata; no full host offsets mirror is needed.
+    Tensor scalar_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime scalar_partition(
+        scalar_offsets, RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    scalar_partition.setHostActiveValueCount(offsets.back());
+    scalar_partition.setHostMaxActiveRowLength(9);
+    Tensor scalar_output = makeGpuTensor<float>(
+        {max_total_values, output_channels},
+        std::vector<float>(max_total_values * output_channels, inactive_sentinel),
+        stream);
+    FusedEquation scalar_equation =
+        FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    StampedExecutionPlan scalar_plan = scalar_equation.stamp({{"tokens.values", gpu_values},
+                                                              {"tokens.offsets", scalar_offsets},
+                                                              {"filter", gpu_filter}},
+                                                             stream,
+                                                             {},
+                                                             {{"y", scalar_output}});
+    scalar_plan.run();
+    stream.synchronize();
+    const std::vector<float> scalar_metadata_result = copyToCpuValues(scalar_plan.output("y"), stream);
+    const std::vector<RaggedConv1dStageDiagnostic> scalar_diagnostics =
+        scalar_plan.raggedConv1dStageDiagnostics();
+    ASSERT_EQ(scalar_diagnostics.size(), 1u);
+
+    // Publishing complete host offsets derives the same scalar metadata and must select the same padded representation.
+    Tensor padded_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime(padded_offsets,
+                        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values))
+        .setHostOffsets(offsets);
+    Tensor padded_output = makeGpuTensor<float>(
+        {max_total_values, output_channels},
+        std::vector<float>(max_total_values * output_channels, inactive_sentinel),
+        stream);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"tokens.values", gpu_values},
+                                                {"tokens.offsets", padded_offsets},
+                                                {"filter", gpu_filter}},
+                                               stream,
+                                               {},
+                                               {{"y", padded_output}});
+    plan.run();
+    stream.synchronize();
+
+    const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+    const std::vector<float> cpu_expected = cpuRaggedCausalConv1d(values,
+                                                                  offsets,
+                                                                  filter,
+                                                                  max_total_values,
+                                                                  input_channels,
+                                                                  output_channels,
+                                                                  kernel_width,
+                                                                  dilation,
+                                                                  inactive_sentinel);
+    const std::vector<float> dense_rows = denseRowByRowCausalConv1d(values,
+                                                                    offsets,
+                                                                    gpu_filter,
+                                                                    max_total_values,
+                                                                    input_channels,
+                                                                    output_channels,
+                                                                    kernel_width,
+                                                                    dilation,
+                                                                    inactive_sentinel,
+                                                                    stream);
+    expectNear(actual, scalar_metadata_result, 1.0e-5F);
+    expectNear(actual, cpu_expected, 1.0e-5F);
+    expectNear(actual, dense_rows, 1.0e-5F);
+
+    const std::vector<RaggedConv1dStageDiagnostic> diagnostics = plan.raggedConv1dStageDiagnostics();
+    ASSERT_EQ(diagnostics.size(), 1u);
+    const RaggedConv1dStageDiagnostic& diagnostic = diagnostics.front();
+    EXPECT_EQ(diagnostic.active_values, offsets.back());
+    EXPECT_EQ(diagnostic.selected_width_capacity, 16u);
+    EXPECT_EQ(diagnostic.explicit_unfold_workspace_bytes, 0u);
+    const uint64_t element_bytes = sizeof(float);
+    EXPECT_EQ(diagnostic.input_padded_value_bytes,
+              batch_size * input_channels * diagnostic.selected_width_capacity * element_bytes);
+    EXPECT_EQ(diagnostic.output_padded_value_bytes,
+              batch_size * output_channels * diagnostic.selected_width_capacity * element_bytes);
+    EXPECT_EQ(diagnostic.allocated_padded_value_bytes,
+              batch_size * max_total_values * (input_channels + output_channels) * element_bytes);
+
+    const uint64_t active_elements = offsets.back() * output_channels;
+    for (uint64_t i = active_elements; i < actual.size(); ++i) {
+        EXPECT_EQ(actual[i], inactive_sentinel) << "packed spare output element " << i;
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT7R2PaddedCudnnSupportsFp16Bf16AndFp32) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 9;
+    constexpr uint64_t input_channels = 2;
+    constexpr uint64_t output_channels = 2;
+    constexpr uint64_t kernel_width = 2;
+    constexpr uint64_t dilation = 1;
+    const std::vector<uint32_t> offsets32{0, 3, 5, 8};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    const std::vector<float> values{
+        1.0F, -2.0F, 3.0F, 0.5F, 4.0F, -5.0F,
+        2.0F, 1.0F, -1.5F, 3.0F,
+        0.25F, -0.75F, 1.25F, 2.0F, -3.0F, 0.125F,
+        12345.0F, -12345.0F,
+    };
+    const std::vector<float> filter{
+        0.5F, 1.0F,
+        -0.25F, 0.75F,
+        1.25F, -0.5F,
+        0.5F, 0.25F,
+    };
+    const std::vector<float> expected = cpuRaggedCausalConv1d(values,
+                                                              offsets,
+                                                              filter,
+                                                              max_total_values,
+                                                              input_channels,
+                                                              output_channels,
+                                                              kernel_width,
+                                                              dilation,
+                                                              0.0F);
+
+    Stream stream(0);
+    for (DataType dtype : {DataType::FP16, DataType::BF16, DataType::FP32}) {
+        SCOPED_TRACE(TensorDescriptor::getElementTypeName(dtype));
+        Tensor gpu_values = makeGpuTensorFromFloats({max_total_values, input_channels}, values, dtype, stream);
+        Tensor gpu_filter = makeGpuTensorFromFloats({output_channels, input_channels, kernel_width}, filter, dtype, stream);
+        Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+        RowPartitionRuntime(gpu_offsets,
+                            RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32))
+            .setHostOffsets(offsets);
+
+        const RaggedExpression input = RaggedExpression::input(
+            "tokens", makeDescriptor(dtype, {input_channels}, batch_size, max_total_values, DataType::UINT32));
+        const Expression filter_expr = Expression::input("filter", std::nullopt, dtype);
+        const RaggedExpression result =
+            input.causalConv1d(filter_expr, output_channels, kernel_width, dilation, DataType::FP32, dtype);
+
+        FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+        StampedExecutionPlan plan = equation.stamp({{"tokens.values", gpu_values},
+                                                    {"tokens.offsets", gpu_offsets},
+                                                    {"filter", gpu_filter}},
+                                                   stream);
+        plan.run();
+        stream.synchronize();
+        const std::vector<float> actual = copyToCpuFloatValues(plan.output("y"), stream);
+        const size_t active_elements = static_cast<size_t>(offsets.back() * output_channels);
+        for (size_t i = 0; i < active_elements; ++i) {
+            EXPECT_NEAR(actual[i], expected[i], dtype == DataType::FP32 ? 1.0e-5F : 3.0e-2F) << "index " << i;
+        }
+        const std::vector<RaggedConv1dStageDiagnostic> diagnostics = plan.raggedConv1dStageDiagnostics();
+        ASSERT_EQ(diagnostics.size(), 1u);
+        EXPECT_EQ(diagnostics.front().explicit_unfold_workspace_bytes, 0u);
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT7CGroupedAndDepthwiseMatchCpuAndDenseRows) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 4;
+    constexpr uint64_t max_total_values = 18;
+    constexpr uint64_t input_channels = 4;
+    constexpr uint64_t kernel_width = 3;
+    constexpr uint64_t dilation = 2;
+    constexpr float inactive_sentinel = -54321.0F;
+    const std::vector<uint32_t> offsets32{0, 5, 5, 11, 15};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+
+    std::vector<float> values(max_total_values * input_channels, 7777.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < input_channels; ++channel) {
+            values[value * input_channels + channel] =
+                static_cast<float>(static_cast<int>((value * 7 + channel * 3) % 19) - 9) * 0.125F;
+        }
+    }
+    // Distinctive row-end values make any cross-row read obvious.
+    values[(offsets[1] - 1) * input_channels + 0] = 6000.0F;
+    values[(offsets[3] - 1) * input_channels + 2] = -8000.0F;
+    values[(offsets[4] - 1) * input_channels + 3] = 10000.0F;
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, input_channels}, values, stream);
+
+    auto run_case = [&](uint64_t output_channels, uint64_t groups, const char* label) {
+        SCOPED_TRACE(label);
+        const uint64_t input_channels_per_group = input_channels / groups;
+        std::vector<float> filter(output_channels * input_channels_per_group * kernel_width);
+        for (size_t i = 0; i < filter.size(); ++i) {
+            filter[i] = static_cast<float>(static_cast<int>((i * 5) % 17) - 8) * 0.075F;
+        }
+        Tensor gpu_filter =
+            makeGpuTensor<float>({output_channels, input_channels_per_group, kernel_width}, filter, stream);
+        Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+        RowPartitionRuntime(gpu_offsets,
+                            RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values))
+            .setHostOffsets(offsets);
+
+        const RaggedExpression input = RaggedExpression::input(
+            "tokens", makeDescriptor(DataType::FP32, {input_channels}, batch_size, max_total_values, DataType::UINT32));
+        const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+        const RaggedExpression result = input.causalConv1d(filter_expr,
+                                                           output_channels,
+                                                           kernel_width,
+                                                           dilation,
+                                                           DataType::FP32,
+                                                           DataType::FP32,
+                                                           groups);
+        Tensor packed_output = makeGpuTensor<float>(
+            {max_total_values, output_channels},
+            std::vector<float>(max_total_values * output_channels, inactive_sentinel),
+            stream);
+        FusedEquation equation =
+            FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+        StampedExecutionPlan plan = equation.stamp({{"tokens.values", gpu_values},
+                                                    {"tokens.offsets", gpu_offsets},
+                                                    {"filter", gpu_filter}},
+                                                   stream,
+                                                   {},
+                                                   {{"y", packed_output}});
+        const uint64_t expected_flops =
+            2 * max_total_values * output_channels * input_channels_per_group * kernel_width;
+        EXPECT_EQ(plan.flopCount(), expected_flops);
+        plan.run();
+        stream.synchronize();
+        const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+        const std::vector<float> cpu_expected = cpuRaggedCausalConv1d(values,
+                                                                      offsets,
+                                                                      filter,
+                                                                      max_total_values,
+                                                                      input_channels,
+                                                                      output_channels,
+                                                                      kernel_width,
+                                                                      dilation,
+                                                                      inactive_sentinel,
+                                                                      groups);
+        const std::vector<float> dense_expected = denseRowByRowCausalConv1d(values,
+                                                                            offsets,
+                                                                            gpu_filter,
+                                                                            max_total_values,
+                                                                            input_channels,
+                                                                            output_channels,
+                                                                            kernel_width,
+                                                                            dilation,
+                                                                            inactive_sentinel,
+                                                                            stream,
+                                                                            groups);
+        // The distinctive row-end sentinels deliberately drive some valid outputs
+        // into the thousands. Grouped cuDNN execution may accumulate those FP32
+        // products in a different order than the scalar CPU reference or the
+        // row-by-row dense reference, so an absolute-only 1e-5 tolerance rejects
+        // one-ULP differences at that scale. Retain the tight near-zero absolute
+        // bound and allow only a few FP32 ulps of relative error for large values.
+        constexpr float rtol = 4.0F * std::numeric_limits<float>::epsilon();
+        expectNearRelative(actual, cpu_expected, 1.0e-5F, rtol);
+        expectNearRelative(actual, dense_expected, 1.0e-5F, rtol);
+
+        const uint64_t active_elements = offsets.back() * output_channels;
+        for (uint64_t i = active_elements; i < actual.size(); ++i) {
+            EXPECT_EQ(actual[i], inactive_sentinel) << "packed spare output element " << i;
+        }
+        const std::vector<RaggedConv1dStageDiagnostic> diagnostics = plan.raggedConv1dStageDiagnostics();
+        ASSERT_EQ(diagnostics.size(), 1u);
+        EXPECT_EQ(diagnostics.front().explicit_unfold_workspace_bytes, 0u);
+    };
+
+    run_case(6, 2, "groups=2");
+    run_case(4, 4, "depthwise");
+}
+
+TEST(RaggedExpression, CausalConv1dT8ARetainsOnePaddedRepresentationAcrossCompatibleRegion) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 12;
+    constexpr uint64_t input_channels = 2;
+    constexpr uint64_t hidden_channels = 3;
+    constexpr uint64_t output_channels = 2;
+    constexpr uint64_t kernel_width = 3;
+    const std::vector<uint32_t> offsets32{0, 4, 4, 9};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+
+    std::vector<float> values(max_total_values * input_channels, 7777.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < input_channels; ++channel) {
+            values[value * input_channels + channel] =
+                static_cast<float>(1 + value * input_channels + channel) * 0.125F;
+        }
+    }
+    std::vector<float> filter1(hidden_channels * input_channels * kernel_width);
+    for (size_t i = 0; i < filter1.size(); ++i) {
+        filter1[i] = static_cast<float>(static_cast<int>(i % 7) - 3) * 0.125F;
+    }
+    std::vector<float> filter2(output_channels * hidden_channels * kernel_width);
+    for (size_t i = 0; i < filter2.size(); ++i) {
+        filter2[i] = static_cast<float>(static_cast<int>((i * 3) % 11) - 5) * 0.0625F;
+    }
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, input_channels}, values, stream);
+    Tensor gpu_filter1 = makeGpuTensor<float>({hidden_channels, input_channels, kernel_width}, filter1, stream);
+    Tensor gpu_filter2 = makeGpuTensor<float>({output_channels, hidden_channels, kernel_width}, filter2, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(
+        gpu_offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostOffsets(offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {input_channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter1_expr = Expression::input("filter1", std::nullopt, DataType::FP32);
+    const Expression filter2_expr = Expression::input("filter2", std::nullopt, DataType::FP32);
+    const RaggedExpression hidden =
+        input.causalConv1d(filter1_expr, hidden_channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+    const RaggedExpression result =
+        hidden.causalConv1d(filter2_expr, output_channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    const std::unordered_map<std::string, Tensor> named_inputs{{"tokens.values", gpu_values},
+                                                               {"tokens.offsets", gpu_offsets},
+                                                               {"filter1", gpu_filter1},
+                                                               {"filter2", gpu_filter2}};
+    const std::shared_ptr<CompiledOutputs> compiled = equation.compileForInputs(named_inputs);
+    ASSERT_NE(compiled, nullptr);
+    ASSERT_GE(compiled->padded_ragged_values.size(), 2u);
+    ASSERT_EQ(compiled->final_outputs.size(), 1u);
+    std::vector<const CompiledExecutionStage*> ragged_stages;
+    for (const CompiledExecutionStage& stage : compiled->stages) {
+        if (stage.kind == CompiledExecutionStage::Kind::RaggedConv1dCausal) {
+            ragged_stages.push_back(&stage);
+        }
+    }
+    ASSERT_EQ(ragged_stages.size(), 2u);
+    ASSERT_EQ(ragged_stages[0]->outputs.size(), 1u);
+    ASSERT_EQ(ragged_stages[1]->outputs.size(), 1u);
+    EXPECT_TRUE(compiled->padded_ragged_values.contains(
+        paddedRaggedRepresentationKey(compiled->final_outputs[0].value_id, ragged_stages[1]->input_value_ids[2])));
+    EXPECT_EQ(ragged_stages[1]->input_value_ids[0], ragged_stages[0]->outputs[0].value_id);
+    const auto entry_representation_it = compiled->padded_ragged_values.find(
+        paddedRaggedRepresentationKey(ragged_stages[0]->input_value_ids[0], ragged_stages[0]->input_value_ids[2]));
+    ASSERT_NE(entry_representation_it, compiled->padded_ragged_values.end());
+    EXPECT_EQ(entry_representation_it->second.offsets_value_id, ragged_stages[0]->input_value_ids[2]);
+    EXPECT_EQ(entry_representation_it->second.layout, ragged_stages[0]->ragged_conv1d_causal->padded_input_layout);
+    for (const CompiledExecutionStage* stage : ragged_stages) {
+        const auto representation_it = compiled->padded_ragged_values.find(
+            paddedRaggedRepresentationKey(stage->outputs[0].value_id, stage->input_value_ids[2]));
+        ASSERT_NE(representation_it, compiled->padded_ragged_values.end());
+        EXPECT_EQ(representation_it->second.offsets_value_id, stage->input_value_ids[2]);
+        EXPECT_FALSE(representation_it->second.width_capacities.empty());
+        EXPECT_GE(representation_it->second.width_capacities.back(), max_total_values);
+    }
+
+    constexpr float inactive_sentinel = 6543.25F;
+    Tensor packed_output = makeGpuTensor<float>(
+        {max_total_values, output_channels},
+        std::vector<float>(max_total_values * output_channels, inactive_sentinel),
+        stream);
+    StampedExecutionPlan plan = equation.stamp(named_inputs, stream, {}, {{"y", packed_output}});
+    EXPECT_EQ(plan.stageKindNames(),
+              (std::vector<std::string>{"PaddedRaggedPack",
+                                        "RaggedConv1dCausal",
+                                        "RaggedConv1dCausal",
+                                        "PaddedRaggedUnpack"}));
+
+    plan.run();
+    stream.synchronize();
+    const std::vector<RaggedConv1dStageDiagnostic> diagnostics = plan.raggedConv1dStageDiagnostics();
+    ASSERT_EQ(diagnostics.size(), 2u);
+    EXPECT_EQ(diagnostics[0].selected_width_capacity, diagnostics[1].selected_width_capacity);
+    EXPECT_EQ(diagnostics[0].active_values, diagnostics[1].active_values);
+    const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+    const std::vector<float> expected_hidden = cpuRaggedCausalConv1d(values,
+                                                                     offsets,
+                                                                     filter1,
+                                                                     max_total_values,
+                                                                     input_channels,
+                                                                     hidden_channels,
+                                                                     kernel_width,
+                                                                     1,
+                                                                     0.0F);
+    const std::vector<float> expected = cpuRaggedCausalConv1d(expected_hidden,
+                                                              offsets,
+                                                              filter2,
+                                                              max_total_values,
+                                                              hidden_channels,
+                                                              output_channels,
+                                                              kernel_width,
+                                                              1,
+                                                              0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < output_channels; ++channel) {
+            const uint64_t index = value * output_channels + channel;
+            EXPECT_NEAR(actual[index], expected[index], 1.0e-5F) << "active output index " << index;
+        }
+    }
+    for (uint64_t index = offsets.back() * output_channels; index < actual.size(); ++index) {
+        EXPECT_EQ(actual[index], inactive_sentinel) << "packed spare output element " << index;
+    }
+
+    // The retained region must carry one newly selected width through every
+    // compatible value when the row partition changes between executions.
+    const std::vector<uint32_t> wider_offsets32{0, 9, 9, 9};
+    const std::vector<uint64_t> wider_offsets(wider_offsets32.begin(), wider_offsets32.end());
+    overwriteGpuTensor<uint32_t>(gpu_offsets, wider_offsets32, stream);
+    partition.setHostOffsets(wider_offsets);
+    plan.run();
+    stream.synchronize();
+    const std::vector<RaggedConv1dStageDiagnostic> wider_diagnostics = plan.raggedConv1dStageDiagnostics();
+    ASSERT_EQ(wider_diagnostics.size(), 2u);
+    EXPECT_EQ(wider_diagnostics[0].selected_width_capacity, 12u);
+    EXPECT_EQ(wider_diagnostics[1].selected_width_capacity, 12u);
+    const std::vector<float> wider_actual = copyToCpuValues(plan.output("y"), stream);
+    const std::vector<float> wider_hidden = cpuRaggedCausalConv1d(values,
+                                                                  wider_offsets,
+                                                                  filter1,
+                                                                  max_total_values,
+                                                                  input_channels,
+                                                                  hidden_channels,
+                                                                  kernel_width,
+                                                                  1,
+                                                                  0.0F);
+    const std::vector<float> wider_expected = cpuRaggedCausalConv1d(wider_hidden,
+                                                                    wider_offsets,
+                                                                    filter2,
+                                                                    max_total_values,
+                                                                    hidden_channels,
+                                                                    output_channels,
+                                                                    kernel_width,
+                                                                    1,
+                                                                    0.0F);
+    for (uint64_t value = 0; value < wider_offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < output_channels; ++channel) {
+            const uint64_t index = value * output_channels + channel;
+            EXPECT_NEAR(wider_actual[index], wider_expected[index], 1.0e-5F) << "wider active output index " << index;
+        }
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT8ASharesOneEntryPackAcrossCompatibleFanout) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 8;
+    constexpr uint64_t channels = 1;
+    constexpr uint64_t kernel_width = 3;
+    const std::vector<uint32_t> offsets32{0, 3, 6};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    const std::vector<float> values{1.0F, -2.0F, 3.0F, 4.0F, 0.5F, -1.0F, 7777.0F, 7777.0F};
+    const std::vector<float> filter1{0.5F, -0.25F, 1.0F};
+    const std::vector<float> filter2{-0.75F, 0.5F, 0.25F};
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, channels}, values, stream);
+    Tensor gpu_filter1 = makeGpuTensor<float>({channels, channels, kernel_width}, filter1, stream);
+    Tensor gpu_filter2 = makeGpuTensor<float>({channels, channels, kernel_width}, filter2, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime(
+        gpu_offsets, RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values))
+        .setHostOffsets(offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter1_expr = Expression::input("filter1", std::nullopt, DataType::FP32);
+    const Expression filter2_expr = Expression::input("filter2", std::nullopt, DataType::FP32);
+    const RaggedExpression y1 =
+        input.causalConv1d(filter1_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+    const RaggedExpression y2 =
+        input.causalConv1d(filter2_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+
+    FusedEquation equation = FusedEquation::compile(
+        Expression::outputs({{"y1", y1.getValues()}, {"y2", y2.getValues()}}).physicalOutputs(), 0);
+    const std::unordered_map<std::string, Tensor> named_inputs{{"tokens.values", gpu_values},
+                                                               {"tokens.offsets", gpu_offsets},
+                                                               {"filter1", gpu_filter1},
+                                                               {"filter2", gpu_filter2}};
+    constexpr float inactive_sentinel = -8765.5F;
+    Tensor output1 = makeGpuTensor<float>(
+        {max_total_values, channels}, std::vector<float>(max_total_values * channels, inactive_sentinel), stream);
+    Tensor output2 = makeGpuTensor<float>(
+        {max_total_values, channels}, std::vector<float>(max_total_values * channels, inactive_sentinel), stream);
+    StampedExecutionPlan plan = equation.stamp(named_inputs, stream, {}, {{"y1", output1}, {"y2", output2}});
+
+    const std::vector<std::string> stage_names = plan.stageKindNames();
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedPack"), 1);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "RaggedConv1dCausal"), 2);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedUnpack"), 2);
+
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> actual1 = copyToCpuValues(plan.output("y1"), stream);
+    const std::vector<float> actual2 = copyToCpuValues(plan.output("y2"), stream);
+    const std::vector<float> expected1 = cpuRaggedCausalConv1d(values,
+                                                               offsets,
+                                                               filter1,
+                                                               max_total_values,
+                                                               channels,
+                                                               channels,
+                                                               kernel_width,
+                                                               1,
+                                                               0.0F);
+    const std::vector<float> expected2 = cpuRaggedCausalConv1d(values,
+                                                               offsets,
+                                                               filter2,
+                                                               max_total_values,
+                                                               channels,
+                                                               channels,
+                                                               kernel_width,
+                                                               1,
+                                                               0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        EXPECT_NEAR(actual1[value], expected1[value], 1.0e-5F) << "y1 active output index " << value;
+        EXPECT_NEAR(actual2[value], expected2[value], 1.0e-5F) << "y2 active output index " << value;
+    }
+    for (uint64_t value = offsets.back(); value < max_total_values; ++value) {
+        EXPECT_EQ(actual1[value], inactive_sentinel) << "y1 packed spare output index " << value;
+        EXPECT_EQ(actual2[value], inactive_sentinel) << "y2 packed spare output index " << value;
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT8BRetainsPointwiseActivationAcrossCompatibleRegion) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 8;
+    constexpr uint64_t channels = 1;
+    constexpr uint64_t kernel_width = 2;
+    const std::vector<uint32_t> offsets32{0, 3, 6};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    const std::vector<float> values{-2.0F, 1.0F, 3.0F, -1.0F, 4.0F, 2.0F, 7777.0F, 7777.0F};
+    const std::vector<float> filter1{-0.5F, 1.0F};
+    const std::vector<float> filter2{0.25F, 0.75F};
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, channels}, values, stream);
+    Tensor gpu_filter1 = makeGpuTensor<float>({channels, channels, kernel_width}, filter1, stream);
+    Tensor gpu_filter2 = makeGpuTensor<float>({channels, channels, kernel_width}, filter2, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(
+        gpu_offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostOffsets(offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter1_expr = Expression::input("filter1", std::nullopt, DataType::FP32);
+    const Expression filter2_expr = Expression::input("filter2", std::nullopt, DataType::FP32);
+    const RaggedExpression hidden =
+        input.causalConv1d(filter1_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+    // T8B keeps this valuewise activation in the same padded physical region.
+    // The inactive tail is deliberately undefined; the following causal
+    // convolution must not observe it while computing active positions.
+    const RaggedExpression activated = hidden.relu();
+    const RaggedExpression result =
+        activated.causalConv1d(filter2_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+
+    FusedEquation equation = FusedEquation::compile(
+        Expression::outputs({{"root", input.getValues()}, {"y", result.getValues()}}).physicalOutputs(), 0);
+    const std::unordered_map<std::string, Tensor> named_inputs{{"tokens.values", gpu_values},
+                                                               {"tokens.offsets", gpu_offsets},
+                                                               {"filter1", gpu_filter1},
+                                                               {"filter2", gpu_filter2}};
+    constexpr float inactive_sentinel = 4321.5F;
+    Tensor packed_root_output = makeGpuTensor<float>(
+        {max_total_values, channels}, std::vector<float>(max_total_values * channels, inactive_sentinel), stream);
+    Tensor packed_output = makeGpuTensor<float>(
+        {max_total_values, channels}, std::vector<float>(max_total_values * channels, inactive_sentinel), stream);
+    StampedExecutionPlan plan =
+        equation.stamp(named_inputs, stream, {}, {{"root", packed_root_output}, {"y", packed_output}});
+
+    const std::vector<std::string> stage_names = plan.stageKindNames();
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedPack"), 1);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedPointwise"), 1);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedUnpack"), 1);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "RaggedConv1dCausal"), 2);
+
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> root_actual = copyToCpuValues(plan.output("root"), stream);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        EXPECT_EQ(root_actual[value], values[value]) << "packed root output index " << value;
+    }
+    for (uint64_t value = offsets.back(); value < max_total_values; ++value) {
+        EXPECT_EQ(root_actual[value], inactive_sentinel) << "packed root spare output index " << value;
+    }
+    const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+    std::vector<float> expected_hidden = cpuRaggedCausalConv1d(values,
+                                                               offsets,
+                                                               filter1,
+                                                               max_total_values,
+                                                               channels,
+                                                               channels,
+                                                               kernel_width,
+                                                               1,
+                                                               0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        expected_hidden[value] = std::max(expected_hidden[value], 0.0F);
+    }
+    const std::vector<float> expected = cpuRaggedCausalConv1d(expected_hidden,
+                                                              offsets,
+                                                              filter2,
+                                                              max_total_values,
+                                                              channels,
+                                                              channels,
+                                                              kernel_width,
+                                                              1,
+                                                              0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        EXPECT_NEAR(actual[value], expected[value], 1.0e-5F) << "active output index " << value;
+    }
+    for (uint64_t value = offsets.back(); value < max_total_values; ++value) {
+        EXPECT_EQ(actual[value], inactive_sentinel) << "packed spare output index " << value;
+    }
+}
+
+
+TEST(RaggedExpression, CausalConv1dT8BRetainsChannelBiasAndActivationWithUndefinedTail) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 12;
+    constexpr uint64_t channels = 2;
+    constexpr uint64_t kernel_width = 3;
+    const std::vector<uint32_t> offsets32{0, 4, 4, 9};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+
+    std::vector<float> values(max_total_values * channels, 7777.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            values[value * channels + channel] =
+                static_cast<float>(static_cast<int>(value * channels + channel) - 6) * 0.25F;
+        }
+    }
+    std::vector<float> filter1(channels * channels * kernel_width);
+    std::vector<float> filter2(channels * channels * kernel_width);
+    for (size_t i = 0; i < filter1.size(); ++i) {
+        filter1[i] = static_cast<float>(static_cast<int>((i * 3) % 9) - 4) * 0.125F;
+        filter2[i] = static_cast<float>(static_cast<int>((i * 5) % 11) - 5) * 0.0625F;
+    }
+    const std::vector<float> bias{2.0F, 1.25F};
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, channels}, values, stream);
+    Tensor gpu_filter1 = makeGpuTensor<float>({channels, channels, kernel_width}, filter1, stream);
+    Tensor gpu_filter2 = makeGpuTensor<float>({channels, channels, kernel_width}, filter2, stream);
+    Tensor gpu_bias = makeGpuTensor<float>({channels}, bias, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(
+        gpu_offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostOffsets(offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter1_expr = Expression::input("filter1", std::nullopt, DataType::FP32);
+    const Expression filter2_expr = Expression::input("filter2", std::nullopt, DataType::FP32);
+    const Expression bias_expr = Expression::input("bias", std::nullopt, DataType::FP32);
+    const RaggedExpression hidden =
+        input.causalConv1d(filter1_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+    const RaggedExpression biased_relu = hidden.mapValues(
+        [&](const Expression& x) { return (x + bias_expr).max(Expression::constantScalar(0.0)); });
+    const RaggedExpression result =
+        biased_relu.causalConv1d(filter2_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    const std::unordered_map<std::string, Tensor> named_inputs{{"tokens.values", gpu_values},
+                                                               {"tokens.offsets", gpu_offsets},
+                                                               {"filter1", gpu_filter1},
+                                                               {"filter2", gpu_filter2},
+                                                               {"bias", gpu_bias}};
+    constexpr float inactive_sentinel = -5432.25F;
+    Tensor packed_output = makeGpuTensor<float>(
+        {max_total_values, channels},
+        std::vector<float>(max_total_values * channels, inactive_sentinel),
+        stream);
+    StampedExecutionPlan plan = equation.stamp(named_inputs, stream, {}, {{"y", packed_output}});
+
+    EXPECT_EQ(plan.stageKindNames(),
+              (std::vector<std::string>{"PaddedRaggedPack",
+                                        "RaggedConv1dCausal",
+                                        "PaddedRaggedPointwise",
+                                        "RaggedConv1dCausal",
+                                        "PaddedRaggedUnpack"}));
+
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+    std::vector<float> expected_hidden = cpuRaggedCausalConv1d(values,
+                                                               offsets,
+                                                               filter1,
+                                                               max_total_values,
+                                                               channels,
+                                                               channels,
+                                                               kernel_width,
+                                                               1,
+                                                               0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            const uint64_t index = value * channels + channel;
+            expected_hidden[index] = std::max(expected_hidden[index] + bias[channel], 0.0F);
+        }
+    }
+    const std::vector<float> expected = cpuRaggedCausalConv1d(expected_hidden,
+                                                              offsets,
+                                                              filter2,
+                                                              max_total_values,
+                                                              channels,
+                                                              channels,
+                                                              kernel_width,
+                                                              1,
+                                                              0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            const uint64_t index = value * channels + channel;
+            EXPECT_NEAR(actual[index], expected[index], 1.0e-5F) << "active output index " << index;
+        }
+    }
+    for (uint64_t index = offsets.back() * channels; index < actual.size(); ++index) {
+        EXPECT_EQ(actual[index], inactive_sentinel) << "packed spare output index " << index;
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT8BRetainsRuntimeScalarPointwiseBeforeConvolution) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 2;
+    // Use a placement-time row capacity that genuinely has more than one
+    // canonical selected width ({8, 16}). The old fixture used 8, whose finite
+    // width family is intentionally just {8}, so it could not test the
+    // no-runtime-compilation width-switch contract asserted below.
+    constexpr uint64_t max_total_values = 16;
+    constexpr uint64_t channels = 1;
+    constexpr uint64_t kernel_width = 3;
+    const std::vector<uint32_t> offsets32{0, 3, 6};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    const std::vector<float> values{1.0F,
+                                    -2.0F,
+                                    3.0F,
+                                    4.0F,
+                                    0.5F,
+                                    -1.0F,
+                                    2.25F,
+                                    -3.5F,
+                                    1.75F,
+                                    0.25F,
+                                    -2.5F,
+                                    4.5F,
+                                    3.25F,
+                                    -1.25F,
+                                    0.75F,
+                                    -4.0F};
+    const std::vector<float> filter{0.5F, -0.25F, 1.0F};
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, channels}, values, stream);
+    Tensor gpu_filter = makeGpuTensor<float>({channels, channels, kernel_width}, filter, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(
+        gpu_offsets, RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostOffsets(offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression alpha = Expression::runtimeScalar("alpha", DataType::FP32, DataType::FP32);
+    const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression scaled = input.mapValues([&](const Expression& x) { return x * alpha; });
+    const RaggedExpression result =
+        scaled.causalConv1d(filter_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    const std::unordered_map<std::string, Tensor> named_inputs{{"tokens.values", gpu_values},
+                                                               {"tokens.offsets", gpu_offsets},
+                                                               {"filter", gpu_filter}};
+    constexpr float inactive_sentinel = 6789.5F;
+    Tensor packed_output = makeGpuTensor<float>(
+        {max_total_values, channels}, std::vector<float>(max_total_values * channels, inactive_sentinel), stream);
+    StampedExecutionPlan plan = equation.stamp(named_inputs, stream, {}, {{"y", packed_output}});
+
+    EXPECT_EQ(plan.stageKindNames(),
+              (std::vector<std::string>{"PaddedRaggedPack",
+                                        "PaddedRaggedPointwise",
+                                        "RaggedConv1dCausal",
+                                        "PaddedRaggedUnpack"}));
+    EXPECT_EQ(plan.runtimeScalarNames(), (std::unordered_set<std::string>{"alpha"}));
+
+    const std::vector<size_t> pre_stamped_width_counts = plan.paddedRaggedPointwisePreStampedWidthCounts();
+    ASSERT_EQ(pre_stamped_width_counts.size(), 1u);
+    EXPECT_GT(pre_stamped_width_counts.front(), 1u);
+
+    auto run_and_check = [&](float alpha_value, const std::vector<uint64_t>& run_offsets) {
+        overwriteGpuTensor<float>(packed_output,
+                                  std::vector<float>(max_total_values * channels, inactive_sentinel),
+                                  stream);
+        plan.run({{"alpha", alpha_value}});
+        stream.synchronize();
+        const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+        std::vector<float> scaled_values = values;
+        for (uint64_t value = 0; value < run_offsets.back(); ++value) {
+            scaled_values[value] *= alpha_value;
+        }
+        const std::vector<float> expected = cpuRaggedCausalConv1d(scaled_values,
+                                                                  run_offsets,
+                                                                  filter,
+                                                                  max_total_values,
+                                                                  channels,
+                                                                  channels,
+                                                                  kernel_width,
+                                                                  1,
+                                                                  0.0F);
+        for (uint64_t value = 0; value < run_offsets.back(); ++value) {
+            EXPECT_NEAR(actual[value], expected[value], 1.0e-5F) << "active output index " << value;
+        }
+        for (uint64_t value = run_offsets.back(); value < max_total_values; ++value) {
+            EXPECT_EQ(actual[value], inactive_sentinel) << "packed spare output index " << value;
+        }
+    };
+
+    run_and_check(2.0F, offsets);
+    run_and_check(-0.5F, offsets);
+
+    // Move from selected W=8 to selected W=16 without compiling anything at
+    // runtime; both pointwise invocations must already exist from stamping.
+    const std::vector<uint32_t> wider_offsets32{0, 10, 10};
+    const std::vector<uint64_t> wider_offsets(wider_offsets32.begin(), wider_offsets32.end());
+    overwriteGpuTensor<uint32_t>(gpu_offsets, wider_offsets32, stream);
+    partition.setHostOffsets(wider_offsets);
+    run_and_check(1.5F, wider_offsets);
+
+    const std::vector<uint32_t> empty_offsets32{0, 0, 0};
+    const std::vector<uint64_t> empty_offsets(empty_offsets32.begin(), empty_offsets32.end());
+    overwriteGpuTensor<uint32_t>(gpu_offsets, empty_offsets32, stream);
+    partition.setHostOffsets(empty_offsets);
+    run_and_check(3.0F, empty_offsets);
+
+    EXPECT_EQ(plan.paddedRaggedPointwisePreStampedWidthCounts(), pre_stamped_width_counts);
+}
+
+TEST(RaggedExpression, CausalConv1dT8BRetainsCastsAcrossPaddedRegion) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 8;
+    constexpr uint64_t channels = 1;
+    constexpr uint64_t kernel_width = 2;
+    const std::vector<uint32_t> offsets32{0, 3, 6};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    const std::vector<float> values{0.1F, -0.35F, 1.2F, 2.3F, -4.7F, 0.6F, 7777.0F, 7777.0F};
+    const std::vector<float> filter{0.5F, -0.25F};
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, channels}, values, stream);
+    Tensor gpu_filter = makeGpuTensorFromFloats({channels, channels, kernel_width}, filter, DataType::FP16, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime(
+        gpu_offsets, RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values))
+        .setHostOffsets(offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP16);
+    const RaggedExpression quantized = input.cast(DataType::FP16);
+    const RaggedExpression result =
+        quantized.causalConv1d(filter_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP16);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    constexpr float inactive_sentinel = -123.5F;
+    Tensor packed_output = makeGpuTensorFromFloats(
+        {max_total_values, channels},
+        std::vector<float>(max_total_values * channels, inactive_sentinel),
+        DataType::FP16,
+        stream);
+    StampedExecutionPlan plan = equation.stamp({{"tokens.values", gpu_values},
+                                                {"tokens.offsets", gpu_offsets},
+                                                {"filter", gpu_filter}},
+                                               stream,
+                                               {},
+                                               {{"y", packed_output}});
+
+    const std::vector<std::string> stage_names = plan.stageKindNames();
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedPack"), 1);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedPointwise"), 1);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "RaggedConv1dCausal"), 1);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedUnpack"), 1);
+
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> actual = copyToCpuFloatValues(plan.output("y"), stream);
+    std::vector<float> quantized_values = values;
+    std::vector<float> quantized_filter = filter;
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        quantized_values[value] = __half2float(__float2half(quantized_values[value]));
+    }
+    for (float& coefficient : quantized_filter) {
+        coefficient = __half2float(__float2half(coefficient));
+    }
+    const std::vector<float> expected = cpuRaggedCausalConv1d(quantized_values,
+                                                               offsets,
+                                                               quantized_filter,
+                                                               max_total_values,
+                                                               channels,
+                                                               channels,
+                                                               kernel_width,
+                                                               1,
+                                                               0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        EXPECT_NEAR(actual[value], expected[value], 2.0e-2F) << "active output index " << value;
+    }
+    const float stored_sentinel = __half2float(__float2half(inactive_sentinel));
+    for (uint64_t value = offsets.back(); value < max_total_values; ++value) {
+        EXPECT_EQ(actual[value], stored_sentinel) << "packed spare output index " << value;
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT8BRetainsSamePartitionBinaryValuewiseRegion) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 12;
+    constexpr uint64_t channels = 2;
+    constexpr uint64_t kernel_width = 2;
+    const std::vector<uint32_t> offsets32{0, 3, 3, 8};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+
+    std::vector<float> values(max_total_values * channels, 7777.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            values[value * channels + channel] =
+                static_cast<float>(static_cast<int>((value * 5 + channel * 3) % 17) - 8) * 0.25F;
+        }
+    }
+    const std::vector<float> filter1{
+        0.5F, -0.25F,
+        0.75F, 0.125F,
+        -0.5F, 0.25F,
+        0.375F, -0.625F,
+    };
+    const std::vector<float> filter2{
+        -0.125F, 0.625F,
+        0.25F, 0.5F,
+        0.875F, -0.375F,
+        -0.25F, 0.125F,
+    };
+    const std::vector<float> filter3{
+        0.5F, 0.25F,
+        -0.125F, 0.75F,
+        0.375F, -0.5F,
+        0.625F, 0.125F,
+    };
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, channels}, values, stream);
+    Tensor gpu_filter1 = makeGpuTensor<float>({channels, channels, kernel_width}, filter1, stream);
+    Tensor gpu_filter2 = makeGpuTensor<float>({channels, channels, kernel_width}, filter2, stream);
+    Tensor gpu_filter3 = makeGpuTensor<float>({channels, channels, kernel_width}, filter3, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime(
+        gpu_offsets, RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values))
+        .setHostOffsets(offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter1_expr = Expression::input("filter1", std::nullopt, DataType::FP32);
+    const Expression filter2_expr = Expression::input("filter2", std::nullopt, DataType::FP32);
+    const Expression filter3_expr = Expression::input("filter3", std::nullopt, DataType::FP32);
+    const RaggedExpression branch1 =
+        input.causalConv1d(filter1_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+    const RaggedExpression branch2 =
+        input.causalConv1d(filter2_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+    const RaggedExpression combined = (branch1 + branch2).relu();
+    const RaggedExpression result =
+        combined.causalConv1d(filter3_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    constexpr float inactive_sentinel = 2468.5F;
+    Tensor packed_output = makeGpuTensor<float>(
+        {max_total_values, channels}, std::vector<float>(max_total_values * channels, inactive_sentinel), stream);
+    StampedExecutionPlan plan = equation.stamp({{"tokens.values", gpu_values},
+                                                {"tokens.offsets", gpu_offsets},
+                                                {"filter1", gpu_filter1},
+                                                {"filter2", gpu_filter2},
+                                                {"filter3", gpu_filter3}},
+                                               stream,
+                                               {},
+                                               {{"y", packed_output}});
+
+    const std::vector<std::string> stage_names = plan.stageKindNames();
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedPack"), 1);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "RaggedConv1dCausal"), 3);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedPointwise"), 1);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedUnpack"), 1);
+
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+    const std::vector<float> branch1_expected = cpuRaggedCausalConv1d(values,
+                                                                       offsets,
+                                                                       filter1,
+                                                                       max_total_values,
+                                                                       channels,
+                                                                       channels,
+                                                                       kernel_width,
+                                                                       1,
+                                                                       0.0F);
+    const std::vector<float> branch2_expected = cpuRaggedCausalConv1d(values,
+                                                                       offsets,
+                                                                       filter2,
+                                                                       max_total_values,
+                                                                       channels,
+                                                                       channels,
+                                                                       kernel_width,
+                                                                       1,
+                                                                       0.0F);
+    std::vector<float> combined_expected(max_total_values * channels, 0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            const uint64_t index = value * channels + channel;
+            combined_expected[index] = std::max(branch1_expected[index] + branch2_expected[index], 0.0F);
+        }
+    }
+    const std::vector<float> expected = cpuRaggedCausalConv1d(combined_expected,
+                                                               offsets,
+                                                               filter3,
+                                                               max_total_values,
+                                                               channels,
+                                                               channels,
+                                                               kernel_width,
+                                                               1,
+                                                               0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            const uint64_t index = value * channels + channel;
+            EXPECT_NEAR(actual[index], expected[index], 1.0e-5F) << "active output index " << index;
+        }
+    }
+    for (uint64_t index = offsets.back() * channels; index < actual.size(); ++index) {
+        EXPECT_EQ(actual[index], inactive_sentinel) << "packed spare output index " << index;
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT8BFallsBackAtUnsupportedPerTimestepBroadcastBoundary) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 8;
+    constexpr uint64_t channels = 2;
+    constexpr uint64_t kernel_width = 2;
+    const std::vector<uint32_t> offsets32{0, 3, 6};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+
+    std::vector<float> values(max_total_values * channels, 7777.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            values[value * channels + channel] = static_cast<float>(value * channels + channel + 1) * 0.25F;
+        }
+    }
+    const std::vector<float> filter1{
+        0.5F, -0.25F,
+        0.75F, 0.125F,
+        -0.5F, 0.25F,
+        0.375F, -0.625F,
+    };
+    const std::vector<float> filter2{
+        0.25F, 0.5F,
+        -0.125F, 0.75F,
+        0.625F, -0.25F,
+        0.5F, 0.125F,
+    };
+    std::vector<float> timestep_bias(max_total_values, 99.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        timestep_bias[value] = static_cast<float>(static_cast<int>(value) - 2) * 0.5F;
+    }
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, channels}, values, stream);
+    Tensor gpu_filter1 = makeGpuTensor<float>({channels, channels, kernel_width}, filter1, stream);
+    Tensor gpu_filter2 = makeGpuTensor<float>({channels, channels, kernel_width}, filter2, stream);
+    Tensor gpu_timestep_bias = makeGpuTensor<float>({max_total_values, 1}, timestep_bias, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime(
+        gpu_offsets, RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values))
+        .setHostOffsets(offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter1_expr = Expression::input("filter1", std::nullopt, DataType::FP32);
+    const Expression filter2_expr = Expression::input("filter2", std::nullopt, DataType::FP32);
+    const Expression timestep_bias_expr = Expression::input("timestep_bias", std::nullopt, DataType::FP32);
+    const RaggedExpression hidden =
+        input.causalConv1d(filter1_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+    const RaggedExpression biased = hidden.mapValues([&](const Expression& x) { return x + timestep_bias_expr; });
+    const RaggedExpression result =
+        biased.causalConv1d(filter2_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    constexpr float inactive_sentinel = 1357.25F;
+    Tensor packed_output = makeGpuTensor<float>(
+        {max_total_values, channels}, std::vector<float>(max_total_values * channels, inactive_sentinel), stream);
+    StampedExecutionPlan plan = equation.stamp({{"tokens.values", gpu_values},
+                                                {"tokens.offsets", gpu_offsets},
+                                                {"filter1", gpu_filter1},
+                                                {"filter2", gpu_filter2},
+                                                {"timestep_bias", gpu_timestep_bias}},
+                                               stream,
+                                               {},
+                                               {{"y", packed_output}});
+
+    const std::vector<std::string> stage_names = plan.stageKindNames();
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedPointwise"), 0);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedPack"), 2);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedUnpack"), 2);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "RaggedConv1dCausal"), 2);
+
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+    std::vector<float> expected_hidden = cpuRaggedCausalConv1d(values,
+                                                               offsets,
+                                                               filter1,
+                                                               max_total_values,
+                                                               channels,
+                                                               channels,
+                                                               kernel_width,
+                                                               1,
+                                                               0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            expected_hidden[value * channels + channel] += timestep_bias[value];
+        }
+    }
+    const std::vector<float> expected = cpuRaggedCausalConv1d(expected_hidden,
+                                                               offsets,
+                                                               filter2,
+                                                               max_total_values,
+                                                               channels,
+                                                               channels,
+                                                               kernel_width,
+                                                               1,
+                                                               0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            const uint64_t index = value * channels + channel;
+            EXPECT_NEAR(actual[index], expected[index], 1.0e-5F) << "active output index " << index;
+        }
+    }
+    for (uint64_t index = offsets.back() * channels; index < actual.size(); ++index) {
+        EXPECT_EQ(actual[index], inactive_sentinel) << "packed spare output index " << index;
+    }
+}
+
+TEST(RaggedExpression, T8BDoesNotPadStandaloneValuewiseExpressionWithoutCompatibleRegion) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 8;
+    constexpr uint64_t channels = 1;
+    const std::vector<uint32_t> offsets32{0, 3, 6};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    const std::vector<float> values{-2.0F, 1.0F, 3.0F, -1.0F, 4.0F, 2.0F, 7777.0F, 7777.0F};
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, channels}, values, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime(
+        gpu_offsets, RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values))
+        .setHostOffsets(offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {channels}, batch_size, max_total_values, DataType::UINT32));
+    const RaggedExpression result = input.relu();
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"tokens.values", gpu_values}, {"tokens.offsets", gpu_offsets}}, stream);
+
+    const std::vector<std::string> stage_names = plan.stageKindNames();
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedPack"), 0);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedPointwise"), 0);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedUnpack"), 0);
+    EXPECT_GE(std::count(stage_names.begin(), stage_names.end(), "FusedKernel"), 1);
+
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        EXPECT_EQ(actual[value], std::max(values[value], 0.0F));
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT7R5PrebuildsFixedPlanFamilyBeforeExecutionAndNeverGrowsIt) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 24;
+    constexpr uint64_t input_channels = 1;
+    constexpr uint64_t output_channels = 1;
+    constexpr uint64_t kernel_width = 3;
+    constexpr uint64_t dilation = 1;
+    std::vector<float> values(max_total_values, 9999.0F);
+    for (uint64_t i = 0; i < 14; ++i) values[i] = static_cast<float>(i + 1);
+    const std::vector<float> filter{0.5F, -1.0F, 2.0F};
+    const std::vector<uint32_t> first_offsets32{0, 9, 13, 14};
+    const std::vector<uint64_t> first_offsets(first_offsets32.begin(), first_offsets32.end());
+    const std::vector<uint32_t> second_offsets32{0, 7, 7, 12};
+    const std::vector<uint64_t> second_offsets(second_offsets32.begin(), second_offsets32.end());
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, input_channels}, values, stream);
+    Tensor gpu_filter = makeGpuTensor<float>({output_channels, input_channels, kernel_width}, filter, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, first_offsets32, stream);
+    RowPartitionRuntime partition(gpu_offsets,
+                                  RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostOffsets(first_offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {input_channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression result =
+        input.causalConv1d(filter_expr, output_channels, kernel_width, dilation, DataType::FP32, DataType::FP32);
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"tokens.values", gpu_values},
+                                                {"tokens.offsets", gpu_offsets},
+                                                {"filter", gpu_filter}},
+                                               stream);
+
+    const std::vector<RaggedConv1dStageDiagnostic> stamped_diagnostics = plan.raggedConv1dStageDiagnostics();
+    ASSERT_EQ(stamped_diagnostics.size(), 1u);
+    EXPECT_GT(stamped_diagnostics.front().width_capacity_count, 0u);
+    EXPECT_EQ(stamped_diagnostics.front().prebuilt_cudnn_plan_count,
+              stamped_diagnostics.front().width_capacity_count);
+    const uint64_t placement_plan_count = stamped_diagnostics.front().prebuilt_cudnn_plan_count;
+    const uint64_t placement_workspace_bytes = stamped_diagnostics.front().cudnn_workspace_bytes;
+
+    plan.run();
+    stream.synchronize();
+    std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+    std::vector<float> expected = cpuRaggedCausalConv1d(values,
+                                                        first_offsets,
+                                                        filter,
+                                                        max_total_values,
+                                                        input_channels,
+                                                        output_channels,
+                                                        kernel_width,
+                                                        dilation,
+                                                        0.0F);
+    for (uint64_t i = 0; i < first_offsets.back(); ++i) {
+        EXPECT_NEAR(actual[i], expected[i], 1.0e-5F) << "first partition index " << i;
+    }
+    {
+        const std::vector<RaggedConv1dStageDiagnostic> diagnostics = plan.raggedConv1dStageDiagnostics();
+        ASSERT_EQ(diagnostics.size(), 1u);
+        EXPECT_EQ(diagnostics.front().selected_width_capacity, 16u);
+        EXPECT_EQ(diagnostics.front().prebuilt_cudnn_plan_count, placement_plan_count);
+        EXPECT_EQ(diagnostics.front().width_capacity_count, placement_plan_count);
+        EXPECT_EQ(diagnostics.front().cudnn_workspace_bytes, placement_workspace_bytes);
+    }
+
+    // A generic offsets write invalidates the host mirror; publish the new
+    // already-known metadata after the copy, exactly as NetworkInput does.
+    overwriteGpuTensor<uint32_t>(gpu_offsets, second_offsets32, stream);
+    partition.setHostOffsets(second_offsets);
+    plan.run();
+    stream.synchronize();
+    actual = copyToCpuValues(plan.output("y"), stream);
+    expected = cpuRaggedCausalConv1d(values,
+                                     second_offsets,
+                                     filter,
+                                     max_total_values,
+                                     input_channels,
+                                     output_channels,
+                                     kernel_width,
+                                     dilation,
+                                     0.0F);
+    for (uint64_t i = 0; i < second_offsets.back(); ++i) {
+        EXPECT_NEAR(actual[i], expected[i], 1.0e-5F) << "second partition index " << i;
+    }
+
+    const std::vector<RaggedConv1dStageDiagnostic> diagnostics = plan.raggedConv1dStageDiagnostics();
+    ASSERT_EQ(diagnostics.size(), 1u);
+    EXPECT_EQ(diagnostics.front().selected_width_capacity, 8u);
+    EXPECT_EQ(diagnostics.front().prebuilt_cudnn_plan_count, placement_plan_count);
+    EXPECT_EQ(diagnostics.front().width_capacity_count, placement_plan_count);
+    EXPECT_EQ(diagnostics.front().cudnn_workspace_bytes, placement_workspace_bytes);
+
+    // Repeated runtime shape changes may select different prebuilt widths but
+    // can never construct another cuDNN graph/plan or grow the shared workspace.
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        const bool use_first = (iteration % 2) == 0;
+        overwriteGpuTensor<uint32_t>(gpu_offsets, use_first ? first_offsets32 : second_offsets32, stream);
+        partition.setHostOffsets(use_first ? first_offsets : second_offsets);
+        plan.run();
+        stream.synchronize();
+        const std::vector<RaggedConv1dStageDiagnostic> repeated = plan.raggedConv1dStageDiagnostics();
+        ASSERT_EQ(repeated.size(), 1u);
+        EXPECT_EQ(repeated.front().prebuilt_cudnn_plan_count, placement_plan_count);
+        EXPECT_EQ(repeated.front().width_capacity_count, placement_plan_count);
+        EXPECT_EQ(repeated.front().cudnn_workspace_bytes, placement_workspace_bytes);
+        EXPECT_EQ(repeated.front().selected_width_capacity, use_first ? 16u : 8u);
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT9ADgradMatchesPackedReferenceForGroupedAndDepthwise) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 16;
+    constexpr uint64_t kernel_width = 3;
+    constexpr uint64_t dilation = 1;
+    constexpr float inactive_sentinel = -8181.0F;
+    const std::vector<uint32_t> offsets32{0, 3, 3, 8};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+
+    struct Geometry {
+        uint64_t input_channels;
+        uint64_t output_channels;
+        uint64_t groups;
+    };
+    for (const Geometry geometry : {Geometry{3, 4, 1}, Geometry{4, 6, 2}, Geometry{4, 4, 4}}) {
+        SCOPED_TRACE("groups=" + std::to_string(geometry.groups));
+        const uint64_t input_channels_per_group = geometry.input_channels / geometry.groups;
+        std::vector<float> filter(geometry.output_channels * input_channels_per_group * kernel_width);
+        for (size_t i = 0; i < filter.size(); ++i) {
+            filter[i] = static_cast<float>(static_cast<int>(i % 7) - 3) * 0.125F;
+        }
+        std::vector<float> dy(max_total_values * geometry.output_channels, 12345.0F);
+        for (uint64_t value = 0; value < offsets.back(); ++value) {
+            for (uint64_t channel = 0; channel < geometry.output_channels; ++channel) {
+                dy[value * geometry.output_channels + channel] =
+                    static_cast<float>((value + 1) * (channel + 2)) * 0.0625F - 0.4F;
+            }
+        }
+
+        Stream stream(0);
+        Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+        RowPartitionRuntime partition(
+            gpu_offsets,
+            RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+        partition.setHostOffsets(offsets);
+        Tensor gpu_filter = makeGpuTensor<float>(
+            {geometry.output_channels, input_channels_per_group, kernel_width}, filter, stream);
+        Tensor gpu_dy = makeGpuTensor<float>({max_total_values, geometry.output_channels}, dy, stream);
+        Tensor gpu_values = makeGpuTensor<float>(
+            {max_total_values, geometry.input_channels},
+            std::vector<float>(max_total_values * geometry.input_channels, 0.0F),
+            stream);
+
+        const RaggedExpression input = RaggedExpression::input(
+            "tokens",
+            makeDescriptor(DataType::FP32, {geometry.input_channels}, batch_size, max_total_values, DataType::UINT32));
+        const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+        const RaggedExpression output = input.causalConv1d(filter_expr,
+                                                           geometry.output_channels,
+                                                           kernel_width,
+                                                           dilation,
+                                                           DataType::FP32,
+                                                           DataType::FP32,
+                                                           geometry.groups);
+        FusedEquation forward =
+            FusedEquation::compile(Expression::outputs({{"y", output.getValues()}}).physicalOutputs(), 0);
+        FusedEquation backward = forward.compileBackward({"tokens.values"}, "dy");
+
+        Tensor dx(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, geometry.input_channels}));
+        dx.fill(inactive_sentinel, stream);
+        StampedExecutionPlan plan = backward.stamp({{"tokens.values", gpu_values},
+                                                    {"filter", gpu_filter},
+                                                    {"tokens.offsets", gpu_offsets},
+                                                    {"dy", gpu_dy}},
+                                                   stream,
+                                                   {},
+                                                   {{"tokens.values_grad", dx}});
+        plan.run();
+        stream.synchronize();
+
+        const std::vector<float> actual = copyToCpuValues(plan.output("tokens.values_grad"), stream);
+        const std::vector<float> expected = cpuRaggedCausalConv1dDgrad(dy,
+                                                                       offsets,
+                                                                       filter,
+                                                                       max_total_values,
+                                                                       geometry.input_channels,
+                                                                       geometry.output_channels,
+                                                                       kernel_width,
+                                                                       dilation,
+                                                                       inactive_sentinel,
+                                                                       geometry.groups);
+        expectNear(actual, expected, 1.0e-5F);
+
+        const std::vector<RaggedConv1dStageDiagnostic> diagnostics = plan.raggedConv1dStageDiagnostics();
+        ASSERT_EQ(diagnostics.size(), 1u);
+        EXPECT_EQ(diagnostics.front().active_values, offsets.back());
+        EXPECT_EQ(diagnostics.front().selected_width_capacity, 8u);
+        EXPECT_GT(diagnostics.front().width_capacity_count, 0u);
+        EXPECT_EQ(diagnostics.front().prebuilt_cudnn_plan_count, diagnostics.front().width_capacity_count);
+        EXPECT_EQ(diagnostics.front().explicit_unfold_workspace_bytes, 0u);
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT9AAllEmptyUsesWidthZeroAndLeavesDxInactiveStorageUndefined) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 12;
+    constexpr uint64_t input_channels = 2;
+    constexpr uint64_t output_channels = 2;
+    constexpr float sentinel = 4545.0F;
+    const std::vector<uint32_t> offsets32{0, 0, 0, 0};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    const std::vector<float> filter{0.5F, -0.25F, 1.0F, 0.75F, -0.5F, 0.125F,
+                                    -0.2F, 0.4F, 0.6F, -0.8F, 0.3F, 0.7F};
+    std::vector<float> dy(max_total_values * output_channels, std::numeric_limits<float>::quiet_NaN());
+
+    Stream stream(0);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(
+        gpu_offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostOffsets(offsets);
+    Tensor gpu_filter = makeGpuTensor<float>({output_channels, input_channels, 3}, filter, stream);
+    Tensor gpu_dy = makeGpuTensor<float>({max_total_values, output_channels}, dy, stream);
+    Tensor gpu_values = makeGpuTensor<float>(
+        {max_total_values, input_channels}, std::vector<float>(max_total_values * input_channels, 0.0F), stream);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {input_channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression output = input.causalConv1d(filter_expr, output_channels, 3, 1, DataType::FP32, DataType::FP32);
+    FusedEquation forward = FusedEquation::compile(Expression::outputs({{"y", output.getValues()}}).physicalOutputs(), 0);
+    FusedEquation backward = forward.compileBackward({"tokens.values"}, "dy");
+
+    Tensor dx(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, input_channels}));
+    dx.fill(sentinel, stream);
+    StampedExecutionPlan plan = backward.stamp({{"tokens.values", gpu_values},
+                                                {"filter", gpu_filter},
+                                                {"tokens.offsets", gpu_offsets},
+                                                {"dy", gpu_dy}},
+                                               stream,
+                                               {},
+                                               {{"tokens.values_grad", dx}});
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> actual = copyToCpuValues(plan.output("tokens.values_grad"), stream);
+    for (float value : actual) {
+        EXPECT_EQ(value, sentinel);
+    }
+    const std::vector<RaggedConv1dStageDiagnostic> diagnostics = plan.raggedConv1dStageDiagnostics();
+    ASSERT_EQ(diagnostics.size(), 1u);
+    EXPECT_EQ(diagnostics.front().active_values, 0u);
+    EXPECT_EQ(diagnostics.front().selected_width_capacity, 0u);
+    EXPECT_EQ(diagnostics.front().prebuilt_cudnn_plan_count, diagnostics.front().width_capacity_count);
+}
+
+TEST(RaggedExpression, CausalConv1dT9ADgradConsumerSanitizesPoisonedRetainedDyWithoutMutatingProducer) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 8;
+    constexpr uint64_t max_values_per_row = 8;
+    constexpr uint64_t input_channels = 2;
+    constexpr uint64_t output_channels = 2;
+    constexpr uint64_t kernel_width = 3;
+    constexpr uint64_t selected_width = 8;
+    constexpr float inactive_sentinel = -9911.0F;
+    const std::vector<uint32_t> offsets32{0, 2, 5};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    const std::vector<float> filter{0.5F, -0.25F, 1.0F, -0.75F, 0.4F, 0.2F,
+                                    -0.3F, 0.6F, 0.8F, 0.125F, -0.5F, 0.9F};
+    std::vector<float> packed_dy(max_total_values * output_channels, 3333.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        packed_dy[value * output_channels + 0] = 0.2F * static_cast<float>(value + 1);
+        packed_dy[value * output_channels + 1] = -0.15F * static_cast<float>(value + 2);
+    }
+
+    Stream stream(0);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(
+        gpu_offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_values_per_row));
+    partition.setHostOffsets(offsets);
+    Tensor gpu_filter = makeGpuTensor<float>({output_channels, input_channels, kernel_width}, filter, stream);
+
+    PaddedRaggedSequencePlan dy_plan =
+        preparePaddedRaggedSequencePlan(partition, output_channels, DataType::FP32, selected_width);
+    PaddedRaggedSequencePlan dx_plan =
+        preparePaddedRaggedSequencePlan(partition, input_channels, DataType::FP32, selected_width);
+    auto padded_dy = std::make_shared<PaddedRaggedSequence>(dy_plan, gpu_offsets, gpuPlacement, selected_width);
+    auto padded_dx = std::make_shared<PaddedRaggedSequence>(dx_plan, gpu_offsets, gpuPlacement, selected_width);
+    auto compiled = std::make_shared<CompiledRaggedConv1dCausalBackwardData>(DataType::FP32,
+                                                                             DataType::FP32,
+                                                                             DataType::FP32,
+                                                                             DataType::FP32,
+                                                                             DataType::UINT32,
+                                                                             batch_size,
+                                                                             max_total_values,
+                                                                             max_values_per_row,
+                                                                             input_channels,
+                                                                             output_channels,
+                                                                             kernel_width,
+                                                                             1,
+                                                                             1);
+    StampedRaggedConv1dCausalBackwardData dgrad(compiled, gpu_filter, padded_dy, gpu_offsets, padded_dx, stream);
+    // Plan-family construction is placement-only and may leave the shared value
+    // configured at the last prebuilt W. Establish this execution's retained W
+    // exactly as an upstream retained producer would before poisoning its tail.
+    padded_dy->reconfigure(dy_plan);
+
+    std::vector<float> poisoned(batch_size * output_channels * selected_width,
+                                std::numeric_limits<float>::quiet_NaN());
+    for (uint64_t row = 0; row < batch_size; ++row) {
+        const uint64_t begin = offsets[row];
+        const uint64_t row_length = offsets[row + 1] - begin;
+        for (uint64_t channel = 0; channel < output_channels; ++channel) {
+            for (uint64_t timestep = 0; timestep < row_length; ++timestep) {
+                poisoned[(row * output_channels + channel) * selected_width + timestep] =
+                    packed_dy[(begin + timestep) * output_channels + channel];
+            }
+            for (uint64_t timestep = row_length; timestep < selected_width; ++timestep) {
+                const size_t index = (row * output_channels + channel) * selected_width + timestep;
+                poisoned[index] = ((index & 1U) == 0U) ? std::numeric_limits<float>::infinity()
+                                                       : std::numeric_limits<float>::quiet_NaN();
+            }
+        }
+    }
+    Tensor dy_storage = padded_dy->getPaddedValuesStorage();
+    overwriteGpuTensor<float>(dy_storage, poisoned, stream);
+    const std::vector<float> producer_before = copyToCpuValues(dy_storage, stream);
+
+    Stream other_stream(0);
+    EXPECT_THROW(dgrad.runOn(other_stream), std::runtime_error);
+    dgrad.runOn(stream);
+    stream.synchronize();
+
+    Tensor packed_dx(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, input_channels}));
+    packed_dx.fill(inactive_sentinel, stream);
+    padded_dx->unpackTo(packed_dx, stream);
+    stream.synchronize();
+    const std::vector<float> actual = copyToCpuValues(packed_dx, stream);
+    const std::vector<float> expected = cpuRaggedCausalConv1dDgrad(packed_dy,
+                                                                   offsets,
+                                                                   filter,
+                                                                   max_total_values,
+                                                                   input_channels,
+                                                                   output_channels,
+                                                                   kernel_width,
+                                                                   1,
+                                                                   inactive_sentinel);
+    expectNear(actual, expected, 1.0e-5F);
+    for (uint64_t i = 0; i < offsets.back() * input_channels; ++i) {
+        EXPECT_TRUE(std::isfinite(actual[i])) << "active dX index " << i;
+    }
+
+    const std::vector<float> producer_after = copyToCpuValues(dy_storage, stream);
+    ASSERT_EQ(producer_after.size(), producer_before.size());
+    for (size_t i = 0; i < producer_before.size(); ++i) {
+        if (std::isnan(producer_before[i])) {
+            EXPECT_TRUE(std::isnan(producer_after[i])) << "producer dY index " << i;
+        } else {
+            EXPECT_EQ(producer_after[i], producer_before[i]) << "producer dY index " << i;
+        }
+    }
+    const RaggedConv1dStageDiagnostic diagnostic = dgrad.diagnostic();
+    EXPECT_EQ(diagnostic.active_values, offsets.back());
+    EXPECT_EQ(diagnostic.selected_width_capacity, selected_width);
+    EXPECT_EQ(diagnostic.prebuilt_cudnn_plan_count, diagnostic.width_capacity_count);
+    EXPECT_GT(diagnostic.prebuilt_cudnn_plan_count, 0u);
+    EXPECT_EQ(diagnostic.explicit_unfold_workspace_bytes, 0u);
+}
+
+TEST(RaggedExpression, CausalConv1dT9BWgradMatchesPackedReferenceForGroupedAndDepthwise) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 16;
+    constexpr uint64_t kernel_width = 3;
+    constexpr uint64_t dilation = 1;
+    const std::vector<uint32_t> offsets32{0, 3, 3, 8};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+
+    struct Geometry {
+        uint64_t input_channels;
+        uint64_t output_channels;
+        uint64_t groups;
+    };
+    for (const Geometry geometry : {Geometry{3, 4, 1}, Geometry{4, 6, 2}, Geometry{4, 4, 4}}) {
+        SCOPED_TRACE("groups=" + std::to_string(geometry.groups));
+        const uint64_t input_channels_per_group = geometry.input_channels / geometry.groups;
+        std::vector<float> x(max_total_values * geometry.input_channels, 7777.0F);
+        std::vector<float> dy(max_total_values * geometry.output_channels, -8888.0F);
+        for (uint64_t value = 0; value < offsets.back(); ++value) {
+            for (uint64_t channel = 0; channel < geometry.input_channels; ++channel) {
+                x[value * geometry.input_channels + channel] =
+                    static_cast<float>(static_cast<int>((value + 2) * (channel + 1)) - 5) * 0.125F;
+            }
+            for (uint64_t channel = 0; channel < geometry.output_channels; ++channel) {
+                dy[value * geometry.output_channels + channel] =
+                    static_cast<float>(static_cast<int>((value + 1) * (channel + 3)) - 7) * 0.0625F;
+            }
+        }
+        std::vector<float> filter(geometry.output_channels * input_channels_per_group * kernel_width, 0.0F);
+
+        Stream stream(0);
+        Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+        RowPartitionRuntime partition(
+            gpu_offsets,
+            RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+        partition.setHostOffsets(offsets);
+        Tensor gpu_x = makeGpuTensor<float>({max_total_values, geometry.input_channels}, x, stream);
+        Tensor gpu_dy = makeGpuTensor<float>({max_total_values, geometry.output_channels}, dy, stream);
+        Tensor gpu_filter = makeGpuTensor<float>(
+            {geometry.output_channels, input_channels_per_group, kernel_width}, filter, stream);
+
+        const RaggedExpression input = RaggedExpression::input(
+            "tokens",
+            makeDescriptor(DataType::FP32, {geometry.input_channels}, batch_size, max_total_values, DataType::UINT32));
+        const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+        const RaggedExpression output = input.causalConv1d(filter_expr,
+                                                           geometry.output_channels,
+                                                           kernel_width,
+                                                           dilation,
+                                                           DataType::FP32,
+                                                           DataType::FP32,
+                                                           geometry.groups);
+        FusedEquation forward =
+            FusedEquation::compile(Expression::outputs({{"y", output.getValues()}}).physicalOutputs(), 0);
+        FusedEquation backward = forward.compileBackward({"filter"}, "dy");
+
+        StampedExecutionPlan plan = backward.stamp({{"tokens.values", gpu_x},
+                                                    {"filter", gpu_filter},
+                                                    {"tokens.offsets", gpu_offsets},
+                                                    {"dy", gpu_dy}},
+                                                   stream);
+        plan.run();
+        stream.synchronize();
+
+        const std::vector<float> actual = copyToCpuValues(plan.output("filter_grad"), stream);
+        const std::vector<float> expected = cpuRaggedCausalConv1dWgrad(x,
+                                                                       dy,
+                                                                       offsets,
+                                                                       max_total_values,
+                                                                       geometry.input_channels,
+                                                                       geometry.output_channels,
+                                                                       kernel_width,
+                                                                       dilation,
+                                                                       geometry.groups);
+        expectNear(actual, expected, 1.0e-5F);
+        const std::vector<RaggedConv1dStageDiagnostic> diagnostics = plan.raggedConv1dStageDiagnostics();
+        ASSERT_EQ(diagnostics.size(), 1u);
+        EXPECT_EQ(diagnostics.front().active_values, offsets.back());
+        EXPECT_EQ(diagnostics.front().selected_width_capacity, 8u);
+        EXPECT_GT(diagnostics.front().width_capacity_count, 0u);
+        EXPECT_EQ(diagnostics.front().prebuilt_cudnn_plan_count, diagnostics.front().width_capacity_count);
+        EXPECT_EQ(diagnostics.front().explicit_unfold_workspace_bytes, 0u);
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT9BAllEmptyProducesExactZeroWeightGradient) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 12;
+    constexpr uint64_t input_channels = 4;
+    constexpr uint64_t output_channels = 4;
+    constexpr uint64_t groups = 4;
+    constexpr uint64_t kernel_width = 3;
+    const std::vector<uint32_t> offsets32{0, 0, 0, 0};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    std::vector<float> x(max_total_values * input_channels, std::numeric_limits<float>::quiet_NaN());
+    std::vector<float> dy(max_total_values * output_channels, std::numeric_limits<float>::infinity());
+    std::vector<float> filter(output_channels * (input_channels / groups) * kernel_width, 0.0F);
+
+    Stream stream(0);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(
+        gpu_offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostOffsets(offsets);
+    Tensor gpu_x = makeGpuTensor<float>({max_total_values, input_channels}, x, stream);
+    Tensor gpu_dy = makeGpuTensor<float>({max_total_values, output_channels}, dy, stream);
+    Tensor gpu_filter = makeGpuTensor<float>({output_channels, input_channels / groups, kernel_width}, filter, stream);
+    Tensor dw(gpuPlacement, TensorDescriptor(DataType::FP32, {output_channels, input_channels / groups, kernel_width}));
+    dw.fill(37.0F, stream);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {input_channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression output =
+        input.causalConv1d(filter_expr, output_channels, kernel_width, 1, DataType::FP32, DataType::FP32, groups);
+    FusedEquation forward = FusedEquation::compile(Expression::outputs({{"y", output.getValues()}}).physicalOutputs(), 0);
+    FusedEquation backward = forward.compileBackward({"filter"}, "dy");
+    StampedExecutionPlan plan = backward.stamp({{"tokens.values", gpu_x},
+                                                {"filter", gpu_filter},
+                                                {"tokens.offsets", gpu_offsets},
+                                                {"dy", gpu_dy}},
+                                               stream,
+                                               {},
+                                               {{"filter_grad", dw}});
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> actual = copyToCpuValues(plan.output("filter_grad"), stream);
+    for (float value : actual) {
+        EXPECT_EQ(value, 0.0F);
+        EXPECT_FALSE(std::signbit(value));
+    }
+    const std::vector<RaggedConv1dStageDiagnostic> diagnostics = plan.raggedConv1dStageDiagnostics();
+    ASSERT_EQ(diagnostics.size(), 1u);
+    EXPECT_EQ(diagnostics.front().active_values, 0u);
+    EXPECT_EQ(diagnostics.front().selected_width_capacity, 0u);
+    EXPECT_EQ(diagnostics.front().prebuilt_cudnn_plan_count, diagnostics.front().width_capacity_count);
+}
+
+TEST(RaggedExpression, CausalConv1dT9BWgradConsumerSanitizesBothInputsAndCatchesZeroTimesNaN) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 16;
+    constexpr uint64_t max_values_per_row = 16;
+    constexpr uint64_t input_channels = 2;
+    constexpr uint64_t output_channels = 2;
+    constexpr uint64_t kernel_width = 3;
+    constexpr uint64_t selected_width = 8;
+    const std::vector<uint32_t> offsets32{0, 2, 5};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    std::vector<float> packed_x(max_total_values * input_channels, 1234.0F);
+    std::vector<float> packed_dy(max_total_values * output_channels, -5678.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < input_channels; ++channel) {
+            packed_x[value * input_channels + channel] =
+                static_cast<float>(static_cast<int>((value + 1) * (channel + 2)) - 4) * 0.2F;
+        }
+        for (uint64_t channel = 0; channel < output_channels; ++channel) {
+            packed_dy[value * output_channels + channel] =
+                static_cast<float>(static_cast<int>((value + 2) * (channel + 1)) - 3) * 0.15F;
+        }
+    }
+    const std::vector<float> expected = cpuRaggedCausalConv1dWgrad(
+        packed_x, packed_dy, offsets, max_total_values, input_channels, output_channels, kernel_width, 1);
+
+    Stream stream(0);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(
+        gpu_offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_values_per_row));
+    partition.setHostOffsets(offsets);
+    PaddedRaggedSequencePlan x_plan =
+        preparePaddedRaggedSequencePlan(partition, input_channels, DataType::FP32, selected_width);
+    PaddedRaggedSequencePlan dy_plan =
+        preparePaddedRaggedSequencePlan(partition, output_channels, DataType::FP32, selected_width);
+    auto padded_x = std::make_shared<PaddedRaggedSequence>(x_plan, gpu_offsets, gpuPlacement, selected_width);
+    auto padded_dy = std::make_shared<PaddedRaggedSequence>(dy_plan, gpu_offsets, gpuPlacement, selected_width);
+    Tensor dw(gpuPlacement, TensorDescriptor(DataType::FP32, {output_channels, input_channels, kernel_width}));
+    auto compiled = std::make_shared<CompiledRaggedConv1dCausalBackwardFilter>(DataType::FP32,
+                                                                               DataType::FP32,
+                                                                               DataType::FP32,
+                                                                               DataType::FP32,
+                                                                               DataType::UINT32,
+                                                                               batch_size,
+                                                                               max_total_values,
+                                                                               max_values_per_row,
+                                                                               input_channels,
+                                                                               output_channels,
+                                                                               kernel_width,
+                                                                               1,
+                                                                               1);
+    StampedRaggedConv1dCausalBackwardFilter wgrad(compiled, padded_x, padded_dy, gpu_offsets, dw, stream);
+    EXPECT_EQ(padded_x->getPlan().widthCapacity, selected_width);
+    EXPECT_EQ(padded_dy->getPlan().widthCapacity, selected_width);
+
+    auto make_poisoned_padded = [&](uint64_t channels, const std::vector<float>& packed, bool poison_tail) {
+        std::vector<float> values(batch_size * channels * selected_width, 0.0F);
+        for (uint64_t row = 0; row < batch_size; ++row) {
+            const uint64_t begin = offsets[row];
+            const uint64_t row_length = offsets[row + 1] - begin;
+            for (uint64_t channel = 0; channel < channels; ++channel) {
+                for (uint64_t timestep = 0; timestep < row_length; ++timestep) {
+                    values[(row * channels + channel) * selected_width + timestep] =
+                        packed[(begin + timestep) * channels + channel];
+                }
+                if (poison_tail) {
+                    for (uint64_t timestep = row_length; timestep < selected_width; ++timestep) {
+                        const size_t index = (row * channels + channel) * selected_width + timestep;
+                        values[index] = ((index & 1U) == 0U) ? std::numeric_limits<float>::quiet_NaN()
+                                                               : std::numeric_limits<float>::infinity();
+                    }
+                }
+            }
+        }
+        return values;
+    };
+
+    // First execution is the specifically adversarial 0 * NaN case: inactive
+    // dY is exactly zero while inactive X is NaN/Inf. Sanitizing dY alone is
+    // insufficient because IEEE 0 * NaN is NaN.
+    Tensor x_storage = padded_x->getPaddedValuesStorage();
+    Tensor dy_storage = padded_dy->getPaddedValuesStorage();
+    const std::vector<float> poisoned_x = make_poisoned_padded(input_channels, packed_x, true);
+    const std::vector<float> zero_tail_dy = make_poisoned_padded(output_channels, packed_dy, false);
+    overwriteGpuTensor<float>(x_storage, poisoned_x, stream);
+    overwriteGpuTensor<float>(dy_storage, zero_tail_dy, stream);
+    const std::vector<float> x_before = copyToCpuValues(x_storage, stream);
+    const std::vector<float> dy_before = copyToCpuValues(dy_storage, stream);
+    Stream other_stream(0);
+    EXPECT_THROW(wgrad.runOn(other_stream), std::runtime_error);
+    wgrad.runOn(stream);
+    stream.synchronize();
+    expectNear(copyToCpuValues(dw, stream), expected, 1.0e-5F);
+    for (float value : copyToCpuValues(dw, stream)) EXPECT_TRUE(std::isfinite(value));
+
+    auto expect_storage_unchanged = [&](const Tensor& storage, const std::vector<float>& before, const char* label) {
+        const std::vector<float> after = copyToCpuValues(storage, stream);
+        ASSERT_EQ(after.size(), before.size());
+        for (size_t i = 0; i < before.size(); ++i) {
+            if (std::isnan(before[i])) {
+                EXPECT_TRUE(std::isnan(after[i])) << label << " index " << i;
+            } else {
+                EXPECT_EQ(after[i], before[i]) << label << " index " << i;
+            }
+        }
+    };
+    expect_storage_unchanged(x_storage, x_before, "producer X");
+    expect_storage_unchanged(dy_storage, dy_before, "producer dY");
+
+    // Second execution independently proves dY sanitation: keep inactive X
+    // finite/zero and poison inactive dY with NaN/Inf.
+    const std::vector<float> zero_tail_x = make_poisoned_padded(input_channels, packed_x, false);
+    const std::vector<float> poisoned_dy = make_poisoned_padded(output_channels, packed_dy, true);
+    overwriteGpuTensor<float>(x_storage, zero_tail_x, stream);
+    overwriteGpuTensor<float>(dy_storage, poisoned_dy, stream);
+    const std::vector<float> x2_before = copyToCpuValues(x_storage, stream);
+    const std::vector<float> dy2_before = copyToCpuValues(dy_storage, stream);
+    wgrad.runOn(stream);
+    stream.synchronize();
+    expectNear(copyToCpuValues(dw, stream), expected, 1.0e-5F);
+    for (float value : copyToCpuValues(dw, stream)) EXPECT_TRUE(std::isfinite(value));
+    expect_storage_unchanged(x_storage, x2_before, "producer X second run");
+    expect_storage_unchanged(dy_storage, dy2_before, "producer dY second run");
+
+    const RaggedConv1dStageDiagnostic diagnostic = wgrad.diagnostic();
+    EXPECT_EQ(diagnostic.active_values, offsets.back());
+    EXPECT_EQ(diagnostic.selected_width_capacity, selected_width);
+    EXPECT_EQ(diagnostic.prebuilt_cudnn_plan_count, diagnostic.width_capacity_count);
+    EXPECT_GT(diagnostic.prebuilt_cudnn_plan_count, 0u);
+    EXPECT_EQ(diagnostic.explicit_unfold_workspace_bytes, 0u);
+}
+
+TEST(RaggedExpression, CausalConv1dT8CRmsNormIsExplicitPaddedRepresentationBoundary) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 12;
+    constexpr uint64_t channels = 4;
+    constexpr uint64_t kernel1_width = 3;
+    constexpr uint64_t kernel2_width = 2;
+    constexpr float epsilon = 1.0e-5F;
+    const std::vector<uint32_t> offsets32{0, 3, 3, 8};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+
+    std::vector<float> values(max_total_values * channels, 7777.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            values[value * channels + channel] =
+                static_cast<float>(static_cast<int>((value + 1) * (channel + 2)) - 7) * 0.125F;
+        }
+    }
+    std::vector<float> filter1(channels * channels * kernel1_width, 0.0F);
+    std::vector<float> filter2(channels * channels * kernel2_width, 0.0F);
+    for (uint64_t channel = 0; channel < channels; ++channel) {
+        filter1[(channel * channels + channel) * kernel1_width + 0] = 0.25F;
+        filter1[(channel * channels + channel) * kernel1_width + 1] = -0.5F;
+        filter1[(channel * channels + channel) * kernel1_width + 2] = 1.0F;
+        filter2[(channel * channels + channel) * kernel2_width + 0] = 0.5F;
+        filter2[(channel * channels + channel) * kernel2_width + 1] = 0.5F;
+    }
+    const std::vector<float> scale{1.0F, 0.5F, 1.5F, -2.0F};
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, channels}, values, stream);
+    Tensor gpu_filter1 = makeGpuTensor<float>({channels, channels, kernel1_width}, filter1, stream);
+    Tensor gpu_filter2 = makeGpuTensor<float>({channels, channels, kernel2_width}, filter2, stream);
+    Tensor gpu_scale = makeGpuTensor<float>({channels}, scale, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(
+        gpu_offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostOffsets(offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter1_expr = Expression::input("filter1", std::nullopt, DataType::FP32);
+    const Expression filter2_expr = Expression::input("filter2", std::nullopt, DataType::FP32);
+    const Expression scale_expr = Expression::input("scale", std::nullopt, DataType::FP32);
+    const RaggedExpression hidden =
+        input.causalConv1d(filter1_expr, channels, kernel1_width, 1, DataType::FP32, DataType::FP32);
+    const RaggedExpression normalized = hidden.rmsNorm(scale_expr, epsilon, DataType::FP32, DataType::FP32);
+    const RaggedExpression result =
+        normalized.causalConv1d(filter2_expr, channels, kernel2_width, 1, DataType::FP32, DataType::FP32);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    const std::unordered_map<std::string, Tensor> named_inputs{{"tokens.values", gpu_values},
+                                                               {"tokens.offsets", gpu_offsets},
+                                                               {"filter1", gpu_filter1},
+                                                               {"filter2", gpu_filter2},
+                                                               {"scale", gpu_scale}};
+    constexpr float inactive_sentinel = -8765.25F;
+    Tensor packed_output = makeGpuTensor<float>(
+        {max_total_values, channels},
+        std::vector<float>(max_total_values * channels, inactive_sentinel),
+        stream);
+    StampedExecutionPlan plan = equation.stamp(named_inputs, stream, {}, {{"y", packed_output}});
+
+    EXPECT_EQ(plan.stageKindNames(),
+              (std::vector<std::string>{"PaddedRaggedPack",
+                                        "RaggedConv1dCausal",
+                                        "PaddedRaggedUnpack",
+                                        "RmsNorm",
+                                        "PaddedRaggedPack",
+                                        "RaggedConv1dCausal",
+                                        "PaddedRaggedUnpack"}));
+    const std::vector<RaggedConv1dStageDiagnostic> conv_diagnostics = plan.raggedConv1dStageDiagnostics();
+    ASSERT_EQ(conv_diagnostics.size(), 2U);
+
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+
+    std::vector<float> expected_hidden = cpuRaggedCausalConv1d(values,
+                                                               offsets,
+                                                               filter1,
+                                                               max_total_values,
+                                                               channels,
+                                                               channels,
+                                                               kernel1_width,
+                                                               1,
+                                                               0.0F);
+    std::vector<float> expected_normalized(max_total_values * channels, 0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        float sum_sq = 0.0F;
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            const float x = expected_hidden[value * channels + channel];
+            sum_sq += x * x;
+        }
+        const float inv_rms = 1.0F / std::sqrt(sum_sq / static_cast<float>(channels) + epsilon);
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            expected_normalized[value * channels + channel] =
+                expected_hidden[value * channels + channel] * inv_rms * scale[channel];
+        }
+    }
+    const std::vector<float> expected = cpuRaggedCausalConv1d(expected_normalized,
+                                                              offsets,
+                                                              filter2,
+                                                              max_total_values,
+                                                              channels,
+                                                              channels,
+                                                              kernel2_width,
+                                                              1,
+                                                              0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            const uint64_t index = value * channels + channel;
+            EXPECT_NEAR(actual[index], expected[index], 2.0e-4F) << "active output index " << index;
+        }
+    }
+    for (uint64_t index = offsets.back() * channels; index < actual.size(); ++index) {
+        EXPECT_EQ(actual[index], inactive_sentinel) << "packed spare output index " << index;
+    }
+}
+
+TEST(RaggedExpression, LayerNormT8CCanonicalIdentityAndSerializationPreserveConfiguration) {
+    const RaggedExpression input =
+        RaggedExpression::input("tokens", makeDescriptor(DataType::FP32, {4}, 3, 11, DataType::UINT32));
+    const Expression scale = Expression::input("scale", std::nullopt, DataType::FP32);
+    const Expression bias = Expression::input("bias", std::nullopt, DataType::FP32);
+    const RaggedExpression normalized = input.layerNorm(scale, bias, 2.5e-4, DataType::FP32, DataType::FP16);
+    const RaggedExpression different_epsilon = input.layerNorm(scale, bias, 5.0e-4, DataType::FP32, DataType::FP16);
+
+    const std::string canonical = canonicalize(normalized.getValues().expression());
+    EXPECT_NE(canonical.find("LAYERNORM"), std::string::npos);
+    EXPECT_NE(canonical.find("hidden=4"), std::string::npos);
+    EXPECT_NE(canonical.find("packedRowsCapacity=11"), std::string::npos);
+    EXPECT_NE(canonical, canonicalize(different_epsilon.getValues().expression()));
+
+    const ExpressionDefinition definition =
+        ExpressionDefinition::fromOutputs(Expression::outputs({{"y", normalized.getValues()}}));
+    const nlohmann::json payload = definition.architectureJson();
+    bool found = false;
+    for (const auto& node : payload.at("nodes")) {
+        if (node.at("op").get<std::string>() != "layernorm") continue;
+        found = true;
+        EXPECT_EQ(node.at("layer_norm_normalized_feature_count").get<uint64_t>(), 4ULL);
+        EXPECT_DOUBLE_EQ(node.at("layer_norm_epsilon").get<double>(), 2.5e-4);
+        EXPECT_EQ(node.at("layer_norm_packed_row_capacity").get<uint64_t>(), 11ULL);
+    }
+    ASSERT_TRUE(found);
+
+    const ExpressionDefinition loaded = ExpressionDefinition::deserialize(payload);
+    EXPECT_EQ(loaded.architectureJson(), payload);
+    EXPECT_EQ(loaded.canonical_hash, definition.canonical_hash);
+}
+
+TEST(RaggedExpression, CausalConv1dT8CLayerNormIsExplicitPaddedRepresentationBoundary) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 12;
+    constexpr uint64_t channels = 4;
+    constexpr uint64_t kernel1_width = 3;
+    constexpr uint64_t kernel2_width = 2;
+    constexpr float epsilon = 1.0e-5F;
+    const std::vector<uint32_t> offsets32{0, 3, 3, 8};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+
+    std::vector<float> values(max_total_values * channels, 7777.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            values[value * channels + channel] =
+                static_cast<float>(static_cast<int>((value + 2) * (channel + 1)) - 6) * 0.125F;
+        }
+    }
+    std::vector<float> filter1(channels * channels * kernel1_width, 0.0F);
+    std::vector<float> filter2(channels * channels * kernel2_width, 0.0F);
+    for (uint64_t channel = 0; channel < channels; ++channel) {
+        filter1[(channel * channels + channel) * kernel1_width + 0] = -0.25F;
+        filter1[(channel * channels + channel) * kernel1_width + 1] = 0.5F;
+        filter1[(channel * channels + channel) * kernel1_width + 2] = 1.0F;
+        filter2[(channel * channels + channel) * kernel2_width + 0] = 0.75F;
+        filter2[(channel * channels + channel) * kernel2_width + 1] = -0.25F;
+    }
+    const std::vector<float> scale{1.0F, 0.5F, 1.5F, -2.0F};
+    const std::vector<float> bias{0.25F, -0.5F, 1.0F, 0.75F};
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, channels}, values, stream);
+    Tensor gpu_filter1 = makeGpuTensor<float>({channels, channels, kernel1_width}, filter1, stream);
+    Tensor gpu_filter2 = makeGpuTensor<float>({channels, channels, kernel2_width}, filter2, stream);
+    Tensor gpu_scale = makeGpuTensor<float>({channels}, scale, stream);
+    Tensor gpu_bias = makeGpuTensor<float>({channels}, bias, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(
+        gpu_offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostOffsets(offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter1_expr = Expression::input("filter1", std::nullopt, DataType::FP32);
+    const Expression filter2_expr = Expression::input("filter2", std::nullopt, DataType::FP32);
+    const Expression scale_expr = Expression::input("scale", std::nullopt, DataType::FP32);
+    const Expression bias_expr = Expression::input("bias", std::nullopt, DataType::FP32);
+    const RaggedExpression hidden =
+        input.causalConv1d(filter1_expr, channels, kernel1_width, 1, DataType::FP32, DataType::FP32);
+    const RaggedExpression normalized =
+        hidden.layerNorm(scale_expr, bias_expr, epsilon, DataType::FP32, DataType::FP32);
+    const RaggedExpression result =
+        normalized.causalConv1d(filter2_expr, channels, kernel2_width, 1, DataType::FP32, DataType::FP32);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    const std::unordered_map<std::string, Tensor> named_inputs{{"tokens.values", gpu_values},
+                                                               {"tokens.offsets", gpu_offsets},
+                                                               {"filter1", gpu_filter1},
+                                                               {"filter2", gpu_filter2},
+                                                               {"scale", gpu_scale},
+                                                               {"bias", gpu_bias}};
+    constexpr float inactive_sentinel = -7654.5F;
+    Tensor packed_output = makeGpuTensor<float>(
+        {max_total_values, channels},
+        std::vector<float>(max_total_values * channels, inactive_sentinel),
+        stream);
+    StampedExecutionPlan plan = equation.stamp(named_inputs, stream, {}, {{"y", packed_output}});
+
+    EXPECT_EQ(plan.stageKindNames(),
+              (std::vector<std::string>{"PaddedRaggedPack",
+                                        "RaggedConv1dCausal",
+                                        "PaddedRaggedUnpack",
+                                        "LayerNorm",
+                                        "PaddedRaggedPack",
+                                        "RaggedConv1dCausal",
+                                        "PaddedRaggedUnpack"}));
+    const std::vector<RaggedConv1dStageDiagnostic> conv_diagnostics = plan.raggedConv1dStageDiagnostics();
+    ASSERT_EQ(conv_diagnostics.size(), 2U);
+
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+
+    std::vector<float> expected_hidden = cpuRaggedCausalConv1d(values,
+                                                               offsets,
+                                                               filter1,
+                                                               max_total_values,
+                                                               channels,
+                                                               channels,
+                                                               kernel1_width,
+                                                               1,
+                                                               0.0F);
+    std::vector<float> expected_normalized(max_total_values * channels, 0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        float mean = 0.0F;
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            mean += expected_hidden[value * channels + channel];
+        }
+        mean /= static_cast<float>(channels);
+        float variance = 0.0F;
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            const float centered = expected_hidden[value * channels + channel] - mean;
+            variance += centered * centered;
+        }
+        variance /= static_cast<float>(channels);
+        const float inv_std = 1.0F / std::sqrt(variance + epsilon);
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            expected_normalized[value * channels + channel] =
+                (expected_hidden[value * channels + channel] - mean) * inv_std * scale[channel] + bias[channel];
+        }
+    }
+    const std::vector<float> expected = cpuRaggedCausalConv1d(expected_normalized,
+                                                              offsets,
+                                                              filter2,
+                                                              max_total_values,
+                                                              channels,
+                                                              channels,
+                                                              kernel2_width,
+                                                              1,
+                                                              0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            const uint64_t index = value * channels + channel;
+            EXPECT_NEAR(actual[index], expected[index], 3.0e-4F) << "active output index " << index;
+        }
+    }
+    for (uint64_t index = offsets.back() * channels; index < actual.size(); ++index) {
+        EXPECT_EQ(actual[index], inactive_sentinel) << "packed spare output index " << index;
+    }
+}
+
+TEST(RaggedExpression, CausalConv1dT8CMixedPointwiseRegionStopsAtNormalizationBoundaries) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 12;
+    constexpr uint64_t channels = 4;
+    constexpr uint64_t kernel1_width = 3;
+    constexpr uint64_t kernel2_width = 2;
+    constexpr float layer_epsilon = 1.0e-5F;
+    constexpr float rms_epsilon = 2.0e-5F;
+    const std::vector<uint32_t> offsets32{0, 4, 4, 9};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+
+    std::vector<float> values(max_total_values * channels, 9999.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            values[value * channels + channel] =
+                static_cast<float>(static_cast<int>((value + 1) * 3 + channel * 2) - 11) * 0.125F;
+        }
+    }
+    std::vector<float> filter1(channels * channels * kernel1_width, 0.0F);
+    std::vector<float> filter2(channels * channels * kernel2_width, 0.0F);
+    for (uint64_t channel = 0; channel < channels; ++channel) {
+        filter1[(channel * channels + channel) * kernel1_width + 0] = 0.25F;
+        filter1[(channel * channels + channel) * kernel1_width + 1] = -0.5F;
+        filter1[(channel * channels + channel) * kernel1_width + 2] = 1.0F;
+        filter2[(channel * channels + channel) * kernel2_width + 0] = 0.5F;
+        filter2[(channel * channels + channel) * kernel2_width + 1] = 0.5F;
+    }
+    const std::vector<float> pointwise_bias{0.25F, -0.5F, 0.75F, -1.0F};
+    const std::vector<float> layer_scale{1.0F, 0.75F, 1.25F, -1.5F};
+    const std::vector<float> layer_bias{0.5F, -0.25F, 0.125F, 0.75F};
+    const std::vector<float> rms_scale{1.0F, 0.5F, 1.5F, 2.0F};
+
+    Stream stream(0);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, channels}, values, stream);
+    Tensor gpu_filter1 = makeGpuTensor<float>({channels, channels, kernel1_width}, filter1, stream);
+    Tensor gpu_filter2 = makeGpuTensor<float>({channels, channels, kernel2_width}, filter2, stream);
+    Tensor gpu_pointwise_bias = makeGpuTensor<float>({channels}, pointwise_bias, stream);
+    Tensor gpu_layer_scale = makeGpuTensor<float>({channels}, layer_scale, stream);
+    Tensor gpu_layer_bias = makeGpuTensor<float>({channels}, layer_bias, stream);
+    Tensor gpu_rms_scale = makeGpuTensor<float>({channels}, rms_scale, stream);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(
+        gpu_offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostOffsets(offsets);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter1_expr = Expression::input("filter1", std::nullopt, DataType::FP32);
+    const Expression filter2_expr = Expression::input("filter2", std::nullopt, DataType::FP32);
+    const Expression pointwise_bias_expr = Expression::input("pointwise_bias", std::nullopt, DataType::FP32);
+    const Expression layer_scale_expr = Expression::input("layer_scale", std::nullopt, DataType::FP32);
+    const Expression layer_bias_expr = Expression::input("layer_bias", std::nullopt, DataType::FP32);
+    const Expression rms_scale_expr = Expression::input("rms_scale", std::nullopt, DataType::FP32);
+
+    const RaggedExpression hidden =
+        input.causalConv1d(filter1_expr, channels, kernel1_width, 1, DataType::FP32, DataType::FP32);
+    const RaggedExpression biased = hidden.mapValues([&](const Expression& x) { return x + pointwise_bias_expr; });
+    const RaggedExpression layer_normalized =
+        biased.layerNorm(layer_scale_expr, layer_bias_expr, layer_epsilon, DataType::FP32, DataType::FP32);
+    const RaggedExpression activated = layer_normalized.relu();
+    const RaggedExpression rms_normalized =
+        activated.rmsNorm(rms_scale_expr, rms_epsilon, DataType::FP32, DataType::FP32);
+    const RaggedExpression result =
+        rms_normalized.causalConv1d(filter2_expr, channels, kernel2_width, 1, DataType::FP32, DataType::FP32);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", result.getValues()}}).physicalOutputs(), 0);
+    const std::unordered_map<std::string, Tensor> named_inputs{{"tokens.values", gpu_values},
+                                                               {"tokens.offsets", gpu_offsets},
+                                                               {"filter1", gpu_filter1},
+                                                               {"filter2", gpu_filter2},
+                                                               {"pointwise_bias", gpu_pointwise_bias},
+                                                               {"layer_scale", gpu_layer_scale},
+                                                               {"layer_bias", gpu_layer_bias},
+                                                               {"rms_scale", gpu_rms_scale}};
+    constexpr float inactive_sentinel = -4321.75F;
+    Tensor packed_output = makeGpuTensor<float>(
+        {max_total_values, channels},
+        std::vector<float>(max_total_values * channels, inactive_sentinel),
+        stream);
+    StampedExecutionPlan plan = equation.stamp(named_inputs, stream, {}, {{"y", packed_output}});
+
+    // Normalization is an explicit padded-representation boundary. Because the
+    // channel-broadcast add is layout-compatible on either side of that boundary,
+    // the compiler may place the unpack before it and execute the add as an
+    // ordinary packed fused kernel. That is preferable here: it touches only the
+    // active packed values and does not introduce another representation change.
+    EXPECT_EQ(plan.stageKindNames(),
+              (std::vector<std::string>{"PaddedRaggedPack",
+                                        "RaggedConv1dCausal",
+                                        "PaddedRaggedUnpack",
+                                        "FusedKernel",
+                                        "LayerNorm",
+                                        "FusedKernel",
+                                        "RmsNorm",
+                                        "PaddedRaggedPack",
+                                        "RaggedConv1dCausal",
+                                        "PaddedRaggedUnpack"}));
+
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+
+    std::vector<float> expected = cpuRaggedCausalConv1d(values,
+                                                        offsets,
+                                                        filter1,
+                                                        max_total_values,
+                                                        channels,
+                                                        channels,
+                                                        kernel1_width,
+                                                        1,
+                                                        0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            expected[value * channels + channel] += pointwise_bias[channel];
+        }
+        float mean = 0.0F;
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            mean += expected[value * channels + channel];
+        }
+        mean /= static_cast<float>(channels);
+        float variance = 0.0F;
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            const float centered = expected[value * channels + channel] - mean;
+            variance += centered * centered;
+        }
+        variance /= static_cast<float>(channels);
+        const float inv_std = 1.0F / std::sqrt(variance + layer_epsilon);
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            float normalized =
+                (expected[value * channels + channel] - mean) * inv_std * layer_scale[channel] + layer_bias[channel];
+            expected[value * channels + channel] = std::max(normalized, 0.0F);
+        }
+        float sum_sq = 0.0F;
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            const float x = expected[value * channels + channel];
+            sum_sq += x * x;
+        }
+        const float inv_rms = 1.0F / std::sqrt(sum_sq / static_cast<float>(channels) + rms_epsilon);
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            expected[value * channels + channel] *= inv_rms * rms_scale[channel];
+        }
+    }
+    expected = cpuRaggedCausalConv1d(expected,
+                                     offsets,
+                                     filter2,
+                                     max_total_values,
+                                     channels,
+                                     channels,
+                                     kernel2_width,
+                                     1,
+                                     0.0F);
+    for (uint64_t value = 0; value < offsets.back(); ++value) {
+        for (uint64_t channel = 0; channel < channels; ++channel) {
+            const uint64_t index = value * channels + channel;
+            EXPECT_NEAR(actual[index], expected[index], 4.0e-4F) << "active output index " << index;
+        }
+    }
+    for (uint64_t index = offsets.back() * channels; index < actual.size(); ++index) {
+        EXPECT_EQ(actual[index], inactive_sentinel) << "packed spare output index " << index;
     }
 }

@@ -1075,6 +1075,26 @@ DeviceDatasetStorage deviceDatasetStorageFromPython(nb::object value, const std:
             .c_str());
 }
 
+WindowedDeviceCache windowedDeviceCacheFromPython(nb::object value, const std::string& argumentName) {
+    WindowedDeviceCache policy{};
+    if (nb::try_cast<WindowedDeviceCache>(value, policy, false)) {
+        return policy;
+    }
+    if (nb::isinstance<nb::str>(value)) {
+        const std::string text = pybind::castOrTypeError<std::string>(value, argumentName, "str", false);
+        try {
+            return windowedDeviceCacheFromName(text);
+        } catch (const std::runtime_error& e) {
+            throw nb::value_error(e.what());
+        }
+    }
+    throw nb::type_error(
+        (argumentName +
+         " must be a thor.data.WindowedDeviceCache value or one of: "
+         "'off', 'auto', 'required'.")
+            .c_str());
+}
+
 TrainingEventPhase trainingEventPhaseFromString(const std::string& value) {
     if (value == "train") {
         return TrainingEventPhase::TRAIN;
@@ -2421,14 +2441,17 @@ fields reuse a named window source and store only compact row references.
            Thor::DatasetSplitManifest splits,
            Thor::BatchPolicy batching,
            std::string datasetName,
-           nb::object deviceStorage) -> std::shared_ptr<Thor::TrainingData> {
+           nb::object deviceStorage,
+           nb::object windowedDeviceCache) -> std::shared_ptr<Thor::TrainingData> {
             (void)cls;
             if (dataset == nullptr) {
                 throw nb::value_error("TrainingData dataset must not be None");
             }
             Thor::DatasetAccessPolicy accessPolicy{
                 .deviceStorage = deviceDatasetStorageFromPython(
-                    std::move(deviceStorage), "device_storage")};
+                    std::move(deviceStorage), "device_storage"),
+                .windowedDeviceCache = windowedDeviceCacheFromPython(
+                    std::move(windowedDeviceCache), "windowed_device_cache")};
             return std::make_shared<Thor::TrainingData>(
                 std::move(dataset),
                 std::move(splits),
@@ -2441,16 +2464,18 @@ fields reuse a named window source and store only compact row references.
         "splits"_a,
         "batching"_a,
         "dataset_name"_a = "dataset",
-        "device_storage"_a = "off");
+        "device_storage"_a = "off",
+        "windowed_device_cache"_a = "auto");
     training_data.def(
         "__init__",
         [](Thor::TrainingData*, std::shared_ptr<Thor::NamedDataset>, Thor::DatasetSplitManifest,
-           Thor::BatchPolicy, std::string, nb::object) {},
+           Thor::BatchPolicy, std::string, nb::object, nb::object) {},
         "dataset"_a,
         "splits"_a,
         "batching"_a,
         "dataset_name"_a = "dataset",
-        "device_storage"_a = "off");
+        "device_storage"_a = "off",
+        "windowed_device_cache"_a = "auto");
     training_data.def(
         "open_session",
         [](const Thor::TrainingData& self, uint64_t maxInFlightBatches) {
@@ -2480,6 +2505,11 @@ fields reuse a named window source and store only compact row references.
         "device_storage",
         [](const Thor::TrainingData& self) {
             return self.getAccessPolicy().deviceStorage;
+        });
+    training_data.def_prop_ro(
+        "windowed_device_cache",
+        [](const Thor::TrainingData& self) {
+            return self.getAccessPolicy().windowedDeviceCache;
         });
 
     auto dataset_writer = nb::class_<DatasetWriter>(training, "DatasetWriter");
@@ -2666,6 +2696,12 @@ Multiple windowed fields may reference the same persisted sequence.
                                              DeviceDatasetStorage::STRICT_WINDOWED_ONLY);
     device_dataset_storage.attr("__module__") = "thor.data";
 
+    auto windowed_device_cache = nb::enum_<WindowedDeviceCache>(training, "WindowedDeviceCache")
+                                     .value("OFF", WindowedDeviceCache::OFF)
+                                     .value("AUTO", WindowedDeviceCache::AUTO)
+                                     .value("REQUIRED", WindowedDeviceCache::REQUIRED);
+    windowed_device_cache.attr("__module__") = "thor.data";
+
     auto dataset_access_policy = nb::class_<Thor::DatasetAccessPolicy>(training, "DatasetAccessPolicy");
     dataset_access_policy.attr("__module__") = "thor.data";
     dataset_access_policy.def(nb::init<>());
@@ -2675,6 +2711,29 @@ Multiple windowed fields may reference the same persisted sequence.
         [](Thor::DatasetAccessPolicy& self, nb::object value) {
             self.deviceStorage = deviceDatasetStorageFromPython(std::move(value), "device_storage");
         });
+    dataset_access_policy.def_prop_rw(
+        "windowed_device_cache",
+        [](const Thor::DatasetAccessPolicy& self) { return self.windowedDeviceCache; },
+        [](Thor::DatasetAccessPolicy& self, nb::object value) {
+            self.windowedDeviceCache =
+                windowedDeviceCacheFromPython(std::move(value), "windowed_device_cache");
+        });
+
+    auto windowed_device_cache_report =
+        nb::class_<WindowedDeviceCacheReport>(training, "WindowedDeviceCacheReport");
+    windowed_device_cache_report.attr("__module__") = "thor.training";
+    windowed_device_cache_report.def_ro("requested", &WindowedDeviceCacheReport::requested);
+    windowed_device_cache_report.def_ro("attempted", &WindowedDeviceCacheReport::attempted);
+    windowed_device_cache_report.def_ro("used", &WindowedDeviceCacheReport::used);
+    windowed_device_cache_report.def_ro("reason", &WindowedDeviceCacheReport::reason);
+    windowed_device_cache_report.def_ro("eligible_sources", &WindowedDeviceCacheReport::eligibleSources);
+    windowed_device_cache_report.def_ro("active_sources", &WindowedDeviceCacheReport::activeSources);
+    windowed_device_cache_report.def_ro("eligible_source_bytes", &WindowedDeviceCacheReport::eligibleSourceBytes);
+    windowed_device_cache_report.def_ro("budget_bytes", &WindowedDeviceCacheReport::budgetBytes);
+    windowed_device_cache_report.def_ro("max_access_policy_window_bytes",
+                                        &WindowedDeviceCacheReport::maxAccessPolicyWindowBytes);
+    windowed_device_cache_report.def_ro("active_unique_bytes", &WindowedDeviceCacheReport::activeUniqueBytes);
+    windowed_device_cache_report.def_ro("hit_ratio", &WindowedDeviceCacheReport::hitRatio);
 
     auto device_dataset_storage_report = nb::class_<DeviceDatasetStorageReport>(training, "DeviceDatasetStorageReport");
     device_dataset_storage_report.attr("__module__") = "thor.training";
@@ -2693,6 +2752,8 @@ Multiple windowed fields may reference the same persisted sequence.
     device_dataset_storage_report.def_ro("resident_construction_started",
                                          &DeviceDatasetStorageReport::residentConstructionStarted);
     device_dataset_storage_report.def_ro("materialization_seconds", &DeviceDatasetStorageReport::materializationSeconds);
+    device_dataset_storage_report.def_ro("windowed_device_cache",
+                                         &DeviceDatasetStorageReport::windowedDeviceCache);
 
     auto trainer_fit_options = nb::class_<TrainerFitOptions>(training, "TrainerFitOptions");
     trainer_fit_options.attr("__module__") = "thor.training";

@@ -38,9 +38,10 @@ std::shared_ptr<Network> deserializePhaseNetwork(const json& networkJson, std::s
             throw std::runtime_error("TrainingPhase network 'ragged_network_inputs' is not a JSON array.");
         }
         for (const json& raggedInputJson : raggedInputs) {
-            if (raggedInputJson.at("version").get<std::string>() != "1.0.0") {
+            const std::string raggedInputVersion = raggedInputJson.at("version").get<std::string>();
+            if (raggedInputVersion != "1.0.0" && raggedInputVersion != "1.1.0") {
                 throw std::runtime_error("Unsupported TrainingPhase network ragged_network_inputs version: " +
-                                         raggedInputJson.at("version").get<std::string>());
+                                         raggedInputVersion);
             }
             const std::string name = raggedInputJson.at("name").get<std::string>();
             const std::string valuesInputName = raggedInputJson.at("values_input_name").get<std::string>();
@@ -49,7 +50,10 @@ std::shared_ptr<Network> deserializePhaseNetwork(const json& networkJson, std::s
             const uint64_t offsetsTensorId = raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
             Tensor values = network->getApiTensorByOriginalId(valuesTensorId);
             Tensor offsets = network->getApiTensorByOriginalId(offsetsTensorId);
-            network->registerRaggedNetworkInput(name, RaggedTensor(values, offsets), valuesInputName, offsetsInputName);
+            RaggedTensor raggedTensor = raggedInputJson.contains("max_values_per_row")
+                ? RaggedTensor(values, offsets, raggedInputJson.at("max_values_per_row").get<uint64_t>())
+                : RaggedTensor(values, offsets);
+            network->registerRaggedNetworkInput(name, raggedTensor, valuesInputName, offsetsInputName);
         }
     }
 
@@ -59,9 +63,10 @@ std::shared_ptr<Network> deserializePhaseNetwork(const json& networkJson, std::s
             throw std::runtime_error("TrainingPhase network 'ragged_network_outputs' is not a JSON array.");
         }
         for (const json& raggedOutputJson : raggedOutputs) {
-            if (raggedOutputJson.at("version").get<std::string>() != "1.0.0") {
+            const std::string raggedOutputVersion = raggedOutputJson.at("version").get<std::string>();
+            if (raggedOutputVersion != "1.0.0" && raggedOutputVersion != "1.1.0") {
                 throw std::runtime_error("Unsupported TrainingPhase network ragged_network_outputs version: " +
-                                         raggedOutputJson.at("version").get<std::string>());
+                                         raggedOutputVersion);
             }
             const std::string name = raggedOutputJson.at("name").get<std::string>();
             const std::string valuesOutputName = raggedOutputJson.at("values_output_name").get<std::string>();
@@ -70,7 +75,10 @@ std::shared_ptr<Network> deserializePhaseNetwork(const json& networkJson, std::s
             const uint64_t offsetsTensorId = raggedOutputJson.at("offsets_tensor_id").get<uint64_t>();
             Tensor values = network->getApiTensorByOriginalId(valuesTensorId);
             Tensor offsets = network->getApiTensorByOriginalId(offsetsTensorId);
-            network->registerRaggedNetworkOutput(name, RaggedTensor(values, offsets), valuesOutputName, offsetsOutputName);
+            RaggedTensor raggedTensor = raggedOutputJson.contains("max_values_per_row")
+                ? RaggedTensor(values, offsets, raggedOutputJson.at("max_values_per_row").get<uint64_t>())
+                : RaggedTensor(values, offsets);
+            network->registerRaggedNetworkOutput(name, raggedTensor, valuesOutputName, offsetsOutputName);
         }
     }
 

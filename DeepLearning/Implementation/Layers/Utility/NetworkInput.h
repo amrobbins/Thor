@@ -303,7 +303,9 @@ class NetworkInput : public Layer {
         bool validationPass,
         RowPartitionDescriptor descriptor,
         std::optional<uint64_t> hostActiveValueCount,
+        std::optional<uint64_t> hostMaxActiveRowLength,
         uint32_t batchSize,
+        std::optional<std::vector<uint64_t>> hostOffsets = std::nullopt,
         std::optional<Thor::BatchSourceReference> sourceReference = std::nullopt) {
         forwardMaterializedInput(
             featureInput,
@@ -311,7 +313,9 @@ class NetworkInput : public Layer {
             batchSize,
             std::move(sourceReference),
             descriptor,
-            hostActiveValueCount);
+            hostActiveValueCount,
+            hostMaxActiveRowLength,
+            std::move(hostOffsets));
     }
 
     virtual void forwardRowPartitionOffsets(
@@ -320,7 +324,9 @@ class NetworkInput : public Layer {
         Event copyToSourceTensorFinished,
         RowPartitionDescriptor descriptor,
         std::optional<uint64_t> hostActiveValueCount,
+        std::optional<uint64_t> hostMaxActiveRowLength,
         uint32_t batchSize,
+        std::optional<std::vector<uint64_t>> hostOffsets = std::nullopt,
         std::optional<Thor::BatchSourceReference> sourceReference = std::nullopt) {
         if (isPassThrough() || isDeviceLoad()) {
             stream.waitEvent(copyToSourceTensorFinished);
@@ -332,7 +338,9 @@ class NetworkInput : public Layer {
             validationPass,
             descriptor,
             hostActiveValueCount,
+            hostMaxActiveRowLength,
             batchSize,
+            std::move(hostOffsets),
             std::move(sourceReference));
     }
 
@@ -343,7 +351,9 @@ class NetworkInput : public Layer {
         uint32_t batchSize,
         std::optional<Thor::BatchSourceReference> sourceReference,
         std::optional<RowPartitionDescriptor> rowPartitionDescriptor = std::nullopt,
-        std::optional<uint64_t> rowPartitionHostActiveValueCount = std::nullopt) {
+        std::optional<uint64_t> rowPartitionHostActiveValueCount = std::nullopt,
+        std::optional<uint64_t> rowPartitionHostMaxActiveRowLength = std::nullopt,
+        std::optional<std::vector<uint64_t>> rowPartitionHostOffsets = std::nullopt) {
         const bool emitDiagnostics = layerSubmitDiagnosticsActive();
         const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         if (isPassThrough()) {
@@ -413,13 +423,25 @@ class NetworkInput : public Layer {
                 stream.synchronize();
             }
             RowPartitionRuntime rowPartition(featureOutput.value(), rowPartitionDescriptor.value());
+            if (rowPartitionHostOffsets.has_value()) {
+                rowPartition.setHostOffsets(std::move(rowPartitionHostOffsets.value()));
+            } else {
+                rowPartition.clearHostOffsets();
+            }
             if (rowPartitionHostActiveValueCount.has_value()) {
                 rowPartition.setHostActiveValueCount(rowPartitionHostActiveValueCount.value());
             } else {
                 rowPartition.clearHostActiveValueCount();
             }
+            if (rowPartitionHostMaxActiveRowLength.has_value()) {
+                rowPartition.setHostMaxActiveRowLength(rowPartitionHostMaxActiveRowLength.value());
+            } else {
+                rowPartition.clearHostMaxActiveRowLength();
+            }
         } else {
             THOR_THROW_IF_FALSE(!rowPartitionHostActiveValueCount.has_value());
+            THOR_THROW_IF_FALSE(!rowPartitionHostMaxActiveRowLength.has_value());
+            THOR_THROW_IF_FALSE(!rowPartitionHostOffsets.has_value());
         }
         if (!contentDimensions.has_value() && sourceReference.has_value()) {
             sourceReference->recordConsumption(stream);
@@ -496,6 +518,34 @@ class NetworkInput : public Layer {
         THOR_THROW_IF_FALSE(!slot.outputBuffer.has_value());
         slot.deviceBatchReference = deviceBatchReference;
         if (sourceReference.has_value()) sourceReference->waitUntilReady(stream);
+
+        // A device reference may identify a compact source whose repeated
+        // reads have an active persisting-L2 lease. NetworkInput owns the
+        // processing stream, so this is the boundary where the descriptive
+        // batch hint becomes a CUDA stream access-policy window. Applying or
+        // clearing the hint is deliberately best-effort: L2 persistence is a
+        // performance optimization and must never make materialization fail.
+        const std::optional<Thor::DeviceBatchAccessPolicy> accessPolicy =
+            slot.deviceBatchReference.value().getAccessPolicy();
+        if (accessPolicy.has_value() &&
+            accessPolicy->deviceNum == stream.getGpuNum()) {
+            const ThorImplementation::PersistingL2OperationResult result =
+                stream.trySetPersistingL2AccessPolicyWindow(
+                    accessPolicy->base,
+                    accessPolicy->bytes,
+                    accessPolicy->persistingHitRatio,
+                    accessPolicy->tensorId,
+                    accessPolicy->generation);
+            if (!result.succeeded()) {
+                // Do not leave a previously configured window active when a
+                // new hint cannot be applied. Stream caches successful set/clear
+                // state, so steady-state batches do not issue CUDA attribute calls.
+                (void)stream.tryClearPersistingL2AccessPolicyWindow();
+            }
+        } else {
+            (void)stream.tryClearPersistingL2AccessPolicyWindow();
+        }
+
         slot.deviceBatchReference.value().enqueueMaterialization(featureOutput.value(), stream);
         if (sourceReference.has_value()) sourceReference->recordConsumption(stream);
 

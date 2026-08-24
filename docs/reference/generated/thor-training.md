@@ -8,6 +8,8 @@ Public API metadata source: **python __all__**.
 
 ::: thor.training.DeviceDatasetStorageReport
 
+::: thor.training.WindowedDeviceCacheReport
+
 ::: thor.training.EarlyCompletionPolicy
 
 ::: thor.training.EarlyCompletionRule

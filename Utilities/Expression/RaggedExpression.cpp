@@ -214,6 +214,126 @@ RaggedExpression RaggedExpression::cast(DataType output_dtype) const {
     return withValues(values.cast(output_dtype), descriptorWithValuesDataType(descriptor, output_dtype));
 }
 
+RaggedExpression RaggedExpression::rmsNorm(const Expression& scale,
+                                             double epsilon,
+                                             std::optional<DataType> compute_dtype,
+                                             std::optional<DataType> output_dtype) const {
+    validateInitialized("rmsNorm");
+    const std::vector<uint64_t> trailing = descriptor.getTrailingDimensions();
+    if (trailing.size() != 1 || trailing.front() == 0) {
+        throw std::invalid_argument("RaggedExpression::rmsNorm currently requires exactly one channel dimension.");
+    }
+    const DataType result_dtype = output_dtype.value_or(descriptor.getValuesDataType());
+    Expression normalized = Expression::rmsNorm(executionValues,
+                                                scale,
+                                                trailing.front(),
+                                                epsilon,
+                                                compute_dtype.value_or(DataType::FP32),
+                                                result_dtype,
+                                                descriptor.getMaxTotalValues());
+    return withValues(normalized, descriptorWithValuesDataType(descriptor, result_dtype));
+}
+
+RaggedExpression RaggedExpression::layerNorm(const Expression& scale,
+                                             const Expression& bias,
+                                             double epsilon,
+                                             std::optional<DataType> compute_dtype,
+                                             std::optional<DataType> output_dtype) const {
+    validateInitialized("layerNorm");
+    const std::vector<uint64_t> trailing = descriptor.getTrailingDimensions();
+    if (trailing.size() != 1 || trailing.front() == 0) {
+        throw std::invalid_argument(
+            "RaggedExpression::layerNorm currently requires exactly one non-zero trailing channel dimension.");
+    }
+    const uint64_t channels = trailing.front();
+    const DataType result_dtype = output_dtype.value_or(descriptor.getValuesDataType());
+    Expression normalized = Expression::layerNorm(executionValues,
+                                                  scale,
+                                                  bias,
+                                                  channels,
+                                                  epsilon,
+                                                  compute_dtype.value_or(DataType::FP32),
+                                                  result_dtype,
+                                                  descriptor.getMaxTotalValues());
+    return withValues(normalized, descriptorWithValuesDataType(descriptor, result_dtype));
+}
+
+RaggedExpression RaggedExpression::conv1d(const Expression& filter,
+                                          uint64_t output_channels,
+                                          uint64_t kernel_width,
+                                          ConvolutionSpatial1d spatial,
+                                          std::optional<DataType> compute_dtype,
+                                          std::optional<DataType> output_dtype,
+                                          uint64_t groups) const {
+    validateInitialized("conv1d");
+    const std::vector<uint64_t> trailing = descriptor.getTrailingDimensions();
+    if (trailing.size() != 1) {
+        throw std::invalid_argument("RaggedExpression::conv1d requires exactly one trailing channel dimension.");
+    }
+    if (output_channels == 0 || kernel_width == 0 || groups == 0) {
+        throw std::invalid_argument("RaggedExpression::conv1d requires positive output_channels, kernel_width, and groups.");
+    }
+    if (trailing.front() % groups != 0 || output_channels % groups != 0) {
+        throw std::invalid_argument("RaggedExpression::conv1d requires input and output channels divisible by groups.");
+    }
+    if (!descriptor.hasMaxValuesPerRow()) {
+        throw std::invalid_argument(
+            "RaggedExpression::conv1d requires max_values_per_row in the row-partition descriptor so placement can "
+            "prebuild the finite convolution width family.");
+    }
+    if (spatial.stride != 1) {
+        throw std::invalid_argument("RaggedExpression::conv1d T6A supports only stride=1.");
+    }
+    if (spatial.dilation <= 0) {
+        throw std::invalid_argument("RaggedExpression::conv1d dilation must be positive.");
+    }
+    const ConvolutionSpatial1d causal = ConvolutionSpatial1d::causal(kernel_width, 1, spatial.dilation);
+    if (spatial.pre_padding != causal.pre_padding || spatial.post_padding != causal.post_padding) {
+        throw std::invalid_argument("RaggedExpression::conv1d T6A supports only causal padding.");
+    }
+
+    Expression output_values = Expression::ternaryOp(values, filter, offsets, ExprOp::RAGGED_CONV1D_CAUSAL);
+    ExprNode& node = output_values.expr->nodes.at(output_values.nodeIndex);
+    node.ragged_conv_spatial_1d = spatial;
+    node.ragged_conv1d_input_channels = trailing.front();
+    node.ragged_conv1d_output_channels = output_channels;
+    node.ragged_conv1d_kernel_width = kernel_width;
+    node.ragged_conv1d_groups = groups;
+    node.ragged_runtime_batch_size = descriptor.getBatchSize();
+    node.ragged_runtime_max_active_values = descriptor.getMaxTotalValues();
+    node.ragged_runtime_max_values_per_row = descriptor.getMaxValuesPerRow();
+    node.ragged_runtime_elements_per_value = output_channels;
+    if (compute_dtype.has_value()) {
+        node.compute_dtype = compute_dtype.value();
+    }
+    const DataType values_dtype = output_dtype.value_or(descriptor.getValuesDataType());
+    node.output_dtype = values_dtype;
+    const RaggedTensorDescriptor output_descriptor(values_dtype,
+                                                    {output_channels},
+                                                    descriptor.getBatchSize(),
+                                                    descriptor.getMaxTotalValues(),
+                                                    descriptor.getMaxValuesPerRow(),
+                                                    descriptor.getOffsetsDataType(),
+                                                    descriptor.getRaggedRank());
+    return RaggedExpression(std::move(output_values), offsets, output_descriptor);
+}
+
+RaggedExpression RaggedExpression::causalConv1d(const Expression& filter,
+                                                uint64_t output_channels,
+                                                uint64_t kernel_width,
+                                                int32_t dilation,
+                                                std::optional<DataType> compute_dtype,
+                                                std::optional<DataType> output_dtype,
+                                                uint64_t groups) const {
+    return conv1d(filter,
+                  output_channels,
+                  kernel_width,
+                  ConvolutionSpatial1d::causal(kernel_width, 1, dilation),
+                  compute_dtype,
+                  output_dtype,
+                  groups);
+}
+
 RaggedExpression RaggedExpression::operator+(const RaggedExpression& other) const { return binaryValuewise(other, ExprOp::ADD, "operator+"); }
 RaggedExpression RaggedExpression::operator-(const RaggedExpression& other) const { return binaryValuewise(other, ExprOp::SUB, "operator-"); }
 RaggedExpression RaggedExpression::operator*(const RaggedExpression& other) const { return binaryValuewise(other, ExprOp::MUL, "operator*"); }

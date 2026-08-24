@@ -965,7 +965,8 @@ void CustomLayer::enableRaggedInterfaces(const std::vector<RaggedTensorMap>& rag
                 }
                 outputInterface.emplace(outputName, explicitOutput->second);
             } else {
-                outputInterface.emplace(outputName, RaggedTensor(outputValues, offsets));
+                outputInterface.emplace(
+                    outputName, raggedInputs[interfaceIndex].at(inputNames.front()).withValues(outputValues));
             }
         }
         raggedOutputInterfaces.push_back(std::move(outputInterface));

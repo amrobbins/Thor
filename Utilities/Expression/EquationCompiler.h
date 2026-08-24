@@ -24,7 +24,31 @@
 namespace ThorImplementation {
 
 struct PhysicalExecutionStage {
-    enum class Kind { FusedKernel, CudaKernel, Reduction, ArgMinMax, SegmentedReduction, SegmentedBroadcast, Scan, Softmax, RmsNorm, RmsNormBackward, EmbeddingLookup, Matmul, InPlaceRope, Attention, AttentionBackward, Convolution, ConvolutionBackward, ReduceMinMaxBackward, ScanMinMaxBackward };
+    enum class Kind {
+        FusedKernel,
+        CudaKernel,
+        Reduction,
+        ArgMinMax,
+        SegmentedReduction,
+        SegmentedBroadcast,
+        RaggedConv1dCausal,
+        RaggedConv1dCausalBackwardData,
+        Scan,
+        Softmax,
+        RmsNorm,
+        LayerNorm,
+        RmsNormBackward,
+        EmbeddingLookup,
+        Matmul,
+        InPlaceRope,
+        Attention,
+        AttentionBackward,
+        Convolution,
+        ConvolutionBackward,
+        ReduceMinMaxBackward,
+        ScanMinMaxBackward,
+        RaggedConv1dCausalBackwardFilter
+    };
 
     Kind kind;
     PhysicalExpression expr;
@@ -49,15 +73,26 @@ class EquationCompiler {
     static std::shared_ptr<CompiledEquation> compileFusedStage(const PhysicalExecutionStage& stage,
                                                                const EquationSignature& sig,
                                                                bool use_uint32_index_math = true);
+    static std::shared_ptr<CompiledEquation> compilePaddedRaggedPointwiseStage(
+        const PhysicalExecutionStage& stage,
+        const EquationSignature& sig,
+        const std::vector<PaddedRaggedPointwiseInputAccess>& input_access,
+        uint64_t batch_size,
+        uint64_t channels);
     static std::vector<PhysicalExecutionStage> splitAtReductionBoundaries(const PhysicalOutputs& outputs);
 
     static std::shared_ptr<CompiledReduction> compileReduction(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledArgMinMax> compileArgMinMax(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledSegmentedReduction> compileSegmentedReduction(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledSegmentedBroadcast> compileSegmentedBroadcast(const PhysicalExpression& expr);
+    static std::shared_ptr<CompiledRaggedConv1dCausal> compileRaggedConv1dCausal(const PhysicalExpression& expr);
+    static std::shared_ptr<CompiledRaggedConv1dCausalBackwardData> compileRaggedConv1dCausalBackwardData(const PhysicalExpression& expr);
+    static std::shared_ptr<CompiledRaggedConv1dCausalBackwardFilter>
+    compileRaggedConv1dCausalBackwardFilter(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledScan> compileScan(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledSoftmax> compileSoftmax(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledRmsNorm> compileRmsNorm(const PhysicalExpression& expr);
+    static std::shared_ptr<CompiledLayerNorm> compileLayerNorm(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledRmsNormBackward> compileRmsNormBackward(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledEmbeddingLookup> compileEmbeddingLookup(const PhysicalExpression& expr);
     static std::shared_ptr<CompiledMatmul> compileMatmul(const PhysicalExpression& expr, const std::vector<CompiledStageOutput>& outputs = {});

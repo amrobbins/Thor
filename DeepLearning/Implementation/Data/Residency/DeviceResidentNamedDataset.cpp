@@ -330,6 +330,7 @@ uint64_t compactStorageBytes(
     bool needsRecords = false;
     uint64_t bytes = 0;
     std::set<std::string> sourceNames;
+    std::set<std::string> sourcesNeedingSequenceMetadata;
     std::set<std::string> affineFieldNames;
     for (const auto &entry : requested) {
         if (entry.second.kind == RequestedCompactFieldKind::DIRECT) {
@@ -338,14 +339,21 @@ uint64_t compactStorageBytes(
         }
         if (entry.second.kind == RequestedCompactFieldKind::RAGGED) {
             needsRecords = true;
-            bytes = checkedAdd(
-                bytes,
-                entry.second.raggedSpec->valuesNumBytes,
-                "Compact resident ragged values storage");
+            const DatasetLayout::RaggedTensorSpec &spec = *entry.second.raggedSpec;
+            if (spec.isWindowedSourceBacked()) {
+                THOR_THROW_IF_FALSE(spec.sourceName.has_value());
+                sourceNames.insert(spec.sourceName.value());
+            } else {
+                bytes = checkedAdd(
+                    bytes,
+                    spec.valuesNumBytes,
+                    "Compact resident ragged values storage");
+            }
             continue;
         }
         const DatasetLayout::WindowedTensorSpec &spec = *entry.second.windowSpec;
         sourceNames.insert(spec.sourceName);
+        sourcesNeedingSequenceMetadata.insert(spec.sourceName);
         if (spec.referenceMode == DatasetLayout::WindowedTensorReferenceMode::INDEXED) {
             needsRecords = true;
         } else {
@@ -365,12 +373,15 @@ uint64_t compactStorageBytes(
         const DatasetLayout::WindowedTensorSourceSpec &source =
             description.layout.windowedTensorSource(sourceName);
         bytes = checkedAdd(bytes, source.sourceNumBytes, "Compact resident source storage");
-        bytes = checkedAdd(
-            bytes,
-            checkedMul(static_cast<uint64_t>(source.sourceSequences.size()),
-                       static_cast<uint64_t>(sizeof(DeviceResidentWindowSourceSequence)),
-                       "Compact resident source metadata"),
-            "Compact resident storage");
+        if (sourcesNeedingSequenceMetadata.find(sourceName) !=
+            sourcesNeedingSequenceMetadata.end()) {
+            bytes = checkedAdd(
+                bytes,
+                checkedMul(static_cast<uint64_t>(source.sourceSequences.size()),
+                           static_cast<uint64_t>(sizeof(DeviceResidentWindowSourceSequence)),
+                           "Compact resident source metadata"),
+                "Compact resident storage");
+        }
     }
     const uint64_t segmentCount = affineSegmentCount(manifest);
     for (const std::string &fieldName : affineFieldNames) {
@@ -847,6 +858,7 @@ DeviceResidentNamedDataset::fromCompactFileDataset(
 
     bool needsRecords = false;
     std::set<std::string> sourceNames;
+    std::set<std::string> sourcesNeedingSequenceMetadata;
     std::set<std::string> affineFieldNames;
     std::map<std::string, RequestedCompactField> requestedWindows;
     std::map<std::string, RequestedCompactField> requestedRagged;
@@ -862,11 +874,17 @@ DeviceResidentNamedDataset::fromCompactFileDataset(
         if (entry.second.kind == RequestedCompactFieldKind::RAGGED) {
             needsRecords = true;
             requestedRagged.emplace(entry.first, entry.second);
+            const DatasetLayout::RaggedTensorSpec &spec = *entry.second.raggedSpec;
+            if (spec.isWindowedSourceBacked()) {
+                THOR_THROW_IF_FALSE(spec.sourceName.has_value());
+                sourceNames.insert(spec.sourceName.value());
+            }
             continue;
         }
         const DatasetLayout::WindowedTensorSpec &spec = *entry.second.windowSpec;
         requestedWindows.emplace(entry.first, entry.second);
         sourceNames.insert(spec.sourceName);
+        sourcesNeedingSequenceMetadata.insert(spec.sourceName);
         needsRecords = needsRecords ||
                        spec.referenceMode ==
                            DatasetLayout::WindowedTensorReferenceMode::INDEXED;
@@ -896,13 +914,15 @@ DeviceResidentNamedDataset::fromCompactFileDataset(
 
     for (const auto &entry : requestedRagged) {
         const DatasetLayout::RaggedTensorSpec &spec = *entry.second.raggedSpec;
-        Tensor valuesHost = readRaggedValuesBytes(description, spec);
         CompactRaggedFieldStorage storage;
         storage.spec = spec;
         storage.valueCounts = raggedValueCounts.at(entry.first);
-        if (valuesHost.isInitialized()) {
-            storage.values = uploadTensor(valuesHost, devicePlacement, uploadStream);
-            uploadSources.push_back(std::move(valuesHost));
+        if (!spec.isWindowedSourceBacked()) {
+            Tensor valuesHost = readRaggedValuesBytes(description, spec);
+            if (valuesHost.isInitialized()) {
+                storage.values = uploadTensor(valuesHost, devicePlacement, uploadStream);
+                uploadSources.push_back(std::move(valuesHost));
+            }
         }
         dataset->compactRaggedFields.emplace(entry.first, std::move(storage));
     }
@@ -911,15 +931,18 @@ DeviceResidentNamedDataset::fromCompactFileDataset(
         const DatasetLayout::WindowedTensorSourceSpec &source =
             description.layout.windowedTensorSource(sourceName);
         Tensor sourceHost = readSourceBytes(description, source);
-        Tensor sequencesHost = sourceSequenceTensor(source);
         CompactWindowSourceStorage storage;
         storage.spec = source;
         storage.bytes = uploadTensor(sourceHost, devicePlacement, uploadStream);
-        storage.sequences = uploadTensor(sequencesHost, devicePlacement, uploadStream);
-        storage.sequenceCount = static_cast<uint64_t>(source.sourceSequences.size());
+        if (sourcesNeedingSequenceMetadata.find(sourceName) !=
+            sourcesNeedingSequenceMetadata.end()) {
+            Tensor sequencesHost = sourceSequenceTensor(source);
+            storage.sequences = uploadTensor(sequencesHost, devicePlacement, uploadStream);
+            storage.sequenceCount = static_cast<uint64_t>(source.sourceSequences.size());
+            uploadSources.push_back(std::move(sequencesHost));
+        }
         dataset->compactSources.emplace(sourceName, std::move(storage));
         uploadSources.push_back(std::move(sourceHost));
-        uploadSources.push_back(std::move(sequencesHost));
     }
 
     for (const std::string &fieldName : affineFieldNames) {
@@ -968,7 +991,9 @@ uint64_t DeviceResidentNamedDataset::totalBytes() const {
     }
     for (const auto &entry : compactSources) {
         bytes += entry.second.bytes.getArraySizeInBytes();
-        bytes += entry.second.sequences.getArraySizeInBytes();
+        if (entry.second.sequences.isInitialized()) {
+            bytes += entry.second.sequences.getArraySizeInBytes();
+        }
     }
     for (const auto &entry : compactAffineFields) {
         bytes += entry.second.segments.getArraySizeInBytes();
@@ -996,7 +1021,9 @@ uint64_t DeviceResidentNamedDataset::compactSourceBytes() const {
 uint64_t DeviceResidentNamedDataset::compactMetadataBytes() const {
     uint64_t bytes = 0;
     for (const auto &entry : compactSources) {
-        bytes += entry.second.sequences.getArraySizeInBytes();
+        if (entry.second.sequences.isInitialized()) {
+            bytes += entry.second.sequences.getArraySizeInBytes();
+        }
     }
     for (const auto &entry : compactAffineFields) {
         bytes += entry.second.segments.getArraySizeInBytes();
@@ -1041,6 +1068,78 @@ bool DeviceResidentNamedDataset::hasSnapshotRaggedField(const std::string &name)
     return snapshotRaggedFields.find(name) != snapshotRaggedFields.end();
 }
 
+std::optional<DeviceResidentNamedDataset::CompactWindowSourceAccess>
+DeviceResidentNamedDataset::compactWindowSourceAccessForField(
+    const std::string &fieldName) const {
+    std::optional<std::string> sourceName;
+
+    const auto windowIt = compactWindowFields.find(fieldName);
+    if (windowIt != compactWindowFields.end()) {
+        if (windowIt->second.materializeMask) return std::nullopt;
+        sourceName = windowIt->second.spec.sourceName;
+    } else {
+        const auto raggedIt = compactRaggedFields.find(fieldName);
+        if (raggedIt == compactRaggedFields.end() ||
+            !raggedIt->second.spec.isWindowedSourceBacked()) {
+            return std::nullopt;
+        }
+        THOR_THROW_IF_FALSE(raggedIt->second.spec.sourceName.has_value());
+        sourceName = raggedIt->second.spec.sourceName.value();
+    }
+
+    const auto sourceIt = compactSources.find(sourceName.value());
+    THOR_THROW_IF_FALSE(sourceIt != compactSources.end());
+    const Tensor &source = sourceIt->second.bytes;
+    THOR_THROW_IF_FALSE(source.isInitialized());
+    THOR_THROW_IF_FALSE(source.getPlacement() == placement);
+    THOR_THROW_IF_FALSE(
+        source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+
+    return CompactWindowSourceAccess{
+        .sourceName = sourceIt->first,
+        .tensorId = source.getTensorId(),
+        .base = source.getMemPtr(),
+        .bytes = source.getArraySizeInBytes()};
+}
+
+std::vector<DeviceResidentNamedDataset::CompactWindowSourceAccess>
+DeviceResidentNamedDataset::compactWindowSourceAccesses() const {
+    std::set<std::string> sourceNames;
+    for (const auto &entry : compactWindowFields) {
+        if (!entry.second.materializeMask) {
+            sourceNames.insert(entry.second.spec.sourceName);
+        }
+    }
+    for (const auto &entry : compactRaggedFields) {
+        if (entry.second.spec.isWindowedSourceBacked()) {
+            THOR_THROW_IF_FALSE(entry.second.spec.sourceName.has_value());
+            sourceNames.insert(entry.second.spec.sourceName.value());
+        }
+    }
+
+    std::vector<CompactWindowSourceAccess> accesses;
+    accesses.reserve(sourceNames.size());
+    std::set<uint64_t> seenTensorIds;
+    for (const std::string &sourceName : sourceNames) {
+        const auto sourceIt = compactSources.find(sourceName);
+        THOR_THROW_IF_FALSE(sourceIt != compactSources.end());
+        const Tensor &source = sourceIt->second.bytes;
+        THOR_THROW_IF_FALSE(source.isInitialized());
+        THOR_THROW_IF_FALSE(source.getPlacement() == placement);
+        THOR_THROW_IF_FALSE(
+            source.getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        if (!seenTensorIds.insert(source.getTensorId()).second) {
+            continue;
+        }
+        accesses.push_back(CompactWindowSourceAccess{
+            .sourceName = sourceName,
+            .tensorId = source.getTensorId(),
+            .base = source.getMemPtr(),
+            .bytes = source.getArraySizeInBytes()});
+    }
+    return accesses;
+}
+
 const Tensor &DeviceResidentNamedDataset::field(Thor::DatasetFieldId id) const {
     const auto found = fields.find(id);
     if (found == fields.end()) {
@@ -1057,11 +1156,12 @@ const Tensor &DeviceResidentNamedDataset::tensor(const std::string &name) const 
     return field(schema.getField(name).id);
 }
 
-uint64_t DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity(
+RaggedBatchExtent DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity(
     const std::string &fieldName,
     const Tensor &rowIndicesHost,
     uint64_t logicalRows,
-    uint64_t maxTotalValues) const {
+    uint64_t maxTotalValues,
+    uint64_t maxValuesPerRow) const {
     const auto found = compactRaggedFields.find(fieldName);
     if (found == compactRaggedFields.end()) {
         throw std::runtime_error(
@@ -1076,6 +1176,7 @@ uint64_t DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity(
 
     const uint64_t *rowIndices = rowIndicesHost.getMemPtr<uint64_t>();
     uint64_t active = 0;
+    uint64_t maxActiveRowLength = 0;
     for (uint64_t row = 0; row < logicalRows; ++row) {
         const uint64_t sourceRow = rowIndices[row];
         if (sourceRow >= found->second.valueCounts.size()) {
@@ -1085,6 +1186,12 @@ uint64_t DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity(
                 " at batch row " + std::to_string(row) + ".");
         }
         const uint64_t count = found->second.valueCounts[sourceRow];
+        if (maxValuesPerRow != 0 && count > maxValuesPerRow) {
+            throw std::runtime_error(
+                "Device resident ragged field '" + fieldName + "' row " + std::to_string(row) +
+                " has length " + std::to_string(count) + ", exceeding maxValuesPerRow=" +
+                std::to_string(maxValuesPerRow) + ".");
+        }
         if (count > maxTotalValues - active) {
             throw std::runtime_error(
                 "Device resident ragged field '" + fieldName + "' requires " +
@@ -1093,8 +1200,9 @@ uint64_t DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity(
                 std::to_string(maxTotalValues) + ".");
         }
         active += count;
+        maxActiveRowLength = std::max(maxActiveRowLength, count);
     }
-    return active;
+    return RaggedBatchExtent{.activeValueCount = active, .maxActiveRowLength = maxActiveRowLength};
 }
 
 void DeviceResidentNamedDataset::enqueueCompactRaggedFieldMaterialization(
@@ -1113,11 +1221,27 @@ void DeviceResidentNamedDataset::enqueueCompactRaggedFieldMaterialization(
     THOR_THROW_IF_FALSE(descriptor.getValuesDataType() == spec.dataType);
     THOR_THROW_IF_FALSE(descriptor.getTrailingDimensions() == spec.valueDimensions);
     THOR_THROW_IF_FALSE(descriptor.getBatchSize() == rowIndicesDevice.getDimensions().front());
+    const Tensor *sourceValues = &found->second.values;
+    if (spec.isWindowedSourceBacked()) {
+        THOR_THROW_IF_FALSE(spec.sourceName.has_value());
+        const auto sourceIt = compactSources.find(spec.sourceName.value());
+        THOR_THROW_IF_FALSE(sourceIt != compactSources.end());
+        sourceValues = &sourceIt->second.bytes;
+    }
+    // A completely empty ordinary ragged values sidecar is represented by an
+    // uninitialized Tensor.  The CUDA materializer intentionally accepts that
+    // representation when storedValueCount() == 0 and passes a null source
+    // pointer to the gather kernel; every row then has count == 0, so the
+    // pointer is never dereferenced.  Source-backed ragged windows still have a
+    // real source allocation because empty window sources are rejected while
+    // building compact residency.
+    THOR_THROW_IF_FALSE(sourceValues->isInitialized() || spec.storedValueCount() == 0);
+
     Tensor values = destination.getValues();
     Tensor offsets = destination.getOffsets();
     launchDeviceResidentRaggedMaterializationKernel(
         compactRecords,
-        found->second.values,
+        *sourceValues,
         numExamples,
         layout.recordSizeBytes(),
         spec.referenceOffsetBytes,
@@ -1130,11 +1254,12 @@ void DeviceResidentNamedDataset::enqueueCompactRaggedFieldMaterialization(
         stream);
 }
 
-uint64_t DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacity(
+RaggedBatchExtent DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacity(
     const std::string &fieldName,
     const Tensor &rowIndicesHost,
     uint64_t logicalRows,
-    uint64_t maxTotalValues) const {
+    uint64_t maxTotalValues,
+    uint64_t maxValuesPerRow) const {
     const auto found = snapshotRaggedFields.find(fieldName);
     if (found == snapshotRaggedFields.end()) {
         throw std::runtime_error(
@@ -1149,6 +1274,7 @@ uint64_t DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacity(
 
     const uint64_t *rowIndices = rowIndicesHost.getMemPtr<uint64_t>();
     uint64_t active = 0;
+    uint64_t maxActiveRowLength = 0;
     for (uint64_t row = 0; row < logicalRows; ++row) {
         const uint64_t sourceRow = rowIndices[row];
         if (sourceRow >= found->second.valueCounts.size()) {
@@ -1158,6 +1284,12 @@ uint64_t DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacity(
                 " at batch row " + std::to_string(row) + ".");
         }
         const uint64_t count = found->second.valueCounts[sourceRow];
+        if (maxValuesPerRow != 0 && count > maxValuesPerRow) {
+            throw std::runtime_error(
+                "Device resident ragged field '" + fieldName + "' row " + std::to_string(row) +
+                " has length " + std::to_string(count) + ", exceeding maxValuesPerRow=" +
+                std::to_string(maxValuesPerRow) + ".");
+        }
         if (count > maxTotalValues - active) {
             throw std::runtime_error(
                 "Device resident ragged field '" + fieldName + "' requires " +
@@ -1166,8 +1298,9 @@ uint64_t DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacity(
                 std::to_string(maxTotalValues) + ".");
         }
         active += count;
+        maxActiveRowLength = std::max(maxActiveRowLength, count);
     }
-    return active;
+    return RaggedBatchExtent{.activeValueCount = active, .maxActiveRowLength = maxActiveRowLength};
 }
 
 void DeviceResidentNamedDataset::enqueueSnapshotRaggedFieldMaterialization(

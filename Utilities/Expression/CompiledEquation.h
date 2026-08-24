@@ -20,6 +20,20 @@ struct TensorScalarBinding {
 
 using RuntimeInputValue = std::variant<Tensor, float, TensorScalarBinding>;
 
+// T8B physical addressing mode for tensor inputs to a retained padded-ragged
+// pointwise fused kernel. PaddedValue follows the selected [B,C,1,W] storage
+// directly, ChannelBroadcast is a logical [C] / [1,C] bias-like operand,
+// ScalarTensor is a one-element tensor, and MetadataTensor is structural input
+// such as canonical row offsets that is present in the expression signature but
+// not read by the value computation. Runtime scalar kinds are carried by the
+// existing NamedInput::Kind and do not need an addressing mode here.
+enum class PaddedRaggedPointwiseInputAccess : uint8_t {
+    PaddedValue,
+    ChannelBroadcast,
+    ScalarTensor,
+    MetadataTensor,
+};
+
 struct EquationSignature {
     uint32_t num_inputs;
     int sm_major;
@@ -180,6 +194,177 @@ struct CompiledSegmentedBroadcast {
           normalize_by_segment_length(normalize_by_segment_length) {}
 };
 
+// Static compiler-side contract for one padded ragged sequence value. Runtime
+// selects one dense [B,C,1,W] width from a placement-defined family that covers max_values_per_row; T8 may later
+// retain this representation across compatible stage boundaries.
+struct CompiledPaddedRaggedSequenceLayout {
+    DataType values_dtype = DataType::FP32;
+    DataType offset_dtype = DataType::UINT32;
+    uint64_t batch_size = 0;
+    uint64_t max_total_values = 0;
+    uint64_t max_values_per_row = 0;
+    uint64_t channels = 0;
+
+    bool operator==(const CompiledPaddedRaggedSequenceLayout& other) const = default;
+};
+
+struct CompiledRaggedConv1dCausal {
+    DataType input_dtype = DataType::FP32;
+    DataType filter_dtype = DataType::FP32;
+    DataType output_dtype = DataType::FP32;
+    DataType compute_dtype = DataType::FP32;
+    DataType offset_dtype = DataType::UINT32;
+    uint64_t batch_size = 0;
+    uint64_t max_active_values = 0;
+    uint64_t max_values_per_row = 0;
+    uint64_t input_channels = 0;
+    uint64_t output_channels = 0;
+    uint64_t kernel_width = 0;
+    uint64_t groups = 1;
+    int32_t dilation = 1;
+    CompiledPaddedRaggedSequenceLayout padded_input_layout;
+    CompiledPaddedRaggedSequenceLayout padded_output_layout;
+
+    bool operator==(const CompiledRaggedConv1dCausal& other) const = default;
+
+    CompiledRaggedConv1dCausal(DataType input_dtype,
+                               DataType filter_dtype,
+                               DataType output_dtype,
+                               DataType compute_dtype,
+                               DataType offset_dtype,
+                               uint64_t batch_size,
+                               uint64_t max_active_values,
+                               uint64_t max_values_per_row,
+                               uint64_t input_channels,
+                               uint64_t output_channels,
+                               uint64_t kernel_width,
+                               uint64_t groups,
+                               int32_t dilation)
+        : input_dtype(input_dtype),
+          filter_dtype(filter_dtype),
+          output_dtype(output_dtype),
+          compute_dtype(compute_dtype),
+          offset_dtype(offset_dtype),
+          batch_size(batch_size),
+          max_active_values(max_active_values),
+          max_values_per_row(max_values_per_row),
+          input_channels(input_channels),
+          output_channels(output_channels),
+          kernel_width(kernel_width),
+          groups(groups),
+          dilation(dilation),
+          padded_input_layout{input_dtype, offset_dtype, batch_size, max_active_values, max_values_per_row, input_channels},
+          padded_output_layout{output_dtype, offset_dtype, batch_size, max_active_values, max_values_per_row, output_channels} {}
+};
+
+struct CompiledRaggedConv1dCausalBackwardData {
+    DataType filter_dtype = DataType::FP32;
+    DataType grad_output_dtype = DataType::FP32;
+    DataType output_dtype = DataType::FP32;
+    DataType compute_dtype = DataType::FP32;
+    DataType offset_dtype = DataType::UINT32;
+    uint64_t batch_size = 0;
+    uint64_t max_active_values = 0;
+    uint64_t max_values_per_row = 0;
+    uint64_t input_channels = 0;
+    uint64_t output_channels = 0;
+    uint64_t kernel_width = 0;
+    uint64_t groups = 1;
+    int32_t dilation = 1;
+    CompiledPaddedRaggedSequenceLayout padded_grad_output_layout;
+    CompiledPaddedRaggedSequenceLayout padded_output_layout;
+
+    bool operator==(const CompiledRaggedConv1dCausalBackwardData& other) const = default;
+
+    CompiledRaggedConv1dCausalBackwardData(DataType filter_dtype,
+                                           DataType grad_output_dtype,
+                                           DataType output_dtype,
+                                           DataType compute_dtype,
+                                           DataType offset_dtype,
+                                           uint64_t batch_size,
+                                           uint64_t max_active_values,
+                                           uint64_t max_values_per_row,
+                                           uint64_t input_channels,
+                                           uint64_t output_channels,
+                                           uint64_t kernel_width,
+                                           uint64_t groups,
+                                           int32_t dilation)
+        : filter_dtype(filter_dtype),
+          grad_output_dtype(grad_output_dtype),
+          output_dtype(output_dtype),
+          compute_dtype(compute_dtype),
+          offset_dtype(offset_dtype),
+          batch_size(batch_size),
+          max_active_values(max_active_values),
+          max_values_per_row(max_values_per_row),
+          input_channels(input_channels),
+          output_channels(output_channels),
+          kernel_width(kernel_width),
+          groups(groups),
+          dilation(dilation),
+          padded_grad_output_layout{grad_output_dtype,
+                                    offset_dtype,
+                                    batch_size,
+                                    max_active_values,
+                                    max_values_per_row,
+                                    output_channels},
+          padded_output_layout{output_dtype, offset_dtype, batch_size, max_active_values, max_values_per_row, input_channels} {}
+};
+
+struct CompiledRaggedConv1dCausalBackwardFilter {
+    DataType input_dtype = DataType::FP32;
+    DataType grad_output_dtype = DataType::FP32;
+    DataType output_dtype = DataType::FP32;
+    DataType compute_dtype = DataType::FP32;
+    DataType offset_dtype = DataType::UINT32;
+    uint64_t batch_size = 0;
+    uint64_t max_active_values = 0;
+    uint64_t max_values_per_row = 0;
+    uint64_t input_channels = 0;
+    uint64_t output_channels = 0;
+    uint64_t kernel_width = 0;
+    uint64_t groups = 1;
+    int32_t dilation = 1;
+    CompiledPaddedRaggedSequenceLayout padded_input_layout;
+    CompiledPaddedRaggedSequenceLayout padded_grad_output_layout;
+
+    bool operator==(const CompiledRaggedConv1dCausalBackwardFilter& other) const = default;
+
+    CompiledRaggedConv1dCausalBackwardFilter(DataType input_dtype,
+                                             DataType grad_output_dtype,
+                                             DataType output_dtype,
+                                             DataType compute_dtype,
+                                             DataType offset_dtype,
+                                             uint64_t batch_size,
+                                             uint64_t max_active_values,
+                                             uint64_t max_values_per_row,
+                                             uint64_t input_channels,
+                                             uint64_t output_channels,
+                                             uint64_t kernel_width,
+                                             uint64_t groups,
+                                             int32_t dilation)
+        : input_dtype(input_dtype),
+          grad_output_dtype(grad_output_dtype),
+          output_dtype(output_dtype),
+          compute_dtype(compute_dtype),
+          offset_dtype(offset_dtype),
+          batch_size(batch_size),
+          max_active_values(max_active_values),
+          max_values_per_row(max_values_per_row),
+          input_channels(input_channels),
+          output_channels(output_channels),
+          kernel_width(kernel_width),
+          groups(groups),
+          dilation(dilation),
+          padded_input_layout{input_dtype, offset_dtype, batch_size, max_active_values, max_values_per_row, input_channels},
+          padded_grad_output_layout{grad_output_dtype,
+                                    offset_dtype,
+                                    batch_size,
+                                    max_active_values,
+                                    max_values_per_row,
+                                    output_channels} {}
+};
+
 struct CompiledScan {
     const ScanOp op;
     const ScanMode mode;
@@ -329,6 +514,10 @@ struct CompiledReduceMinMaxBackward {
 
 struct CompiledConvolution {
     const bool is_3d;
+    const ConvolutionSpatial2d spatial_2d;
+    const uint64_t groups;
+    // Conv3D retains its legacy depth/height/width representation. Conv2D uses
+    // spatial_2d exclusively.
     const int32_t stride_d;
     const int32_t stride_h;
     const int32_t stride_w;
@@ -342,8 +531,27 @@ struct CompiledConvolution {
 
     bool operator==(const CompiledConvolution& other) const = default;
 
-    CompiledConvolution(bool is_3d,
-                        int32_t stride_d,
+    CompiledConvolution(ConvolutionSpatial2d spatial_2d,
+                        DataType input_dtype,
+                        DataType filter_dtype,
+                        DataType output_dtype,
+                        std::optional<DataType> compute_dtype,
+                        uint64_t groups = 1)
+        : is_3d(false),
+          spatial_2d(spatial_2d),
+          groups(groups),
+          stride_d(1),
+          stride_h(1),
+          stride_w(1),
+          pad_d(0),
+          pad_h(0),
+          pad_w(0),
+          input_dtype(input_dtype),
+          filter_dtype(filter_dtype),
+          output_dtype(output_dtype),
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : DataType::FP32) {}
+
+    CompiledConvolution(int32_t stride_d,
                         int32_t stride_h,
                         int32_t stride_w,
                         int32_t pad_d,
@@ -352,8 +560,11 @@ struct CompiledConvolution {
                         DataType input_dtype,
                         DataType filter_dtype,
                         DataType output_dtype,
-                        std::optional<DataType> compute_dtype)
-        : is_3d(is_3d),
+                        std::optional<DataType> compute_dtype,
+                        uint64_t groups = 1)
+        : is_3d(true),
+          spatial_2d(),
+          groups(groups),
           stride_d(stride_d),
           stride_h(stride_h),
           stride_w(stride_w),
@@ -368,6 +579,10 @@ struct CompiledConvolution {
 
 struct CompiledConvolutionBackward {
     const ExprOp op;
+    const ConvolutionSpatial2d spatial_2d;
+    const uint64_t groups;
+    // Conv3D retains its legacy depth/height/width representation. Conv2D uses
+    // spatial_2d exclusively.
     const int32_t stride_d;
     const int32_t stride_h;
     const int32_t stride_w;
@@ -383,6 +598,29 @@ struct CompiledConvolutionBackward {
     bool operator==(const CompiledConvolutionBackward& other) const = default;
 
     CompiledConvolutionBackward(ExprOp op,
+                                ConvolutionSpatial2d spatial_2d,
+                                DataType input_dtype,
+                                DataType grad_output_dtype,
+                                DataType output_dtype,
+                                std::optional<DataType> compute_dtype,
+                                std::vector<uint64_t> explicit_output_dims = {},
+                                uint64_t groups = 1)
+        : op(op),
+          spatial_2d(spatial_2d),
+          groups(groups),
+          stride_d(1),
+          stride_h(1),
+          stride_w(1),
+          pad_d(0),
+          pad_h(0),
+          pad_w(0),
+          input_dtype(input_dtype),
+          grad_output_dtype(grad_output_dtype),
+          output_dtype(output_dtype),
+          compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : DataType::FP32),
+          explicit_output_dims(std::move(explicit_output_dims)) {}
+
+    CompiledConvolutionBackward(ExprOp op,
                                 int32_t stride_d,
                                 int32_t stride_h,
                                 int32_t stride_w,
@@ -393,8 +631,11 @@ struct CompiledConvolutionBackward {
                                 DataType grad_output_dtype,
                                 DataType output_dtype,
                                 std::optional<DataType> compute_dtype,
-                                std::vector<uint64_t> explicit_output_dims = {})
+                                std::vector<uint64_t> explicit_output_dims = {},
+                                uint64_t groups = 1)
         : op(op),
+          spatial_2d(),
+          groups(groups),
           stride_d(stride_d),
           stride_h(stride_h),
           stride_w(stride_w),

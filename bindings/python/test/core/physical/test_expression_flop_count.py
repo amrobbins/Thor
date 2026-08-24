@@ -176,7 +176,7 @@ def test_flop_count_convolution_forward():
     x = ex.input("x")
     w = ex.input("w")
 
-    expr = ex.conv2d(x, w, stride_h=1, stride_w=1, pad_h=0, pad_w=0)
+    expr = ex.conv2d(x, w, stride_h=1, stride_w=1, padding=(0, 0, 0, 0))
     eq = ex.compile(expr, device_num=0)
 
     inputs = {

@@ -23,6 +23,7 @@ void bind_adaptive_layer_norm(nb::module_ &m);
 void bind_attention(nb::module_ &m);
 void bind_batch_normalization(nb::module_ &m);
 void bind_concatenate(nb::module_ &m);
+void bind_convolution_1d(nb::module_ &m);
 void bind_convolution_2d(nb::module_ &m);
 void bind_convolution_3d(nb::module_ &m);
 void bind_custom_layer(nb::module_ &m);
@@ -76,6 +77,7 @@ void bind_layers(nb::module_ &layers) {
     bind_batch_normalization(layers);
     bind_drop_out(layers);
     bind_concatenate(layers);
+    bind_convolution_1d(layers);
     bind_convolution_2d(layers);
     bind_convolution_3d(layers);
     bind_flatten(layers);

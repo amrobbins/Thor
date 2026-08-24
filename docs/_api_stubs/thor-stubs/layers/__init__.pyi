@@ -519,6 +519,27 @@ class Concatenate(Layer):
     def get_feature_output(self) -> thor.Tensor:
         """Return the concatenated feature output tensor."""
 
+class Convolution1d(TrainableLayer):
+    """
+    Trainable dense 1D convolution over a CW API tensor.
+
+    ``padding`` accepts ``"valid"``, ``"same"`` (SAME_UPPER), ``"causal"``,
+    or an explicit ``(left, right)`` pair. Causal padding is
+    ``left = dilation * (filter_width - 1), right = 0``.
+    The physical implementation lowers to the shared Conv2D backend using a
+    singleton height dimension; it does not materialize an im2col/unfold tensor.
+    """
+
+    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_channels: int, filter_width: int, stride: int = 1, padding: object = 'valid', has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, dilation: int = 1, groups: int = 1) -> None: ...
+
+    @staticmethod
+    def epilogue_input(output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression: ...
+
+    @staticmethod
+    def epilogue_aux_input(name: str, output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression: ...
+
+    def get_feature_output(self) -> thor.Tensor: ...
+
 class Convolution2d(TrainableLayer):
     """
     2D convolution layer.
@@ -549,12 +570,12 @@ class Convolution2d(TrainableLayer):
         Stride of the convolution in the vertical direction.
     horizontal_stride : int, default 1
         Stride of the convolution in the horizontal direction.
-    vertical_padding : int, default 0
-        Amount of explicit zero-padding to apply above and below the
-        input.
-    horizontal_padding : int, default 0
-        Amount of explicit zero-padding to apply left and right of the
-        input.
+    padding : {"valid", "same"} or tuple[int, int, int, int], default "valid"
+        Padding policy. ``"valid"`` applies no padding. ``"same"`` uses
+        SAME_UPPER semantics, choosing output spatial dimensions as
+        ``ceil(input / stride)`` and assigning any odd extra padding to
+        the bottom/right sides. A length-4 tuple specifies explicit
+        ``(top, bottom, left, right)`` zero-padding.
     has_bias : bool, default True
         Whether to learn an additive bias per output channel.
     activation : thor.Activation or None, default thor.activations.Gelu()
@@ -573,9 +594,13 @@ class Convolution2d(TrainableLayer):
         Named auxiliary input tensors consumed by the epilogue expression.
         This is intended for residual-style epilogues such as
         ``relu(Convolution2d.epilogue_input() + Convolution2d.epilogue_aux_input("residual"))``.
+    dilation : int or tuple[int, int], default 1
+        Spacing between kernel elements. An integer applies the same dilation
+        vertically and horizontally; a length-2 sequence specifies
+        ``(vertical_dilation, horizontal_dilation)``.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_channels: int, filter_height: int, filter_width: int, vertical_stride: int = 1, horizontal_stride: int = 1, vertical_padding: int = 0, horizontal_padding: int = 0, has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_channels: int, filter_height: int, filter_width: int, vertical_stride: int = 1, horizontal_stride: int = 1, padding: object = 'valid', has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, dilation: object = 1, groups: int = 1) -> None: ...
 
     @staticmethod
     def epilogue_input(output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression:
@@ -608,13 +633,14 @@ class Convolution3d(TrainableLayer):
     Omitted activation defaults to ``thor.activations.Gelu()``; pass
     ``None`` to keep the layer linear.
     The API tensor layout is CDHW; the physical implementation adds the
-    batch dimension and uses NCDHW. Activations are stitched into the
+    batch dimension and uses NCDHW. ``groups`` partitions input and output
+    channels using standard grouped-convolution semantics. Activations are stitched into the
     expression before the implementation CustomLayer is constructed.
     ``epilogue`` may be a ``thor.physical.Expression`` built from
     ``Convolution3d.epilogue_input()`` and is applied after activation.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_channels: int, filter_depth: int, filter_height: int, filter_width: int, depth_stride: int = 1, vertical_stride: int = 1, horizontal_stride: int = 1, depth_padding: int = 0, vertical_padding: int = 0, horizontal_padding: int = 0, has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_channels: int, filter_depth: int, filter_height: int, filter_width: int, depth_stride: int = 1, vertical_stride: int = 1, horizontal_stride: int = 1, depth_padding: int = 0, vertical_padding: int = 0, horizontal_padding: int = 0, has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, groups: int = 1) -> None: ...
 
     @staticmethod
     def epilogue_input(output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression:

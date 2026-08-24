@@ -3,6 +3,7 @@
 #include "Utilities/Common/GpuMemoryDiagnostics.h"
 #include "Utilities/CudaDriver/CudaGraphConditional.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "Utilities/Expression/ConvolutionKernelValidation.h"
 #include "Utilities/Expression/BatchedMatmulPlan.h"
 #include "Utilities/Expression/EquationRunner.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
@@ -10,6 +11,8 @@
 #include "Utilities/Expression/MatmulScalarKernel.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
 #include "Utilities/Expression/SegmentedBroadcastKernel.h"
+#include "Utilities/TensorOperations/Ragged/PaddedRaggedSequence.h"
+#include "Utilities/TensorOperations/Ragged/RaggedConv1dWidthCapacity.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/RaggedMatmulCapacityBuckets.h"
 #include "Utilities/TensorOperations/Copy/StridedCopy.h"
@@ -22,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -87,6 +91,20 @@ static bool thorMatmulDiagnosticsEnabled() {
 
 static bool thorMatmulDiagnosticsVerbose() {
     const char* value = std::getenv("THOR_MATMUL_DIAGNOSTICS");
+    if (value == nullptr) {
+        return false;
+    }
+    const std::string mode(value);
+    return mode == "2" || mode == "verbose" || mode == "VERBOSE" || mode == "full" || mode == "FULL";
+}
+
+static bool thorConvolutionDiagnosticsEnabled() {
+    const char* value = std::getenv("THOR_CONVOLUTION_DIAGNOSTICS");
+    return value != nullptr && value[0] != '\0' && std::string(value) != "0";
+}
+
+static bool thorConvolutionDiagnosticsVerbose() {
+    const char* value = std::getenv("THOR_CONVOLUTION_DIAGNOSTICS");
     if (value == nullptr) {
         return false;
     }
@@ -328,6 +346,39 @@ CudnnRmsNormDescriptor CompiledRmsNorm::descriptorFor(const Tensor& inputTensor,
     descriptor.epsilon = static_cast<float>(epsilon);
     descriptor.training = false;
     descriptor.fusedActivation = fused_activation;
+    descriptor.debugName = debug_name;
+    descriptor.validateForward();
+    return descriptor;
+}
+
+CudnnLayerNormDescriptor CompiledLayerNorm::descriptorFor(const Tensor& inputTensor,
+                                                           const Tensor& scaleTensor,
+                                                           const Tensor& biasTensor,
+                                                           const Tensor& outputTensor) const {
+    const std::vector<uint64_t> input_dims = inputTensor.getDimensions();
+    if (input_dims.size() != 2 || outputTensor.getDimensions() != input_dims) {
+        throw std::runtime_error(
+            "Thor LayerNorm expression stage requires rank-2 logical [outer, hidden] input/output tensors.");
+    }
+    if (scaleTensor.getDimensions() != std::vector<uint64_t>{normalized_feature_count} ||
+        biasTensor.getDimensions() != std::vector<uint64_t>{normalized_feature_count} ||
+        input_dims[1] != normalized_feature_count) {
+        throw std::runtime_error("Thor LayerNorm expression stage parameter/hidden dimensions do not match.");
+    }
+    if (inputTensor.getDataType() != input_dtype || scaleTensor.getDataType() != scale_dtype ||
+        biasTensor.getDataType() != bias_dtype || outputTensor.getDataType() != output_dtype) {
+        throw std::runtime_error("Thor LayerNorm expression stage tensor dtype does not match compiled metadata.");
+    }
+
+    CudnnLayerNormDescriptor descriptor;
+    descriptor.outerSize = input_dims[0];
+    descriptor.normalizedFeatureCount = normalized_feature_count;
+    descriptor.inputDataType = input_dtype;
+    descriptor.outputDataType = output_dtype;
+    descriptor.parameterDataType = scale_dtype;
+    descriptor.computeDataType = compute_dtype;
+    descriptor.epsilon = static_cast<float>(epsilon);
+    descriptor.training = false;
     descriptor.debugName = debug_name;
     descriptor.validateForward();
     return descriptor;
@@ -1512,6 +1563,1152 @@ void StampedSegmentedBroadcast::runOn(Stream& run_stream) const {
                              run_stream);
 }
 
+struct RaggedConv1dPaddedForwardState {
+    std::shared_ptr<PaddedRaggedSequence> input_padded;
+    std::shared_ptr<PaddedRaggedSequence> output_padded;
+    std::shared_ptr<CompiledConvolution> dense_convolution;
+    Tensor filter_2d;
+    // T7R5/T8A fixes both the runtime shape domain and every cuDNN execution
+    // plan during stamping. Runtime may only select from this immutable family.
+    std::vector<uint64_t> width_capacity_family;
+    std::vector<std::shared_ptr<BuiltConvolution>> prebuilt_convolutions;
+    std::optional<Tensor> cudnn_workspace;
+    uint64_t cudnn_workspace_bytes = 0;
+};
+
+struct RaggedConv1dPaddedBackwardDataState {
+    // Producer-owned dY remains untouched. T9A owns a separate consumer scratch
+    // with exactly the same retained plan; sanitation copies active values and
+    // zeros only the scratch tail before cuDNN dgrad observes it.
+    std::shared_ptr<PaddedRaggedSequence> grad_output_padded;
+    std::shared_ptr<PaddedRaggedSequence> sanitized_grad_output;
+    std::shared_ptr<PaddedRaggedSequence> output_padded;
+    std::shared_ptr<CompiledConvolutionBackward> dense_dgrad;
+    Tensor filter_2d;
+    std::vector<uint64_t> width_capacity_family;
+    std::vector<std::shared_ptr<BuiltConvolution>> prebuilt_dgrads;
+    std::optional<Tensor> cudnn_workspace;
+    uint64_t cudnn_workspace_bytes = 0;
+};
+
+struct RaggedConv1dPaddedBackwardFilterState {
+    std::shared_ptr<PaddedRaggedSequence> input_padded;
+    std::shared_ptr<PaddedRaggedSequence> grad_output_padded;
+    std::shared_ptr<PaddedRaggedSequence> sanitized_input;
+    std::shared_ptr<PaddedRaggedSequence> sanitized_grad_output;
+    std::shared_ptr<CompiledConvolutionBackward> dense_wgrad;
+    std::vector<uint64_t> width_capacity_family;
+    std::vector<std::shared_ptr<BuiltConvolution>> prebuilt_wgrads;
+    std::optional<Tensor> cudnn_workspace;
+    uint64_t cudnn_workspace_bytes = 0;
+};
+
+
+namespace {
+
+bool t7r5CudnnValueDTypeSupported(DataType dtype) {
+    return dtype == DataType::FP16 || dtype == DataType::BF16 || dtype == DataType::FP32;
+}
+
+uint64_t t7r5CheckedMul(uint64_t lhs, uint64_t rhs, const char* label) {
+    if (lhs != 0 && rhs > std::numeric_limits<uint64_t>::max() / lhs) {
+        throw std::invalid_argument(std::string(label) + " overflows uint64_t.");
+    }
+    return lhs * rhs;
+}
+
+uint64_t t7r5ElementSizeBytes(DataType dtype) {
+    const float bytes = TensorDescriptor::getElementSizeInBytes(dtype);
+    const uint64_t rounded = static_cast<uint64_t>(bytes);
+    if (rounded == 0 || static_cast<float>(rounded) != bytes) {
+        throw std::invalid_argument("Ragged Conv1D padded plan requires a whole-byte value dtype.");
+    }
+    return rounded;
+}
+
+PaddedRaggedSequencePlan makeStructuralPaddedPlan(const CompiledPaddedRaggedSequenceLayout& layout,
+                                                  uint64_t width_capacity) {
+    PaddedRaggedSequencePlan plan;
+    plan.valuesDataType = layout.values_dtype;
+    plan.offsetsDataType = layout.offset_dtype;
+    plan.batchSize = layout.batch_size;
+    plan.maxTotalValues = layout.max_total_values;
+    plan.maxValuesPerRow = layout.max_values_per_row;
+    plan.channels = layout.channels;
+    plan.activeValues = 0;
+    plan.widthCapacity = width_capacity;
+    plan.valueElements = t7r5CheckedMul(
+        t7r5CheckedMul(plan.batchSize, plan.channels, "padded ragged B*C"),
+        width_capacity,
+        "padded ragged B*C*W");
+    plan.valueBytes =
+        t7r5CheckedMul(plan.valueElements, t7r5ElementSizeBytes(layout.values_dtype), "padded ragged value bytes");
+    return plan;
+}
+
+PaddedRaggedSequencePlan makeT7r5StructuralPaddedPlan(const CompiledRaggedConv1dCausal& compiled,
+                                                      uint64_t channels,
+                                                      DataType dtype,
+                                                      uint64_t width_capacity) {
+    return makeStructuralPaddedPlan(
+        CompiledPaddedRaggedSequenceLayout{
+            dtype, compiled.offset_dtype, compiled.batch_size, compiled.max_active_values, compiled.max_values_per_row, channels},
+        width_capacity);
+}
+
+void preparePaddedForCurrentPartition(PaddedRaggedSequence& padded,
+                                      const CompiledPaddedRaggedSequenceLayout& layout,
+                                      const std::vector<uint64_t>& width_capacity_family) {
+    if (width_capacity_family.empty()) {
+        throw std::runtime_error("Padded ragged value has an empty placement-time width-capacity family.");
+    }
+    RowPartitionRuntime row_partition(
+        padded.getRowOffsets(),
+        RowPartitionDescriptor(layout.batch_size, layout.max_total_values, layout.offset_dtype, layout.max_values_per_row));
+    const uint64_t max_active_row_length = row_partition.requireHostMaxActiveRowLength();
+    const uint64_t width_capacity =
+        chooseRaggedConv1dWidthCapacity(max_active_row_length, width_capacity_family);
+    padded.reconfigure(preparePaddedRaggedSequencePlan(row_partition, layout.channels, layout.values_dtype, width_capacity));
+}
+
+std::shared_ptr<CompiledConvolutionBackward> makeT9aDenseDgradDescriptor(
+    const CompiledRaggedConv1dCausalBackwardData& ragged) {
+    ConvolutionSpatial2d spatial;
+    spatial.stride_h = 1;
+    spatial.stride_w = 1;
+    spatial.dilation_h = 1;
+    spatial.dilation_w = ragged.dilation;
+    spatial.pre_padding_h = 0;
+    spatial.post_padding_h = 0;
+    const ConvolutionSpatial1d causal = ConvolutionSpatial1d::causal(ragged.kernel_width, 1, ragged.dilation);
+    spatial.pre_padding_w = causal.pre_padding;
+    spatial.post_padding_w = causal.post_padding;
+    return std::make_shared<CompiledConvolutionBackward>(ExprOp::CONV2D_BACKWARD_DATA,
+                                                          spatial,
+                                                          ragged.filter_dtype,
+                                                          ragged.grad_output_dtype,
+                                                          ragged.output_dtype,
+                                                          ragged.compute_dtype,
+                                                          std::vector<uint64_t>{},
+                                                          ragged.groups);
+}
+
+std::shared_ptr<CompiledConvolutionBackward> makeT9bDenseWgradDescriptor(
+    const CompiledRaggedConv1dCausalBackwardFilter& ragged) {
+    ConvolutionSpatial2d spatial;
+    spatial.stride_h = 1;
+    spatial.stride_w = 1;
+    spatial.dilation_h = 1;
+    spatial.dilation_w = ragged.dilation;
+    spatial.pre_padding_h = 0;
+    spatial.post_padding_h = 0;
+    const ConvolutionSpatial1d causal = ConvolutionSpatial1d::causal(ragged.kernel_width, 1, ragged.dilation);
+    spatial.pre_padding_w = causal.pre_padding;
+    spatial.post_padding_w = causal.post_padding;
+    return std::make_shared<CompiledConvolutionBackward>(ExprOp::CONV2D_BACKWARD_FILTER,
+                                                          spatial,
+                                                          ragged.input_dtype,
+                                                          ragged.grad_output_dtype,
+                                                          ragged.output_dtype,
+                                                          ragged.compute_dtype,
+                                                          std::vector<uint64_t>{ragged.output_channels,
+                                                                                ragged.input_channels / ragged.groups,
+                                                                                1,
+                                                                                ragged.kernel_width},
+                                                          ragged.groups);
+}
+
+std::shared_ptr<CompiledConvolution> makeT7r5DenseConvolutionDescriptor(const CompiledRaggedConv1dCausal& ragged) {
+    ConvolutionSpatial2d spatial;
+    spatial.stride_h = 1;
+    spatial.stride_w = 1;
+    spatial.dilation_h = 1;
+    spatial.dilation_w = ragged.dilation;
+    spatial.pre_padding_h = 0;
+    spatial.post_padding_h = 0;
+    const ConvolutionSpatial1d causal = ConvolutionSpatial1d::causal(ragged.kernel_width, 1, ragged.dilation);
+    spatial.pre_padding_w = causal.pre_padding;
+    spatial.post_padding_w = causal.post_padding;
+    return std::make_shared<CompiledConvolution>(spatial,
+                                                 ragged.input_dtype,
+                                                 ragged.filter_dtype,
+                                                 ragged.output_dtype,
+                                                 ragged.compute_dtype,
+                                                 ragged.groups);
+}
+
+void allocateT7r5Workspace(RaggedConv1dPaddedForwardState& state,
+                           const TensorPlacement& placement,
+                           uint64_t required_bytes) {
+    state.cudnn_workspace_bytes = required_bytes;
+    if (required_bytes == 0) {
+        state.cudnn_workspace.reset();
+        return;
+    }
+    reportGpuWorkspaceAllocationRequest("ragged_conv1d_padded_cudnn_forward",
+                                        placement.getDeviceNum(),
+                                        required_bytes,
+                                        "single max cuDNN workspace across placement-built padded-width plans");
+    ScopedGpuAllocationContext allocation_context(
+        "ragged_conv1d_padded_cudnn_forward: single max cuDNN workspace across placement-built padded-width plans");
+    state.cudnn_workspace = Tensor(placement, TensorDescriptor(DataType::UINT8, {required_bytes}), 256);
+}
+
+void buildT7r5PlanFamily(RaggedConv1dPaddedForwardState& state,
+                         const CompiledRaggedConv1dCausal& compiled,
+                         const Tensor& filter,
+                         const Stream& stream) {
+    if (!t7r5CudnnValueDTypeSupported(compiled.input_dtype) ||
+        !t7r5CudnnValueDTypeSupported(compiled.filter_dtype) ||
+        !t7r5CudnnValueDTypeSupported(compiled.output_dtype)) {
+        throw std::runtime_error(
+            "Ragged Conv1D padded cuDNN forward currently supports FP16, BF16, and FP32 value/filter/output dtypes; "
+            "no alternate convolution backend is used.");
+    }
+    if (!state.input_padded || !state.output_padded) {
+        throw std::runtime_error("T8A ragged Conv1D requires preallocated padded input and output values.");
+    }
+    if (state.width_capacity_family.empty()) {
+        throw std::runtime_error("Ragged Conv1D placement produced an empty width-capacity family.");
+    }
+
+    state.filter_2d = filter;
+    state.filter_2d.reshape(
+        {compiled.output_channels, compiled.input_channels / compiled.groups, 1, compiled.kernel_width});
+    state.dense_convolution = makeT7r5DenseConvolutionDescriptor(compiled);
+
+    uint64_t max_workspace_bytes = 0;
+    for (uint64_t width_capacity : state.width_capacity_family) {
+        state.input_padded->reconfigure(
+            makeT7r5StructuralPaddedPlan(compiled, compiled.input_channels, compiled.input_dtype, width_capacity));
+        state.output_padded->reconfigure(
+            makeT7r5StructuralPaddedPlan(compiled, compiled.output_channels, compiled.output_dtype, width_capacity));
+
+        Tensor padded_input = state.input_padded->paddedTensor();
+        Tensor padded_output = state.output_padded->paddedTensor();
+        std::shared_ptr<BuiltConvolution> built =
+            StampedEquation::buildConvolution(state.dense_convolution,
+                                              padded_input,
+                                              state.filter_2d,
+                                              padded_output,
+                                              stream,
+                                              padded_input.getPlacement().getDeviceNum());
+        if (!built) {
+            throw std::runtime_error("Ragged Conv1D placement failed to build a cuDNN convolution plan.");
+        }
+        max_workspace_bytes = std::max(max_workspace_bytes, static_cast<uint64_t>(built->workspace_bytes));
+        state.prebuilt_convolutions.push_back(std::move(built));
+    }
+
+    if (state.prebuilt_convolutions.size() != state.width_capacity_family.size()) {
+        throw std::runtime_error("Ragged Conv1D placement did not prebuild the complete width-capacity plan family.");
+    }
+
+    allocateT7r5Workspace(state, filter.getPlacement(), max_workspace_bytes);
+}
+
+void prepareT7r5OutputForRetainedInput(RaggedConv1dPaddedForwardState& state,
+                                        const CompiledRaggedConv1dCausal& compiled) {
+    if (!state.input_padded || !state.output_padded || !state.dense_convolution ||
+        state.prebuilt_convolutions.size() != state.width_capacity_family.size()) {
+        throw std::runtime_error(
+            "Ragged Conv1D padded cuDNN plan family was not completely prepared during stamping.");
+    }
+
+    // T8A selects W exactly once when a packed value enters a retained padded
+    // region. Compatible producers preserve that selected physical width in
+    // their output value, so downstream Conv1D stages must not independently
+    // re-read extent metadata or re-select a shape.
+    const PaddedRaggedSequencePlan& input_plan = state.input_padded->getPlan();
+    if (input_plan.valuesDataType != compiled.input_dtype || input_plan.offsetsDataType != compiled.offset_dtype ||
+        input_plan.batchSize != compiled.batch_size || input_plan.maxTotalValues != compiled.max_active_values ||
+        input_plan.maxValuesPerRow != compiled.max_values_per_row || input_plan.channels != compiled.input_channels) {
+        throw std::runtime_error("Ragged Conv1D retained input plan does not match its compiled representation.");
+    }
+    if (input_plan.widthCapacity != 0) {
+        const auto capacity = std::lower_bound(
+            state.width_capacity_family.begin(), state.width_capacity_family.end(), input_plan.widthCapacity);
+        if (capacity == state.width_capacity_family.end() || *capacity != input_plan.widthCapacity) {
+            throw std::runtime_error(
+                "Ragged Conv1D retained input selected a width outside its placement-time capacity family.");
+        }
+        const uint64_t dense_value_capacity =
+            t7r5CheckedMul(input_plan.batchSize, input_plan.widthCapacity, "retained padded B*W capacity");
+        if (input_plan.activeValues > dense_value_capacity) {
+            throw std::runtime_error(
+                "Ragged Conv1D retained input active population exceeds its selected padded width capacity.");
+        }
+    } else if (input_plan.activeValues != 0) {
+        throw std::runtime_error("Ragged Conv1D retained width-0 input cannot contain active values.");
+    }
+
+    PaddedRaggedSequencePlan output_plan =
+        makeT7r5StructuralPaddedPlan(compiled, compiled.output_channels, compiled.output_dtype, input_plan.widthCapacity);
+    output_plan.activeValues = input_plan.activeValues;
+    state.output_padded->reconfigure(std::move(output_plan));
+}
+
+std::shared_ptr<BuiltConvolution> t7r5PrebuiltConvolutionForWidth(const RaggedConv1dPaddedForwardState& state,
+                                                                 uint64_t width_capacity) {
+    const auto capacity =
+        std::lower_bound(state.width_capacity_family.begin(), state.width_capacity_family.end(), width_capacity);
+    if (capacity == state.width_capacity_family.end() || *capacity != width_capacity) {
+        throw std::runtime_error(
+            "Ragged Conv1D runtime selected a width outside its placement-time capacity family.");
+    }
+    const size_t plan_index = static_cast<size_t>(capacity - state.width_capacity_family.begin());
+    if (plan_index >= state.prebuilt_convolutions.size() || !state.prebuilt_convolutions[plan_index]) {
+        throw std::runtime_error(
+            "Ragged Conv1D runtime selected a width whose cuDNN plan was not prebuilt during stamping.");
+    }
+    return state.prebuilt_convolutions[plan_index];
+}
+
+void allocateT9aWorkspace(RaggedConv1dPaddedBackwardDataState& state,
+                          const TensorPlacement& placement,
+                          uint64_t required_bytes) {
+    state.cudnn_workspace_bytes = required_bytes;
+    if (required_bytes == 0) {
+        state.cudnn_workspace.reset();
+        return;
+    }
+    reportGpuWorkspaceAllocationRequest("ragged_conv1d_padded_cudnn_backward_data",
+                                        placement.getDeviceNum(),
+                                        required_bytes,
+                                        "single max cuDNN workspace across placement-built padded-width dgrad plans");
+    ScopedGpuAllocationContext allocation_context(
+        "ragged_conv1d_padded_cudnn_backward_data: single max cuDNN workspace across placement-built padded-width dgrad plans");
+    state.cudnn_workspace = Tensor(placement, TensorDescriptor(DataType::UINT8, {required_bytes}), 256);
+}
+
+void buildT9aDgradPlanFamily(RaggedConv1dPaddedBackwardDataState& state,
+                             const CompiledRaggedConv1dCausalBackwardData& compiled,
+                             const Tensor& filter,
+                             const Stream& stream) {
+    if (!t7r5CudnnValueDTypeSupported(compiled.filter_dtype) ||
+        !t7r5CudnnValueDTypeSupported(compiled.grad_output_dtype) ||
+        !t7r5CudnnValueDTypeSupported(compiled.output_dtype)) {
+        throw std::runtime_error(
+            "Ragged Conv1D padded cuDNN dgrad currently supports FP16, BF16, and FP32 dtypes; no alternate backend is used.");
+    }
+    if (!state.grad_output_padded || !state.sanitized_grad_output || !state.output_padded) {
+        throw std::runtime_error("T9A ragged Conv1D dgrad requires producer dY, sanitation scratch, and padded dX.");
+    }
+    if (state.width_capacity_family.empty()) {
+        throw std::runtime_error("Ragged Conv1D dgrad placement produced an empty width-capacity family.");
+    }
+
+    state.filter_2d = filter;
+    state.filter_2d.reshape(
+        {compiled.output_channels, compiled.input_channels / compiled.groups, 1, compiled.kernel_width});
+    state.dense_dgrad = makeT9aDenseDgradDescriptor(compiled);
+
+    uint64_t max_workspace_bytes = 0;
+    for (uint64_t width_capacity : state.width_capacity_family) {
+        state.grad_output_padded->reconfigure(makeStructuralPaddedPlan(compiled.padded_grad_output_layout, width_capacity));
+        state.sanitized_grad_output->reconfigure(
+            makeStructuralPaddedPlan(compiled.padded_grad_output_layout, width_capacity));
+        state.output_padded->reconfigure(makeStructuralPaddedPlan(compiled.padded_output_layout, width_capacity));
+
+        Tensor padded_dy = state.sanitized_grad_output->paddedTensor();
+        Tensor padded_dx = state.output_padded->paddedTensor();
+        std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolutionBackward(
+            state.dense_dgrad,
+            state.filter_2d,
+            padded_dy,
+            padded_dx,
+            stream,
+            padded_dx.getPlacement().getDeviceNum());
+        if (!built) {
+            throw std::runtime_error("Ragged Conv1D dgrad placement failed to build a cuDNN backward-data plan.");
+        }
+        max_workspace_bytes = std::max(max_workspace_bytes, static_cast<uint64_t>(built->workspace_bytes));
+        state.prebuilt_dgrads.push_back(std::move(built));
+    }
+
+    if (state.prebuilt_dgrads.size() != state.width_capacity_family.size()) {
+        throw std::runtime_error("Ragged Conv1D dgrad placement did not prebuild the complete width-capacity plan family.");
+    }
+    allocateT9aWorkspace(state, filter.getPlacement(), max_workspace_bytes);
+}
+
+void prepareT9aDgradForRetainedGradOutput(RaggedConv1dPaddedBackwardDataState& state,
+                                           const CompiledRaggedConv1dCausalBackwardData& compiled) {
+    if (!state.grad_output_padded || !state.sanitized_grad_output || !state.output_padded || !state.dense_dgrad ||
+        state.prebuilt_dgrads.size() != state.width_capacity_family.size()) {
+        throw std::runtime_error("Ragged Conv1D dgrad plan family was not completely prepared during stamping.");
+    }
+
+    // The retained dY already carries the region's selected W. dgrad must inherit
+    // it verbatim; independently re-reading the partition would violate the T8A
+    // one-width-per-retained-region contract.
+    const PaddedRaggedSequencePlan& dy_plan = state.grad_output_padded->getPlan();
+    if (dy_plan.valuesDataType != compiled.grad_output_dtype || dy_plan.offsetsDataType != compiled.offset_dtype ||
+        dy_plan.batchSize != compiled.batch_size || dy_plan.maxTotalValues != compiled.max_active_values ||
+        dy_plan.maxValuesPerRow != compiled.max_values_per_row || dy_plan.channels != compiled.output_channels) {
+        throw std::runtime_error("Ragged Conv1D dgrad retained dY plan does not match its compiled representation.");
+    }
+    if (dy_plan.widthCapacity != 0) {
+        const auto capacity =
+            std::lower_bound(state.width_capacity_family.begin(), state.width_capacity_family.end(), dy_plan.widthCapacity);
+        if (capacity == state.width_capacity_family.end() || *capacity != dy_plan.widthCapacity) {
+            throw std::runtime_error("Ragged Conv1D dgrad retained dY selected W outside its placement-time family.");
+        }
+        const uint64_t dense_value_capacity =
+            t7r5CheckedMul(dy_plan.batchSize, dy_plan.widthCapacity, "T9A retained padded dY B*W capacity");
+        if (dy_plan.activeValues > dense_value_capacity) {
+            throw std::runtime_error("Ragged Conv1D dgrad active dY population exceeds its selected padded width.");
+        }
+    } else if (dy_plan.activeValues != 0) {
+        throw std::runtime_error("Ragged Conv1D dgrad width-0 dY cannot contain active values.");
+    }
+
+    PaddedRaggedSequencePlan sanitized_plan = makeStructuralPaddedPlan(compiled.padded_grad_output_layout, dy_plan.widthCapacity);
+    sanitized_plan.activeValues = dy_plan.activeValues;
+    state.sanitized_grad_output->reconfigure(std::move(sanitized_plan));
+    PaddedRaggedSequencePlan dx_plan = makeStructuralPaddedPlan(compiled.padded_output_layout, dy_plan.widthCapacity);
+    dx_plan.activeValues = dy_plan.activeValues;
+    state.output_padded->reconfigure(std::move(dx_plan));
+}
+
+std::shared_ptr<BuiltConvolution> t9aPrebuiltDgradForWidth(const RaggedConv1dPaddedBackwardDataState& state,
+                                                           uint64_t width_capacity) {
+    const auto capacity =
+        std::lower_bound(state.width_capacity_family.begin(), state.width_capacity_family.end(), width_capacity);
+    if (capacity == state.width_capacity_family.end() || *capacity != width_capacity) {
+        throw std::runtime_error("Ragged Conv1D dgrad runtime selected W outside its placement-time family.");
+    }
+    const size_t plan_index = static_cast<size_t>(capacity - state.width_capacity_family.begin());
+    if (plan_index >= state.prebuilt_dgrads.size() || !state.prebuilt_dgrads[plan_index]) {
+        throw std::runtime_error("Ragged Conv1D dgrad selected W whose cuDNN plan was not prebuilt during stamping.");
+    }
+    return state.prebuilt_dgrads[plan_index];
+}
+
+void allocateT9bWorkspace(RaggedConv1dPaddedBackwardFilterState& state,
+                          const TensorPlacement& placement,
+                          uint64_t required_bytes) {
+    state.cudnn_workspace_bytes = required_bytes;
+    if (required_bytes == 0) {
+        state.cudnn_workspace.reset();
+        return;
+    }
+    reportGpuWorkspaceAllocationRequest("ragged_conv1d_padded_cudnn_backward_filter",
+                                        placement.getDeviceNum(),
+                                        required_bytes,
+                                        "single max cuDNN workspace across placement-built padded-width wgrad plans");
+    ScopedGpuAllocationContext allocation_context(
+        "ragged_conv1d_padded_cudnn_backward_filter: single max cuDNN workspace across placement-built padded-width wgrad plans");
+    state.cudnn_workspace = Tensor(placement, TensorDescriptor(DataType::UINT8, {required_bytes}), 256);
+}
+
+void buildT9bWgradPlanFamily(RaggedConv1dPaddedBackwardFilterState& state,
+                             const CompiledRaggedConv1dCausalBackwardFilter& compiled,
+                             const Tensor& output,
+                             const Stream& stream) {
+    if (!t7r5CudnnValueDTypeSupported(compiled.input_dtype) ||
+        !t7r5CudnnValueDTypeSupported(compiled.grad_output_dtype) ||
+        !t7r5CudnnValueDTypeSupported(compiled.output_dtype)) {
+        throw std::runtime_error(
+            "Ragged Conv1D padded cuDNN wgrad currently supports FP16, BF16, and FP32 dtypes; no alternate backend is used.");
+    }
+    if (!state.input_padded || !state.grad_output_padded || !state.sanitized_input || !state.sanitized_grad_output) {
+        throw std::runtime_error("T9B ragged Conv1D wgrad requires X, dY, and both sanitation scratch values.");
+    }
+    state.dense_wgrad = makeT9bDenseWgradDescriptor(compiled);
+    Tensor output_2d = output;
+    output_2d.reshape({compiled.output_channels, compiled.input_channels / compiled.groups, 1, compiled.kernel_width});
+    uint64_t max_workspace_bytes = 0;
+    for (uint64_t width_capacity : state.width_capacity_family) {
+        // Plan construction uses consumer-owned scratch only. Never reconfigure
+        // producer-retained X/dY merely to build the finite wgrad family.
+        state.sanitized_input->reconfigure(makeStructuralPaddedPlan(compiled.padded_input_layout, width_capacity));
+        state.sanitized_grad_output->reconfigure(makeStructuralPaddedPlan(compiled.padded_grad_output_layout, width_capacity));
+        Tensor x = state.sanitized_input->paddedTensor();
+        Tensor dy = state.sanitized_grad_output->paddedTensor();
+        std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolutionBackward(
+            state.dense_wgrad, x, dy, output_2d, stream, output.getPlacement().getDeviceNum());
+        if (!built) throw std::runtime_error("Ragged Conv1D wgrad placement failed to build a cuDNN backward-filter plan.");
+        max_workspace_bytes = std::max(max_workspace_bytes, static_cast<uint64_t>(built->workspace_bytes));
+        state.prebuilt_wgrads.push_back(std::move(built));
+    }
+    if (state.prebuilt_wgrads.size() != state.width_capacity_family.size()) {
+        throw std::runtime_error("Ragged Conv1D wgrad placement did not prebuild the complete width-capacity plan family.");
+    }
+    allocateT9bWorkspace(state, output.getPlacement(), max_workspace_bytes);
+}
+
+void prepareT9bWgradForRetainedInputs(RaggedConv1dPaddedBackwardFilterState& state,
+                                       const CompiledRaggedConv1dCausalBackwardFilter& compiled) {
+    const PaddedRaggedSequencePlan& x_plan = state.input_padded->getPlan();
+    const PaddedRaggedSequencePlan& dy_plan = state.grad_output_padded->getPlan();
+    if (x_plan.valuesDataType != compiled.input_dtype || x_plan.channels != compiled.input_channels ||
+        dy_plan.valuesDataType != compiled.grad_output_dtype || dy_plan.channels != compiled.output_channels ||
+        x_plan.offsetsDataType != compiled.offset_dtype || dy_plan.offsetsDataType != compiled.offset_dtype ||
+        x_plan.batchSize != compiled.batch_size || dy_plan.batchSize != compiled.batch_size ||
+        x_plan.maxTotalValues != compiled.max_active_values || dy_plan.maxTotalValues != compiled.max_active_values ||
+        x_plan.maxValuesPerRow != compiled.max_values_per_row || dy_plan.maxValuesPerRow != compiled.max_values_per_row) {
+        throw std::runtime_error("Ragged Conv1D wgrad retained X/dY plans do not match the compiled representation.");
+    }
+    // dY carries the backward region's selected W. Saved X must agree exactly;
+    // wgrad never independently selects a runtime width.
+    if (x_plan.widthCapacity != dy_plan.widthCapacity || x_plan.activeValues != dy_plan.activeValues) {
+        throw std::runtime_error("Ragged Conv1D wgrad retained X and dY must share selected W and active population.");
+    }
+    if (dy_plan.widthCapacity != 0) {
+        const auto it = std::lower_bound(state.width_capacity_family.begin(), state.width_capacity_family.end(), dy_plan.widthCapacity);
+        if (it == state.width_capacity_family.end() || *it != dy_plan.widthCapacity) {
+            throw std::runtime_error("Ragged Conv1D wgrad selected W outside its placement-time family.");
+        }
+        const uint64_t dense_value_capacity =
+            t7r5CheckedMul(dy_plan.batchSize, dy_plan.widthCapacity, "T9B retained padded B*W capacity");
+        if (dy_plan.activeValues > dense_value_capacity) {
+            throw std::runtime_error("Ragged Conv1D wgrad active population exceeds its selected padded width.");
+        }
+    } else if (dy_plan.activeValues != 0) {
+        throw std::runtime_error("Ragged Conv1D wgrad width-0 inputs cannot contain active values.");
+    }
+    PaddedRaggedSequencePlan sx = makeStructuralPaddedPlan(compiled.padded_input_layout, dy_plan.widthCapacity);
+    PaddedRaggedSequencePlan sdy = makeStructuralPaddedPlan(compiled.padded_grad_output_layout, dy_plan.widthCapacity);
+    sx.activeValues = dy_plan.activeValues;
+    sdy.activeValues = dy_plan.activeValues;
+    state.sanitized_input->reconfigure(std::move(sx));
+    state.sanitized_grad_output->reconfigure(std::move(sdy));
+}
+
+std::shared_ptr<BuiltConvolution> t9bPrebuiltWgradForWidth(const RaggedConv1dPaddedBackwardFilterState& state,
+                                                           uint64_t width_capacity) {
+    const auto it = std::lower_bound(state.width_capacity_family.begin(), state.width_capacity_family.end(), width_capacity);
+    if (it == state.width_capacity_family.end() || *it != width_capacity) {
+        throw std::runtime_error("Ragged Conv1D wgrad runtime selected W outside its placement-time family.");
+    }
+    const size_t index = static_cast<size_t>(it - state.width_capacity_family.begin());
+    if (index >= state.prebuilt_wgrads.size() || !state.prebuilt_wgrads[index]) {
+        throw std::runtime_error("Ragged Conv1D wgrad selected W whose cuDNN plan was not prebuilt during stamping.");
+    }
+    return state.prebuilt_wgrads[index];
+}
+
+void validatePaddedLayoutMatches(const PaddedRaggedSequence& value,
+                                 const CompiledPaddedRaggedSequenceLayout& layout,
+                                 const char* role) {
+    const PaddedRaggedSequencePlan& plan = value.getPlan();
+    if (plan.valuesDataType != layout.values_dtype || plan.offsetsDataType != layout.offset_dtype ||
+        plan.batchSize != layout.batch_size || plan.maxTotalValues != layout.max_total_values ||
+        plan.maxValuesPerRow != layout.max_values_per_row || plan.channels != layout.channels) {
+        throw std::runtime_error(std::string("T8A padded ragged ") + role + " does not match its compiled representation.");
+    }
+}
+
+}  // namespace
+
+StampedPaddedRaggedPack::StampedPaddedRaggedPack(CompiledPaddedRaggedSequenceLayout layout,
+                                                 std::vector<uint64_t> width_capacities,
+                                                 const Tensor& packed_values,
+                                                 std::shared_ptr<PaddedRaggedSequence> padded_values,
+                                                 const Stream& stream)
+    : layout(std::move(layout)),
+      width_capacities(std::move(width_capacities)),
+      packed_values(packed_values),
+      padded_values(std::move(padded_values)),
+      stream(stream) {
+    if (!this->padded_values) {
+        throw std::runtime_error("StampedPaddedRaggedPack requires a padded destination.");
+    }
+    validatePaddedLayoutMatches(*this->padded_values, this->layout, "pack destination");
+    if (this->packed_values.getDataType() != this->layout.values_dtype ||
+        this->packed_values.getDimensions() !=
+            std::vector<uint64_t>({this->layout.max_total_values, this->layout.channels}) ||
+        this->packed_values.getPlacement() != this->padded_values->getPaddedValuesStorage().getPlacement() ||
+        !this->packed_values.isDenseContiguous()) {
+        throw std::runtime_error(
+            "StampedPaddedRaggedPack packed source must be a dense tensor matching its compiled representation.");
+    }
+    if (this->width_capacities.empty() || this->width_capacities.back() < this->layout.max_values_per_row) {
+        throw std::runtime_error("StampedPaddedRaggedPack requires a complete placement-time width family.");
+    }
+}
+
+void StampedPaddedRaggedPack::run() { runOn(stream); }
+
+void StampedPaddedRaggedPack::runOn(Stream& run_stream) const {
+    if (run_stream.getGpuNum() != packed_values.getPlacement().getDeviceNum()) {
+        throw std::runtime_error("Padded ragged pack stream GPU does not match tensor placement.");
+    }
+    preparePaddedForCurrentPartition(*padded_values, layout, width_capacities);
+    padded_values->packFrom(packed_values, run_stream);
+}
+
+StampedPaddedRaggedUnpack::StampedPaddedRaggedUnpack(std::shared_ptr<PaddedRaggedSequence> padded_values,
+                                                     Tensor packed_values,
+                                                     const Stream& stream)
+    : padded_values(std::move(padded_values)), packed_values(std::move(packed_values)), stream(stream) {
+    if (!this->padded_values) {
+        throw std::runtime_error("StampedPaddedRaggedUnpack requires a padded source.");
+    }
+    const PaddedRaggedSequencePlan& plan = this->padded_values->getPlan();
+    if (this->packed_values.getDataType() != plan.valuesDataType ||
+        this->packed_values.getDimensions() != std::vector<uint64_t>({plan.maxTotalValues, plan.channels}) ||
+        this->packed_values.getPlacement() != this->padded_values->getPaddedValuesStorage().getPlacement() ||
+        !this->packed_values.isDenseContiguous()) {
+        throw std::runtime_error(
+            "StampedPaddedRaggedUnpack packed destination must be a dense tensor matching its padded source.");
+    }
+}
+
+void StampedPaddedRaggedUnpack::run() { runOn(stream); }
+
+void StampedPaddedRaggedUnpack::runOn(Stream& run_stream) const {
+    if (run_stream.getGpuNum() != packed_values.getPlacement().getDeviceNum()) {
+        throw std::runtime_error("Padded ragged unpack stream GPU does not match tensor placement.");
+    }
+    padded_values->unpackTo(packed_values, run_stream);
+}
+
+StampedPaddedRaggedPointwise::StampedPaddedRaggedPointwise(
+    std::shared_ptr<CompiledEquation> compiled,
+    std::vector<std::string> input_names,
+    std::vector<PaddedRaggedPointwiseInputAccess> input_access,
+    std::vector<RuntimeInputValue> static_inputs,
+    std::vector<std::shared_ptr<PaddedRaggedSequence>> padded_inputs,
+    std::vector<std::shared_ptr<PaddedRaggedSequence>> padded_outputs,
+    std::vector<uint64_t> width_capacities,
+    const Stream& stream)
+    : compiled(std::move(compiled)),
+      input_names(std::move(input_names)),
+      static_inputs(std::move(static_inputs)),
+      padded_inputs(std::move(padded_inputs)),
+      padded_outputs(std::move(padded_outputs)),
+      stream(stream) {
+    if (!this->compiled || this->padded_outputs.empty() || this->input_names.size() != this->compiled->numInputs() ||
+        input_access.size() != this->compiled->numInputs() ||
+        this->static_inputs.size() != this->compiled->numInputs() ||
+        this->padded_inputs.size() != this->compiled->numInputs()) {
+        throw std::invalid_argument("StampedPaddedRaggedPointwise received inconsistent compiled/input metadata.");
+    }
+    const auto first_input_it = std::find_if(
+        this->padded_inputs.begin(), this->padded_inputs.end(), [](const auto& value) { return value != nullptr; });
+    if (first_input_it == this->padded_inputs.end()) {
+        throw std::invalid_argument("StampedPaddedRaggedPointwise requires at least one padded value input.");
+    }
+    if (width_capacities.empty()) {
+        throw std::invalid_argument("StampedPaddedRaggedPointwise requires a non-empty placement-time width family.");
+    }
+    std::sort(width_capacities.begin(), width_capacities.end());
+    width_capacities.erase(std::unique(width_capacities.begin(), width_capacities.end()), width_capacities.end());
+    if (width_capacities.front() == 0) {
+        throw std::invalid_argument("StampedPaddedRaggedPointwise width family must contain only positive capacities.");
+    }
+
+    const PaddedRaggedSequencePlan& structural_plan = (*first_input_it)->getPlan();
+    for (uint64_t width_capacity : width_capacities) {
+        const uint64_t physical_numel = t7r5CheckedMul(
+            t7r5CheckedMul(structural_plan.batchSize, structural_plan.channels, "T8B padded pointwise B*C"),
+            width_capacity,
+            "T8B padded pointwise B*C*W");
+        if (physical_numel == 0 || physical_numel > UINT32_MAX) {
+            throw std::invalid_argument(
+                "StampedPaddedRaggedPointwise placement-time physical element count must fit uint32_t.");
+        }
+
+        std::vector<RuntimeInputValue> invocation_inputs = this->static_inputs;
+        for (size_t i = 0; i < this->padded_inputs.size(); ++i) {
+            if (this->padded_inputs[i]) {
+                invocation_inputs[i] = this->padded_inputs[i]->paddedTensorForWidth(width_capacity);
+            }
+        }
+        std::vector<Tensor> invocation_outputs;
+        invocation_outputs.reserve(this->padded_outputs.size());
+        for (const auto& output : this->padded_outputs) {
+            if (!output) {
+                throw std::invalid_argument("StampedPaddedRaggedPointwise received a null padded output.");
+            }
+            invocation_outputs.push_back(output->paddedTensorForWidth(width_capacity));
+        }
+        auto invocation = std::make_shared<StampedEquation>(
+            this->compiled, this->input_names, std::move(invocation_inputs), std::move(invocation_outputs), this->stream);
+        const bool inserted = invocation_by_width.emplace(width_capacity, std::move(invocation)).second;
+        if (!inserted) {
+            throw std::logic_error("StampedPaddedRaggedPointwise placement-time width family contains a duplicate.");
+        }
+    }
+}
+
+uint32_t StampedPaddedRaggedPointwise::gpuNum() const {
+    if (!padded_outputs.empty() && padded_outputs.front() && padded_outputs.front()->hasValueStorage()) {
+        return padded_outputs.front()->getPaddedValuesStorage().getPlacement().getDeviceNum();
+    }
+    for (const auto& input : padded_inputs) {
+        if (input && input->hasValueStorage()) {
+            return input->getPaddedValuesStorage().getPlacement().getDeviceNum();
+        }
+    }
+    throw std::runtime_error("StampedPaddedRaggedPointwise has no GPU storage.");
+}
+
+bool StampedPaddedRaggedPointwise::requiresRuntimeScalars() const {
+    if (!compiled) {
+        return false;
+    }
+    return std::find(compiled->input_kinds.begin(), compiled->input_kinds.end(), NamedInput::Kind::RuntimeScalarFp32) !=
+           compiled->input_kinds.end();
+}
+
+std::unordered_set<std::string> StampedPaddedRaggedPointwise::runtimeScalarNames() const {
+    std::unordered_set<std::string> names;
+    if (!compiled) {
+        return names;
+    }
+    if (compiled->input_kinds.size() != input_names.size()) {
+        throw std::runtime_error("StampedPaddedRaggedPointwise compiled input metadata is inconsistent.");
+    }
+    for (size_t i = 0; i < compiled->input_kinds.size(); ++i) {
+        if (compiled->input_kinds[i] == NamedInput::Kind::RuntimeScalarFp32) {
+            names.insert(input_names[i]);
+        }
+    }
+    return names;
+}
+
+const StampedEquation& StampedPaddedRaggedPointwise::currentInvocationForCapture() const {
+    const PaddedRaggedSequence* source = nullptr;
+    for (const auto& input : padded_inputs) {
+        if (input) {
+            source = input.get();
+            break;
+        }
+    }
+    if (source == nullptr || source->getPlan().widthCapacity == 0) {
+        throw std::runtime_error(
+            "Conditional capture of a padded-ragged pointwise stage requires a non-empty selected width.");
+    }
+    auto it = invocation_by_width.find(source->getPlan().widthCapacity);
+    if (it == invocation_by_width.end() || !it->second) {
+        throw std::runtime_error(
+            "Conditional capture selected a padded-ragged pointwise width that was not pre-stamped.");
+    }
+    return *it->second;
+}
+
+void StampedPaddedRaggedPointwise::run() { runOn(stream); }
+
+void StampedPaddedRaggedPointwise::runOn(Stream& run_stream) const { runOn(run_stream, {}); }
+
+void StampedPaddedRaggedPointwise::runOn(
+    Stream& run_stream,
+    const std::unordered_map<std::string, float>& runtime_scalars) const {
+    const PaddedRaggedSequence* source = nullptr;
+    for (const auto& input : padded_inputs) {
+        if (input) {
+            source = input.get();
+            break;
+        }
+    }
+    if (source == nullptr) {
+        throw std::runtime_error("Padded-ragged pointwise execution is missing its retained input.");
+    }
+    const PaddedRaggedSequencePlan& source_plan = source->getPlan();
+    if (source_plan.widthCapacity == 0 && source_plan.activeValues != 0) {
+        throw std::runtime_error("Padded-ragged pointwise width-0 input cannot contain active values.");
+    }
+    if (source_plan.widthCapacity != 0 &&
+        source_plan.activeValues > t7r5CheckedMul(source_plan.batchSize,
+                                                   source_plan.widthCapacity,
+                                                   "T8B padded pointwise B*W active capacity")) {
+        throw std::runtime_error(
+            "Padded-ragged pointwise active_value_count exceeds B * selected_width_capacity.");
+    }
+
+    for (size_t i = 0; i < padded_inputs.size(); ++i) {
+        if (!padded_inputs[i]) {
+            continue;
+        }
+        const PaddedRaggedSequencePlan& plan = padded_inputs[i]->getPlan();
+        if (plan.batchSize != source_plan.batchSize || plan.maxTotalValues != source_plan.maxTotalValues ||
+            plan.maxValuesPerRow != source_plan.maxValuesPerRow || plan.channels != source_plan.channels ||
+            plan.activeValues != source_plan.activeValues || plan.widthCapacity != source_plan.widthCapacity ||
+            padded_inputs[i]->getRowOffsets() != source->getRowOffsets()) {
+            throw std::runtime_error(
+                "T8B padded-ragged pointwise inputs must share one row partition, channel width, active population, and selected W.");
+        }
+    }
+
+    for (const auto& output : padded_outputs) {
+        if (!output) {
+            throw std::runtime_error("T8B padded-ragged pointwise output is missing its physical value.");
+        }
+        const PaddedRaggedSequencePlan& old_plan = output->getPlan();
+        if (old_plan.batchSize != source_plan.batchSize || old_plan.maxTotalValues != source_plan.maxTotalValues ||
+            old_plan.maxValuesPerRow != source_plan.maxValuesPerRow || old_plan.channels != source_plan.channels ||
+            output->getRowOffsets() != source->getRowOffsets()) {
+            throw std::runtime_error("T8B padded-ragged pointwise output does not preserve the input row partition/layout.");
+        }
+        PaddedRaggedSequencePlan output_plan = makeStructuralPaddedPlan(
+            CompiledPaddedRaggedSequenceLayout{old_plan.valuesDataType,
+                                               old_plan.offsetsDataType,
+                                               old_plan.batchSize,
+                                               old_plan.maxTotalValues,
+                                               old_plan.maxValuesPerRow,
+                                               old_plan.channels},
+            source_plan.widthCapacity);
+        output_plan.activeValues = source_plan.activeValues;
+        output->reconfigure(std::move(output_plan));
+    }
+
+    if (source_plan.widthCapacity == 0) {
+        const std::unordered_set<std::string> required_scalar_names = runtimeScalarNames();
+        std::unordered_set<std::string> consumed_scalar_names;
+        for (const std::string& name : required_scalar_names) {
+            if (!runtime_scalars.contains(name)) {
+                throw std::runtime_error(
+                    "Missing value for runtime scalar in all-empty padded-ragged pointwise execution: " + name);
+            }
+            consumed_scalar_names.insert(name);
+        }
+        for (const auto& [name, _] : runtime_scalars) {
+            if (!consumed_scalar_names.contains(name)) {
+                throw std::runtime_error(
+                    "Unexpected runtime scalar override for all-empty padded-ragged pointwise execution: " + name);
+            }
+        }
+        return;
+    }
+    auto invocation_it = invocation_by_width.find(source_plan.widthCapacity);
+    if (invocation_it == invocation_by_width.end() || !invocation_it->second) {
+        throw std::runtime_error(
+            "T8B padded-ragged pointwise selected a runtime W that was not pre-stamped at placement.");
+    }
+    if (runtime_scalars.empty()) {
+        invocation_it->second->runOn(run_stream);
+    } else {
+        invocation_it->second->runOn(run_stream, runtime_scalars);
+    }
+}
+
+StampedRaggedConv1dCausal::StampedRaggedConv1dCausal(std::shared_ptr<CompiledRaggedConv1dCausal> compiled,
+                                                     std::shared_ptr<PaddedRaggedSequence> padded_input,
+                                                     const Tensor& filter,
+                                                     const Tensor& row_offsets,
+                                                     std::shared_ptr<PaddedRaggedSequence> padded_output,
+                                                     const Stream& stream)
+    : compiled_ragged_conv1d_causal(std::move(compiled)),
+      filter(filter),
+      row_offsets(row_offsets),
+      stream(stream),
+      padded_forward_state(std::make_shared<RaggedConv1dPaddedForwardState>()) {
+    if (!compiled_ragged_conv1d_causal) {
+        throw std::runtime_error("StampedRaggedConv1dCausal requires a compiled descriptor.");
+    }
+    if (!padded_input || !padded_output) {
+        throw std::runtime_error("StampedRaggedConv1dCausal requires padded input and output representations.");
+    }
+    if (filter.getDataType() != compiled_ragged_conv1d_causal->filter_dtype ||
+        row_offsets.getDataType() != compiled_ragged_conv1d_causal->offset_dtype) {
+        throw std::runtime_error("StampedRaggedConv1dCausal tensor dtypes do not match the compiled descriptor.");
+    }
+    if (!filter.isDenseContiguous() || !row_offsets.isDenseContiguous()) {
+        throw std::runtime_error("Ragged causal Conv1D requires dense filter and offsets tensors.");
+    }
+    if (padded_input->getRowOffsets() != row_offsets || padded_output->getRowOffsets() != row_offsets) {
+        throw std::runtime_error("T8A retained ragged Conv1D values must share the exact canonical offsets tensor.");
+    }
+    validatePaddedLayoutMatches(*padded_input, compiled_ragged_conv1d_causal->padded_input_layout, "Conv1D input");
+    validatePaddedLayoutMatches(*padded_output, compiled_ragged_conv1d_causal->padded_output_layout, "Conv1D output");
+
+    padded_forward_state->input_padded = std::move(padded_input);
+    padded_forward_state->output_padded = std::move(padded_output);
+    padded_forward_state->width_capacity_family =
+        makeRaggedConv1dWidthCapacities(compiled_ragged_conv1d_causal->max_values_per_row);
+    buildT7r5PlanFamily(*padded_forward_state, *compiled_ragged_conv1d_causal, filter, stream);
+}
+
+uint32_t StampedRaggedConv1dCausal::gpuNum() const {
+    if (!padded_forward_state || !padded_forward_state->output_padded) {
+        throw std::runtime_error("Ragged Conv1D is missing its padded output representation.");
+    }
+    return padded_forward_state->output_padded->getPaddedValuesStorage().getPlacement().getDeviceNum();
+}
+
+void StampedRaggedConv1dCausal::run() { runOn(stream); }
+
+void StampedRaggedConv1dCausal::runOn(Stream& run_stream) const {
+    if (run_stream != stream) {
+        throw std::runtime_error(
+            "StampedRaggedConv1dCausal must execute on the same Stream used for stamping because Thor assigns its "
+            "operation-local cuDNN Frontend plan family to that stamping execution domain.");
+    }
+    if (run_stream.getGpuNum() != filter.getPlacement().getDeviceNum()) {
+        throw std::runtime_error("Ragged causal Conv1D run stream does not match tensor placement.");
+    }
+    if (!padded_forward_state) {
+        throw std::runtime_error("Ragged causal Conv1D is missing its padded runtime state.");
+    }
+
+    RaggedConv1dPaddedForwardState& state = *padded_forward_state;
+    prepareT7r5OutputForRetainedInput(state, *compiled_ragged_conv1d_causal);
+
+    const uint64_t width_capacity = state.input_padded->getPlan().widthCapacity;
+    if (width_capacity == 0) {
+        return;
+    }
+
+    std::shared_ptr<BuiltConvolution> built = t7r5PrebuiltConvolutionForWidth(state, width_capacity);
+    Tensor padded_input = state.input_padded->paddedTensor();
+    Tensor padded_output = state.output_padded->paddedTensor();
+    StampedConvolution padded_convolution(state.dense_convolution,
+                                          built,
+                                          padded_input,
+                                          state.filter_2d,
+                                          padded_output,
+                                          run_stream,
+                                          state.cudnn_workspace);
+    padded_convolution.runOn(run_stream);
+}
+
+RaggedConv1dStageDiagnostic StampedRaggedConv1dCausal::diagnostic() const {
+    RaggedConv1dStageDiagnostic out;
+    if (!padded_forward_state) {
+        return out;
+    }
+    const RaggedConv1dPaddedForwardState& state = *padded_forward_state;
+    out.cudnn_workspace_bytes = state.cudnn_workspace_bytes;
+    out.width_capacity_count = state.width_capacity_family.size();
+    out.prebuilt_cudnn_plan_count = state.prebuilt_convolutions.size();
+    if (!state.input_padded || !state.output_padded) {
+        return out;
+    }
+    const PaddedRaggedSequencePlan& input_plan = state.input_padded->getPlan();
+    const PaddedRaggedSequencePlan& output_plan = state.output_padded->getPlan();
+    out.active_values = input_plan.activeValues;
+    out.selected_width_capacity = input_plan.widthCapacity;
+    out.input_padded_value_bytes = input_plan.valueBytes;
+    out.output_padded_value_bytes = output_plan.valueBytes;
+    out.allocated_padded_value_bytes = state.input_padded->allocatedValueBytes() + state.output_padded->allocatedValueBytes();
+    return out;
+}
+
+StampedRaggedConv1dCausalBackwardData::StampedRaggedConv1dCausalBackwardData(
+    std::shared_ptr<CompiledRaggedConv1dCausalBackwardData> compiled,
+    const Tensor& filter,
+    std::shared_ptr<PaddedRaggedSequence> padded_grad_output,
+    const Tensor& row_offsets,
+    std::shared_ptr<PaddedRaggedSequence> padded_output,
+    const Stream& stream)
+    : compiled_ragged_conv1d_causal_backward_data(std::move(compiled)),
+      filter(filter),
+      row_offsets(row_offsets),
+      stream(stream),
+      padded_backward_data_state(std::make_shared<RaggedConv1dPaddedBackwardDataState>()) {
+    if (!compiled_ragged_conv1d_causal_backward_data) {
+        throw std::runtime_error("StampedRaggedConv1dCausalBackwardData requires a compiled descriptor.");
+    }
+    if (!padded_grad_output || !padded_output) {
+        throw std::runtime_error("StampedRaggedConv1dCausalBackwardData requires padded dY and dX representations.");
+    }
+    if (filter.getDataType() != compiled_ragged_conv1d_causal_backward_data->filter_dtype ||
+        row_offsets.getDataType() != compiled_ragged_conv1d_causal_backward_data->offset_dtype) {
+        throw std::runtime_error("Ragged Conv1D backward-data tensor dtypes do not match the compiled descriptor.");
+    }
+    if (!filter.isDenseContiguous() || !row_offsets.isDenseContiguous()) {
+        throw std::runtime_error("Ragged Conv1D backward-data requires dense filter and offsets tensors.");
+    }
+    if (padded_grad_output->getRowOffsets() != row_offsets || padded_output->getRowOffsets() != row_offsets) {
+        throw std::runtime_error("T9A retained dY and dX must share the exact canonical offsets tensor.");
+    }
+    const TensorPlacement placement = padded_grad_output->getPaddedValuesStorage().getPlacement();
+    if (placement.getMemDevice() != TensorPlacement::MemDevices::GPU ||
+        padded_output->getPaddedValuesStorage().getPlacement() != placement || filter.getPlacement() != placement ||
+        row_offsets.getPlacement() != placement || stream.getGpuNum() != placement.getDeviceNum()) {
+        throw std::runtime_error("Ragged Conv1D backward-data tensors and stamping stream must share one GPU placement.");
+    }
+    validatePaddedLayoutMatches(*padded_grad_output,
+                                compiled_ragged_conv1d_causal_backward_data->padded_grad_output_layout,
+                                "dgrad dY");
+    validatePaddedLayoutMatches(*padded_output,
+                                compiled_ragged_conv1d_causal_backward_data->padded_output_layout,
+                                "dgrad dX");
+
+    RaggedConv1dPaddedBackwardDataState& state = *padded_backward_data_state;
+    state.grad_output_padded = std::move(padded_grad_output);
+    state.output_padded = std::move(padded_output);
+    state.width_capacity_family =
+        makeRaggedConv1dWidthCapacities(compiled_ragged_conv1d_causal_backward_data->max_values_per_row);
+    if (state.width_capacity_family.empty()) {
+        throw std::runtime_error("Ragged Conv1D dgrad requires a non-empty placement-time width family.");
+    }
+    const uint64_t reserved_width = state.width_capacity_family.back();
+    PaddedRaggedSequencePlan scratch_plan =
+        makeStructuralPaddedPlan(compiled_ragged_conv1d_causal_backward_data->padded_grad_output_layout, reserved_width);
+    state.sanitized_grad_output = std::make_shared<PaddedRaggedSequence>(
+        std::move(scratch_plan), row_offsets, placement, reserved_width);
+    buildT9aDgradPlanFamily(state, *compiled_ragged_conv1d_causal_backward_data, filter, stream);
+}
+
+uint32_t StampedRaggedConv1dCausalBackwardData::gpuNum() const {
+    if (!padded_backward_data_state || !padded_backward_data_state->output_padded) {
+        throw std::runtime_error("Ragged Conv1D dgrad is missing its padded dX representation.");
+    }
+    return padded_backward_data_state->output_padded->getPaddedValuesStorage().getPlacement().getDeviceNum();
+}
+
+void StampedRaggedConv1dCausalBackwardData::run() { runOn(stream); }
+
+void StampedRaggedConv1dCausalBackwardData::runOn(Stream& run_stream) const {
+    if (run_stream != stream) {
+        throw std::runtime_error(
+            "StampedRaggedConv1dCausalBackwardData must execute on the same Stream used for stamping because Thor "
+            "assigns its operation-local cuDNN Frontend plan family to that stamping execution domain.");
+    }
+    if (run_stream.getGpuNum() != filter.getPlacement().getDeviceNum()) {
+        throw std::runtime_error("Ragged Conv1D dgrad run stream does not match tensor placement.");
+    }
+    if (!padded_backward_data_state) {
+        throw std::runtime_error("Ragged Conv1D dgrad is missing its padded runtime state.");
+    }
+
+    RaggedConv1dPaddedBackwardDataState& state = *padded_backward_data_state;
+    prepareT9aDgradForRetainedGradOutput(state, *compiled_ragged_conv1d_causal_backward_data);
+    const uint64_t width_capacity = state.grad_output_padded->getPlan().widthCapacity;
+    if (width_capacity == 0) {
+        return;
+    }
+
+    // T9A consumer responsibility: sanitize into private scratch immediately
+    // before dgrad. Never mutate producer dY, and never promise any dX tail value.
+    state.sanitized_grad_output->sanitizedCopyFrom(*state.grad_output_padded, run_stream);
+    std::shared_ptr<BuiltConvolution> built = t9aPrebuiltDgradForWidth(state, width_capacity);
+    Tensor padded_dy = state.sanitized_grad_output->paddedTensor();
+    Tensor padded_dx = state.output_padded->paddedTensor();
+    StampedConvolutionBackward dgrad(state.dense_dgrad,
+                                     built,
+                                     state.filter_2d,
+                                     padded_dy,
+                                     padded_dx,
+                                     run_stream,
+                                     state.cudnn_workspace);
+    dgrad.runOn(run_stream);
+}
+
+RaggedConv1dStageDiagnostic StampedRaggedConv1dCausalBackwardData::diagnostic() const {
+    RaggedConv1dStageDiagnostic out;
+    if (!padded_backward_data_state) {
+        return out;
+    }
+    const RaggedConv1dPaddedBackwardDataState& state = *padded_backward_data_state;
+    out.cudnn_workspace_bytes = state.cudnn_workspace_bytes;
+    out.width_capacity_count = state.width_capacity_family.size();
+    out.prebuilt_cudnn_plan_count = state.prebuilt_dgrads.size();
+    if (!state.grad_output_padded || !state.sanitized_grad_output || !state.output_padded) {
+        return out;
+    }
+    const PaddedRaggedSequencePlan& dy_plan = state.grad_output_padded->getPlan();
+    const PaddedRaggedSequencePlan& dx_plan = state.output_padded->getPlan();
+    out.active_values = dy_plan.activeValues;
+    out.selected_width_capacity = dy_plan.widthCapacity;
+    out.input_padded_value_bytes = dy_plan.valueBytes;
+    out.output_padded_value_bytes = dx_plan.valueBytes;
+    out.allocated_padded_value_bytes = state.grad_output_padded->allocatedValueBytes() +
+                                       state.sanitized_grad_output->allocatedValueBytes() +
+                                       state.output_padded->allocatedValueBytes();
+    return out;
+}
+
+StampedRaggedConv1dCausalBackwardFilter::StampedRaggedConv1dCausalBackwardFilter(
+    std::shared_ptr<CompiledRaggedConv1dCausalBackwardFilter> compiled,
+    std::shared_ptr<PaddedRaggedSequence> padded_input,
+    std::shared_ptr<PaddedRaggedSequence> padded_grad_output,
+    const Tensor& row_offsets,
+    const Tensor& output,
+    const Stream& stream)
+    : compiled_ragged_conv1d_causal_backward_filter(std::move(compiled)),
+      row_offsets(row_offsets), output(output), stream(stream),
+      padded_backward_filter_state(std::make_shared<RaggedConv1dPaddedBackwardFilterState>()) {
+    if (!compiled_ragged_conv1d_causal_backward_filter || !padded_input || !padded_grad_output) {
+        throw std::runtime_error("StampedRaggedConv1dCausalBackwardFilter requires compiled X and dY representations.");
+    }
+    const auto& c = *compiled_ragged_conv1d_causal_backward_filter;
+    if (c.groups == 0 || c.input_channels % c.groups != 0 || c.output_channels % c.groups != 0) {
+        throw std::runtime_error("Ragged Conv1D backward-filter compiled descriptor has invalid grouped channel geometry.");
+    }
+    if (output.getDataType() != c.output_dtype || row_offsets.getDataType() != c.offset_dtype ||
+        output.getDimensions() != std::vector<uint64_t>({c.output_channels, c.input_channels / c.groups, c.kernel_width})) {
+        throw std::runtime_error("Ragged Conv1D backward-filter output/offset metadata does not match compiled descriptor.");
+    }
+    if (!output.isDenseContiguous() || !row_offsets.isDenseContiguous()) {
+        throw std::runtime_error("Ragged Conv1D backward-filter requires dense dW and offsets tensors.");
+    }
+    if (padded_input->getRowOffsets() != row_offsets || padded_grad_output->getRowOffsets() != row_offsets) {
+        throw std::runtime_error("T9B retained X and dY must share the exact canonical offsets tensor.");
+    }
+    validatePaddedLayoutMatches(*padded_input, c.padded_input_layout, "wgrad X");
+    validatePaddedLayoutMatches(*padded_grad_output, c.padded_grad_output_layout, "wgrad dY");
+    const TensorPlacement placement = output.getPlacement();
+    if (placement.getMemDevice() != TensorPlacement::MemDevices::GPU ||
+        padded_input->getPaddedValuesStorage().getPlacement() != placement ||
+        padded_grad_output->getPaddedValuesStorage().getPlacement() != placement ||
+        row_offsets.getPlacement() != placement || stream.getGpuNum() != placement.getDeviceNum()) {
+        throw std::runtime_error("Ragged Conv1D backward-filter tensors and stamping stream must share one GPU placement.");
+    }
+    auto& state = *padded_backward_filter_state;
+    state.input_padded = std::move(padded_input);
+    state.grad_output_padded = std::move(padded_grad_output);
+    state.width_capacity_family = makeRaggedConv1dWidthCapacities(c.max_values_per_row);
+    if (state.width_capacity_family.empty()) throw std::runtime_error("Ragged Conv1D wgrad requires a non-empty width family.");
+    const uint64_t reserved_width = state.width_capacity_family.back();
+    state.sanitized_input = std::make_shared<PaddedRaggedSequence>(
+        makeStructuralPaddedPlan(c.padded_input_layout, reserved_width), row_offsets, placement, reserved_width);
+    state.sanitized_grad_output = std::make_shared<PaddedRaggedSequence>(
+        makeStructuralPaddedPlan(c.padded_grad_output_layout, reserved_width), row_offsets, placement, reserved_width);
+    buildT9bWgradPlanFamily(state, c, output, stream);
+}
+
+uint32_t StampedRaggedConv1dCausalBackwardFilter::gpuNum() const { return output.getPlacement().getDeviceNum(); }
+void StampedRaggedConv1dCausalBackwardFilter::run() { runOn(stream); }
+void StampedRaggedConv1dCausalBackwardFilter::runOn(Stream& run_stream) const {
+    if (run_stream != stream) {
+        throw std::runtime_error(
+            "StampedRaggedConv1dCausalBackwardFilter must execute on the same Stream used for stamping because Thor "
+            "assigns its operation-local cuDNN Frontend plan family to that stamping execution domain.");
+    }
+    auto& state = *padded_backward_filter_state;
+    prepareT9bWgradForRetainedInputs(state, *compiled_ragged_conv1d_causal_backward_filter);
+    const uint64_t width = state.grad_output_padded->getPlan().widthCapacity;
+    if (width == 0) {
+        output.memsetAsync(run_stream, 0);
+        return;
+    }
+    // Both consumers are sanitized because zero dY does not make NaN X safe:
+    // IEEE 0 * NaN is NaN. Producer storage is never mutated.
+    state.sanitized_input->sanitizedCopyFrom(*state.input_padded, run_stream);
+    state.sanitized_grad_output->sanitizedCopyFrom(*state.grad_output_padded, run_stream);
+    Tensor x = state.sanitized_input->paddedTensor();
+    Tensor dy = state.sanitized_grad_output->paddedTensor();
+    Tensor dw = output;
+    const auto& c = *compiled_ragged_conv1d_causal_backward_filter;
+    dw.reshape({c.output_channels, c.input_channels / c.groups, 1, c.kernel_width});
+    StampedConvolutionBackward wgrad(state.dense_wgrad, t9bPrebuiltWgradForWidth(state, width), x, dy, dw,
+                                     run_stream, state.cudnn_workspace);
+    wgrad.runOn(run_stream);
+}
+
+RaggedConv1dStageDiagnostic StampedRaggedConv1dCausalBackwardFilter::diagnostic() const {
+    RaggedConv1dStageDiagnostic out;
+    if (!padded_backward_filter_state) return out;
+    const auto& state = *padded_backward_filter_state;
+    out.cudnn_workspace_bytes = state.cudnn_workspace_bytes;
+    out.width_capacity_count = state.width_capacity_family.size();
+    out.prebuilt_cudnn_plan_count = state.prebuilt_wgrads.size();
+    if (!state.input_padded || !state.grad_output_padded || !state.sanitized_input || !state.sanitized_grad_output) return out;
+    const auto& plan = state.grad_output_padded->getPlan();
+    out.active_values = plan.activeValues;
+    out.selected_width_capacity = plan.widthCapacity;
+    out.input_padded_value_bytes = state.input_padded->getPlan().valueBytes + plan.valueBytes;
+    out.output_padded_value_bytes = 0;
+    out.allocated_padded_value_bytes = state.input_padded->allocatedValueBytes() + state.grad_output_padded->allocatedValueBytes() +
+                                       state.sanitized_input->allocatedValueBytes() + state.sanitized_grad_output->allocatedValueBytes();
+    return out;
+}
+
 StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled,
                          const Tensor& input,
                          const Tensor& output,
@@ -1709,6 +2906,11 @@ void StampedConvolution::runOn(Stream& run_stream) const {
     if (!built_convolution) {
         throw std::runtime_error("StampedConvolution missing built convolution payload.");
     }
+    if (run_stream != stream) {
+        throw std::runtime_error(
+            "StampedConvolution must execute on the same Stream used for stamping because Thor assigns its "
+            "operation-local cuDNN Frontend plan to that stamping execution domain.");
+    }
 
     if (built_convolution->use_cudnn_frontend) {
         std::unordered_map<int64_t, void*> tensor_pack;
@@ -1743,6 +2945,11 @@ void StampedConvolutionBackward::run() { runOn(stream); }
 void StampedConvolutionBackward::runOn(Stream& run_stream) const {
     if (!built_convolution) {
         throw std::runtime_error("StampedConvolutionBackward missing built convolution payload.");
+    }
+    if (run_stream != stream) {
+        throw std::runtime_error(
+            "StampedConvolutionBackward must execute on the same Stream used for stamping because Thor assigns its "
+            "operation-local cuDNN Frontend plan to that stamping execution domain.");
     }
     if (!compiled_convolution_backward) {
         throw std::runtime_error("StampedConvolutionBackward missing compiled convolution payload.");
@@ -1827,6 +3034,40 @@ static void sanitizePackedRmsNormOverreadRows(Tensor tensor,
                                        {hidden, 1},
                                        active_outer * hidden);
     overread.memsetAsync(stream, 0);
+}
+
+StampedLayerNorm::StampedLayerNorm(std::shared_ptr<CompiledLayerNorm> compiled,
+                                       Tensor input,
+                                       Tensor scale,
+                                       Tensor bias,
+                                       Tensor output,
+                                       const Stream& stream)
+    : compiled_layer_norm(std::move(compiled)),
+      input(std::move(input)),
+      scale(std::move(scale)),
+      bias(std::move(bias)),
+      output(std::move(output)),
+      stream(stream) {
+    if (!compiled_layer_norm) throw std::invalid_argument("StampedLayerNorm requires a compiled stage.");
+    const CudnnLayerNormDescriptor descriptor =
+        compiled_layer_norm->descriptorFor(this->input, this->scale, this->bias, this->output);
+    const uint64_t workspace_bytes =
+        CudnnLayerNorm::instance().forwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum());
+    ensureRmsNormExecutionWorkspace(workspace,
+                                    this->input.getPlacement(),
+                                    workspace_bytes,
+                                    "layernorm_forward",
+                                    "hidden=" + std::to_string(compiled_layer_norm->normalized_feature_count));
+}
+
+void StampedLayerNorm::runOn(Stream& run_stream) const {
+    CudnnLayerNormForwardArgs args;
+    args.x = input;
+    args.scale = scale;
+    args.bias = bias;
+    args.y = output;
+    CudnnLayerNorm::instance().forward(
+        compiled_layer_norm->descriptorFor(input, scale, bias, output), args, workspace, run_stream);
 }
 
 StampedRmsNorm::StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
@@ -3327,6 +4568,8 @@ namespace detail {
 struct ConditionalGraphCaptureAccess {
     static const std::vector<StampedExecutionStage>& steps(const StampedExecutionPlan& plan) { return plan.steps; }
 
+    static Stream stampedStream(const StampedExecutionPlan& plan) { return plan.stream; }
+
     static bool hasOutputMaterializations(const StampedExecutionPlan& plan) { return !plan.output_materializations.empty(); }
 
     static void materializeOutputs(const StampedExecutionPlan& plan, Stream& capture_stream) {
@@ -3552,7 +4795,16 @@ static std::vector<cudaGraphNode_t> appendPlanSequentiallyIntoGraph(
 
         const std::unordered_set<std::string> stage_runtime_scalar_names = runtimeScalarNamesForStage(stage);
         if (stage_runtime_scalar_names.empty()) {
-            captureIntoExistingGraph(graph, capture_stream, current_dependencies, [&]() { stage.runOn(capture_stream); });
+            if (stage.requiresStampedStream()) {
+                // Thor gives convolution stages stamping-stream affinity so their
+                // operation-local plan/workspace state remains in one execution domain,
+                // even while capturing into a conditional CUDA graph. This is Thor's
+                // ownership policy, not a cuDNN exact-handle-affinity requirement.
+                Stream stamped_stream = detail::ConditionalGraphCaptureAccess::stampedStream(plan);
+                captureIntoExistingGraph(graph, stamped_stream, current_dependencies, [&]() { stage.runOn(stamped_stream); });
+            } else {
+                captureIntoExistingGraph(graph, capture_stream, current_dependencies, [&]() { stage.runOn(capture_stream); });
+            }
             current_dependencies = graphLeafNodes(graph);
             continue;
         }
@@ -3569,6 +4821,25 @@ static std::vector<cudaGraphNode_t> appendPlanSequentiallyIntoGraph(
                 kernel_node,
                 detail::ConditionalGraphCaptureAccess::fusedKernelArgumentCount(*stage.kernel),
                 detail::ConditionalGraphCaptureAccess::fusedRuntimeScalarArguments(*stage.kernel),
+                /*use_driver_api=*/true,
+                runtime_scalar_bindings);
+            current_dependencies = graphLeafNodes(graph);
+            continue;
+        }
+
+        if (stage.kind == StampedExecutionStage::Kind::PaddedRaggedPointwise) {
+            THOR_THROW_IF_FALSE(stage.padded_ragged_pointwise != nullptr);
+            const std::vector<cudaGraphNode_t> before_nodes = graphNodes(graph);
+            const std::unordered_map<std::string, float> placeholders = placeholderRuntimeScalarsForStage(stage);
+            captureIntoExistingGraph(graph, capture_stream, current_dependencies, [&]() {
+                stage.padded_ragged_pointwise->runOn(capture_stream, placeholders);
+            });
+            cudaGraphNode_t kernel_node = uniqueNewKernelNode(graph, before_nodes);
+            const StampedEquation& invocation = stage.padded_ragged_pointwise->currentInvocationForCapture();
+            registerConditionalRuntimeScalarKernelBinding(
+                kernel_node,
+                detail::ConditionalGraphCaptureAccess::fusedKernelArgumentCount(invocation),
+                detail::ConditionalGraphCaptureAccess::fusedRuntimeScalarArguments(invocation),
                 /*use_driver_api=*/true,
                 runtime_scalar_bindings);
             current_dependencies = graphLeafNodes(graph);
@@ -3849,6 +5120,9 @@ static std::unordered_set<std::string> runtimeScalarNamesForStage(const StampedE
     std::unordered_set<std::string> stage_names;
     if (stage.kind == StampedExecutionStage::Kind::FusedKernel && stage.kernel != nullptr && stage.kernel->requiresRuntimeScalars()) {
         stage_names = stage.kernel->runtimeScalarNames();
+    } else if (stage.kind == StampedExecutionStage::Kind::PaddedRaggedPointwise &&
+               stage.padded_ragged_pointwise != nullptr && stage.padded_ragged_pointwise->requiresRuntimeScalars()) {
+        stage_names = stage.padded_ragged_pointwise->runtimeScalarNames();
     } else if (stage.kind == StampedExecutionStage::Kind::CudaKernel && stage.cuda_kernel != nullptr &&
                stage.cuda_kernel->requiresRuntimeScalars()) {
         stage_names = stage.cuda_kernel->runtimeScalarNames();
@@ -3996,6 +5270,23 @@ detail::StampedExecutionSchedule detail::buildStampedExecutionSchedule(const std
     for (uint32_t stage_idx = 0; stage_idx < steps.size(); ++stage_idx) {
         const StampedExecutionStage& stage = steps[stage_idx];
 
+        // Thor deliberately keeps each operation-local cuDNN Frontend convolution
+        // plan on its stamping execution domain. Do not migrate these stages to helper
+        // lanes after placement; this is an ownership/scheduling policy rather than an
+        // assertion that cuDNN plans are intrinsically bound to their creation handle.
+        // Cross-stream dependencies still use events.
+        if (stage.requiresStampedStream()) {
+            if (stage.gpu_num != caller_gpu_num) {
+                throw std::runtime_error(
+                    "Stamped cuDNN convolution stage cannot be scheduled on a different GPU from its stamping Stream.");
+            }
+            schedule.stage_lane_indices[stage_idx] = 0;
+            if (stage.dependency_stage_indices.empty()) {
+                caller_root_claimed = true;
+            }
+            continue;
+        }
+
         std::optional<uint32_t> inherited_lane;
         for (uint32_t dep_stage_idx : stage.dependency_stage_indices) {
             if (!continuation_child[dep_stage_idx].has_value() ||
@@ -4058,6 +5349,16 @@ void StampedExecutionPlan::runOn(Stream& run_stream, const std::unordered_map<st
     if (steps.empty()) {
         materializeOutputsOn(run_stream);
         return;
+    }
+
+    if (run_stream != stream) {
+        for (const StampedExecutionStage& stage : steps) {
+            if (stage.requiresStampedStream()) {
+                throw std::runtime_error(
+                    "StampedExecutionPlan containing cuDNN Frontend convolution must run on the same Stream used for "
+                    "stamping because Thor keeps operation-local convolution execution state in that stamping domain.");
+            }
+        }
     }
 
     // The overwhelmingly common single-stage plan needs no DAG scheduler at runtime. Runtime-scalar plans retain the
@@ -4450,11 +5751,16 @@ static void setFrontendConvolutionOutputTensor(std::shared_ptr<fe::graph::Tensor
         .set_data_type(toFrontendDataType(dtype));
 }
 
-static std::vector<int64_t> convolutionFrontendPadding(bool is_3d, int32_t pad_d, int32_t pad_h, int32_t pad_w) {
-    if (is_3d) {
-        return {static_cast<int64_t>(pad_d), static_cast<int64_t>(pad_h), static_cast<int64_t>(pad_w)};
-    }
-    return {static_cast<int64_t>(pad_h), static_cast<int64_t>(pad_w)};
+static std::vector<int64_t> convolutionFrontend3dPadding(int32_t pad_d, int32_t pad_h, int32_t pad_w) {
+    return {static_cast<int64_t>(pad_d), static_cast<int64_t>(pad_h), static_cast<int64_t>(pad_w)};
+}
+
+static std::vector<int64_t> convolutionFrontendPrePadding(const ConvolutionSpatial2d& spatial) {
+    return {static_cast<int64_t>(spatial.pre_padding_h), static_cast<int64_t>(spatial.pre_padding_w)};
+}
+
+static std::vector<int64_t> convolutionFrontendPostPadding(const ConvolutionSpatial2d& spatial) {
+    return {static_cast<int64_t>(spatial.post_padding_h), static_cast<int64_t>(spatial.post_padding_w)};
 }
 
 static std::vector<int64_t> convolutionFrontendStrides(bool is_3d, int32_t stride_d, int32_t stride_h, int32_t stride_w) {
@@ -4464,11 +5770,19 @@ static std::vector<int64_t> convolutionFrontendStrides(bool is_3d, int32_t strid
     return {static_cast<int64_t>(stride_h), static_cast<int64_t>(stride_w)};
 }
 
+static std::vector<int64_t> convolutionFrontendStrides(const ConvolutionSpatial2d& spatial) {
+    return {static_cast<int64_t>(spatial.stride_h), static_cast<int64_t>(spatial.stride_w)};
+}
+
 static std::vector<int64_t> convolutionFrontendDilations(bool is_3d) {
     if (is_3d) {
         return {1, 1, 1};
     }
     return {1, 1};
+}
+
+static std::vector<int64_t> convolutionFrontendDilations(const ConvolutionSpatial2d& spatial) {
+    return {static_cast<int64_t>(spatial.dilation_h), static_cast<int64_t>(spatial.dilation_w)};
 }
 
 static void checkFrontendStatus(cudnn_frontend::error_t status, const std::string& message) {
@@ -4488,7 +5802,10 @@ static int64_t checkedFrontendPlanWorkspaceBytes(const BuiltConvolution& built, 
     return workspace_bytes;
 }
 
-static void buildFrontendConvolutionCandidatePlans(BuiltConvolution& built, const Stream& stream, const char* op_name) {
+static void buildFrontendConvolutionCandidatePlans(BuiltConvolution& built,
+                                                   const Stream& stream,
+                                                   const char* op_name,
+                                                   bool require_deterministic) {
     if (!built.frontend_graph) {
         throw std::runtime_error(std::string(op_name) + " missing cuDNN Frontend graph.");
     }
@@ -4499,6 +5816,14 @@ static void buildFrontendConvolutionCandidatePlans(BuiltConvolution& built, cons
                         std::string("Failed to build cuDNN Frontend ") + op_name + " operation graph");
     checkFrontendStatus(built.frontend_graph->create_execution_plans({fe::HeurMode_t::A, fe::HeurMode_t::B, fe::HeurMode_t::FALLBACK}),
                         std::string("Failed to enumerate cuDNN Frontend ") + op_name + " execution plans");
+    if (require_deterministic) {
+        // Preserve Thor's long-standing backward-filter contract. The legacy cuDNN
+        // selector rejected CUDNN_NON_DETERMINISTIC wgrad algorithms because cuDNN
+        // can report them as runnable even though they are unsuitable for stable
+        // training gradients. Frontend exposes the same property as a numerical
+        // note; filter it before support/build/autotune so it can never win timing.
+        built.frontend_graph->deselect_numeric_notes({fe::NumericalNote_t::NONDETERMINISTIC});
+    }
     checkFrontendStatus(built.frontend_graph->check_support(stream.getCudnnHandle()),
                         std::string("Failed to check support for cuDNN Frontend ") + op_name + " execution plans");
 }
@@ -4520,8 +5845,13 @@ struct FrontendConvolutionAutotuneBinding {
 
 struct FrontendConvolutionAutotuneCandidate {
     int64_t plan_index = -1;
+    int64_t engine_id = -1;
+    std::unordered_map<fe::KnobType_t, int64_t> knobs;
     int64_t workspace_bytes = 0;
     bool failed = false;
+    bool correctness_validated = false;
+    float score_ms = std::numeric_limits<float>::infinity();
+    std::string rejection_reason;
     std::vector<float> samples_ms;
 };
 
@@ -4531,7 +5861,175 @@ struct FrontendConvolutionAutotuneTensorPool {
     std::vector<Tensor> workspaces;
 };
 
+static void selectFrontendConvolutionPlan(BuiltConvolution& built, const Stream& stream, int64_t plan_index, const char* op_name);
+
 constexpr float kConvolutionAutotuneTieRelativeTolerance = 0.001f;
+constexpr double kConvolutionValidationOutputSentinel = 1.0 / 512.0;
+
+struct FrontendConvolutionCorrectnessValidation {
+    int64_t lhs_uid = -1;
+    int64_t rhs_uid = -1;
+    int64_t output_uid = -1;
+    ConvolutionKernelValidationSpec spec;
+};
+
+static std::vector<std::pair<int64_t, int64_t>> normalizedFrontendConvolutionKnobs(
+    const std::unordered_map<fe::KnobType_t, int64_t>& knobs) {
+    std::vector<std::pair<int64_t, int64_t>> normalized;
+    normalized.reserve(knobs.size());
+    for (const auto& [knob, value] : knobs) {
+        normalized.emplace_back(static_cast<int64_t>(knob), value);
+    }
+    std::sort(normalized.begin(), normalized.end());
+    return normalized;
+}
+
+static std::string frontendConvolutionCandidateIdentityString(const FrontendConvolutionAutotuneCandidate& candidate) {
+    std::ostringstream out;
+    out << "plan=" << candidate.plan_index << " engine=" << candidate.engine_id << " knobs={";
+    const auto knobs = normalizedFrontendConvolutionKnobs(candidate.knobs);
+    for (size_t i = 0; i < knobs.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << knobs[i].first << ':' << knobs[i].second;
+    }
+    out << "} workspace=" << candidate.workspace_bytes;
+    return out.str();
+}
+
+static bool sameFrontendConvolutionCandidateIdentity(const FrontendConvolutionAutotuneCandidate& lhs,
+                                                     const FrontendConvolutionAutotuneCandidate& rhs) {
+    return lhs.engine_id == rhs.engine_id && lhs.knobs == rhs.knobs;
+}
+
+struct FrontendConvolutionValidationBuffers {
+    std::vector<Tensor> tensors;
+    std::unordered_map<int64_t, size_t> tensor_index_by_uid;
+    std::unordered_map<int64_t, uint64_t> input_seed_by_uid;
+    std::unordered_map<int64_t, void*> tensor_pack;
+};
+
+static FrontendConvolutionValidationBuffers createFrontendConvolutionValidationBuffers(
+    const std::vector<FrontendConvolutionAutotuneBinding>& bindings,
+    const FrontendConvolutionCorrectnessValidation& validation,
+    const Stream& stream) {
+    FrontendConvolutionValidationBuffers buffers;
+    buffers.tensors.reserve(bindings.size());
+    buffers.tensor_index_by_uid.reserve(bindings.size());
+    buffers.input_seed_by_uid.reserve(bindings.size());
+    buffers.tensor_pack.reserve(bindings.size());
+
+    bool saw_lhs = false;
+    bool saw_rhs = false;
+    bool saw_output = false;
+    Stream fill_stream = stream;
+    for (const FrontendConvolutionAutotuneBinding& binding : bindings) {
+        const size_t tensor_index = buffers.tensors.size();
+        buffers.tensors.emplace_back(binding.reference_tensor.getPlacement(), binding.reference_tensor.getDescriptor());
+        Tensor& tensor = buffers.tensors.back();
+        buffers.tensor_index_by_uid.emplace(binding.uid, tensor_index);
+        buffers.tensor_pack.emplace(binding.uid, const_cast<void*>(static_cast<const void*>(tensor.getMemPtr<void>())));
+
+        if (binding.uid == validation.output_uid) {
+            // Do not initialize to zero: many legitimate convolution canary outputs
+            // are zero because of padding or cancellation.  A non-lattice sentinel
+            // makes an engine that silently leaves an output element unwritten fail
+            // validation instead of accidentally matching the reference.
+            tensor.fill(kConvolutionValidationOutputSentinel, fill_stream);
+            saw_output = true;
+        } else {
+            const uint64_t seed = static_cast<uint64_t>(binding.uid);
+            buffers.input_seed_by_uid.emplace(binding.uid, seed);
+            fillConvolutionKernelValidationTensor(tensor, seed, fill_stream);
+        }
+        saw_lhs = saw_lhs || binding.uid == validation.lhs_uid;
+        saw_rhs = saw_rhs || binding.uid == validation.rhs_uid;
+    }
+
+    if (!saw_lhs || !saw_rhs || !saw_output) {
+        throw std::runtime_error("Internal cuDNN convolution correctness validation binding UID mismatch.");
+    }
+    fill_stream.synchronize();
+    return buffers;
+}
+
+static Tensor& frontendConvolutionValidationTensor(FrontendConvolutionValidationBuffers& buffers, int64_t uid) {
+    const auto it = buffers.tensor_index_by_uid.find(uid);
+    if (it == buffers.tensor_index_by_uid.end()) {
+        throw std::runtime_error("Internal cuDNN convolution correctness validation tensor UID was not allocated.");
+    }
+    return buffers.tensors.at(it->second);
+}
+
+static uint64_t frontendConvolutionValidationInputSeed(const FrontendConvolutionValidationBuffers& buffers, int64_t uid) {
+    const auto it = buffers.input_seed_by_uid.find(uid);
+    if (it == buffers.input_seed_by_uid.end()) {
+        throw std::runtime_error("Internal cuDNN convolution correctness validation input seed UID was not allocated.");
+    }
+    return it->second;
+}
+
+static ConvolutionKernelValidationResult validateFrontendConvolutionCandidate(
+    const std::shared_ptr<fe::graph::Graph>& candidate_graph,
+    const Stream& stream,
+    FrontendConvolutionValidationBuffers& buffers,
+    const TensorPlacement& workspace_placement,
+    const FrontendConvolutionCorrectnessValidation& validation,
+    int64_t workspace_bytes,
+    const char* op_name) {
+    if (!candidate_graph) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
+                                 " correctness validation received a null exact-replay graph.");
+    }
+
+    Tensor& output = frontendConvolutionValidationTensor(buffers, validation.output_uid);
+    Stream validation_stream = stream;
+
+    // Every candidate starts from pristine validation operands. A rejected kernel
+    // may itself have illegally overwritten an input; never let that corruption
+    // poison the next-fastest candidate's correctness trial.
+    for (const auto& [uid, seed] : buffers.input_seed_by_uid) {
+        Tensor& input = frontendConvolutionValidationTensor(buffers, uid);
+        fillConvolutionKernelValidationTensor(input, seed, validation_stream);
+    }
+    output.fill(kConvolutionValidationOutputSentinel, validation_stream);
+
+    std::optional<Tensor> workspace;
+    if (workspace_bytes > 0) {
+        workspace.emplace(workspace_placement, TensorDescriptor(DataType::UINT8, {static_cast<uint64_t>(workspace_bytes)}));
+        workspace->memsetAsync(validation_stream, 0);
+    }
+    void* workspace_ptr = workspace.has_value()
+                              ? const_cast<void*>(static_cast<const void*>(workspace->getMemPtr<void>()))
+                              : nullptr;
+
+    auto status = candidate_graph->execute(stream.getCudnnHandle(), buffers.tensor_pack, workspace_ptr);
+    if (!status.is_good()) {
+        throw std::runtime_error(std::string("Failed to execute exact-replay cuDNN Frontend ") + op_name +
+                                 " candidate during correctness validation: " + status.get_message());
+    }
+
+    Tensor& lhs = frontendConvolutionValidationTensor(buffers, validation.lhs_uid);
+    Tensor& rhs = frontendConvolutionValidationTensor(buffers, validation.rhs_uid);
+
+    const ConvolutionKernelValidationResult lhs_preserved = validateConvolutionKernelValidationInputUnchanged(
+        lhs, frontendConvolutionValidationInputSeed(buffers, validation.lhs_uid), validation_stream);
+    if (!lhs_preserved.passed) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
+                                 " candidate modified validation lhs input: " +
+                                 describeConvolutionKernelValidationFailure(lhs_preserved));
+    }
+    const ConvolutionKernelValidationResult rhs_preserved = validateConvolutionKernelValidationInputUnchanged(
+        rhs, frontendConvolutionValidationInputSeed(buffers, validation.rhs_uid), validation_stream);
+    if (!rhs_preserved.passed) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
+                                 " candidate modified validation rhs input: " +
+                                 describeConvolutionKernelValidationFailure(rhs_preserved));
+    }
+
+    return validateConvolutionKernelOutput(lhs, rhs, output, validation.spec, validation_stream);
+}
 
 static uint64_t safeAddAutotuneBytes(uint64_t a, uint64_t b) {
     if (b > std::numeric_limits<uint64_t>::max() - a) {
@@ -4717,12 +6215,16 @@ static bool isBetterFrontendConvolutionCandidate(float candidate_score_ms,
 }
 }  // namespace
 
-static void autotuneFrontendConvolutionGraph(BuiltConvolution& built,
-                                             const Stream& stream,
-                                             const std::vector<FrontendConvolutionAutotuneBinding>& autotune_bindings,
-                                             const TensorPlacement& workspace_placement,
-                                             const char* op_name) {
-    buildFrontendConvolutionCandidatePlans(built, stream, op_name);
+static void autotuneFrontendConvolutionGraph(
+    BuiltConvolution& built,
+    const Stream& stream,
+    const std::vector<FrontendConvolutionAutotuneBinding>& autotune_bindings,
+    const TensorPlacement& workspace_placement,
+    const char* op_name,
+    const std::function<std::shared_ptr<fe::graph::Graph>()>& graph_factory,
+    bool require_deterministic,
+    const FrontendConvolutionCorrectnessValidation& correctness_validation) {
+    buildFrontendConvolutionCandidatePlans(built, stream, op_name, require_deterministic);
 
     const int64_t plan_count = built.frontend_graph->get_execution_plan_count();
     if (plan_count <= 0) {
@@ -4732,13 +6234,18 @@ static void autotuneFrontendConvolutionGraph(BuiltConvolution& built,
     // cuDNN Frontend returns execution plans in heuristic-ranked order for the requested modes.
     // Autotune only the front of that ordered pool so placement does not devolve into measuring
     // every possible engine/configuration. If this pool cannot produce a runnable plan, fail loudly.
-    const int64_t candidate_count = std::min(plan_count, kConvolutionAutotuneMaxCandidatePlans);
+    const int64_t candidate_limit = std::min(plan_count, kConvolutionAutotuneMaxCandidatePlans);
 
     std::vector<FrontendConvolutionAutotuneCandidate> candidates;
-    candidates.reserve(static_cast<size_t>(candidate_count));
+    candidates.reserve(static_cast<size_t>(candidate_limit));
     int64_t max_workspace_bytes = 0;
 
-    for (int64_t plan_index = 0; plan_index < candidate_count; ++plan_index) {
+    // Numerical-note and support filtering may bar some of the highest-ranked raw
+    // plan indices. Scan the heuristic list until we have the desired number of
+    // buildable eligible candidates rather than letting barred plans consume the cap.
+    for (int64_t plan_index = 0; plan_index < plan_count &&
+                                 static_cast<int64_t>(candidates.size()) < candidate_limit;
+         ++plan_index) {
         auto status = built.frontend_graph->build_plan_at_index(stream.getCudnnHandle(), plan_index);
         if (!status.is_good()) {
             continue;
@@ -4748,22 +6255,38 @@ static void autotuneFrontendConvolutionGraph(BuiltConvolution& built,
         FrontendConvolutionAutotuneCandidate candidate;
         candidate.plan_index = plan_index;
         candidate.workspace_bytes = workspace_bytes;
+        auto plan_identity_status = built.frontend_graph->get_engine_and_knobs_at_index(
+            plan_index, candidate.engine_id, candidate.knobs);
+        if (!plan_identity_status.is_good()) {
+            // A candidate that cannot expose a stable structured identity cannot be
+            // replayed safely on the immutable production graph. Do not autotune it.
+            continue;
+        }
+        bool duplicate_identity = false;
+        for (const FrontendConvolutionAutotuneCandidate& existing : candidates) {
+            if (sameFrontendConvolutionCandidateIdentity(existing, candidate)) {
+                duplicate_identity = true;
+                break;
+            }
+        }
+        if (duplicate_identity) {
+            continue;
+        }
         candidate.samples_ms.reserve(kConvolutionAutotuneTimedIterations);
         candidates.push_back(std::move(candidate));
         max_workspace_bytes = std::max(max_workspace_bytes, workspace_bytes);
     }
 
     if (candidates.empty()) {
-        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name + " autotune could not build any of the top " +
-                                 std::to_string(candidate_count) + " heuristic-ranked execution plans.");
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
+                                 " autotune could not build any eligible heuristic-ranked execution plan.");
     }
 
-    FrontendConvolutionAutotuneTensorPool timing_pool =
-        createFrontendConvolutionAutotuneTensorPool(autotune_bindings, workspace_placement, max_workspace_bytes);
-    touchFrontendConvolutionAutotuneTensorPool(timing_pool, stream);
-
-    auto mark_candidate_failed = [&](FrontendConvolutionAutotuneCandidate& candidate) {
+    auto mark_candidate_failed = [&](FrontendConvolutionAutotuneCandidate& candidate, std::string reason = {}) {
         candidate.failed = true;
+        candidate.correctness_validated = false;
+        candidate.score_ms = std::numeric_limits<float>::infinity();
+        candidate.rejection_reason = std::move(reason);
         candidate.samples_ms.clear();
         Stream recovery_stream = stream;
         try {
@@ -4774,75 +6297,284 @@ static void autotuneFrontendConvolutionGraph(BuiltConvolution& built,
         }
     };
 
-    int iteration = 0;
-    for (int warmup = 0; warmup < kConvolutionAutotuneWarmupIterations; ++warmup) {
-        for (size_t offset = 0; offset < candidates.size(); ++offset) {
-            const size_t candidate_index = (offset + static_cast<size_t>(warmup)) % candidates.size();
-            FrontendConvolutionAutotuneCandidate& candidate = candidates[candidate_index];
-            if (candidate.failed) {
-                continue;
-            }
-
-            try {
-                selectFrontendConvolutionPlan(built, stream, candidate.plan_index, op_name);
-                executeFrontendConvolutionPlanOnce(built, stream, timing_pool, iteration++, op_name);
-            } catch (const std::exception&) {
-                mark_candidate_failed(candidate);
-            }
+    if (thorConvolutionDiagnosticsVerbose()) {
+        std::fprintf(stderr,
+                     "[thor convolution] %s stream=%llu cudnn=%zu candidates=%zu\n",
+                     op_name,
+                     static_cast<unsigned long long>(stream.getId()),
+                     static_cast<size_t>(cudnnGetVersion()),
+                     candidates.size());
+        for (const FrontendConvolutionAutotuneCandidate& candidate : candidates) {
+            std::fprintf(stderr, "[thor convolution]   candidate %s\n", frontendConvolutionCandidateIdentityString(candidate).c_str());
         }
+        std::fflush(stderr);
     }
 
-    Stream timing_stream = stream;
-    timing_stream.synchronize();
+    // First rank the runnable candidates strictly by measured performance.  Correctness
+    // validation is intentionally *not* paid for every candidate: Thor validates the
+    // fastest remaining candidate, rejects it permanently for this placement if it is
+    // numerically wrong, then walks down the measured ranking until one proves correct.
+    // This preserves normal autotune cost while making correctness a hard eligibility
+    // requirement for the production plan.
+    {
+        FrontendConvolutionAutotuneTensorPool timing_pool =
+            createFrontendConvolutionAutotuneTensorPool(autotune_bindings, workspace_placement, max_workspace_bytes);
+        touchFrontendConvolutionAutotuneTensorPool(timing_pool, stream);
 
-    for (int timed_round = 0; timed_round < kConvolutionAutotuneTimedIterations; ++timed_round) {
-        for (size_t offset = 0; offset < candidates.size(); ++offset) {
-            const size_t candidate_index = (offset + static_cast<size_t>(timed_round)) % candidates.size();
-            FrontendConvolutionAutotuneCandidate& candidate = candidates[candidate_index];
-            if (candidate.failed) {
-                continue;
-            }
-
-            try {
-                selectFrontendConvolutionPlan(built, stream, candidate.plan_index, op_name);
-                const float milliseconds = timeFrontendConvolutionPlanOnce(built, stream, timing_pool, iteration++, op_name);
-                if (std::isfinite(milliseconds)) {
-                    candidate.samples_ms.push_back(milliseconds);
-                } else {
-                    mark_candidate_failed(candidate);
+        int iteration = 0;
+        for (int warmup = 0; warmup < kConvolutionAutotuneWarmupIterations; ++warmup) {
+            for (size_t offset = 0; offset < candidates.size(); ++offset) {
+                const size_t candidate_index = (offset + static_cast<size_t>(warmup)) % candidates.size();
+                FrontendConvolutionAutotuneCandidate& candidate = candidates[candidate_index];
+                if (candidate.failed) {
+                    continue;
                 }
-            } catch (const std::exception&) {
-                mark_candidate_failed(candidate);
+
+                try {
+                    selectFrontendConvolutionPlan(built, stream, candidate.plan_index, op_name);
+                    executeFrontendConvolutionPlanOnce(built, stream, timing_pool, iteration++, op_name);
+                    // build_plan_at_index() mutates the graph's selected execution plan. Do not
+                    // switch that plan while a previously selected plan can still be executing
+                    // asynchronously on this same graph. Timed iterations synchronize through
+                    // their stop event; warm-up iterations need the equivalent barrier here.
+                    Stream warmup_stream = stream;
+                    warmup_stream.synchronize();
+                } catch (const std::exception& e) {
+                    mark_candidate_failed(candidate, std::string("warmup execution failed: ") + e.what());
+                }
+            }
+        }
+
+        Stream timing_stream = stream;
+        timing_stream.synchronize();
+
+        for (int timed_round = 0; timed_round < kConvolutionAutotuneTimedIterations; ++timed_round) {
+            for (size_t offset = 0; offset < candidates.size(); ++offset) {
+                const size_t candidate_index = (offset + static_cast<size_t>(timed_round)) % candidates.size();
+                FrontendConvolutionAutotuneCandidate& candidate = candidates[candidate_index];
+                if (candidate.failed) {
+                    continue;
+                }
+
+                try {
+                    selectFrontendConvolutionPlan(built, stream, candidate.plan_index, op_name);
+                    const float milliseconds = timeFrontendConvolutionPlanOnce(built, stream, timing_pool, iteration++, op_name);
+                    if (std::isfinite(milliseconds)) {
+                        candidate.samples_ms.push_back(milliseconds);
+                    } else {
+                        mark_candidate_failed(candidate, "timing produced a non-finite latency");
+                    }
+                } catch (const std::exception& e) {
+                    mark_candidate_failed(candidate, std::string("timed execution failed: ") + e.what());
+                }
+            }
+        }
+
+        for (FrontendConvolutionAutotuneCandidate& candidate : candidates) {
+            if (!candidate.failed && !candidate.samples_ms.empty()) {
+                candidate.score_ms = scoreFrontendConvolutionAutotuneSamples(candidate.samples_ms);
             }
         }
     }
 
-    int64_t best_plan_index = -1;
-    int64_t best_workspace_bytes = 0;
-    float best_score_ms = std::numeric_limits<float>::infinity();
+    // The timing pool can be hundreds of MiB.  It is intentionally out of scope before
+    // correctness validation allocates exact-geometry non-zero tensors.
+    Stream post_timing_stream = stream;
+    post_timing_stream.synchronize();
 
+    size_t timed_candidate_count = 0;
     for (const FrontendConvolutionAutotuneCandidate& candidate : candidates) {
-        if (candidate.failed || candidate.samples_ms.empty()) {
-            continue;
+        if (!candidate.failed && std::isfinite(candidate.score_ms)) {
+            ++timed_candidate_count;
         }
-        const float score_ms = scoreFrontendConvolutionAutotuneSamples(candidate.samples_ms);
-        if (isBetterFrontendConvolutionCandidate(score_ms, candidate.plan_index, best_score_ms, best_plan_index)) {
-            best_score_ms = score_ms;
-            best_plan_index = candidate.plan_index;
-            best_workspace_bytes = candidate.workspace_bytes;
+    }
+    if (timed_candidate_count == 0) {
+        std::ostringstream message;
+        message << "cuDNN Frontend " << op_name << " autotune could not time any runnable candidate.";
+        for (const FrontendConvolutionAutotuneCandidate& candidate : candidates) {
+            if (!candidate.rejection_reason.empty()) {
+                message << " [" << frontendConvolutionCandidateIdentityString(candidate) << " => "
+                        << candidate.rejection_reason << ']';
+            }
+        }
+        throw std::runtime_error(message.str());
+    }
+
+    if (thorConvolutionDiagnosticsVerbose()) {
+        for (const FrontendConvolutionAutotuneCandidate& candidate : candidates) {
+            if (!candidate.failed && std::isfinite(candidate.score_ms)) {
+                std::fprintf(stderr,
+                             "[thor convolution] %s timed candidate %s score_ms=%.9g\n",
+                             op_name,
+                             frontendConvolutionCandidateIdentityString(candidate).c_str(),
+                             static_cast<double>(candidate.score_ms));
+            }
+        }
+        std::fflush(stderr);
+    }
+
+    FrontendConvolutionValidationBuffers validation_buffers =
+        createFrontendConvolutionValidationBuffers(autotune_bindings, correctness_validation, stream);
+
+    if (!graph_factory) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
+                                 " autotune requires a graph factory for exact-replay correctness validation.");
+    }
+
+    FrontendConvolutionAutotuneCandidate* best_candidate = nullptr;
+    float best_score_ms = std::numeric_limits<float>::infinity();
+    std::shared_ptr<fe::graph::Graph> selected_graph;
+    int64_t selected_workspace_bytes = -1;
+    constexpr int64_t matching_plan_index = 0;
+    std::vector<std::string> correctness_rejections;
+
+    while (true) {
+        FrontendConvolutionAutotuneCandidate* candidate_to_validate = nullptr;
+        float candidate_score_ms = std::numeric_limits<float>::infinity();
+        for (FrontendConvolutionAutotuneCandidate& candidate : candidates) {
+            if (candidate.failed || candidate.correctness_validated || !std::isfinite(candidate.score_ms)) {
+                continue;
+            }
+            const int64_t current_plan_index = candidate_to_validate ? candidate_to_validate->plan_index : -1;
+            if (isBetterFrontendConvolutionCandidate(
+                    candidate.score_ms, candidate.plan_index, candidate_score_ms, current_plan_index)) {
+                candidate_score_ms = candidate.score_ms;
+                candidate_to_validate = &candidate;
+            }
+        }
+
+        if (candidate_to_validate == nullptr) {
+            break;
+        }
+
+        try {
+            // Recreate the exact structured winner on a pristine graph *before*
+            // validating it.  The graph that passes this check is the graph Thor
+            // retains for production, so there is no trust gap between a validated
+            // scratch plan and a later reconstruction.
+            std::shared_ptr<fe::graph::Graph> candidate_graph = graph_factory();
+            if (!candidate_graph) {
+                throw std::runtime_error("graph factory returned null");
+            }
+
+            ScopedGpu candidate_graph_gpu(stream.getGpuNum());
+            checkFrontendStatus(candidate_graph->validate(),
+                                std::string("Failed to validate exact-replay cuDNN Frontend ") + op_name + " graph");
+            checkFrontendStatus(candidate_graph->build_operation_graph(stream.getCudnnHandle()),
+                                std::string("Failed to build exact-replay cuDNN Frontend ") + op_name + " operation graph");
+            checkFrontendStatus(candidate_graph->create_execution_plan(candidate_to_validate->engine_id, candidate_to_validate->knobs),
+                                std::string("Failed to recreate exact cuDNN Frontend ") + op_name +
+                                    " execution plan from engine/knob identity");
+            checkFrontendStatus(candidate_graph->check_support(stream.getCudnnHandle()),
+                                std::string("Failed to check support for exact-replay cuDNN Frontend ") + op_name +
+                                    " execution plan");
+            checkFrontendStatus(candidate_graph->build_plan_at_index(stream.getCudnnHandle(), matching_plan_index),
+                                std::string("Failed to build exact-replay cuDNN Frontend ") + op_name + " execution plan");
+
+            const int64_t candidate_workspace_bytes = candidate_graph->get_workspace_size_plan_at_index(matching_plan_index);
+            if (candidate_workspace_bytes < 0) {
+                throw std::runtime_error("exact-replay plan returned a negative workspace size");
+            }
+            if (candidate_workspace_bytes != candidate_to_validate->workspace_bytes) {
+                throw std::runtime_error("exact-replay workspace changed from " +
+                                         std::to_string(candidate_to_validate->workspace_bytes) + " to " +
+                                         std::to_string(candidate_workspace_bytes));
+            }
+
+            const ConvolutionKernelValidationResult validation_result = validateFrontendConvolutionCandidate(candidate_graph,
+                                                                                                               stream,
+                                                                                                               validation_buffers,
+                                                                                                               workspace_placement,
+                                                                                                               correctness_validation,
+                                                                                                               candidate_workspace_bytes,
+                                                                                                               op_name);
+            if (!validation_result.passed) {
+                const std::string reason = describeConvolutionKernelValidationFailure(validation_result);
+                correctness_rejections.push_back(frontendConvolutionCandidateIdentityString(*candidate_to_validate) + " => " + reason);
+                if (thorConvolutionDiagnosticsEnabled()) {
+                    std::fprintf(stderr,
+                                 "[thor convolution] %s correctness rejected %s: %s\n",
+                                 op_name,
+                                 frontendConvolutionCandidateIdentityString(*candidate_to_validate).c_str(),
+                                 reason.c_str());
+                    std::fflush(stderr);
+                }
+                mark_candidate_failed(*candidate_to_validate, std::string("independent reference mismatch: ") + reason);
+                continue;
+            }
+
+            candidate_to_validate->correctness_validated = true;
+            best_candidate = candidate_to_validate;
+            best_score_ms = candidate_to_validate->score_ms;
+            selected_graph = std::move(candidate_graph);
+            selected_workspace_bytes = candidate_workspace_bytes;
+            if (thorConvolutionDiagnosticsEnabled()) {
+                std::fprintf(stderr,
+                             "[thor convolution] %s correctness validated %s checked_elements=%llu max_abs_error=%.9g\n",
+                             op_name,
+                             frontendConvolutionCandidateIdentityString(*candidate_to_validate).c_str(),
+                             static_cast<unsigned long long>(validation_result.checked_elements),
+                             static_cast<double>(validation_result.max_abs_error));
+                std::fflush(stderr);
+            }
+            break;
+        } catch (const std::exception& e) {
+            const std::string reason = std::string("exact-replay/correctness validation failed: ") + e.what();
+            correctness_rejections.push_back(frontendConvolutionCandidateIdentityString(*candidate_to_validate) + " => " + reason);
+            if (thorConvolutionDiagnosticsEnabled()) {
+                std::fprintf(stderr,
+                             "[thor convolution] %s correctness rejected %s: %s\n",
+                             op_name,
+                             frontendConvolutionCandidateIdentityString(*candidate_to_validate).c_str(),
+                             reason.c_str());
+                std::fflush(stderr);
+            }
+            mark_candidate_failed(*candidate_to_validate, reason);
         }
     }
 
-    if (best_plan_index < 0) {
-        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name + " autotune could not run any of the top " +
-                                 std::to_string(candidate_count) + " heuristic-ranked execution plans.");
+    if (best_candidate == nullptr) {
+        std::ostringstream message;
+        message << "cuDNN Frontend " << op_name
+                << " autotune found no candidate that passed Thor's independent full-output correctness validation.";
+        if (!correctness_rejections.empty()) {
+            message << " Rejections:";
+            for (const std::string& rejection : correctness_rejections) {
+                message << " [" << rejection << ']';
+            }
+        }
+        throw std::runtime_error(message.str());
     }
 
-    checkFrontendStatus(built.frontend_graph->build_plan_at_index(stream.getCudnnHandle(), best_plan_index),
-                        std::string("Failed to rebuild selected cuDNN Frontend ") + op_name + " execution plan");
+    if (!selected_graph || selected_workspace_bytes < 0 || !best_candidate->correctness_validated) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
+                                 " lost the independently validated exact execution plan before placement completed.");
+    }
+    if (selected_workspace_bytes != best_candidate->workspace_bytes) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
+                                 " validated exact plan workspace no longer matches its timed candidate.");
+    }
 
-    built.selected_plan_index = best_plan_index;
-    built.workspace_bytes = static_cast<size_t>(best_workspace_bytes);
+    if (thorConvolutionDiagnosticsEnabled()) {
+        std::fprintf(stderr,
+                     "[thor convolution] %s selected %s score_ms=%.9g production_plan=%lld validated=1 stream=%llu\n",
+                     op_name,
+                     frontendConvolutionCandidateIdentityString(*best_candidate).c_str(),
+                     static_cast<double>(best_score_ms),
+                     static_cast<long long>(matching_plan_index),
+                     static_cast<unsigned long long>(stream.getId()));
+        std::fflush(stderr);
+    }
+
+    // Retain the exact pristine graph that passed the independent mathematical
+    // reference.  Never reconstruct or re-enumerate after validation: the graph
+    // being placed is byte-for-byte the execution-plan object Thor proved correct.
+    built.frontend_graph = std::move(selected_graph);
+    built.correctness_validated = true;
+    built.selected_plan_index = matching_plan_index;
+    built.selected_engine_id = best_candidate->engine_id;
+    built.selected_knobs = normalizedFrontendConvolutionKnobs(best_candidate->knobs);
+    built.workspace_bytes = static_cast<size_t>(selected_workspace_bytes);
 }
 
 static void putFrontendTensorPointer(std::unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor& tensor) {
@@ -4866,11 +6598,52 @@ static void executeFrontendConvolutionGraph(const BuiltConvolution& built,
         workspace_ptr = const_cast<void*>(static_cast<const void*>(workspace.value().getMemPtr<void>()));
     }
 
-    if (built.selected_plan_index < 0) {
-        throw std::runtime_error(std::string(op_name) + " has no autotuned cuDNN Frontend execution plan.");
+    if (!built.correctness_validated || built.selected_plan_index < 0) {
+        throw std::runtime_error(std::string(op_name) +
+                                 " has no independently correctness-validated cuDNN Frontend execution plan.");
     }
 
-    auto status = built.frontend_graph->execute(run_stream.getCudnnHandle(), tensor_pack, workspace_ptr);
+    cudnnHandle_t handle = run_stream.getCudnnHandle();
+    if (thorConvolutionDiagnosticsEnabled()) {
+        cudaStream_t handle_stream = nullptr;
+        const cudnnStatus_t stream_status = cudnnGetStream(handle, &handle_stream);
+        if (stream_status != CUDNN_STATUS_SUCCESS) {
+            throw std::runtime_error(std::string(op_name) + " failed to query its cuDNN handle stream: " +
+                                     cudnnGetErrorString(stream_status));
+        }
+        if (handle_stream != run_stream.getStream()) {
+            std::ostringstream message;
+            message << op_name << " cuDNN handle/stream invariant is broken: Thor Stream id=" << run_stream.getId()
+                    << " owns cudaStream=" << static_cast<const void*>(run_stream.getStream())
+                    << " but cudnnGetStream(handle) returned " << static_cast<const void*>(handle_stream) << '.';
+            throw std::runtime_error(message.str());
+        }
+        if (thorConvolutionDiagnosticsVerbose()) {
+            std::ostringstream knobs;
+            knobs << '{';
+            for (size_t i = 0; i < built.selected_knobs.size(); ++i) {
+                if (i != 0) {
+                    knobs << ',';
+                }
+                knobs << built.selected_knobs[i].first << ':' << built.selected_knobs[i].second;
+            }
+            knobs << '}';
+            std::fprintf(stderr,
+                         "[thor convolution] execute %s stream=%llu cuda_stream=%p cudnn_handle=%p engine=%lld knobs=%s "
+                         "plan=%lld workspace=%zu\n",
+                         op_name,
+                         static_cast<unsigned long long>(run_stream.getId()),
+                         static_cast<void*>(run_stream.getStream()),
+                         static_cast<void*>(handle),
+                         static_cast<long long>(built.selected_engine_id),
+                         knobs.str().c_str(),
+                         static_cast<long long>(built.selected_plan_index),
+                         built.workspace_bytes);
+            std::fflush(stderr);
+        }
+    }
+
+    auto status = built.frontend_graph->execute(handle, tensor_pack, workspace_ptr);
     if (!status.is_good()) {
         throw std::runtime_error(std::string("Failed to execute autotuned cuDNN Frontend ") + op_name + " graph: " + status.get_message());
     }
@@ -5358,43 +7131,89 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
         throw std::runtime_error(is_3d ? "buildConvolution expected rank-5 tensors for CONV3D."
                                        : "buildConvolution expected rank-4 tensors for CONV2D.");
     }
+    const uint64_t groups = compiled_convolution->groups;
+    if (groups == 0 || input.getDimensions()[1] != filter.getDimensions()[1] * groups ||
+        output.getDimensions()[1] != filter.getDimensions()[0] || output.getDimensions()[1] % groups != 0) {
+        throw std::runtime_error("buildConvolution received invalid grouped convolution channel geometry.");
+    }
 
     auto built = std::make_shared<BuiltConvolution>();
     built->use_cudnn_frontend = true;
-    built->frontend_graph = std::make_shared<fe::graph::Graph>();
-    built->frontend_graph->set_io_data_type(toFrontendDataType(compiled_convolution->output_dtype))
-        .set_intermediate_data_type(toFrontendDataType(compiled_convolution->compute_dtype))
-        .set_compute_data_type(toFrontendDataType(compiled_convolution->compute_dtype));
 
     const char* prefix = is_3d ? "conv3d" : "conv2d";
-    auto x = createFrontendConvolutionTensor(built->frontend_graph,
-                                             std::string(prefix) + "_x",
-                                             CUDNN_FRONTEND_CONV_X_UID,
-                                             input.getDimensions(),
-                                             compiled_convolution->input_dtype);
-    auto w = createFrontendConvolutionTensor(built->frontend_graph,
-                                             std::string(prefix) + "_w",
-                                             CUDNN_FRONTEND_CONV_W_UID,
-                                             filter.getDimensions(),
-                                             compiled_convolution->filter_dtype);
+    const auto padding =
+        convolutionFrontend3dPadding(compiled_convolution->pad_d, compiled_convolution->pad_h, compiled_convolution->pad_w);
+    const auto strides = is_3d
+                             ? convolutionFrontendStrides(
+                                   true, compiled_convolution->stride_d, compiled_convolution->stride_h, compiled_convolution->stride_w)
+                             : convolutionFrontendStrides(compiled_convolution->spatial_2d);
+    const auto dilations =
+        is_3d ? convolutionFrontendDilations(true) : convolutionFrontendDilations(compiled_convolution->spatial_2d);
 
-    auto conv_attrs = fe::graph::Conv_fprop_attributes()
-                          .set_name(std::string("thor_expr_") + prefix + "_fprop")
-                          .set_padding(convolutionFrontendPadding(
-                              is_3d, compiled_convolution->pad_d, compiled_convolution->pad_h, compiled_convolution->pad_w))
-                          .set_stride(convolutionFrontendStrides(
-                              is_3d, compiled_convolution->stride_d, compiled_convolution->stride_h, compiled_convolution->stride_w))
-                          .set_dilation(convolutionFrontendDilations(is_3d))
-                          .set_compute_data_type(toFrontendDataType(compiled_convolution->compute_dtype))
-                          .set_convolution_mode(fe::ConvolutionMode_t::CROSS_CORRELATION);
+    const auto graph_factory = [&]() {
+        auto graph = std::make_shared<fe::graph::Graph>();
+        graph->set_io_data_type(toFrontendDataType(compiled_convolution->output_dtype))
+            .set_intermediate_data_type(toFrontendDataType(compiled_convolution->compute_dtype))
+            .set_compute_data_type(toFrontendDataType(compiled_convolution->compute_dtype));
 
-    auto y = built->frontend_graph->conv_fprop(x, w, conv_attrs);
-    setFrontendConvolutionOutputTensor(
-        y, std::string(prefix) + "_y", CUDNN_FRONTEND_CONV_Y_UID, output.getDimensions(), compiled_convolution->output_dtype);
+        auto x = createFrontendConvolutionTensor(graph,
+                                                 std::string(prefix) + "_x",
+                                                 CUDNN_FRONTEND_CONV_X_UID,
+                                                 input.getDimensions(),
+                                                 compiled_convolution->input_dtype);
+        auto w = createFrontendConvolutionTensor(graph,
+                                                 std::string(prefix) + "_w",
+                                                 CUDNN_FRONTEND_CONV_W_UID,
+                                                 filter.getDimensions(),
+                                                 compiled_convolution->filter_dtype);
 
+        auto conv_attrs = fe::graph::Conv_fprop_attributes()
+                              .set_name(std::string("thor_expr_") + prefix + "_fprop")
+                              .set_stride(strides)
+                              .set_dilation(dilations)
+                              .set_compute_data_type(toFrontendDataType(compiled_convolution->compute_dtype))
+                              .set_convolution_mode(fe::ConvolutionMode_t::CROSS_CORRELATION);
+        if (is_3d) {
+            conv_attrs.set_padding(padding);
+        } else {
+            conv_attrs.set_pre_padding(convolutionFrontendPrePadding(compiled_convolution->spatial_2d));
+            conv_attrs.set_post_padding(convolutionFrontendPostPadding(compiled_convolution->spatial_2d));
+        }
+
+        auto y = graph->conv_fprop(x, w, conv_attrs);
+        setFrontendConvolutionOutputTensor(
+            y, std::string(prefix) + "_y", CUDNN_FRONTEND_CONV_Y_UID, output.getDimensions(), compiled_convolution->output_dtype);
+        return graph;
+    };
+
+    built->frontend_graph = graph_factory();
     std::vector<FrontendConvolutionAutotuneBinding> autotune_bindings = {
         {CUDNN_FRONTEND_CONV_X_UID, input, true}, {CUDNN_FRONTEND_CONV_W_UID, filter, true}, {CUDNN_FRONTEND_CONV_Y_UID, output, true}};
-    autotuneFrontendConvolutionGraph(*built, stream, autotune_bindings, input.getPlacement(), is_3d ? "CONV3D forward" : "CONV2D forward");
+    FrontendConvolutionCorrectnessValidation correctness_validation;
+    correctness_validation.lhs_uid = CUDNN_FRONTEND_CONV_X_UID;
+    correctness_validation.rhs_uid = CUDNN_FRONTEND_CONV_W_UID;
+    correctness_validation.output_uid = CUDNN_FRONTEND_CONV_Y_UID;
+    correctness_validation.spec.kind = ConvolutionKernelValidationKind::Forward;
+    correctness_validation.spec.is_3d = is_3d;
+    correctness_validation.spec.groups = groups;
+    correctness_validation.spec.stride_d = is_3d ? compiled_convolution->stride_d : 1;
+    correctness_validation.spec.stride_h = is_3d ? compiled_convolution->stride_h : compiled_convolution->spatial_2d.stride_h;
+    correctness_validation.spec.stride_w = is_3d ? compiled_convolution->stride_w : compiled_convolution->spatial_2d.stride_w;
+    correctness_validation.spec.pre_padding_d = is_3d ? compiled_convolution->pad_d : 0;
+    correctness_validation.spec.pre_padding_h = is_3d ? compiled_convolution->pad_h : compiled_convolution->spatial_2d.pre_padding_h;
+    correctness_validation.spec.pre_padding_w = is_3d ? compiled_convolution->pad_w : compiled_convolution->spatial_2d.pre_padding_w;
+    correctness_validation.spec.dilation_d = 1;
+    correctness_validation.spec.dilation_h = is_3d ? 1 : compiled_convolution->spatial_2d.dilation_h;
+    correctness_validation.spec.dilation_w = is_3d ? 1 : compiled_convolution->spatial_2d.dilation_w;
+    correctness_validation.spec.compute_dtype = compiled_convolution->compute_dtype;
+    autotuneFrontendConvolutionGraph(*built,
+                                     stream,
+                                     autotune_bindings,
+                                     input.getPlacement(),
+                                     is_3d ? "CONV3D forward" : "CONV2D forward",
+                                     graph_factory,
+                                     false,
+                                     correctness_validation);
     return built;
 }
 
@@ -5426,86 +7245,183 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
         throw std::runtime_error(is_3d ? "buildConvolutionBackward expected rank-5 tensors for CONV3D backward."
                                        : "buildConvolutionBackward expected rank-4 tensors for CONV2D backward.");
     }
+    const uint64_t groups = compiled_convolution_backward->groups;
+    if (groups == 0 || grad_output.getDimensions()[1] % groups != 0) {
+        throw std::runtime_error("buildConvolutionBackward received invalid grouped convolution channel geometry.");
+    }
+    if (is_backward_data) {
+        if (output.getDimensions()[1] != input.getDimensions()[1] * groups ||
+            grad_output.getDimensions()[1] != input.getDimensions()[0]) {
+            throw std::runtime_error("buildConvolutionBackward received invalid grouped dgrad channel geometry.");
+        }
+    } else if (input.getDimensions()[1] != output.getDimensions()[1] * groups ||
+               grad_output.getDimensions()[1] != output.getDimensions()[0]) {
+        throw std::runtime_error("buildConvolutionBackward received invalid grouped wgrad channel geometry.");
+    }
 
     auto built = std::make_shared<BuiltConvolution>();
     built->use_cudnn_frontend = true;
-    built->frontend_graph = std::make_shared<fe::graph::Graph>();
-    built->frontend_graph->set_io_data_type(toFrontendDataType(compiled_convolution_backward->output_dtype))
-        .set_intermediate_data_type(toFrontendDataType(compiled_convolution_backward->compute_dtype))
-        .set_compute_data_type(toFrontendDataType(compiled_convolution_backward->compute_dtype));
 
     const char* prefix = is_3d ? "conv3d" : "conv2d";
-    const auto padding = convolutionFrontendPadding(
-        is_3d, compiled_convolution_backward->pad_d, compiled_convolution_backward->pad_h, compiled_convolution_backward->pad_w);
-    const auto strides = convolutionFrontendStrides(
-        is_3d, compiled_convolution_backward->stride_d, compiled_convolution_backward->stride_h, compiled_convolution_backward->stride_w);
-    const auto dilations = convolutionFrontendDilations(is_3d);
+    const auto padding = convolutionFrontend3dPadding(compiled_convolution_backward->pad_d,
+                                                      compiled_convolution_backward->pad_h,
+                                                      compiled_convolution_backward->pad_w);
+    const auto strides = is_3d
+                             ? convolutionFrontendStrides(true,
+                                                          compiled_convolution_backward->stride_d,
+                                                          compiled_convolution_backward->stride_h,
+                                                          compiled_convolution_backward->stride_w)
+                             : convolutionFrontendStrides(compiled_convolution_backward->spatial_2d);
+    const auto dilations = is_3d ? convolutionFrontendDilations(true)
+                                 : convolutionFrontendDilations(compiled_convolution_backward->spatial_2d);
     const fe::DataType_t compute_dtype = toFrontendDataType(compiled_convolution_backward->compute_dtype);
 
     if (is_backward_data) {
-        auto w = createFrontendConvolutionTensor(built->frontend_graph,
-                                                 std::string(prefix) + "_bwd_data_w",
-                                                 CUDNN_FRONTEND_CONV_W_UID,
+        const auto graph_factory = [&]() {
+            auto graph = std::make_shared<fe::graph::Graph>();
+            graph->set_io_data_type(toFrontendDataType(compiled_convolution_backward->output_dtype))
+                .set_intermediate_data_type(toFrontendDataType(compiled_convolution_backward->compute_dtype))
+                .set_compute_data_type(toFrontendDataType(compiled_convolution_backward->compute_dtype));
+
+            auto w = createFrontendConvolutionTensor(graph,
+                                                     std::string(prefix) + "_bwd_data_w",
+                                                     CUDNN_FRONTEND_CONV_W_UID,
+                                                     input.getDimensions(),
+                                                     compiled_convolution_backward->input_dtype);
+            auto dy = createFrontendConvolutionTensor(graph,
+                                                      std::string(prefix) + "_bwd_data_dy",
+                                                      CUDNN_FRONTEND_CONV_Y_UID,
+                                                      grad_output.getDimensions(),
+                                                      compiled_convolution_backward->grad_output_dtype);
+            auto conv_attrs = fe::graph::Conv_dgrad_attributes()
+                                  .set_name(std::string("thor_expr_") + prefix + "_dgrad")
+                                  .set_stride(strides)
+                                  .set_dilation(dilations)
+                                  .set_compute_data_type(compute_dtype)
+                                  .set_convolution_mode(fe::ConvolutionMode_t::CROSS_CORRELATION);
+            if (is_3d) {
+                conv_attrs.set_padding(padding);
+            } else {
+                conv_attrs.set_pre_padding(convolutionFrontendPrePadding(compiled_convolution_backward->spatial_2d));
+                conv_attrs.set_post_padding(convolutionFrontendPostPadding(compiled_convolution_backward->spatial_2d));
+            }
+
+            auto dx = graph->conv_dgrad(dy, w, conv_attrs);
+            setFrontendConvolutionOutputTensor(dx,
+                                               std::string(prefix) + "_bwd_data_dx",
+                                               CUDNN_FRONTEND_CONV_X_UID,
+                                               output.getDimensions(),
+                                               compiled_convolution_backward->output_dtype);
+            return graph;
+        };
+
+        built->frontend_graph = graph_factory();
+        std::vector<FrontendConvolutionAutotuneBinding> autotune_bindings = {{CUDNN_FRONTEND_CONV_W_UID, input, true},
+                                                                             {CUDNN_FRONTEND_CONV_Y_UID, grad_output, true},
+                                                                             {CUDNN_FRONTEND_CONV_X_UID, output, true}};
+        FrontendConvolutionCorrectnessValidation correctness_validation;
+        correctness_validation.lhs_uid = CUDNN_FRONTEND_CONV_W_UID;
+        correctness_validation.rhs_uid = CUDNN_FRONTEND_CONV_Y_UID;
+        correctness_validation.output_uid = CUDNN_FRONTEND_CONV_X_UID;
+        correctness_validation.spec.kind = ConvolutionKernelValidationKind::BackwardData;
+        correctness_validation.spec.is_3d = is_3d;
+        correctness_validation.spec.groups = groups;
+        correctness_validation.spec.stride_d = is_3d ? compiled_convolution_backward->stride_d : 1;
+        correctness_validation.spec.stride_h =
+            is_3d ? compiled_convolution_backward->stride_h : compiled_convolution_backward->spatial_2d.stride_h;
+        correctness_validation.spec.stride_w =
+            is_3d ? compiled_convolution_backward->stride_w : compiled_convolution_backward->spatial_2d.stride_w;
+        correctness_validation.spec.pre_padding_d = is_3d ? compiled_convolution_backward->pad_d : 0;
+        correctness_validation.spec.pre_padding_h =
+            is_3d ? compiled_convolution_backward->pad_h : compiled_convolution_backward->spatial_2d.pre_padding_h;
+        correctness_validation.spec.pre_padding_w =
+            is_3d ? compiled_convolution_backward->pad_w : compiled_convolution_backward->spatial_2d.pre_padding_w;
+        correctness_validation.spec.dilation_d = 1;
+        correctness_validation.spec.dilation_h = is_3d ? 1 : compiled_convolution_backward->spatial_2d.dilation_h;
+        correctness_validation.spec.dilation_w = is_3d ? 1 : compiled_convolution_backward->spatial_2d.dilation_w;
+        correctness_validation.spec.compute_dtype = compiled_convolution_backward->compute_dtype;
+        autotuneFrontendConvolutionGraph(*built,
+                                         stream,
+                                         autotune_bindings,
+                                         output.getPlacement(),
+                                         is_3d ? "CONV3D backward-data" : "CONV2D backward-data",
+                                         graph_factory,
+                                         false,
+                                         correctness_validation);
+        return built;
+    }
+
+    const auto graph_factory = [&]() {
+        auto graph = std::make_shared<fe::graph::Graph>();
+        graph->set_io_data_type(toFrontendDataType(compiled_convolution_backward->output_dtype))
+            .set_intermediate_data_type(toFrontendDataType(compiled_convolution_backward->compute_dtype))
+            .set_compute_data_type(toFrontendDataType(compiled_convolution_backward->compute_dtype));
+
+        auto x = createFrontendConvolutionTensor(graph,
+                                                 std::string(prefix) + "_bwd_filter_x",
+                                                 CUDNN_FRONTEND_CONV_X_UID,
                                                  input.getDimensions(),
                                                  compiled_convolution_backward->input_dtype);
-        auto dy = createFrontendConvolutionTensor(built->frontend_graph,
-                                                  std::string(prefix) + "_bwd_data_dy",
+        auto dy = createFrontendConvolutionTensor(graph,
+                                                  std::string(prefix) + "_bwd_filter_dy",
                                                   CUDNN_FRONTEND_CONV_Y_UID,
                                                   grad_output.getDimensions(),
                                                   compiled_convolution_backward->grad_output_dtype);
-        auto conv_attrs = fe::graph::Conv_dgrad_attributes()
-                              .set_name(std::string("thor_expr_") + prefix + "_dgrad")
-                              .set_padding(padding)
+        auto conv_attrs = fe::graph::Conv_wgrad_attributes()
+                              .set_name(std::string("thor_expr_") + prefix + "_wgrad")
                               .set_stride(strides)
                               .set_dilation(dilations)
                               .set_compute_data_type(compute_dtype)
                               .set_convolution_mode(fe::ConvolutionMode_t::CROSS_CORRELATION);
+        if (is_3d) {
+            conv_attrs.set_padding(padding);
+        } else {
+            conv_attrs.set_pre_padding(convolutionFrontendPrePadding(compiled_convolution_backward->spatial_2d));
+            conv_attrs.set_post_padding(convolutionFrontendPostPadding(compiled_convolution_backward->spatial_2d));
+        }
 
-        auto dx = built->frontend_graph->conv_dgrad(dy, w, conv_attrs);
-        setFrontendConvolutionOutputTensor(dx,
-                                           std::string(prefix) + "_bwd_data_dx",
-                                           CUDNN_FRONTEND_CONV_X_UID,
+        auto dw = graph->conv_wgrad(dy, x, conv_attrs);
+        setFrontendConvolutionOutputTensor(dw,
+                                           std::string(prefix) + "_bwd_filter_dw",
+                                           CUDNN_FRONTEND_CONV_W_UID,
                                            output.getDimensions(),
                                            compiled_convolution_backward->output_dtype);
+        return graph;
+    };
 
-        std::vector<FrontendConvolutionAutotuneBinding> autotune_bindings = {{CUDNN_FRONTEND_CONV_W_UID, input, true},
-                                                                             {CUDNN_FRONTEND_CONV_Y_UID, grad_output, true},
-                                                                             {CUDNN_FRONTEND_CONV_X_UID, output, true}};
-        autotuneFrontendConvolutionGraph(
-            *built, stream, autotune_bindings, output.getPlacement(), is_3d ? "CONV3D backward-data" : "CONV2D backward-data");
-        return built;
-    }
-
-    auto x = createFrontendConvolutionTensor(built->frontend_graph,
-                                             std::string(prefix) + "_bwd_filter_x",
-                                             CUDNN_FRONTEND_CONV_X_UID,
-                                             input.getDimensions(),
-                                             compiled_convolution_backward->input_dtype);
-    auto dy = createFrontendConvolutionTensor(built->frontend_graph,
-                                              std::string(prefix) + "_bwd_filter_dy",
-                                              CUDNN_FRONTEND_CONV_Y_UID,
-                                              grad_output.getDimensions(),
-                                              compiled_convolution_backward->grad_output_dtype);
-    auto conv_attrs = fe::graph::Conv_wgrad_attributes()
-                          .set_name(std::string("thor_expr_") + prefix + "_wgrad")
-                          .set_padding(padding)
-                          .set_stride(strides)
-                          .set_dilation(dilations)
-                          .set_compute_data_type(compute_dtype)
-                          .set_convolution_mode(fe::ConvolutionMode_t::CROSS_CORRELATION);
-
-    auto dw = built->frontend_graph->conv_wgrad(dy, x, conv_attrs);
-    setFrontendConvolutionOutputTensor(dw,
-                                       std::string(prefix) + "_bwd_filter_dw",
-                                       CUDNN_FRONTEND_CONV_W_UID,
-                                       output.getDimensions(),
-                                       compiled_convolution_backward->output_dtype);
-
+    built->frontend_graph = graph_factory();
     std::vector<FrontendConvolutionAutotuneBinding> autotune_bindings = {{CUDNN_FRONTEND_CONV_X_UID, input, true},
                                                                          {CUDNN_FRONTEND_CONV_Y_UID, grad_output, true},
                                                                          {CUDNN_FRONTEND_CONV_W_UID, output, true}};
-    autotuneFrontendConvolutionGraph(
-        *built, stream, autotune_bindings, output.getPlacement(), is_3d ? "CONV3D backward-filter" : "CONV2D backward-filter");
+    FrontendConvolutionCorrectnessValidation correctness_validation;
+    correctness_validation.lhs_uid = CUDNN_FRONTEND_CONV_X_UID;
+    correctness_validation.rhs_uid = CUDNN_FRONTEND_CONV_Y_UID;
+    correctness_validation.output_uid = CUDNN_FRONTEND_CONV_W_UID;
+    correctness_validation.spec.kind = ConvolutionKernelValidationKind::BackwardFilter;
+    correctness_validation.spec.is_3d = is_3d;
+    correctness_validation.spec.groups = groups;
+    correctness_validation.spec.stride_d = is_3d ? compiled_convolution_backward->stride_d : 1;
+    correctness_validation.spec.stride_h =
+        is_3d ? compiled_convolution_backward->stride_h : compiled_convolution_backward->spatial_2d.stride_h;
+    correctness_validation.spec.stride_w =
+        is_3d ? compiled_convolution_backward->stride_w : compiled_convolution_backward->spatial_2d.stride_w;
+    correctness_validation.spec.pre_padding_d = is_3d ? compiled_convolution_backward->pad_d : 0;
+    correctness_validation.spec.pre_padding_h =
+        is_3d ? compiled_convolution_backward->pad_h : compiled_convolution_backward->spatial_2d.pre_padding_h;
+    correctness_validation.spec.pre_padding_w =
+        is_3d ? compiled_convolution_backward->pad_w : compiled_convolution_backward->spatial_2d.pre_padding_w;
+    correctness_validation.spec.dilation_d = 1;
+    correctness_validation.spec.dilation_h = is_3d ? 1 : compiled_convolution_backward->spatial_2d.dilation_h;
+    correctness_validation.spec.dilation_w = is_3d ? 1 : compiled_convolution_backward->spatial_2d.dilation_w;
+    correctness_validation.spec.compute_dtype = compiled_convolution_backward->compute_dtype;
+    autotuneFrontendConvolutionGraph(*built,
+                                     stream,
+                                     autotune_bindings,
+                                     output.getPlacement(),
+                                     is_3d ? "CONV3D backward-filter" : "CONV2D backward-filter",
+                                     graph_factory,
+                                     true,
+                                     correctness_validation);
     return built;
 }
 

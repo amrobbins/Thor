@@ -36,9 +36,14 @@ struct PhysicalBatchInput {
 
     // Present only for the physical offsets port of a logical ragged input.
     // Generic Tensor mutations invalidate payload-derived runtime metadata; the
-    // NetworkInput boundary republishes this cache only after offsets materialization.
+    // NetworkInput boundary republishes these caches only after offsets
+    // materialization. The complete host offsets mirror remains optional. Consumers
+    // that require a scalar host dispatch extent must require that scalar explicitly
+    // rather than synchronously reading device offsets or silently changing backend.
     std::optional<RowPartitionDescriptor> rowPartitionDescriptor;
     std::optional<uint64_t> rowPartitionHostActiveValueCount;
+    std::optional<uint64_t> rowPartitionHostMaxActiveRowLength;
+    std::optional<std::vector<uint64_t>> rowPartitionHostOffsets;
 };
 
 struct PartialBatchIncompatibility {

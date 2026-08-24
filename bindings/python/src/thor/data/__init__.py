@@ -11,6 +11,7 @@ from .._thor.training import DatasetSchema
 from .._thor.training import DatasetSplitManifest
 from .._thor.training import DatasetWriter
 from .._thor.training import DeviceDatasetStorage
+from .._thor.training import WindowedDeviceCache
 from .._thor.training import ExampleIndexRange
 from .._thor.training import ExampleIndexSet
 from .._thor.training import FileDataset
@@ -48,6 +49,7 @@ __all__ = [
     "DatasetSplitManifest",
     "DatasetWriter",
     "DeviceDatasetStorage",
+    "WindowedDeviceCache",
     "ExampleIndexRange",
     "ExampleIndexSet",
     "FileDataset",

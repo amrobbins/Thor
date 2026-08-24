@@ -457,6 +457,10 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
             requireConsistentBatchCapacity(raggedTensor.getBatchSize());
             const std::optional<uint64_t> activeValueCount =
                 raggedTensor.getHostActiveValueCountIfAvailable();
+            const std::optional<uint64_t> maxActiveRowLength =
+                raggedTensor.getHostMaxActiveRowLengthIfAvailable();
+            const std::optional<std::vector<uint64_t>> hostOffsets =
+                raggedTensor.getHostOffsetsIfAvailable();
             THOR_THROW_IF_FALSE(
                 physicalBatchInputs.emplace(
                     binding.valuesInputName,
@@ -467,7 +471,9 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
                     PhysicalBatchInput{raggedTensor.getOffsets(),
                                        sourceReference,
                                        raggedTensor.getRowPartitionRuntime().getDescriptor(),
-                                       activeValueCount}).second);
+                                       activeValueCount,
+                                       maxActiveRowLength,
+                                       hostOffsets}).second);
         } else if (std::holds_alternative<Thor::DeviceBatchReference>(value)) {
             Thor::DeviceBatchReference reference = std::get<Thor::DeviceBatchReference>(value);
             requireConsistentBatchCapacity(reference.getBatchCapacity());
@@ -576,7 +582,9 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
                         readyIt->second,
                         it->second.rowPartitionDescriptor.value(),
                         it->second.rowPartitionHostActiveValueCount,
+                        it->second.rowPartitionHostMaxActiveRowLength,
                         validExampleCount,
+                        it->second.rowPartitionHostOffsets,
                         it->second.sourceReference);
                 } else {
                     inputs[i]->forwardRowPartitionOffsets(
@@ -584,7 +592,9 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
                         isInferenceOnly,
                         it->second.rowPartitionDescriptor.value(),
                         it->second.rowPartitionHostActiveValueCount,
+                        it->second.rowPartitionHostMaxActiveRowLength,
                         validExampleCount,
+                        it->second.rowPartitionHostOffsets,
                         it->second.sourceReference);
                 }
             } else if (readyIt != inputReadyEvents.end()) {

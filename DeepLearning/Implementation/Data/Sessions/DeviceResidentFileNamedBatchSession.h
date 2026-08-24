@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/Data/Materialization/DeviceDatasetMaterialization.h"
 #include "DeepLearning/Api/Data/BatchSession.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceDatasetResidency.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceWindowL2Cache.h"
 #include "Utilities/Common/Stream.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedDataset.h"
 #include "Utilities/Data/Readers/IndexedDatasetReader.h"
@@ -17,6 +18,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -26,6 +28,16 @@ struct DeviceResidentFileRaggedSlot;
 struct DeviceResidentFilePendingSelection;
 struct DeviceResidentFilePendingDirect;
 struct DeviceResidentFilePendingRagged;
+
+namespace Thor {
+
+class WindowedDeviceCacheRequiredError : public std::runtime_error {
+   public:
+    explicit WindowedDeviceCacheRequiredError(const std::string &message)
+        : std::runtime_error(message) {}
+};
+
+}  // namespace Thor
 
 /**
  * Compact file-backed device session. Windowed fields are returned as
@@ -68,6 +80,9 @@ class DeviceResidentFileNamedBatchSession : public Thor::BatchSession {
     }
     [[nodiscard]] uint64_t getBatchQueueDepth() const { return batchQueueDepth; }
     [[nodiscard]] bool isCancelled() const { return cancelled.load(std::memory_order_acquire); }
+    [[nodiscard]] const Thor::WindowedDeviceCacheReport &getWindowedDeviceCacheReport() const {
+        return windowedDeviceCacheReport;
+    }
 
    private:
     Batch acquireBatch(ExampleType exampleType, uint64_t &batchNum) override;
@@ -113,7 +128,18 @@ class DeviceResidentFileNamedBatchSession : public Thor::BatchSession {
     uint64_t batchQueueDepth = 0;
     uint64_t readerQueueDepth = 0;
     std::map<ExampleType, std::unique_ptr<SplitRuntime>> splitRuntimes;
+    // One long-lived registration per unique compact window source used by
+    // this session, whether consumed by a dense or ragged window field. Batch
+    // materializers and ragged gather streams share these leases rather than
+    // acquiring/releasing the device-wide budget on every batch.
+    std::map<uint64_t, std::shared_ptr<Thor::DeviceWindowL2CacheLease>> windowL2CacheLeases;
+    Thor::WindowedDeviceCacheReport windowedDeviceCacheReport{};
     std::atomic<bool> cancelled{false};
+
+    void initializeWindowL2CacheLeases();
+    [[nodiscard]] std::shared_ptr<const Thor::DeviceWindowL2CacheLease>
+    windowL2CacheLeaseForField(const std::string &fieldName) const;
+    void applyWindowL2CachePolicyForField(const std::string &fieldName, Stream &stream) const;
 
     void initializeSplit(ExampleType exampleType,
                          std::shared_ptr<const Thor::ExampleIndexSet> sourceIndices,

@@ -292,7 +292,7 @@ void Activation::initializeStandaloneActivation(RaggedTensor inputTensor,
     raggedFeatureInput = inputTensor;
     featureInput = values;
     featureOutput = standaloneOutputTensorForInput(values);
-    raggedFeatureOutput = RaggedTensor(featureOutput.value(), inputTensor.getOffsets());
+    raggedFeatureOutput = inputTensor.withValues(featureOutput.value());
     epilogue = std::move(epilogueExpression);
     epilogueInputBindings = std::move(epilogueInputBindingsValue);
     serializableEpilogue.reset();
@@ -310,7 +310,10 @@ void Activation::deserializeStandaloneFields(const json& j, Network* network) {
         const uint64_t valuesId = raggedJson.at("values").at("id").get<uint64_t>();
         const uint64_t offsetsId = raggedJson.at("offsets").at("id").get<uint64_t>();
         inputTensor = network->getApiTensorByOriginalId(valuesId);
-        raggedInput = RaggedTensor(inputTensor, network->getApiTensorByOriginalId(offsetsId));
+        Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
+        raggedInput = raggedJson.contains("max_values_per_row")
+            ? RaggedTensor(inputTensor, offsets, raggedJson.at("max_values_per_row").get<uint64_t>())
+            : RaggedTensor(inputTensor, offsets);
         if (raggedInput->getBatchSize() != raggedJson.at("batch_size").get<uint64_t>() ||
             raggedInput->getMaxTotalValues() != raggedJson.at("max_total_values").get<uint64_t>())
             throw std::runtime_error("Activation serialized ragged input metadata does not match reconstructed tensors.");
@@ -341,7 +344,7 @@ void Activation::deserializeStandaloneFields(const json& j, Network* network) {
     if (raggedInput.has_value()) {
         initializeStandaloneActivation(raggedInput.value(), epilogueExpression, epilogueBindings);
         featureOutput = Tensor::deserialize(j.at("feature_output"));
-        raggedFeatureOutput = RaggedTensor(featureOutput.value(), raggedInput->getOffsets());
+        raggedFeatureOutput = raggedInput->withValues(featureOutput.value());
         if (j.at("ragged_feature_output").at("offsets").at("id").get<uint64_t>() !=
             j.at("ragged_feature_input").at("offsets").at("id").get<uint64_t>())
             throw std::runtime_error("Activation serialized ragged output must preserve the input row partition.");

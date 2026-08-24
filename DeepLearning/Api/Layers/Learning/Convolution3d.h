@@ -40,6 +40,7 @@ class Convolution3d : public TrainableLayer {
     virtual uint32_t getDepthPadding() { return depthPadding; }
     virtual uint32_t getVerticalPadding() { return verticalPadding; }
     virtual uint32_t getHorizontalPadding() { return horizontalPadding; }
+    virtual uint32_t getGroups() const { return groups; }
 
     std::string getLayerType() const override { return "Convolution3d"; }
 
@@ -142,6 +143,7 @@ class Convolution3d : public TrainableLayer {
     uint32_t depthPadding;
     uint32_t verticalPadding;
     uint32_t horizontalPadding;
+    uint32_t groups = 1;
     bool hasBias;
     std::shared_ptr<Initializer> weightsInitializer;
     std::shared_ptr<Initializer> biasInitializer;
@@ -187,6 +189,8 @@ class Convolution3d::Builder {
             _verticalPadding = 0;
         if (!_horizontalPadding.has_value())
             _horizontalPadding = 0;
+        if (!_groups.has_value())
+            _groups = 1;
         if (!_hasBias.has_value())
             _hasBias = false;
         if (_weightsInitializer == nullptr)
@@ -217,6 +221,7 @@ class Convolution3d::Builder {
         convolution3d.depthPadding = _depthPadding.value();
         convolution3d.verticalPadding = _verticalPadding.value();
         convolution3d.horizontalPadding = _horizontalPadding.value();
+        convolution3d.groups = _groups.value();
 
         THOR_THROW_IF_FALSE(convolution3d.depthPadding < convolution3d.filterDepth);
         THOR_THROW_IF_FALSE(convolution3d.verticalPadding < convolution3d.filterHeight);
@@ -246,10 +251,16 @@ class Convolution3d::Builder {
         const DataType convolutionDataType = convolution3d.featureInputs.front().getDataType();
         const DataType weightsDataType = convolutionDataType;
         const uint64_t inputChannels = convolution3d.featureInputs.front().getDimensions()[0];
+        if (inputChannels % convolution3d.groups != 0 || convolution3d.numOutputChannels % convolution3d.groups != 0)
+            throw std::invalid_argument("Convolution3d requires input and output channels divisible by groups.");
 
         ParameterSpecification::Builder weightsParameterBuilder;
         weightsParameterBuilder.name("weights")
-            .shape({convolution3d.numOutputChannels, inputChannels, convolution3d.filterDepth, convolution3d.filterHeight, convolution3d.filterWidth})
+            .shape({convolution3d.numOutputChannels,
+                    inputChannels / convolution3d.groups,
+                    convolution3d.filterDepth,
+                    convolution3d.filterHeight,
+                    convolution3d.filterWidth})
             .dtype(weightsDataType)
             .initializer(convolution3d.weightsInitializer)
             .trainable(true);
@@ -326,6 +337,12 @@ class Convolution3d::Builder {
     virtual Convolution3d::Builder& filterWidth(uint32_t value) {
         THOR_THROW_IF_FALSE(!this->_filterWidth.has_value());
         this->_filterWidth = value;
+        return *this;
+    }
+    virtual Convolution3d::Builder& groups(uint32_t value) {
+        THOR_THROW_IF_FALSE(value > 0);
+        THOR_THROW_IF_FALSE(!this->_groups.has_value());
+        this->_groups = value;
         return *this;
     }
     virtual Convolution3d::Builder& depthStride(uint32_t value) {
@@ -440,6 +457,7 @@ class Convolution3d::Builder {
     std::optional<uint32_t> _depthPadding;
     std::optional<uint32_t> _verticalPadding;
     std::optional<uint32_t> _horizontalPadding;
+    std::optional<uint32_t> _groups;
     std::optional<bool> _hasBias;
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasesInitializer;

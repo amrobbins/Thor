@@ -272,8 +272,6 @@ std::shared_ptr<Api::Network> buildBf16Convolution2dPhaseNetwork(const std::stri
                                          .numOutputChannels(1)
                                          .filterHeight(1)
                                          .filterWidth(1)
-                                         .verticalPadding(0)
-                                         .horizontalPadding(0)
                                          .hasBias(true)
                                          .weightsOptimizer(Api::Adam::Builder().alpha(0.002f).build())
                                          .biasesOptimizer(Api::Adam::Builder().alpha(0.003f).build())

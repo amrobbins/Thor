@@ -54,7 +54,8 @@ struct DeviceDatasetStorageSelection {
 [[nodiscard]] DeviceDatasetSessionDescription describeDeviceDatasetSession(
     const DatasetSplitManifest& splits,
     const BatchPolicy& batching,
-    const DatasetFieldMaterializationRequirements& fieldRequirements = {});
+    const DatasetFieldMaterializationRequirements& fieldRequirements = {},
+    WindowedDeviceCache windowedDeviceCache = WindowedDeviceCache::AUTO);
 
 [[nodiscard]] DeviceDatasetSessionDescription describeDeviceDatasetSession(
     const TrainingData& trainingData,

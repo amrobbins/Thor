@@ -37,6 +37,7 @@ TEST(RaggedNetworkInputApi, BuildsLogicalRaggedInputBackedByPhysicalNetworkInput
                               .trailingDimensions({})
                               .batchSize(3)
                               .maxTotalValues(7)
+                              .maxValuesPerRow(4)
                               .build();
 
     ASSERT_TRUE(labels.isInitialized());
@@ -44,6 +45,8 @@ TEST(RaggedNetworkInputApi, BuildsLogicalRaggedInputBackedByPhysicalNetworkInput
     EXPECT_EQ(labels.getOffsetsDimensions(), (std::vector<uint64_t>{4}));
     EXPECT_EQ(labels.getBatchSize(), 3u);
     EXPECT_EQ(labels.getMaxTotalValues(), 7u);
+    ASSERT_TRUE(labels.hasMaxValuesPerRow());
+    EXPECT_EQ(labels.getMaxValuesPerRow(), 4u);
 
     const json architecture = network.architectureJson();
     ASSERT_TRUE(architecture.contains("ragged_network_inputs"));
@@ -54,6 +57,7 @@ TEST(RaggedNetworkInputApi, BuildsLogicalRaggedInputBackedByPhysicalNetworkInput
     EXPECT_EQ(raggedInput.at("offsets_input_name").get<std::string>(), "labels.offsets");
     EXPECT_EQ(raggedInput.at("values_tensor_id").get<uint64_t>(), labels.getValues().getId());
     EXPECT_EQ(raggedInput.at("offsets_tensor_id").get<uint64_t>(), labels.getOffsets().getId());
+    EXPECT_EQ(raggedInput.at("max_values_per_row").get<uint64_t>(), 4u);
     EXPECT_FALSE(raggedInput.contains("ragged_tensor"));
 
     ASSERT_TRUE(architecture.contains("layers"));
@@ -78,6 +82,7 @@ TEST(RaggedNetworkInputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTensor
                               .trailingDimensions({2})
                               .batchSize(2)
                               .maxTotalValues(6)
+                              .maxValuesPerRow(4)
                               .build();
 
     const json architecture = network.architectureJson();
@@ -85,6 +90,7 @@ TEST(RaggedNetworkInputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTensor
     EXPECT_FALSE(logicalInput.contains("ragged_tensor"));
     EXPECT_EQ(logicalInput.at("values_tensor_id").get<uint64_t>(), labels.getValues().getId());
     EXPECT_EQ(logicalInput.at("offsets_tensor_id").get<uint64_t>(), labels.getOffsets().getId());
+    EXPECT_EQ(logicalInput.at("max_values_per_row").get<uint64_t>(), 4u);
 
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     const std::filesystem::path archiveDir =
@@ -103,12 +109,15 @@ TEST(RaggedNetworkInputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTensor
     EXPECT_EQ(loadedInputs[0].offsetsInputName, "labels.offsets");
     EXPECT_EQ(loadedInputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{6, 2}));
     EXPECT_EQ(loadedInputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{3}));
+    ASSERT_TRUE(loadedInputs[0].raggedTensor.hasMaxValuesPerRow());
+    EXPECT_EQ(loadedInputs[0].raggedTensor.getMaxValuesPerRow(), 4u);
 
     const json loadedArchitecture = loaded.architectureJson();
     const json& loadedLogicalInput = loadedArchitecture.at("ragged_network_inputs").at(0);
     EXPECT_FALSE(loadedLogicalInput.contains("ragged_tensor"));
     EXPECT_EQ(loadedLogicalInput.at("values_tensor_id").get<uint64_t>(), loadedInputs[0].raggedTensor.getValues().getId());
     EXPECT_EQ(loadedLogicalInput.at("offsets_tensor_id").get<uint64_t>(), loadedInputs[0].raggedTensor.getOffsets().getId());
+    EXPECT_EQ(loadedLogicalInput.at("max_values_per_row").get<uint64_t>(), 4u);
 
     std::filesystem::remove_all(archiveDir);
 }
@@ -158,6 +167,7 @@ TEST(RaggedNetworkInputApi, FlattenedTensorMapSubmissionIsRejectedButLogicalBatc
                               .trailingDimensions({inputWidth})
                               .batchSize(batchSize)
                               .maxTotalValues(maxTotalValues)
+                              .maxValuesPerRow(3)
                               .build();
     FullyConnected projection = FullyConnected::Builder()
                                     .network(network)
@@ -214,7 +224,10 @@ TEST(RaggedNetworkInputApi, FlattenedTensorMapSubmissionIsRejectedButLogicalBatc
     // capacity bucket. Successful logical inference therefore proves that offsets
     // materialization republished the cache before downstream host dispatch.
     Batch logicalBatch;
-    logicalBatch.insert("labels", ThorImplementation::RaggedTensor(values, offsets));
+    ThorImplementation::RowPartitionRuntime logicalPartition(
+        offsets,
+        ThorImplementation::RowPartitionDescriptor(batchSize, maxTotalValues, DataType::UINT32, 3));
+    logicalBatch.insert("labels", ThorImplementation::RaggedTensor(values, logicalPartition));
     std::map<std::string, ThorImplementation::Tensor> logicalOutputs;
     ASSERT_NO_THROW(logicalOutputs = placed->infer(logicalBatch));
     ASSERT_TRUE(logicalOutputs.contains("projected_values"));
@@ -223,6 +236,14 @@ TEST(RaggedNetworkInputApi, FlattenedTensorMapSubmissionIsRejectedButLogicalBatc
               (std::vector<uint64_t>{maxTotalValues, outputWidth}));
     EXPECT_EQ(logicalOutputs.at("label_offsets").getDescriptor().getDimensions(),
               (std::vector<uint64_t>{batchSize + 1}));
+
+    auto physicalOffsetsInput = placed->getStampedNetwork(0).getNamedInput("labels.offsets");
+    ASSERT_NE(physicalOffsetsInput, nullptr);
+    ASSERT_TRUE(physicalOffsetsInput->getFeatureOutput().has_value());
+    ThorImplementation::RowPartitionRuntime publishedPartition(
+        physicalOffsetsInput->getFeatureOutput().value(), labels.getDescriptor().getRowPartition());
+    EXPECT_EQ(publishedPartition.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(3));
+    EXPECT_EQ(publishedPartition.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(2));
 }
 
 TEST(RaggedNetworkInputApi, RejectsInvalidOffsetDType) {
@@ -235,6 +256,16 @@ TEST(RaggedNetworkInputApi, RejectsInvalidOffsetDType) {
                       .offsetsDataType(DataType::INT32)
                       .batchSize(2)
                       .maxTotalValues(5)
+                      .build()),
+                 std::logic_error);
+
+    EXPECT_THROW((RaggedNetworkInput::Builder()
+                      .network(network)
+                      .name("too_wide")
+                      .valuesDataType(DataType::FP32)
+                      .batchSize(2)
+                      .maxTotalValues(5)
+                      .maxValuesPerRow(6)
                       .build()),
                  std::logic_error);
 }

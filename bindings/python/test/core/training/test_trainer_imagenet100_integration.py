@@ -1110,8 +1110,7 @@ def _conv_bn_relu(
         kernel_size,
         vertical_stride=stride,
         horizontal_stride=stride,
-        vertical_padding=padding,
-        horizontal_padding=padding,
+        padding=(padding, padding, padding, padding),
         has_bias=False,
         activation=None,
     )
@@ -1135,8 +1134,7 @@ def _resnet18_basic_block(
         3,
         vertical_stride=stride,
         horizontal_stride=stride,
-        vertical_padding=1,
-        horizontal_padding=1,
+        padding=(1, 1, 1, 1),
         has_bias=False,
         activation=None,
     )
@@ -1149,8 +1147,7 @@ def _resnet18_basic_block(
         out_channels,
         3,
         3,
-        vertical_padding=1,
-        horizontal_padding=1,
+        padding=(1, 1, 1, 1),
         has_bias=False,
         activation=None,
     )

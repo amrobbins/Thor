@@ -153,7 +153,7 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
           computeDataType(computeDataType),
           outputDataType(outputDataType) {
         if (this->raggedFeatureInput.has_value()) {
-            raggedFeatureOutput = RaggedTensor(getOutput("feature_output"), this->raggedFeatureInput->getOffsets());
+            raggedFeatureOutput = this->raggedFeatureInput->withValues(getOutput("feature_output"));
         }
     }
 

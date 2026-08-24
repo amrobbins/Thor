@@ -150,7 +150,7 @@ class ScaledDotProductAttention : public CustomLayer {
     std::optional<RaggedTensor> getRaggedFeatureOutput() const {
         if (!queryRaggedInput.has_value())
             return std::nullopt;
-        return RaggedTensor(getOutput("output"), queryRaggedInput->getOffsets());
+        return queryRaggedInput->withValues(getOutput("output"));
     }
     std::optional<Tensor> getFp8DescaleQInput() const { return fp8DescaleQInput; }
     std::optional<Tensor> getFp8DescaleKInput() const { return fp8DescaleKInput; }

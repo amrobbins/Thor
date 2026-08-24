@@ -55,8 +55,9 @@ void CtcLoss::deserialize(const json& j, Network* network) {
 
     const uint64_t predictionsId = j.at("predictions_tensor").at("id").get<uint64_t>();
     const json& labelsJson = j.at("labels_ragged_tensor");
-    if (labelsJson.at("version").get<string>() != "1.0.0")
-        throw runtime_error("Unsupported RaggedTensor version in CtcLoss::deserialize: " + labelsJson.at("version").get<string>());
+    const string labelsVersion = labelsJson.at("version").get<string>();
+    if (labelsVersion != "1.0.0" && labelsVersion != "1.1.0")
+        throw runtime_error("Unsupported RaggedTensor version in CtcLoss::deserialize: " + labelsVersion);
     if (labelsJson.at("ragged_rank").get<uint32_t>() != 1)
         throw runtime_error("CtcLoss requires ragged_rank 1 labels.");
     const uint64_t labelValuesId = labelsJson.at("values").at("id").get<uint64_t>();
@@ -66,8 +67,11 @@ void CtcLoss::deserialize(const json& j, Network* network) {
     CtcLoss ctcLoss;
     ctcLoss.rawLossAddedToNetwork = true;
     ctcLoss.predictionsTensor = network->getApiTensorByOriginalId(predictionsId);
-    ctcLoss.labelsRaggedTensor =
-        RaggedTensor(network->getApiTensorByOriginalId(labelValuesId), network->getApiTensorByOriginalId(labelOffsetsId));
+    Tensor labelValues = network->getApiTensorByOriginalId(labelValuesId);
+    Tensor labelOffsets = network->getApiTensorByOriginalId(labelOffsetsId);
+    ctcLoss.labelsRaggedTensor = labelsJson.contains("max_values_per_row")
+        ? RaggedTensor(labelValues, labelOffsets, labelsJson.at("max_values_per_row").get<uint64_t>())
+        : RaggedTensor(labelValues, labelOffsets);
     THOR_THROW_IF_FALSE(ctcLoss.labelsRaggedTensor.getBatchSize() == labelsJson.at("batch_size").get<uint64_t>());
     THOR_THROW_IF_FALSE(ctcLoss.labelsRaggedTensor.getMaxTotalValues() == labelsJson.at("max_total_values").get<uint64_t>());
     THOR_THROW_IF_FALSE(ctcLoss.predictionsTensor.getDataType() == DataType::FP32);

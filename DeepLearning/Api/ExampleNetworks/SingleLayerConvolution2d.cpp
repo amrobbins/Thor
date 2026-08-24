@@ -32,7 +32,6 @@ Network buildSingleLayerConvolution2d() {
                              .filterWidth(25)
                              .verticalStride(1)
                              .horizontalStride(1)
-                             .noPadding()
                              .hasBias(true)
                              .weightsInitializer(glorot)
                              .biasInitializer(glorot)
