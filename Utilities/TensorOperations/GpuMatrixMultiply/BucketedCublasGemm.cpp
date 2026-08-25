@@ -133,7 +133,7 @@ BucketedCublasGemm BucketedCublasGemm::build(int gpuNum,
                                        dataTypes,
                                        printResults);
 
-        CublasKernel kernel = cublas.getCachedGemmKernel(gpuNum,
+        CublasKernel kernel = cublas.materializeSelectedGemmKernel(gpuNum,
                                                          shape.rowsA,
                                                          shape.colsA,
                                                          shape.rowsB,
@@ -212,6 +212,14 @@ BucketedCublasGemmShape BucketedCublasGemm::getSelectedShape(uint64_t activeRows
 
 CublasKernelRequirement BucketedCublasGemm::getSelectedKernelRequirement(uint64_t activeRows) const {
     return selectBucket(activeRows).kernel.getCublasKernelRequirement();
+}
+
+CublasKernelSelection BucketedCublasGemm::getSelectedKernelSelectionForTests(uint64_t activeRows) const {
+    return selectBucket(activeRows).kernel.getSelectionRecipe();
+}
+
+uintptr_t BucketedCublasGemm::getSelectedExecutionStateIdForTests(uint64_t activeRows) const {
+    return selectBucket(activeRows).kernel.executionStateId();
 }
 
 cublasStatus_t BucketedCublasGemm::launchUncheckedPrevalidated(uint64_t activeRows,

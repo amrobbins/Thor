@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Common/CudnnFrontendPlan.h"
 #include "Utilities/Common/Stream.h"
 
 #include <cstddef>
@@ -8,6 +9,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 
 namespace ThorImplementation {
 
@@ -64,35 +67,79 @@ struct CudnnInstanceNormBackwardArgs {
     Tensor dbias;
 };
 
+/**
+ * One finalized InstanceNorm execution plan owned by one independently
+ * executable InstanceNorm connection. The descriptor is retained locally so
+ * execution validates its tensor pack without consulting process-global state.
+ */
+class CudnnInstanceNormExecutablePlan final : public AcceleratorBackendLocalExecutionStateTag {
+   public:
+    CudnnInstanceNormExecutablePlan(const CudnnInstanceNormExecutablePlan&) = delete;
+    CudnnInstanceNormExecutablePlan& operator=(const CudnnInstanceNormExecutablePlan&) = delete;
+    CudnnInstanceNormExecutablePlan(CudnnInstanceNormExecutablePlan&&) noexcept = default;
+    CudnnInstanceNormExecutablePlan& operator=(CudnnInstanceNormExecutablePlan&&) noexcept = default;
+    ~CudnnInstanceNormExecutablePlan() = default;
+
+    [[nodiscard]] const CudnnInstanceNormDescriptor& descriptor() const noexcept { return descriptor_; }
+    [[nodiscard]] const CudnnFrontendPlanSelection& selection() const noexcept { return executable_.selection(); }
+    [[nodiscard]] uint64_t workspaceBytes() const noexcept { return executable_.workspaceBytes(); }
+    [[nodiscard]] uintptr_t executableId() const noexcept { return executable_.executableId(); }
+    [[nodiscard]] int gpuNum() const noexcept { return gpu_num_; }
+    [[nodiscard]] bool isForward() const noexcept { return pass_ == Pass::Forward; }
+    [[nodiscard]] bool isBackward() const noexcept { return pass_ == Pass::Backward; }
+
+   private:
+    enum class Pass { Forward, Backward };
+
+    CudnnInstanceNormExecutablePlan(CudnnInstanceNormDescriptor descriptor,
+                                    Pass pass,
+                                    int gpuNum,
+                                    CudnnFrontendExecutablePlan executable)
+        : descriptor_(std::move(descriptor)), pass_(pass), gpu_num_(gpuNum), executable_(std::move(executable)) {}
+
+    CudnnInstanceNormDescriptor descriptor_;
+    Pass pass_;
+    int gpu_num_ = -1;
+    CudnnFrontendExecutablePlan executable_;
+
+    friend class CudnnInstanceNorm;
+};
+
 class CudnnInstanceNorm {
    public:
     static CudnnInstanceNorm& instance();
 
-    void forward(const CudnnInstanceNormDescriptor& descriptor,
+    // Preparation is the only phase allowed to consult the process-global
+    // selection cache or construct a Frontend executable graph. Each call
+    // returns a fresh operation-local executable.
+    [[nodiscard]] CudnnInstanceNormExecutablePlan prepareForward(const CudnnInstanceNormDescriptor& descriptor, Stream stream);
+    [[nodiscard]] CudnnInstanceNormExecutablePlan prepareBackward(const CudnnInstanceNormDescriptor& descriptor, Stream stream);
+
+    void forward(const CudnnInstanceNormExecutablePlan& plan,
                  const CudnnInstanceNormForwardArgs& args,
                  std::optional<Tensor>& workspace,
                  Stream stream);
-    void backward(const CudnnInstanceNormDescriptor& descriptor,
+    void backward(const CudnnInstanceNormExecutablePlan& plan,
                   const CudnnInstanceNormBackwardArgs& args,
                   std::optional<Tensor>& workspace,
                   Stream stream);
 
-    // Build/lookup the compatible cached graph and report its cuDNN execution
-    // workspace requirement. The returned byte count is immutable graph metadata;
-    // execution workspace itself belongs to the placed/stamped caller.
-    [[nodiscard]] uint64_t forwardWorkspaceSizeInBytes(const CudnnInstanceNormDescriptor& descriptor, int gpuNum);
-    [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes(const CudnnInstanceNormDescriptor& descriptor, int gpuNum);
-
-    void warmForward(const CudnnInstanceNormDescriptor& descriptor, int gpuNum);
-    void warmBackward(const CudnnInstanceNormDescriptor& descriptor, int gpuNum);
-
-    void clearCache();
-    size_t cachedGraphCount() const;
+    // Diagnostics describe immutable global selection recipes only.
+    void clearSelectionCache();
+    [[nodiscard]] size_t cachedSelectionCount() const;
+    [[nodiscard]] uint64_t selectionCacheHitCount() const;
+    [[nodiscard]] uint64_t selectionCacheMissCount() const;
 
     static bool frontendAvailable();
 
    private:
     CudnnInstanceNorm() = default;
 };
+
+static_assert(AcceleratorBackendLocalExecutionState<CudnnInstanceNormExecutablePlan>);
+static_assert(!std::is_copy_constructible_v<CudnnInstanceNormExecutablePlan>);
+static_assert(!std::is_copy_assignable_v<CudnnInstanceNormExecutablePlan>);
+static_assert(std::is_move_constructible_v<CudnnInstanceNormExecutablePlan>);
+static_assert(std::is_move_assignable_v<CudnnInstanceNormExecutablePlan>);
 
 }  // namespace ThorImplementation

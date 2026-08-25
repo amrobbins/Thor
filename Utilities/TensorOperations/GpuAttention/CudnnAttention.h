@@ -1,12 +1,15 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Common/CudnnFrontendPlan.h"
 #include "Utilities/Common/Stream.h"
 
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace ThorImplementation {
@@ -214,34 +217,77 @@ struct CudnnAttentionBackwardArgs {
 };
 
 /**
- * Thread-safe cached executor for cuDNN SDPA graphs.
+ * Move-only, operation-local cuDNN Frontend SDPA executable.
  *
- * This is deliberately a low-level TensorOperation first.  It is the right boundary to wire into Thor's expression
- * scheduler as a first-class Attention execution stage, and it is also directly testable against CPU/PyTorch or
- * decomposed Thor matmul-softmax-matmul reference paths.
+ * The process-global repository retains only CudnnFrontendPlanSelection recipes.
+ * Every stamped/placed attention execution receives its own finalized Frontend
+ * graph/plan and caller-owned workspace.
+ */
+class CudnnAttentionExecutablePlan final : public AcceleratorBackendLocalExecutionStateTag {
+   public:
+    CudnnAttentionExecutablePlan(const CudnnAttentionExecutablePlan&) = delete;
+    CudnnAttentionExecutablePlan& operator=(const CudnnAttentionExecutablePlan&) = delete;
+    CudnnAttentionExecutablePlan(CudnnAttentionExecutablePlan&&) noexcept = default;
+    CudnnAttentionExecutablePlan& operator=(CudnnAttentionExecutablePlan&&) noexcept = default;
+    ~CudnnAttentionExecutablePlan() = default;
+
+    [[nodiscard]] const CudnnAttentionDescriptor& descriptor() const noexcept { return descriptor_; }
+    [[nodiscard]] const CudnnFrontendPlanSelection& selection() const noexcept { return executable_.selection(); }
+    [[nodiscard]] uint64_t workspaceBytes() const noexcept { return executable_.workspaceBytes(); }
+    [[nodiscard]] uintptr_t executableId() const noexcept { return executable_.executableId(); }
+    [[nodiscard]] int gpuNum() const noexcept { return gpu_num_; }
+    [[nodiscard]] bool isForward() const noexcept { return pass_ == Pass::Forward; }
+    [[nodiscard]] bool isBackward() const noexcept { return pass_ == Pass::Backward; }
+
+   private:
+    enum class Pass { Forward, Backward };
+
+    CudnnAttentionExecutablePlan(CudnnAttentionDescriptor descriptor,
+                                 Pass pass,
+                                 int gpuNum,
+                                 CudnnFrontendExecutablePlan executable)
+        : descriptor_(std::move(descriptor)), pass_(pass), gpu_num_(gpuNum), executable_(std::move(executable)) {}
+
+    CudnnAttentionDescriptor descriptor_;
+    Pass pass_;
+    int gpu_num_ = -1;
+    CudnnFrontendExecutablePlan executable_;
+
+    friend class CudnnScaledDotProductAttention;
+};
+
+/**
+ * cuDNN Frontend SDPA selection repository and operation-local executor.
+ *
+ * Preparation is placement/stamping work.  It may consult the immutable global
+ * selection cache and replay/deserialise a selected recipe into a fresh local
+ * executable. Runtime forward/backward accept only an already-prepared plan and
+ * never consult selection state or construct Frontend objects.
  */
 class CudnnScaledDotProductAttention {
    public:
     static CudnnScaledDotProductAttention& instance();
 
-    void forward(const CudnnAttentionDescriptor& descriptor,
+    [[nodiscard]] CudnnAttentionExecutablePlan prepareForward(const CudnnAttentionDescriptor& descriptor,
+                                                               const CudnnAttentionForwardArgs& args,
+                                                               Stream stream);
+    [[nodiscard]] CudnnAttentionExecutablePlan prepareBackward(const CudnnAttentionDescriptor& descriptor,
+                                                                const CudnnAttentionBackwardArgs& args,
+                                                                Stream stream);
+
+    void forward(const CudnnAttentionExecutablePlan& plan,
                  const CudnnAttentionForwardArgs& args,
                  std::optional<Tensor>& workspace,
                  Stream stream);
-    void backward(const CudnnAttentionDescriptor& descriptor,
+    void backward(const CudnnAttentionExecutablePlan& plan,
                   const CudnnAttentionBackwardArgs& args,
                   std::optional<Tensor>& workspace,
                   Stream stream);
 
-    // Useful after shape inference / stamping when a model will repeatedly run the same attention shape.
-    // Build/lookup the compatible cached graph and report its cuDNN execution
-    // workspace requirement. The returned byte count is immutable graph metadata;
-    // execution workspace itself belongs to the placed/stamped caller.
+    // Selection-only helpers for descriptor validation/tests and ahead-of-time
+    // warming. They never retain a live executable graph.
     [[nodiscard]] uint64_t forwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor, int gpuNum);
     [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor, int gpuNum);
-    // Attention bias/dBias shapes may be runtime-bound and participate in the
-    // graph cache key. These overloads size the exact graph that forward/backward
-    // will execute for the supplied bindings.
     [[nodiscard]] uint64_t forwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor,
                                                        const CudnnAttentionForwardArgs& args,
                                                        int gpuNum);
@@ -252,13 +298,21 @@ class CudnnScaledDotProductAttention {
     void warmForward(const CudnnAttentionDescriptor& descriptor, int gpuNum);
     void warmBackward(const CudnnAttentionDescriptor& descriptor, int gpuNum);
 
-    void clearCache();
-    size_t cachedGraphCount() const;
+    void clearSelectionCache();
+    [[nodiscard]] size_t cachedSelectionCount() const;
+    [[nodiscard]] uint64_t selectionCacheHitCount() const;
+    [[nodiscard]] uint64_t selectionCacheMissCount() const;
 
     static bool frontendAvailable();
 
    private:
     CudnnScaledDotProductAttention() = default;
 };
+
+static_assert(AcceleratorBackendLocalExecutionState<CudnnAttentionExecutablePlan>);
+static_assert(!std::is_copy_constructible_v<CudnnAttentionExecutablePlan>);
+static_assert(!std::is_copy_assignable_v<CudnnAttentionExecutablePlan>);
+static_assert(std::is_move_constructible_v<CudnnAttentionExecutablePlan>);
+static_assert(std::is_move_assignable_v<CudnnAttentionExecutablePlan>);
 
 }  // namespace ThorImplementation

@@ -89,13 +89,20 @@ FusedEquation compileMatmulPlusOne() {
 
 TEST(ExpressionBatchedMatmulExecution, DenseRegularBatchUsesOneStridedBatchedMatmul) {
     REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
+    Stream streamA(0);
+    Stream streamB(0);
 
-    Tensor lhs = makeGpuTensor({2, 2, 3}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, stream);
-    Tensor rhs = makeGpuTensor({2, 3, 2}, {1, 0, 0, 1, 1, 1, 2, 1, 1, 0, 0, 1}, stream);
+    Tensor lhs = makeGpuTensor({2, 2, 3}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, streamA);
+    Tensor rhs = makeGpuTensor({2, 3, 2}, {1, 0, 0, 1, 1, 1, 2, 1, 1, 0, 0, 1}, streamA);
 
     FusedEquation equation = compileMatmul();
-    StampedExecutionPlan plan = equation.stamp({{"lhs", lhs}, {"rhs", rhs}}, stream);
+    auto& cublas = CublasMatrixMultiply::instance();
+    cublas.clearOptimalKernelSelectionCacheForTests();
+    ASSERT_EQ(cublas.cachedOptimalKernelSelectionCountForTests(), 0u);
+
+    StampedExecutionPlan plan = equation.stamp({{"lhs", lhs}, {"rhs", rhs}}, streamA);
+    const size_t selectionCountAfterFirstStamp = cublas.cachedOptimalKernelSelectionCountForTests();
+    EXPECT_GT(selectionCountAfterFirstStamp, 0u);
     ASSERT_EQ(plan.output("y").getDimensions(), (std::vector<uint64_t>{2, 2, 2}));
     EXPECT_EQ(plan.flopCount(), 48u);
     const std::vector<StampedMatmulStageDiagnostic> diagnostics = plan.matmulStageDiagnostics();
@@ -112,9 +119,41 @@ TEST(ExpressionBatchedMatmulExecution, DenseRegularBatchUsesOneStridedBatchedMat
     EXPECT_GT(diagnostics[0].kernel.waves_count, 0.0f);
     EXPECT_GT(diagnostics[0].kernel.picker_runtime_ms, 0.0);
     EXPECT_GE(diagnostics[0].kernel.algorithm_id, 0);
-    plan.run();
+    EXPECT_NE(diagnostics[0].kernel.execution_state_id, 0u);
 
-    expectValues(copyToCpu(plan.output("y"), stream), {4, 5, 10, 11, 22, 16, 31, 22});
+    // C9: an equivalent independently stamped expression may reuse the immutable
+    // measured selection, but it must materialize its own descriptor-bearing kernel.
+    StampedExecutionPlan second_plan = equation.stamp({{"lhs", lhs}, {"rhs", rhs}}, streamB);
+    const std::vector<StampedMatmulStageDiagnostic> second_diagnostics = second_plan.matmulStageDiagnostics();
+    ASSERT_EQ(second_diagnostics.size(), 1u);
+    EXPECT_NE(second_diagnostics[0].kernel.execution_state_id, 0u);
+    EXPECT_NE(second_diagnostics[0].kernel.execution_state_id, diagnostics[0].kernel.execution_state_id);
+    EXPECT_EQ(second_diagnostics[0].kernel.algorithm_id, diagnostics[0].kernel.algorithm_id);
+    EXPECT_EQ(cublas.cachedOptimalKernelSelectionCountForTests(), selectionCountAfterFirstStamp);
+    if (diagnostics[0].kernel.workspace_bytes > 0) {
+        EXPECT_NE(diagnostics[0].kernel.workspace_state_id, 0u);
+        EXPECT_NE(second_diagnostics[0].kernel.workspace_state_id, 0u);
+        EXPECT_NE(second_diagnostics[0].kernel.workspace_state_id, diagnostics[0].kernel.workspace_state_id);
+    }
+
+    const uint64_t materializationsAfterStamping = CublasKernel::materializationCountForTests();
+    cublas.clearOptimalKernelSelectionCacheForTests();
+    ASSERT_EQ(cublas.cachedOptimalKernelSelectionCountForTests(), 0u);
+
+    for (int repetition = 0; repetition < 8; ++repetition) {
+        plan.run();
+        second_plan.run();
+    }
+    streamA.synchronize();
+    streamB.synchronize();
+
+    EXPECT_EQ(CublasKernel::materializationCountForTests(), materializationsAfterStamping)
+        << "Ordinary cuBLASLt runtime must not materialize descriptor-bearing kernels.";
+    EXPECT_EQ(cublas.cachedOptimalKernelSelectionCountForTests(), 0u)
+        << "Ordinary cuBLASLt runtime must not consult/repopulate the global selection cache.";
+
+    expectValues(copyToCpu(plan.output("y"), streamA), {4, 5, 10, 11, 22, 16, 31, 22});
+    expectValues(copyToCpu(second_plan.output("y"), streamB), {4, 5, 10, 11, 22, 16, 31, 22});
 }
 
 TEST(ExpressionBatchedMatmulExecution, WholeOperandBatchBroadcastUsesZeroStride) {

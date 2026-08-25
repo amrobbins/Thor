@@ -1,6 +1,9 @@
 #pragma once
 
 #include "DeepLearning/Implementation/ThorError.h"
+
+#include <mutex>
+
 namespace ThorImplementation {
 
 struct RunStats {

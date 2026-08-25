@@ -1449,8 +1449,8 @@ add_custom_target(check-release-artifact-io
         VERBATIM
 )
 
-# Shared-ownership qualification gate. The individual ownership migrations keep
-# focused tests in their natural test files; this target gathers those tests
+# Backend ownership qualification gate. Shared-handle tests and migrated local-state
+# tests stay in their natural test files; this target gathers those tests
 # into one release gate and repeatedly shuffles them to exercise control-block
 # churn and cross-test resource teardown. The disabled preflight makes a
 # missing CUDA device a hard failure for this gate instead of allowing the
@@ -1463,8 +1463,8 @@ Event.CopiesAndMovesShareOneEventIdentity:
 Event.IndependentlyCreatedEventsHaveDistinctIdentities:
 Event.DistinctHandlesMayCopyAndDestroyOneEventConcurrently:
 StreamSharedOwnership.*:
-ConvolutionKernelRequirementSharedOwnership.*:
-CublasKernelSharedOwnership.*:
+CublasKernelLocalOwnership.*:
+CublasLtEpiloguePlanOwnership.*:
 TensorSharedOwnership.*")
 string(REPLACE "\n" "" THOR_RELEASE_SHARED_OWNERSHIP_GTEST_FILTER "${THOR_RELEASE_SHARED_OWNERSHIP_GTEST_FILTER}")
 

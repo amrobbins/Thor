@@ -60,7 +60,7 @@ class CudnnRmsNormRhtAbsMax {
     void warmForward(const CudnnRmsNormRhtAbsMaxDescriptor& descriptor, int gpuNum);
 
     void clearCache();
-    size_t cachedGraphCount() const;
+    size_t cachedResolvedKernelCount() const;
 
     static bool frontendAvailable();
 

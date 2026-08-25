@@ -32,11 +32,13 @@ namespace ThorImplementation {
  * CublasMatrixMultiply is a singleton object that can find the optimal matrix multiply kernel for a matrix multiply operation
  * of a given set of dimensions on a specific type of GPU.
  *
- * Once the optimal kernel is found, it will be use on all subsequent matching matrix multiply calls.
+ * Once the optimal algorithm/configuration is measured, only that immutable selection recipe is cached process-wide.
+ * Descriptor-bearing CublasKernel execution state is materialized privately by the operation that retains it.
  *
  * It is not required to first evaluate the optimal kernel, when the optimal kernel is not known then a pretty-good-fit kernel can be used.
  *
- * The recommendation is that if you plan to do a matrix multiply of a certain size many times, first find the optimal kernel.
+ * The recommendation is that if you plan to do a matrix multiply of a certain size many times, first measure the optimal selection
+ * and retain a local CublasKernel materialized from it.
  *
  * The singleton object is accessed as CublasMatrixMultiply::instance().multiply(...)
  *
@@ -96,11 +98,11 @@ class CublasMatrixMultiply {
         DGelu,
     };
 
-    struct LtMatmulAlgorithmSelection {
+    struct LtMatmulAlgorithmSelection : AcceleratorBackendSelectionRecipeTag {
         cublasLtMatmulAlgo_t algorithm{};
         uint64_t workspace_size_in_bytes = 0;
     };
-    struct LtMatmulPlan {
+    struct LtMatmulPlan : AcceleratorBackendLocalExecutionStateTag {
         cublasLtMatmulDesc_t operation_desc_host = nullptr;
         cublasLtMatmulDesc_t operation_desc_device = nullptr;
         cublasLtMatrixLayout_t a_desc = nullptr;
@@ -114,6 +116,12 @@ class CublasMatrixMultiply {
 
         LtMatmulPlan(const LtMatmulPlan &) = delete;
         LtMatmulPlan &operator=(const LtMatmulPlan &) = delete;
+        LtMatmulPlan(LtMatmulPlan &&other) noexcept;
+        LtMatmulPlan &operator=(LtMatmulPlan &&other) noexcept;
+
+        [[nodiscard]] uintptr_t executionStateId() const {
+            return reinterpret_cast<uintptr_t>(operation_desc_host);
+        }
 
         cublasLtMatmulDesc_t operationDesc(CublasScalarPointerMode pointerMode) const {
             return (pointerMode == CublasScalarPointerMode::Device) ? operation_desc_device : operation_desc_host;
@@ -425,7 +433,7 @@ class CublasMatrixMultiply {
         bool addendIsBiasVector,
         std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
 
-    std::shared_ptr<LtMatmulPlan> buildGemmWithEpiloguePlan(int gpuNum,
+    std::unique_ptr<LtMatmulPlan> buildGemmWithEpiloguePlan(int gpuNum,
                                                             const int32_t A_rows,
                                                             const int32_t A_cols,
                                                             const int32_t B_rows,
@@ -452,7 +460,7 @@ class CublasMatrixMultiply {
                                  Stream stream,
                                  CublasScalarPointerMode pointerMode,
                                  std::optional<Tensor> workspace,
-                                 const std::shared_ptr<LtMatmulPlan> &plan,
+                                 const LtMatmulPlan &plan,
                                  bool addendIsBiasVector);
 
     uint64_t getGemmWithEpilogueWorkspaceSizeInBytes(int gpuNum,
@@ -491,7 +499,7 @@ class CublasMatrixMultiply {
         int64_t epilogueAuxLd,
         std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
 
-    std::shared_ptr<LtMatmulPlan> buildGemmWithBackwardEpiloguePlan(
+    std::unique_ptr<LtMatmulPlan> buildGemmWithBackwardEpiloguePlan(
         int gpuNum,
         const int32_t A_rows,
         const int32_t A_cols,
@@ -521,7 +529,7 @@ class CublasMatrixMultiply {
                                          Stream stream,
                                          CublasScalarPointerMode pointerMode,
                                          std::optional<Tensor> workspace,
-                                         const std::shared_ptr<LtMatmulPlan> &plan);
+                                         const LtMatmulPlan &plan);
 
     uint64_t getGemmWithBackwardEpilogueWorkspaceSizeInBytes(int gpuNum,
                                                              const int32_t A_rows,
@@ -932,7 +940,9 @@ class CublasMatrixMultiply {
             gpuNum, rowsA, colsA, rowsB, colsB, ldA, ldB, ldC, ldD, transposeA, transposeB, false, ABCDataType, kernelWillRunOnGpu);
     }
 
-    CublasKernel getCachedGemmKernel(int gpuNum,
+    // Materialize fresh descriptor-bearing execution state from an already-selected
+    // immutable GEMM recipe. This never returns a globally cached CublasKernel.
+    CublasKernel materializeSelectedGemmKernel(int gpuNum,
                                      int rowsA,
                                      int colsA,
                                      int rowsB,
@@ -1057,18 +1067,32 @@ class CublasMatrixMultiply {
                                 MatmulDataTypes dataTypes,
                                 bool workspaceAllowed);
 
+    // Test/diagnostic surface for the C9 selection-only epilogue cache. Clearing
+    // this repository must not invalidate any already materialized LtMatmulPlan.
+    void clearLtMatmulAlgorithmSelectionCacheForTests();
+    [[nodiscard]] size_t cachedLtMatmulAlgorithmSelectionCountForTests() const;
+    [[nodiscard]] uint64_t ltMatmulAlgorithmSelectionHitCountForTests() const;
+    [[nodiscard]] uint64_t ltMatmulAlgorithmSelectionMissCountForTests() const;
+    [[nodiscard]] uint64_t ltMatmulAlgorithmSelectionTuneCountForTests() const;
+    [[nodiscard]] uint64_t ltMatmulPlanBuildCountForTests() const;
+
+    // C13 diagnostic surface for the ordinary measured GEMM selection cache.
+    // Clearing it must not invalidate already stamped/local CublasKernel state.
+    void clearOptimalKernelSelectionCacheForTests();
+    [[nodiscard]] size_t cachedOptimalKernelSelectionCountForTests() const;
+
    private:
     static const float ALPHA_NO_SCALE;
     static const float ALPHA_NEGATE;
     static const float BETA_ACCUMULATE;
     static const float BETA_CLEAR;
 
-    LruCacheThreadSafe<CublasKernelRequirement, CublasKernel> optimalKernels;
+    LruCacheThreadSafe<CublasKernelRequirement, CublasKernelSelection> optimalKernelSelections;
     LruCacheThreadSafe<CublasKernelRequirement, cublasLtMatmulAlgo_t> knownHeuristicAlgorithms;
     std::mutex mtx;
 
     static constexpr std::size_t MAX_KERNEL_CACHE_OCCUPANCY = 25000;
-    CublasMatrixMultiply() : optimalKernels(MAX_KERNEL_CACHE_OCCUPANCY), knownHeuristicAlgorithms(MAX_KERNEL_CACHE_OCCUPANCY) {}
+    CublasMatrixMultiply() : optimalKernelSelections(MAX_KERNEL_CACHE_OCCUPANCY), knownHeuristicAlgorithms(MAX_KERNEL_CACHE_OCCUPANCY) {}
 
     cudaDataType_t mapToCublasDataType(DataType dataType);
     std::optional<cublasComputeType_t> mapToCublasComputeType(DataType dataType);

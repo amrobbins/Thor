@@ -742,7 +742,10 @@ void StampedAttention::runOn(Stream& run_stream) const {
         forward_state->has_valid_stats = false;
     }
 
-    CudnnScaledDotProductAttention::instance().forward(descriptor, args, workspace, run_stream);
+    if (!forward_plan.has_value()) {
+        throw std::runtime_error("StampedAttention has no prepared local cuDNN forward executable plan.");
+    }
+    CudnnScaledDotProductAttention::instance().forward(forward_plan.value(), args, workspace, run_stream);
 
     if (forward_state && forward_state->retain_for_backward) {
         forward_state->output = output;
@@ -855,19 +858,19 @@ StampedAttention::StampedAttention(std::shared_ptr<CompiledAttention> compiled,
     }
     const uint64_t raggedBatchSize = attentionRaggedBatchSize(
         compiled_attention->use_ragged_offsets, q_ragged_offsets, kv_ragged_offsets, "StampedAttention");
-    const CudnnAttentionDescriptor descriptor = compiled_attention->descriptorFor(q, k, v, output, raggedBatchSize);
-    CudnnAttentionForwardArgs workspaceArgs{.q = q, .k = k, .v = v, .o = output};
-    workspaceArgs.bias = bias;
-    const uint64_t workspace_bytes = CudnnScaledDotProductAttention::instance().forwardWorkspaceSizeInBytes(
-        descriptor, workspaceArgs, stream.getGpuNum());
-    ensureAttentionExecutionWorkspace(workspace,
-                                      output.getPlacement(),
-                                      workspace_bytes,
-                                      "attention_forward",
-                                      attentionWorkspaceDetail(descriptor, compiled_attention->use_ragged_offsets));
-
     if (this->forward_state->retain_for_backward) {
         retainForwardStateForBackward();
+    } else {
+        const CudnnAttentionDescriptor descriptor = compiled_attention->descriptorFor(q, k, v, output, raggedBatchSize);
+        CudnnAttentionForwardArgs workspaceArgs{.q = q, .k = k, .v = v, .o = output};
+        workspaceArgs.bias = bias;
+        forward_plan.emplace(
+            CudnnScaledDotProductAttention::instance().prepareForward(descriptor, workspaceArgs, stream));
+        ensureAttentionExecutionWorkspace(workspace,
+                                          output.getPlacement(),
+                                          forward_plan->workspaceBytes(),
+                                          "attention_forward",
+                                          attentionWorkspaceDetail(descriptor, compiled_attention->use_ragged_offsets));
     }
 }
 
@@ -881,11 +884,11 @@ void StampedAttention::retainForwardStateForBackward() {
     descriptor.generateStats = true;
     CudnnAttentionForwardArgs workspaceArgs{.q = q, .k = k, .v = v, .o = output};
     workspaceArgs.bias = bias;
-    const uint64_t workspace_bytes = CudnnScaledDotProductAttention::instance().forwardWorkspaceSizeInBytes(
-        descriptor, workspaceArgs, stream.getGpuNum());
+    forward_plan.emplace(
+        CudnnScaledDotProductAttention::instance().prepareForward(descriptor, workspaceArgs, stream));
     ensureAttentionExecutionWorkspace(workspace,
                                       output.getPlacement(),
-                                      workspace_bytes,
+                                      forward_plan->workspaceBytes(),
                                       "attention_forward",
                                       attentionWorkspaceDetail(descriptor, compiled_attention->use_ragged_offsets));
 
@@ -987,7 +990,11 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
             fwdArgs.dropoutSeed = dropout_seed.value();
             fwdArgs.dropoutOffset = dropout_offset.value();
         }
-        CudnnScaledDotProductAttention::instance().forward(descriptor, fwdArgs, fallback_forward_workspace, run_stream);
+        if (!fallback_forward_plan.has_value()) {
+            throw std::runtime_error("StampedAttentionBackward has no prepared fallback-forward executable plan.");
+        }
+        CudnnScaledDotProductAttention::instance().forward(
+            fallback_forward_plan.value(), fwdArgs, fallback_forward_workspace, run_stream);
     }
 
     CudnnAttentionBackwardArgs bwdArgs{.q = cudnnQ,
@@ -1032,7 +1039,10 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
         bwdArgs.dropoutSeed = dropout_seed.value();
         bwdArgs.dropoutOffset = dropout_offset.value();
     }
-    CudnnScaledDotProductAttention::instance().backward(descriptor, bwdArgs, backward_workspace, run_stream);
+    if (!backward_plan.has_value()) {
+        throw std::runtime_error("StampedAttentionBackward has no prepared local cuDNN backward executable plan.");
+    }
+    CudnnScaledDotProductAttention::instance().backward(backward_plan.value(), bwdArgs, backward_workspace, run_stream);
 }
 
 StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAttentionBackward> compiled,
@@ -1103,23 +1113,23 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
                                                       .dV = dV};
     backwardWorkspaceArgs.bias = bias;
     backwardWorkspaceArgs.dBias = dBiasScratch;
-    const uint64_t backward_workspace_bytes = CudnnScaledDotProductAttention::instance().backwardWorkspaceSizeInBytes(
-        descriptor, backwardWorkspaceArgs, stream.getGpuNum());
+    backward_plan.emplace(
+        CudnnScaledDotProductAttention::instance().prepareBackward(descriptor, backwardWorkspaceArgs, stream));
     ensureAttentionExecutionWorkspace(backward_workspace,
                                       dQ.getPlacement(),
-                                      backward_workspace_bytes,
+                                      backward_plan->workspaceBytes(),
                                       "attention_backward",
                                       attentionWorkspaceDetail(descriptor, compiled_attention_backward->use_ragged_offsets));
 
     if (!this->saved_forward_state) {
         CudnnAttentionForwardArgs forwardWorkspaceArgs{.q = q, .k = k, .v = v, .o = oScratch};
         forwardWorkspaceArgs.bias = bias;
-        const uint64_t fallback_forward_workspace_bytes = CudnnScaledDotProductAttention::instance().forwardWorkspaceSizeInBytes(
-            descriptor, forwardWorkspaceArgs, stream.getGpuNum());
+        fallback_forward_plan.emplace(
+            CudnnScaledDotProductAttention::instance().prepareForward(descriptor, forwardWorkspaceArgs, stream));
         ensureAttentionExecutionWorkspace(
             fallback_forward_workspace,
             dQ.getPlacement(),
-            fallback_forward_workspace_bytes,
+            fallback_forward_plan->workspaceBytes(),
             "attention_fallback_forward",
             attentionWorkspaceDetail(descriptor, compiled_attention_backward->use_ragged_offsets));
     }
@@ -2851,7 +2861,7 @@ void StampedScan::runOn(Stream& run_stream) const {
 }
 
 StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
-                               std::shared_ptr<BuiltSoftmax> built,
+                               std::unique_ptr<BuiltSoftmax> built,
                                const Tensor& source_input,
                                const Tensor& input,
                                const Tensor& output,
@@ -2865,8 +2875,8 @@ StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
     if (!compiled_softmax || !built_softmax) {
         throw std::runtime_error("StampedSoftmax requires compiled and built softmax payloads.");
     }
-    THOR_THROW_IF_FALSE(input.getDataType() == built_softmax->key.input_dtype);
-    THOR_THROW_IF_FALSE(output.getDataType() == built_softmax->key.output_dtype);
+    THOR_THROW_IF_FALSE(input.getDataType() == compiled_softmax->input_dtype);
+    THOR_THROW_IF_FALSE(output.getDataType() == compiled_softmax->output_dtype);
 }
 
 void StampedSoftmax::run() { runOn(stream); }
@@ -2875,14 +2885,30 @@ void StampedSoftmax::runOn(Stream& run_stream) const {
     refreshCudnnSoftmaxInputAdapter(source_input, input, run_stream);
 
     CUDNN_CHECK(cudnnSoftmaxForward(run_stream.getCudnnHandle(),
-                                    built_softmax->key.algorithm,
-                                    built_softmax->key.mode,
+                                    compiled_softmax->algorithm,
+                                    compiled_softmax->mode,
                                     alpha,
                                     built_softmax->x_desc,
                                     input.getMemPtr(),
                                     beta,
                                     built_softmax->y_desc,
                                     (void*)output.getMemPtr()));
+}
+
+static CudnnFrontendConvolutionOwnershipDiagnostic convolutionOwnershipDiagnostic(
+    const std::shared_ptr<BuiltConvolution>& built,
+    const std::optional<Tensor>& workspace) {
+    if (!built || !built->frontend_plan.has_value()) {
+        throw std::runtime_error("Convolution ownership diagnostic requires a prepared local cuDNN Frontend executable.");
+    }
+    CudnnFrontendConvolutionOwnershipDiagnostic diagnostic;
+    diagnostic.selection = built->frontend_plan->selection();
+    diagnostic.executable_id = built->frontend_plan->executableId();
+    diagnostic.workspace_bytes = built->workspace_bytes;
+    if (workspace.has_value()) {
+        diagnostic.workspace_id = reinterpret_cast<uintptr_t>(workspace->getMemPtr<void>());
+    }
+    return diagnostic;
 }
 
 StampedConvolution::StampedConvolution(std::shared_ptr<CompiledConvolution> compiled,
@@ -2899,6 +2925,10 @@ StampedConvolution::StampedConvolution(std::shared_ptr<CompiledConvolution> comp
       output(output),
       stream(stream),
       workspace(std::move(workspace)) {}
+
+CudnnFrontendConvolutionOwnershipDiagnostic StampedConvolution::ownershipDiagnostic() const {
+    return convolutionOwnershipDiagnostic(built_convolution, workspace);
+}
 
 void StampedConvolution::run() { runOn(stream); }
 
@@ -2939,6 +2969,10 @@ StampedConvolutionBackward::StampedConvolutionBackward(std::shared_ptr<CompiledC
       output(output),
       stream(stream),
       workspace(std::move(workspace)) {}
+
+CudnnFrontendConvolutionOwnershipDiagnostic StampedConvolutionBackward::ownershipDiagnostic() const {
+    return convolutionOwnershipDiagnostic(built_convolution, workspace);
+}
 
 void StampedConvolutionBackward::run() { runOn(stream); }
 
@@ -3051,11 +3085,10 @@ StampedLayerNorm::StampedLayerNorm(std::shared_ptr<CompiledLayerNorm> compiled,
     if (!compiled_layer_norm) throw std::invalid_argument("StampedLayerNorm requires a compiled stage.");
     const CudnnLayerNormDescriptor descriptor =
         compiled_layer_norm->descriptorFor(this->input, this->scale, this->bias, this->output);
-    const uint64_t workspace_bytes =
-        CudnnLayerNorm::instance().forwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum());
+    executable_plan.emplace(CudnnLayerNorm::instance().prepareForward(descriptor, stream));
     ensureRmsNormExecutionWorkspace(workspace,
                                     this->input.getPlacement(),
-                                    workspace_bytes,
+                                    executable_plan->workspaceBytes(),
                                     "layernorm_forward",
                                     "hidden=" + std::to_string(compiled_layer_norm->normalized_feature_count));
 }
@@ -3066,8 +3099,106 @@ void StampedLayerNorm::runOn(Stream& run_stream) const {
     args.scale = scale;
     args.bias = bias;
     args.y = output;
-    CudnnLayerNorm::instance().forward(
-        compiled_layer_norm->descriptorFor(input, scale, bias, output), args, workspace, run_stream);
+    if (!executable_plan.has_value()) {
+        throw std::runtime_error("StampedLayerNorm run requires a prepared executable plan.");
+    }
+    CudnnLayerNorm::instance().forward(executable_plan.value(), args, workspace, run_stream);
+}
+
+std::vector<uintptr_t> StampedRmsNorm::executablePlanIds() const {
+    std::vector<std::pair<uint64_t, uintptr_t>> keyed;
+    keyed.reserve(forward_executable_plans.size());
+    for (const auto& [outer, plan] : forward_executable_plans) {
+        keyed.emplace_back(outer, plan.executableId());
+    }
+    std::sort(keyed.begin(), keyed.end());
+    std::vector<uintptr_t> ids;
+    ids.reserve(keyed.size());
+    for (const auto& [_, id] : keyed) ids.push_back(id);
+    return ids;
+}
+
+std::vector<CudnnFrontendPlanSelection> StampedRmsNorm::planSelections() const {
+    std::vector<std::pair<uint64_t, CudnnFrontendPlanSelection>> keyed;
+    keyed.reserve(forward_executable_plans.size());
+    for (const auto& [outer, plan] : forward_executable_plans) {
+        keyed.emplace_back(outer, plan.selection());
+    }
+    std::sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<CudnnFrontendPlanSelection> selections;
+    selections.reserve(keyed.size());
+    for (auto& [_, selection] : keyed) selections.push_back(std::move(selection));
+    return selections;
+}
+
+const CudnnRmsNormExecutablePlan& StampedRmsNorm::forwardExecutableForOuter(uint64_t outer) const {
+    const auto iter = forward_executable_plans.find(outer);
+    if (iter == forward_executable_plans.end()) {
+        throw std::runtime_error("Stamped RMSNorm has no prepared local forward executable for outer extent " +
+                                 std::to_string(outer) + ".");
+    }
+    return iter->second;
+}
+
+void StampedRmsNorm::prepareForwardExecutableFamily(bool training) {
+    if (training && compiled_rms_norm->fused_activation != CudnnRmsNormFusedActivation::NONE) {
+        throw std::runtime_error("RMSNorm fused activation backward is not supported.");
+    }
+
+    std::unordered_map<uint64_t, CudnnRmsNormExecutablePlan> prepared;
+    uint64_t max_workspace_bytes = 0;
+    auto prepare_descriptor = [&](CudnnRmsNormDescriptor descriptor) {
+        descriptor.training = training;
+        CudnnRmsNormExecutablePlan plan = CudnnRmsNorm::instance().prepareForward(descriptor, stream);
+        max_workspace_bytes = std::max(max_workspace_bytes, plan.workspaceBytes());
+        const uint64_t outer = plan.descriptor().outerSize;
+        const auto [_, inserted] = prepared.emplace(outer, std::move(plan));
+        if (!inserted) {
+            throw std::runtime_error("Stamped RMSNorm finite family produced a duplicate outer extent.");
+        }
+    };
+
+    if (compiled_rms_norm->packed_row_capacity == 0) {
+        prepare_descriptor(compiled_rms_norm->descriptorFor(input, scale, output));
+    } else {
+        if (!row_partition_offsets.has_value() || compiled_rms_norm->ragged_batch_size == 0) {
+            throw std::runtime_error("Packed-row RMSNorm requires an explicit row-partition runtime binding.");
+        }
+        const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
+        RowPartitionRuntime(row_partition_offsets.value(),
+                            RowPartitionDescriptor(compiled_rms_norm->ragged_batch_size,
+                                                   compiled_rms_norm->packed_row_capacity,
+                                                   offsets_descriptor.getDataType()));
+        const std::vector<uint64_t> input_dims = input.getDimensions();
+        if (input_dims.size() != 2 || input_dims[0] % compiled_rms_norm->packed_row_capacity != 0) {
+            throw std::runtime_error(
+                "Packed-row RMSNorm requires logical [outer, hidden] input whose outer dimension is divisible by packed_row_capacity.");
+        }
+        const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm->packed_row_capacity;
+        if (outer_per_packed_row == 0) {
+            throw std::runtime_error("Packed-row RMSNorm outer samples per packed row must be non-zero.");
+        }
+
+        for (const uint64_t capacity_rows : makeRaggedRmsNormCapacityBuckets(compiled_rms_norm->packed_row_capacity)) {
+            const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
+            Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            Tensor bucket_output = output.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            prepare_descriptor(compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output));
+        }
+    }
+
+    if (prepared.empty()) {
+        throw std::runtime_error("Stamped RMSNorm prepared an empty executable family.");
+    }
+    forward_executable_plans = std::move(prepared);
+    prepared_training_forward = training;
+    ensureRmsNormExecutionWorkspace(
+        workspace,
+        input.getPlacement(),
+        max_workspace_bytes,
+        training ? "rmsnorm_training_forward" : "rmsnorm_forward",
+        "input=" + input.getDescriptor().toString() + " packed_capacity=" +
+            std::to_string(compiled_rms_norm->packed_row_capacity));
 }
 
 StampedRmsNorm::StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
@@ -3088,53 +3219,12 @@ StampedRmsNorm::StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
         throw std::runtime_error("StampedRmsNorm requires a compiled RMSNorm payload.");
     }
 
-    uint64_t max_workspace_bytes = 0;
-    if (compiled_rms_norm->packed_row_capacity == 0) {
-        const CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(input, scale, output);
-        max_workspace_bytes = CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum());
-    } else {
-        if (!this->row_partition_offsets.has_value() || compiled_rms_norm->ragged_batch_size == 0) {
-            throw std::runtime_error("Packed-row RMSNorm requires an explicit row-partition runtime binding.");
-        }
-        const TensorDescriptor offsets_descriptor = this->row_partition_offsets->getDescriptor();
-        RowPartitionRuntime(this->row_partition_offsets.value(),
-                            RowPartitionDescriptor(compiled_rms_norm->ragged_batch_size,
-                                                   compiled_rms_norm->packed_row_capacity,
-                                                   offsets_descriptor.getDataType()));
-        const std::vector<uint64_t> input_dims = input.getDimensions();
-        if (input_dims.size() != 2 || input_dims[0] % compiled_rms_norm->packed_row_capacity != 0) {
-            throw std::runtime_error(
-                "Packed-row RMSNorm requires logical [outer, hidden] input whose outer dimension is divisible by packed_row_capacity.");
-        }
-        const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm->packed_row_capacity;
-        if (outer_per_packed_row == 0) {
-            throw std::runtime_error("Packed-row RMSNorm outer samples per packed row must be non-zero.");
-        }
+    prepareForwardExecutableFamily(this->forward_state->retain_for_backward);
 
-        // Pre-build the finite RMSNorm row-capacity family and size one private
-        // stamped workspace to the largest requirement across all buckets.
-        for (const uint64_t capacity_rows : makeRaggedRmsNormCapacityBuckets(compiled_rms_norm->packed_row_capacity)) {
-            const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
-            Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            Tensor bucket_output = output.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            const CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output);
-            max_workspace_bytes = std::max(max_workspace_bytes,
-                                           CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum()));
-        }
-    }
-    ensureRmsNormExecutionWorkspace(
-        workspace,
-        input.getPlacement(),
-        max_workspace_bytes,
-        "rmsnorm_forward",
-        "input=" + input.getDescriptor().toString() + " packed_capacity=" +
-            std::to_string(compiled_rms_norm->packed_row_capacity));
-
-    // A pre-linked state may already request a training forward. Ensure both its
-    // state tensor and potentially larger training-forward workspace are ready
-    // before any runOn() can execute.
-    if (this->forward_state->retain_for_backward) {
-        retainForwardStateForBackward();
+    if (this->forward_state->retain_for_backward && !this->forward_state->inv_variance.isInitialized()) {
+        ScopedGpuAllocationContext allocation_context("rmsnorm_forward_inv_variance");
+        this->forward_state->inv_variance =
+            Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input.getDimensions().at(0)}));
     }
 }
 
@@ -3142,21 +3232,21 @@ void StampedRmsNorm::run() { runOn(stream); }
 
 void StampedRmsNorm::runOn(Stream& run_stream) const {
     if (compiled_rms_norm->packed_row_capacity == 0) {
-        CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(input, scale, output);
+        const CudnnRmsNormExecutablePlan& plan = forwardExecutableForOuter(input.getDimensions().at(0));
         CudnnRmsNormForwardArgs args;
         args.x = input;
         args.scale = scale;
         args.y = output;
-        if (forward_state != nullptr && forward_state->retain_for_backward) {
-            descriptor.training = true;
-            if (!forward_state->inv_variance.isInitialized()) {
+        if (plan.descriptor().training) {
+            if (forward_state == nullptr || !forward_state->retain_for_backward ||
+                !forward_state->inv_variance.isInitialized()) {
                 throw std::runtime_error("Stamped RMSNorm training forward state was not prepared before execution.");
             }
             args.invVariance = forward_state->inv_variance;
             forward_state->has_valid_state = false;
         }
-        CudnnRmsNorm::instance().forward(descriptor, args, workspace, run_stream);
-        if (descriptor.training) {
+        CudnnRmsNorm::instance().forward(plan, args, workspace, run_stream);
+        if (plan.descriptor().training) {
             forward_state->has_valid_state = true;
             forward_state->packed_active_rows = 0;
             forward_state->packed_selected_rows = 0;
@@ -3194,21 +3284,21 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
 
     Tensor bucket_input = input.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
     Tensor bucket_output = output.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
-    CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output);
+    const CudnnRmsNormExecutablePlan& plan = forwardExecutableForOuter(selected_outer);
     CudnnRmsNormForwardArgs args;
     args.x = bucket_input;
     args.scale = scale;
     args.y = bucket_output;
-    if (forward_state != nullptr && forward_state->retain_for_backward) {
-        descriptor.training = true;
-        if (!forward_state->inv_variance.isInitialized()) {
+    if (plan.descriptor().training) {
+        if (forward_state == nullptr || !forward_state->retain_for_backward ||
+            !forward_state->inv_variance.isInitialized()) {
             throw std::runtime_error("Packed stamped RMSNorm training forward state was not prepared before execution.");
         }
         args.invVariance = forward_state->inv_variance.aliasView({selected_outer}, {1}, 0);
         forward_state->has_valid_state = false;
     }
-    CudnnRmsNorm::instance().forward(descriptor, args, workspace, run_stream);
-    if (descriptor.training) {
+    CudnnRmsNorm::instance().forward(plan, args, workspace, run_stream);
+    if (plan.descriptor().training) {
         forward_state->packed_active_rows = active_rows;
         forward_state->packed_selected_rows = selected_rows;
         forward_state->has_valid_state = true;
@@ -3226,33 +3316,11 @@ void StampedRmsNorm::retainForwardStateForBackward() {
         forward_state->has_valid_state = false;
     }
 
-    uint64_t max_training_workspace_bytes = 0;
-    if (compiled_rms_norm->packed_row_capacity == 0) {
-        CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(input, scale, output);
-        descriptor.training = true;
-        max_training_workspace_bytes =
-            CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum());
-    } else {
-        const std::vector<uint64_t> input_dims = input.getDimensions();
-        const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm->packed_row_capacity;
-        for (const uint64_t capacity_rows : makeRaggedRmsNormCapacityBuckets(compiled_rms_norm->packed_row_capacity)) {
-            const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
-            Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            Tensor bucket_output = output.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            CudnnRmsNormDescriptor descriptor = compiled_rms_norm->descriptorFor(bucket_input, scale, bucket_output);
-            descriptor.training = true;
-            max_training_workspace_bytes =
-                std::max(max_training_workspace_bytes,
-                         CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum()));
-        }
+    if (!prepared_training_forward) {
+        // Linking is a placement-time transition. Replace the inference family
+        // with a complete local training family before any subsequent runOn().
+        prepareForwardExecutableFamily(true);
     }
-    ensureRmsNormExecutionWorkspace(
-        workspace,
-        input.getPlacement(),
-        max_training_workspace_bytes,
-        "rmsnorm_training_forward",
-        "input=" + input.getDescriptor().toString() + " packed_capacity=" +
-            std::to_string(compiled_rms_norm->packed_row_capacity));
 
     forward_state->retain_for_backward = true;
     if (!forward_state->inv_variance.isInitialized()) {
@@ -3328,6 +3396,149 @@ bool StampedRmsNorm::canProvideForwardStateFor(const CompiledRmsNormBackward& ba
            compiled_rms_norm->compute_dtype == backward.compute_dtype;
 }
 
+std::vector<uintptr_t> StampedRmsNormBackward::backwardExecutablePlanIds() const {
+    std::vector<std::pair<uint64_t, uintptr_t>> keyed;
+    keyed.reserve(backward_executable_plans.size());
+    for (const auto& [outer, plan] : backward_executable_plans) keyed.emplace_back(outer, plan.executableId());
+    std::sort(keyed.begin(), keyed.end());
+    std::vector<uintptr_t> ids;
+    ids.reserve(keyed.size());
+    for (const auto& [_, id] : keyed) ids.push_back(id);
+    return ids;
+}
+
+std::vector<uintptr_t> StampedRmsNormBackward::fallbackForwardExecutablePlanIds() const {
+    std::vector<std::pair<uint64_t, uintptr_t>> keyed;
+    keyed.reserve(fallback_forward_executable_plans.size());
+    for (const auto& [outer, plan] : fallback_forward_executable_plans) keyed.emplace_back(outer, plan.executableId());
+    std::sort(keyed.begin(), keyed.end());
+    std::vector<uintptr_t> ids;
+    ids.reserve(keyed.size());
+    for (const auto& [_, id] : keyed) ids.push_back(id);
+    return ids;
+}
+
+std::vector<CudnnFrontendPlanSelection> StampedRmsNormBackward::backwardPlanSelections() const {
+    std::vector<std::pair<uint64_t, CudnnFrontendPlanSelection>> keyed;
+    keyed.reserve(backward_executable_plans.size());
+    for (const auto& [outer, plan] : backward_executable_plans) keyed.emplace_back(outer, plan.selection());
+    std::sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<CudnnFrontendPlanSelection> selections;
+    selections.reserve(keyed.size());
+    for (auto& [_, selection] : keyed) selections.push_back(std::move(selection));
+    return selections;
+}
+
+std::vector<CudnnFrontendPlanSelection> StampedRmsNormBackward::fallbackForwardPlanSelections() const {
+    std::vector<std::pair<uint64_t, CudnnFrontendPlanSelection>> keyed;
+    keyed.reserve(fallback_forward_executable_plans.size());
+    for (const auto& [outer, plan] : fallback_forward_executable_plans) keyed.emplace_back(outer, plan.selection());
+    std::sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<CudnnFrontendPlanSelection> selections;
+    selections.reserve(keyed.size());
+    for (auto& [_, selection] : keyed) selections.push_back(std::move(selection));
+    return selections;
+}
+
+const CudnnRmsNormExecutablePlan& StampedRmsNormBackward::backwardExecutableForOuter(uint64_t outer) const {
+    const auto iter = backward_executable_plans.find(outer);
+    if (iter == backward_executable_plans.end()) {
+        throw std::runtime_error("Stamped RMSNorm backward has no prepared local executable for outer extent " +
+                                 std::to_string(outer) + ".");
+    }
+    return iter->second;
+}
+
+const CudnnRmsNormExecutablePlan& StampedRmsNormBackward::fallbackForwardExecutableForOuter(uint64_t outer) const {
+    const auto iter = fallback_forward_executable_plans.find(outer);
+    if (iter == fallback_forward_executable_plans.end()) {
+        throw std::runtime_error("Stamped RMSNorm backward has no prepared local fallback-forward executable for outer extent " +
+                                 std::to_string(outer) + ".");
+    }
+    return iter->second;
+}
+
+void StampedRmsNormBackward::prepareBackwardExecutableFamilies() {
+    std::unordered_map<uint64_t, CudnnRmsNormExecutablePlan> prepared_backward;
+    std::unordered_map<uint64_t, CudnnRmsNormExecutablePlan> prepared_fallback_forward;
+    uint64_t max_backward_workspace_bytes = 0;
+    uint64_t max_fallback_forward_workspace_bytes = 0;
+
+    auto prepare_descriptor = [&](const CudnnRmsNormDescriptor& descriptor) {
+        CudnnRmsNormExecutablePlan backward_plan = CudnnRmsNorm::instance().prepareBackward(descriptor, stream);
+        max_backward_workspace_bytes = std::max(max_backward_workspace_bytes, backward_plan.workspaceBytes());
+        const uint64_t outer = backward_plan.descriptor().outerSize;
+        const auto [_, backward_inserted] = prepared_backward.emplace(outer, std::move(backward_plan));
+        if (!backward_inserted) {
+            throw std::runtime_error("Stamped RMSNorm backward finite family produced a duplicate outer extent.");
+        }
+
+        if (saved_forward_state == nullptr) {
+            CudnnRmsNormDescriptor forward_descriptor = descriptor;
+            forward_descriptor.training = true;
+            CudnnRmsNormExecutablePlan forward_plan = CudnnRmsNorm::instance().prepareForward(forward_descriptor, stream);
+            max_fallback_forward_workspace_bytes =
+                std::max(max_fallback_forward_workspace_bytes, forward_plan.workspaceBytes());
+            const auto [__, forward_inserted] = prepared_fallback_forward.emplace(outer, std::move(forward_plan));
+            if (!forward_inserted) {
+                throw std::runtime_error("Stamped RMSNorm fallback-forward finite family produced a duplicate outer extent.");
+            }
+        }
+    };
+
+    if (compiled_rms_norm_backward->packed_row_capacity == 0) {
+        prepare_descriptor(compiled_rms_norm_backward->descriptorFor(input, scale, dY, dX, dScale));
+    } else {
+        if (!row_partition_offsets.has_value() || compiled_rms_norm_backward->ragged_batch_size == 0) {
+            throw std::runtime_error("Packed-row RMSNorm backward requires an explicit row-partition runtime binding.");
+        }
+        const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
+        RowPartitionRuntime(row_partition_offsets.value(),
+                            RowPartitionDescriptor(compiled_rms_norm_backward->ragged_batch_size,
+                                                   compiled_rms_norm_backward->packed_row_capacity,
+                                                   offsets_descriptor.getDataType()));
+        const std::vector<uint64_t> input_dims = input.getDimensions();
+        if (input_dims.size() != 2 || input_dims[0] % compiled_rms_norm_backward->packed_row_capacity != 0) {
+            throw std::runtime_error(
+                "Packed-row RMSNorm backward requires [outer, hidden] input divisible by packed row capacity.");
+        }
+        const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm_backward->packed_row_capacity;
+        if (outer_per_packed_row == 0) {
+            throw std::runtime_error("Packed-row RMSNorm backward outer samples per packed row must be non-zero.");
+        }
+        for (const uint64_t capacity_rows : makeRaggedRmsNormCapacityBuckets(compiled_rms_norm_backward->packed_row_capacity)) {
+            const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
+            Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            Tensor bucket_dy = dY.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            Tensor bucket_dx = dX.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            prepare_descriptor(compiled_rms_norm_backward->descriptorFor(bucket_input, scale, bucket_dy, bucket_dx, dScale));
+        }
+    }
+
+    if (prepared_backward.empty()) {
+        throw std::runtime_error("Stamped RMSNorm backward prepared an empty executable family.");
+    }
+    backward_executable_plans = std::move(prepared_backward);
+    fallback_forward_executable_plans = std::move(prepared_fallback_forward);
+
+    ensureRmsNormExecutionWorkspace(
+        backward_workspace,
+        input.getPlacement(),
+        max_backward_workspace_bytes,
+        "rmsnorm_backward",
+        "input=" + input.getDescriptor().toString() + " packed_capacity=" +
+            std::to_string(compiled_rms_norm_backward->packed_row_capacity));
+    if (saved_forward_state == nullptr) {
+        ensureRmsNormExecutionWorkspace(
+            fallback_forward_workspace,
+            input.getPlacement(),
+            max_fallback_forward_workspace_bytes,
+            "rmsnorm_fallback_forward",
+            "input=" + input.getDescriptor().toString() + " packed_capacity=" +
+                std::to_string(compiled_rms_norm_backward->packed_row_capacity));
+    }
+}
+
 StampedRmsNormBackward::StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBackward> compiled,
                                                const Tensor& input,
                                                const Tensor& scale,
@@ -3351,76 +3562,14 @@ StampedRmsNormBackward::StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBa
         throw std::runtime_error("StampedRmsNormBackward requires a compiled RMSNorm backward payload.");
     }
 
-    uint64_t max_backward_workspace_bytes = 0;
-    uint64_t max_fallback_forward_workspace_bytes = 0;
-    if (compiled_rms_norm_backward->packed_row_capacity == 0) {
-        const CudnnRmsNormDescriptor descriptor =
-            compiled_rms_norm_backward->descriptorFor(input, scale, dY, dX, dScale);
-        max_backward_workspace_bytes =
-            CudnnRmsNorm::instance().backwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum());
-        if (this->saved_forward_state == nullptr) {
-            CudnnRmsNormDescriptor forward_descriptor = descriptor;
-            forward_descriptor.training = true;
-            max_fallback_forward_workspace_bytes =
-                CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(forward_descriptor, stream.getGpuNum());
-        }
-    } else {
-        if (!this->row_partition_offsets.has_value() || compiled_rms_norm_backward->ragged_batch_size == 0) {
-            throw std::runtime_error("Packed-row RMSNorm backward requires an explicit row-partition runtime binding.");
-        }
-        const TensorDescriptor offsets_descriptor = this->row_partition_offsets->getDescriptor();
-        RowPartitionRuntime(this->row_partition_offsets.value(),
-                            RowPartitionDescriptor(compiled_rms_norm_backward->ragged_batch_size,
-                                                   compiled_rms_norm_backward->packed_row_capacity,
-                                                   offsets_descriptor.getDataType()));
-        const std::vector<uint64_t> input_dims = input.getDimensions();
-        if (input_dims.size() != 2 || input_dims[0] % compiled_rms_norm_backward->packed_row_capacity != 0) {
-            throw std::runtime_error(
-                "Packed-row RMSNorm backward requires [outer, hidden] input divisible by packed row capacity.");
-        }
-        const uint64_t outer_per_packed_row = input_dims[0] / compiled_rms_norm_backward->packed_row_capacity;
-        for (const uint64_t capacity_rows : makeRaggedRmsNormCapacityBuckets(compiled_rms_norm_backward->packed_row_capacity)) {
-            const uint64_t bucket_outer = capacity_rows * outer_per_packed_row;
-            Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            Tensor bucket_dy = dY.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            Tensor bucket_dx = dX.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
-            const CudnnRmsNormDescriptor descriptor =
-                compiled_rms_norm_backward->descriptorFor(bucket_input, scale, bucket_dy, bucket_dx, dScale);
-            max_backward_workspace_bytes =
-                std::max(max_backward_workspace_bytes,
-                         CudnnRmsNorm::instance().backwardWorkspaceSizeInBytes(descriptor, stream.getGpuNum()));
-            if (this->saved_forward_state == nullptr) {
-                CudnnRmsNormDescriptor forward_descriptor = descriptor;
-                forward_descriptor.training = true;
-                max_fallback_forward_workspace_bytes =
-                    std::max(max_fallback_forward_workspace_bytes,
-                             CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(forward_descriptor, stream.getGpuNum()));
-            }
-        }
-    }
+    prepareBackwardExecutableFamilies();
 
-    ensureRmsNormExecutionWorkspace(
-        backward_workspace,
-        input.getPlacement(),
-        max_backward_workspace_bytes,
-        "rmsnorm_backward",
-        "input=" + input.getDescriptor().toString() + " packed_capacity=" +
-            std::to_string(compiled_rms_norm_backward->packed_row_capacity));
     if (this->saved_forward_state == nullptr) {
-        ensureRmsNormExecutionWorkspace(
-            fallback_forward_workspace,
-            input.getPlacement(),
-            max_fallback_forward_workspace_bytes,
-            "rmsnorm_fallback_forward",
-            "input=" + input.getDescriptor().toString() + " packed_capacity=" +
-                std::to_string(compiled_rms_norm_backward->packed_row_capacity));
         fallback_forward_state = std::make_shared<RmsNormForwardState>();
-        {
-            ScopedGpuAllocationContext allocation_context("rmsnorm_fallback_forward_state");
-            fallback_forward_state->inv_variance =
-                Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input.getDimensions().at(0)}));
-            fallback_output = Tensor(input.getPlacement(), TensorDescriptor(dY.getDataType(), input.getDimensions()));
-        }
+        ScopedGpuAllocationContext allocation_context("rmsnorm_fallback_forward_state");
+        fallback_forward_state->inv_variance =
+            Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input.getDimensions().at(0)}));
+        fallback_output = Tensor(input.getPlacement(), TensorDescriptor(dY.getDataType(), input.getDimensions()));
     }
 }
 
@@ -3433,6 +3582,7 @@ bool StampedRmsNormBackward::tryLinkForwardStateFrom(const std::shared_ptr<Stamp
     saved_forward_state = forward->getForwardState();
     // A linked backward will consume retained forward statistics and can never
     // execute the standalone fallback forward. Release that private scratch.
+    fallback_forward_executable_plans.clear();
     fallback_forward_workspace.reset();
     fallback_forward_state.reset();
     fallback_output = Tensor();
@@ -3443,6 +3593,7 @@ void StampedRmsNormBackward::run() { runOn(stream); }
 
 void StampedRmsNormBackward::runOn(Stream& run_stream) const {
     if (compiled_rms_norm_backward->packed_row_capacity == 0) {
+        const uint64_t outer = input.getDimensions().at(0);
         std::shared_ptr<RmsNormForwardState> state = saved_forward_state;
         if (state != nullptr) {
             if (!state->has_valid_state || !state->inv_variance.isInitialized()) {
@@ -3451,27 +3602,23 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
             }
         } else {
             // A standalone differentiated equation has no separately stamped forward execution plan.
-            // Generate the exact cuDNN training statistic locally rather than falling back to
-            // the old algebraic RMSNorm derivative. CustomLayer/network training never takes
-            // this path: its backward plan is linked to the retained forward state above.
+            // Generate the exact cuDNN training statistic with the already-prepared local fallback plan.
             if (fallback_forward_state == nullptr || !fallback_forward_state->inv_variance.isInitialized() ||
                 !fallback_output.isInitialized()) {
                 throw std::runtime_error("Standalone RMSNorm backward fallback state was not prepared before execution.");
             }
-            CudnnRmsNormDescriptor forward_descriptor =
-                compiled_rms_norm_backward->descriptorFor(input, scale, dY, dX, dScale);
-            forward_descriptor.training = true;
+            const CudnnRmsNormExecutablePlan& fallback_plan = fallbackForwardExecutableForOuter(outer);
             CudnnRmsNormForwardArgs forward_args;
             forward_args.x = input;
             forward_args.scale = scale;
             forward_args.y = fallback_output;
             forward_args.invVariance = fallback_forward_state->inv_variance;
-            CudnnRmsNorm::instance().forward(forward_descriptor, forward_args, fallback_forward_workspace, run_stream);
+            CudnnRmsNorm::instance().forward(fallback_plan, forward_args, fallback_forward_workspace, run_stream);
             fallback_forward_state->has_valid_state = true;
             state = fallback_forward_state;
         }
 
-        CudnnRmsNormDescriptor descriptor = compiled_rms_norm_backward->descriptorFor(input, scale, dY, dX, dScale);
+        const CudnnRmsNormExecutablePlan& backward_plan = backwardExecutableForOuter(outer);
         CudnnRmsNormBackwardArgs args;
         args.dy = dY;
         args.x = input;
@@ -3479,7 +3626,7 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
         args.invVariance = state->inv_variance;
         args.dx = dX;
         args.dscale = dScale;
-        CudnnRmsNorm::instance().backward(descriptor, args, backward_workspace, run_stream);
+        CudnnRmsNorm::instance().backward(backward_plan, args, backward_workspace, run_stream);
         return;
     }
 
@@ -3524,8 +3671,8 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
         }
     } else {
         // Standalone differentiated packed equations have no separately stamped
-        // forward plan. Recreate the cuDNN training statistic over the same selected
-        // bucket while honoring the consumer-responsibility contract.
+        // forward stage. Execute the already-prepared fallback plan for the same
+        // selected physical bucket while honoring consumer responsibility.
         Tensor mutable_input = input;
         sanitizePackedRmsNormOverreadRows(mutable_input,
                                           active_rows,
@@ -3538,23 +3685,20 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
             throw std::runtime_error("Standalone packed RMSNorm backward fallback state was not prepared before execution.");
         }
         Tensor bucket_fallback_output = fallback_output.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
-        CudnnRmsNormDescriptor forward_descriptor =
-            compiled_rms_norm_backward->descriptorFor(bucket_input, scale, bucket_dy, bucket_dx, dScale);
-        forward_descriptor.training = true;
+        const CudnnRmsNormExecutablePlan& fallback_plan = fallbackForwardExecutableForOuter(selected_outer);
         CudnnRmsNormForwardArgs forward_args;
         forward_args.x = bucket_input;
         forward_args.scale = scale;
         forward_args.y = bucket_fallback_output;
         forward_args.invVariance = fallback_forward_state->inv_variance.aliasView({selected_outer}, {1}, 0);
-        CudnnRmsNorm::instance().forward(forward_descriptor, forward_args, fallback_forward_workspace, run_stream);
+        CudnnRmsNorm::instance().forward(fallback_plan, forward_args, fallback_forward_workspace, run_stream);
         fallback_forward_state->packed_active_rows = active_rows;
         fallback_forward_state->packed_selected_rows = selected_rows;
         fallback_forward_state->has_valid_state = true;
         state = fallback_forward_state;
     }
 
-    CudnnRmsNormDescriptor descriptor =
-        compiled_rms_norm_backward->descriptorFor(bucket_input, scale, bucket_dy, bucket_dx, dScale);
+    const CudnnRmsNormExecutablePlan& backward_plan = backwardExecutableForOuter(selected_outer);
     CudnnRmsNormBackwardArgs args;
     args.dy = bucket_dy;
     args.x = bucket_input;
@@ -3562,7 +3706,7 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
     args.invVariance = state->inv_variance.aliasView({selected_outer}, {1}, 0);
     args.dx = bucket_dx;
     args.dscale = dScale;
-    CudnnRmsNorm::instance().backward(descriptor, args, backward_workspace, run_stream);
+    CudnnRmsNorm::instance().backward(backward_plan, args, backward_workspace, run_stream);
 }
 
 StampedEmbeddingLookup::StampedEmbeddingLookup(std::shared_ptr<CompiledEmbeddingLookup> compiled,
@@ -3596,7 +3740,7 @@ void StampedEmbeddingLookup::runOn(Stream& run_stream) const {
 }
 
 StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
-                             std::shared_ptr<BuiltMatmul> built,
+                             std::unique_ptr<BuiltMatmul> built,
                              const Tensor& lhs,
                              const Tensor& rhs,
                              const std::optional<Tensor>& addend,
@@ -3700,6 +3844,9 @@ StampedMatmulKernelDiagnostic StampedMatmul::kernelDiagnostic() const {
     }
     diagnostic.flop_count = fma_count * 2;
     diagnostic.workspace_bytes = built_matmul->workspace_bytes;
+    if (workspace.has_value()) {
+        diagnostic.workspace_state_id = reinterpret_cast<uintptr_t>(workspace->getMemPtr<void>());
+    }
 
     if (built_matmul->cublas_kernel.has_value()) {
         const CublasKernel& kernel = built_matmul->cublas_kernel.value();
@@ -3709,6 +3856,9 @@ StampedMatmulKernelDiagnostic StampedMatmul::kernelDiagnostic() const {
             diagnostic.picker_runtime_ms = kernel.getAverageRunTimeMilliseconds();
         }
         diagnostic.algorithm_id = kernel.getAlgorithmId();
+        diagnostic.execution_state_id = kernel.executionStateId();
+    } else if (built_matmul->epilogue_plan) {
+        diagnostic.execution_state_id = built_matmul->epilogue_plan->executionStateId();
     }
     return diagnostic;
 }
@@ -5516,26 +5666,6 @@ static shared_ptr<BuiltReduction> cacheLookup(const ReductionCacheKey& key) {
     return nullptr;
 }
 
-static LruCacheThreadSafe<SoftmaxCacheKey, shared_ptr<BuiltSoftmax>> builtSoftmaxCache(10'000);
-
-static shared_ptr<BuiltSoftmax> cacheLookup(const SoftmaxCacheKey& key) {
-    optional<shared_ptr<BuiltSoftmax>> hit = builtSoftmaxCache.get(key);
-    if (hit.has_value()) {
-        return hit.value();
-    }
-    return nullptr;
-}
-
-static LruCacheThreadSafe<MatmulCacheKey, shared_ptr<BuiltMatmul>> builtMatmulCache(10'000);
-
-static shared_ptr<BuiltMatmul> cacheLookup(const MatmulCacheKey& key) {
-    optional<shared_ptr<BuiltMatmul>> hit = builtMatmulCache.get(key);
-    if (hit.has_value()) {
-        return hit.value();
-    }
-    return nullptr;
-}
-
 static cudnnDataType_t toCudnnSoftmaxDataType(DataType dtype) {
     switch (dtype) {
         case DataType::FP32:
@@ -5791,30 +5921,15 @@ static void checkFrontendStatus(cudnn_frontend::error_t status, const std::strin
     }
 }
 
-static int64_t checkedFrontendPlanWorkspaceBytes(const BuiltConvolution& built, int64_t plan_index, const char* op_name) {
-    if (!built.frontend_graph) {
-        throw std::runtime_error(std::string(op_name) + " missing cuDNN Frontend graph.");
-    }
-    const int64_t workspace_bytes = built.frontend_graph->get_workspace_size_plan_at_index(plan_index);
-    if (workspace_bytes < 0) {
-        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name + " plan returned a negative workspace size.");
-    }
-    return workspace_bytes;
-}
-
-static void buildFrontendConvolutionCandidatePlans(BuiltConvolution& built,
+static void buildFrontendConvolutionCandidatePlans(fe::graph::Graph& graph,
                                                    const Stream& stream,
                                                    const char* op_name,
                                                    bool require_deterministic) {
-    if (!built.frontend_graph) {
-        throw std::runtime_error(std::string(op_name) + " missing cuDNN Frontend graph.");
-    }
-
     ScopedGpu scopedGpu(stream.getGpuNum());
-    checkFrontendStatus(built.frontend_graph->validate(), std::string("Failed to validate cuDNN Frontend ") + op_name + " graph");
-    checkFrontendStatus(built.frontend_graph->build_operation_graph(stream.getCudnnHandle()),
+    checkFrontendStatus(graph.validate(), std::string("Failed to validate cuDNN Frontend ") + op_name + " graph");
+    checkFrontendStatus(graph.build_operation_graph(stream.getCudnnHandle()),
                         std::string("Failed to build cuDNN Frontend ") + op_name + " operation graph");
-    checkFrontendStatus(built.frontend_graph->create_execution_plans({fe::HeurMode_t::A, fe::HeurMode_t::B, fe::HeurMode_t::FALLBACK}),
+    checkFrontendStatus(graph.create_execution_plans({fe::HeurMode_t::A, fe::HeurMode_t::B, fe::HeurMode_t::FALLBACK}),
                         std::string("Failed to enumerate cuDNN Frontend ") + op_name + " execution plans");
     if (require_deterministic) {
         // Preserve Thor's long-standing backward-filter contract. The legacy cuDNN
@@ -5822,9 +5937,9 @@ static void buildFrontendConvolutionCandidatePlans(BuiltConvolution& built,
         // can report them as runnable even though they are unsuitable for stable
         // training gradients. Frontend exposes the same property as a numerical
         // note; filter it before support/build/autotune so it can never win timing.
-        built.frontend_graph->deselect_numeric_notes({fe::NumericalNote_t::NONDETERMINISTIC});
+        graph.deselect_numeric_notes({fe::NumericalNote_t::NONDETERMINISTIC});
     }
-    checkFrontendStatus(built.frontend_graph->check_support(stream.getCudnnHandle()),
+    checkFrontendStatus(graph.check_support(stream.getCudnnHandle()),
                         std::string("Failed to check support for cuDNN Frontend ") + op_name + " execution plans");
 }
 
@@ -5836,6 +5951,7 @@ constexpr int64_t kConvolutionAutotuneMaxCandidatePlans = 16;
 constexpr uint64_t kConvolutionAutotuneTargetRotationBytes = 512ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kConvolutionAutotuneMinFreeMemReserveBytes = 512ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kConvolutionAutotuneMaxFreeMemFractionDivisor = 4;
+constexpr size_t kConvolutionSelectionCacheCapacity = 1024;
 
 struct FrontendConvolutionAutotuneBinding {
     int64_t uid;
@@ -5845,9 +5961,7 @@ struct FrontendConvolutionAutotuneBinding {
 
 struct FrontendConvolutionAutotuneCandidate {
     int64_t plan_index = -1;
-    int64_t engine_id = -1;
-    std::unordered_map<fe::KnobType_t, int64_t> knobs;
-    int64_t workspace_bytes = 0;
+    CudnnFrontendPlanSelection selection;
     bool failed = false;
     bool correctness_validated = false;
     float score_ms = std::numeric_limits<float>::infinity();
@@ -5861,7 +5975,7 @@ struct FrontendConvolutionAutotuneTensorPool {
     std::vector<Tensor> workspaces;
 };
 
-static void selectFrontendConvolutionPlan(BuiltConvolution& built, const Stream& stream, int64_t plan_index, const char* op_name);
+static void selectFrontendConvolutionPlan(fe::graph::Graph& graph, const Stream& stream, int64_t plan_index, const char* op_name);
 
 constexpr float kConvolutionAutotuneTieRelativeTolerance = 0.001f;
 constexpr double kConvolutionValidationOutputSentinel = 1.0 / 512.0;
@@ -5873,34 +5987,86 @@ struct FrontendConvolutionCorrectnessValidation {
     ConvolutionKernelValidationSpec spec;
 };
 
-static std::vector<std::pair<int64_t, int64_t>> normalizedFrontendConvolutionKnobs(
-    const std::unordered_map<fe::KnobType_t, int64_t>& knobs) {
-    std::vector<std::pair<int64_t, int64_t>> normalized;
-    normalized.reserve(knobs.size());
-    for (const auto& [knob, value] : knobs) {
-        normalized.emplace_back(static_cast<int64_t>(knob), value);
+static CudnnFrontendPlanSelectionCache<std::string>& frontendConvolutionSelectionCache() {
+    // C11: this is deliberately the only process-global convolution cache.  Its
+    // value type is the immutable C2 recipe; live Frontend graphs and workspaces
+    // remain owned by the individual stamped operation.
+    static CudnnFrontendPlanSelectionCache<std::string> selections(kConvolutionSelectionCacheCapacity);
+    return selections;
+}
+
+static void appendFrontendConvolutionCacheVector(std::ostringstream& out,
+                                                  std::string_view name,
+                                                  const std::vector<int64_t>& values) {
+    out << name << '=';
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << values[i];
     }
-    std::sort(normalized.begin(), normalized.end());
-    return normalized;
+    out << ';';
+}
+
+static std::string frontendConvolutionSelectionCacheKey(
+    const Stream& stream,
+    ConvolutionKernelValidationKind kind,
+    bool is_3d,
+    uint64_t groups,
+    DataType compute_dtype,
+    const std::vector<int64_t>& strides,
+    const std::vector<int64_t>& dilations,
+    const std::vector<int64_t>& pre_padding,
+    const std::vector<int64_t>& post_padding,
+    bool require_deterministic,
+    const std::vector<FrontendConvolutionAutotuneBinding>& bindings) {
+    std::ostringstream out;
+    out << "cudnn_frontend_convolution:v1;gpu=" << stream.getGpuNum() << ";cudnn=" << static_cast<uint64_t>(cudnnGetVersion())
+        << ";kind=" << static_cast<int>(kind) << ";rank=" << (is_3d ? 5 : 4) << ";groups=" << groups
+        << ";compute=" << static_cast<int>(compute_dtype) << ";deterministic=" << require_deterministic << ';';
+    appendFrontendConvolutionCacheVector(out, "stride", strides);
+    appendFrontendConvolutionCacheVector(out, "dilation", dilations);
+    appendFrontendConvolutionCacheVector(out, "pre", pre_padding);
+    appendFrontendConvolutionCacheVector(out, "post", post_padding);
+
+    std::vector<const FrontendConvolutionAutotuneBinding*> ordered_bindings;
+    ordered_bindings.reserve(bindings.size());
+    for (const FrontendConvolutionAutotuneBinding& binding : bindings) {
+        ordered_bindings.push_back(&binding);
+    }
+    std::sort(ordered_bindings.begin(), ordered_bindings.end(), [](const auto* lhs, const auto* rhs) {
+        return lhs->uid < rhs->uid;
+    });
+    for (const FrontendConvolutionAutotuneBinding* binding : ordered_bindings) {
+        out << "uid=" << binding->uid << ":dtype=" << static_cast<int>(binding->reference_tensor.getDataType()) << ":dims=";
+        const std::vector<uint64_t>& dims = binding->reference_tensor.getDimensions();
+        for (size_t i = 0; i < dims.size(); ++i) {
+            if (i != 0) {
+                out << ',';
+            }
+            out << dims[i];
+        }
+        out << ';';
+    }
+    return out.str();
 }
 
 static std::string frontendConvolutionCandidateIdentityString(const FrontendConvolutionAutotuneCandidate& candidate) {
     std::ostringstream out;
-    out << "plan=" << candidate.plan_index << " engine=" << candidate.engine_id << " knobs={";
-    const auto knobs = normalizedFrontendConvolutionKnobs(candidate.knobs);
-    for (size_t i = 0; i < knobs.size(); ++i) {
+    out << "plan=" << candidate.plan_index << " engine=" << candidate.selection.engine_id << " knobs={";
+    for (size_t i = 0; i < candidate.selection.knobs.size(); ++i) {
         if (i != 0) {
             out << ',';
         }
-        out << knobs[i].first << ':' << knobs[i].second;
+        out << candidate.selection.knobs[i].first << ':' << candidate.selection.knobs[i].second;
     }
-    out << "} workspace=" << candidate.workspace_bytes;
+    out << "} workspace=" << candidate.selection.expected_workspace_bytes;
     return out.str();
 }
 
 static bool sameFrontendConvolutionCandidateIdentity(const FrontendConvolutionAutotuneCandidate& lhs,
                                                      const FrontendConvolutionAutotuneCandidate& rhs) {
-    return lhs.engine_id == rhs.engine_id && lhs.knobs == rhs.knobs;
+    return lhs.selection == rhs.selection;
 }
 
 struct FrontendConvolutionValidationBuffers {
@@ -5971,17 +6137,13 @@ static uint64_t frontendConvolutionValidationInputSeed(const FrontendConvolution
 }
 
 static ConvolutionKernelValidationResult validateFrontendConvolutionCandidate(
-    const std::shared_ptr<fe::graph::Graph>& candidate_graph,
+    const CudnnFrontendExecutablePlan& candidate_plan,
     const Stream& stream,
     FrontendConvolutionValidationBuffers& buffers,
     const TensorPlacement& workspace_placement,
     const FrontendConvolutionCorrectnessValidation& validation,
-    int64_t workspace_bytes,
+    uint64_t workspace_bytes,
     const char* op_name) {
-    if (!candidate_graph) {
-        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
-                                 " correctness validation received a null exact-replay graph.");
-    }
 
     Tensor& output = frontendConvolutionValidationTensor(buffers, validation.output_uid);
     Stream validation_stream = stream;
@@ -6004,10 +6166,11 @@ static ConvolutionKernelValidationResult validateFrontendConvolutionCandidate(
                               ? const_cast<void*>(static_cast<const void*>(workspace->getMemPtr<void>()))
                               : nullptr;
 
-    auto status = candidate_graph->execute(stream.getCudnnHandle(), buffers.tensor_pack, workspace_ptr);
-    if (!status.is_good()) {
+    try {
+        candidate_plan.execute(stream.getCudnnHandle(), buffers.tensor_pack, workspace_ptr);
+    } catch (const std::exception& e) {
         throw std::runtime_error(std::string("Failed to execute exact-replay cuDNN Frontend ") + op_name +
-                                 " candidate during correctness validation: " + status.get_message());
+                                 " candidate during correctness validation: " + e.what());
     }
 
     Tensor& lhs = frontendConvolutionValidationTensor(buffers, validation.lhs_uid);
@@ -6040,8 +6203,8 @@ static uint64_t safeAddAutotuneBytes(uint64_t a, uint64_t b) {
 
 static int chooseFrontendConvolutionAutotuneRotationSlots(const std::vector<FrontendConvolutionAutotuneBinding>& bindings,
                                                           const TensorPlacement& placement,
-                                                          int64_t workspace_bytes) {
-    uint64_t rotating_slot_bytes = workspace_bytes > 0 ? static_cast<uint64_t>(workspace_bytes) : 0;
+                                                          uint64_t workspace_bytes) {
+    uint64_t rotating_slot_bytes = workspace_bytes;
     for (const FrontendConvolutionAutotuneBinding& binding : bindings) {
         const uint64_t tensor_bytes = binding.reference_tensor.getArraySizeInBytes();
         if (binding.rotate_for_timing) {
@@ -6072,7 +6235,7 @@ static int chooseFrontendConvolutionAutotuneRotationSlots(const std::vector<Fron
 }
 
 static FrontendConvolutionAutotuneTensorPool createFrontendConvolutionAutotuneTensorPool(
-    const std::vector<FrontendConvolutionAutotuneBinding>& bindings, const TensorPlacement& workspace_placement, int64_t workspace_bytes) {
+    const std::vector<FrontendConvolutionAutotuneBinding>& bindings, const TensorPlacement& workspace_placement, uint64_t workspace_bytes) {
     FrontendConvolutionAutotuneTensorPool pool;
     const int rotation_slots = chooseFrontendConvolutionAutotuneRotationSlots(bindings, workspace_placement, workspace_bytes);
 
@@ -6131,33 +6294,30 @@ static void* frontendConvolutionAutotuneWorkspacePointer(FrontendConvolutionAuto
     return const_cast<void*>(static_cast<const void*>(workspace.getMemPtr<void>()));
 }
 
-static void selectFrontendConvolutionPlan(BuiltConvolution& built, const Stream& stream, int64_t plan_index, const char* op_name) {
-    auto status = built.frontend_graph->build_plan_at_index(stream.getCudnnHandle(), plan_index);
+static void selectFrontendConvolutionPlan(fe::graph::Graph& graph, const Stream& stream, int64_t plan_index, const char* op_name) {
+    auto status = graph.build_plan_at_index(stream.getCudnnHandle(), plan_index);
     checkFrontendStatus(status, std::string("Failed to build cuDNN Frontend ") + op_name + " execution plan during autotune");
 }
 
-static void executeFrontendConvolutionPlanOnce(BuiltConvolution& built,
+static void executeFrontendConvolutionPlanOnce(fe::graph::Graph& graph,
                                                const Stream& stream,
                                                FrontendConvolutionAutotuneTensorPool& pool,
                                                int iteration,
                                                const char* op_name) {
-    if (!built.frontend_graph) {
-        throw std::runtime_error(std::string(op_name) + " missing cuDNN Frontend graph.");
-    }
     if (pool.tensor_packs.empty()) {
         throw std::runtime_error(std::string(op_name) + " autotune tensor pack rotation pool is empty.");
     }
 
     std::unordered_map<int64_t, void*>& tensor_pack = pool.tensor_packs[static_cast<size_t>(iteration) % pool.tensor_packs.size()];
     void* workspace_ptr = frontendConvolutionAutotuneWorkspacePointer(pool, iteration);
-    auto status = built.frontend_graph->execute(stream.getCudnnHandle(), tensor_pack, workspace_ptr);
+    auto status = graph.execute(stream.getCudnnHandle(), tensor_pack, workspace_ptr);
     if (!status.is_good()) {
         throw std::runtime_error(std::string("Failed to execute cuDNN Frontend ") + op_name +
                                  " plan during autotune: " + status.get_message());
     }
 }
 
-static float timeFrontendConvolutionPlanOnce(BuiltConvolution& built,
+static float timeFrontendConvolutionPlanOnce(fe::graph::Graph& graph,
                                              const Stream& stream,
                                              FrontendConvolutionAutotuneTensorPool& pool,
                                              int iteration,
@@ -6165,7 +6325,7 @@ static float timeFrontendConvolutionPlanOnce(BuiltConvolution& built,
     Event start(stream.getGpuNum(), true, true);
     Event stop(stream.getGpuNum(), true, true);
     start.record(stream);
-    executeFrontendConvolutionPlanOnce(built, stream, pool, iteration, op_name);
+    executeFrontendConvolutionPlanOnce(graph, stream, pool, iteration, op_name);
     stop.record(stream);
     return stop.synchronizeAndReportElapsedTimeInMilliseconds(start);
 }
@@ -6215,8 +6375,15 @@ static bool isBetterFrontendConvolutionCandidate(float candidate_score_ms,
 }
 }  // namespace
 
-static void autotuneFrontendConvolutionGraph(
-    BuiltConvolution& built,
+void clearCudnnFrontendConvolutionSelectionCacheForTests() { frontendConvolutionSelectionCache().clear(); }
+
+size_t cachedCudnnFrontendConvolutionSelectionCountForTests() { return frontendConvolutionSelectionCache().size(); }
+
+uint64_t cudnnFrontendConvolutionSelectionCacheHitCountForTests() { return frontendConvolutionSelectionCache().hitCount(); }
+
+uint64_t cudnnFrontendConvolutionSelectionCacheMissCountForTests() { return frontendConvolutionSelectionCache().missCount(); }
+
+static CudnnFrontendPlanSelection autotuneFrontendConvolutionSelection(
     const Stream& stream,
     const std::vector<FrontendConvolutionAutotuneBinding>& autotune_bindings,
     const TensorPlacement& workspace_placement,
@@ -6224,9 +6391,18 @@ static void autotuneFrontendConvolutionGraph(
     const std::function<std::shared_ptr<fe::graph::Graph>()>& graph_factory,
     bool require_deterministic,
     const FrontendConvolutionCorrectnessValidation& correctness_validation) {
-    buildFrontendConvolutionCandidatePlans(built, stream, op_name, require_deterministic);
+    if (!graph_factory) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name + " autotune requires a graph factory.");
+    }
 
-    const int64_t plan_count = built.frontend_graph->get_execution_plan_count();
+    std::shared_ptr<fe::graph::Graph> autotune_graph = graph_factory();
+    if (!autotune_graph || autotune_graph.use_count() != 1) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
+                                 " autotune requires a pristine operation-local scratch graph.");
+    }
+    buildFrontendConvolutionCandidatePlans(*autotune_graph, stream, op_name, require_deterministic);
+
+    const int64_t plan_count = autotune_graph->get_execution_plan_count();
     if (plan_count <= 0) {
         throw std::runtime_error(std::string("cuDNN Frontend ") + op_name + " produced no execution plans.");
     }
@@ -6238,7 +6414,7 @@ static void autotuneFrontendConvolutionGraph(
 
     std::vector<FrontendConvolutionAutotuneCandidate> candidates;
     candidates.reserve(static_cast<size_t>(candidate_limit));
-    int64_t max_workspace_bytes = 0;
+    uint64_t max_workspace_bytes = 0;
 
     // Numerical-note and support filtering may bar some of the highest-ranked raw
     // plan indices. Scan the heuristic list until we have the desired number of
@@ -6246,20 +6422,18 @@ static void autotuneFrontendConvolutionGraph(
     for (int64_t plan_index = 0; plan_index < plan_count &&
                                  static_cast<int64_t>(candidates.size()) < candidate_limit;
          ++plan_index) {
-        auto status = built.frontend_graph->build_plan_at_index(stream.getCudnnHandle(), plan_index);
+        auto status = autotune_graph->build_plan_at_index(stream.getCudnnHandle(), plan_index);
         if (!status.is_good()) {
             continue;
         }
 
-        const int64_t workspace_bytes = checkedFrontendPlanWorkspaceBytes(built, plan_index, op_name);
         FrontendConvolutionAutotuneCandidate candidate;
         candidate.plan_index = plan_index;
-        candidate.workspace_bytes = workspace_bytes;
-        auto plan_identity_status = built.frontend_graph->get_engine_and_knobs_at_index(
-            plan_index, candidate.engine_id, candidate.knobs);
-        if (!plan_identity_status.is_good()) {
+        try {
+            candidate.selection = cudnnFrontendPlanSelectionAtIndex(*autotune_graph, plan_index, op_name);
+        } catch (const std::exception&) {
             // A candidate that cannot expose a stable structured identity cannot be
-            // replayed safely on the immutable production graph. Do not autotune it.
+            // replayed safely on an operation-local production graph. Do not autotune it.
             continue;
         }
         bool duplicate_identity = false;
@@ -6273,8 +6447,8 @@ static void autotuneFrontendConvolutionGraph(
             continue;
         }
         candidate.samples_ms.reserve(kConvolutionAutotuneTimedIterations);
+        max_workspace_bytes = std::max(max_workspace_bytes, candidate.selection.expected_workspace_bytes);
         candidates.push_back(std::move(candidate));
-        max_workspace_bytes = std::max(max_workspace_bytes, workspace_bytes);
     }
 
     if (candidates.empty()) {
@@ -6331,8 +6505,8 @@ static void autotuneFrontendConvolutionGraph(
                 }
 
                 try {
-                    selectFrontendConvolutionPlan(built, stream, candidate.plan_index, op_name);
-                    executeFrontendConvolutionPlanOnce(built, stream, timing_pool, iteration++, op_name);
+                    selectFrontendConvolutionPlan(*autotune_graph, stream, candidate.plan_index, op_name);
+                    executeFrontendConvolutionPlanOnce(*autotune_graph, stream, timing_pool, iteration++, op_name);
                     // build_plan_at_index() mutates the graph's selected execution plan. Do not
                     // switch that plan while a previously selected plan can still be executing
                     // asynchronously on this same graph. Timed iterations synchronize through
@@ -6357,8 +6531,8 @@ static void autotuneFrontendConvolutionGraph(
                 }
 
                 try {
-                    selectFrontendConvolutionPlan(built, stream, candidate.plan_index, op_name);
-                    const float milliseconds = timeFrontendConvolutionPlanOnce(built, stream, timing_pool, iteration++, op_name);
+                    selectFrontendConvolutionPlan(*autotune_graph, stream, candidate.plan_index, op_name);
+                    const float milliseconds = timeFrontendConvolutionPlanOnce(*autotune_graph, stream, timing_pool, iteration++, op_name);
                     if (std::isfinite(milliseconds)) {
                         candidate.samples_ms.push_back(milliseconds);
                     } else {
@@ -6416,16 +6590,9 @@ static void autotuneFrontendConvolutionGraph(
     FrontendConvolutionValidationBuffers validation_buffers =
         createFrontendConvolutionValidationBuffers(autotune_bindings, correctness_validation, stream);
 
-    if (!graph_factory) {
-        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
-                                 " autotune requires a graph factory for exact-replay correctness validation.");
-    }
-
     FrontendConvolutionAutotuneCandidate* best_candidate = nullptr;
     float best_score_ms = std::numeric_limits<float>::infinity();
-    std::shared_ptr<fe::graph::Graph> selected_graph;
-    int64_t selected_workspace_bytes = -1;
-    constexpr int64_t matching_plan_index = 0;
+    std::optional<CudnnFrontendExecutablePlan> selected_plan;
     std::vector<std::string> correctness_rejections;
 
     while (true) {
@@ -6448,40 +6615,16 @@ static void autotuneFrontendConvolutionGraph(
         }
 
         try {
-            // Recreate the exact structured winner on a pristine graph *before*
-            // validating it.  The graph that passes this check is the graph Thor
-            // retains for production, so there is no trust gap between a validated
-            // scratch plan and a later reconstruction.
-            std::shared_ptr<fe::graph::Graph> candidate_graph = graph_factory();
-            if (!candidate_graph) {
-                throw std::runtime_error("graph factory returned null");
-            }
-
+            // Recreate the exact structured winner through the common cuDNN Frontend
+            // recipe replay path. This move-only executable exists only long enough
+            // to prove the recipe correct; C11 publishes the immutable recipe and
+            // production subsequently replays a fresh stamp-local executable from it.
             ScopedGpu candidate_graph_gpu(stream.getGpuNum());
-            checkFrontendStatus(candidate_graph->validate(),
-                                std::string("Failed to validate exact-replay cuDNN Frontend ") + op_name + " graph");
-            checkFrontendStatus(candidate_graph->build_operation_graph(stream.getCudnnHandle()),
-                                std::string("Failed to build exact-replay cuDNN Frontend ") + op_name + " operation graph");
-            checkFrontendStatus(candidate_graph->create_execution_plan(candidate_to_validate->engine_id, candidate_to_validate->knobs),
-                                std::string("Failed to recreate exact cuDNN Frontend ") + op_name +
-                                    " execution plan from engine/knob identity");
-            checkFrontendStatus(candidate_graph->check_support(stream.getCudnnHandle()),
-                                std::string("Failed to check support for exact-replay cuDNN Frontend ") + op_name +
-                                    " execution plan");
-            checkFrontendStatus(candidate_graph->build_plan_at_index(stream.getCudnnHandle(), matching_plan_index),
-                                std::string("Failed to build exact-replay cuDNN Frontend ") + op_name + " execution plan");
+            CudnnFrontendExecutablePlan candidate_plan = replayCudnnFrontendExecutablePlan(
+                graph_factory, candidate_to_validate->selection, stream.getCudnnHandle(), op_name);
 
-            const int64_t candidate_workspace_bytes = candidate_graph->get_workspace_size_plan_at_index(matching_plan_index);
-            if (candidate_workspace_bytes < 0) {
-                throw std::runtime_error("exact-replay plan returned a negative workspace size");
-            }
-            if (candidate_workspace_bytes != candidate_to_validate->workspace_bytes) {
-                throw std::runtime_error("exact-replay workspace changed from " +
-                                         std::to_string(candidate_to_validate->workspace_bytes) + " to " +
-                                         std::to_string(candidate_workspace_bytes));
-            }
-
-            const ConvolutionKernelValidationResult validation_result = validateFrontendConvolutionCandidate(candidate_graph,
+            const uint64_t candidate_workspace_bytes = candidate_plan.workspaceBytes();
+            const ConvolutionKernelValidationResult validation_result = validateFrontendConvolutionCandidate(candidate_plan,
                                                                                                                stream,
                                                                                                                validation_buffers,
                                                                                                                workspace_placement,
@@ -6506,8 +6649,7 @@ static void autotuneFrontendConvolutionGraph(
             candidate_to_validate->correctness_validated = true;
             best_candidate = candidate_to_validate;
             best_score_ms = candidate_to_validate->score_ms;
-            selected_graph = std::move(candidate_graph);
-            selected_workspace_bytes = candidate_workspace_bytes;
+            selected_plan.emplace(std::move(candidate_plan));
             if (thorConvolutionDiagnosticsEnabled()) {
                 std::fprintf(stderr,
                              "[thor convolution] %s correctness validated %s checked_elements=%llu max_abs_error=%.9g\n",
@@ -6546,35 +6688,77 @@ static void autotuneFrontendConvolutionGraph(
         throw std::runtime_error(message.str());
     }
 
-    if (!selected_graph || selected_workspace_bytes < 0 || !best_candidate->correctness_validated) {
+    if (!selected_plan.has_value() || !best_candidate->correctness_validated) {
         throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
                                  " lost the independently validated exact execution plan before placement completed.");
     }
-    if (selected_workspace_bytes != best_candidate->workspace_bytes) {
+    if (selected_plan->selection() != best_candidate->selection ||
+        selected_plan->workspaceBytes() != best_candidate->selection.expected_workspace_bytes) {
         throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
-                                 " validated exact plan workspace no longer matches its timed candidate.");
+                                 " validated exact plan no longer matches its timed selection recipe.");
     }
 
     if (thorConvolutionDiagnosticsEnabled()) {
         std::fprintf(stderr,
-                     "[thor convolution] %s selected %s score_ms=%.9g production_plan=%lld validated=1 stream=%llu\n",
+                     "[thor convolution] %s selected %s score_ms=%.9g validation_plan=%lld validated=1 stream=%llu\n",
                      op_name,
                      frontendConvolutionCandidateIdentityString(*best_candidate).c_str(),
                      static_cast<double>(best_score_ms),
-                     static_cast<long long>(matching_plan_index),
+                     static_cast<long long>(selected_plan->planIndex()),
                      static_cast<unsigned long long>(stream.getId()));
         std::fflush(stderr);
     }
 
-    // Retain the exact pristine graph that passed the independent mathematical
-    // reference.  Never reconstruct or re-enumerate after validation: the graph
-    // being placed is byte-for-byte the execution-plan object Thor proved correct.
-    built.frontend_graph = std::move(selected_graph);
+    // This is the C11 publication boundary.  Nothing leaves selection until an
+    // exact replay of this recipe has passed Thor's independent mathematical
+    // reference.  The caller may therefore publish only this immutable value to
+    // the process-global cache; the validated executable itself remains local
+    // scratch state and is destroyed on return.
+    return selected_plan->selection();
+}
+
+static void prepareFrontendConvolutionExecutable(
+    BuiltConvolution& built,
+    const Stream& stream,
+    const std::string& selection_cache_key,
+    const std::vector<FrontendConvolutionAutotuneBinding>& autotune_bindings,
+    const TensorPlacement& workspace_placement,
+    const char* op_name,
+    const CudnnFrontendGraphFactory& graph_factory,
+    bool require_deterministic,
+    const FrontendConvolutionCorrectnessValidation& correctness_validation) {
+    ScopedGpu scoped_gpu(stream.getGpuNum());
+
+    // The selector is the only path that can publish a new recipe.  It returns
+    // only after exact replay plus Thor's independent full-output oracle has
+    // accepted the candidate, so a cache hit carries the same correctness
+    // qualification as the miss that originally populated it.
+    const CudnnFrontendPlanSelection selection = frontendConvolutionSelectionCache().getOrSelect(selection_cache_key, [&]() {
+        return autotuneFrontendConvolutionSelection(stream,
+                                                    autotune_bindings,
+                                                    workspace_placement,
+                                                    op_name,
+                                                    graph_factory,
+                                                    require_deterministic,
+                                                    correctness_validation);
+    });
+
+    // Cache values are recipes, never executables.  Every stamp replays its own
+    // fresh graph/plan even on a cache hit so descriptors, handles and workspace
+    // ownership cannot cross execution domains.
+    CudnnFrontendExecutablePlan executable =
+        replayCudnnFrontendExecutablePlan(graph_factory, selection, stream.getCudnnHandle(), op_name);
+    if (executable.selection() != selection || executable.workspaceBytes() != selection.expected_workspace_bytes) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
+                                 " local replay diverged from its correctness-validated cached selection recipe.");
+    }
+    if (executable.workspaceBytes() > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        throw std::runtime_error(std::string("cuDNN Frontend ") + op_name + " workspace does not fit size_t.");
+    }
+
+    built.workspace_bytes = static_cast<size_t>(executable.workspaceBytes());
+    built.frontend_plan.emplace(std::move(executable));
     built.correctness_validated = true;
-    built.selected_plan_index = matching_plan_index;
-    built.selected_engine_id = best_candidate->engine_id;
-    built.selected_knobs = normalizedFrontendConvolutionKnobs(best_candidate->knobs);
-    built.workspace_bytes = static_cast<size_t>(selected_workspace_bytes);
 }
 
 static void putFrontendTensorPointer(std::unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor& tensor) {
@@ -6586,8 +6770,15 @@ static void executeFrontendConvolutionGraph(const BuiltConvolution& built,
                                             std::unordered_map<int64_t, void*>& tensor_pack,
                                             const std::optional<Tensor>& workspace,
                                             const char* op_name) {
-    if (!built.frontend_graph) {
-        throw std::runtime_error(std::string(op_name) + " missing cuDNN Frontend graph.");
+    if (!built.frontend_plan.has_value()) {
+        throw std::runtime_error(std::string(op_name) + " missing operation-local cuDNN Frontend executable plan.");
+    }
+    if (!built.correctness_validated) {
+        throw std::runtime_error(std::string(op_name) +
+                                 " has no independently correctness-validated cuDNN Frontend execution plan.");
+    }
+    if (built.workspace_bytes != built.frontend_plan->workspaceBytes()) {
+        throw std::runtime_error(std::string(op_name) + " cuDNN Frontend workspace metadata diverged from its executable plan.");
     }
 
     void* workspace_ptr = nullptr;
@@ -6595,12 +6786,10 @@ static void executeFrontendConvolutionGraph(const BuiltConvolution& built,
         if (!workspace.has_value()) {
             throw std::runtime_error(std::string(op_name) + " requires cuDNN Frontend workspace, but none was allocated.");
         }
+        if (workspace.value().getArraySizeInBytes() < built.workspace_bytes) {
+            throw std::runtime_error(std::string(op_name) + " received undersized cuDNN Frontend workspace.");
+        }
         workspace_ptr = const_cast<void*>(static_cast<const void*>(workspace.value().getMemPtr<void>()));
-    }
-
-    if (!built.correctness_validated || built.selected_plan_index < 0) {
-        throw std::runtime_error(std::string(op_name) +
-                                 " has no independently correctness-validated cuDNN Frontend execution plan.");
     }
 
     cudnnHandle_t handle = run_stream.getCudnnHandle();
@@ -6619,33 +6808,36 @@ static void executeFrontendConvolutionGraph(const BuiltConvolution& built,
             throw std::runtime_error(message.str());
         }
         if (thorConvolutionDiagnosticsVerbose()) {
+            const CudnnFrontendPlanSelection& selection = built.frontend_plan->selection();
             std::ostringstream knobs;
             knobs << '{';
-            for (size_t i = 0; i < built.selected_knobs.size(); ++i) {
+            for (size_t i = 0; i < selection.knobs.size(); ++i) {
                 if (i != 0) {
                     knobs << ',';
                 }
-                knobs << built.selected_knobs[i].first << ':' << built.selected_knobs[i].second;
+                knobs << selection.knobs[i].first << ':' << selection.knobs[i].second;
             }
             knobs << '}';
             std::fprintf(stderr,
                          "[thor convolution] execute %s stream=%llu cuda_stream=%p cudnn_handle=%p engine=%lld knobs=%s "
-                         "plan=%lld workspace=%zu\n",
+                         "plan=%lld executable=%llu workspace=%zu\n",
                          op_name,
                          static_cast<unsigned long long>(run_stream.getId()),
                          static_cast<void*>(run_stream.getStream()),
                          static_cast<void*>(handle),
-                         static_cast<long long>(built.selected_engine_id),
+                         static_cast<long long>(selection.engine_id),
                          knobs.str().c_str(),
-                         static_cast<long long>(built.selected_plan_index),
+                         static_cast<long long>(built.frontend_plan->planIndex()),
+                         static_cast<unsigned long long>(built.frontend_plan->executableId()),
                          built.workspace_bytes);
             std::fflush(stderr);
         }
     }
 
-    auto status = built.frontend_graph->execute(handle, tensor_pack, workspace_ptr);
-    if (!status.is_good()) {
-        throw std::runtime_error(std::string("Failed to execute autotuned cuDNN Frontend ") + op_name + " graph: " + status.get_message());
+    try {
+        built.frontend_plan->execute(handle, tensor_pack, workspace_ptr);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("Failed to execute autotuned cuDNN Frontend ") + op_name + " graph: " + e.what());
     }
 }
 
@@ -6705,7 +6897,7 @@ static BucketedCublasGemmRowBinding toBucketedRowBinding(MatmulPackedRowBinding 
     throw std::invalid_argument("Expression packed-row matmul requires a non-empty row binding.");
 }
 
-std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
+std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
                                                           const Tensor& lhs,
                                                           const Tensor& rhs,
                                                           const std::optional<Tensor>& addend,
@@ -6896,12 +7088,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                        dataTypes.compute,
                        device_num);
 
-    std::shared_ptr<BuiltMatmul> hit = (use_cublaslt_epilogue_wrapper || bucketed_packed_rows) ? nullptr : cacheLookup(key);
-    if (hit) {
-        return hit;
-    }
-
-    auto built = std::make_shared<BuiltMatmul>(key);
+    auto built = std::make_unique<BuiltMatmul>(key);
     bool kernelWillRunOnGpu = false;
     const bool print_verbose_matmul_diagnostics = thorMatmulDiagnosticsVerbose();
     const char* diagnostic_path = "unknown";
@@ -6957,7 +7144,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                                print_verbose_matmul_diagnostics);
             diagnostic_path = "optimal-matmul-picker";
         }
-        built->cublas_kernel = CublasMatrixMultiply::instance().getCachedGemmKernel(device_num,
+        built->cublas_kernel = CublasMatrixMultiply::instance().materializeSelectedGemmKernel(device_num,
                                                                                     a_rows,
                                                                                     a_cols,
                                                                                     b_rows,
@@ -7041,7 +7228,7 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                  dataTypes,
                                                                  print_verbose_matmul_diagnostics);
         diagnostic_path = "optimal-gemm-picker";
-        built->cublas_kernel = CublasMatrixMultiply::instance().getCachedGemmKernel(device_num,
+        built->cublas_kernel = CublasMatrixMultiply::instance().materializeSelectedGemmKernel(device_num,
                                                                                     a_rows,
                                                                                     a_cols,
                                                                                     b_rows,
@@ -7108,9 +7295,6 @@ std::shared_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
         }
     }
 
-    if (!use_cublaslt_epilogue_wrapper && !bucketed_packed_rows) {
-        builtMatmulCache.put(key, built);
-    }
     return built;
 }
 
@@ -7149,6 +7333,8 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
                              : convolutionFrontendStrides(compiled_convolution->spatial_2d);
     const auto dilations =
         is_3d ? convolutionFrontendDilations(true) : convolutionFrontendDilations(compiled_convolution->spatial_2d);
+    const auto pre_padding = is_3d ? padding : convolutionFrontendPrePadding(compiled_convolution->spatial_2d);
+    const auto post_padding = is_3d ? padding : convolutionFrontendPostPadding(compiled_convolution->spatial_2d);
 
     const auto graph_factory = [&]() {
         auto graph = std::make_shared<fe::graph::Graph>();
@@ -7176,8 +7362,8 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
         if (is_3d) {
             conv_attrs.set_padding(padding);
         } else {
-            conv_attrs.set_pre_padding(convolutionFrontendPrePadding(compiled_convolution->spatial_2d));
-            conv_attrs.set_post_padding(convolutionFrontendPostPadding(compiled_convolution->spatial_2d));
+            conv_attrs.set_pre_padding(pre_padding);
+            conv_attrs.set_post_padding(post_padding);
         }
 
         auto y = graph->conv_fprop(x, w, conv_attrs);
@@ -7186,7 +7372,6 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
         return graph;
     };
 
-    built->frontend_graph = graph_factory();
     std::vector<FrontendConvolutionAutotuneBinding> autotune_bindings = {
         {CUDNN_FRONTEND_CONV_X_UID, input, true}, {CUDNN_FRONTEND_CONV_W_UID, filter, true}, {CUDNN_FRONTEND_CONV_Y_UID, output, true}};
     FrontendConvolutionCorrectnessValidation correctness_validation;
@@ -7206,14 +7391,26 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
     correctness_validation.spec.dilation_h = is_3d ? 1 : compiled_convolution->spatial_2d.dilation_h;
     correctness_validation.spec.dilation_w = is_3d ? 1 : compiled_convolution->spatial_2d.dilation_w;
     correctness_validation.spec.compute_dtype = compiled_convolution->compute_dtype;
-    autotuneFrontendConvolutionGraph(*built,
-                                     stream,
-                                     autotune_bindings,
-                                     input.getPlacement(),
-                                     is_3d ? "CONV3D forward" : "CONV2D forward",
-                                     graph_factory,
-                                     false,
-                                     correctness_validation);
+    const std::string selection_cache_key = frontendConvolutionSelectionCacheKey(stream,
+                                                                                  ConvolutionKernelValidationKind::Forward,
+                                                                                  is_3d,
+                                                                                  groups,
+                                                                                  compiled_convolution->compute_dtype,
+                                                                                  strides,
+                                                                                  dilations,
+                                                                                  pre_padding,
+                                                                                  post_padding,
+                                                                                  false,
+                                                                                  autotune_bindings);
+    prepareFrontendConvolutionExecutable(*built,
+                                         stream,
+                                         selection_cache_key,
+                                         autotune_bindings,
+                                         input.getPlacement(),
+                                         is_3d ? "CONV3D forward" : "CONV2D forward",
+                                         graph_factory,
+                                         false,
+                                         correctness_validation);
     return built;
 }
 
@@ -7274,6 +7471,10 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
                              : convolutionFrontendStrides(compiled_convolution_backward->spatial_2d);
     const auto dilations = is_3d ? convolutionFrontendDilations(true)
                                  : convolutionFrontendDilations(compiled_convolution_backward->spatial_2d);
+    const auto pre_padding =
+        is_3d ? padding : convolutionFrontendPrePadding(compiled_convolution_backward->spatial_2d);
+    const auto post_padding =
+        is_3d ? padding : convolutionFrontendPostPadding(compiled_convolution_backward->spatial_2d);
     const fe::DataType_t compute_dtype = toFrontendDataType(compiled_convolution_backward->compute_dtype);
 
     if (is_backward_data) {
@@ -7302,8 +7503,8 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
             if (is_3d) {
                 conv_attrs.set_padding(padding);
             } else {
-                conv_attrs.set_pre_padding(convolutionFrontendPrePadding(compiled_convolution_backward->spatial_2d));
-                conv_attrs.set_post_padding(convolutionFrontendPostPadding(compiled_convolution_backward->spatial_2d));
+                conv_attrs.set_pre_padding(pre_padding);
+                conv_attrs.set_post_padding(post_padding);
             }
 
             auto dx = graph->conv_dgrad(dy, w, conv_attrs);
@@ -7315,7 +7516,6 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
             return graph;
         };
 
-        built->frontend_graph = graph_factory();
         std::vector<FrontendConvolutionAutotuneBinding> autotune_bindings = {{CUDNN_FRONTEND_CONV_W_UID, input, true},
                                                                              {CUDNN_FRONTEND_CONV_Y_UID, grad_output, true},
                                                                              {CUDNN_FRONTEND_CONV_X_UID, output, true}};
@@ -7340,14 +7540,26 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
         correctness_validation.spec.dilation_h = is_3d ? 1 : compiled_convolution_backward->spatial_2d.dilation_h;
         correctness_validation.spec.dilation_w = is_3d ? 1 : compiled_convolution_backward->spatial_2d.dilation_w;
         correctness_validation.spec.compute_dtype = compiled_convolution_backward->compute_dtype;
-        autotuneFrontendConvolutionGraph(*built,
-                                         stream,
-                                         autotune_bindings,
-                                         output.getPlacement(),
-                                         is_3d ? "CONV3D backward-data" : "CONV2D backward-data",
-                                         graph_factory,
-                                         false,
-                                         correctness_validation);
+        const std::string selection_cache_key = frontendConvolutionSelectionCacheKey(stream,
+                                                                                      ConvolutionKernelValidationKind::BackwardData,
+                                                                                      is_3d,
+                                                                                      groups,
+                                                                                      compiled_convolution_backward->compute_dtype,
+                                                                                      strides,
+                                                                                      dilations,
+                                                                                      pre_padding,
+                                                                                      post_padding,
+                                                                                      false,
+                                                                                      autotune_bindings);
+        prepareFrontendConvolutionExecutable(*built,
+                                             stream,
+                                             selection_cache_key,
+                                             autotune_bindings,
+                                             output.getPlacement(),
+                                             is_3d ? "CONV3D backward-data" : "CONV2D backward-data",
+                                             graph_factory,
+                                             false,
+                                             correctness_validation);
         return built;
     }
 
@@ -7376,8 +7588,8 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
         if (is_3d) {
             conv_attrs.set_padding(padding);
         } else {
-            conv_attrs.set_pre_padding(convolutionFrontendPrePadding(compiled_convolution_backward->spatial_2d));
-            conv_attrs.set_post_padding(convolutionFrontendPostPadding(compiled_convolution_backward->spatial_2d));
+            conv_attrs.set_pre_padding(pre_padding);
+            conv_attrs.set_post_padding(post_padding);
         }
 
         auto dw = graph->conv_wgrad(dy, x, conv_attrs);
@@ -7389,7 +7601,6 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
         return graph;
     };
 
-    built->frontend_graph = graph_factory();
     std::vector<FrontendConvolutionAutotuneBinding> autotune_bindings = {{CUDNN_FRONTEND_CONV_X_UID, input, true},
                                                                          {CUDNN_FRONTEND_CONV_Y_UID, grad_output, true},
                                                                          {CUDNN_FRONTEND_CONV_W_UID, output, true}};
@@ -7414,14 +7625,26 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
     correctness_validation.spec.dilation_h = is_3d ? 1 : compiled_convolution_backward->spatial_2d.dilation_h;
     correctness_validation.spec.dilation_w = is_3d ? 1 : compiled_convolution_backward->spatial_2d.dilation_w;
     correctness_validation.spec.compute_dtype = compiled_convolution_backward->compute_dtype;
-    autotuneFrontendConvolutionGraph(*built,
-                                     stream,
-                                     autotune_bindings,
-                                     output.getPlacement(),
-                                     is_3d ? "CONV3D backward-filter" : "CONV2D backward-filter",
-                                     graph_factory,
-                                     true,
-                                     correctness_validation);
+    const std::string selection_cache_key = frontendConvolutionSelectionCacheKey(stream,
+                                                                                  ConvolutionKernelValidationKind::BackwardFilter,
+                                                                                  is_3d,
+                                                                                  groups,
+                                                                                  compiled_convolution_backward->compute_dtype,
+                                                                                  strides,
+                                                                                  dilations,
+                                                                                  pre_padding,
+                                                                                  post_padding,
+                                                                                  true,
+                                                                                  autotune_bindings);
+    prepareFrontendConvolutionExecutable(*built,
+                                         stream,
+                                         selection_cache_key,
+                                         autotune_bindings,
+                                         output.getPlacement(),
+                                         is_3d ? "CONV3D backward-filter" : "CONV2D backward-filter",
+                                         graph_factory,
+                                         true,
+                                         correctness_validation);
     return built;
 }
 
@@ -7496,10 +7719,9 @@ std::shared_ptr<BuiltReduction> StampedEquation::buildReduction(ExprOp op,
     return built;
 }
 
-std::shared_ptr<BuiltSoftmax> StampedEquation::buildSoftmax(const std::shared_ptr<CompiledSoftmax>& compiled_softmax,
+std::unique_ptr<BuiltSoftmax> StampedEquation::buildSoftmax(const std::shared_ptr<CompiledSoftmax>& compiled_softmax,
                                                             const Tensor& input,
-                                                            const Tensor& output,
-                                                            int device_num) {
+                                                            const Tensor& output) {
     if (!compiled_softmax) {
         throw std::runtime_error("buildSoftmax requires compiled_softmax.");
     }
@@ -7513,24 +7735,9 @@ std::shared_ptr<BuiltSoftmax> StampedEquation::buildSoftmax(const std::shared_pt
         throw std::runtime_error("Softmax output dtype does not match compiled output dtype.");
     }
 
-    SoftmaxCacheKey key{
-        .input_dims = input.getDimensions(),
-        .input_dtype = compiled_softmax->input_dtype,
-        .output_dtype = compiled_softmax->output_dtype,
-        .algorithm = compiled_softmax->algorithm,
-        .mode = compiled_softmax->mode,
-        .device_num = device_num,
-    };
-
-    std::shared_ptr<BuiltSoftmax> hit = cacheLookup(key);
-    if (hit)
-        return hit;
-
-    auto built = std::make_shared<BuiltSoftmax>(key);
-    built->x_desc = createCudnnSoftmaxTensorDescriptor(input.getDimensions(), built->key.input_dtype);
-    built->y_desc = createCudnnSoftmaxTensorDescriptor(output.getDimensions(), built->key.output_dtype);
-
-    builtSoftmaxCache.put(key, built);
+    auto built = std::make_unique<BuiltSoftmax>();
+    built->x_desc = createCudnnSoftmaxTensorDescriptor(input.getDimensions(), compiled_softmax->input_dtype);
+    built->y_desc = createCudnnSoftmaxTensorDescriptor(output.getDimensions(), compiled_softmax->output_dtype);
     return built;
 }
 

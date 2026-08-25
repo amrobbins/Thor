@@ -1,6 +1,7 @@
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNormRhtAbsMax.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Common/AcceleratorBackendCachePolicy.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
@@ -76,43 +77,47 @@ void requireTensor(
     requireNumElements(tensor, expectedElements, name);
 }
 
-struct ResolvedRhtAmaxKernel {
+struct ResolvedRhtAmaxKernel final : AcceleratorBackendSelectionRecipeTag {
+    ResolvedRhtAmaxKernel(uint32_t numThreads, uint32_t rowsPerCta) : num_threads(numThreads), rows_per_cta(rowsPerCta) {}
+
     uint32_t num_threads = 0;
     uint32_t rows_per_cta = 0;
 };
 
-class RhtAmaxPlanCache {
+static_assert(AcceleratorBackendSelectionRecipe<ResolvedRhtAmaxKernel>);
+
+class ResolvedRhtAmaxKernelCache {
    public:
     ResolvedRhtAmaxKernel getOrBuild(const CudnnRmsNormRhtAbsMaxDescriptor& descriptor, int gpuNum) {
         const string key = descriptor.cacheKey("forward", gpuNum);
         unique_lock<mutex> lock(mtx);
-        auto iter = plans.find(key);
-        if (iter != plans.end()) {
+        auto iter = resolved_kernels.find(key);
+        if (iter != resolved_kernels.end()) {
             return iter->second;
         }
         descriptor.validate();
         ResolvedRhtAmaxKernel plan{descriptor.resolvedNumThreads(), descriptor.resolvedRowsPerCta()};
-        plans.emplace(key, plan);
+        resolved_kernels.emplace(key, plan);
         return plan;
     }
 
     void clear() {
         unique_lock<mutex> lock(mtx);
-        plans.clear();
+        resolved_kernels.clear();
     }
 
     size_t size() const {
         unique_lock<mutex> lock(mtx);
-        return plans.size();
+        return resolved_kernels.size();
     }
 
    private:
     mutable mutex mtx;
-    unordered_map<string, ResolvedRhtAmaxKernel> plans;
+    unordered_map<string, ResolvedRhtAmaxKernel> resolved_kernels;
 };
 
-RhtAmaxPlanCache& cache() {
-    static RhtAmaxPlanCache instance;
+ResolvedRhtAmaxKernelCache& resolvedKernelCache() {
+    static ResolvedRhtAmaxKernelCache instance;
     return instance;
 }
 
@@ -337,7 +342,7 @@ void CudnnRmsNormRhtAbsMax::forward(const CudnnRmsNormRhtAbsMaxDescriptor& descr
         throw runtime_error("RMSNorm+RHT+Amax follows the cuDNN Frontend SM100+ support surface and requires compute capability >= 10.0.");
     }
 
-    const ResolvedRhtAmaxKernel plan = cache().getOrBuild(descriptor, gpuNum);
+    const ResolvedRhtAmaxKernel plan = resolvedKernelCache().getOrBuild(descriptor, gpuNum);
     const dim3 grid(static_cast<unsigned int>(descriptor.absMaxElementCount()));
     const dim3 block(plan.num_threads);
     const size_t shared_bytes = ((plan.num_threads + 31) / 32) * sizeof(float);
@@ -353,11 +358,11 @@ void CudnnRmsNormRhtAbsMax::forward(const CudnnRmsNormRhtAbsMaxDescriptor& descr
 }
 
 void CudnnRmsNormRhtAbsMax::warmForward(const CudnnRmsNormRhtAbsMaxDescriptor& descriptor, int gpuNum) {
-    (void)cache().getOrBuild(descriptor, gpuNum);
+    (void)resolvedKernelCache().getOrBuild(descriptor, gpuNum);
 }
 
-void CudnnRmsNormRhtAbsMax::clearCache() { cache().clear(); }
+void CudnnRmsNormRhtAbsMax::clearCache() { resolvedKernelCache().clear(); }
 
-size_t CudnnRmsNormRhtAbsMax::cachedGraphCount() const { return cache().size(); }
+size_t CudnnRmsNormRhtAbsMax::cachedResolvedKernelCount() const { return resolvedKernelCache().size(); }
 
 bool CudnnRmsNormRhtAbsMax::frontendAvailable() { return true; }

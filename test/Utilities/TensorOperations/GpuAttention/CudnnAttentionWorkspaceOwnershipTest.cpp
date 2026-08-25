@@ -105,40 +105,16 @@ CudnnAttentionBackwardArgs backwardArgs(AttentionExecutionTensors& tensors) {
 
 }  // namespace
 
-TEST(AttentionWorkspaceOwnership, SharedCachedGraphsUseCallerOwnedIndependentScratchForConcurrentExecutions) {
+TEST(AttentionWorkspaceOwnership, EquivalentOperationsShareOnlySelectionAndSurviveSelectionCacheClear) {
     if (cudaDeviceCount() < 1)
         GTEST_SKIP() << "CUDA device is required for Attention workspace ownership tests.";
 
     constexpr int gpuNum = 0;
     const TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     CudnnScaledDotProductAttention& attention = CudnnScaledDotProductAttention::instance();
-    attention.clearCache();
+    attention.clearSelectionCache();
 
     const CudnnAttentionDescriptor descriptor = makeTrainingDescriptor();
-    const uint64_t forwardBytes = attention.forwardWorkspaceSizeInBytes(descriptor, gpuNum);
-    const uint64_t backwardBytes = attention.backwardWorkspaceSizeInBytes(descriptor, gpuNum);
-    ASSERT_EQ(attention.cachedGraphCount(), 2U);
-
-    EXPECT_EQ(attention.forwardWorkspaceSizeInBytes(descriptor, gpuNum), forwardBytes);
-    EXPECT_EQ(attention.backwardWorkspaceSizeInBytes(descriptor, gpuNum), backwardBytes);
-    EXPECT_EQ(attention.cachedGraphCount(), 2U);
-
-    optional<Tensor> forwardWorkspaceA = allocateWorkspace(placement, forwardBytes);
-    optional<Tensor> forwardWorkspaceB = allocateWorkspace(placement, forwardBytes);
-    optional<Tensor> backwardWorkspaceA = allocateWorkspace(placement, backwardBytes);
-    optional<Tensor> backwardWorkspaceB = allocateWorkspace(placement, backwardBytes);
-
-    if (forwardBytes > 0) {
-        ASSERT_TRUE(forwardWorkspaceA.has_value());
-        ASSERT_TRUE(forwardWorkspaceB.has_value());
-        EXPECT_NE(forwardWorkspaceA->getMemPtr<void>(), forwardWorkspaceB->getMemPtr<void>());
-    }
-    if (backwardBytes > 0) {
-        ASSERT_TRUE(backwardWorkspaceA.has_value());
-        ASSERT_TRUE(backwardWorkspaceB.has_value());
-        EXPECT_NE(backwardWorkspaceA->getMemPtr<void>(), backwardWorkspaceB->getMemPtr<void>());
-    }
-
     AttentionExecutionTensors tensorsA = makeExecutionTensors(placement, descriptor);
     AttentionExecutionTensors tensorsB = makeExecutionTensors(placement, descriptor);
     Stream streamA(gpuNum);
@@ -148,15 +124,58 @@ TEST(AttentionWorkspaceOwnership, SharedCachedGraphsUseCallerOwnedIndependentScr
 
     CudnnAttentionForwardArgs forwardA = forwardArgs(tensorsA);
     CudnnAttentionForwardArgs forwardB = forwardArgs(tensorsB);
-    attention.forward(descriptor, forwardA, forwardWorkspaceA, streamA);
-    attention.forward(descriptor, forwardB, forwardWorkspaceB, streamB);
+    CudnnAttentionBackwardArgs backwardA = backwardArgs(tensorsA);
+    CudnnAttentionBackwardArgs backwardB = backwardArgs(tensorsB);
+
+    CudnnAttentionExecutablePlan forwardPlanA = attention.prepareForward(descriptor, forwardA, streamA);
+    CudnnAttentionExecutablePlan forwardPlanB = attention.prepareForward(descriptor, forwardB, streamB);
+    CudnnAttentionExecutablePlan backwardPlanA = attention.prepareBackward(descriptor, backwardA, streamA);
+    CudnnAttentionExecutablePlan backwardPlanB = attention.prepareBackward(descriptor, backwardB, streamB);
+
+    ASSERT_EQ(attention.cachedSelectionCount(), 2U);
+    EXPECT_EQ(forwardPlanA.selection(), forwardPlanB.selection());
+    EXPECT_EQ(backwardPlanA.selection(), backwardPlanB.selection());
+    EXPECT_EQ(forwardPlanA.selection().usesSerializedReplay(), true);
+    EXPECT_EQ(backwardPlanA.selection().usesSerializedReplay(), true);
+    EXPECT_EQ(forwardPlanA.selection().engine_id, -1);
+    EXPECT_EQ(backwardPlanA.selection().engine_id, -1);
+    EXPECT_NE(forwardPlanA.executableId(), forwardPlanB.executableId());
+    EXPECT_NE(backwardPlanA.executableId(), backwardPlanB.executableId());
+
+    optional<Tensor> forwardWorkspaceA = allocateWorkspace(placement, forwardPlanA.workspaceBytes());
+    optional<Tensor> forwardWorkspaceB = allocateWorkspace(placement, forwardPlanB.workspaceBytes());
+    optional<Tensor> backwardWorkspaceA = allocateWorkspace(placement, backwardPlanA.workspaceBytes());
+    optional<Tensor> backwardWorkspaceB = allocateWorkspace(placement, backwardPlanB.workspaceBytes());
+
+    if (forwardPlanA.workspaceBytes() > 0) {
+        ASSERT_TRUE(forwardWorkspaceA.has_value());
+        ASSERT_TRUE(forwardWorkspaceB.has_value());
+        EXPECT_NE(forwardWorkspaceA->getMemPtr<void>(), forwardWorkspaceB->getMemPtr<void>());
+    }
+    if (backwardPlanA.workspaceBytes() > 0) {
+        ASSERT_TRUE(backwardWorkspaceA.has_value());
+        ASSERT_TRUE(backwardWorkspaceB.has_value());
+        EXPECT_NE(backwardWorkspaceA->getMemPtr<void>(), backwardWorkspaceB->getMemPtr<void>());
+    }
+
+    const uint64_t preparationsAfterStamping = cudnnFrontendExecutablePreparationCountForTests();
+    attention.clearSelectionCache();
+    ASSERT_EQ(attention.cachedSelectionCount(), 0U);
+
+    for (int repetition = 0; repetition < 4; ++repetition) {
+        attention.forward(forwardPlanA, forwardA, forwardWorkspaceA, streamA);
+        attention.forward(forwardPlanB, forwardB, forwardWorkspaceB, streamB);
+    }
     streamA.synchronize();
     streamB.synchronize();
 
-    CudnnAttentionBackwardArgs backwardA = backwardArgs(tensorsA);
-    CudnnAttentionBackwardArgs backwardB = backwardArgs(tensorsB);
-    attention.backward(descriptor, backwardA, backwardWorkspaceA, streamA);
-    attention.backward(descriptor, backwardB, backwardWorkspaceB, streamB);
+    for (int repetition = 0; repetition < 4; ++repetition) {
+        attention.backward(backwardPlanA, backwardA, backwardWorkspaceA, streamA);
+        attention.backward(backwardPlanB, backwardB, backwardWorkspaceB, streamB);
+    }
     streamA.synchronize();
     streamB.synchronize();
+
+    EXPECT_EQ(attention.cachedSelectionCount(), 0U);
+    EXPECT_EQ(cudnnFrontendExecutablePreparationCountForTests(), preparationsAfterStamping);
 }

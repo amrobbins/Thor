@@ -103,36 +103,47 @@ CudnnInstanceNormBackwardArgs backwardArgs(InstanceNormExecutionTensors& tensors
 
 }  // namespace
 
-TEST(InstanceNormWorkspaceOwnership, SharedCachedGraphsUseCallerOwnedIndependentScratchForConcurrentExecutions) {
+TEST(InstanceNormWorkspaceOwnership, EquivalentOperationsShareOnlySelectionAndSurviveSelectionCacheClear) {
     if (cudaDeviceCount() < 1)
         GTEST_SKIP() << "CUDA device is required for InstanceNorm workspace ownership tests.";
 
     constexpr int gpuNum = 0;
     const TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     CudnnInstanceNorm& instanceNorm = CudnnInstanceNorm::instance();
-    instanceNorm.clearCache();
+    instanceNorm.clearSelectionCache();
 
+    const uint64_t hitsBefore = instanceNorm.selectionCacheHitCount();
+    const uint64_t missesBefore = instanceNorm.selectionCacheMissCount();
     const CudnnInstanceNormDescriptor descriptor = makeTrainingDescriptor();
-    const uint64_t forwardBytes = instanceNorm.forwardWorkspaceSizeInBytes(descriptor, gpuNum);
-    const uint64_t backwardBytes = instanceNorm.backwardWorkspaceSizeInBytes(descriptor, gpuNum);
-    ASSERT_EQ(instanceNorm.cachedGraphCount(), 2U);
 
-    // Re-querying an identical descriptor must reuse the same cached plans.
-    EXPECT_EQ(instanceNorm.forwardWorkspaceSizeInBytes(descriptor, gpuNum), forwardBytes);
-    EXPECT_EQ(instanceNorm.backwardWorkspaceSizeInBytes(descriptor, gpuNum), backwardBytes);
-    EXPECT_EQ(instanceNorm.cachedGraphCount(), 2U);
+    Stream streamA(gpuNum);
+    Stream streamB(gpuNum);
+    CudnnInstanceNormExecutablePlan forwardPlanA = instanceNorm.prepareForward(descriptor, streamA);
+    CudnnInstanceNormExecutablePlan forwardPlanB = instanceNorm.prepareForward(descriptor, streamB);
+    CudnnInstanceNormExecutablePlan backwardPlanA = instanceNorm.prepareBackward(descriptor, streamA);
+    CudnnInstanceNormExecutablePlan backwardPlanB = instanceNorm.prepareBackward(descriptor, streamB);
+    const uint64_t preparationsAfterStamping = cudnnFrontendExecutablePreparationCountForTests();
 
-    optional<Tensor> forwardWorkspaceA = allocateWorkspace(placement, forwardBytes);
-    optional<Tensor> forwardWorkspaceB = allocateWorkspace(placement, forwardBytes);
-    optional<Tensor> backwardWorkspaceA = allocateWorkspace(placement, backwardBytes);
-    optional<Tensor> backwardWorkspaceB = allocateWorkspace(placement, backwardBytes);
+    ASSERT_EQ(instanceNorm.cachedSelectionCount(), 2U);
+    EXPECT_EQ(instanceNorm.selectionCacheMissCount() - missesBefore, 2U);
+    EXPECT_EQ(instanceNorm.selectionCacheHitCount() - hitsBefore, 2U);
 
-    if (forwardBytes > 0) {
+    EXPECT_EQ(forwardPlanA.selection(), forwardPlanB.selection());
+    EXPECT_EQ(backwardPlanA.selection(), backwardPlanB.selection());
+    EXPECT_NE(forwardPlanA.executableId(), forwardPlanB.executableId());
+    EXPECT_NE(backwardPlanA.executableId(), backwardPlanB.executableId());
+
+    optional<Tensor> forwardWorkspaceA = allocateWorkspace(placement, forwardPlanA.workspaceBytes());
+    optional<Tensor> forwardWorkspaceB = allocateWorkspace(placement, forwardPlanB.workspaceBytes());
+    optional<Tensor> backwardWorkspaceA = allocateWorkspace(placement, backwardPlanA.workspaceBytes());
+    optional<Tensor> backwardWorkspaceB = allocateWorkspace(placement, backwardPlanB.workspaceBytes());
+
+    if (forwardPlanA.workspaceBytes() > 0) {
         ASSERT_TRUE(forwardWorkspaceA.has_value());
         ASSERT_TRUE(forwardWorkspaceB.has_value());
         EXPECT_NE(forwardWorkspaceA->getMemPtr<void>(), forwardWorkspaceB->getMemPtr<void>());
     }
-    if (backwardBytes > 0) {
+    if (backwardPlanA.workspaceBytes() > 0) {
         ASSERT_TRUE(backwardWorkspaceA.has_value());
         ASSERT_TRUE(backwardWorkspaceB.has_value());
         EXPECT_NE(backwardWorkspaceA->getMemPtr<void>(), backwardWorkspaceB->getMemPtr<void>());
@@ -140,22 +151,33 @@ TEST(InstanceNormWorkspaceOwnership, SharedCachedGraphsUseCallerOwnedIndependent
 
     InstanceNormExecutionTensors tensorsA = makeExecutionTensors(placement, descriptor);
     InstanceNormExecutionTensors tensorsB = makeExecutionTensors(placement, descriptor);
-    Stream streamA(gpuNum);
-    Stream streamB(gpuNum);
     initializeExecutionTensors(tensorsA, streamA);
     initializeExecutionTensors(tensorsB, streamB);
 
+    instanceNorm.clearSelectionCache();
+    ASSERT_EQ(instanceNorm.cachedSelectionCount(), 0U);
+
     CudnnInstanceNormForwardArgs forwardA = forwardArgs(tensorsA);
     CudnnInstanceNormForwardArgs forwardB = forwardArgs(tensorsB);
-    instanceNorm.forward(descriptor, forwardA, forwardWorkspaceA, streamA);
-    instanceNorm.forward(descriptor, forwardB, forwardWorkspaceB, streamB);
+    for (int repetition = 0; repetition < 4; ++repetition) {
+        instanceNorm.forward(forwardPlanA, forwardA, forwardWorkspaceA, streamA);
+        instanceNorm.forward(forwardPlanB, forwardB, forwardWorkspaceB, streamB);
+    }
     streamA.synchronize();
     streamB.synchronize();
+    EXPECT_EQ(instanceNorm.cachedSelectionCount(), 0U);
+    EXPECT_EQ(cudnnFrontendExecutablePreparationCountForTests(), preparationsAfterStamping)
+        << "InstanceNorm forward hot path must not replay/build/deserialize a cuDNN Frontend plan.";
 
     CudnnInstanceNormBackwardArgs backwardA = backwardArgs(tensorsA);
     CudnnInstanceNormBackwardArgs backwardB = backwardArgs(tensorsB);
-    instanceNorm.backward(descriptor, backwardA, backwardWorkspaceA, streamA);
-    instanceNorm.backward(descriptor, backwardB, backwardWorkspaceB, streamB);
+    for (int repetition = 0; repetition < 4; ++repetition) {
+        instanceNorm.backward(backwardPlanA, backwardA, backwardWorkspaceA, streamA);
+        instanceNorm.backward(backwardPlanB, backwardB, backwardWorkspaceB, streamB);
+    }
     streamA.synchronize();
     streamB.synchronize();
+    EXPECT_EQ(instanceNorm.cachedSelectionCount(), 0U);
+    EXPECT_EQ(cudnnFrontendExecutablePreparationCountForTests(), preparationsAfterStamping)
+        << "InstanceNorm backward hot path must not replay/build/deserialize a cuDNN Frontend plan.";
 }

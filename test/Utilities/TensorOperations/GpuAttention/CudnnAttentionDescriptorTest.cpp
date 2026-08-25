@@ -669,7 +669,7 @@ TEST(CudnnAttentionFrontendFp8Probe, ExperimentalForwardSupportSurface) {
 
     size_t supportedCount = 0;
     for (const Fp8AttentionProbeCase& probeCase : cases) {
-        CudnnScaledDotProductAttention::instance().clearCache();
+        CudnnScaledDotProductAttention::instance().clearSelectionCache();
         const CudnnAttentionDescriptor descriptor = makeFp8ProbeDescriptor(probeCase);
         const std::string label = probeCaseLabel(probeCase);
 
@@ -733,9 +733,11 @@ TEST(CudnnAttentionFrontendFp8Probe, ExperimentalForwardSupportSurface) {
                                                   .amaxS = amaxS,
                                                   .amaxO = amaxO};
 
+            CudnnAttentionExecutablePlan forwardPlan =
+                CudnnScaledDotProductAttention::instance().prepareForward(descriptor, forwardArgs, stream);
             std::optional<Tensor> forwardWorkspace =
                 allocateAttentionWorkspace(gpuPlacement, descriptor, gpuNum, false);
-            CudnnScaledDotProductAttention::instance().forward(descriptor, forwardArgs, forwardWorkspace, stream);
+            CudnnScaledDotProductAttention::instance().forward(forwardPlan, forwardArgs, forwardWorkspace, stream);
 
             if (probeCase.runBackward) {
                 Tensor dO = makeTensorForSpec(gpuPlacement, descriptor.o, stream);
@@ -779,9 +781,11 @@ TEST(CudnnAttentionFrontendFp8Probe, ExperimentalForwardSupportSurface) {
                                                         .amaxDK = amaxDK,
                                                         .amaxDV = amaxDV,
                                                         .amaxDP = amaxDP};
+                CudnnAttentionExecutablePlan backwardPlan =
+                    CudnnScaledDotProductAttention::instance().prepareBackward(descriptor, backwardArgs, stream);
                 std::optional<Tensor> backwardWorkspace =
                     allocateAttentionWorkspace(gpuPlacement, descriptor, gpuNum, true);
-                CudnnScaledDotProductAttention::instance().backward(descriptor, backwardArgs, backwardWorkspace, stream);
+                CudnnScaledDotProductAttention::instance().backward(backwardPlan, backwardArgs, backwardWorkspace, stream);
             }
 
             stream.synchronize();

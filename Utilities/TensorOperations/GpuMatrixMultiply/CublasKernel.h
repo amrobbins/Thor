@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Common/AcceleratorBackendCachePolicy.h"
 #include "Utilities/Common/SharedOwnership.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelOptions.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasKernelRequirement.h"
@@ -14,6 +15,7 @@
 #include <cuda_fp16.h>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -23,7 +25,7 @@ namespace ThorImplementation {
 
 enum class CublasScalarPointerMode { Host, Device };
 
-class CublasKernel {
+class CublasKernel final : public AcceleratorBackendLocalExecutionStateTag {
    private:
     struct State {
         State(CublasKernelRequirement requirement, CublasKernelOptions options, std::string gpuType)
@@ -73,15 +75,26 @@ class CublasKernel {
         construct(cublasKernelRequirement, cublasKernelOptions, gpuType);
     }
 
-    CublasKernel(const CublasKernel &other) = default;
+    CublasKernel(CublasKernelRequirement cublasKernelRequirement, const CublasKernelSelection &selection, std::string gpuType) {
+        construct(std::move(cublasKernelRequirement), selection.makeKernelOptions(), std::move(gpuType));
+        state->cublasKernelOptions.runStats.runCount = selection.measuredRunCount;
+        state->cublasKernelOptions.runStats.totalExecutionTimeMilliseconds = selection.measuredTotalExecutionTimeMilliseconds;
+    }
+
+    CublasKernel(const CublasKernel &other) = delete;
     CublasKernel(CublasKernel &&other) noexcept = default;
 
-    CublasKernel &operator=(const CublasKernel &other) = default;
+    CublasKernel &operator=(const CublasKernel &other) = delete;
     CublasKernel &operator=(CublasKernel &&other) noexcept = default;
 
     virtual ~CublasKernel() = default;
 
-    inline bool operator==(const CublasKernel &other) const { return state == other.state; }
+    // Placement-time diagnostic used by the accelerator backend ownership gate.
+    // Runtime launch paths never increment this counter.
+    [[nodiscard]] static uint64_t materializationCountForTests() noexcept {
+        return materializationCount.load(std::memory_order_relaxed);
+    }
+
 
     void setErrorFlag() {
         THOR_THROW_IF_FALSE(!uninitialized());
@@ -474,10 +487,42 @@ class CublasKernel {
         return state->cublasKernelOptions;
     }
 
-    cublasLtMatmulAlgo_t getAlgorithm(int gpuNum) { return state->cublasKernelOptions.algorithm; }
+    [[nodiscard]] CublasKernelSelection getSelectionRecipe() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        THOR_THROW_IF_FALSE(!state->cublasKernelOptions.runStats.errorFlag);
+        CublasKernelSelection selection;
+        selection.algorithm = state->cublasKernelOptions.algorithm;
+        selection.algorithmId = state->cublasKernelOptions.algorithmId;
+        selection.tileSize = state->cublasKernelOptions.tileSize;
+        selection.splitK = state->cublasKernelOptions.splitK;
+        selection.reductionFlag = state->cublasKernelOptions.reductionFlag;
+        selection.swizzleType = state->cublasKernelOptions.swizzleType;
+        selection.customOptionValue = state->cublasKernelOptions.customOptionValue;
+        selection.stagesId = state->cublasKernelOptions.stagesId;
+        selection.innerShapeId = state->cublasKernelOptions.innerShapeId;
+        selection.clusterShapeId = state->cublasKernelOptions.clusterShapeId;
+        selection.workspaceSizeInBytes = state->cublasKernelOptions.workspaceSizeInBytes;
+        selection.wavesCount = state->cublasKernelOptions.wavesCount;
+        selection.measuredRunCount = state->cublasKernelOptions.runStats.runCount;
+        selection.measuredTotalExecutionTimeMilliseconds = state->cublasKernelOptions.runStats.totalExecutionTimeMilliseconds;
+        return selection;
+    }
+
+    [[nodiscard]] uintptr_t executionStateId() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        return reinterpret_cast<uintptr_t>(state.get());
+    }
+
+    cublasLtMatmulAlgo_t getAlgorithm(int gpuNum) {
+        (void)gpuNum;
+        THOR_THROW_IF_FALSE(!uninitialized());
+        return state->cublasKernelOptions.algorithm;
+    }
 
    private:
-    std::shared_ptr<State> state;
+    inline static std::atomic<uint64_t> materializationCount{0};
+
+    std::unique_ptr<State> state;
 
     static cudaDataType_t mapTensorDataTypeToCublasDataType(DataType dataType) {
         switch (dataType) {
@@ -876,7 +921,7 @@ class CublasKernel {
     }
 
     void construct(CublasKernelRequirement cublasKernelRequirement, CublasKernelOptions cublasKernelOptions, std::string gpuType) {
-        state = std::make_shared<State>(std::move(cublasKernelRequirement), cublasKernelOptions, std::move(gpuType));
+        state = std::make_unique<State>(std::move(cublasKernelRequirement), cublasKernelOptions, std::move(gpuType));
 
         validateFp8RowMajorGemmShapeAndLayoutOrThrow("CublasKernel::construct");
         if (state->cublasKernelRequirement.kernelRequirement.batchConfig.isBatched() && usesFp8ColumnMajorLtPath()) {
@@ -885,6 +930,7 @@ class CublasKernel {
                 "the FP8 row-major adapter needs a batched transpose-workspace implementation first.");
         }
         allocateCublasResources();
+        materializationCount.fetch_add(1, std::memory_order_relaxed);
     }
 
     bool uninitialized() const { return state == nullptr; }

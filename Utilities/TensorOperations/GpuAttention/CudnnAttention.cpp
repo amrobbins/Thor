@@ -7,6 +7,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstddef>
@@ -18,6 +19,7 @@
 #include <string_view>
 #include <unordered_map>
 
+#include <cuda_runtime.h>
 #include <cudnn_frontend.h>
 
 using namespace ThorImplementation;
@@ -588,41 +590,40 @@ fe::DataType_t toFrontendDataType(DataType dtype) {
     }
 }
 
-using BuiltGraph = CudnnCachedExecutionPlan<fe::graph::Graph>;
-
-class AttentionGraphCache {
+class AttentionPlanRepository {
    public:
-    BuiltGraph& getOrBuildForward(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
-        const string key = descriptor.cacheKey("forward", gpuNum);
-        unique_lock<mutex> lock(mtx);
-        auto iter = graphs.find(key);
-        if (iter != graphs.end())
-            return iter->second;
-        BuiltGraph graph = buildForwardGraph(descriptor, gpuNum);
-        auto [inserted, _] = graphs.emplace(key, std::move(graph));
-        return inserted->second;
+    CudnnFrontendExecutablePlan prepareForward(const CudnnAttentionDescriptor& descriptor, Stream stream) {
+        descriptor.validateForward();
+        CudnnFrontendGraphFactory graphFactory = [this, descriptor]() { return makeForwardGraph(descriptor); };
+        return prepare(descriptor, "forward", std::move(stream), std::move(graphFactory));
     }
 
-    BuiltGraph& getOrBuildBackward(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
-        const string key = descriptor.cacheKey("backward", gpuNum);
-        unique_lock<mutex> lock(mtx);
-        auto iter = graphs.find(key);
-        if (iter != graphs.end())
-            return iter->second;
-        BuiltGraph graph = buildBackwardGraph(descriptor, gpuNum);
-        auto [inserted, _] = graphs.emplace(key, std::move(graph));
-        return inserted->second;
+    CudnnFrontendExecutablePlan prepareBackward(const CudnnAttentionDescriptor& descriptor, Stream stream) {
+        descriptor.validateBackward();
+        CudnnFrontendGraphFactory graphFactory = [this, descriptor]() { return makeBackwardGraph(descriptor); };
+        return prepare(descriptor, "backward", std::move(stream), std::move(graphFactory));
     }
 
-    void clear() {
-        unique_lock<mutex> lock(mtx);
-        graphs.clear();
+    CudnnFrontendPlanSelection selectForward(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
+        descriptor.validateForward();
+        ScopedGpu scopedGpu(gpuNum);
+        Stream stream(gpuNum);
+        CudnnFrontendGraphFactory graphFactory = [this, descriptor]() { return makeForwardGraph(descriptor); };
+        return select(descriptor, "forward", std::move(stream), std::move(graphFactory));
     }
 
-    size_t size() const {
-        unique_lock<mutex> lock(mtx);
-        return graphs.size();
+    CudnnFrontendPlanSelection selectBackward(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
+        descriptor.validateBackward();
+        ScopedGpu scopedGpu(gpuNum);
+        Stream stream(gpuNum);
+        CudnnFrontendGraphFactory graphFactory = [this, descriptor]() { return makeBackwardGraph(descriptor); };
+        return select(descriptor, "backward", std::move(stream), std::move(graphFactory));
     }
+
+    void clear() { selections.clear(); }
+    size_t size() const { return selections.size(); }
+    uint64_t hitCount() const { return selections.hitCount(); }
+    uint64_t missCount() const { return selections.missCount(); }
 
    private:
     shared_ptr<fe::graph::Tensor_attributes> tensor(shared_ptr<fe::graph::Graph>& graph,
@@ -749,28 +750,419 @@ class AttentionGraphCache {
             attrs.set_alibi_mask(true);
     }
 
-    void finalize(BuiltGraph& built, int gpuNum) {
-        ScopedGpu scopedGpu(gpuNum);
-        Stream temporaryStream(gpuNum);
-        auto status = built.graph->build(temporaryStream.getCudnnHandle(), {fe::HeurMode_t::A});
-        if (!status.is_good())
-            throw runtime_error(
-                "Failed to build cuDNN Frontend SDPA graph with primary heuristics only "
-                "(Thor attention does not permit cuDNN fallback engines): " +
-                status.get_message());
-
-        int64_t workspaceBytes = 0;
-        status = built.graph->get_workspace_size(workspaceBytes);
-        if (!status.is_good())
-            throw runtime_error("Failed to query cuDNN Frontend SDPA workspace: " + status.get_message());
-
-        built.workspaceBytes = workspaceBytes;
+    static void checkStatus(fe::error_t status, const string& message) {
+        if (!status.is_good()) {
+            throw runtime_error(message + ": " + status.get_message());
+        }
     }
 
-    BuiltGraph buildForwardGraph(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
+    static constexpr size_t kAutotuneCandidateLimit = 16;
+
+    struct AutotuneBuffers {
+        vector<Tensor> tensors;
+        unordered_map<int64_t, void*> pack;
+    };
+
+    static uint64_t checkedMul(uint64_t lhs, uint64_t rhs, string_view label) {
+        if (lhs != 0 && rhs > numeric_limits<uint64_t>::max() / lhs) {
+            throw runtime_error("cuDNN attention autotune buffer size overflow for " + string(label) + ".");
+        }
+        return lhs * rhs;
+    }
+
+    static uint64_t storageElementsForSpec(const AttentionTensorSpec& spec, string_view label) {
+        if (spec.dimensions.size() != spec.strides.size() || spec.dimensions.empty()) {
+            throw runtime_error("cuDNN attention autotune requires a valid tensor spec for " + string(label) + ".");
+        }
+        uint64_t maxElement = 0;
+        for (size_t i = 0; i < spec.dimensions.size(); ++i) {
+            if (spec.dimensions[i] <= 0 || spec.strides[i] < 0) {
+                throw runtime_error("cuDNN attention autotune requires positive dimensions/non-negative strides for " +
+                                    string(label) + ".");
+            }
+            // A genuinely packed ragged tensor stores one packed token domain even
+            // though its semantic graph descriptor still carries B in dimension 0.
+            // Tune against a legal packed prefix whose total token count is <= S;
+            // ignoring the batch stride therefore matches the storage that cuDNN
+            // reaches through the synthetic ragged offsets below.  Legacy rank-4
+            // ragged storage is over-provisioned relative to this prefix, so this is
+            // safe for that representation too.
+            const uint64_t dim = (spec.ragged && i == 0) ? 1 : static_cast<uint64_t>(spec.dimensions[i]);
+            if (dim > 1) {
+                const uint64_t term = checkedMul(dim - 1, static_cast<uint64_t>(spec.strides[i]), label);
+                if (term > numeric_limits<uint64_t>::max() - maxElement) {
+                    throw runtime_error("cuDNN attention autotune buffer span overflow for " + string(label) + ".");
+                }
+                maxElement += term;
+            }
+        }
+        return maxElement + 1;
+    }
+
+    static Tensor& addRawBuffer(AutotuneBuffers& buffers,
+                                const TensorPlacement& placement,
+                                int64_t uid,
+                                uint64_t bytes,
+                                Stream stream,
+                                string_view label) {
+        if (bytes == 0) {
+            bytes = 1;
+        }
+        buffers.tensors.emplace_back(placement, TensorDescriptor(DataType::UINT8, {bytes}), 256);
+        Tensor& tensor = buffers.tensors.back();
+        tensor.memsetAsync(stream, 0);
+        buffers.pack[uid] = tensor.getMemPtr<void>();
+        (void)label;
+        return tensor;
+    }
+
+    static Tensor& addSpecBuffer(AutotuneBuffers& buffers,
+                                 const TensorPlacement& placement,
+                                 int64_t uid,
+                                 const AttentionTensorSpec& spec,
+                                 Stream stream,
+                                 string_view label) {
+        const uint64_t elements = storageElementsForSpec(spec, label);
+        const uint64_t bytes = TensorDescriptor::getArraySizeInBytes(elements, spec.dataType);
+        return addRawBuffer(buffers, placement, uid, bytes, stream, label);
+    }
+
+    static Tensor& addScalar(AutotuneBuffers& buffers,
+                             const TensorPlacement& placement,
+                             int64_t uid,
+                             DataType dtype,
+                             double value,
+                             Stream stream) {
+        buffers.tensors.emplace_back(placement, TensorDescriptor(dtype, {1}));
+        Tensor& tensor = buffers.tensors.back();
+        tensor.fill(value, stream);
+        buffers.pack[uid] = tensor.getMemPtr<void>();
+        return tensor;
+    }
+
+    static void uploadInt32(Tensor& tensor, const vector<int32_t>& values, Stream stream, string_view label) {
+        if (tensor.getDataType() != DataType::INT32 || tensor.getTotalNumElements() != values.size()) {
+            throw runtime_error("Invalid cuDNN attention autotune INT32 tensor for " + string(label) + ".");
+        }
+        const cudaError_t status = cudaMemcpyAsync(tensor.getMemPtr<int32_t>(),
+                                                   values.data(),
+                                                   values.size() * sizeof(int32_t),
+                                                   cudaMemcpyHostToDevice,
+                                                   stream.getStream());
+        if (status != cudaSuccess) {
+            throw runtime_error("Failed to upload cuDNN attention autotune metadata for " + string(label) + ": " +
+                                cudaGetErrorString(status));
+        }
+    }
+
+    static vector<int32_t> representativeSequenceLengths(int64_t batchSize, int64_t sequenceCapacity, bool packedRagged) {
+        if (batchSize <= 0 || sequenceCapacity <= 0 || batchSize > numeric_limits<int32_t>::max() ||
+            sequenceCapacity > numeric_limits<int32_t>::max()) {
+            throw runtime_error("cuDNN attention autotune sequence geometry must fit INT32.");
+        }
+        vector<int32_t> lengths(static_cast<size_t>(batchSize));
+        if (!packedRagged) {
+            fill(lengths.begin(), lengths.end(), static_cast<int32_t>(sequenceCapacity));
+            return lengths;
+        }
+        const int64_t base = sequenceCapacity / batchSize;
+        const int64_t remainder = sequenceCapacity % batchSize;
+        for (int64_t i = 0; i < batchSize; ++i) {
+            lengths[static_cast<size_t>(i)] = static_cast<int32_t>(base + (i < remainder ? 1 : 0));
+        }
+        return lengths;
+    }
+
+    static vector<int32_t> elementOffsets(const vector<int32_t>& lengths, int64_t elementsPerToken) {
+        if (elementsPerToken <= 0) {
+            throw runtime_error("cuDNN attention autotune elements-per-token must be positive.");
+        }
+        vector<int32_t> offsets(lengths.size() + 1, 0);
+        int64_t tokenOffset = 0;
+        for (size_t i = 0; i < lengths.size(); ++i) {
+            tokenOffset += lengths[i];
+            const int64_t elementOffset = tokenOffset * elementsPerToken;
+            if (elementOffset > numeric_limits<int32_t>::max()) {
+                throw runtime_error("cuDNN attention autotune ragged element offset exceeds INT32.");
+            }
+            offsets[i + 1] = static_cast<int32_t>(elementOffset);
+        }
+        return offsets;
+    }
+
+    static Tensor& addInt32Vector(AutotuneBuffers& buffers,
+                                  const TensorPlacement& placement,
+                                  int64_t uid,
+                                  const vector<int32_t>& values,
+                                  Stream stream,
+                                  string_view label) {
+        buffers.tensors.emplace_back(placement, TensorDescriptor(DataType::INT32, {values.size()}));
+        Tensor& tensor = buffers.tensors.back();
+        uploadInt32(tensor, values, stream, label);
+        buffers.pack[uid] = tensor.getMemPtr<void>();
+        return tensor;
+    }
+
+    static AutotuneBuffers makeAutotuneBuffers(const CudnnAttentionDescriptor& descriptor,
+                                               bool backward,
+                                               Stream stream) {
+        const int gpuNum = stream.getGpuNum();
+        const TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
+        AutotuneBuffers buffers;
+        buffers.tensors.reserve(40);
+
+        addSpecBuffer(buffers, placement, UID_Q, descriptor.q, stream, "q");
+        addSpecBuffer(buffers, placement, UID_K, descriptor.k, stream, "k");
+        addSpecBuffer(buffers, placement, UID_V, descriptor.v, stream, "v");
+        addSpecBuffer(buffers, placement, UID_O, descriptor.o, stream, "o");
+
+        const uint64_t statsElements = checkedMul(
+            checkedMul(static_cast<uint64_t>(descriptor.batchSize()), static_cast<uint64_t>(descriptor.queryHeads()), "stats"),
+            static_cast<uint64_t>(descriptor.queryLength()),
+            "stats");
+        if (descriptor.generateStats || backward) {
+            addRawBuffer(buffers,
+                         placement,
+                         UID_STATS,
+                         checkedMul(statsElements, sizeof(float), "stats"),
+                         stream,
+                         "stats");
+        }
+
+        if (descriptor.useBias) {
+            AttentionTensorSpec fallback;
+            const AttentionTensorSpec& biasSpec = scoreBiasSpecOrDefault(descriptor, descriptor.computeDataType, fallback);
+            addSpecBuffer(buffers, placement, UID_BIAS, biasSpec, stream, "bias");
+            if (backward) {
+                AttentionTensorSpec dBiasFallback;
+                const AttentionTensorSpec& dBiasSpec = scoreDBiasSpecOrDefault(descriptor, dBiasFallback);
+                addSpecBuffer(buffers, placement, UID_DBIA, dBiasSpec, stream, "dBias");
+            }
+        }
+
+        if (backward) {
+            addSpecBuffer(buffers, placement, UID_DO, descriptor.o, stream, "dO");
+            addSpecBuffer(buffers, placement, UID_DQ, descriptor.q, stream, "dQ");
+            addSpecBuffer(buffers, placement, UID_DK, descriptor.k, stream, "dK");
+            addSpecBuffer(buffers, placement, UID_DV, descriptor.v, stream, "dV");
+        }
+
+        const bool mixedSequenceDomains = backward && descriptor.q.ragged != descriptor.k.ragged;
+        const bool backendQueryRagged = descriptor.q.ragged || mixedSequenceDomains;
+        const bool backendKvRagged = descriptor.k.ragged || mixedSequenceDomains;
+        const bool backendOutputRagged = descriptor.o.ragged || mixedSequenceDomains;
+
+        const vector<int32_t> queryLengths = representativeSequenceLengths(
+            descriptor.batchSize(), descriptor.queryLength(), descriptor.q.ragged);
+        const vector<int32_t> kvLengths = representativeSequenceLengths(
+            descriptor.batchSize(), descriptor.keyValueLength(), descriptor.k.ragged);
+
+        if (descriptor.usePaddingMask) {
+            addInt32Vector(buffers, placement, UID_SEQ_Q, queryLengths, stream, "query sequence lengths");
+            addInt32Vector(buffers, placement, UID_SEQ_KV, kvLengths, stream, "key/value sequence lengths");
+        }
+
+        if (backendQueryRagged || backendOutputRagged) {
+            const vector<int32_t> backendQueryLengths = descriptor.q.ragged
+                                                           ? queryLengths
+                                                           : representativeSequenceLengths(
+                                                                 descriptor.batchSize(), descriptor.queryLength(), false);
+            if (backendQueryRagged) {
+                addInt32Vector(buffers,
+                               placement,
+                               UID_RAGGED_Q,
+                               elementOffsets(backendQueryLengths, descriptor.queryHeads() * descriptor.qkHeadDim()),
+                               stream,
+                               "query ragged offsets");
+            }
+            if (backendOutputRagged) {
+                addInt32Vector(buffers,
+                               placement,
+                               UID_RAGGED_O,
+                               elementOffsets(backendQueryLengths, descriptor.queryHeads() * descriptor.vHeadDim()),
+                               stream,
+                               "output ragged offsets");
+            }
+        }
+        if (backendKvRagged) {
+            const vector<int32_t> backendKvLengths = descriptor.k.ragged
+                                                        ? kvLengths
+                                                        : representativeSequenceLengths(
+                                                              descriptor.batchSize(), descriptor.keyValueLength(), false);
+            addInt32Vector(buffers,
+                           placement,
+                           UID_RAGGED_K,
+                           elementOffsets(backendKvLengths, descriptor.keyValueHeads() * descriptor.qkHeadDim()),
+                           stream,
+                           "key ragged offsets");
+            addInt32Vector(buffers,
+                           placement,
+                           UID_RAGGED_V,
+                           elementOffsets(backendKvLengths, descriptor.keyValueHeads() * descriptor.vHeadDim()),
+                           stream,
+                           "value ragged offsets");
+        }
+
+        if (descriptor.dropout.probability > 0.0f) {
+            if (descriptor.dropout.usePhilox) {
+                addScalar(buffers, placement, UID_DROPOUT_SEED, DataType::INT64, 0.0, stream);
+                addScalar(buffers, placement, UID_DROPOUT_OFFSET, DataType::INT64, 0.0, stream);
+            } else if (!backward) {
+                const uint64_t maskElements = checkedMul(
+                    checkedMul(checkedMul(static_cast<uint64_t>(descriptor.batchSize()),
+                                          static_cast<uint64_t>(descriptor.queryHeads()),
+                                          "dropout mask"),
+                               static_cast<uint64_t>(descriptor.queryLength()),
+                               "dropout mask"),
+                    static_cast<uint64_t>(descriptor.keyValueLength()),
+                    "dropout mask");
+                addRawBuffer(buffers, placement, UID_DROPOUT_MASK, max<uint64_t>(maskElements, 1), stream, "dropout mask");
+                addScalar(buffers, placement, UID_DROPOUT_SCALE, DataType::FP32, 1.0, stream);
+            }
+        }
+
+        if (!backward && descriptor.usePagedKvCache) {
+            const int64_t kPages = pagedKvPageCountForTable(descriptor, "page_table_k");
+            const int64_t vPages = pagedKvPageCountForTable(descriptor, "page_table_v");
+            addInt32Vector(buffers,
+                           placement,
+                           UID_PAGE_TABLE_K,
+                           vector<int32_t>(static_cast<size_t>(descriptor.batchSize() * kPages), 0),
+                           stream,
+                           "K page table");
+            addInt32Vector(buffers,
+                           placement,
+                           UID_PAGE_TABLE_V,
+                           vector<int32_t>(static_cast<size_t>(descriptor.batchSize() * vPages), 0),
+                           stream,
+                           "V page table");
+        }
+
+        if (descriptor.useFp8) {
+            if (!backward) {
+                for (const int64_t uid : {UID_DESCALE_Q, UID_DESCALE_K, UID_DESCALE_V, UID_DESCALE_S, UID_SCALE_S, UID_SCALE_O}) {
+                    addScalar(buffers, placement, uid, DataType::FP32, 1.0, stream);
+                }
+                addScalar(buffers, placement, UID_AMAX_S, DataType::FP32, 0.0, stream);
+                addScalar(buffers, placement, UID_AMAX_O, DataType::FP32, 0.0, stream);
+            } else {
+                for (const int64_t uid : {UID_DESCALE_Q,
+                                          UID_DESCALE_K,
+                                          UID_DESCALE_V,
+                                          UID_DESCALE_O,
+                                          UID_DESCALE_DO,
+                                          UID_DESCALE_S,
+                                          UID_DESCALE_DP,
+                                          UID_SCALE_S,
+                                          UID_SCALE_DQ,
+                                          UID_SCALE_DK,
+                                          UID_SCALE_DV,
+                                          UID_SCALE_DP}) {
+                    addScalar(buffers, placement, uid, DataType::FP32, 1.0, stream);
+                }
+                for (const int64_t uid : {UID_AMAX_DQ, UID_AMAX_DK, UID_AMAX_DV, UID_AMAX_DP}) {
+                    addScalar(buffers, placement, uid, DataType::FP32, 0.0, stream);
+                }
+            }
+        }
+
+        return buffers;
+    }
+
+    static CudnnFrontendPlanSelection selectAutotunedHeuristicB(const CudnnAttentionDescriptor& descriptor,
+                                                                 const CudnnFrontendGraphFactory& graphFactory,
+                                                                 Stream stream,
+                                                                 string_view passName) {
+        ScopedGpu scopedGpu(stream.getGpuNum());
+        shared_ptr<fe::graph::Graph> graph = graphFactory();
+        if (!graph || graph.use_count() != 1) {
+            throw runtime_error("cuDNN Frontend attention selection requires a pristine operation-local graph.");
+        }
+
+        const string operation = "SDPA " + string(passName);
+        checkStatus(graph->validate(), "Failed to validate cuDNN Frontend " + operation + " graph");
+        checkStatus(graph->build_operation_graph(stream.getCudnnHandle()),
+                    "Failed to build cuDNN Frontend " + operation + " operation graph");
+        checkStatus(graph->create_execution_plans({fe::HeurMode_t::B}),
+                    "Failed to enumerate cuDNN Frontend " + operation + " Mode-B heuristic execution plans");
+
+        const int64_t planCount = graph->get_execution_plan_count();
+        size_t builtCandidates = 0;
+        uint64_t autotuneWorkspaceBytes = 0;
+        string lastBuildFailure;
+        for (int64_t planIndex = 0; planIndex < planCount && builtCandidates < kAutotuneCandidateLimit; ++planIndex) {
+            auto status = graph->build_plan_at_index(stream.getCudnnHandle(), planIndex);
+            if (!status.is_good()) {
+                lastBuildFailure = status.get_message();
+                continue;
+            }
+            const int64_t candidateWorkspace = graph->get_workspace_size_plan_at_index(planIndex);
+            if (candidateWorkspace < 0) {
+                throw runtime_error("cuDNN Frontend " + operation +
+                                    " built a Mode-B candidate but returned a negative workspace requirement.");
+            }
+            autotuneWorkspaceBytes = max<uint64_t>(autotuneWorkspaceBytes, static_cast<uint64_t>(candidateWorkspace));
+            ++builtCandidates;
+        }
+
+        if (builtCandidates == 0) {
+            string message = "cuDNN Frontend " + operation +
+                             " produced no buildable Mode-B heuristic execution plan; Thor attention does not permit fallback engines.";
+            if (!lastBuildFailure.empty()) {
+                message += " Last build failure: " + lastBuildFailure;
+            }
+            throw runtime_error(message);
+        }
+
+        AutotuneBuffers buffers = makeAutotuneBuffers(descriptor, passName == "backward", stream);
+        Tensor autotuneWorkspace(TensorPlacement(TensorPlacement::MemDevices::GPU, stream.getGpuNum()),
+                                 TensorDescriptor(DataType::UINT8, {max<uint64_t>(autotuneWorkspaceBytes, 1)}),
+                                 256);
+        void* workspacePtr = autotuneWorkspaceBytes == 0 ? nullptr : autotuneWorkspace.getMemPtr<void>();
+
+        checkStatus(graph->autotune(stream.getCudnnHandle(), buffers.pack, workspacePtr),
+                    "Failed to autotune cuDNN Frontend " + operation + " Mode-B shortlist");
+        if (graph->get_execution_plan_count() <= 0) {
+            throw runtime_error("cuDNN Frontend " + operation +
+                                " autotune produced no successfully timed Mode-B execution plan.");
+        }
+        stream.synchronize();
+
+        // Frontend autotune reorders execution_plans by measured latency but does
+        // not keep the heuristic engine-config vector in lockstep.  Serialize the
+        // selected candidate itself so the global cache records the exact measured
+        // winner rather than a stale heuristic index.
+        return cudnnFrontendSelectedSerializedPlanSelection(*graph, operation);
+    }
+
+    CudnnFrontendPlanSelection select(const CudnnAttentionDescriptor& descriptor,
+                                      string_view passName,
+                                      Stream stream,
+                                      CudnnFrontendGraphFactory graphFactory) {
+        ScopedGpu scopedGpu(stream.getGpuNum());
+        const string key = descriptor.cacheKey(passName, stream.getGpuNum());
+        return selections.getOrSelect(key, [&]() {
+            return selectAutotunedHeuristicB(descriptor, graphFactory, stream, passName);
+        });
+    }
+
+    CudnnFrontendExecutablePlan prepare(const CudnnAttentionDescriptor& descriptor,
+                                        string_view passName,
+                                        Stream stream,
+                                        CudnnFrontendGraphFactory graphFactory) {
+        CudnnFrontendPlanSelection selection = select(descriptor, passName, stream, graphFactory);
+        return replayCudnnFrontendExecutablePlan(
+            graphFactory, selection, stream.getCudnnHandle(), "SDPA " + string(passName));
+    }
+
+    struct AttentionGraphDefinition {
+        shared_ptr<fe::graph::Graph> graph;
+    };
+
+    shared_ptr<fe::graph::Graph> makeForwardGraph(const CudnnAttentionDescriptor& descriptor) {
         descriptor.validateForward();
 
-        BuiltGraph built;
+        AttentionGraphDefinition built;
         built.graph = make_shared<fe::graph::Graph>();
         built.graph->set_io_data_type(toFrontendDataType(descriptor.q.dataType))
             .set_intermediate_data_type(toFrontendDataType(descriptor.intermediateDataType))
@@ -930,14 +1322,13 @@ class AttentionGraphCache {
                 .set_data_type(fe::DataType_t::FLOAT);
         }
 
-        finalize(built, gpuNum);
-        return built;
+        return built.graph;
     }
 
-    BuiltGraph buildBackwardGraph(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
+    shared_ptr<fe::graph::Graph> makeBackwardGraph(const CudnnAttentionDescriptor& descriptor) {
         descriptor.validateBackward();
 
-        BuiltGraph built;
+        AttentionGraphDefinition built;
         built.graph = make_shared<fe::graph::Graph>();
         built.graph->set_io_data_type(toFrontendDataType(descriptor.q.dataType))
             .set_intermediate_data_type(toFrontendDataType(descriptor.intermediateDataType))
@@ -1034,8 +1425,7 @@ class AttentionGraphCache {
                 .set_stride({1, 1, 1, 1})
                 .set_data_type(fe::DataType_t::FLOAT);
 
-            finalize(built, gpuNum);
-            return built;
+            return built.graph;
         }
 
         auto attrs = fe::graph::SDPA_backward_attributes()
@@ -1097,39 +1487,32 @@ class AttentionGraphCache {
         if (backendKvRagged)
             dV->set_ragged_offset(vRagged);
 
-        finalize(built, gpuNum);
-        return built;
+        return built.graph;
     }
 
-    mutable mutex mtx;
-    unordered_map<string, BuiltGraph> graphs;
+    static constexpr size_t kSelectionCacheCapacity = 4096;
+    CudnnFrontendPlanSelectionCache<string> selections{kSelectionCacheCapacity};
 };
 
-AttentionGraphCache& cache() {
-    static AttentionGraphCache c;
-    return c;
+AttentionPlanRepository& repository() {
+    static AttentionPlanRepository instance;
+    return instance;
 }
 
 void insertTensor(unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor& tensor) {
     pack[uid] = const_cast<void*>(static_cast<const void*>(tensor.getMemPtr<void>()));
 }
 
-void insertOptionalTensor(unordered_map<int64_t, void*>& pack, int64_t uid, const optional<Tensor>& tensor) {
-    if (tensor.has_value())
-        pack[uid] = const_cast<void*>(static_cast<const void*>(tensor.value().getMemPtr<void>()));
-}
-
-void executeGraph(BuiltGraph& built,
+void executeGraph(const CudnnFrontendExecutablePlan& executable,
                   unordered_map<int64_t, void*>& pack,
                   optional<Tensor>& workspace,
                   Stream stream,
                   string_view operationName) {
-    const uint64_t requiredBytes = checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, operationName);
+    const uint64_t requiredBytes = checkedCudnnWorkspaceSizeInBytes(executable.workspaceBytes(), operationName);
     void* workspacePointer = cudnnExecutionWorkspacePointer(workspace, requiredBytes, stream.getGpuNum(), operationName);
-    auto status = built.graph->execute(stream.getCudnnHandle(), pack, workspacePointer);
-    if (!status.is_good())
-        throw runtime_error("Failed to execute cuDNN Frontend SDPA graph: " + status.get_message());
+    executable.execute(stream.getCudnnHandle(), pack, workspacePointer);
 }
+
 
 }  // namespace
 
@@ -1403,13 +1786,48 @@ CudnnScaledDotProductAttention& CudnnScaledDotProductAttention::instance() {
     return executor;
 }
 
-void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& descriptor,
+CudnnAttentionExecutablePlan CudnnScaledDotProductAttention::prepareForward(const CudnnAttentionDescriptor& descriptor,
+                                                                              const CudnnAttentionForwardArgs& args,
+                                                                              Stream stream) {
+    CudnnAttentionDescriptor runtimeDescriptor =
+        descriptorWithRuntimeBiasSpec(descriptor, args.bias, attentionForwardBiasDataType(descriptor));
+    runtimeDescriptor.validateForward();
+    const int gpuNum = stream.getGpuNum();
+    CudnnFrontendExecutablePlan executable = repository().prepareForward(runtimeDescriptor, stream);
+    return CudnnAttentionExecutablePlan(runtimeDescriptor,
+                                        CudnnAttentionExecutablePlan::Pass::Forward,
+                                        gpuNum,
+                                        std::move(executable));
+}
+
+CudnnAttentionExecutablePlan CudnnScaledDotProductAttention::prepareBackward(const CudnnAttentionDescriptor& descriptor,
+                                                                               const CudnnAttentionBackwardArgs& args,
+                                                                               Stream stream) {
+    CudnnAttentionDescriptor runtimeDescriptor =
+        descriptorWithRuntimeBiasSpec(descriptor, args.bias, attentionForwardBiasDataType(descriptor));
+    runtimeDescriptor = descriptorWithRuntimeDBiasSpec(runtimeDescriptor, args.dBias);
+    runtimeDescriptor.validateBackward();
+    const int gpuNum = stream.getGpuNum();
+    CudnnFrontendExecutablePlan executable = repository().prepareBackward(runtimeDescriptor, stream);
+    return CudnnAttentionExecutablePlan(runtimeDescriptor,
+                                        CudnnAttentionExecutablePlan::Pass::Backward,
+                                        gpuNum,
+                                        std::move(executable));
+}
+
+void CudnnScaledDotProductAttention::forward(const CudnnAttentionExecutablePlan& plan,
                                              const CudnnAttentionForwardArgs& args,
                                              optional<Tensor>& workspace,
                                              Stream stream) {
-    CudnnAttentionDescriptor runtimeDescriptor = descriptorWithRuntimeBiasSpec(descriptor, args.bias, attentionForwardBiasDataType(descriptor));
+    if (!plan.isForward()) {
+        throw invalid_argument("cuDNN attention forward requires a forward executable plan.");
+    }
+    const CudnnAttentionDescriptor& runtimeDescriptor = plan.descriptor();
     runtimeDescriptor.validateForward();
     const int gpuNum = stream.getGpuNum();
+    if (gpuNum != plan.gpuNum()) {
+        throw invalid_argument("cuDNN attention forward executable plan cannot move between GPUs.");
+    }
     requireGpuTensor(args.q, "q", gpuNum);
     requireGpuTensor(args.k, "k", gpuNum);
     requireGpuTensor(args.v, "v", gpuNum);
@@ -1419,7 +1837,6 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
     requireTensorMatchesSpec(args.v, runtimeDescriptor.v, "v");
     requireTensorMatchesSpec(args.o, runtimeDescriptor.o, "o");
 
-    BuiltGraph& graph = cache().getOrBuildForward(runtimeDescriptor, gpuNum);
     unordered_map<int64_t, void*> pack;
     insertTensor(pack, UID_Q, args.q);
     insertTensor(pack, UID_K, args.k);
@@ -1476,7 +1893,7 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
         }
     }
     if (runtimeDescriptor.dropout.probability > 0.0f) {
-        if (descriptor.dropout.usePhilox) {
+        if (runtimeDescriptor.dropout.usePhilox) {
             requireOptionalGpuTensor(args.dropoutSeed, "dropoutSeed", gpuNum);
             requireOptionalGpuTensor(args.dropoutOffset, "dropoutOffset", gpuNum);
             requireDropoutScalarMatchesDescriptor(args.dropoutSeed.value(), "dropoutSeed");
@@ -1498,7 +1915,7 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
         insertTensor(pack, UID_PAGE_TABLE_K, args.pageTableK.value());
         insertTensor(pack, UID_PAGE_TABLE_V, args.pageTableV.value());
     }
-    if (descriptor.useFp8) {
+    if (runtimeDescriptor.useFp8) {
         requireOptionalGpuTensor(args.descaleQ, "descaleQ", gpuNum);
         requireOptionalGpuTensor(args.descaleK, "descaleK", gpuNum);
         requireOptionalGpuTensor(args.descaleV, "descaleV", gpuNum);
@@ -1525,17 +1942,22 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionDescriptor& des
         insertTensor(pack, UID_AMAX_O, args.amaxO.value());
     }
 
-    executeGraph(graph, pack, workspace, stream, "SDPA forward");
+    executeGraph(plan.executable_, pack, workspace, stream, "SDPA forward");
 }
 
-void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& descriptor,
+void CudnnScaledDotProductAttention::backward(const CudnnAttentionExecutablePlan& plan,
                                               const CudnnAttentionBackwardArgs& args,
                                               optional<Tensor>& workspace,
                                               Stream stream) {
-    CudnnAttentionDescriptor runtimeDescriptor = descriptorWithRuntimeBiasSpec(descriptor, args.bias, attentionForwardBiasDataType(descriptor));
-    runtimeDescriptor = descriptorWithRuntimeDBiasSpec(runtimeDescriptor, args.dBias);
+    if (!plan.isBackward()) {
+        throw invalid_argument("cuDNN attention backward requires a backward executable plan.");
+    }
+    const CudnnAttentionDescriptor& runtimeDescriptor = plan.descriptor();
     runtimeDescriptor.validateBackward();
     const int gpuNum = stream.getGpuNum();
+    if (gpuNum != plan.gpuNum()) {
+        throw invalid_argument("cuDNN attention backward executable plan cannot move between GPUs.");
+    }
     requireGpuTensor(args.q, "q", gpuNum);
     requireGpuTensor(args.k, "k", gpuNum);
     requireGpuTensor(args.v, "v", gpuNum);
@@ -1546,7 +1968,6 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& de
     requireGpuTensor(args.dK, "dK", gpuNum);
     requireGpuTensor(args.dV, "dV", gpuNum);
 
-    BuiltGraph& graph = cache().getOrBuildBackward(runtimeDescriptor, gpuNum);
     unordered_map<int64_t, void*> pack;
     insertTensor(pack, UID_Q, args.q);
     insertTensor(pack, UID_K, args.k);
@@ -1608,7 +2029,7 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& de
             insertTensor(pack, UID_RAGGED_O, args.raggedScratch->oElementOffsets);
         }
     }
-    if (descriptor.dropout.probability > 0.0f && descriptor.dropout.usePhilox) {
+    if (runtimeDescriptor.dropout.probability > 0.0f && runtimeDescriptor.dropout.usePhilox) {
         requireOptionalGpuTensor(args.dropoutSeed, "dropoutSeed", gpuNum);
         requireOptionalGpuTensor(args.dropoutOffset, "dropoutOffset", gpuNum);
         requireDropoutScalarMatchesDescriptor(args.dropoutSeed.value(), "dropoutSeed");
@@ -1616,7 +2037,7 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& de
         insertTensor(pack, UID_DROPOUT_SEED, args.dropoutSeed.value());
         insertTensor(pack, UID_DROPOUT_OFFSET, args.dropoutOffset.value());
     }
-    if (descriptor.useFp8) {
+    if (runtimeDescriptor.useFp8) {
         requireOptionalGpuTensor(args.descaleQ, "descaleQ", gpuNum);
         requireOptionalGpuTensor(args.descaleK, "descaleK", gpuNum);
         requireOptionalGpuTensor(args.descaleV, "descaleV", gpuNum);
@@ -1667,17 +2088,17 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionDescriptor& de
         insertTensor(pack, UID_AMAX_DP, args.amaxDP.value());
     }
 
-    executeGraph(graph, pack, workspace, stream, "SDPA backward");
+    executeGraph(plan.executable_, pack, workspace, stream, "SDPA backward");
 }
 
 uint64_t CudnnScaledDotProductAttention::forwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
-    const BuiltGraph& built = cache().getOrBuildForward(descriptor, gpuNum);
-    return checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "SDPA forward");
+    const CudnnFrontendPlanSelection selection = repository().selectForward(descriptor, gpuNum);
+    return selection.expected_workspace_bytes;
 }
 
 uint64_t CudnnScaledDotProductAttention::backwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
-    const BuiltGraph& built = cache().getOrBuildBackward(descriptor, gpuNum);
-    return checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "SDPA backward");
+    const CudnnFrontendPlanSelection selection = repository().selectBackward(descriptor, gpuNum);
+    return selection.expected_workspace_bytes;
 }
 
 uint64_t CudnnScaledDotProductAttention::forwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor,
@@ -1698,15 +2119,19 @@ uint64_t CudnnScaledDotProductAttention::backwardWorkspaceSizeInBytes(const Cudn
 }
 
 void CudnnScaledDotProductAttention::warmForward(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
-    (void)forwardWorkspaceSizeInBytes(descriptor, gpuNum);
+    (void)repository().selectForward(descriptor, gpuNum);
 }
 
 void CudnnScaledDotProductAttention::warmBackward(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
-    (void)backwardWorkspaceSizeInBytes(descriptor, gpuNum);
+    (void)repository().selectBackward(descriptor, gpuNum);
 }
 
-void CudnnScaledDotProductAttention::clearCache() { cache().clear(); }
+void CudnnScaledDotProductAttention::clearSelectionCache() { repository().clear(); }
 
-size_t CudnnScaledDotProductAttention::cachedGraphCount() const { return cache().size(); }
+size_t CudnnScaledDotProductAttention::cachedSelectionCount() const { return repository().size(); }
+
+uint64_t CudnnScaledDotProductAttention::selectionCacheHitCount() const { return repository().hitCount(); }
+
+uint64_t CudnnScaledDotProductAttention::selectionCacheMissCount() const { return repository().missCount(); }
 
 bool CudnnScaledDotProductAttention::frontendAvailable() { return true; }

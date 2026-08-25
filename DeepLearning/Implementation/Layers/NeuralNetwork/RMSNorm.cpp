@@ -239,11 +239,15 @@ void RMSNorm::compileImpl() {
     saveInvVariance.clear();
     scratchDScale.clear();
     scratchErrorOutput.reset();
+    forwardExecutablePlans.clear();
+    backwardExecutablePlans.clear();
     forwardWorkspaces.clear();
     backwardWorkspaces.clear();
 
     saveInvVariance.reserve(featureInputs.size());
     scratchDScale.reserve(featureInputs.size());
+    forwardExecutablePlans.reserve(featureInputs.size());
+    backwardExecutablePlans.reserve(featureInputs.size());
     forwardWorkspaces.reserve(featureInputs.size());
     backwardWorkspaces.reserve(featureInputs.size());
 
@@ -264,6 +268,8 @@ void RMSNorm::compileImpl() {
             }
         }
 
+        optional<CudnnRmsNormExecutablePlan> forwardPlan = nullopt;
+        optional<CudnnRmsNormExecutablePlan> backwardPlan = nullopt;
         optional<Tensor> forwardWorkspace = nullopt;
         optional<Tensor> backwardWorkspace = nullopt;
         if (featureInputs[i].has_value() && featureOutputs[i].has_value()) {
@@ -279,20 +285,20 @@ void RMSNorm::compileImpl() {
             forwardDescriptor.epsilon = static_cast<float>(epsilon);
             forwardDescriptor.training = !isInferenceOnly();
             forwardDescriptor.fusedActivation = fusedActivation;
-            const uint64_t forwardWorkspaceBytes =
-                CudnnRmsNorm::instance().forwardWorkspaceSizeInBytes(forwardDescriptor, placement.getDeviceNum());
-            forwardWorkspace = allocateRmsNormWorkspace(placement, forwardWorkspaceBytes);
+            forwardPlan.emplace(CudnnRmsNorm::instance().prepareForward(forwardDescriptor, streams[i]));
+            forwardWorkspace = allocateRmsNormWorkspace(placement, forwardPlan->workspaceBytes());
 
             if (!isInferenceOnly() && errorInputs.size() > i && errorInputs[i].has_value()) {
                 CudnnRmsNormDescriptor backwardDescriptor = forwardDescriptor;
                 backwardDescriptor.outputDataType = errorInputs[i].value().getDataType();
                 backwardDescriptor.training = true;
                 backwardDescriptor.fusedActivation = CudnnRmsNormFusedActivation::NONE;
-                const uint64_t backwardWorkspaceBytes =
-                    CudnnRmsNorm::instance().backwardWorkspaceSizeInBytes(backwardDescriptor, placement.getDeviceNum());
-                backwardWorkspace = allocateRmsNormWorkspace(placement, backwardWorkspaceBytes);
+                backwardPlan.emplace(CudnnRmsNorm::instance().prepareBackward(backwardDescriptor, streams[i]));
+                backwardWorkspace = allocateRmsNormWorkspace(placement, backwardPlan->workspaceBytes());
             }
         }
+        forwardExecutablePlans.emplace_back(std::move(forwardPlan));
+        backwardExecutablePlans.emplace_back(std::move(backwardPlan));
         forwardWorkspaces.emplace_back(std::move(forwardWorkspace));
         backwardWorkspaces.emplace_back(std::move(backwardWorkspace));
     }
@@ -302,6 +308,8 @@ void RMSNorm::cleanup() {
     saveInvVariance.clear();
     scratchDScale.clear();
     scratchErrorOutput.reset();
+    forwardExecutablePlans.clear();
+    backwardExecutablePlans.clear();
     forwardWorkspaces.clear();
     backwardWorkspaces.clear();
     Layer::cleanup();
@@ -317,17 +325,6 @@ void RMSNorm::computeFeatureOut(uint32_t connectionNumber) {
     THOR_THROW_IF_FALSE(output.getDescriptor() == input.getDescriptor());
     THOR_THROW_IF_FALSE(output.getPlacement() == input.getPlacement());
 
-    CudnnRmsNormDescriptor descriptor;
-    descriptor.outerSize = computeOuterSize(input);
-    descriptor.normalizedFeatureCount = normalizedFeatureCount;
-    descriptor.inputDataType = input.getDataType();
-    descriptor.outputDataType = output.getDataType();
-    descriptor.parameterDataType = parameterDataType;
-    descriptor.computeDataType = DataType::FP32;
-    descriptor.epsilon = static_cast<float>(epsilon);
-    descriptor.training = !isInferenceOnly();
-    descriptor.fusedActivation = fusedActivation;
-
     CudnnRmsNormForwardArgs args;
     args.x = input;
     args.scale = weights;
@@ -336,8 +333,11 @@ void RMSNorm::computeFeatureOut(uint32_t connectionNumber) {
         args.invVariance = saveInvVariance[connectionNumber];
     }
 
+    THOR_THROW_IF_FALSE(connectionNumber < forwardExecutablePlans.size());
+    THOR_THROW_IF_FALSE(forwardExecutablePlans[connectionNumber].has_value());
     THOR_THROW_IF_FALSE(connectionNumber < forwardWorkspaces.size());
-    CudnnRmsNorm::instance().forward(descriptor, args, forwardWorkspaces[connectionNumber], streams[connectionNumber]);
+    CudnnRmsNorm::instance().forward(
+        forwardExecutablePlans[connectionNumber].value(), args, forwardWorkspaces[connectionNumber], streams[connectionNumber]);
 }
 
 optional<Event> RMSNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
@@ -377,16 +377,6 @@ optional<Event> RMSNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t c
     }
 
     const Tensor& input = featureInputs[connectionNumber].value();
-    CudnnRmsNormDescriptor descriptor;
-    descriptor.outerSize = computeOuterSize(input);
-    descriptor.normalizedFeatureCount = normalizedFeatureCount;
-    descriptor.inputDataType = input.getDataType();
-    descriptor.outputDataType = errorInputs[connectionNumber].value().getDataType();
-    descriptor.parameterDataType = parameterDataType;
-    descriptor.computeDataType = DataType::FP32;
-    descriptor.epsilon = static_cast<float>(epsilon);
-    descriptor.training = true;
-
     CudnnRmsNormBackwardArgs args;
     args.dy = errorInputs[connectionNumber].value();
     args.x = input;
@@ -395,8 +385,11 @@ optional<Event> RMSNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t c
     args.dx = errorOut.value();
     args.dscale = dscaleOutput;
 
+    THOR_THROW_IF_FALSE(connectionNumber < backwardExecutablePlans.size());
+    THOR_THROW_IF_FALSE(backwardExecutablePlans[connectionNumber].has_value());
     THOR_THROW_IF_FALSE(connectionNumber < backwardWorkspaces.size());
-    CudnnRmsNorm::instance().backward(descriptor, args, backwardWorkspaces[connectionNumber], executionStream);
+    CudnnRmsNorm::instance().backward(
+        backwardExecutablePlans[connectionNumber].value(), args, backwardWorkspaces[connectionNumber], executionStream);
 
     if (needWeightsGradient && !clearWeightsGradientFirstIfFused) {
         launchAccumulateBatchNormGradientFp32(weightsGradient->getMemPtr<float>(),

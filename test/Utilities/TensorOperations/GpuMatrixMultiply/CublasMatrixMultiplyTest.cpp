@@ -3829,26 +3829,26 @@ TEST(CublasMatrixMultiply, StridedBatchedGemmSupportsTransposeAndZeroStrideBroad
         workspace = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {workspaceSize}));
     }
 
-    CublasKernel cachedKernel = CublasMatrixMultiply::instance().getCachedGemmKernel(0,
-                                                                                     rowsA,
-                                                                                     colsA,
-                                                                                     rowsB,
-                                                                                     colsB,
-                                                                                     ldA,
-                                                                                     ldB,
-                                                                                     ldC,
-                                                                                     ldD,
-                                                                                     true,
-                                                                                     false,
-                                                                                     false,
-                                                                                     dataTypes,
-                                                                                     true,
-                                                                                     batchConfig);
+    CublasKernel materializedKernel = CublasMatrixMultiply::instance().materializeSelectedGemmKernel(0,
+                                                                                                      rowsA,
+                                                                                                      colsA,
+                                                                                                      rowsB,
+                                                                                                      colsB,
+                                                                                                      ldA,
+                                                                                                      ldB,
+                                                                                                      ldC,
+                                                                                                      ldD,
+                                                                                                      true,
+                                                                                                      false,
+                                                                                                      false,
+                                                                                                      dataTypes,
+                                                                                                      true,
+                                                                                                      batchConfig);
     int32_t descriptorBatchCount = 0;
     int64_t descriptorStrideA = -1;
     int64_t descriptorStrideB = -1;
     size_t sizeWritten = 0;
-    ASSERT_EQ(cublasLtMatrixLayoutGetAttribute(cachedKernel.getADesc(),
+    ASSERT_EQ(cublasLtMatrixLayoutGetAttribute(materializedKernel.getADesc(),
                                                CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
                                                &descriptorBatchCount,
                                                sizeof(descriptorBatchCount),
@@ -3856,14 +3856,14 @@ TEST(CublasMatrixMultiply, StridedBatchedGemmSupportsTransposeAndZeroStrideBroad
               CUBLAS_STATUS_SUCCESS);
     ASSERT_EQ(sizeWritten, sizeof(descriptorBatchCount));
     ASSERT_EQ(descriptorBatchCount, batchCount);
-    ASSERT_EQ(cublasLtMatrixLayoutGetAttribute(cachedKernel.getADesc(),
+    ASSERT_EQ(cublasLtMatrixLayoutGetAttribute(materializedKernel.getADesc(),
                                                CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
                                                &descriptorStrideA,
                                                sizeof(descriptorStrideA),
                                                &sizeWritten),
               CUBLAS_STATUS_SUCCESS);
     ASSERT_EQ(descriptorStrideA, strideA);
-    ASSERT_EQ(cublasLtMatrixLayoutGetAttribute(cachedKernel.getBDesc(),
+    ASSERT_EQ(cublasLtMatrixLayoutGetAttribute(materializedKernel.getBDesc(),
                                                CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET,
                                                &descriptorStrideB,
                                                sizeof(descriptorStrideB),

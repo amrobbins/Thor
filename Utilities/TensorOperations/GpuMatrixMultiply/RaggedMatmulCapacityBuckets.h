@@ -38,9 +38,10 @@ namespace ThorImplementation {
 /**
  * Build the packed-row capacity classes used by ragged RMSNorm.
  *
- * RMSNorm mirrors the GEMM bucket schedule exactly.  Cached cuDNN graphs remain
- * bucket-specific, while each placed/stamped RMSNorm owns one execution
- * workspace sized to the maximum requirement across its bucket family.
+ * RMSNorm mirrors the GEMM bucket schedule exactly.  Global cuDNN state is
+ * selection-only for each bucket, while every placed/stamped RMSNorm owns a
+ * private executable for each bucket and one execution workspace sized to the
+ * maximum requirement across its local family.
  */
 [[nodiscard]] std::vector<uint64_t> makeRaggedRmsNormCapacityBuckets(uint64_t fullCapacityRows);
 

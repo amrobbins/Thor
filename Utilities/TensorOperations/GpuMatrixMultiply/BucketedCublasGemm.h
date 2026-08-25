@@ -67,6 +67,8 @@ class BucketedCublasGemm {
     [[nodiscard]] uint64_t getSelectedCapacityRows(uint64_t activeRows) const;
     [[nodiscard]] BucketedCublasGemmShape getSelectedShape(uint64_t activeRows) const;
     [[nodiscard]] CublasKernelRequirement getSelectedKernelRequirement(uint64_t activeRows) const;
+    [[nodiscard]] CublasKernelSelection getSelectedKernelSelectionForTests(uint64_t activeRows) const;
+    [[nodiscard]] uintptr_t getSelectedExecutionStateIdForTests(uint64_t activeRows) const;
     [[nodiscard]] uint64_t getWorkspaceSizeInBytes() const { return workspaceSizeInBytes; }
 
     cublasStatus_t launchUncheckedPrevalidated(uint64_t activeRows,

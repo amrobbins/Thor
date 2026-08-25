@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Common/CudnnFrontendPlan.h"
 #include "Utilities/Common/Stream.h"
 
 #include <array>
@@ -9,6 +10,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 
 namespace ThorImplementation {
 
@@ -39,7 +42,6 @@ struct CudnnLayerNormDescriptor {
     bool training = true;
     std::string debugName = "thor_layer_norm";
 
-
     // Optional explicit cuDNN 4-D physical view. When unset, Thor uses the
     // legacy contiguous [outer, hidden, 1, 1] view. T8C uses this to expose
     // retained padded ragged storage directly as [B,C,1,W], with statistics
@@ -63,7 +65,7 @@ struct CudnnLayerNormForwardArgs {
     Tensor bias;
     Tensor y;
 
-    // Required when descriptor.training is true.  FP32 tensors with outerSize elements.
+    // Required when descriptor.training is true. FP32 tensors with outerSize elements.
     std::optional<Tensor> mean;
     std::optional<Tensor> invVariance;
 };
@@ -79,35 +81,80 @@ struct CudnnLayerNormBackwardArgs {
     Tensor dbias;
 };
 
+/**
+ * One finalized LayerNorm execution plan owned by one independently executable
+ * LayerNorm operation/connection.  The descriptor is retained locally so
+ * execution can validate its tensor pack without consulting process-global
+ * state.  The underlying Frontend executable is move-only and operation-local.
+ */
+class CudnnLayerNormExecutablePlan final : public AcceleratorBackendLocalExecutionStateTag {
+   public:
+    CudnnLayerNormExecutablePlan(const CudnnLayerNormExecutablePlan&) = delete;
+    CudnnLayerNormExecutablePlan& operator=(const CudnnLayerNormExecutablePlan&) = delete;
+    CudnnLayerNormExecutablePlan(CudnnLayerNormExecutablePlan&&) noexcept = default;
+    CudnnLayerNormExecutablePlan& operator=(CudnnLayerNormExecutablePlan&&) noexcept = default;
+    ~CudnnLayerNormExecutablePlan() = default;
+
+    [[nodiscard]] const CudnnLayerNormDescriptor& descriptor() const noexcept { return descriptor_; }
+    [[nodiscard]] const CudnnFrontendPlanSelection& selection() const noexcept { return executable_.selection(); }
+    [[nodiscard]] uint64_t workspaceBytes() const noexcept { return executable_.workspaceBytes(); }
+    [[nodiscard]] uintptr_t executableId() const noexcept { return executable_.executableId(); }
+    [[nodiscard]] int gpuNum() const noexcept { return gpu_num_; }
+    [[nodiscard]] bool isForward() const noexcept { return pass_ == Pass::Forward; }
+    [[nodiscard]] bool isBackward() const noexcept { return pass_ == Pass::Backward; }
+
+   private:
+    enum class Pass { Forward, Backward };
+
+    CudnnLayerNormExecutablePlan(CudnnLayerNormDescriptor descriptor,
+                                 Pass pass,
+                                 int gpuNum,
+                                 CudnnFrontendExecutablePlan executable)
+        : descriptor_(std::move(descriptor)), pass_(pass), gpu_num_(gpuNum), executable_(std::move(executable)) {}
+
+    CudnnLayerNormDescriptor descriptor_;
+    Pass pass_;
+    int gpu_num_ = -1;
+    CudnnFrontendExecutablePlan executable_;
+
+    friend class CudnnLayerNorm;
+};
+
 class CudnnLayerNorm {
    public:
     static CudnnLayerNorm& instance();
 
-    void forward(const CudnnLayerNormDescriptor& descriptor,
+    // Preparation is the only phase allowed to consult the process-global
+    // selection cache or construct a Frontend executable graph. Each call
+    // returns a new operation-local finalized executable.
+    [[nodiscard]] CudnnLayerNormExecutablePlan prepareForward(const CudnnLayerNormDescriptor& descriptor, Stream stream);
+    [[nodiscard]] CudnnLayerNormExecutablePlan prepareBackward(const CudnnLayerNormDescriptor& descriptor, Stream stream);
+
+    void forward(const CudnnLayerNormExecutablePlan& plan,
                  const CudnnLayerNormForwardArgs& args,
                  std::optional<Tensor>& workspace,
                  Stream stream);
-    void backward(const CudnnLayerNormDescriptor& descriptor,
+    void backward(const CudnnLayerNormExecutablePlan& plan,
                   const CudnnLayerNormBackwardArgs& args,
                   std::optional<Tensor>& workspace,
                   Stream stream);
 
-    // Build/lookup the compatible cached graph and report its cuDNN execution
-    // workspace requirement. The returned byte count is immutable graph metadata;
-    // execution workspace itself belongs to the placed/stamped caller.
-    [[nodiscard]] uint64_t forwardWorkspaceSizeInBytes(const CudnnLayerNormDescriptor& descriptor, int gpuNum);
-    [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes(const CudnnLayerNormDescriptor& descriptor, int gpuNum);
-
-    void warmForward(const CudnnLayerNormDescriptor& descriptor, int gpuNum);
-    void warmBackward(const CudnnLayerNormDescriptor& descriptor, int gpuNum);
-
-    void clearCache();
-    size_t cachedGraphCount() const;
+    // These diagnostics describe immutable global selection recipes only.
+    void clearSelectionCache();
+    [[nodiscard]] size_t cachedSelectionCount() const;
+    [[nodiscard]] uint64_t selectionCacheHitCount() const;
+    [[nodiscard]] uint64_t selectionCacheMissCount() const;
 
     static bool frontendAvailable();
 
    private:
     CudnnLayerNorm() = default;
 };
+
+static_assert(AcceleratorBackendLocalExecutionState<CudnnLayerNormExecutablePlan>);
+static_assert(!std::is_copy_constructible_v<CudnnLayerNormExecutablePlan>);
+static_assert(!std::is_copy_assignable_v<CudnnLayerNormExecutablePlan>);
+static_assert(std::is_move_constructible_v<CudnnLayerNormExecutablePlan>);
+static_assert(std::is_move_assignable_v<CudnnLayerNormExecutablePlan>);
 
 }  // namespace ThorImplementation

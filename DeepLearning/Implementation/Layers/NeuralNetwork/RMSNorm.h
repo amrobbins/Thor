@@ -65,9 +65,11 @@ class RMSNorm : public TrainableLayer {
     std::vector<Tensor> saveInvVariance;
     std::vector<Tensor> scratchDScale;
     std::optional<Tensor> scratchErrorOutput;
-    // RMSNorm instances may have multiple independently scheduled connections.
-    // Each connection owns its own cuDNN execution scratch so compatible graph
-    // cache entries can be shared without aliasing mutable workspace.
+    // Every independently scheduled connection owns its own finalized cuDNN
+    // Frontend executable(s) and scratch. Equivalent connections may share only
+    // immutable process-global selection recipes.
+    std::vector<std::optional<CudnnRmsNormExecutablePlan>> forwardExecutablePlans;
+    std::vector<std::optional<CudnnRmsNormExecutablePlan>> backwardExecutablePlans;
     std::vector<std::optional<Tensor>> forwardWorkspaces;
     std::vector<std::optional<Tensor>> backwardWorkspaces;
 };

@@ -226,6 +226,8 @@ void LayerNorm::compileImpl() {
     scratchDScale.clear();
     scratchDBias.clear();
     scratchErrorOutput.reset();
+    forwardPlans.clear();
+    backwardPlans.clear();
     forwardWorkspaces.clear();
     backwardWorkspaces.clear();
 
@@ -233,6 +235,8 @@ void LayerNorm::compileImpl() {
     saveInvVariance.reserve(featureInputs.size());
     scratchDScale.reserve(featureInputs.size());
     scratchDBias.reserve(featureInputs.size());
+    forwardPlans.reserve(featureInputs.size());
+    backwardPlans.reserve(featureInputs.size());
     forwardWorkspaces.reserve(featureInputs.size());
     backwardWorkspaces.reserve(featureInputs.size());
 
@@ -255,6 +259,8 @@ void LayerNorm::compileImpl() {
             }
         }
 
+        optional<CudnnLayerNormExecutablePlan> forwardPlan = nullopt;
+        optional<CudnnLayerNormExecutablePlan> backwardPlan = nullopt;
         optional<Tensor> forwardWorkspace = nullopt;
         optional<Tensor> backwardWorkspace = nullopt;
         if (featureInputs[i].has_value() && featureOutputs[i].has_value()) {
@@ -270,19 +276,19 @@ void LayerNorm::compileImpl() {
             forwardDescriptor.computeDataType = DataType::FP32;
             forwardDescriptor.epsilon = static_cast<float>(epsilon);
             forwardDescriptor.training = !isInferenceOnly();
-            const uint64_t forwardWorkspaceBytes =
-                CudnnLayerNorm::instance().forwardWorkspaceSizeInBytes(forwardDescriptor, placement.getDeviceNum());
-            forwardWorkspace = allocateLayerNormWorkspace(placement, forwardWorkspaceBytes);
+            forwardPlan.emplace(CudnnLayerNorm::instance().prepareForward(forwardDescriptor, streams[i]));
+            forwardWorkspace = allocateLayerNormWorkspace(placement, forwardPlan->workspaceBytes());
 
             if (!isInferenceOnly() && errorInputs.size() > i && errorInputs[i].has_value()) {
                 CudnnLayerNormDescriptor backwardDescriptor = forwardDescriptor;
                 backwardDescriptor.outputDataType = errorInputs[i].value().getDataType();
                 backwardDescriptor.training = true;
-                const uint64_t backwardWorkspaceBytes =
-                    CudnnLayerNorm::instance().backwardWorkspaceSizeInBytes(backwardDescriptor, placement.getDeviceNum());
-                backwardWorkspace = allocateLayerNormWorkspace(placement, backwardWorkspaceBytes);
+                backwardPlan.emplace(CudnnLayerNorm::instance().prepareBackward(backwardDescriptor, streams[i]));
+                backwardWorkspace = allocateLayerNormWorkspace(placement, backwardPlan->workspaceBytes());
             }
         }
+        forwardPlans.emplace_back(std::move(forwardPlan));
+        backwardPlans.emplace_back(std::move(backwardPlan));
         forwardWorkspaces.emplace_back(std::move(forwardWorkspace));
         backwardWorkspaces.emplace_back(std::move(backwardWorkspace));
     }
@@ -294,6 +300,8 @@ void LayerNorm::cleanup() {
     scratchDScale.clear();
     scratchDBias.clear();
     scratchErrorOutput.reset();
+    forwardPlans.clear();
+    backwardPlans.clear();
     forwardWorkspaces.clear();
     backwardWorkspaces.clear();
     Layer::cleanup();
@@ -309,16 +317,6 @@ void LayerNorm::computeFeatureOut(uint32_t connectionNumber) {
     THOR_THROW_IF_FALSE(output.getDescriptor() == input.getDescriptor());
     THOR_THROW_IF_FALSE(output.getPlacement() == input.getPlacement());
 
-    CudnnLayerNormDescriptor descriptor;
-    descriptor.outerSize = computeOuterSize(input);
-    descriptor.normalizedFeatureCount = normalizedFeatureCount;
-    descriptor.inputDataType = input.getDataType();
-    descriptor.outputDataType = output.getDataType();
-    descriptor.parameterDataType = parameterDataType;
-    descriptor.computeDataType = DataType::FP32;
-    descriptor.epsilon = static_cast<float>(epsilon);
-    descriptor.training = !isInferenceOnly();
-
     CudnnLayerNormForwardArgs args;
     args.x = input;
     args.scale = weights;
@@ -329,8 +327,11 @@ void LayerNorm::computeFeatureOut(uint32_t connectionNumber) {
         args.invVariance = saveInvVariance[connectionNumber];
     }
 
+    THOR_THROW_IF_FALSE(connectionNumber < forwardPlans.size());
+    THOR_THROW_IF_FALSE(forwardPlans[connectionNumber].has_value());
     THOR_THROW_IF_FALSE(connectionNumber < forwardWorkspaces.size());
-    CudnnLayerNorm::instance().forward(descriptor, args, forwardWorkspaces[connectionNumber], streams[connectionNumber]);
+    CudnnLayerNorm::instance().forward(
+        forwardPlans[connectionNumber].value(), args, forwardWorkspaces[connectionNumber], streams[connectionNumber]);
 }
 
 optional<Event> LayerNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t connectionNumber,
@@ -384,16 +385,6 @@ optional<Event> LayerNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t
     }
 
     const Tensor& input = featureInputs[connectionNumber].value();
-    CudnnLayerNormDescriptor descriptor;
-    descriptor.outerSize = computeOuterSize(input);
-    descriptor.normalizedFeatureCount = normalizedFeatureCount;
-    descriptor.inputDataType = input.getDataType();
-    descriptor.outputDataType = errorInputs[connectionNumber].value().getDataType();
-    descriptor.parameterDataType = parameterDataType;
-    descriptor.computeDataType = DataType::FP32;
-    descriptor.epsilon = static_cast<float>(epsilon);
-    descriptor.training = true;
-
     CudnnLayerNormBackwardArgs args;
     args.dy = errorInputs[connectionNumber].value();
     args.x = input;
@@ -404,8 +395,11 @@ optional<Event> LayerNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t
     args.dscale = dscaleOutput;
     args.dbias = dbiasOutput;
 
+    THOR_THROW_IF_FALSE(connectionNumber < backwardPlans.size());
+    THOR_THROW_IF_FALSE(backwardPlans[connectionNumber].has_value());
     THOR_THROW_IF_FALSE(connectionNumber < backwardWorkspaces.size());
-    CudnnLayerNorm::instance().backward(descriptor, args, backwardWorkspaces[connectionNumber], executionStream);
+    CudnnLayerNorm::instance().backward(
+        backwardPlans[connectionNumber].value(), args, backwardWorkspaces[connectionNumber], executionStream);
 
     if (needWeightsGradient && !clearWeightsGradientFirstIfFused) {
         launchAccumulateBatchNormGradientFp32(weightsGradient->getMemPtr<float>(),

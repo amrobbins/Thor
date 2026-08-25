@@ -155,8 +155,8 @@ class Convolution2d : public TrainableLayer {
         (void)inputTensor;
         (void)batchSize;
         (void)stream;
-        // Conv2D now lowers through cuDNN Frontend expression graphs, so there is no
-        // legacy GpuConvolution kernel selection to pre-warm here.
+        // Conv2D lowers through cuDNN Frontend expression graphs; there is no
+        // separate classic-cuDNN kernel-selection pre-warm step.
     }
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,

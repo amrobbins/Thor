@@ -4,6 +4,7 @@
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/FusedEquation.h"
+#include "Utilities/Expression/StampedEquation.h"
 
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
@@ -270,22 +271,29 @@ TEST(ExpressionConv1d, ForwardAndBackwardMatchIndependentCpuReference) {
     Tensor filter_gpu = makeGpuTensor({k_count, c_count, kernel_width}, filter, stream);
     Tensor grad_gpu = makeGpuTensor({n_count, k_count, out_width}, grad_output, stream);
 
+    clearCudnnFrontendConvolutionSelectionCacheForTests();
+    ASSERT_EQ(cachedCudnnFrontendConvolutionSelectionCountForTests(), 0u);
+    const uint64_t initial_cache_hits = cudnnFrontendConvolutionSelectionCacheHitCountForTests();
+    const uint64_t initial_cache_misses = cudnnFrontendConvolutionSelectionCacheMissCountForTests();
+
     FusedEquation forward = FusedEquation::compile(conv1dOutputs(spatial).physicalOutputs(), 0);
     const std::vector<float> expected_forward =
         forwardReference(input, filter, n_count, c_count, input_width, k_count, kernel_width, spatial);
-    // Repeated stamping exercises placement-time cuDNN Frontend autotuning. Candidate
-    // selection mutates the scratch Frontend graph; the retained production graph must
-    // be rebuilt pristine with the winning plan and remain immutable thereafter. This
-    // catches the intermittent corruption that occurs when an autotuned scratch graph
-    // is reused directly for real execution.
+    // C11 autotunes and independently validates only the first equivalent stamp.
+    // Later stamps reuse only that immutable selection recipe and exact-replay it
+    // into fresh operation-local executables. Repeated execution therefore checks
+    // both the cache-hit path and the no-shared-executable ownership boundary.
     for (int repetition = 0; repetition < 8; ++repetition) {
-        SCOPED_TRACE("forward autotune repetition=" + std::to_string(repetition));
+        SCOPED_TRACE("forward selection-cache repetition=" + std::to_string(repetition));
         StampedExecutionPlan forward_plan = forward.stamp({{"input", input_gpu}, {"filter", filter_gpu}}, stream);
         forward_plan.run();
         stream.synchronize();
         EXPECT_EQ(forward_plan.output("output").getDimensions(), (std::vector<uint64_t>{n_count, k_count, out_width}));
         expectClose(copyToCpu(forward_plan.output("output"), stream), expected_forward);
     }
+    EXPECT_EQ(cachedCudnnFrontendConvolutionSelectionCountForTests(), 1u);
+    EXPECT_EQ(cudnnFrontendConvolutionSelectionCacheMissCountForTests() - initial_cache_misses, 1u);
+    EXPECT_EQ(cudnnFrontendConvolutionSelectionCacheHitCountForTests() - initial_cache_hits, 7u);
 
     FusedEquation backward = forward.compileBackward({"input", "filter"}, std::optional<std::string>{"doutput"});
     const std::vector<float> expected_input_grad =
@@ -294,9 +302,10 @@ TEST(ExpressionConv1d, ForwardAndBackwardMatchIndependentCpuReference) {
         filterGradReference(input, grad_output, n_count, c_count, input_width, k_count, kernel_width, spatial);
     // Backward contains independent dgrad and wgrad roots. Thor deliberately keeps
     // each operation-local cuDNN Frontend plan in its stamping execution domain, so
-    // neither root may be migrated to a helper stream by the DAG scheduler.
+    // neither root may be migrated to a helper stream by the DAG scheduler. Their
+    // validated selection recipes are independently cached by operation kind.
     for (int repetition = 0; repetition < 8; ++repetition) {
-        SCOPED_TRACE("backward autotune repetition=" + std::to_string(repetition));
+        SCOPED_TRACE("backward selection-cache repetition=" + std::to_string(repetition));
         StampedExecutionPlan backward_plan = backward.stamp(
             {{"input", input_gpu}, {"filter", filter_gpu}, {"doutput", grad_gpu}}, stream);
         EXPECT_EQ(backward_plan.stageLaneIndices(),
@@ -306,6 +315,82 @@ TEST(ExpressionConv1d, ForwardAndBackwardMatchIndependentCpuReference) {
         expectClose(copyToCpu(backward_plan.output("input_grad"), stream), expected_input_grad);
         expectClose(copyToCpu(backward_plan.output("filter_grad"), stream), expected_filter_grad);
     }
+    EXPECT_EQ(cachedCudnnFrontendConvolutionSelectionCountForTests(), 3u);
+    EXPECT_EQ(cudnnFrontendConvolutionSelectionCacheMissCountForTests() - initial_cache_misses, 3u);
+    EXPECT_EQ(cudnnFrontendConvolutionSelectionCacheHitCountForTests() - initial_cache_hits, 21u);
+    clearCudnnFrontendConvolutionSelectionCacheForTests();
+}
+
+TEST(ExpressionConv1d, C13EquivalentStampedPlansShareSelectionButRemainExecutionLocalAfterCacheClear) {
+    REQUIRE_CUDA_DEVICE();
+    Stream streamA(0);
+    Stream streamB(0);
+
+    constexpr uint64_t n_count = 2;
+    constexpr uint64_t c_count = 2;
+    constexpr uint64_t input_width = 9;
+    constexpr uint64_t k_count = 3;
+    constexpr uint64_t kernel_width = 3;
+    const ConvolutionSpatial1d spatial = ConvolutionSpatial1d::explicitPadding(2, 1, 2, 2);
+
+    std::vector<float> input(n_count * c_count * input_width);
+    std::vector<float> filter(k_count * c_count * kernel_width);
+    for (size_t i = 0; i < input.size(); ++i)
+        input[i] = static_cast<float>(static_cast<int>(i % 13) - 6) * 0.125F;
+    for (size_t i = 0; i < filter.size(); ++i)
+        filter[i] = static_cast<float>(static_cast<int>(i % 7) - 3) * 0.2F;
+
+    Tensor input_gpu = makeGpuTensor({n_count, c_count, input_width}, input, streamA);
+    Tensor filter_gpu = makeGpuTensor({k_count, c_count, kernel_width}, filter, streamA);
+    const std::vector<float> expected =
+        forwardReference(input, filter, n_count, c_count, input_width, k_count, kernel_width, spatial);
+
+    clearCudnnFrontendConvolutionSelectionCacheForTests();
+    const uint64_t hitsBefore = cudnnFrontendConvolutionSelectionCacheHitCountForTests();
+    const uint64_t missesBefore = cudnnFrontendConvolutionSelectionCacheMissCountForTests();
+
+    FusedEquation equation = FusedEquation::compile(conv1dOutputs(spatial).physicalOutputs(), 0);
+    StampedExecutionPlan planA = equation.stamp({{"input", input_gpu}, {"filter", filter_gpu}}, streamA);
+    StampedExecutionPlan planB = equation.stamp({{"input", input_gpu}, {"filter", filter_gpu}}, streamB);
+
+    ASSERT_EQ(cachedCudnnFrontendConvolutionSelectionCountForTests(), 1u);
+    EXPECT_EQ(cudnnFrontendConvolutionSelectionCacheMissCountForTests() - missesBefore, 1u);
+    EXPECT_EQ(cudnnFrontendConvolutionSelectionCacheHitCountForTests() - hitsBefore, 1u);
+
+    const auto diagnosticsA = planA.convolutionOwnershipDiagnostics();
+    const auto diagnosticsB = planB.convolutionOwnershipDiagnostics();
+    ASSERT_EQ(diagnosticsA.size(), 1u);
+    ASSERT_EQ(diagnosticsB.size(), 1u);
+    EXPECT_EQ(diagnosticsA[0].selection, diagnosticsB[0].selection);
+    EXPECT_NE(diagnosticsA[0].executable_id, 0u);
+    EXPECT_NE(diagnosticsB[0].executable_id, 0u);
+    EXPECT_NE(diagnosticsA[0].executable_id, diagnosticsB[0].executable_id);
+    EXPECT_EQ(diagnosticsA[0].workspace_bytes, diagnosticsB[0].workspace_bytes);
+    if (diagnosticsA[0].workspace_bytes > 0) {
+        EXPECT_NE(diagnosticsA[0].workspace_id, 0u);
+        EXPECT_NE(diagnosticsB[0].workspace_id, 0u);
+        EXPECT_NE(diagnosticsA[0].workspace_id, diagnosticsB[0].workspace_id);
+    }
+
+    const uint64_t preparationsAfterStamping = cudnnFrontendExecutablePreparationCountForTests();
+    clearCudnnFrontendConvolutionSelectionCacheForTests();
+    ASSERT_EQ(cachedCudnnFrontendConvolutionSelectionCountForTests(), 0u);
+
+    // These two independently stamped plans enqueue on distinct streams with no
+    // repository present. Repeated runtime must neither replay the validated
+    // recipe nor recreate any graph/workspace state.
+    for (int repetition = 0; repetition < 8; ++repetition) {
+        planA.run();
+        planB.run();
+    }
+    streamA.synchronize();
+    streamB.synchronize();
+
+    EXPECT_EQ(cachedCudnnFrontendConvolutionSelectionCountForTests(), 0u);
+    EXPECT_EQ(cudnnFrontendExecutablePreparationCountForTests(), preparationsAfterStamping)
+        << "Convolution runtime must not replay/build a cuDNN Frontend executable.";
+    expectClose(copyToCpu(planA.output("output"), streamA), expected);
+    expectClose(copyToCpu(planB.output("output"), streamB), expected);
 }
 
 TEST(ExpressionConv1d, IndependentKernelValidatorMatchesCpuReferenceAndRejectsCorruption) {

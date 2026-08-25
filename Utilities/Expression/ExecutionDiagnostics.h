@@ -18,6 +18,8 @@ struct StampedMatmulKernelDiagnostic {
     double picker_runtime_ms = 0.0;
     uint64_t workspace_bytes = 0;
     int algorithm_id = -1;
+    uintptr_t execution_state_id = 0;
+    uintptr_t workspace_state_id = 0;
 };
 
 struct StampedMatmulStageDiagnostic {

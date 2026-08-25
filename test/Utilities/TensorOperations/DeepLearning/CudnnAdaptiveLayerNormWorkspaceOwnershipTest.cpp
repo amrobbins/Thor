@@ -110,36 +110,47 @@ CudnnAdaptiveLayerNormBackwardArgs backwardArgs(AdaptiveLayerNormExecutionTensor
 
 }  // namespace
 
-TEST(AdaptiveLayerNormWorkspaceOwnership, SharedCachedGraphsUseCallerOwnedIndependentScratchForConcurrentExecutions) {
+TEST(AdaptiveLayerNormWorkspaceOwnership, EquivalentOperationsShareOnlySelectionAndSurviveSelectionCacheClear) {
     if (cudaDeviceCount() < 1)
         GTEST_SKIP() << "CUDA device is required for AdaptiveLayerNorm workspace ownership tests.";
 
     constexpr int gpuNum = 0;
     const TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
     CudnnAdaptiveLayerNorm& adaptiveLayerNorm = CudnnAdaptiveLayerNorm::instance();
-    adaptiveLayerNorm.clearCache();
+    adaptiveLayerNorm.clearSelectionCache();
 
+    const uint64_t hitsBefore = adaptiveLayerNorm.selectionCacheHitCount();
+    const uint64_t missesBefore = adaptiveLayerNorm.selectionCacheMissCount();
     const CudnnAdaptiveLayerNormDescriptor descriptor = makeTrainingDescriptor();
-    const uint64_t forwardBytes = adaptiveLayerNorm.forwardWorkspaceSizeInBytes(descriptor, gpuNum);
-    const uint64_t backwardBytes = adaptiveLayerNorm.backwardWorkspaceSizeInBytes(descriptor, gpuNum);
-    ASSERT_EQ(adaptiveLayerNorm.cachedGraphCount(), 2U);
 
-    // Identical descriptors share immutable cached plans, not mutable execution scratch.
-    EXPECT_EQ(adaptiveLayerNorm.forwardWorkspaceSizeInBytes(descriptor, gpuNum), forwardBytes);
-    EXPECT_EQ(adaptiveLayerNorm.backwardWorkspaceSizeInBytes(descriptor, gpuNum), backwardBytes);
-    EXPECT_EQ(adaptiveLayerNorm.cachedGraphCount(), 2U);
+    Stream streamA(gpuNum);
+    Stream streamB(gpuNum);
+    CudnnAdaptiveLayerNormExecutablePlan forwardPlanA = adaptiveLayerNorm.prepareForward(descriptor, streamA);
+    CudnnAdaptiveLayerNormExecutablePlan forwardPlanB = adaptiveLayerNorm.prepareForward(descriptor, streamB);
+    CudnnAdaptiveLayerNormExecutablePlan backwardPlanA = adaptiveLayerNorm.prepareBackward(descriptor, streamA);
+    CudnnAdaptiveLayerNormExecutablePlan backwardPlanB = adaptiveLayerNorm.prepareBackward(descriptor, streamB);
+    const uint64_t preparationsAfterStamping = cudnnFrontendExecutablePreparationCountForTests();
 
-    optional<Tensor> forwardWorkspaceA = allocateWorkspace(placement, forwardBytes);
-    optional<Tensor> forwardWorkspaceB = allocateWorkspace(placement, forwardBytes);
-    optional<Tensor> backwardWorkspaceA = allocateWorkspace(placement, backwardBytes);
-    optional<Tensor> backwardWorkspaceB = allocateWorkspace(placement, backwardBytes);
+    ASSERT_EQ(adaptiveLayerNorm.cachedSelectionCount(), 2U);
+    EXPECT_EQ(adaptiveLayerNorm.selectionCacheMissCount() - missesBefore, 2U);
+    EXPECT_EQ(adaptiveLayerNorm.selectionCacheHitCount() - hitsBefore, 2U);
 
-    if (forwardBytes > 0) {
+    EXPECT_EQ(forwardPlanA.selection(), forwardPlanB.selection());
+    EXPECT_EQ(backwardPlanA.selection(), backwardPlanB.selection());
+    EXPECT_NE(forwardPlanA.executableId(), forwardPlanB.executableId());
+    EXPECT_NE(backwardPlanA.executableId(), backwardPlanB.executableId());
+
+    optional<Tensor> forwardWorkspaceA = allocateWorkspace(placement, forwardPlanA.workspaceBytes());
+    optional<Tensor> forwardWorkspaceB = allocateWorkspace(placement, forwardPlanB.workspaceBytes());
+    optional<Tensor> backwardWorkspaceA = allocateWorkspace(placement, backwardPlanA.workspaceBytes());
+    optional<Tensor> backwardWorkspaceB = allocateWorkspace(placement, backwardPlanB.workspaceBytes());
+
+    if (forwardPlanA.workspaceBytes() > 0) {
         ASSERT_TRUE(forwardWorkspaceA.has_value());
         ASSERT_TRUE(forwardWorkspaceB.has_value());
         EXPECT_NE(forwardWorkspaceA->getMemPtr<void>(), forwardWorkspaceB->getMemPtr<void>());
     }
-    if (backwardBytes > 0) {
+    if (backwardPlanA.workspaceBytes() > 0) {
         ASSERT_TRUE(backwardWorkspaceA.has_value());
         ASSERT_TRUE(backwardWorkspaceB.has_value());
         EXPECT_NE(backwardWorkspaceA->getMemPtr<void>(), backwardWorkspaceB->getMemPtr<void>());
@@ -147,22 +158,33 @@ TEST(AdaptiveLayerNormWorkspaceOwnership, SharedCachedGraphsUseCallerOwnedIndepe
 
     AdaptiveLayerNormExecutionTensors tensorsA = makeExecutionTensors(placement, descriptor);
     AdaptiveLayerNormExecutionTensors tensorsB = makeExecutionTensors(placement, descriptor);
-    Stream streamA(gpuNum);
-    Stream streamB(gpuNum);
     initializeExecutionTensors(tensorsA, streamA);
     initializeExecutionTensors(tensorsB, streamB);
 
+    adaptiveLayerNorm.clearSelectionCache();
+    ASSERT_EQ(adaptiveLayerNorm.cachedSelectionCount(), 0U);
+
     CudnnAdaptiveLayerNormForwardArgs forwardA = forwardArgs(tensorsA);
     CudnnAdaptiveLayerNormForwardArgs forwardB = forwardArgs(tensorsB);
-    adaptiveLayerNorm.forward(descriptor, forwardA, forwardWorkspaceA, streamA);
-    adaptiveLayerNorm.forward(descriptor, forwardB, forwardWorkspaceB, streamB);
+    for (int repetition = 0; repetition < 4; ++repetition) {
+        adaptiveLayerNorm.forward(forwardPlanA, forwardA, forwardWorkspaceA, streamA);
+        adaptiveLayerNorm.forward(forwardPlanB, forwardB, forwardWorkspaceB, streamB);
+    }
     streamA.synchronize();
     streamB.synchronize();
+    EXPECT_EQ(adaptiveLayerNorm.cachedSelectionCount(), 0U);
+    EXPECT_EQ(cudnnFrontendExecutablePreparationCountForTests(), preparationsAfterStamping)
+        << "AdaptiveLayerNorm forward hot path must not replay/build/deserialize a cuDNN Frontend plan.";
 
     CudnnAdaptiveLayerNormBackwardArgs backwardA = backwardArgs(tensorsA);
     CudnnAdaptiveLayerNormBackwardArgs backwardB = backwardArgs(tensorsB);
-    adaptiveLayerNorm.backward(descriptor, backwardA, backwardWorkspaceA, streamA);
-    adaptiveLayerNorm.backward(descriptor, backwardB, backwardWorkspaceB, streamB);
+    for (int repetition = 0; repetition < 4; ++repetition) {
+        adaptiveLayerNorm.backward(backwardPlanA, backwardA, backwardWorkspaceA, streamA);
+        adaptiveLayerNorm.backward(backwardPlanB, backwardB, backwardWorkspaceB, streamB);
+    }
     streamA.synchronize();
     streamB.synchronize();
+    EXPECT_EQ(adaptiveLayerNorm.cachedSelectionCount(), 0U);
+    EXPECT_EQ(cudnnFrontendExecutablePreparationCountForTests(), preparationsAfterStamping)
+        << "AdaptiveLayerNorm backward hot path must not replay/build/deserialize a cuDNN Frontend plan.";
 }

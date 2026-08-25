@@ -46,8 +46,25 @@ bool isSwishEpilogueExpression(const ThorImplementation::Expression& epilogue) {
 }
 
 bool isUnavailableCudnnRmsNormFusion(const std::runtime_error& error) {
-    return std::string_view(error.what()).find("Failed to build cuDNN Frontend RMSNorm graph with primary heuristics only") !=
-           std::string_view::npos;
+    const std::string_view message(error.what());
+
+    // This probe is intentionally asking whether the optional fused RMSNorm+Swish
+    // backend exists for one concrete descriptor.  C6 changed the placement-time
+    // ownership path from Graph::build() to selection/replay, so the same ordinary
+    // "fusion unavailable" outcome can now surface at several Frontend selection
+    // stages.  Treat only those backend-availability failures as a reason to use
+    // the already-existing algebraic RMSNorm + Swish fallback; malformed descriptors
+    // and unrelated runtime errors must still propagate.
+    for (const std::string_view unavailable : {
+             std::string_view("Failed to build cuDNN Frontend RMSNorm graph with primary heuristics only"),
+             std::string_view("Failed to enumerate cuDNN Frontend RMSNorm forward primary-heuristic execution plans"),
+             std::string_view("Failed to check support for cuDNN Frontend RMSNorm forward primary-heuristic execution plans"),
+             std::string_view("cuDNN Frontend RMSNorm forward produced no exactly replayable primary-heuristic execution plan")}) {
+        if (message.find(unavailable) != std::string_view::npos) {
+            return true;
+        }
+    }
+    return false;
 }
 
 ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation::TensorPlacement placement,

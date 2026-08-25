@@ -7872,7 +7872,7 @@ std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_pt
         output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
     }
 
-    std::shared_ptr<BuiltSoftmax> built = StampedEquation::buildSoftmax(compiledStage, adaptedInput, output, stream.getGpuNum());
+    std::unique_ptr<BuiltSoftmax> built = StampedEquation::buildSoftmax(compiledStage, adaptedInput, output);
     return make_shared<StampedSoftmax>(compiledStage, std::move(built), input, adaptedInput, output, stream);
 }
 
@@ -8212,7 +8212,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         }
     }
 
-    std::shared_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(compiledStage,
+    std::unique_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(compiledStage,
                                                                       lhs,
                                                                       rhs,
                                                                       std::nullopt,
@@ -8229,7 +8229,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
             " output=" + output.getDescriptor().toString());
 
     return make_shared<StampedMatmul>(compiledStage,
-                                      built,
+                                      std::move(built),
                                       lhs,
                                       rhs,
                                       std::nullopt,
@@ -8361,7 +8361,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         }
     }
 
-    std::shared_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(compiledStage,
+    std::unique_ptr<BuiltMatmul> built = StampedEquation::buildMatmul(compiledStage,
                                                                       lhs,
                                                                       rhs,
                                                                       std::optional<Tensor>(addend),
@@ -8394,7 +8394,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
     }
 
     return make_shared<StampedMatmul>(compiledStage,
-                                      built,
+                                      std::move(built),
                                       lhs,
                                       rhs,
                                       std::optional<Tensor>(addend),

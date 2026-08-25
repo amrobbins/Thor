@@ -1,6 +1,7 @@
 #include "Utilities/TensorOperations/DeepLearning/CudnnLayerNorm.h"
 
 #include "Utilities/Common/CudnnExecutionWorkspace.h"
+#include "Utilities/Common/CudnnFrontendPlan.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
@@ -8,7 +9,6 @@
 #include <array>
 #include <cstddef>
 #include <limits>
-#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -175,49 +175,32 @@ vector<int64_t> statsStrides(const CudnnLayerNormDescriptor& descriptor) {
     return explicitOr(descriptor.statsStrides, {1, 1, 1, 1});
 }
 
-using BuiltGraph = CudnnCachedExecutionPlan<fe::graph::Graph>;
-
-class LayerNormGraphCache {
+class LayerNormPlanRepository {
    public:
-    BuiltGraph& getOrBuildForward(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
-        const string key = descriptor.cacheKey("forward", gpuNum);
-        unique_lock<mutex> lock(mtx);
-        auto iter = graphs.find(key);
-        if (iter != graphs.end())
-            return iter->second;
-        BuiltGraph graph = buildForwardGraph(descriptor, gpuNum);
-        auto [inserted, _] = graphs.emplace(key, std::move(graph));
-        return inserted->second;
+    CudnnFrontendExecutablePlan prepareForward(const CudnnLayerNormDescriptor& descriptor, Stream stream) {
+        descriptor.validateForward();
+        return prepare(descriptor, "forward", std::move(stream), [this, descriptor]() { return makeForwardGraph(descriptor); });
     }
 
-    BuiltGraph& getOrBuildBackward(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
-        const string key = descriptor.cacheKey("backward", gpuNum);
-        unique_lock<mutex> lock(mtx);
-        auto iter = graphs.find(key);
-        if (iter != graphs.end())
-            return iter->second;
-        BuiltGraph graph = buildBackwardGraph(descriptor, gpuNum);
-        auto [inserted, _] = graphs.emplace(key, std::move(graph));
-        return inserted->second;
+    CudnnFrontendExecutablePlan prepareBackward(const CudnnLayerNormDescriptor& descriptor, Stream stream) {
+        descriptor.validateBackward();
+        return prepare(descriptor, "backward", std::move(stream), [this, descriptor]() { return makeBackwardGraph(descriptor); });
     }
 
-    void clear() {
-        unique_lock<mutex> lock(mtx);
-        graphs.clear();
-    }
-
-    size_t size() const {
-        unique_lock<mutex> lock(mtx);
-        return graphs.size();
-    }
+    void clear() { selections.clear(); }
+    size_t size() const { return selections.size(); }
+    uint64_t hitCount() const { return selections.hitCount(); }
+    uint64_t missCount() const { return selections.missCount(); }
 
    private:
+    static constexpr size_t kSelectionCacheCapacity = 1024;
+
     shared_ptr<fe::graph::Tensor_attributes> tensor(shared_ptr<fe::graph::Graph>& graph,
                                                     string_view name,
                                                     int64_t uid,
                                                     const vector<int64_t>& dim,
                                                     const vector<int64_t>& stride,
-                                                    DataType dtype) {
+                                                    DataType dtype) const {
         return graph->tensor(fe::graph::Tensor_attributes()
                                  .set_name(string(name))
                                  .set_uid(uid)
@@ -230,46 +213,32 @@ class LayerNormGraphCache {
                                                       string_view name,
                                                       int64_t uid,
                                                       const vector<int64_t>& dim,
-                                                      const vector<int64_t>& stride) {
+                                                      const vector<int64_t>& stride) const {
         return graph->tensor(fe::graph::Tensor_attributes().set_name(string(name)).set_uid(uid).set_dim(dim).set_stride(stride));
     }
 
-    void finalize(BuiltGraph& built, int gpuNum) {
-        ScopedGpu scopedGpu(gpuNum);
-        Stream temporaryStream(gpuNum);
-        auto status = built.graph->build(temporaryStream.getCudnnHandle(), {fe::HeurMode_t::A});
-        if (!status.is_good()) {
-            throw runtime_error(
-                "Failed to build cuDNN Frontend LayerNorm graph with primary heuristics only "
-                "(Thor LayerNorm does not permit cuDNN fallback engines): " +
-                status.get_message());
-        }
-
-        int64_t workspaceBytes = 0;
-        status = built.graph->get_workspace_size(workspaceBytes);
-        if (!status.is_good()) {
-            throw runtime_error("Failed to query cuDNN Frontend LayerNorm workspace: " + status.get_message());
-        }
-
-        built.workspaceBytes = workspaceBytes;
-    }
-
-    BuiltGraph buildForwardGraph(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
-        descriptor.validateForward();
-
-        ScopedGpu scopedGpu(gpuNum);
-        BuiltGraph built;
-        built.graph = make_shared<fe::graph::Graph>();
-        built.graph->set_io_data_type(toFrontendDataType(descriptor.inputDataType))
+    shared_ptr<fe::graph::Graph> makeForwardGraph(const CudnnLayerNormDescriptor& descriptor) const {
+        auto graph = make_shared<fe::graph::Graph>();
+        graph->set_io_data_type(toFrontendDataType(descriptor.inputDataType))
             .set_intermediate_data_type(toFrontendDataType(descriptor.computeDataType))
             .set_compute_data_type(toFrontendDataType(descriptor.computeDataType));
 
         const vector<int64_t> dims = ioDims(descriptor);
         const vector<int64_t> strides = ioStrides(descriptor);
-        auto x = ioTensor(built.graph, descriptor.debugName + "_x", UID_X, dims, strides);
-        auto scale = tensor(built.graph, descriptor.debugName + "_scale", UID_SCALE, parameterDims(descriptor), parameterStrides(descriptor), descriptor.parameterDataType);
-        auto bias = tensor(built.graph, descriptor.debugName + "_bias", UID_BIAS, parameterDims(descriptor), parameterStrides(descriptor), descriptor.parameterDataType);
-        auto epsilon = built.graph->tensor(descriptor.epsilon);
+        auto x = ioTensor(graph, descriptor.debugName + "_x", UID_X, dims, strides);
+        auto scale = tensor(graph,
+                            descriptor.debugName + "_scale",
+                            UID_SCALE,
+                            parameterDims(descriptor),
+                            parameterStrides(descriptor),
+                            descriptor.parameterDataType);
+        auto bias = tensor(graph,
+                           descriptor.debugName + "_bias",
+                           UID_BIAS,
+                           parameterDims(descriptor),
+                           parameterStrides(descriptor),
+                           descriptor.parameterDataType);
+        auto epsilon = graph->tensor(descriptor.epsilon);
 
         auto attrs = fe::graph::Layernorm_attributes()
                          .set_name(descriptor.debugName + "_forward")
@@ -277,7 +246,7 @@ class LayerNormGraphCache {
                          .set_epsilon(epsilon)
                          .set_compute_data_type(toFrontendDataType(descriptor.computeDataType));
 
-        auto [y, mean, invVariance] = built.graph->layernorm(x, scale, bias, attrs);
+        auto [y, mean, invVariance] = graph->layernorm(x, scale, bias, attrs);
         y->set_output(true).set_uid(UID_Y).set_dim(dims).set_stride(strides);
         if (descriptor.outputDataType != descriptor.inputDataType) {
             y->set_data_type(toFrontendDataType(descriptor.outputDataType));
@@ -298,27 +267,32 @@ class LayerNormGraphCache {
                 .set_data_type(toFrontendDataType(DataType::FP32));
         }
 
-        finalize(built, gpuNum);
-        return built;
+        return graph;
     }
 
-    BuiltGraph buildBackwardGraph(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
-        descriptor.validateBackward();
-
-        ScopedGpu scopedGpu(gpuNum);
-        BuiltGraph built;
-        built.graph = make_shared<fe::graph::Graph>();
-        built.graph->set_io_data_type(toFrontendDataType(descriptor.inputDataType))
+    shared_ptr<fe::graph::Graph> makeBackwardGraph(const CudnnLayerNormDescriptor& descriptor) const {
+        auto graph = make_shared<fe::graph::Graph>();
+        graph->set_io_data_type(toFrontendDataType(descriptor.inputDataType))
             .set_intermediate_data_type(toFrontendDataType(descriptor.computeDataType))
             .set_compute_data_type(toFrontendDataType(descriptor.computeDataType));
 
         const vector<int64_t> dims = ioDims(descriptor);
         const vector<int64_t> strides = ioStrides(descriptor);
-        auto dy = ioTensor(built.graph, descriptor.debugName + "_dy", UID_DY, dims, strides);
-        auto x = ioTensor(built.graph, descriptor.debugName + "_x", UID_X, dims, strides);
-        auto scale = tensor(built.graph, descriptor.debugName + "_scale", UID_SCALE, parameterDims(descriptor), parameterStrides(descriptor), descriptor.parameterDataType);
-        auto mean = tensor(built.graph, descriptor.debugName + "_mean", UID_MEAN, statsDims(descriptor), statsStrides(descriptor), DataType::FP32);
-        auto invVariance = tensor(built.graph,
+        auto dy = ioTensor(graph, descriptor.debugName + "_dy", UID_DY, dims, strides);
+        auto x = ioTensor(graph, descriptor.debugName + "_x", UID_X, dims, strides);
+        auto scale = tensor(graph,
+                            descriptor.debugName + "_scale",
+                            UID_SCALE,
+                            parameterDims(descriptor),
+                            parameterStrides(descriptor),
+                            descriptor.parameterDataType);
+        auto mean = tensor(graph,
+                           descriptor.debugName + "_mean",
+                           UID_MEAN,
+                           statsDims(descriptor),
+                           statsStrides(descriptor),
+                           DataType::FP32);
+        auto invVariance = tensor(graph,
                                   descriptor.debugName + "_inv_variance",
                                   UID_INV_VARIANCE,
                                   statsDims(descriptor),
@@ -330,7 +304,7 @@ class LayerNormGraphCache {
                          .set_saved_mean_and_inv_variance(mean, invVariance)
                          .set_compute_data_type(toFrontendDataType(descriptor.computeDataType));
 
-        auto [dx, dscale, dbias] = built.graph->layernorm_backward(dy, x, scale, attrs);
+        auto [dx, dscale, dbias] = graph->layernorm_backward(dy, x, scale, attrs);
         dx->set_output(true).set_uid(UID_DX).set_dim(dims).set_stride(strides);
         dscale->set_output(true)
             .set_uid(UID_DSCALE)
@@ -343,16 +317,83 @@ class LayerNormGraphCache {
             .set_stride(parameterStrides(descriptor))
             .set_data_type(toFrontendDataType(descriptor.parameterDataType));
 
-        finalize(built, gpuNum);
-        return built;
+        return graph;
     }
 
-    mutable mutex mtx;
-    unordered_map<string, BuiltGraph> graphs;
+    static void checkStatus(fe::error_t status, const string& message) {
+        if (!status.is_good()) {
+            throw runtime_error(message + ": " + status.get_message());
+        }
+    }
+
+    static CudnnFrontendPlanSelection selectPrimaryHeuristic(const CudnnFrontendGraphFactory& graphFactory,
+                                                              Stream stream,
+                                                              string_view passName) {
+        ScopedGpu scopedGpu(stream.getGpuNum());
+        shared_ptr<fe::graph::Graph> graph = graphFactory();
+        if (!graph || graph.use_count() != 1) {
+            throw runtime_error("cuDNN Frontend LayerNorm selection requires a pristine operation-local graph.");
+        }
+
+        const string operation = "LayerNorm " + string(passName);
+        checkStatus(graph->validate(), "Failed to validate cuDNN Frontend " + operation + " graph");
+        checkStatus(graph->build_operation_graph(stream.getCudnnHandle()),
+                    "Failed to build cuDNN Frontend " + operation + " operation graph");
+        checkStatus(graph->create_execution_plans({fe::HeurMode_t::A}),
+                    "Failed to enumerate cuDNN Frontend " + operation + " primary-heuristic execution plans");
+        checkStatus(graph->check_support(stream.getCudnnHandle()),
+                    "Failed to check support for cuDNN Frontend " + operation + " primary-heuristic execution plans");
+
+        const int64_t planCount = graph->get_execution_plan_count();
+        string lastReplayFailure;
+        for (int64_t planIndex = 0; planIndex < planCount; ++planIndex) {
+            const auto status = graph->build_plan_at_index(stream.getCudnnHandle(), planIndex);
+            if (!status.is_good()) {
+                continue;
+            }
+
+            try {
+                CudnnFrontendPlanSelection selection =
+                    cudnnFrontendPlanSelectionAtIndex(*graph, planIndex, operation);
+                // A plan is eligible for the global selection cache only if Thor
+                // can recreate it exactly as independent operation-local state. The
+                // common helper prefers engine+knob replay and transparently uses an
+                // immutable serialized replay token when Frontend's knob enum is
+                // lossy. Probe replay once on the cache miss and continue to the next
+                // primary-heuristic plan only if recreation still fails.
+                (void)replayCudnnFrontendExecutablePlan(
+                    graphFactory, selection, stream.getCudnnHandle(), operation);
+                return selection;
+            } catch (const exception& e) {
+                lastReplayFailure = e.what();
+            }
+        }
+
+        string message = "cuDNN Frontend " + operation +
+                         " produced no exactly replayable primary-heuristic execution plan; Thor LayerNorm does not permit fallback engines.";
+        if (!lastReplayFailure.empty()) {
+            message += " Last replay failure: " + lastReplayFailure;
+        }
+        throw runtime_error(message);
+    }
+
+    CudnnFrontendExecutablePlan prepare(const CudnnLayerNormDescriptor& descriptor,
+                                        string_view passName,
+                                        Stream stream,
+                                        CudnnFrontendGraphFactory graphFactory) {
+        ScopedGpu scopedGpu(stream.getGpuNum());
+        const string key = descriptor.cacheKey(passName, stream.getGpuNum());
+        const CudnnFrontendPlanSelection selection = selections.getOrSelect(key, [&]() {
+            return selectPrimaryHeuristic(graphFactory, stream, passName);
+        });
+        return replayCudnnFrontendExecutablePlan(graphFactory, selection, stream.getCudnnHandle(), "LayerNorm " + string(passName));
+    }
+
+    CudnnFrontendPlanSelectionCache<string> selections{kSelectionCacheCapacity};
 };
 
-LayerNormGraphCache& cache() {
-    static LayerNormGraphCache instance;
+LayerNormPlanRepository& repository() {
+    static LayerNormPlanRepository instance;
     return instance;
 }
 
@@ -453,12 +494,33 @@ CudnnLayerNorm& CudnnLayerNorm::instance() {
     return singleton;
 }
 
-void CudnnLayerNorm::forward(const CudnnLayerNormDescriptor& descriptor,
+CudnnLayerNormExecutablePlan CudnnLayerNorm::prepareForward(const CudnnLayerNormDescriptor& descriptor, Stream stream) {
+    descriptor.validateForward();
+    const int gpuNum = stream.getGpuNum();
+    CudnnFrontendExecutablePlan executable = repository().prepareForward(descriptor, stream);
+    return CudnnLayerNormExecutablePlan(descriptor, CudnnLayerNormExecutablePlan::Pass::Forward, gpuNum, std::move(executable));
+}
+
+CudnnLayerNormExecutablePlan CudnnLayerNorm::prepareBackward(const CudnnLayerNormDescriptor& descriptor, Stream stream) {
+    descriptor.validateBackward();
+    const int gpuNum = stream.getGpuNum();
+    CudnnFrontendExecutablePlan executable = repository().prepareBackward(descriptor, stream);
+    return CudnnLayerNormExecutablePlan(descriptor, CudnnLayerNormExecutablePlan::Pass::Backward, gpuNum, std::move(executable));
+}
+
+void CudnnLayerNorm::forward(const CudnnLayerNormExecutablePlan& plan,
                              const CudnnLayerNormForwardArgs& args,
                              optional<Tensor>& workspace,
                              Stream stream) {
+    if (!plan.isForward()) {
+        throw invalid_argument("cuDNN LayerNorm forward requires a forward executable plan.");
+    }
+    const CudnnLayerNormDescriptor& descriptor = plan.descriptor();
     descriptor.validateForward();
     const int gpuNum = stream.getGpuNum();
+    if (gpuNum != plan.gpuNum()) {
+        throw invalid_argument("cuDNN LayerNorm forward executable plan cannot move between GPUs.");
+    }
     requireIoTensor(args.x, descriptor, descriptor.inputDataType, gpuNum, "x");
     requireIoTensor(args.y, descriptor, descriptor.outputDataType, gpuNum, "y");
     requireParameterTensor(args.scale, descriptor, gpuNum, "scale");
@@ -472,7 +534,6 @@ void CudnnLayerNorm::forward(const CudnnLayerNormDescriptor& descriptor,
     }
 
     ScopedGpu scopedGpu(gpuNum);
-    BuiltGraph& built = cache().getOrBuildForward(descriptor, gpuNum);
     unordered_map<int64_t, void*> variantPack;
     insertTensor(variantPack, UID_X, args.x);
     insertTensor(variantPack, UID_SCALE, args.scale);
@@ -483,20 +544,24 @@ void CudnnLayerNorm::forward(const CudnnLayerNormDescriptor& descriptor,
         insertTensor(variantPack, UID_INV_VARIANCE, args.invVariance.value());
     }
 
-    const uint64_t requiredWorkspaceBytes = checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "LayerNorm forward");
+    const uint64_t requiredWorkspaceBytes = checkedCudnnWorkspaceSizeInBytes(plan.workspaceBytes(), "LayerNorm forward");
     void* workspacePtr = cudnnExecutionWorkspacePointer(workspace, requiredWorkspaceBytes, gpuNum, "LayerNorm forward");
-    auto status = built.graph->execute(stream.getCudnnHandle(), variantPack, workspacePtr);
-    if (!status.is_good()) {
-        throw runtime_error("Failed to execute cuDNN Frontend LayerNorm graph: " + status.get_message());
-    }
+    plan.executable_.execute(stream.getCudnnHandle(), variantPack, workspacePtr);
 }
 
-void CudnnLayerNorm::backward(const CudnnLayerNormDescriptor& descriptor,
+void CudnnLayerNorm::backward(const CudnnLayerNormExecutablePlan& plan,
                               const CudnnLayerNormBackwardArgs& args,
                               optional<Tensor>& workspace,
                               Stream stream) {
+    if (!plan.isBackward()) {
+        throw invalid_argument("cuDNN LayerNorm backward requires a backward executable plan.");
+    }
+    const CudnnLayerNormDescriptor& descriptor = plan.descriptor();
     descriptor.validateBackward();
     const int gpuNum = stream.getGpuNum();
+    if (gpuNum != plan.gpuNum()) {
+        throw invalid_argument("cuDNN LayerNorm backward executable plan cannot move between GPUs.");
+    }
     requireIoTensor(args.dy, descriptor, descriptor.outputDataType, gpuNum, "dy");
     requireIoTensor(args.x, descriptor, descriptor.inputDataType, gpuNum, "x");
     requireIoTensor(args.dx, descriptor, descriptor.inputDataType, gpuNum, "dx");
@@ -507,7 +572,6 @@ void CudnnLayerNorm::backward(const CudnnLayerNormDescriptor& descriptor,
     requireParameterTensor(args.dbias, descriptor, gpuNum, "dbias");
 
     ScopedGpu scopedGpu(gpuNum);
-    BuiltGraph& built = cache().getOrBuildBackward(descriptor, gpuNum);
     unordered_map<int64_t, void*> variantPack;
     insertTensor(variantPack, UID_DY, args.dy);
     insertTensor(variantPack, UID_X, args.x);
@@ -518,34 +582,17 @@ void CudnnLayerNorm::backward(const CudnnLayerNormDescriptor& descriptor,
     insertTensor(variantPack, UID_DSCALE, args.dscale);
     insertTensor(variantPack, UID_DBIAS, args.dbias);
 
-    const uint64_t requiredWorkspaceBytes = checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "LayerNorm backward");
+    const uint64_t requiredWorkspaceBytes = checkedCudnnWorkspaceSizeInBytes(plan.workspaceBytes(), "LayerNorm backward");
     void* workspacePtr = cudnnExecutionWorkspacePointer(workspace, requiredWorkspaceBytes, gpuNum, "LayerNorm backward");
-    auto status = built.graph->execute(stream.getCudnnHandle(), variantPack, workspacePtr);
-    if (!status.is_good()) {
-        throw runtime_error("Failed to execute cuDNN Frontend LayerNorm graph: " + status.get_message());
-    }
+    plan.executable_.execute(stream.getCudnnHandle(), variantPack, workspacePtr);
 }
 
-uint64_t CudnnLayerNorm::forwardWorkspaceSizeInBytes(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
-    const BuiltGraph& built = cache().getOrBuildForward(descriptor, gpuNum);
-    return checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "LayerNorm forward");
-}
+void CudnnLayerNorm::clearSelectionCache() { repository().clear(); }
 
-uint64_t CudnnLayerNorm::backwardWorkspaceSizeInBytes(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
-    const BuiltGraph& built = cache().getOrBuildBackward(descriptor, gpuNum);
-    return checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "LayerNorm backward");
-}
+size_t CudnnLayerNorm::cachedSelectionCount() const { return repository().size(); }
 
-void CudnnLayerNorm::warmForward(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
-    (void)forwardWorkspaceSizeInBytes(descriptor, gpuNum);
-}
+uint64_t CudnnLayerNorm::selectionCacheHitCount() const { return repository().hitCount(); }
 
-void CudnnLayerNorm::warmBackward(const CudnnLayerNormDescriptor& descriptor, int gpuNum) {
-    (void)backwardWorkspaceSizeInBytes(descriptor, gpuNum);
-}
-
-void CudnnLayerNorm::clearCache() { cache().clear(); }
-
-size_t CudnnLayerNorm::cachedGraphCount() const { return cache().size(); }
+uint64_t CudnnLayerNorm::selectionCacheMissCount() const { return repository().missCount(); }
 
 bool CudnnLayerNorm::frontendAvailable() { return true; }

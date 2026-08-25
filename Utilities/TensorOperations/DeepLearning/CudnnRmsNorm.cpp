@@ -177,49 +177,50 @@ vector<int64_t> statsStrides(const CudnnRmsNormDescriptor& descriptor) {
     return explicitOr(descriptor.statsStrides, {1, 1, 1, 1});
 }
 
-using BuiltGraph = CudnnCachedExecutionPlan<fe::graph::Graph>;
-
-class RmsNormGraphCache {
+class RmsNormPlanRepository {
    public:
-    BuiltGraph& getOrBuildForward(const CudnnRmsNormDescriptor& descriptor, int gpuNum) {
-        const string key = descriptor.cacheKey("forward", gpuNum);
-        unique_lock<mutex> lock(mtx);
-        auto iter = graphs.find(key);
-        if (iter != graphs.end())
-            return iter->second;
-        BuiltGraph graph = buildForwardGraph(descriptor, gpuNum);
-        auto [inserted, _] = graphs.emplace(key, std::move(graph));
-        return inserted->second;
+    CudnnFrontendExecutablePlan prepareForward(const CudnnRmsNormDescriptor& descriptor, Stream stream) {
+        descriptor.validateForward();
+        CudnnFrontendGraphFactory graphFactory = [this, descriptor]() { return makeForwardGraph(descriptor); };
+        return prepare(descriptor, "forward", std::move(stream), std::move(graphFactory));
     }
 
-    BuiltGraph& getOrBuildBackward(const CudnnRmsNormDescriptor& descriptor, int gpuNum) {
-        const string key = descriptor.cacheKey("backward", gpuNum);
-        unique_lock<mutex> lock(mtx);
-        auto iter = graphs.find(key);
-        if (iter != graphs.end())
-            return iter->second;
-        BuiltGraph graph = buildBackwardGraph(descriptor, gpuNum);
-        auto [inserted, _] = graphs.emplace(key, std::move(graph));
-        return inserted->second;
+    CudnnFrontendExecutablePlan prepareBackward(const CudnnRmsNormDescriptor& descriptor, Stream stream) {
+        descriptor.validateBackward();
+        CudnnFrontendGraphFactory graphFactory = [this, descriptor]() { return makeBackwardGraph(descriptor); };
+        return prepare(descriptor, "backward", std::move(stream), std::move(graphFactory));
     }
 
-    void clear() {
-        unique_lock<mutex> lock(mtx);
-        graphs.clear();
+    CudnnFrontendPlanSelection selectForward(const CudnnRmsNormDescriptor& descriptor, int gpuNum) {
+        descriptor.validateForward();
+        ScopedGpu scopedGpu(gpuNum);
+        Stream stream(gpuNum);
+        CudnnFrontendGraphFactory graphFactory = [this, descriptor]() { return makeForwardGraph(descriptor); };
+        return select(descriptor, "forward", std::move(stream), std::move(graphFactory));
     }
 
-    size_t size() const {
-        unique_lock<mutex> lock(mtx);
-        return graphs.size();
+    CudnnFrontendPlanSelection selectBackward(const CudnnRmsNormDescriptor& descriptor, int gpuNum) {
+        descriptor.validateBackward();
+        ScopedGpu scopedGpu(gpuNum);
+        Stream stream(gpuNum);
+        CudnnFrontendGraphFactory graphFactory = [this, descriptor]() { return makeBackwardGraph(descriptor); };
+        return select(descriptor, "backward", std::move(stream), std::move(graphFactory));
     }
+
+    void clear() { selections.clear(); }
+    size_t size() const { return selections.size(); }
+    uint64_t hitCount() const { return selections.hitCount(); }
+    uint64_t missCount() const { return selections.missCount(); }
 
    private:
+    static constexpr size_t kSelectionCacheCapacity = 2048;
+
     shared_ptr<fe::graph::Tensor_attributes> tensor(shared_ptr<fe::graph::Graph>& graph,
                                                     string_view name,
                                                     int64_t uid,
                                                     const vector<int64_t>& dim,
                                                     const vector<int64_t>& stride,
-                                                    DataType dtype) {
+                                                    DataType dtype) const {
         return graph->tensor(fe::graph::Tensor_attributes()
                                  .set_name(string(name))
                                  .set_uid(uid)
@@ -232,45 +233,26 @@ class RmsNormGraphCache {
                                                       string_view name,
                                                       int64_t uid,
                                                       const vector<int64_t>& dim,
-                                                      const vector<int64_t>& stride) {
+                                                      const vector<int64_t>& stride) const {
         return graph->tensor(fe::graph::Tensor_attributes().set_name(string(name)).set_uid(uid).set_dim(dim).set_stride(stride));
     }
 
-    void finalize(BuiltGraph& built, int gpuNum) {
-        ScopedGpu scopedGpu(gpuNum);
-        Stream temporaryStream(gpuNum);
-        auto status = built.graph->build(temporaryStream.getCudnnHandle(), {fe::HeurMode_t::A});
-        if (!status.is_good()) {
-            throw runtime_error(
-                "Failed to build cuDNN Frontend RMSNorm graph with primary heuristics only "
-                "(Thor RMSNorm does not permit cuDNN fallback engines): " +
-                status.get_message());
-        }
-
-        int64_t workspaceBytes = 0;
-        status = built.graph->get_workspace_size(workspaceBytes);
-        if (!status.is_good()) {
-            throw runtime_error("Failed to query cuDNN Frontend RMSNorm workspace: " + status.get_message());
-        }
-
-        built.workspaceBytes = workspaceBytes;
-    }
-
-    BuiltGraph buildForwardGraph(const CudnnRmsNormDescriptor& descriptor, int gpuNum) {
-        descriptor.validateForward();
-
-        ScopedGpu scopedGpu(gpuNum);
-        BuiltGraph built;
-        built.graph = make_shared<fe::graph::Graph>();
-        built.graph->set_io_data_type(toFrontendDataType(descriptor.inputDataType))
+    shared_ptr<fe::graph::Graph> makeForwardGraph(const CudnnRmsNormDescriptor& descriptor) const {
+        auto graph = make_shared<fe::graph::Graph>();
+        graph->set_io_data_type(toFrontendDataType(descriptor.inputDataType))
             .set_intermediate_data_type(toFrontendDataType(descriptor.computeDataType))
             .set_compute_data_type(toFrontendDataType(descriptor.computeDataType));
 
         const vector<int64_t> dims = ioDims(descriptor);
         const vector<int64_t> strides = ioStrides(descriptor);
-        auto x = ioTensor(built.graph, descriptor.debugName + "_x", UID_X, dims, strides);
-        auto scale = tensor(built.graph, descriptor.debugName + "_scale", UID_SCALE, parameterDims(descriptor), parameterStrides(descriptor), descriptor.parameterDataType);
-        auto epsilon = built.graph->tensor(descriptor.epsilon);
+        auto x = ioTensor(graph, descriptor.debugName + "_x", UID_X, dims, strides);
+        auto scale = tensor(graph,
+                            descriptor.debugName + "_scale",
+                            UID_SCALE,
+                            parameterDims(descriptor),
+                            parameterStrides(descriptor),
+                            descriptor.parameterDataType);
+        auto epsilon = graph->tensor(descriptor.epsilon);
 
         auto attrs = fe::graph::Rmsnorm_attributes()
                          .set_name(descriptor.debugName + "_forward")
@@ -278,7 +260,7 @@ class RmsNormGraphCache {
                          .set_epsilon(epsilon)
                          .set_compute_data_type(toFrontendDataType(descriptor.computeDataType));
 
-        auto [rmsOutput, invVariance] = built.graph->rmsnorm(x, scale, attrs);
+        auto [rmsOutput, invVariance] = graph->rmsnorm(x, scale, attrs);
         rmsOutput->set_dim(dims).set_stride(strides);
 
         shared_ptr<fe::graph::Tensor_attributes> y = rmsOutput;
@@ -287,7 +269,7 @@ class RmsNormGraphCache {
                                   .set_name(descriptor.debugName + "_swish")
                                   .set_mode(fe::PointwiseMode_t::SWISH_FWD)
                                   .set_compute_data_type(toFrontendDataType(descriptor.computeDataType));
-            y = built.graph->pointwise(rmsOutput, swishAttrs);
+            y = graph->pointwise(rmsOutput, swishAttrs);
             y->set_dim(dims).set_stride(strides);
         }
 
@@ -305,29 +287,29 @@ class RmsNormGraphCache {
                 .set_data_type(toFrontendDataType(DataType::FP32));
         }
 
-        finalize(built, gpuNum);
-        return built;
+        return graph;
     }
 
-    BuiltGraph buildBackwardGraph(const CudnnRmsNormDescriptor& descriptor, int gpuNum) {
-        descriptor.validateBackward();
-
-        ScopedGpu scopedGpu(gpuNum);
-        BuiltGraph built;
-        built.graph = make_shared<fe::graph::Graph>();
-        built.graph->set_io_data_type(toFrontendDataType(descriptor.inputDataType))
+    shared_ptr<fe::graph::Graph> makeBackwardGraph(const CudnnRmsNormDescriptor& descriptor) const {
+        auto graph = make_shared<fe::graph::Graph>();
+        graph->set_io_data_type(toFrontendDataType(descriptor.inputDataType))
             .set_intermediate_data_type(toFrontendDataType(descriptor.computeDataType))
             .set_compute_data_type(toFrontendDataType(descriptor.computeDataType));
 
         const vector<int64_t> dims = ioDims(descriptor);
         const vector<int64_t> strides = ioStrides(descriptor);
-        auto dy = ioTensor(built.graph, descriptor.debugName + "_dy", UID_DY, dims, strides);
+        auto dy = ioTensor(graph, descriptor.debugName + "_dy", UID_DY, dims, strides);
         if (descriptor.outputDataType != descriptor.inputDataType) {
             dy->set_data_type(toFrontendDataType(descriptor.outputDataType));
         }
-        auto x = ioTensor(built.graph, descriptor.debugName + "_x", UID_X, dims, strides);
-        auto scale = tensor(built.graph, descriptor.debugName + "_scale", UID_SCALE, parameterDims(descriptor), parameterStrides(descriptor), descriptor.parameterDataType);
-        auto invVariance = tensor(built.graph,
+        auto x = ioTensor(graph, descriptor.debugName + "_x", UID_X, dims, strides);
+        auto scale = tensor(graph,
+                            descriptor.debugName + "_scale",
+                            UID_SCALE,
+                            parameterDims(descriptor),
+                            parameterStrides(descriptor),
+                            descriptor.parameterDataType);
+        auto invVariance = tensor(graph,
                                   descriptor.debugName + "_inv_variance",
                                   UID_INV_VARIANCE,
                                   statsDims(descriptor),
@@ -336,7 +318,7 @@ class RmsNormGraphCache {
 
         auto attrs = fe::graph::Rmsnorm_backward_attributes().set_name(descriptor.debugName + "_backward").has_dbias(false);
 
-        auto [dx, dscale, dbias] = built.graph->rmsnorm_backward(dy, x, scale, invVariance, attrs);
+        auto [dx, dscale, dbias] = graph->rmsnorm_backward(dy, x, scale, invVariance, attrs);
         THOR_THROW_IF_FALSE(dbias == nullptr);
         dx->set_output(true).set_uid(UID_DX).set_dim(dims).set_stride(strides);
         dscale->set_output(true)
@@ -345,16 +327,87 @@ class RmsNormGraphCache {
             .set_stride(parameterStrides(descriptor))
             .set_data_type(toFrontendDataType(descriptor.parameterDataType));
 
-        finalize(built, gpuNum);
-        return built;
+        return graph;
     }
 
-    mutable mutex mtx;
-    unordered_map<string, BuiltGraph> graphs;
+    static void checkStatus(fe::error_t status, const string& message) {
+        if (!status.is_good()) {
+            throw runtime_error(message + ": " + status.get_message());
+        }
+    }
+
+    static CudnnFrontendPlanSelection selectPrimaryHeuristic(const CudnnFrontendGraphFactory& graphFactory,
+                                                              Stream stream,
+                                                              string_view passName) {
+        ScopedGpu scopedGpu(stream.getGpuNum());
+        shared_ptr<fe::graph::Graph> graph = graphFactory();
+        if (!graph || graph.use_count() != 1) {
+            throw runtime_error("cuDNN Frontend RMSNorm selection requires a pristine operation-local graph.");
+        }
+
+        const string operation = "RMSNorm " + string(passName);
+        checkStatus(graph->validate(), "Failed to validate cuDNN Frontend " + operation + " graph");
+        checkStatus(graph->build_operation_graph(stream.getCudnnHandle()),
+                    "Failed to build cuDNN Frontend " + operation + " operation graph");
+        checkStatus(graph->create_execution_plans({fe::HeurMode_t::A}),
+                    "Failed to enumerate cuDNN Frontend " + operation + " primary-heuristic execution plans");
+        checkStatus(graph->check_support(stream.getCudnnHandle()),
+                    "Failed to check support for cuDNN Frontend " + operation + " primary-heuristic execution plans");
+
+        const int64_t planCount = graph->get_execution_plan_count();
+        string lastReplayFailure;
+        for (int64_t planIndex = 0; planIndex < planCount; ++planIndex) {
+            const auto status = graph->build_plan_at_index(stream.getCudnnHandle(), planIndex);
+            if (!status.is_good()) {
+                continue;
+            }
+
+            try {
+                CudnnFrontendPlanSelection selection =
+                    cudnnFrontendPlanSelectionAtIndex(*graph, planIndex, operation);
+                // Cache publication is allowed only after exact operation-local
+                // replay succeeds. The common helper transparently falls back to
+                // an immutable serialized replay token when Frontend's knob enum
+                // cannot losslessly represent the selected backend plan.
+                (void)replayCudnnFrontendExecutablePlan(
+                    graphFactory, selection, stream.getCudnnHandle(), operation);
+                return selection;
+            } catch (const exception& e) {
+                lastReplayFailure = e.what();
+            }
+        }
+
+        string message = "cuDNN Frontend " + operation +
+                         " produced no exactly replayable primary-heuristic execution plan; Thor RMSNorm does not permit fallback engines.";
+        if (!lastReplayFailure.empty()) {
+            message += " Last replay failure: " + lastReplayFailure;
+        }
+        throw runtime_error(message);
+    }
+
+    CudnnFrontendPlanSelection select(const CudnnRmsNormDescriptor& descriptor,
+                                      string_view passName,
+                                      Stream stream,
+                                      CudnnFrontendGraphFactory graphFactory) {
+        ScopedGpu scopedGpu(stream.getGpuNum());
+        const string key = descriptor.cacheKey(passName, stream.getGpuNum());
+        return selections.getOrSelect(key, [&]() { return selectPrimaryHeuristic(graphFactory, stream, passName); });
+    }
+
+    CudnnFrontendExecutablePlan prepare(const CudnnRmsNormDescriptor& descriptor,
+                                        string_view passName,
+                                        Stream stream,
+                                        CudnnFrontendGraphFactory graphFactory) {
+        CudnnFrontendPlanSelection selection = select(descriptor, passName, stream, graphFactory);
+        return replayCudnnFrontendExecutablePlan(
+            graphFactory, selection, stream.getCudnnHandle(), "RMSNorm " + string(passName));
+    }
+
+    CudnnFrontendPlanSelectionCache<string> selections{kSelectionCacheCapacity};
 };
 
-RmsNormGraphCache& cache() {
-    static RmsNormGraphCache instance;
+RmsNormPlanRepository& repository() {
+    static RmsNormPlanRepository instance;
     return instance;
 }
 
@@ -488,12 +541,35 @@ CudnnRmsNorm& CudnnRmsNorm::instance() {
     return singleton;
 }
 
-void CudnnRmsNorm::forward(const CudnnRmsNormDescriptor& descriptor,
+CudnnRmsNormExecutablePlan CudnnRmsNorm::prepareForward(const CudnnRmsNormDescriptor& descriptor, Stream stream) {
+    descriptor.validateForward();
+    const int gpuNum = stream.getGpuNum();
+    CudnnFrontendExecutablePlan executable = repository().prepareForward(descriptor, stream);
+    return CudnnRmsNormExecutablePlan(
+        descriptor, CudnnRmsNormExecutablePlan::Pass::Forward, gpuNum, std::move(executable));
+}
+
+CudnnRmsNormExecutablePlan CudnnRmsNorm::prepareBackward(const CudnnRmsNormDescriptor& descriptor, Stream stream) {
+    descriptor.validateBackward();
+    const int gpuNum = stream.getGpuNum();
+    CudnnFrontendExecutablePlan executable = repository().prepareBackward(descriptor, stream);
+    return CudnnRmsNormExecutablePlan(
+        descriptor, CudnnRmsNormExecutablePlan::Pass::Backward, gpuNum, std::move(executable));
+}
+
+void CudnnRmsNorm::forward(const CudnnRmsNormExecutablePlan& plan,
                            const CudnnRmsNormForwardArgs& args,
                            optional<Tensor>& workspace,
                            Stream stream) {
+    if (!plan.isForward()) {
+        throw invalid_argument("cuDNN RMSNorm forward requires a forward executable plan.");
+    }
+    const CudnnRmsNormDescriptor& descriptor = plan.descriptor();
     descriptor.validateForward();
     const int gpuNum = stream.getGpuNum();
+    if (gpuNum != plan.gpuNum()) {
+        throw invalid_argument("cuDNN RMSNorm forward executable plan cannot move between GPUs.");
+    }
     requireIoTensor(args.x, descriptor, descriptor.inputDataType, gpuNum, "x");
     requireIoTensor(args.y, descriptor, descriptor.outputDataType, gpuNum, "y");
     requireParameterTensor(args.scale, descriptor, gpuNum, "scale");
@@ -505,7 +581,6 @@ void CudnnRmsNorm::forward(const CudnnRmsNormDescriptor& descriptor,
     }
 
     ScopedGpu scopedGpu(gpuNum);
-    BuiltGraph& built = cache().getOrBuildForward(descriptor, gpuNum);
     unordered_map<int64_t, void*> variantPack;
     insertTensor(variantPack, UID_X, args.x);
     insertTensor(variantPack, UID_SCALE, args.scale);
@@ -514,20 +589,24 @@ void CudnnRmsNorm::forward(const CudnnRmsNormDescriptor& descriptor,
         insertTensor(variantPack, UID_INV_VARIANCE, args.invVariance.value());
     }
 
-    const uint64_t requiredWorkspaceBytes = checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "RMSNorm forward");
+    const uint64_t requiredWorkspaceBytes = checkedCudnnWorkspaceSizeInBytes(plan.workspaceBytes(), "RMSNorm forward");
     void* workspacePtr = cudnnExecutionWorkspacePointer(workspace, requiredWorkspaceBytes, gpuNum, "RMSNorm forward");
-    auto status = built.graph->execute(stream.getCudnnHandle(), variantPack, workspacePtr);
-    if (!status.is_good()) {
-        throw runtime_error("Failed to execute cuDNN Frontend RMSNorm graph: " + status.get_message());
-    }
+    plan.executable_.execute(stream.getCudnnHandle(), variantPack, workspacePtr);
 }
 
-void CudnnRmsNorm::backward(const CudnnRmsNormDescriptor& descriptor,
+void CudnnRmsNorm::backward(const CudnnRmsNormExecutablePlan& plan,
                             const CudnnRmsNormBackwardArgs& args,
                             optional<Tensor>& workspace,
                             Stream stream) {
+    if (!plan.isBackward()) {
+        throw invalid_argument("cuDNN RMSNorm backward requires a backward executable plan.");
+    }
+    const CudnnRmsNormDescriptor& descriptor = plan.descriptor();
     descriptor.validateBackward();
     const int gpuNum = stream.getGpuNum();
+    if (gpuNum != plan.gpuNum()) {
+        throw invalid_argument("cuDNN RMSNorm backward executable plan cannot move between GPUs.");
+    }
     requireIoTensor(args.dy, descriptor, descriptor.outputDataType, gpuNum, "dy");
     requireIoTensor(args.x, descriptor, descriptor.inputDataType, gpuNum, "x");
     requireIoTensor(args.dx, descriptor, descriptor.inputDataType, gpuNum, "dx");
@@ -536,7 +615,6 @@ void CudnnRmsNorm::backward(const CudnnRmsNormDescriptor& descriptor,
     requireParameterTensor(args.dscale, descriptor, gpuNum, "dscale");
 
     ScopedGpu scopedGpu(gpuNum);
-    BuiltGraph& built = cache().getOrBuildBackward(descriptor, gpuNum);
     unordered_map<int64_t, void*> variantPack;
     insertTensor(variantPack, UID_DY, args.dy);
     insertTensor(variantPack, UID_X, args.x);
@@ -545,34 +623,35 @@ void CudnnRmsNorm::backward(const CudnnRmsNormDescriptor& descriptor,
     insertTensor(variantPack, UID_DX, args.dx);
     insertTensor(variantPack, UID_DSCALE, args.dscale);
 
-    const uint64_t requiredWorkspaceBytes = checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "RMSNorm backward");
+    const uint64_t requiredWorkspaceBytes = checkedCudnnWorkspaceSizeInBytes(plan.workspaceBytes(), "RMSNorm backward");
     void* workspacePtr = cudnnExecutionWorkspacePointer(workspace, requiredWorkspaceBytes, gpuNum, "RMSNorm backward");
-    auto status = built.graph->execute(stream.getCudnnHandle(), variantPack, workspacePtr);
-    if (!status.is_good()) {
-        throw runtime_error("Failed to execute cuDNN Frontend RMSNorm graph: " + status.get_message());
-    }
+    plan.executable_.execute(stream.getCudnnHandle(), variantPack, workspacePtr);
 }
 
 uint64_t CudnnRmsNorm::forwardWorkspaceSizeInBytes(const CudnnRmsNormDescriptor& descriptor, int gpuNum) {
-    const BuiltGraph& built = cache().getOrBuildForward(descriptor, gpuNum);
-    return checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "RMSNorm forward");
+    const CudnnFrontendPlanSelection selection = repository().selectForward(descriptor, gpuNum);
+    return selection.expected_workspace_bytes;
 }
 
 uint64_t CudnnRmsNorm::backwardWorkspaceSizeInBytes(const CudnnRmsNormDescriptor& descriptor, int gpuNum) {
-    const BuiltGraph& built = cache().getOrBuildBackward(descriptor, gpuNum);
-    return checkedCudnnWorkspaceSizeInBytes(built.workspaceBytes, "RMSNorm backward");
+    const CudnnFrontendPlanSelection selection = repository().selectBackward(descriptor, gpuNum);
+    return selection.expected_workspace_bytes;
 }
 
 void CudnnRmsNorm::warmForward(const CudnnRmsNormDescriptor& descriptor, int gpuNum) {
-    (void)forwardWorkspaceSizeInBytes(descriptor, gpuNum);
+    (void)repository().selectForward(descriptor, gpuNum);
 }
 
 void CudnnRmsNorm::warmBackward(const CudnnRmsNormDescriptor& descriptor, int gpuNum) {
-    (void)backwardWorkspaceSizeInBytes(descriptor, gpuNum);
+    (void)repository().selectBackward(descriptor, gpuNum);
 }
 
-void CudnnRmsNorm::clearCache() { cache().clear(); }
+void CudnnRmsNorm::clearSelectionCache() { repository().clear(); }
 
-size_t CudnnRmsNorm::cachedGraphCount() const { return cache().size(); }
+size_t CudnnRmsNorm::cachedSelectionCount() const { return repository().size(); }
+
+uint64_t CudnnRmsNorm::selectionCacheHitCount() const { return repository().hitCount(); }
+
+uint64_t CudnnRmsNorm::selectionCacheMissCount() const { return repository().missCount(); }
 
 bool CudnnRmsNorm::frontendAvailable() { return true; }

@@ -17,7 +17,7 @@
 
 #include "test/DeepLearning/Implementation/Layers/Helpers/GradientRivet.h"
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
-#include "test/Utilities/TensorOperations/GpuConvolution/ConvolutionTestHelper.h"
+#include "test/Utilities/TensorOperations/ConvolutionTestHelper.h"
 
 using namespace std;
 using namespace ThorImplementation;
@@ -130,29 +130,19 @@ vector<float> randomFloatVector(mt19937& rng, uint64_t size, float low, float hi
     return values;
 }
 
-ConvolutionKernelRequirement makeConvolutionKernelRequirement(uint64_t batchSize,
-                                                              uint32_t numInputChannels,
-                                                              uint64_t inputH,
-                                                              uint64_t inputW,
-                                                              uint32_t numOutputChannels,
-                                                              uint32_t filterH,
-                                                              uint32_t filterW,
-                                                              uint32_t strideH,
-                                                              uint32_t strideW,
-                                                              uint32_t padH,
-                                                              uint32_t padW) {
-    return ConvolutionKernelRequirement(MachineEvaluator::instance().getGpuType(0),
-                                        filterW,
-                                        filterH,
-                                        strideW,
-                                        strideH,
-                                        padW,
-                                        padH,
-                                        numInputChannels,
-                                        numOutputChannels,
-                                        batchSize,
-                                        inputW,
-                                        inputH);
+ConvolutionTestRequirement makeConvolutionTestRequirement(uint64_t batchSize,
+                                                          uint32_t numInputChannels,
+                                                          uint64_t inputH,
+                                                          uint64_t inputW,
+                                                          uint32_t numOutputChannels,
+                                                          uint32_t filterH,
+                                                          uint32_t filterW,
+                                                          uint32_t strideH,
+                                                          uint32_t strideW,
+                                                          uint32_t padH,
+                                                          uint32_t padW) {
+    return ConvolutionTestRequirement(
+        filterW, filterH, strideW, strideH, padW, padH, numInputChannels, numOutputChannels, batchSize, inputW, inputH);
 }
 
 pair<uint64_t, uint64_t> convOutputSpatial(uint64_t inputH,
@@ -163,7 +153,7 @@ pair<uint64_t, uint64_t> convOutputSpatial(uint64_t inputH,
                                            uint32_t strideW,
                                            uint32_t padH,
                                            uint32_t padW) {
-    const auto requirement = makeConvolutionKernelRequirement(1, 1, inputH, inputW, 1, filterH, filterW, strideH, strideW, padH, padW);
+    const auto requirement = makeConvolutionTestRequirement(1, 1, inputH, inputW, 1, filterH, filterW, strideH, strideW, padH, padW);
     return {static_cast<uint64_t>(requirement.getNumOutputRows()), static_cast<uint64_t>(requirement.getNumOutputColumns())};
 }
 
@@ -188,7 +178,7 @@ vector<float> conv2dForwardReference(const vector<float>& inputValues,
                                      uint32_t padH,
                                      uint32_t padW,
                                      bool hasBias) {
-    const auto requirement = makeConvolutionKernelRequirement(
+    const auto requirement = makeConvolutionTestRequirement(
         batchSize, numInputChannels, inputH, inputW, numOutputChannels, filterH, filterW, strideH, strideW, padH, padW);
 
     Tensor inputTensor = makeCpuTensor(DataType::FP16, {batchSize, numInputChannels, inputH, inputW}, inputValues);
@@ -222,7 +212,7 @@ vector<float> conv2dBackwardErrorReference(const vector<float>& errorInputValues
                                            uint32_t strideW,
                                            uint32_t padH,
                                            uint32_t padW) {
-    const auto requirement = makeConvolutionKernelRequirement(
+    const auto requirement = makeConvolutionTestRequirement(
         batchSize, numInputChannels, inputH, inputW, numOutputChannels, filterH, filterW, strideH, strideW, padH, padW);
 
     Tensor errorInputTensor = makeCpuTensor(DataType::FP16,
@@ -251,7 +241,7 @@ vector<float> conv2dWeightGradReference(const vector<float>& inputValues,
                                         uint32_t strideW,
                                         uint32_t padH,
                                         uint32_t padW) {
-    const auto requirement = makeConvolutionKernelRequirement(
+    const auto requirement = makeConvolutionTestRequirement(
         batchSize, numInputChannels, inputH, inputW, numOutputChannels, filterH, filterW, strideH, strideW, padH, padW);
 
     Tensor inputTensor = makeCpuTensor(DataType::FP16, {batchSize, numInputChannels, inputH, inputW}, inputValues);

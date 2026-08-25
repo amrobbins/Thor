@@ -329,18 +329,20 @@ void AdaptiveLayerNorm::compileImpl() {
     forwardDescriptor.computeDataType = DataType::FP32;
     forwardDescriptor.epsilon = static_cast<float>(epsilon);
     forwardDescriptor.training = !isInferenceOnly();
-    const uint64_t forwardWorkspaceBytes =
-        CudnnAdaptiveLayerNorm::instance().forwardWorkspaceSizeInBytes(forwardDescriptor, placement.getDeviceNum());
-    forwardWorkspace = allocateAdaptiveLayerNormWorkspace(placement, forwardWorkspaceBytes);
-
+    forwardPlan.reset();
+    backwardPlan.reset();
+    forwardWorkspace.reset();
     backwardWorkspace.reset();
+
+    forwardPlan.emplace(CudnnAdaptiveLayerNorm::instance().prepareForward(forwardDescriptor, computeStream()));
+    forwardWorkspace = allocateAdaptiveLayerNormWorkspace(placement, forwardPlan->workspaceBytes());
+
     if (!isInferenceOnly() && errorInput.has_value() && anyErrorOutput()) {
         CudnnAdaptiveLayerNormDescriptor backwardDescriptor = forwardDescriptor;
         backwardDescriptor.outputDataType = errorInput.value().getDataType();
         backwardDescriptor.training = true;
-        const uint64_t backwardWorkspaceBytes =
-            CudnnAdaptiveLayerNorm::instance().backwardWorkspaceSizeInBytes(backwardDescriptor, placement.getDeviceNum());
-        backwardWorkspace = allocateAdaptiveLayerNormWorkspace(placement, backwardWorkspaceBytes);
+        backwardPlan.emplace(CudnnAdaptiveLayerNorm::instance().prepareBackward(backwardDescriptor, computeStream()));
+        backwardWorkspace = allocateAdaptiveLayerNormWorkspace(placement, backwardPlan->workspaceBytes());
     }
 
     resetForwardArrivalBookkeeping();
@@ -356,6 +358,8 @@ void AdaptiveLayerNorm::cleanup() {
     saveInvVariance = Tensor();
     for (auto& scratch : scratchErrorOutputs)
         scratch.reset();
+    forwardPlan.reset();
+    backwardPlan.reset();
     forwardWorkspace.reset();
     backwardWorkspace.reset();
     allForwardInputTensorIds.clear();
@@ -397,16 +401,7 @@ void AdaptiveLayerNorm::forward(optional<Tensor> featureInput, bool validationPa
         computeStream().waitEvent(adaptiveStreams[i].value().putEvent());
     }
 
-    CudnnAdaptiveLayerNormDescriptor descriptor;
-    descriptor.batchSize = computeBatchSize(adaptiveFeatureInputs[DATA].value());
-    descriptor.leadingFeatureCount = computeLeadingFeatureCount(adaptiveFeatureInputs[DATA].value());
-    descriptor.normalizedFeatureCount = normalizedFeatureCount;
-    descriptor.inputDataType = adaptiveFeatureInputs[DATA].value().getDataType();
-    descriptor.outputDataType = featureOutput.value().getDataType();
-    descriptor.scaleBiasDataType = scaleBiasDataType;
-    descriptor.computeDataType = DataType::FP32;
-    descriptor.epsilon = static_cast<float>(epsilon);
-    descriptor.training = !isInferenceOnly();
+    THOR_THROW_IF_FALSE(forwardPlan.has_value());
 
     CudnnAdaptiveLayerNormForwardArgs args;
     args.x = adaptiveFeatureInputs[DATA].value();
@@ -418,7 +413,7 @@ void AdaptiveLayerNorm::forward(optional<Tensor> featureInput, bool validationPa
         args.invVariance = saveInvVariance;
     }
 
-    CudnnAdaptiveLayerNorm::instance().forward(descriptor, args, forwardWorkspace, computeStream());
+    CudnnAdaptiveLayerNorm::instance().forward(forwardPlan.value(), args, forwardWorkspace, computeStream());
 
     if (nextLayer.has_value()) {
         nextLayer.value()->forward(featureOutput, validationPass, batchSize);
@@ -447,16 +442,7 @@ void AdaptiveLayerNorm::backward(optional<Tensor> errorInput, uint32_t batchSize
         }
     }
 
-    CudnnAdaptiveLayerNormDescriptor descriptor;
-    descriptor.batchSize = computeBatchSize(adaptiveFeatureInputs[DATA].value());
-    descriptor.leadingFeatureCount = computeLeadingFeatureCount(adaptiveFeatureInputs[DATA].value());
-    descriptor.normalizedFeatureCount = normalizedFeatureCount;
-    descriptor.inputDataType = adaptiveFeatureInputs[DATA].value().getDataType();
-    descriptor.outputDataType = errorInput.value().getDataType();
-    descriptor.scaleBiasDataType = scaleBiasDataType;
-    descriptor.computeDataType = DataType::FP32;
-    descriptor.epsilon = static_cast<float>(epsilon);
-    descriptor.training = true;
+    THOR_THROW_IF_FALSE(backwardPlan.has_value());
 
     CudnnAdaptiveLayerNormBackwardArgs args;
     args.dy = errorInput.value();
@@ -468,7 +454,7 @@ void AdaptiveLayerNorm::backward(optional<Tensor> errorInput, uint32_t batchSize
     args.dscale = gradientOutputs[SCALE];
     args.dbias = gradientOutputs[BIAS];
 
-    CudnnAdaptiveLayerNorm::instance().backward(descriptor, args, backwardWorkspace, computeStream());
+    CudnnAdaptiveLayerNorm::instance().backward(backwardPlan.value(), args, backwardWorkspace, computeStream());
 
     Event gradientsReady = computeStream().putEvent();
     for (uint32_t i = 0; i < NUM_INPUT_PORTS; ++i) {

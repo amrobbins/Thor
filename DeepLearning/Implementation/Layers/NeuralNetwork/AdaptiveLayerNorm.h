@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnAdaptiveLayerNorm.h"
 
 #include <array>
 #include <optional>
@@ -96,10 +97,12 @@ class AdaptiveLayerNorm : public Layer {
     Tensor saveInvVariance;
     std::array<std::optional<Tensor>, NUM_INPUT_PORTS> scratchErrorOutputs;
 
-    // AdaptiveLayerNorm synchronizes all three input ports onto one private
-    // compute stream. Mutable cuDNN scratch therefore belongs to this placed
-    // execution object, never to the globally shared graph cache. Forward and
-    // backward own separate workspaces so their lifetimes remain independent.
+    // AdaptiveLayerNorm synchronizes all three input ports onto the DATA-port
+    // compute stream. This placed layer owns both finalized cuDNN Frontend
+    // executables and mutable workspaces. Equivalent layers may share only the
+    // immutable process-global selection recipe.
+    std::optional<CudnnAdaptiveLayerNormExecutablePlan> forwardPlan;
+    std::optional<CudnnAdaptiveLayerNormExecutablePlan> backwardPlan;
     std::optional<Tensor> forwardWorkspace;
     std::optional<Tensor> backwardWorkspace;
 };

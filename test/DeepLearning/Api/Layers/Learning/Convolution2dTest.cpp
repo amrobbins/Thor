@@ -8,7 +8,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
-#include "test/Utilities/TensorOperations/GpuConvolution/ConvolutionTestHelper.h"
+#include "test/Utilities/TensorOperations/ConvolutionTestHelper.h"
 
 #include "cuda_bf16.h"
 #include "cuda_fp16.h"
@@ -145,29 +145,19 @@ uint32_t convOutputDim(uint32_t input, uint32_t stride, uint32_t filter, uint32_
     return 1 + (((input + 2 * padding) - filter) / stride);
 }
 
-ConvolutionKernelRequirement makeConvolutionKernelRequirement(uint64_t batchSize,
-                                                              uint32_t numInputChannels,
-                                                              uint64_t inputH,
-                                                              uint64_t inputW,
-                                                              uint32_t numOutputChannels,
-                                                              uint32_t filterH,
-                                                              uint32_t filterW,
-                                                              uint32_t strideH,
-                                                              uint32_t strideW,
-                                                              uint32_t padH,
-                                                              uint32_t padW) {
-    return ConvolutionKernelRequirement(MachineEvaluator::instance().getGpuType(0),
-                                        filterW,
-                                        filterH,
-                                        strideW,
-                                        strideH,
-                                        padW,
-                                        padH,
-                                        numInputChannels,
-                                        numOutputChannels,
-                                        batchSize,
-                                        inputW,
-                                        inputH);
+Impl::ConvolutionTestRequirement makeConvolutionTestRequirement(uint64_t batchSize,
+                                                                uint32_t numInputChannels,
+                                                                uint64_t inputH,
+                                                                uint64_t inputW,
+                                                                uint32_t numOutputChannels,
+                                                                uint32_t filterH,
+                                                                uint32_t filterW,
+                                                                uint32_t strideH,
+                                                                uint32_t strideW,
+                                                                uint32_t padH,
+                                                                uint32_t padW) {
+    return Impl::ConvolutionTestRequirement(
+        filterW, filterH, strideW, strideH, padW, padH, numInputChannels, numOutputChannels, batchSize, inputW, inputH);
 }
 
 Impl::Tensor makeCpuTensor(DataType dataType, const vector<uint64_t>& dims, const vector<float>& values) {
@@ -191,7 +181,7 @@ vector<float> conv2dForwardReference(const vector<float>& inputValues,
                                      uint32_t padH,
                                      uint32_t padW,
                                      bool hasBias) {
-    const auto requirement = makeConvolutionKernelRequirement(
+    const auto requirement = makeConvolutionTestRequirement(
         batchSize, numInputChannels, inputH, inputW, numOutputChannels, filterH, filterW, strideH, strideW, padH, padW);
 
     Impl::Tensor inputTensor = makeCpuTensor(DataType::FP16, {batchSize, numInputChannels, inputH, inputW}, inputValues);
@@ -287,7 +277,7 @@ vector<float> conv2dErrorReference(const vector<float>& errorInputValues,
                                    uint32_t strideW,
                                    uint32_t padH,
                                    uint32_t padW) {
-    const auto requirement = makeConvolutionKernelRequirement(
+    const auto requirement = makeConvolutionTestRequirement(
         batchSize, numInputChannels, inputH, inputW, numOutputChannels, filterH, filterW, strideH, strideW, padH, padW);
 
     Impl::Tensor errorInputTensor = makeCpuTensor(DataType::FP16,
@@ -316,7 +306,7 @@ vector<float> conv2dWeightGradReference(const vector<float>& inputValues,
                                         uint32_t strideW,
                                         uint32_t padH,
                                         uint32_t padW) {
-    const auto requirement = makeConvolutionKernelRequirement(
+    const auto requirement = makeConvolutionTestRequirement(
         batchSize, numInputChannels, inputH, inputW, numOutputChannels, filterH, filterW, strideH, strideW, padH, padW);
 
     Impl::Tensor inputTensor = makeCpuTensor(DataType::FP16, {batchSize, numInputChannels, inputH, inputW}, inputValues);

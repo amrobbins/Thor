@@ -60,12 +60,30 @@ float referenceValue(const float *A, const float *B, uint64_t row, uint64_t col)
 TEST(BucketedCublasGemm, RowsABindingUsesSelectedCachedDescriptorAgainstFullCapacityAllocation) {
     ScopedGpu scopedGpu(0);
     Stream stream(0);
+    auto& cublas = CublasMatrixMultiply::instance();
+    cublas.clearOptimalKernelSelectionCacheForTests();
 
     BucketedCublasGemm gemm = BucketedCublasGemm::build(0,
                                                         kFullRows,
                                                         forwardShape(),
                                                         BucketedCublasGemmRowBinding::RowsA,
                                                         CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP32));
+    const size_t selectionsAfterFirstFamily = cublas.cachedOptimalKernelSelectionCountForTests();
+    ASSERT_GT(selectionsAfterFirstFamily, 0u);
+
+    BucketedCublasGemm peer = BucketedCublasGemm::build(0,
+                                                        kFullRows,
+                                                        forwardShape(),
+                                                        BucketedCublasGemmRowBinding::RowsA,
+                                                        CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP32));
+    EXPECT_EQ(cublas.cachedOptimalKernelSelectionCountForTests(), selectionsAfterFirstFamily);
+    for (const uint64_t activeRows : {0u, 20u, 33u, 65u}) {
+        EXPECT_EQ(gemm.getSelectedKernelSelectionForTests(activeRows), peer.getSelectedKernelSelectionForTests(activeRows));
+        EXPECT_NE(gemm.getSelectedExecutionStateIdForTests(activeRows), peer.getSelectedExecutionStateIdForTests(activeRows));
+    }
+    const uint64_t materializationsAfterFamilies = CublasKernel::materializationCountForTests();
+    cublas.clearOptimalKernelSelectionCacheForTests();
+    ASSERT_EQ(cublas.cachedOptimalKernelSelectionCountForTests(), 0u);
 
     EXPECT_EQ(gemm.getCapacityBuckets(), (std::vector<uint64_t>{8, 16, 32, 64, 66}));
     EXPECT_EQ(gemm.getSelectedCapacityRows(0), 8U);
@@ -160,6 +178,11 @@ TEST(BucketedCublasGemm, RowsABindingUsesSelectedCachedDescriptorAgainstFullCapa
                 << "row " << row << " col " << col << " changed beyond the selected M=64 descriptor";
         }
     }
+
+    EXPECT_EQ(CublasKernel::materializationCountForTests(), materializationsAfterFamilies)
+        << "Bucketed cuBLASLt runtime must use the prebuilt executable family without rematerializing kernels.";
+    EXPECT_EQ(cublas.cachedOptimalKernelSelectionCountForTests(), 0u)
+        << "Bucketed cuBLASLt runtime must not consult/repopulate the global selection family.";
 }
 
 TEST(BucketedCublasGemm, RowsAAndRowsBBindingBucketsTheRawReductionRowsTogether) {

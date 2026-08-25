@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnLayerNorm.h"
 
 #include <optional>
 #include <vector>
@@ -65,9 +66,11 @@ class LayerNorm : public TrainableLayer {
     std::vector<Tensor> scratchDBias;
     std::optional<Tensor> scratchErrorOutput;
 
-    // LayerNorm is a MultiConnectionLayer. Connections may execute on
-    // independent CUDA streams, so mutable cuDNN scratch must be owned per
-    // connection rather than by the globally shared graph cache.
+    // LayerNorm is a MultiConnectionLayer. Every connection owns both its
+    // finalized cuDNN Frontend executable and its mutable workspace. Equivalent
+    // connections may share only the immutable global selection recipe.
+    std::vector<std::optional<CudnnLayerNormExecutablePlan>> forwardPlans;
+    std::vector<std::optional<CudnnLayerNormExecutablePlan>> backwardPlans;
     std::vector<std::optional<Tensor>> forwardWorkspaces;
     std::vector<std::optional<Tensor>> backwardWorkspaces;
 };

@@ -15,6 +15,8 @@
 #include <vector>
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/Common/AcceleratorBackendCachePolicy.h"
+#include "Utilities/Common/CudnnFrontendPlan.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/CudaDriver/CudaGraph.h"
 
@@ -32,12 +34,6 @@
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/BucketedCublasGemm.h"
-
-namespace cudnn_frontend {
-namespace graph {
-class Graph;
-}
-}
 
 namespace ThorImplementation {
 
@@ -133,23 +129,18 @@ struct BuiltReduction {
     BuiltReduction& operator=(const BuiltReduction&) = delete;
 };
 
-struct SoftmaxCacheKey {
-    const std::vector<uint64_t> input_dims;
-    const DataType input_dtype;
-    const DataType output_dtype;
-    const cudnnSoftmaxAlgorithm_t algorithm;
-    const cudnnSoftmaxMode_t mode;
-    const int device_num;
-
-    bool operator==(const SoftmaxCacheKey& other) const = default;
-};
-
-struct BuiltSoftmax {
-    SoftmaxCacheKey key;
+/**
+ * Stamp-local classic-cuDNN softmax execution state.
+ *
+ * Tensor descriptors are mutable backend objects and therefore may not be
+ * process-global or shared across independently executable stamps. Immutable
+ * algorithm/mode/dtype metadata remains on CompiledSoftmax.
+ */
+struct BuiltSoftmax final : AcceleratorBackendLocalExecutionStateTag {
     cudnnTensorDescriptor_t x_desc = nullptr;
     cudnnTensorDescriptor_t y_desc = nullptr;
 
-    explicit BuiltSoftmax(SoftmaxCacheKey key) : key(std::move(key)) {}
+    BuiltSoftmax() = default;
 
     ~BuiltSoftmax() {
         if (x_desc)
@@ -160,6 +151,8 @@ struct BuiltSoftmax {
 
     BuiltSoftmax(const BuiltSoftmax&) = delete;
     BuiltSoftmax& operator=(const BuiltSoftmax&) = delete;
+    BuiltSoftmax(BuiltSoftmax&&) = delete;
+    BuiltSoftmax& operator=(BuiltSoftmax&&) = delete;
 };
 
 struct MatmulCacheKey {
@@ -237,12 +230,12 @@ struct MatmulCacheKey {
           device_num(device_num) {}
 };
 
-struct BuiltMatmul {
+struct BuiltMatmul : AcceleratorBackendLocalExecutionStateTag {
     MatmulCacheKey key;
     size_t workspace_bytes = 0;
     std::optional<CublasKernel> cublas_kernel;
     std::optional<BucketedCublasGemm> bucketed_cublas_gemm;
-    std::shared_ptr<CublasMatrixMultiply::LtMatmulPlan> epilogue_plan;
+    std::unique_ptr<CublasMatrixMultiply::LtMatmulPlan> epilogue_plan;
     std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> epilogue_algorithm;
 
     explicit BuiltMatmul(MatmulCacheKey key) : key(std::move(key)) {}
@@ -414,17 +407,16 @@ struct CompiledAttentionBackward {
     [[nodiscard]] DataType outputDTypeFor(ExprOp op) const;
 };
 
-struct BuiltConvolution {
+struct BuiltConvolution final : AcceleratorBackendLocalExecutionStateTag {
     bool use_cudnn_frontend = false;
-    std::shared_ptr<cudnn_frontend::graph::Graph> frontend_graph;
-    // Placement-time autotuning ranks candidates on a scratch graph. Thor then recreates the
-    // fastest remaining candidate exactly by (engine id, knob choices), proves that pristine graph
-    // against an independent mathematical convolution reference, and retains that same graph for
-    // runtime. A plan that has not passed correctness validation is never executable.
+    // A process-global cache may supply only the immutable engine/knob/serialized replay recipe.
+    // Every stamped convolution recreates its own move-only Frontend executable from that recipe;
+    // no graph, execution plan, descriptor, handle, or workspace is shared through the cache.
+    std::optional<CudnnFrontendExecutablePlan> frontend_plan;
+    // True only when frontend_plan was replayed from a recipe that either just passed Thor's
+    // independent convolution oracle or was retrieved from the cache populated exclusively by
+    // such validated recipes.
     bool correctness_validated = false;
-    int64_t selected_plan_index = -1;
-    int64_t selected_engine_id = -1;
-    std::vector<std::pair<int64_t, int64_t>> selected_knobs;
     size_t workspace_bytes = 0;
 
     BuiltConvolution() = default;
@@ -432,6 +424,23 @@ struct BuiltConvolution {
     BuiltConvolution& operator=(const BuiltConvolution&) = delete;
     ~BuiltConvolution() = default;
 };
+
+// Read-only ownership diagnostics for C13.  The selection is copied value
+// metadata; executable/workspace ids are observation-only addresses used to
+// prove independently stamped operations do not alias local backend state.
+struct CudnnFrontendConvolutionOwnershipDiagnostic {
+    CudnnFrontendPlanSelection selection;
+    uintptr_t executable_id = 0;
+    uintptr_t workspace_id = 0;
+    uint64_t workspace_bytes = 0;
+};
+
+// C11/C13 diagnostics for the process-global immutable convolution-selection cache.
+// These functions never expose or mutate stamped executable state.
+void clearCudnnFrontendConvolutionSelectionCacheForTests();
+[[nodiscard]] size_t cachedCudnnFrontendConvolutionSelectionCountForTests();
+[[nodiscard]] uint64_t cudnnFrontendConvolutionSelectionCacheHitCountForTests();
+[[nodiscard]] uint64_t cudnnFrontendConvolutionSelectionCacheMissCountForTests();
 
 class StampedEquation {
    public:
@@ -500,12 +509,11 @@ class StampedEquation {
                                                           const Tensor& input,
                                                           int device_num);
 
-    static std::shared_ptr<BuiltSoftmax> buildSoftmax(const std::shared_ptr<CompiledSoftmax>& compiled_softmax,
+    static std::unique_ptr<BuiltSoftmax> buildSoftmax(const std::shared_ptr<CompiledSoftmax>& compiled_softmax,
                                                       const Tensor& input,
-                                                      const Tensor& output,
-                                                      int device_num);
+                                                      const Tensor& output);
 
-    static std::shared_ptr<BuiltMatmul> buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
+    static std::unique_ptr<BuiltMatmul> buildMatmul(const std::shared_ptr<CompiledMatmul>& compiled_matmul,
                                                     const Tensor& lhs,
                                                     const Tensor& rhs,
                                                     const std::optional<Tensor>& addend,
@@ -882,7 +890,7 @@ class StampedSoftmax {
     Tensor getOutputTensor() const { return output; }
 
     StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
-                   std::shared_ptr<BuiltSoftmax> built,
+                   std::unique_ptr<BuiltSoftmax> built,
                    const Tensor& source_input,
                    const Tensor& input,
                    const Tensor& output,
@@ -890,7 +898,7 @@ class StampedSoftmax {
 
    private:
     const std::shared_ptr<CompiledSoftmax> compiled_softmax;
-    const std::shared_ptr<BuiltSoftmax> built_softmax;
+    const std::unique_ptr<BuiltSoftmax> built_softmax;
     const Tensor source_input;
     mutable Tensor input;
     Tensor output;
@@ -917,6 +925,15 @@ class StampedLayerNorm {
     void runOn(Stream& run_stream) const;
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
     Tensor getOutputTensor() const { return output; }
+    uintptr_t executablePlanId() const {
+        return executable_plan.has_value() ? executable_plan->executableId() : 0;
+    }
+    CudnnFrontendPlanSelection planSelection() const {
+        if (!executable_plan.has_value()) {
+            throw std::runtime_error("StampedLayerNorm has no prepared executable plan.");
+        }
+        return executable_plan->selection();
+    }
 
     StampedLayerNorm(std::shared_ptr<CompiledLayerNorm> compiled,
                      Tensor input,
@@ -932,6 +949,7 @@ class StampedLayerNorm {
     const Tensor bias;
     Tensor output;
     Stream stream;
+    std::optional<CudnnLayerNormExecutablePlan> executable_plan;
     mutable std::optional<Tensor> workspace;
 };
 
@@ -950,6 +968,9 @@ class StampedRmsNorm {
     [[nodiscard]] const void* workspaceAddress() const {
         return workspace.has_value() ? workspace->getMemPtr<void>() : nullptr;
     }
+    [[nodiscard]] size_t executablePlanCount() const noexcept { return forward_executable_plans.size(); }
+    [[nodiscard]] std::vector<uintptr_t> executablePlanIds() const;
+    [[nodiscard]] std::vector<CudnnFrontendPlanSelection> planSelections() const;
     [[nodiscard]] std::optional<PackedRowConsumerDiagnostic> packedRowConsumerDiagnostic() const;
     bool canProvideForwardStateFor(const CompiledRmsNormBackward& backward,
                                    const Tensor& input_tensor,
@@ -974,10 +995,17 @@ class StampedRmsNorm {
     Tensor output;
     Stream stream;
     std::shared_ptr<RmsNormForwardState> forward_state;
-    // Mutable execution scratch is owned by this stamped operation, never by
-    // the shared cuDNN graph cache. Packed RMSNorm sizes this once to the
-    // maximum workspace requirement across its finite bucket family.
+    // Dense RMSNorm has one entry. Packed RMSNorm owns the entire finite
+    // outer-size family selected by runtime row capacity. Global state contains
+    // only immutable selections; every executable here belongs to this stamp.
+    std::unordered_map<uint64_t, CudnnRmsNormExecutablePlan> forward_executable_plans;
+    bool prepared_training_forward = false;
+    // One private workspace is sized to the maximum requirement across the
+    // operation-local finite executable family.
     mutable std::optional<Tensor> workspace;
+
+    void prepareForwardExecutableFamily(bool training);
+    [[nodiscard]] const CudnnRmsNormExecutablePlan& forwardExecutableForOuter(uint64_t outer) const;
 };
 
 class StampedRmsNormBackward {
@@ -993,6 +1021,12 @@ class StampedRmsNormBackward {
     [[nodiscard]] uint64_t fallbackForwardWorkspaceSizeInBytes() const {
         return fallback_forward_workspace.has_value() ? fallback_forward_workspace->getArraySizeInBytes() : 0;
     }
+    [[nodiscard]] size_t backwardExecutablePlanCount() const noexcept { return backward_executable_plans.size(); }
+    [[nodiscard]] size_t fallbackForwardExecutablePlanCount() const noexcept { return fallback_forward_executable_plans.size(); }
+    [[nodiscard]] std::vector<uintptr_t> backwardExecutablePlanIds() const;
+    [[nodiscard]] std::vector<uintptr_t> fallbackForwardExecutablePlanIds() const;
+    [[nodiscard]] std::vector<CudnnFrontendPlanSelection> backwardPlanSelections() const;
+    [[nodiscard]] std::vector<CudnnFrontendPlanSelection> fallbackForwardPlanSelections() const;
     bool tryLinkForwardStateFrom(const std::shared_ptr<StampedRmsNorm>& forward);
 
     StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBackward> compiled,
@@ -1018,10 +1052,20 @@ class StampedRmsNormBackward {
     std::shared_ptr<RmsNormForwardState> saved_forward_state;
     mutable std::shared_ptr<RmsNormForwardState> fallback_forward_state;
     mutable Tensor fallback_output;
+    // Dense backward has one plan in each applicable family. Packed backward
+    // owns one local executable per finite selected outer size. The fallback
+    // forward family exists only for a standalone differentiated stage that has
+    // no linked forward statistics.
+    std::unordered_map<uint64_t, CudnnRmsNormExecutablePlan> backward_executable_plans;
+    std::unordered_map<uint64_t, CudnnRmsNormExecutablePlan> fallback_forward_executable_plans;
     // Backward and fallback-forward are independently executable cuDNN graphs,
     // so each stamped backward stage owns distinct scratch for each role.
     mutable std::optional<Tensor> backward_workspace;
     mutable std::optional<Tensor> fallback_forward_workspace;
+
+    void prepareBackwardExecutableFamilies();
+    [[nodiscard]] const CudnnRmsNormExecutablePlan& backwardExecutableForOuter(uint64_t outer) const;
+    [[nodiscard]] const CudnnRmsNormExecutablePlan& fallbackForwardExecutableForOuter(uint64_t outer) const;
 };
 
 
@@ -1063,7 +1107,7 @@ class StampedMatmul {
     std::optional<Tensor> getBiasGradientTensor() const { return bgrad_output; }
 
     StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
-                  std::shared_ptr<BuiltMatmul> built,
+                  std::unique_ptr<BuiltMatmul> built,
                   const Tensor& lhs,
                   const Tensor& rhs,
                   const std::optional<Tensor>& addend,
@@ -1092,7 +1136,7 @@ class StampedMatmul {
 
     void runOnConditionalGraphCapture(Stream& run_stream) const;
     const std::shared_ptr<CompiledMatmul> compiled_matmul;
-    const std::shared_ptr<BuiltMatmul> built_matmul;
+    const std::unique_ptr<BuiltMatmul> built_matmul;
     const Tensor lhs;
     const Tensor rhs;
     const std::optional<Tensor> addend;
@@ -1133,6 +1177,14 @@ class StampedAttention {
     }
     [[nodiscard]] const void* workspaceAddress() const {
         return workspace.has_value() ? workspace->getMemPtr<void>() : nullptr;
+    }
+    [[nodiscard]] uintptr_t executableId() const {
+        return forward_plan.has_value() ? forward_plan->executableId() : 0;
+    }
+    [[nodiscard]] const CudnnFrontendPlanSelection& planSelection() const {
+        if (!forward_plan.has_value())
+            throw std::runtime_error("StampedAttention has no prepared forward executable plan.");
+        return forward_plan->selection();
     }
 
     bool canProvideForwardStateFor(const CompiledAttentionBackward& backward,
@@ -1201,8 +1253,9 @@ class StampedAttention {
     Tensor output;
     Stream stream;
     std::shared_ptr<AttentionForwardState> forward_state;
-    // Mutable cuDNN execution scratch belongs to this stamped forward stage,
-    // never to the shared descriptor-keyed graph cache.
+    // The finalized Frontend executable and mutable scratch are both owned by
+    // this independently executable stamped forward stage.
+    std::optional<CudnnAttentionExecutablePlan> forward_plan;
     mutable std::optional<Tensor> workspace;
 };
 
@@ -1219,6 +1272,12 @@ class StampedAttentionBackward {
     }
     [[nodiscard]] uint64_t fallbackForwardWorkspaceSizeInBytes() const {
         return fallback_forward_workspace.has_value() ? fallback_forward_workspace->getArraySizeInBytes() : 0;
+    }
+    [[nodiscard]] uintptr_t backwardExecutableId() const {
+        return backward_plan.has_value() ? backward_plan->executableId() : 0;
+    }
+    [[nodiscard]] uintptr_t fallbackForwardExecutableId() const {
+        return fallback_forward_plan.has_value() ? fallback_forward_plan->executableId() : 0;
     }
 
     StampedAttentionBackward(std::shared_ptr<CompiledAttentionBackward> compiled,
@@ -1266,9 +1325,11 @@ class StampedAttentionBackward {
     Stream stream;
     std::shared_ptr<AttentionForwardState> saved_forward_state;
     std::vector<Tensor> outputs;
-    // Backward and fallback-forward are distinct cuDNN executions and therefore
-    // own independent scratch. The fallback workspace is omitted when a retained
-    // forward state is linked during stamping.
+    // Backward and fallback-forward are independently executable cuDNN plans.
+    // Each owns its finalized local Frontend state and independent scratch. The
+    // fallback pair is omitted when a retained forward state is linked during stamping.
+    std::optional<CudnnAttentionExecutablePlan> backward_plan;
+    std::optional<CudnnAttentionExecutablePlan> fallback_forward_plan;
     mutable std::optional<Tensor> backward_workspace;
     mutable std::optional<Tensor> fallback_forward_workspace;
 };
@@ -1281,6 +1342,7 @@ class StampedConvolution {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    [[nodiscard]] CudnnFrontendConvolutionOwnershipDiagnostic ownershipDiagnostic() const;
 
     StampedConvolution(std::shared_ptr<CompiledConvolution> compiled,
                        std::shared_ptr<BuiltConvolution> built,
@@ -1308,6 +1370,7 @@ class StampedConvolutionBackward {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    [[nodiscard]] CudnnFrontendConvolutionOwnershipDiagnostic ownershipDiagnostic() const;
 
     StampedConvolutionBackward(std::shared_ptr<CompiledConvolutionBackward> compiled,
                                std::shared_ptr<BuiltConvolution> built,
@@ -2064,6 +2127,24 @@ class StampedExecutionPlan {
 
     [[nodiscard]] std::vector<uint32_t> stageLaneIndices() const { return execution_schedule.stage_lane_indices; }
 
+    [[nodiscard]] std::vector<CudnnFrontendConvolutionOwnershipDiagnostic> convolutionOwnershipDiagnostics() const {
+        std::vector<CudnnFrontendConvolutionOwnershipDiagnostic> out;
+        for (const StampedExecutionStage& step : steps) {
+            if (step.kind == StampedExecutionStage::Kind::Convolution) {
+                if (!step.convolution) {
+                    throw std::runtime_error("Convolution execution stage is missing its stamped convolution.");
+                }
+                out.push_back(step.convolution->ownershipDiagnostic());
+            } else if (step.kind == StampedExecutionStage::Kind::ConvolutionBackward) {
+                if (!step.convolution_backward) {
+                    throw std::runtime_error("Convolution backward execution stage is missing its stamped convolution.");
+                }
+                out.push_back(step.convolution_backward->ownershipDiagnostic());
+            }
+        }
+        return out;
+    }
+
     [[nodiscard]] std::vector<StampedMatmulStageDiagnostic> matmulStageDiagnostics() const {
         std::vector<StampedMatmulStageDiagnostic> out;
         for (size_t stage_index = 0; stage_index < steps.size(); ++stage_index) {
@@ -2235,21 +2316,6 @@ struct hash<ThorImplementation::ReductionCacheKey> {
     }
 };
 
-template <>
-struct hash<ThorImplementation::SoftmaxCacheKey> {
-    size_t operator()(const ThorImplementation::SoftmaxCacheKey& k) const noexcept {
-        size_t h = 0;
-        hashCombine(h, hash<size_t>{}(k.input_dims.size()));
-        for (uint64_t d : k.input_dims)
-            hashCombine(h, hash<uint64_t>{}(d));
-        hashCombine(h, hash<ThorImplementation::DataType>{}(k.input_dtype));
-        hashCombine(h, hash<ThorImplementation::DataType>{}(k.output_dtype));
-        hashCombine(h, hash<int>{}(static_cast<int>(k.algorithm)));
-        hashCombine(h, hash<int>{}(static_cast<int>(k.mode)));
-        hashCombine(h, hash<int>{}(k.device_num));
-        return h;
-    }
-};
 
 template <>
 struct hash<ThorImplementation::MatmulCacheKey> {

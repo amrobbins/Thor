@@ -195,7 +195,7 @@ TEST(CudnnMixedRaggedAttention, DenseQueryRaggedKvForwardBackwardMatchesPaddedDe
     const std::vector<int32_t> kvLengths{2, 3};
 
     Stream stream(0);
-    CudnnScaledDotProductAttention::instance().clearCache();
+    CudnnScaledDotProductAttention::instance().clearSelectionCache();
 
     CudnnAttentionDescriptor mixed;
     mixed.q = AttentionTensorSpec::bshd(batch, heads, queryLength, dim, DataType::FP16);
@@ -294,8 +294,12 @@ TEST(CudnnMixedRaggedAttention, DenseQueryRaggedKvForwardBackwardMatchesPaddedDe
 
     std::optional<Tensor> mixedForwardWorkspace = allocateAttentionWorkspace(mixed, false);
     std::optional<Tensor> denseForwardWorkspace = allocateAttentionWorkspace(dense, false);
-    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().forward(mixed, mixedForward, mixedForwardWorkspace, stream));
-    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().forward(dense, denseForward, denseForwardWorkspace, stream));
+    CudnnAttentionExecutablePlan mixedForwardPlan =
+        CudnnScaledDotProductAttention::instance().prepareForward(mixed, mixedForward, stream);
+    CudnnAttentionExecutablePlan denseForwardPlan =
+        CudnnScaledDotProductAttention::instance().prepareForward(dense, denseForward, stream);
+    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().forward(mixedForwardPlan, mixedForward, mixedForwardWorkspace, stream));
+    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().forward(denseForwardPlan, denseForward, denseForwardWorkspace, stream));
     stream.synchronize();
 
     const uint64_t outputStorage = storageElements(mixed.o);
@@ -363,8 +367,12 @@ TEST(CudnnMixedRaggedAttention, DenseQueryRaggedKvForwardBackwardMatchesPaddedDe
 
     std::optional<Tensor> mixedBackwardWorkspace = allocateAttentionWorkspace(mixed, true);
     std::optional<Tensor> denseBackwardWorkspace = allocateAttentionWorkspace(dense, true);
-    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().backward(mixed, mixedBackward, mixedBackwardWorkspace, stream));
-    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().backward(dense, denseBackward, denseBackwardWorkspace, stream));
+    CudnnAttentionExecutablePlan mixedBackwardPlan =
+        CudnnScaledDotProductAttention::instance().prepareBackward(mixed, mixedBackward, stream);
+    CudnnAttentionExecutablePlan denseBackwardPlan =
+        CudnnScaledDotProductAttention::instance().prepareBackward(dense, denseBackward, stream);
+    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().backward(mixedBackwardPlan, mixedBackward, mixedBackwardWorkspace, stream));
+    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().backward(denseBackwardPlan, denseBackward, denseBackwardWorkspace, stream));
     stream.synchronize();
 
     const auto dQMixedValues = copyHalfStorage(dQMixed, storageElements(mixed.q), stream);
@@ -414,7 +422,7 @@ TEST(CudnnMixedRaggedAttention, RaggedQueryDenseKvForwardBackwardMatchesPaddedDe
     const std::vector<int32_t> kvLengths{static_cast<int32_t>(kvLength), static_cast<int32_t>(kvLength)};
 
     Stream stream(0);
-    CudnnScaledDotProductAttention::instance().clearCache();
+    CudnnScaledDotProductAttention::instance().clearSelectionCache();
 
     CudnnAttentionDescriptor mixed;
     mixed.q = AttentionTensorSpec::bshd(batch, heads, queryCapacity, dim, DataType::FP16);
@@ -512,8 +520,12 @@ TEST(CudnnMixedRaggedAttention, RaggedQueryDenseKvForwardBackwardMatchesPaddedDe
 
     std::optional<Tensor> mixedForwardWorkspace = allocateAttentionWorkspace(mixed, false);
     std::optional<Tensor> denseForwardWorkspace = allocateAttentionWorkspace(dense, false);
-    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().forward(mixed, mixedForward, mixedForwardWorkspace, stream));
-    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().forward(dense, denseForward, denseForwardWorkspace, stream));
+    CudnnAttentionExecutablePlan mixedForwardPlan =
+        CudnnScaledDotProductAttention::instance().prepareForward(mixed, mixedForward, stream);
+    CudnnAttentionExecutablePlan denseForwardPlan =
+        CudnnScaledDotProductAttention::instance().prepareForward(dense, denseForward, stream);
+    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().forward(mixedForwardPlan, mixedForward, mixedForwardWorkspace, stream));
+    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().forward(denseForwardPlan, denseForward, denseForwardWorkspace, stream));
     stream.synchronize();
 
     const auto oMixedValues = copyHalfStorage(oMixed, queryCapacity * heads * dim, stream);
@@ -613,8 +625,12 @@ TEST(CudnnMixedRaggedAttention, RaggedQueryDenseKvForwardBackwardMatchesPaddedDe
 
     std::optional<Tensor> mixedBackwardWorkspace = allocateAttentionWorkspace(mixed, true);
     std::optional<Tensor> denseBackwardWorkspace = allocateAttentionWorkspace(dense, true);
-    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().backward(mixed, mixedBackward, mixedBackwardWorkspace, stream));
-    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().backward(dense, denseBackward, denseBackwardWorkspace, stream));
+    CudnnAttentionExecutablePlan mixedBackwardPlan =
+        CudnnScaledDotProductAttention::instance().prepareBackward(mixed, mixedBackward, stream);
+    CudnnAttentionExecutablePlan denseBackwardPlan =
+        CudnnScaledDotProductAttention::instance().prepareBackward(dense, denseBackward, stream);
+    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().backward(mixedBackwardPlan, mixedBackward, mixedBackwardWorkspace, stream));
+    ASSERT_NO_THROW(CudnnScaledDotProductAttention::instance().backward(denseBackwardPlan, denseBackward, denseBackwardWorkspace, stream));
     stream.synchronize();
 
     const auto dQMixedValues = copyHalfStorage(dQMixed, queryCapacity * heads * dim, stream);

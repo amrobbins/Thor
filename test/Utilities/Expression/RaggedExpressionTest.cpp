@@ -2385,6 +2385,100 @@ TEST(RaggedExpression, PackedRmsNormLowersRowPartitionAsStructuralStageInput) {
 }
 
 
+
+TEST(RaggedExpression, PackedRmsNormC6OwnsFiniteExecutableFamiliesAndNeverPreparesAtRuntime) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t capacity = 16;
+    constexpr uint64_t hidden = 4;
+    constexpr uint64_t batch_size = 2;
+    const std::vector<uint64_t> buckets = makeRaggedRmsNormCapacityBuckets(capacity);
+    ASSERT_EQ(buckets, (std::vector<uint64_t>{8, 16}));
+
+    Stream stream_a(0);
+    Stream stream_b(0);
+    Tensor x_a(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, hidden}));
+    Tensor x_b(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, hidden}));
+    Tensor scale_a(gpuPlacement, TensorDescriptor(DataType::FP32, {hidden}));
+    Tensor scale_b(gpuPlacement, TensorDescriptor(DataType::FP32, {hidden}));
+    Tensor y_a(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, hidden}));
+    Tensor y_b(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, hidden}));
+    Tensor offsets_a = makeGpuTensor<uint32_t>({batch_size + 1}, {0, 4, 8}, stream_a);
+    Tensor offsets_b = makeGpuTensor<uint32_t>({batch_size + 1}, {0, 4, 8}, stream_b);
+    x_a.fill(0.5, stream_a);
+    x_b.fill(0.5, stream_b);
+    scale_a.fill(1.0, stream_a);
+    scale_b.fill(1.0, stream_b);
+
+    auto compiled = std::make_shared<CompiledRmsNorm>();
+    compiled->normalized_feature_count = hidden;
+    compiled->packed_row_capacity = capacity;
+    compiled->ragged_batch_size = batch_size;
+    compiled->epsilon = 1.0e-5;
+    compiled->input_dtype = DataType::FP32;
+    compiled->scale_dtype = DataType::FP32;
+    compiled->output_dtype = DataType::FP32;
+    compiled->compute_dtype = DataType::FP32;
+    compiled->debug_name = "c6_packed_rmsnorm_forward";
+
+    CudnnRmsNorm& rms_norm = CudnnRmsNorm::instance();
+    rms_norm.clearSelectionCache();
+    auto stamp_a = std::make_shared<StampedRmsNorm>(compiled, x_a, scale_a, y_a, stream_a, offsets_a);
+    auto stamp_b = std::make_shared<StampedRmsNorm>(compiled, x_b, scale_b, y_b, stream_b, offsets_b);
+
+    ASSERT_EQ(stamp_a->executablePlanCount(), buckets.size());
+    ASSERT_EQ(stamp_b->executablePlanCount(), buckets.size());
+    EXPECT_EQ(stamp_a->planSelections(), stamp_b->planSelections());
+    const std::vector<uintptr_t> ids_a = stamp_a->executablePlanIds();
+    const std::vector<uintptr_t> ids_b = stamp_b->executablePlanIds();
+    ASSERT_EQ(ids_a.size(), ids_b.size());
+    for (size_t i = 0; i < ids_a.size(); ++i) EXPECT_NE(ids_a[i], ids_b[i]);
+    EXPECT_EQ(rms_norm.cachedSelectionCount(), buckets.size());
+
+    Tensor dy(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, hidden}));
+    Tensor dx(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, hidden}));
+    Tensor dscale(gpuPlacement, TensorDescriptor(DataType::FP32, {hidden}));
+    dy.fill(1.0, stream_a);
+    auto compiled_backward = std::make_shared<CompiledRmsNormBackward>();
+    compiled_backward->normalized_feature_count = hidden;
+    compiled_backward->packed_row_capacity = capacity;
+    compiled_backward->ragged_batch_size = batch_size;
+    compiled_backward->epsilon = compiled->epsilon;
+    compiled_backward->input_dtype = DataType::FP32;
+    compiled_backward->scale_dtype = DataType::FP32;
+    compiled_backward->dy_dtype = DataType::FP32;
+    compiled_backward->dx_dtype = DataType::FP32;
+    compiled_backward->dscale_dtype = DataType::FP32;
+    compiled_backward->compute_dtype = DataType::FP32;
+    compiled_backward->debug_name = "c6_packed_rmsnorm_backward";
+
+    StampedRmsNormBackward standalone_backward(
+        compiled_backward, x_a, scale_a, dy, dx, dscale, stream_a, offsets_a);
+    EXPECT_EQ(standalone_backward.backwardExecutablePlanCount(), buckets.size());
+    EXPECT_EQ(standalone_backward.fallbackForwardExecutablePlanCount(), buckets.size());
+
+    // Everything below is execution only. Selection state can disappear and
+    // every bucket transition must choose among already-owned local plans.
+    rms_norm.clearSelectionCache();
+    ASSERT_EQ(rms_norm.cachedSelectionCount(), 0U);
+    const uint64_t preparations_after_stamping = cudnnFrontendExecutablePreparationCountForTests();
+    for (const uint64_t active_rows : std::vector<uint64_t>{7, 9, capacity}) {
+        SCOPED_TRACE("activeRows=" + std::to_string(active_rows));
+        RowPartitionRuntime(offsets_a, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
+            .setHostActiveValueCount(active_rows);
+        RowPartitionRuntime(offsets_b, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
+            .setHostActiveValueCount(active_rows);
+        stamp_a->runOn(stream_a);
+        stamp_b->runOn(stream_b);
+        standalone_backward.runOn(stream_a);
+        stream_a.synchronize();
+        stream_b.synchronize();
+        EXPECT_EQ(rms_norm.cachedSelectionCount(), 0U);
+        EXPECT_EQ(cudnnFrontendExecutablePreparationCountForTests(), preparations_after_stamping)
+            << "RMSNorm bucket transitions must not build/replay/deserialize plans at runtime.";
+    }
+}
+
 TEST(RaggedExpression, PackedRmsNormAutodiffUsesBucketedCudnnBackwardWithStructuralOffsets) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
     const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
@@ -3536,14 +3630,18 @@ TEST(RaggedExpression, CausalConv1dT7CGroupedAndDepthwiseMatchCpuAndDenseRows) {
                                                                             stream,
                                                                             groups);
         // The distinctive row-end sentinels deliberately drive some valid outputs
-        // into the thousands. Grouped cuDNN execution may accumulate those FP32
-        // products in a different order than the scalar CPU reference or the
-        // row-by-row dense reference, so an absolute-only 1e-5 tolerance rejects
-        // one-ULP differences at that scale. Retain the tight near-zero absolute
-        // bound and allow only a few FP32 ulps of relative error for large values.
+        // into the thousands. Grouped cuDNN execution may choose different legal
+        // FP32 convolution engines across placements/runs; those engines can differ
+        // slightly in multiply/accumulation precision and ordering from both the
+        // scalar CPU reference and the row-by-row dense reference. Keep a small
+        // absolute allowance near zero (the observed engine-to-reference drift is
+        // O(1e-5)) and a few FP32 ulps of relative error for the deliberately large
+        // sentinel-driven values. This is still far tighter than the error required
+        // to hide a row-boundary/grouping bug.
+        constexpr float atol = 1.0e-4F;
         constexpr float rtol = 4.0F * std::numeric_limits<float>::epsilon();
-        expectNearRelative(actual, cpu_expected, 1.0e-5F, rtol);
-        expectNearRelative(actual, dense_expected, 1.0e-5F, rtol);
+        expectNearRelative(actual, cpu_expected, atol, rtol);
+        expectNearRelative(actual, dense_expected, atol, rtol);
 
         const uint64_t active_elements = offsets.back() * output_channels;
         for (uint64_t i = active_elements; i < actual.size(); ++i) {

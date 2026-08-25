@@ -1,6 +1,6 @@
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
 #include "test/DeepLearning/Implementation/Layers/NoOpLayer.h"
-#include "test/Utilities/TensorOperations/GpuConvolution/ConvolutionTestHelper.h"
+#include "test/Utilities/TensorOperations/ConvolutionTestHelper.h"
 
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Pooling.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
