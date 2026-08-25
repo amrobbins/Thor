@@ -3362,7 +3362,7 @@ TEST(ExpressionConvenienceOps, StridedViewBackwardComposesWithBroadcastChildWith
     Tensor upstream = makeGpuTensor({2}, {1.5f, -0.75f}, stream);
 
     auto dy = Expression::input("dy");
-    auto expanded = dy.unsqueeze({1}) + Expression::fill(0.0, {2, 3}, DataType::FP32);
+    auto expanded = dy.unsqueeze({1}).broadcastTo({2, 3});
     auto dense = expanded.stridedViewBackward(
         /*source_dims=*/{2, 3, 3},
         /*view_dims=*/{2, 3},
@@ -3393,7 +3393,7 @@ TEST(ExpressionConvenienceOps, MultipleStridedViewBackwardNodesSharingBroadcastC
     Tensor upstream = makeGpuTensor({2}, {1.5f, -0.75f}, stream);
 
     auto dy = Expression::input("dy");
-    auto expanded = dy.unsqueeze({1}) + Expression::fill(0.0, {2, 3}, DataType::FP32);
+    auto expanded = dy.unsqueeze({1}).broadcastTo({2, 3});
     auto diagonal = expanded.stridedViewBackward(
         /*source_dims=*/{2, 3, 3},
         /*view_dims=*/{2, 3},
@@ -3430,7 +3430,7 @@ TEST(ExpressionConvenienceOps, StridedViewBackwardBroadcastChildHonorsRuntimeStr
     Tensor strided = storage.aliasView({3}, {4}, 1);
 
     auto v = Expression::input("v");
-    auto expanded = v.unsqueeze({1}) + Expression::fill(0.0, {3, 2}, DataType::FP32);
+    auto expanded = v.unsqueeze({1}).broadcastTo({3, 2});
     auto dense = expanded.stridedViewBackward(
         /*source_dims=*/{3, 2, 2},
         /*view_dims=*/{3, 2},

@@ -291,6 +291,7 @@ struct StageNodeKey {
     std::vector<uint64_t> squeeze_axes;
     std::vector<uint64_t> unsqueeze_axes;
     std::vector<uint64_t> fill_dims;
+    std::vector<uint64_t> broadcast_dims;
     std::vector<uint64_t> view_dims;
     std::vector<uint64_t> view_strides;
     uint64_t view_element_offset = 0;
@@ -382,6 +383,9 @@ struct StageNodeKeyHash {
             hashCombine(h, std::hash<uint64_t>{}(axis));
         hashCombine(h, std::hash<size_t>{}(k.fill_dims.size()));
         for (uint64_t dim : k.fill_dims)
+            hashCombine(h, std::hash<uint64_t>{}(dim));
+        hashCombine(h, std::hash<size_t>{}(k.broadcast_dims.size()));
+        for (uint64_t dim : k.broadcast_dims)
             hashCombine(h, std::hash<uint64_t>{}(dim));
         hashCombine(h, std::hash<size_t>{}(k.view_dims.size()));
         for (uint64_t dim : k.view_dims)
@@ -531,6 +535,7 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
                 key.aux = n.aux;
             }
             key.reduction_axes = n.reduction_axes;
+            key.broadcast_dims = n.broadcast_dims;
             key.view_dims = n.view_dims;
             key.view_strides = n.view_strides;
             key.view_element_offset = n.view_element_offset;
@@ -1104,6 +1109,12 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
             continue;
         }
 
+        if (node.op == ExprOp::BROADCAST_TO) {
+            throw std::runtime_error(
+                "BROADCAST_TO may not consume a value carrying ragged runtime extent; "
+                "use SEGMENTED_BROADCAST for ragged row-wise expansion.");
+        }
+
         if (isStageBoundaryOp(node.op) || node.op == ExprOp::ROPE || node.op == ExprOp::TRANSPOSE ||
             node.op == ExprOp::TAKE_ALONG_AXIS) {
             throw std::runtime_error(
@@ -1298,6 +1309,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "LNOT";
         case ExprOp::CAST:
             return "CAST";
+        case ExprOp::BROADCAST_TO:
+            return "BROADCAST_TO";
         case ExprOp::RAGGED_VALUEWISE_EXTENT:
             return "RAGGED_EXTENT";
         case ExprOp::WHERE:
@@ -1859,6 +1872,8 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
         std::string s;
         if (node.op == ExprOp::RESHAPE) {
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",dims=" + uintVecSignature(node.reshape_dims) + ")";
+        } else if (node.op == ExprOp::BROADCAST_TO) {
+            s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",dims=" + uintVecSignature(node.broadcast_dims) + ")";
         } else if (node.op == ExprOp::UNSQUEEZE) {
             s = std::string(fusedOpTag(node.op)) + "(" + lhs + ",axes=" + uintVecSignature(node.unsqueeze_axes) + ")";
         } else if (node.op == ExprOp::SQUEEZE) {

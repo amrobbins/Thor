@@ -150,6 +150,7 @@ enum class ExprOp : uint16_t {
     SEGMENTED_REDUCE_MIN_BACKWARD,
     SEGMENTED_REDUCE_MAX_BACKWARD,
     RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER,
+    BROADCAST_TO,
 };
 
 enum class RotaryScalingKind : uint8_t {
@@ -232,6 +233,13 @@ inline bool isReductionOp(ExprOp op) {
 }
 
 inline bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
+
+// Validate ordinary dense broadcasting and return the target dimensions.
+// BROADCAST_TO never carries dtype conversion semantics; it only expands the
+// logical index domain using standard trailing-axis broadcasting rules.
+[[nodiscard]] std::vector<uint64_t> inferBroadcastToOutputDims(
+    const std::vector<uint64_t>& input_dims,
+    const std::vector<uint64_t>& target_dims);
 
 struct ExprNode {
     ExprOp op;
@@ -379,6 +387,9 @@ struct ExprNode {
     std::vector<uint64_t> squeeze_axes;
     std::vector<uint64_t> unsqueeze_axes;
     std::vector<uint64_t> fill_dims;
+    // BROADCAST_TO target dimensions. Keep this distinct from fill_dims: the
+    // operation preserves input values while changing their logical index domain.
+    std::vector<uint64_t> broadcast_dims;
 
     // For CUDA_KERNEL_OUTPUT nodes only. All output nodes for one custom CUDA
     // kernel application share cuda_kernel_spec_index and differ by
@@ -694,6 +705,10 @@ class Expression {
         return input.rotaryPositionEmbedding(std::move(options));
     }
     [[nodiscard]] Expression reshape(const std::vector<uint64_t>& new_dims) const;
+    [[nodiscard]] Expression broadcastTo(const std::vector<uint64_t>& target_dims) const;
+    [[nodiscard]] static Expression broadcastTo(const Expression& input, const std::vector<uint64_t>& target_dims) {
+        return input.broadcastTo(target_dims);
+    }
     [[nodiscard]] Expression stridedView(const std::vector<uint64_t>& dims,
                                          const std::vector<uint64_t>& strides_elements,
                                          uint64_t element_offset = 0) const;

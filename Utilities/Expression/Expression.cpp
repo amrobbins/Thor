@@ -394,6 +394,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "ragged_conv1d_causal_backward_data";
         case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER:
             return "ragged_conv1d_causal_backward_filter";
+        case ExprOp::BROADCAST_TO:
+            return "broadcast_to";
         default:
             throw std::runtime_error("Unknown ExprOp.");
     }
@@ -537,6 +539,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"ragged_conv1d_causal", ExprOp::RAGGED_CONV1D_CAUSAL},
         {"ragged_conv1d_causal_backward_data", ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA},
         {"ragged_conv1d_causal_backward_filter", ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER},
+        {"broadcast_to", ExprOp::BROADCAST_TO},
     };
 
     auto it = lookup.find(op);
@@ -766,6 +769,9 @@ json exprNodeToJson(const ExprNode& node) {
     j["squeeze_axes"] = node.squeeze_axes;
     j["unsqueeze_axes"] = node.unsqueeze_axes;
     j["fill_dims"] = node.fill_dims;
+    if (!node.broadcast_dims.empty()) {
+        j["broadcast_dims"] = node.broadcast_dims;
+    }
     j["cuda_kernel_spec_index"] = node.cuda_kernel_spec_index;
     j["cuda_kernel_output_index"] = node.cuda_kernel_output_index;
     j["cuda_kernel_input_nodes"] = node.cuda_kernel_input_nodes;
@@ -978,6 +984,7 @@ ExprNode exprNodeFromJson(const json& j) {
     node.squeeze_axes = j.value("squeeze_axes", std::vector<uint64_t>{});
     node.unsqueeze_axes = j.value("unsqueeze_axes", std::vector<uint64_t>{});
     node.fill_dims = j.value("fill_dims", std::vector<uint64_t>{});
+    node.broadcast_dims = j.value("broadcast_dims", std::vector<uint64_t>{});
     node.cuda_kernel_spec_index = j.value("cuda_kernel_spec_index", UINT32_MAX);
     node.cuda_kernel_output_index = j.value("cuda_kernel_output_index", UINT32_MAX);
     node.cuda_kernel_input_nodes = j.value("cuda_kernel_input_nodes", std::vector<uint32_t>{});
@@ -992,6 +999,39 @@ std::set<std::string> Expression::getInputNames() const {
     if (expr == nullptr)
         return {};
     return expr->getInputNames();
+}
+
+std::vector<uint64_t> inferBroadcastToOutputDims(const std::vector<uint64_t>& input_dims,
+                                                 const std::vector<uint64_t>& target_dims) {
+    if (target_dims.empty()) {
+        throw std::invalid_argument("BROADCAST_TO requires non-empty target dimensions.");
+    }
+    for (uint64_t dim : target_dims) {
+        if (dim == 0 || dim == std::numeric_limits<uint64_t>::max()) {
+            throw std::invalid_argument("BROADCAST_TO requires concrete non-zero target dimensions.");
+        }
+    }
+    // AutoDiff represents scalar constants/runtime scalars with an empty shape.
+    // They broadcast to any concrete target domain.
+    if (input_dims.empty()) {
+        return target_dims;
+    }
+    if (input_dims.size() > target_dims.size()) {
+        throw std::invalid_argument("BROADCAST_TO target rank may not be smaller than the input rank.");
+    }
+
+    const size_t rank_offset = target_dims.size() - input_dims.size();
+    for (size_t input_axis = 0; input_axis < input_dims.size(); ++input_axis) {
+        const uint64_t input_dim = input_dims[input_axis];
+        const uint64_t target_dim = target_dims[rank_offset + input_axis];
+        if (input_dim == 0 || input_dim == std::numeric_limits<uint64_t>::max()) {
+            throw std::invalid_argument("BROADCAST_TO requires concrete non-zero input dimensions during shape inference.");
+        }
+        if (input_dim != 1 && input_dim != target_dim) {
+            throw std::invalid_argument("BROADCAST_TO target dimensions are not broadcast-compatible with the input.");
+        }
+    }
+    return target_dims;
 }
 
 std::string formatFloatCanonical(double x) {
@@ -1223,6 +1263,8 @@ std::string opName(ExprOp op) {
             return "RAGGED_CONV1D_CAUSAL_BWD_DATA";
         case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER:
             return "RAGGED_CONV1D_CAUSAL_BWD_FILTER";
+        case ExprOp::BROADCAST_TO:
+            return "BROADCAST_TO";
         case ExprOp::RMSNORM:
             return "RMSNORM";
         case ExprOp::LAYERNORM:
@@ -1417,6 +1459,10 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::RESHAPE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
                   ";dims=" + formatUIntVectorCanonical(n.reshape_dims) + ")";
+            break;
+        case ExprOp::BROADCAST_TO:
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
+                  ";dims=" + formatUIntVectorCanonical(n.broadcast_dims) + ")";
             break;
         case ExprOp::STRIDED_VIEW:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + ";dims=" + formatUIntVectorCanonical(n.view_dims) +
@@ -2166,6 +2212,18 @@ void ExpressionDefinition::validate() const {
                 throw std::runtime_error("ExpressionDefinition unary node must reference an earlier node.");
             }
         }
+        if (node.op == ExprOp::BROADCAST_TO) {
+            if (node.broadcast_dims.empty()) {
+                throw std::runtime_error("ExpressionDefinition BROADCAST_TO requires non-empty target dimensions.");
+            }
+            for (uint64_t dim : node.broadcast_dims) {
+                if (dim == 0 || dim == std::numeric_limits<uint64_t>::max()) {
+                    throw std::runtime_error("ExpressionDefinition BROADCAST_TO target dimensions must be concrete and non-zero.");
+                }
+            }
+        } else if (!node.broadcast_dims.empty()) {
+            throw std::runtime_error("ExpressionDefinition broadcast_dims metadata is valid only for BROADCAST_TO nodes.");
+        }
         if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
             validateNodeIndex(node.rope_effective_sequence_length_node, "RoPE effective sequence length");
             if (node.rope_effective_sequence_length_node >= node_index_u32) {
@@ -2739,6 +2797,7 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::STRIDED_VIEW_BACKWARD:
         case ExprOp::UNSQUEEZE:
         case ExprOp::SQUEEZE:
+        case ExprOp::BROADCAST_TO:
         case ExprOp::REDUCE_SUM:
         case ExprOp::REDUCE_PROD:
         case ExprOp::REDUCE_MIN:
@@ -4017,6 +4076,24 @@ Expression Expression::reshape(const std::vector<uint64_t>& new_dims) const {
     }
     Expression out = unaryOp(*this, ExprOp::RESHAPE);
     out.expr->nodes[out.nodeIndex].reshape_dims = new_dims;
+    return out;
+}
+
+Expression Expression::broadcastTo(const std::vector<uint64_t>& target_dims) const {
+    if (!expr) {
+        throw std::runtime_error("Cannot broadcast an empty expression");
+    }
+    if (target_dims.empty()) {
+        throw std::invalid_argument("Expression::broadcastTo requires non-empty target dimensions.");
+    }
+    for (uint64_t dim : target_dims) {
+        if (dim == 0 || dim == std::numeric_limits<uint64_t>::max()) {
+            throw std::invalid_argument("Expression::broadcastTo requires concrete non-zero target dimensions.");
+        }
+    }
+
+    Expression out = unaryOp(*this, ExprOp::BROADCAST_TO);
+    out.expr->nodes[out.nodeIndex].broadcast_dims = target_dims;
     return out;
 }
 

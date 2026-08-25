@@ -512,6 +512,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::STRIDED_VIEW_BACKWARD:
             case ExprOp::UNSQUEEZE:
             case ExprOp::SQUEEZE:
+            case ExprOp::BROADCAST_TO:
             case ExprOp::REDUCE_SUM:
             case ExprOp::REDUCE_PROD:
             case ExprOp::REDUCE_MIN:
@@ -765,6 +766,8 @@ class BackwardGraphBuilder {
                 return n.view_dims;
             case ExprOp::STRIDED_VIEW_BACKWARD:
                 return n.fill_dims;
+            case ExprOp::BROADCAST_TO:
+                return n.broadcast_dims;
             case ExprOp::NEG:
             case ExprOp::CAST:
             case ExprOp::RAGGED_VALUEWISE_EXTENT:
@@ -2037,20 +2040,19 @@ class BackwardGraphBuilder {
     uint32_t mul(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::MUL, lhs, rhs); }
     uint32_t div(uint32_t lhs, uint32_t rhs) { return binary(ExprOp::DIV, lhs, rhs); }
 
-    uint32_t addNoFold(uint32_t lhs,
-                       uint32_t rhs,
-                       std::optional<DataType> output_dtype = std::nullopt,
-                       std::optional<DataType> backward_output_dtype = std::nullopt) {
+    uint32_t broadcastTo(uint32_t value, const std::vector<uint64_t>& target_dims) {
+        if (target_dims.empty()) {
+            throw std::runtime_error("AutoDiff BROADCAST_TO requires non-empty target dimensions.");
+        }
+        for (uint64_t dim : target_dims) {
+            if (dim == 0 || dim == std::numeric_limits<uint64_t>::max()) {
+                throw std::runtime_error("AutoDiff BROADCAST_TO requires concrete non-zero target dimensions.");
+            }
+        }
         ExprNode node{};
-        node.op = ExprOp::ADD;
-        node.lhs = lhs;
-        node.rhs = rhs;
-        if (output_dtype.has_value()) {
-            node.output_dtype = output_dtype.value();
-        }
-        if (backward_output_dtype.has_value()) {
-            node.backward_output_dtype = backward_output_dtype.value();
-        }
+        node.op = ExprOp::BROADCAST_TO;
+        node.lhs = value;
+        node.broadcast_dims = target_dims;
         return push(std::move(node));
     }
 
@@ -3103,6 +3105,9 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::SOFTMAX:
                 node_dims[i] = node_dims[node.lhs];
                 break;
+            case ExprOp::BROADCAST_TO:
+                node_dims[i] = inferBroadcastToOutputDims(node_dims[node.lhs], node.broadcast_dims);
+                break;
             case ExprOp::TRANSPOSE:
                 node_dims[i] = inferTransposeOutputDims(node_dims[node.lhs]);
                 break;
@@ -3820,9 +3825,10 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
         builder.addContribution(child_idx, adjusted_contrib);
     };
 
-    // This helper still expresses a real mathematical shape expansion as zero-add
-    // broadcasting. It is deliberately not an output-materialization mechanism;
-    // the BROADCAST_TO cleanup will replace this representation separately.
+    // Dense gradient shape expansion is a mathematical broadcast, so represent
+    // it explicitly. Constant-like gradients may still fold directly to FILL;
+    // that is genuine constant creation rather than arithmetic used to induce a
+    // broadcast. Ragged row-wise expansion remains SEGMENTED_BROADCAST.
     auto broadcastGradToDims = [&](uint32_t grad_value,
                                    const std::vector<uint64_t>& target_dims,
                                    std::optional<DataType> as_type =
@@ -3836,7 +3842,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
             return builder.fill(grad_constant, target_dims, as_type);
         }
 
-        return builder.add(builder.fill(0.0, target_dims, as_type), grad_value);
+        return builder.broadcastTo(grad_value, target_dims);
     };
 
     auto shapeGradLikeNodeOutput =
@@ -3879,9 +3885,9 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
         std::vector<uint64_t> constant_dims;
         if (!builder.tryGetConstantLike(grad_value, constant_value, constant_dims)) {
             // Non-constant upstream gradients are already tensor-valued gradients for
-            // the attention output. Do not materialize a fill(0)+grad fused kernel
-            // just to stamp cuDNN attention backward; that wrapper is a no-op for
-            // the common training path and incorrectly hides the single-stage
+            // the attention output. Do not add a synthetic shape-materialization node
+            // just to stamp cuDNN attention backward; that wrapper is a no-op for the
+            // common training path and incorrectly hides the single-stage
             // attention-backward plan behind a synthetic fused stage.
             return grad_value;
         }
@@ -5408,17 +5414,18 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         !experimentalCudnnAttentionSupportSurfaceProbeEnabled()) {
                         // cuDNN's native backward surface is not reliable for score bias tensors broadcast across
                         // sequence axes: some shapes are rejected by primary heuristics on SM120 and some accepted
-                        // Skv-vector cases produce incorrect dV/dBias.  Keep the public forward surface broad, but
-                        // lower production backward through an explicit dense score-bias materialization, then let
-                        // the normal broadcast-gradient rule reduce dense dBias back to the original bias shape.
-                        const auto bias_backward_dtype = node.compute_dtype.has_value() ? node.compute_dtype : preferredGradValueDType(node);
-                        // This zero-add is a semantic dense broadcast of score bias, not
-                        // output storage coercion. BROADCAST_TO will replace it in the
-                        // dedicated broadcast cleanup after the materialization gate.
-                        bias = builder.addNoFold(builder.fill(0.0, dense_score_bias_dims, bias_backward_dtype),
-                                                 bias,
-                                                 bias_backward_dtype,
-                                                 bias_backward_dtype);
+                        // Skv-vector cases produce incorrect dV/dBias. Keep the public forward surface broad, but
+                        // lower production backward through an explicit dense score-bias broadcast, then let the
+                        // normal broadcast-gradient rule reduce dense dBias back to the original bias shape.
+                        //
+                        // The old fill(0)+bias form also carried an output dtype. Keep dtype conversion orthogonal
+                        // to shape expansion: CAST only when needed, then BROADCAST_TO.
+                        const auto bias_backward_dtype =
+                            node.compute_dtype.has_value() ? node.compute_dtype : preferredGradValueDType(node);
+                        if (bias_backward_dtype.has_value()) {
+                            bias = builder.cast(bias, bias_backward_dtype.value());
+                        }
+                        bias = builder.broadcastTo(bias, dense_score_bias_dims);
                     }
                 }
                 ExprNode attention_for_backward = node;
@@ -5823,6 +5830,26 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 addContributionToChild(node.lhs, dx, lhs_dims);
                 break;
             }
+
+            case ExprOp::BROADCAST_TO:
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    if (!has_forward_dims) {
+                        if (allow_shape_deferred_placeholders) {
+                            // FusedEquation::compileBackward builds a shape-deferred template first.
+                            // Stamp-time specialization rebuilds it with concrete forward dimensions,
+                            // at which point sumToShape inserts the required reduction.
+                            addContributionToChild(node.lhs, grad, node_dims);
+                            break;
+                        }
+                        throw std::runtime_error(
+                            "BROADCAST_TO autodiff requires resolved forward shapes to reduce the gradient to the input shape.");
+                    }
+                    const std::vector<uint64_t>& lhs_dims = forward_node_dims.at(node.lhs);
+                    const std::optional<DataType> lhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
+                    const uint32_t lhs_grad = sumToShape(builder, grad, node_dims, lhs_dims, lhs_grad_dtype);
+                    addContributionToChild(node.lhs, lhs_grad, lhs_dims, lhs_grad_dtype);
+                }
+                break;
 
             case ExprOp::REDUCE_ARGMIN:
             case ExprOp::REDUCE_ARGMAX:

@@ -1384,6 +1384,9 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::CAST:
                 node_dims[i] = node_dims[node.lhs];
                 break;
+            case ExprOp::BROADCAST_TO:
+                node_dims[i] = inferBroadcastToOutputDims(node_dims[node.lhs], node.broadcast_dims);
+                break;
             case ExprOp::ROPE: {
                 node_dims[i] = node_dims[node.lhs];
                 validateRopeEffectiveSequenceLengthDims(node, node_dims);
@@ -3824,6 +3827,9 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::CAST:
                 node_dims[i] = node_dims[node.lhs];
                 break;
+            case ExprOp::BROADCAST_TO:
+                node_dims[i] = inferBroadcastToOutputDims(node_dims[node.lhs], node.broadcast_dims);
+                break;
             case ExprOp::ROPE: {
                 node_dims[i] = node_dims[node.lhs];
                 validateRopeEffectiveSequenceLengthDims(node, node_dims);
@@ -4030,6 +4036,8 @@ static uint64_t perElementSemanticFlops(ExprOp op) {
         case ExprOp::CAST:
         case ExprOp::WHERE:
             return 1;
+        case ExprOp::BROADCAST_TO:
+            return 0;
 
         case ExprOp::POW:
         case ExprOp::SIN:
@@ -4230,6 +4238,9 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::CAST:
                 node_dims[i] = node_dims[node.lhs];
                 break;
+            case ExprOp::BROADCAST_TO:
+                node_dims[i] = inferBroadcastToOutputDims(node_dims[node.lhs], node.broadcast_dims);
+                break;
             case ExprOp::ROPE: {
                 node_dims[i] = node_dims[node.lhs];
                 validateRopeEffectiveSequenceLengthDims(node, node_dims);
@@ -4418,6 +4429,7 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
             case ExprOp::NORMCDF:
             case ExprOp::LOGICAL_NOT:
             case ExprOp::CAST:
+            case ExprOp::BROADCAST_TO:
             case ExprOp::ROPE:
             case ExprOp::MIN:
             case ExprOp::MAX:
@@ -5576,6 +5588,7 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::NORMCDF:
         case ExprOp::LOGICAL_NOT:
         case ExprOp::CAST:
+        case ExprOp::BROADCAST_TO:
         case ExprOp::REDUCE_SUM:
         case ExprOp::REDUCE_PROD:
         case ExprOp::REDUCE_MIN:

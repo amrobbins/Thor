@@ -802,6 +802,15 @@ class Expression:
         fused kernel when no dtype conversion is requested.
         """
 
+    def broadcast_to(self, shape: Sequence[int]) -> Expression:
+        """
+        Return an explicit dense BROADCAST_TO expression with the requested shape.
+
+        BROADCAST_TO preserves dtype and follows normal trailing-axis broadcasting rules.
+        It does not carry ragged row-partition semantics; use the explicit segmented
+        broadcast operations for ragged row-wise expansion.
+        """
+
     def strided_view(self, shape: Sequence[int], strides: Sequence[int], element_offset: int = 0) -> Expression:
         """
         Return a zero-materialization storage alias with explicit element strides.

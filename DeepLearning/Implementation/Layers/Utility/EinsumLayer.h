@@ -508,7 +508,7 @@ class EinsumLayer : public MultiConnectionLayer {
         if (!gradient.existing_axis_expansions.empty() || !gradient.missing_axis_expansions.empty()) {
             const std::vector<uint64_t> uniquePhysicalDimensions = EinsumLayerBatchContract::prependBatchDimension(
                 batchCapacity(), gradient.target_unique_feature_dimensions);
-            current = current + Expression::fill(0.0, uniquePhysicalDimensions, rawGradient.getDataType());
+            current = current.broadcastTo(uniquePhysicalDimensions);
         }
 
         if (!gradient.diagonal_scatters.empty()) {

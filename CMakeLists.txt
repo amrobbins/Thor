@@ -1483,6 +1483,49 @@ add_custom_target(check-release-shared-ownership
         VERBATIM
 )
 
+# M11 expression materialization/broadcast production gate. This intentionally
+# gathers the structural contract tests, runtime output-ownership checks, explicit
+# dense/ragged broadcast tests, and retained-ragged T9A/B/C coverage into one
+# qualification target before T9D. The disabled preflight prevents a GPU-less
+# machine from passing the gate merely because CUDA-backed tests skipped.
+set(THOR_MATERIALIZATION_BROADCAST_GTEST_FILTER
+        "MaterializationBroadcastProductionGate.*:
+AutoDiff.MaterializationPolicy*:
+EquationCompiler.OutputStorageContractMatchingDTypeAddsNoCompilerLocalCast:
+EquationCompiler.OutputStorageContractMismatchAddsCompilerLocalCastWithoutMutatingExpression:
+EquationCompiler.OutputStorageContractFollowsBackingStorageDTypeThroughAlias:
+AutoDiff.TerminalDTypeMaterializationUsesCompilerLocalCastInsteadOfZeroAdd:
+AutoDiff.MatchingTerminalDTypeNeedsNeitherZeroAddNorCompilerLocalCast:
+AutoDiff.DuplicateNamedGradientsShareMathematicalNodeAndRequestDistinctStorage:
+AutoDiff.ConditionalDuplicateGradientOwnershipIsPromotedAcrossBranches:
+ExpressionGraphConditionalOps.ConditionalBackwardPublishesGradientStorageDtypeAcrossMissingInputBranches:
+ExpressionOutputMaterialization.*:
+BroadcastToExpression.*:
+ExpressionConvenienceOps.StridedViewBackwardComposesWithBroadcastChildWithoutMaterialization:
+ExpressionConvenienceOps.MultipleStridedViewBackwardNodesSharingBroadcastChildFuseWithoutCodegenNameCollisions:
+ExpressionConvenienceOps.StridedViewBackwardBroadcastChildHonorsRuntimeStridedInputLayout:
+EinsumLayer.BackwardExpandsSingletonAndTargetOnlyAxes:
+EinsumLayer.BackwardRestoresForwardReducedTargetOnlyAxis:
+EinsumLayer.BackwardReducesEquationBroadcastBackToSingletonOperandExtent:
+RaggedExpression.BroadcastParameterGradientReducesOnlyAuthoritativePackedRows:
+RaggedExpression.SegmentSumAndMeanAutodiffLowerThroughSegmentedBroadcast:
+RaggedExpression.CausalConv1dT9A*:
+RaggedExpression.CausalConv1dT9B*:
+RaggedExpression.CausalConv1dM7*:
+RaggedExpression.CausalConv1dT9C*")
+string(REPLACE "\n" "" THOR_MATERIALIZATION_BROADCAST_GTEST_FILTER "${THOR_MATERIALIZATION_BROADCAST_GTEST_FILTER}")
+
+add_custom_target(check-materialization-broadcast-cpp
+        COMMAND $<TARGET_FILE:thor_tests>
+        --gtest_color=yes
+        --gtest_also_run_disabled_tests
+        "--gtest_filter=${THOR_MATERIALIZATION_BROADCAST_GTEST_FILTER}"
+        DEPENDS thor_tests
+        USES_TERMINAL
+        COMMENT "Thor: running M11 C++ materialization/broadcast production gate"
+        VERBATIM
+)
+
 # Per-configuration flags
 target_compile_definitions(thor_tests PRIVATE
         THOR_GTEST
@@ -1870,3 +1913,27 @@ endif ()
 
 # For convenience, rebuild the python bindings before rebuilding the c++ tests
 add_dependencies(thor_tests _thor)
+
+# Full M11 gate: the C++ qualification above plus the four ProductTransformer
+# ragged FFN/encoder placement diagnostics that originally exposed the
+# materialization/shape-boundary regression. Run pytest against the build-tree
+# package so this target verifies the freshly built bindings rather than an
+# unrelated installed wheel.
+if (THOR_PYTHON_TESTS)
+    add_custom_target(check-materialization-broadcast
+            COMMAND ${CMAKE_COMMAND} -E env
+            "PYTHONPATH=${CMAKE_BINARY_DIR}/bindings/python"
+            "${Python_EXECUTABLE}" -m pytest -q
+            "${CMAKE_SOURCE_DIR}/bindings/python/test/core/training/test_product_transformer_diagnostics.py"
+            -k "test_product_transformer_ragged_ffn_fused_fc_postop_places_for_training or test_product_transformer_ragged_encoder_block_with_fused_residual_dropout_places_for_training"
+            DEPENDS check-materialization-broadcast-cpp _thor
+            USES_TERMINAL
+            COMMENT "Thor: running full M11 materialization/broadcast gate including ProductTransformer diagnostics"
+            VERBATIM
+    )
+else ()
+    add_custom_target(check-materialization-broadcast
+            DEPENDS check-materialization-broadcast-cpp
+            COMMENT "Thor: running M11 materialization/broadcast gate (Python diagnostics disabled)"
+    )
+endif ()

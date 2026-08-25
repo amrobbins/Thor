@@ -775,6 +775,18 @@ fused kernel when no dtype conversion is requested.
 )nbdoc");
 
     expr.def(
+        "broadcast_to",
+        [](const Expression& self, const std::vector<uint64_t>& target_dims) { return self.broadcastTo(target_dims); },
+        "shape"_a,
+        R"nbdoc(
+Return an explicit dense BROADCAST_TO expression with the requested shape.
+
+BROADCAST_TO preserves dtype and follows normal trailing-axis broadcasting rules.
+It does not carry ragged row-partition semantics; use the explicit segmented
+broadcast operations for ragged row-wise expansion.
+)nbdoc");
+
+    expr.def(
         "strided_view",
         [](const Expression& self, const std::vector<uint64_t>& dims, const std::vector<uint64_t>& strides, uint64_t element_offset) {
             return self.stridedView(dims, strides, element_offset);

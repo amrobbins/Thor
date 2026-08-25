@@ -1751,6 +1751,7 @@ static std::string emitUnaryComputeExpr(ExprOp op, const std::string& x, DataTyp
 
     switch (op) {
         case ExprOp::CAST:
+        case ExprOp::BROADCAST_TO:
             return x;
 
         case ExprOp::NEG:
@@ -5662,6 +5663,8 @@ static std::string emitVector2Flat(const PhysicalExecutionStage& stage,
                     ss << "  " << compute_dtype_vector << " " << refWithSuffix(node_idx, suffix) << " = "
                        << emitVector2Normcdf(refWithSuffix(n.lhs, suffix), dtype) << ";\n";
                     break;
+                case ExprOp::BROADCAST_TO:
+                    [[fallthrough]];
                 case ExprOp::CAST:
                     // getVectorizedStageStorageDTypeImpl only selects this packed path
                     // when all tensor inputs, node outputs, and materialized outputs
@@ -6223,6 +6226,8 @@ static std::string emitVector2SpecializedBroadcast(const CompiledExecutionStage&
                     ss << "    " << compute_dtype_vector << " t" << node_idx << " = "
                        << emitVector2Normcdf(CudaSourceEmitter::ref(n.lhs), dtype) << ";\n";
                     break;
+                case ExprOp::BROADCAST_TO:
+                    [[fallthrough]];
                 case ExprOp::CAST:
                     // getVectorizedStageStorageDTypeImpl only selects this packed
                     // specialized-broadcast path when every tensor input, node

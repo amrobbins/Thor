@@ -88,6 +88,7 @@ static bool isSegmentedReduceMinMaxBackwardOp(ExprOp op) {
 }
 
 static bool isCastOp(ExprOp op) { return op == ExprOp::CAST; }
+static bool isBroadcastToOp(ExprOp op) { return op == ExprOp::BROADCAST_TO; }
 
 static bool isPassthroughViewOp(ExprOp op) {
     return op == ExprOp::STRIDED_VIEW || op == ExprOp::RESHAPE || op == ExprOp::TRANSPOSE || op == ExprOp::UNSQUEEZE ||
@@ -107,7 +108,7 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
         throw std::runtime_error("Unsupported boolean/comparison/where dtype in toSupportedComputeDType.");
     }
 
-    if (isCastOp(op) || isPassthroughViewOp(op)) {
+    if (isCastOp(op) || isPassthroughViewOp(op) || isBroadcastToOp(op)) {
         if (isPassthroughInputDType(requested_compute_dtype)) {
             return requested_compute_dtype;
         }
@@ -247,6 +248,9 @@ DataType defaultComputeDType(DataType input_dtype, DataType output_dtype) {
 
 DataType toSupportedInputDType(ExprOp op, DataType dtype) {
     if (isExactUnsignedSubtractOp(op) && isExactUnsignedPointwiseDType(dtype)) {
+        return dtype;
+    }
+    if (isBroadcastToOp(op) && isPassthroughInputDType(dtype)) {
         return dtype;
     }
     if (!isSupportedFusionFloatingType(dtype)) {
@@ -430,6 +434,13 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
                                      TensorDescriptor::getElementTypeName(offsets_dtype));
         }
         return promoteTensorValueDTypes(resolved_output_dtypes[node.lhs], resolved_output_dtypes[node.rhs]);
+    }
+
+    if (isBroadcastToOp(node.op)) {
+        if (node.lhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("BROADCAST_TO node has parent index out of range in resolveNodeLogicalInputDType.");
+        }
+        return resolved_output_dtypes[node.lhs];
     }
 
     if (node.op == ExprOp::TAKE_ALONG_AXIS) {
@@ -648,6 +659,17 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
             throw std::runtime_error("Cast node is missing output dtype in resolveNodeOutputDType.");
         }
         return node.output_dtype.value();
+    }
+
+    if (isBroadcastToOp(node.op)) {
+        if (node.lhs >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("BROADCAST_TO node has parent index out of range in resolveNodeOutputDType.");
+        }
+        const DataType input_dtype = resolved_output_dtypes[node.lhs];
+        if (node.output_dtype.has_value() && node.output_dtype.value() != input_dtype) {
+            throw std::runtime_error("BROADCAST_TO preserves dtype; use CAST as a separate operation for dtype conversion.");
+        }
+        return input_dtype;
     }
 
     if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
@@ -1119,7 +1141,8 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
         const DataType logical_input_dtype = resolveNodeLogicalInputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
 
         DataType requested_compute_dtype;
-        if (node.op == ExprOp::EMBEDDING_LOOKUP || node.op == ExprOp::CAST || isPassthroughViewOp(node.op)) {
+        if (node.op == ExprOp::EMBEDDING_LOOKUP || node.op == ExprOp::CAST || isPassthroughViewOp(node.op) ||
+            isBroadcastToOp(node.op)) {
             requested_compute_dtype = output_dtype;
         } else if (isExactUnsignedSubtractOp(node.op) && isExactUnsignedPointwiseDType(logical_input_dtype) &&
                    logical_input_dtype == output_dtype) {
