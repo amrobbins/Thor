@@ -1285,7 +1285,11 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
                                                                                    backwardCudaKernelExpressionOffset,
                                                                                    clonedBackwardNodes);
         const uint32_t terminalOutputNode = makeInputSpecificTerminalGradientNode(output.name, clonedOutputNode);
-        fusedBackwardOutputs.outputs.push_back(NamedOutput{output.name, terminalOutputNode});
+        fusedBackwardOutputs.outputs.push_back(NamedOutput{
+            .name = output.name,
+            .node_idx = terminalOutputNode,
+            .materialization = output.materialization,
+        });
     }
 
     return fusedBackwardOutputs;

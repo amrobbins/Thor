@@ -360,50 +360,6 @@ std::optional<DataType> preferredGradValueDType(const ExprNode& forward_node) {
     return std::nullopt;
 }
 
-std::optional<DataType> materializedForwardOperandDType(const PhysicalExpression& forward_expr,
-                                                            uint32_t node_idx,
-                                                            std::unordered_set<uint32_t>& visiting) {
-    if (node_idx >= forward_expr.nodes.size()) {
-        throw std::runtime_error("Matmul autodiff materialized-dtype query index out of range.");
-    }
-    if (!visiting.insert(node_idx).second) {
-        throw std::runtime_error("Matmul autodiff materialized-dtype query encountered a cycle.");
-    }
-
-    const ExprNode& node = forward_expr.nodes.at(node_idx);
-    std::optional<DataType> dtype;
-    switch (node.op) {
-        case ExprOp::INPUT:
-            // INPUT may deliberately expose a promoted logical value dtype while
-            // remaining backed by lower-precision parameter storage.  cuBLASLt
-            // consumes the storage dtype, so autodiff must make the same distinction.
-            dtype = node.input_tensor_dtype.has_value() ? node.input_tensor_dtype : node.output_dtype;
-            break;
-        case ExprOp::RESHAPE:
-        case ExprOp::STRIDED_VIEW:
-        case ExprOp::TRANSPOSE:
-        case ExprOp::UNSQUEEZE:
-        case ExprOp::SQUEEZE:
-            dtype = materializedForwardOperandDType(forward_expr, node.lhs, visiting);
-            break;
-        case ExprOp::CAST:
-            dtype = node.output_dtype;
-            break;
-        default:
-            // Non-alias producers cross a stage boundary in their declared output dtype.
-            dtype = node.output_dtype;
-            break;
-    }
-
-    visiting.erase(node_idx);
-    return dtype;
-}
-
-std::optional<DataType> materializedForwardOperandDType(const PhysicalExpression& forward_expr, uint32_t node_idx) {
-    std::unordered_set<uint32_t> visiting;
-    return materializedForwardOperandDType(forward_expr, node_idx, visiting);
-}
-
 std::optional<DataType> matmulLowPrecisionOperandDType(const PhysicalExpression& forward_expr,
                                                         const ExprNode& matmul_node) {
     if (matmul_node.op != ExprOp::MATMUL && matmul_node.op != ExprOp::GEMM) {
@@ -413,8 +369,8 @@ std::optional<DataType> matmulLowPrecisionOperandDType(const PhysicalExpression&
         throw std::runtime_error("Matmul autodiff encountered an invalid matrix operand node index.");
     }
 
-    const std::optional<DataType> lhs_dtype = materializedForwardOperandDType(forward_expr, matmul_node.lhs);
-    const std::optional<DataType> rhs_dtype = materializedForwardOperandDType(forward_expr, matmul_node.rhs);
+    const std::optional<DataType> lhs_dtype = materializedValueStorageDType(forward_expr, matmul_node.lhs);
+    const std::optional<DataType> rhs_dtype = materializedValueStorageDType(forward_expr, matmul_node.rhs);
     if (!lhs_dtype.has_value() || !rhs_dtype.has_value() || lhs_dtype.value() != rhs_dtype.value()) {
         return std::nullopt;
     }
@@ -431,66 +387,6 @@ static bool isAttentionBackwardOp(ExprOp op) {
 
 static bool isRmsNormBackwardOp(ExprOp op) {
     return op == ExprOp::RMSNORM_BACKWARD_X || op == ExprOp::RMSNORM_BACKWARD_SCALE;
-}
-
-static bool isStageBoundaryLikeBackwardOutputOp(ExprOp op) {
-    switch (op) {
-        case ExprOp::MATMUL:
-        case ExprOp::GEMM:
-        case ExprOp::REDUCE_SUM:
-        case ExprOp::REDUCE_PROD:
-        case ExprOp::REDUCE_AVG:
-        case ExprOp::REDUCE_NORM1:
-        case ExprOp::REDUCE_NORM2:
-        case ExprOp::SCAN:
-        case ExprOp::SEGMENTED_SCAN:
-        case ExprOp::SEGMENTED_REDUCE_SUM:
-        case ExprOp::SEGMENTED_REDUCE_MIN:
-        case ExprOp::SEGMENTED_REDUCE_MAX:
-        case ExprOp::SEGMENTED_REDUCE_MEAN:
-        case ExprOp::SEGMENTED_BROADCAST:
-        case ExprOp::REDUCE_MIN:
-        case ExprOp::REDUCE_MAX:
-        case ExprOp::SOFTMAX:
-        case ExprOp::RMSNORM:
-        case ExprOp::LAYERNORM:
-        case ExprOp::RMSNORM_BACKWARD_X:
-        case ExprOp::RMSNORM_BACKWARD_SCALE:
-        case ExprOp::ATTENTION:
-        case ExprOp::ATTENTION_BACKWARD_Q:
-        case ExprOp::ATTENTION_BACKWARD_K:
-        case ExprOp::ATTENTION_BACKWARD_V:
-        case ExprOp::ATTENTION_BACKWARD_BIAS:
-        case ExprOp::CONV2D:
-        case ExprOp::CONV2D_BACKWARD_DATA:
-        case ExprOp::CONV2D_BACKWARD_FILTER:
-        case ExprOp::CONV3D:
-        case ExprOp::CONV3D_BACKWARD_DATA:
-        case ExprOp::CONV3D_BACKWARD_FILTER:
-        case ExprOp::RAGGED_CONV1D_CAUSAL:
-        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA:
-        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER:
-        case ExprOp::REDUCE_MIN_BACKWARD:
-        case ExprOp::REDUCE_MAX_BACKWARD:
-        case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
-        case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
-        case ExprOp::CUDA_KERNEL_OUTPUT:
-            return true;
-        default:
-            return false;
-    }
-}
-
-static bool stageBoundaryMaterializesRequestedDType(const ExprNode& node, DataType requested_dtype) {
-    if (!isStageBoundaryLikeBackwardOutputOp(node.op)) {
-        return false;
-    }
-
-    // Dense value reductions accumulate/finalize in FP32 but can materialize the
-    // requested storage dtype directly through the CUB runtime output iterator.
-    // Treat them like every other stage boundary: if the node already declares the
-    // requested public dtype, no trailing pointwise materialization is necessary.
-    return node.output_dtype.has_value() && node.output_dtype.value() == requested_dtype;
 }
 
 std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& expr, const std::vector<std::string>& wrt_names) {
@@ -843,11 +739,6 @@ class BackwardGraphBuilder {
 
         visit(root);
         return result;
-    }
-
-    std::optional<DataType> tryInferValueDType(uint32_t node_idx) const {
-        std::unordered_set<uint32_t> visiting;
-        return tryInferValueDTypeImpl(node_idx, visiting);
     }
 
     std::optional<std::vector<uint64_t>> tryInferKnownGradientDims(uint32_t node_idx) const {
@@ -2410,127 +2301,6 @@ class BackwardGraphBuilder {
         }
     }
 
-    std::optional<DataType> tryInferValueDTypeImpl(uint32_t node_idx, std::unordered_set<uint32_t>& visiting) const {
-        if (node_idx >= grad_expr.nodes.size()) {
-            throw std::runtime_error("BackwardGraphBuilder dtype inference node index out of range.");
-        }
-        if (!visiting.insert(node_idx).second) {
-            throw std::runtime_error("BackwardGraphBuilder dtype inference encountered a cycle.");
-        }
-
-        const ExprNode& n = grad_expr.nodes.at(node_idx);
-        if (n.output_dtype.has_value()) {
-            visiting.erase(node_idx);
-            return n.output_dtype;
-        }
-
-        auto is_scalar_like = [&](uint32_t child) {
-            if (child == UINT32_MAX || child >= grad_expr.nodes.size()) {
-                return false;
-            }
-            const ExprOp child_op = grad_expr.nodes.at(child).op;
-            return child_op == ExprOp::SCALAR_FP || child_op == ExprOp::RUNTIME_SCALAR ||
-                   child_op == ExprOp::TENSOR_RUNTIME_SCALAR;
-        };
-        auto infer_child = [&](uint32_t child) -> std::optional<DataType> {
-            if (child == UINT32_MAX) {
-                return std::nullopt;
-            }
-            return tryInferValueDTypeImpl(child, visiting);
-        };
-        auto infer_binary = [&]() -> std::optional<DataType> {
-            // Expression dtype resolution deliberately excludes scalar operands from
-            // tensor-value promotion. Mirror that rule here so multiplying a BF16
-            // gradient by a numeric constant does not make it look FP32.
-            const bool lhs_scalar = is_scalar_like(n.lhs);
-            const bool rhs_scalar = is_scalar_like(n.rhs);
-            if (lhs_scalar && rhs_scalar) {
-                return DataType::FP32;
-            }
-            if (lhs_scalar) {
-                return infer_child(n.rhs);
-            }
-            if (rhs_scalar) {
-                return infer_child(n.lhs);
-            }
-
-            const std::optional<DataType> lhs_dtype = infer_child(n.lhs);
-            const std::optional<DataType> rhs_dtype = infer_child(n.rhs);
-            if (!lhs_dtype.has_value() || !rhs_dtype.has_value()) {
-                return std::nullopt;
-            }
-            return promoteTensorValueDTypes(lhs_dtype.value(), rhs_dtype.value());
-        };
-
-        std::optional<DataType> result;
-        switch (n.op) {
-            case ExprOp::SCALAR_FP:
-            case ExprOp::FILL:
-                result = DataType::FP32;
-                break;
-            case ExprOp::ADD:
-            case ExprOp::SUB:
-            case ExprOp::MUL:
-            case ExprOp::DIV:
-            case ExprOp::POW:
-            case ExprOp::MIN:
-            case ExprOp::MAX:
-            case ExprOp::MIN_GRAD_LEFT:
-            case ExprOp::MIN_GRAD_RIGHT:
-            case ExprOp::MAX_GRAD_LEFT:
-            case ExprOp::MAX_GRAD_RIGHT:
-                result = infer_binary();
-                break;
-            case ExprOp::WHERE: {
-                const bool true_scalar = is_scalar_like(n.rhs);
-                const bool false_scalar = is_scalar_like(n.aux);
-                if (true_scalar && false_scalar) {
-                    result = DataType::FP32;
-                } else if (true_scalar) {
-                    result = infer_child(n.aux);
-                } else if (false_scalar) {
-                    result = infer_child(n.rhs);
-                } else {
-                    const std::optional<DataType> true_dtype = infer_child(n.rhs);
-                    const std::optional<DataType> false_dtype = infer_child(n.aux);
-                    if (true_dtype.has_value() && false_dtype.has_value()) {
-                        result = promoteTensorValueDTypes(true_dtype.value(), false_dtype.value());
-                    }
-                }
-                break;
-            }
-            case ExprOp::MATMUL:
-            case ExprOp::GEMM: {
-                const std::optional<DataType> lhs_dtype = infer_child(n.lhs);
-                const std::optional<DataType> rhs_dtype = infer_child(n.rhs);
-                if (lhs_dtype.has_value() && rhs_dtype.has_value()) {
-                    result = promoteTensorValueDTypes(lhs_dtype.value(), rhs_dtype.value());
-                    if (n.op == ExprOp::GEMM && n.aux != UINT32_MAX && !is_scalar_like(n.aux)) {
-                        const std::optional<DataType> aux_dtype = infer_child(n.aux);
-                        if (aux_dtype.has_value()) {
-                            result = promoteTensorValueDTypes(result.value(), aux_dtype.value());
-                        }
-                    }
-                }
-                break;
-            }
-            case ExprOp::CAST:
-            case ExprOp::INPUT:
-            case ExprOp::RUNTIME_SCALAR:
-            case ExprOp::TENSOR_RUNTIME_SCALAR:
-                // These nodes require an explicit output dtype for build-time inference.
-                break;
-            default:
-                if (Expression::isUnaryOp(n.op)) {
-                    result = infer_child(n.lhs);
-                }
-                break;
-        }
-
-        visiting.erase(node_idx);
-        return result;
-    }
-
     uint32_t push(ExprNode node) {
         const uint32_t idx = static_cast<uint32_t>(grad_expr.nodes.size());
         grad_expr.nodes.push_back(std::move(node));
@@ -4050,6 +3820,9 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
         builder.addContribution(child_idx, adjusted_contrib);
     };
 
+    // This helper still expresses a real mathematical shape expansion as zero-add
+    // broadcasting. It is deliberately not an output-materialization mechanism;
+    // the BROADCAST_TO cleanup will replace this representation separately.
     auto broadcastGradToDims = [&](uint32_t grad_value,
                                    const std::vector<uint64_t>& target_dims,
                                    std::optional<DataType> as_type =
@@ -5500,8 +5273,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     // cuBLASLt epilogue path.  Plain input nodes do not have their runtime dtype resolved
                     // while the backward graph is being built, so use the forward GEMM's public output
                     // dtype as the requested materialized dtype for dAux.  Without this, an FP16 bias
-                    // gradient reduction resolves to the reduction default FP32 output and callers that
-                    // request the FP16 public grad need a trailing conversion wrapper.
+                    // gradient reduction resolves to the reduction default FP32 output and M3 must add
+                    // an unnecessary compiler-local cast for callers that request the FP16 public grad.
                     aux_grad_dtype = preferredGradValueDType(node);
                 }
 
@@ -5639,6 +5412,9 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         // lower production backward through an explicit dense score-bias materialization, then let
                         // the normal broadcast-gradient rule reduce dense dBias back to the original bias shape.
                         const auto bias_backward_dtype = node.compute_dtype.has_value() ? node.compute_dtype : preferredGradValueDType(node);
+                        // This zero-add is a semantic dense broadcast of score bias, not
+                        // output storage coercion. BROADCAST_TO will replace it in the
+                        // dedicated broadcast cleanup after the materialization gate.
                         bias = builder.addNoFold(builder.fill(0.0, dense_score_bias_dims, bias_backward_dtype),
                                                  bias,
                                                  bias_backward_dtype,
@@ -6069,16 +5845,17 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
         std::string name;
         uint32_t node_idx;
         std::optional<DataType> target_output_dtype;
+        bool require_distinct_storage = false;
     };
 
     std::vector<PendingBackwardOutput> pending_outputs;
     pending_outputs.reserve(normalized_wrt.size());
 
-    // Some expressions legitimately produce identical gradient expressions for
-    // multiple requested inputs.  A residual add under ReLU is the common case:
-    // d ReLU(lhs + rhs) / d lhs and d rhs are the same masked upstream tensor.
-    // Keep those as distinct terminal output nodes so later planning/stamping does
-    // not alias one named gradient output away.
+    // Some expressions legitimately produce the same mathematical gradient value for
+    // multiple requested inputs. A residual add is the simplest case: d(lhs + rhs)
+    // / d lhs and d rhs are the same upstream tensor. Keep the mathematical graph
+    // shared and communicate only the public output-ownership requirement. M5 makes
+    // require_distinct_storage a stamped output-materialization concern.
     std::unordered_set<uint32_t> emittedRawGradientNodes;
 
     for (const std::string& wrt_name : normalized_wrt) {
@@ -6103,6 +5880,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
         const std::string grad_output_name = wrt_name + "_grad";
 
         std::optional<uint32_t> total_grad;
+        bool require_distinct_storage = false;
         for (uint32_t i = 0; i < forward_expr.nodes.size(); ++i) {
             const ExprNode& node = forward_expr.nodes[i];
             if (node.op != ExprOp::INPUT || node.input_slot != slot) {
@@ -6122,6 +5900,9 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
             if (accumulate_grad_outputs) {
                 total_grad = builder.input(grad_output_name, grad_dtype);
             } else if (has_forward_dims) {
+                // This is a genuine mathematical zero: the requested forward input
+                // has no gradient contribution. Unlike the removed terminal dtype
+                // coercion, the zero is the value of dOutput/dInput itself.
                 total_grad = builder.fill(0.0, forward_node_dims.at(first_it->second), grad_dtype);
             } else {
                 const uint32_t input_clone = builder.cloneForward(first_it->second);
@@ -6141,49 +5922,23 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             const uint32_t raw_grad = total_grad.value();
             if (!emittedRawGradientNodes.insert(raw_grad).second) {
-                // Force a unique terminal node for this named gradient while preserving
-                // the exact gradient value.  The condition depends on the corresponding
-                // primal input so the node is not a pure duplicate of an earlier output;
-                // both branches return the same gradient, so NaNs in the condition input
-                // do not change the value.
-                const uint32_t input_clone = builder.cloneForward(first_it->second);
-                const uint32_t condition = builder.binary(ExprOp::EQUAL, input_clone, input_clone);
-                total_grad = builder.where(condition, total_grad.value(), total_grad.value());
+                // The named outputs are mathematically identical, but callers historically
+                // receive independent gradient tensors. Preserve that ownership contract
+                // without manufacturing WHERE(g, g) solely to obtain a second node id.
+                require_distinct_storage = true;
             }
         }
 
-        // Create a dedicated terminal output node so we can force only the final
-        // written grad dtype, while leaving internal promoted compute untouched.
-        // Stage-boundary gradients that already declare the requested output dtype
-        // can be written directly; wrapping them in grad + fill(0) only creates a
-        // synthetic fused kernel after the real backend stage.
-        uint32_t terminal_grad = total_grad.value();
-        bool terminal_already_forces_dtype = false;
-        if (grad_dtype.has_value()) {
-            const ExprNode& terminal_node = builder.node(terminal_grad);
-            terminal_already_forces_dtype =
-                stageBoundaryMaterializesRequestedDType(terminal_node, grad_dtype.value());
-        }
-        if (grad_dtype.has_value() && !terminal_already_forces_dtype) {
-            uint32_t zero_like;
-            if (has_forward_dims) {
-                zero_like = builder.fill(0.0, forward_node_dims.at(first_it->second), grad_dtype);
-            } else if (const auto inferred_grad_dims = builder.tryInferKnownGradientDims(total_grad.value()); inferred_grad_dims.has_value()) {
-                // Avoid cloning the primal input just to manufacture a zero tensor when the
-                // backward graph already carries its terminal shape, as strided-view backward does.
-                zero_like = builder.fill(0.0, inferred_grad_dims.value(), grad_dtype);
-            } else {
-                const uint32_t input_clone = builder.cloneForward(first_it->second);
-                zero_like = builder.mul(input_clone, builder.scalar(0.0));
-            }
-
-            terminal_grad = builder.addNoFold(total_grad.value(), zero_like, grad_dtype, grad_dtype);
-        }
+        // Output storage dtype is a physical materialization requirement, not part of
+        // the mathematical backward graph.  M3 lowers this contract compiler-locally,
+        // so the named output points directly at the mathematical gradient value.
+        const uint32_t terminal_grad = total_grad.value();
 
         pending_outputs.push_back(PendingBackwardOutput{
             .name = grad_output_name,
             .node_idx = terminal_grad,
             .target_output_dtype = grad_dtype,
+            .require_distinct_storage = require_distinct_storage,
         });
     }
 
@@ -6191,10 +5946,13 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
     backward_outputs.expr = std::make_shared<PhysicalExpression>(builder.takeExpression());
     backward_outputs.outputs.reserve(pending_outputs.size());
     for (const PendingBackwardOutput& output : pending_outputs) {
-        backward_outputs.outputs.push_back(NamedOutput{
+        NamedOutput named_output{
             .name = output.name,
             .node_idx = output.node_idx,
-        });
+        };
+        named_output.materialization.storage_dtype = output.target_output_dtype;
+        named_output.materialization.require_distinct_storage = output.require_distinct_storage;
+        backward_outputs.outputs.push_back(std::move(named_output));
     }
 
     return backward_outputs;
@@ -6368,7 +6126,27 @@ static PhysicalOutputs assembleConditionalBackwardOutputs(const PhysicalOutputs&
 
     result.outputs.reserve(expected_names.size());
     for (size_t i = 0; i < expected_names.size(); ++i) {
-        result.outputs.push_back(NamedOutput{expected_names[i], static_cast<uint32_t>(i)});
+        OutputMaterializationContract& then_materialization = then_branch.outputs[i].materialization;
+        OutputMaterializationContract& else_materialization = else_branch.outputs[i].materialization;
+        if (then_materialization.storage_dtype != else_materialization.storage_dtype) {
+            throw std::runtime_error("Conditional backward branches produced different gradient output storage dtype contracts.");
+        }
+
+        // A branch-local duplicate gradient is still a root-level ownership requirement:
+        // whichever branch executes, this named output must remain distinct from its
+        // sibling output. Promote the ownership bit across both branches so the
+        // conditional contract is stable without weakening M1's general requirement
+        // that conditional output contracts agree.
+        const bool require_distinct_storage = then_materialization.require_distinct_storage ||
+                                              else_materialization.require_distinct_storage;
+        then_materialization.require_distinct_storage = require_distinct_storage;
+        else_materialization.require_distinct_storage = require_distinct_storage;
+
+        result.outputs.push_back(NamedOutput{
+            .name = expected_names[i],
+            .node_idx = static_cast<uint32_t>(i),
+            .materialization = then_materialization,
+        });
     }
 
     result.conditional = std::make_shared<PhysicalConditionalOutputs>();
@@ -6449,25 +6227,27 @@ static PhysicalOutputs buildConditionalTreeBackwardOutputsImpl(
         backward.expr = std::make_shared<PhysicalExpression>();
     }
 
-    std::unordered_map<std::string, uint32_t> existing_output_nodes;
+    std::unordered_map<std::string, NamedOutput> existing_outputs;
     for (const NamedOutput& output : backward.outputs) {
-        existing_output_nodes.emplace(output.name, output.node_idx);
+        existing_outputs.emplace(output.name, output);
     }
 
     std::vector<NamedOutput> ordered_outputs;
     ordered_outputs.reserve(desired_wrt.size());
     for (const std::string& wrt_name : desired_wrt) {
         const std::string grad_name = wrt_name + "_grad";
-        auto existing = existing_output_nodes.find(grad_name);
-        if (existing != existing_output_nodes.end()) {
-            ordered_outputs.push_back(NamedOutput{grad_name, existing->second});
+        auto existing = existing_outputs.find(grad_name);
+        if (existing != existing_outputs.end()) {
+            ordered_outputs.push_back(existing->second);
             continue;
         }
         auto dtype_it = grad_dtypes.find(wrt_name);
         const std::optional<DataType> grad_dtype = dtype_it == grad_dtypes.end() ? std::nullopt : dtype_it->second;
         const uint32_t zero_node = appendZeroGradientForMissingConditionalInput(
             *backward.expr, wrt_name, grad_dtype, accumulate_grad_outputs);
-        ordered_outputs.push_back(NamedOutput{grad_name, zero_node});
+        NamedOutput zero_output{grad_name, zero_node};
+        zero_output.materialization.storage_dtype = grad_dtype;
+        ordered_outputs.push_back(std::move(zero_output));
     }
     backward.outputs = std::move(ordered_outputs);
     if (!backward.outputs.empty()) {

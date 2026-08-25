@@ -102,6 +102,385 @@ TEST(EquationCompiler, TransitiveSharedInputsBecomeOneFusedStage) {
     ASSERT_EQ(stages[0].outputs.size(), 3);
 }
 
+TEST(EquationCompiler, OutputStorageContractMatchingDTypeAddsNoCompilerLocalCast) {
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto y = x.tanh();
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+    physical.outputs[0].materialization.storage_dtype = DataType::FP32;
+
+    const std::string before = canonicalize(physical);
+    const size_t original_node_count = physical.expr->nodes.size();
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    size_t cast_count = 0;
+    for (const PhysicalExecutionStage& stage : stages) {
+        for (const ExprNode& node : stage.expr.nodes) {
+            if (node.op == ExprOp::CAST) ++cast_count;
+        }
+    }
+    EXPECT_EQ(cast_count, 0u);
+    EXPECT_EQ(physical.expr->nodes.size(), original_node_count);
+    EXPECT_EQ(canonicalize(physical), before);
+}
+
+TEST(EquationCompiler, OutputStorageContractMismatchAddsCompilerLocalCastWithoutMutatingExpression) {
+    auto x = Expression::input("x", DataType::BF16, DataType::BF16);
+    auto y = x.tanh();
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::BF16});
+    physical.outputs[0].materialization.storage_dtype = DataType::FP32;
+
+    const std::string before = canonicalize(physical);
+    const size_t original_node_count = physical.expr->nodes.size();
+
+    auto count_casts = [](const std::vector<PhysicalExecutionStage>& stages) {
+        size_t count = 0;
+        for (const PhysicalExecutionStage& stage : stages) {
+            for (const ExprNode& node : stage.expr.nodes) {
+                if (node.op == ExprOp::CAST) ++count;
+            }
+        }
+        return count;
+    };
+
+    const auto first_stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    EXPECT_EQ(count_casts(first_stages), 1u);
+    EXPECT_EQ(physical.expr->nodes.size(), original_node_count);
+    EXPECT_EQ(canonicalize(physical), before);
+
+    const auto second_stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    EXPECT_EQ(count_casts(second_stages), 1u);
+    EXPECT_EQ(physical.expr->nodes.size(), original_node_count);
+    EXPECT_EQ(canonicalize(physical), before);
+}
+
+TEST(EquationCompiler, OutputStorageContractFollowsBackingStorageDTypeThroughAlias) {
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto y = x.reshape({4});
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+
+    // The graph exposes FP32 logically, but the runtime tensor backing x is BF16.
+    // M3 must inspect physical storage through the alias instead of concluding
+    // that y is already materialized as FP32 from output_dtype alone.
+    resolveOutputsDTypesInPlace(physical, {DataType::BF16});
+    ASSERT_TRUE(physical.expr->nodes.at(physical.outputs[0].node_idx).output_dtype.has_value());
+    ASSERT_EQ(physical.expr->nodes.at(physical.outputs[0].node_idx).output_dtype.value(), DataType::FP32);
+    physical.outputs[0].materialization.storage_dtype = DataType::FP32;
+
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    size_t cast_count = 0;
+    for (const PhysicalExecutionStage& stage : stages) {
+        for (const ExprNode& node : stage.expr.nodes) {
+            if (node.op == ExprOp::CAST) ++cast_count;
+        }
+    }
+    EXPECT_EQ(cast_count, 1u);
+}
+
+TEST(AutoDiff, TerminalDTypeMaterializationUsesCompilerLocalCastInsteadOfZeroAdd) {
+    const Expression x = Expression::input("x", DataType::BF16, DataType::BF16);
+    const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression y = x * scale;
+
+    PhysicalOutputs forward = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(forward, {DataType::BF16, DataType::FP32});
+
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward,
+        {"x"},
+        std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        std::unordered_map<std::string, DataType>{{"y", DataType::FP32}},
+        std::unordered_map<std::string, std::vector<uint64_t>>{
+            {"x", {2, 3}},
+            {"scale", {2, 3}},
+        });
+
+    ASSERT_EQ(backward.outputs.size(), 1u);
+    const NamedOutput& x_grad = backward.outputs.front();
+    ASSERT_EQ(x_grad.name, "x_grad");
+    ASSERT_TRUE(x_grad.materialization.storage_dtype.has_value());
+    EXPECT_EQ(x_grad.materialization.storage_dtype.value(), DataType::BF16);
+    ASSERT_LT(x_grad.node_idx, backward.expr->nodes.size());
+
+    // The mathematical derivative is dy * scale.  Storage conversion belongs to
+    // output lowering, so AutoDiff must not append ADD(raw_grad, FILL(0)).
+    const ExprNode& terminal = backward.expr->nodes.at(x_grad.node_idx);
+    EXPECT_EQ(terminal.op, ExprOp::MUL);
+    for (const ExprNode& node : backward.expr->nodes) {
+        EXPECT_NE(node.op, ExprOp::FILL);
+    }
+
+    std::vector<DataType> backward_input_dtypes(backward.expr->inputs.size(), DataType::FP32);
+    for (const NamedInput& input : backward.expr->inputs) {
+        if (input.name == "x") {
+            backward_input_dtypes.at(input.slot) = DataType::BF16;
+        } else if (input.name == "scale" || input.name == "dy") {
+            backward_input_dtypes.at(input.slot) = DataType::FP32;
+        } else {
+            FAIL() << "Unexpected M4 backward input: " << input.name;
+        }
+    }
+    resolveOutputsDTypesInPlace(backward, backward_input_dtypes);
+    ASSERT_TRUE(backward.expr->nodes.at(x_grad.node_idx).output_dtype.has_value());
+    EXPECT_EQ(backward.expr->nodes.at(x_grad.node_idx).output_dtype.value(), DataType::FP32);
+
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(backward);
+    size_t cast_count = 0;
+    for (const PhysicalExecutionStage& stage : stages) {
+        for (const ExprNode& node : stage.expr.nodes) {
+            if (node.op == ExprOp::CAST) {
+                ++cast_count;
+                ASSERT_TRUE(node.output_dtype.has_value());
+                EXPECT_EQ(node.output_dtype.value(), DataType::BF16);
+            }
+        }
+    }
+    EXPECT_EQ(cast_count, 1u);
+
+    // Planning is compile-local: the persistent backward graph remains pure math.
+    ASSERT_EQ(backward.expr->nodes.at(x_grad.node_idx).op, ExprOp::MUL);
+    for (const ExprNode& node : backward.expr->nodes) {
+        EXPECT_NE(node.op, ExprOp::CAST);
+    }
+}
+
+TEST(AutoDiff, MatchingTerminalDTypeNeedsNeitherZeroAddNorCompilerLocalCast) {
+    const Expression x = Expression::input("x", DataType::BF16, DataType::BF16);
+    const Expression scale = Expression::input("scale", DataType::BF16, DataType::BF16);
+    const Expression y = x * scale;
+
+    PhysicalOutputs forward = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(forward, {DataType::BF16, DataType::BF16});
+
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward,
+        {"x"},
+        std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        std::unordered_map<std::string, DataType>{{"y", DataType::BF16}},
+        std::unordered_map<std::string, std::vector<uint64_t>>{
+            {"x", {2, 3}},
+            {"scale", {2, 3}},
+        });
+
+    ASSERT_EQ(backward.outputs.size(), 1u);
+    const NamedOutput& x_grad = backward.outputs.front();
+    ASSERT_LT(x_grad.node_idx, backward.expr->nodes.size());
+    EXPECT_EQ(backward.expr->nodes.at(x_grad.node_idx).op, ExprOp::MUL);
+    ASSERT_TRUE(x_grad.materialization.storage_dtype.has_value());
+    EXPECT_EQ(x_grad.materialization.storage_dtype.value(), DataType::BF16);
+
+    std::vector<DataType> backward_input_dtypes(backward.expr->inputs.size(), DataType::BF16);
+    resolveOutputsDTypesInPlace(backward, backward_input_dtypes);
+
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(backward);
+    size_t cast_count = 0;
+    for (const PhysicalExecutionStage& stage : stages) {
+        for (const ExprNode& node : stage.expr.nodes) {
+            if (node.op == ExprOp::CAST) ++cast_count;
+        }
+    }
+    EXPECT_EQ(cast_count, 0u);
+
+    for (const ExprNode& node : backward.expr->nodes) {
+        EXPECT_NE(node.op, ExprOp::FILL);
+        EXPECT_NE(node.op, ExprOp::CAST);
+    }
+}
+
+TEST(AutoDiff, DuplicateNamedGradientsShareMathematicalNodeAndRequestDistinctStorage) {
+    const Expression lhs = Expression::input("lhs", DataType::FP32, DataType::FP32);
+    const Expression rhs = Expression::input("rhs", DataType::FP32, DataType::FP32);
+    const Expression y = lhs + rhs;
+
+    PhysicalOutputs forward = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(forward, {DataType::FP32, DataType::FP32});
+
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward,
+        {"lhs", "rhs"},
+        std::optional<std::string>{"dy"},
+        std::unordered_map<std::string, std::vector<uint64_t>>{
+            {"lhs", {4}},
+            {"rhs", {4}},
+        });
+
+    ASSERT_EQ(backward.outputs.size(), 2u);
+    const NamedOutput& lhs_grad = backward.outputs[0];
+    const NamedOutput& rhs_grad = backward.outputs[1];
+    EXPECT_EQ(lhs_grad.name, "lhs_grad");
+    EXPECT_EQ(rhs_grad.name, "rhs_grad");
+
+    // d(lhs + rhs)/d lhs and d(lhs + rhs)/d rhs are exactly the same upstream
+    // value. M6 must keep that mathematical sharing instead of manufacturing a
+    // WHERE(g, g) node merely to obtain another terminal node id.
+    EXPECT_EQ(lhs_grad.node_idx, rhs_grad.node_idx);
+    EXPECT_FALSE(lhs_grad.materialization.require_distinct_storage);
+    EXPECT_TRUE(rhs_grad.materialization.require_distinct_storage);
+    ASSERT_TRUE(lhs_grad.materialization.storage_dtype.has_value());
+    ASSERT_TRUE(rhs_grad.materialization.storage_dtype.has_value());
+    EXPECT_EQ(lhs_grad.materialization.storage_dtype.value(), DataType::FP32);
+    EXPECT_EQ(rhs_grad.materialization.storage_dtype.value(), DataType::FP32);
+
+    for (const ExprNode& node : backward.expr->nodes) {
+        EXPECT_NE(node.op, ExprOp::WHERE);
+        EXPECT_NE(node.op, ExprOp::EQUAL);
+    }
+}
+
+TEST(AutoDiff, ConditionalDuplicateGradientOwnershipIsPromotedAcrossBranches) {
+    const Expression lhs = Expression::input("lhs", DataType::FP32, DataType::FP32);
+    const Expression rhs = Expression::input("rhs", DataType::FP32, DataType::FP32);
+    const Expression predicate_value = Expression::input("predicate_value", DataType::FP32, DataType::FP32);
+
+    Outputs forward = Outputs::conditional(
+        predicate_value.greaterThan(Expression::constantScalar(0.0)),
+        Expression::outputs({{"y", lhs + rhs}}),
+        Expression::outputs({{"y", lhs * rhs}}));
+
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward.physicalOutputs(),
+        {"lhs", "rhs"},
+        std::optional<std::string>{"dy"},
+        std::unordered_map<std::string, std::vector<uint64_t>>{
+            {"lhs", {4}},
+            {"rhs", {4}},
+            {"predicate_value", {1}},
+        });
+
+    ASSERT_TRUE(backward.isConditional());
+    ASSERT_NE(backward.conditional, nullptr);
+    ASSERT_EQ(backward.outputs.size(), 2u);
+    ASSERT_EQ(backward.conditional->then_branch.outputs.size(), 2u);
+    ASSERT_EQ(backward.conditional->else_branch.outputs.size(), 2u);
+
+    // Only the add branch has a duplicated raw gradient, but the public output
+    // ownership contract must be stable regardless of which branch executes.
+    EXPECT_FALSE(backward.outputs[0].materialization.require_distinct_storage);
+    EXPECT_TRUE(backward.outputs[1].materialization.require_distinct_storage);
+    EXPECT_FALSE(backward.conditional->then_branch.outputs[0].materialization.require_distinct_storage);
+    EXPECT_TRUE(backward.conditional->then_branch.outputs[1].materialization.require_distinct_storage);
+    EXPECT_FALSE(backward.conditional->else_branch.outputs[0].materialization.require_distinct_storage);
+    EXPECT_TRUE(backward.conditional->else_branch.outputs[1].materialization.require_distinct_storage);
+
+    const PhysicalOutputs& then_backward = backward.conditional->then_branch;
+    EXPECT_EQ(then_backward.outputs[0].node_idx, then_backward.outputs[1].node_idx);
+    for (const ExprNode& node : then_backward.expr->nodes) {
+        EXPECT_NE(node.op, ExprOp::WHERE);
+        EXPECT_NE(node.op, ExprOp::EQUAL);
+    }
+}
+
+TEST(AutoDiff, MaterializationPolicyKeepsPhysicalRequirementsOutOfMathematicalGraph) {
+    const Expression lhs = Expression::input("lhs", DataType::BF16, DataType::BF16);
+    const Expression rhs = Expression::input("rhs", DataType::BF16, DataType::BF16);
+    const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression y = (lhs + rhs) * scale;
+
+    PhysicalOutputs forward = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(forward, {DataType::BF16, DataType::BF16, DataType::FP32});
+
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward,
+        {"lhs", "rhs"},
+        std::optional<std::string>{"dy"},
+        std::unordered_map<std::string, std::vector<uint64_t>>{
+            {"lhs", {4}},
+            {"rhs", {4}},
+            {"scale", {4}},
+        });
+
+    ASSERT_EQ(backward.outputs.size(), 2u);
+    const NamedOutput& lhs_grad = backward.outputs[0];
+    const NamedOutput& rhs_grad = backward.outputs[1];
+
+    // The two gradients are the same FP32 mathematical value (dy * scale), but
+    // their public storage contract is BF16 and the second output requires its
+    // own allocation. None of those physical facts may create algebraic nodes.
+    EXPECT_EQ(lhs_grad.node_idx, rhs_grad.node_idx);
+    ASSERT_TRUE(lhs_grad.materialization.storage_dtype.has_value());
+    ASSERT_TRUE(rhs_grad.materialization.storage_dtype.has_value());
+    EXPECT_EQ(lhs_grad.materialization.storage_dtype.value(), DataType::BF16);
+    EXPECT_EQ(rhs_grad.materialization.storage_dtype.value(), DataType::BF16);
+    EXPECT_FALSE(lhs_grad.materialization.require_distinct_storage);
+    EXPECT_TRUE(rhs_grad.materialization.require_distinct_storage);
+    ASSERT_LT(lhs_grad.node_idx, backward.expr->nodes.size());
+    EXPECT_EQ(backward.expr->nodes.at(lhs_grad.node_idx).op, ExprOp::MUL);
+
+    for (const ExprNode& node : backward.expr->nodes) {
+        EXPECT_NE(node.op, ExprOp::FILL) << "output dtype coercion must not reappear as grad + fill(0)";
+        EXPECT_NE(node.op, ExprOp::WHERE) << "output ownership must not reappear as where(cond, grad, grad)";
+        EXPECT_NE(node.op, ExprOp::EQUAL) << "output ownership must not manufacture a fake equality predicate";
+    }
+
+    std::vector<DataType> backward_input_dtypes(backward.expr->inputs.size(), DataType::FP32);
+    for (const NamedInput& input : backward.expr->inputs) {
+        if (input.name == "lhs" || input.name == "rhs") {
+            backward_input_dtypes.at(input.slot) = DataType::BF16;
+        } else if (input.name == "scale" || input.name == "dy") {
+            backward_input_dtypes.at(input.slot) = DataType::FP32;
+        } else {
+            FAIL() << "Unexpected M7 backward input: " << input.name;
+        }
+    }
+    resolveOutputsDTypesInPlace(backward, backward_input_dtypes);
+
+    // M3 lowers the shared storage requirement once, compiler-locally. Both
+    // named outputs can reference that physical CAST while M5 handles distinct
+    // returned storage during stamping.
+    const auto stages = EquationCompiler::splitAtReductionBoundaries(backward);
+    size_t cast_count = 0;
+    for (const PhysicalExecutionStage& stage : stages) {
+        for (const ExprNode& node : stage.expr.nodes) {
+            if (node.op == ExprOp::CAST) {
+                ++cast_count;
+                ASSERT_TRUE(node.output_dtype.has_value());
+                EXPECT_EQ(node.output_dtype.value(), DataType::BF16);
+            }
+        }
+    }
+    EXPECT_EQ(cast_count, 1u);
+
+    // Planning must not contaminate the persistent mathematical DAG.
+    EXPECT_EQ(backward.expr->nodes.at(lhs_grad.node_idx).op, ExprOp::MUL);
+    for (const ExprNode& node : backward.expr->nodes) {
+        EXPECT_NE(node.op, ExprOp::CAST);
+    }
+}
+
+TEST(AutoDiff, MaterializationPolicyPreservesLegitimateZeroGradient) {
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression z = Expression::input("z", DataType::FP32, DataType::FP32);
+    PhysicalOutputs forward = Expression::outputs({
+        {"uses_x", x * Expression::constantScalar(2.0)},
+        {"seeded", z},
+    }).physicalOutputs();
+    resolveOutputsDTypesInPlace(forward, {DataType::FP32, DataType::FP32});
+
+    // A partial explicit upstream map intentionally supplies no gradient for the
+    // output that depends on x. The requested dOutput/dx therefore has no
+    // contribution at all, and an explicit zero is the mathematical value.
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward,
+        {"x"},
+        std::unordered_map<std::string, std::string>{{"seeded", "dseeded"}},
+        std::unordered_map<std::string, std::vector<uint64_t>>{
+            {"x", {4}},
+            {"z", {4}},
+        });
+
+    ASSERT_EQ(backward.outputs.size(), 1u);
+    const NamedOutput& x_grad = backward.outputs.front();
+    ASSERT_LT(x_grad.node_idx, backward.expr->nodes.size());
+    const ExprNode& zero = backward.expr->nodes.at(x_grad.node_idx);
+    EXPECT_EQ(zero.op, ExprOp::FILL);
+    EXPECT_DOUBLE_EQ(zero.scalar_fp, 0.0);
+    EXPECT_EQ(zero.fill_dims, std::vector<uint64_t>({4}));
+    ASSERT_TRUE(x_grad.materialization.storage_dtype.has_value());
+    EXPECT_EQ(x_grad.materialization.storage_dtype.value(), DataType::FP32);
+    EXPECT_FALSE(x_grad.materialization.require_distinct_storage);
+}
+
 TEST(EquationCompiler, DeferredTerminalProducerIsMaterializedBeforeExactNodeMatmulConsumer) {
     auto x = Expression::input("x", DataType::FP32, DataType::FP32);
     auto w = Expression::input("w", DataType::FP32, DataType::FP32);

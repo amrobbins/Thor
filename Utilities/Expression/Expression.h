@@ -401,9 +401,26 @@ struct NamedInput {
     Kind kind = Kind::Tensor;
 };
 
+struct OutputMaterializationContract {
+    // Physical requirements on the returned output tensor belong here rather than
+    // in the mathematical expression DAG. In particular, do not append algebraic
+    // identities such as value + fill(0) to force a storage dtype, or
+    // where(cond, value, value) merely to manufacture a distinct output allocation.
+    // Genuine value/shape transformations remain explicit mathematical operations.
+    std::optional<DataType> storage_dtype = std::nullopt;
+    // When true, this named output's returned tensor allocation must not alias
+    // the allocation returned for any other named output.
+    bool require_distinct_storage = false;
+
+    [[nodiscard]] bool isDefault() const { return !storage_dtype.has_value() && !require_distinct_storage; }
+
+    bool operator==(const OutputMaterializationContract&) const = default;
+};
+
 struct NamedOutput {
     std::string name;
     uint32_t node_idx;
+    OutputMaterializationContract materialization;
 };
 
 struct PhysicalExpression {

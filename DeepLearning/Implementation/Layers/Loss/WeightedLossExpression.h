@@ -61,7 +61,14 @@ inline PhysicalOutputs assembleConditionalTransformedOutputs(const PhysicalOutpu
         if (thenBranch.outputs[i].name != elseBranch.outputs[i].name) {
             throw std::runtime_error(what + " conditional transform produced different branch output names.");
         }
-        result.outputs.push_back(NamedOutput{thenBranch.outputs[i].name, static_cast<uint32_t>(i)});
+        if (thenBranch.outputs[i].materialization != elseBranch.outputs[i].materialization) {
+            throw std::runtime_error(what + " conditional transform produced different branch output materialization contracts.");
+        }
+        result.outputs.push_back(NamedOutput{
+            .name = thenBranch.outputs[i].name,
+            .node_idx = static_cast<uint32_t>(i),
+            .materialization = thenBranch.outputs[i].materialization,
+        });
     }
 
     result.conditional = std::make_shared<PhysicalConditionalOutputs>();

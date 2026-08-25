@@ -1281,6 +1281,18 @@ static std::string formatOptionalDTypeCanonical(const std::optional<DataType>& d
     return TensorDescriptor::getElementTypeName(dtype.value());
 }
 
+static void appendOutputMaterializationCanonical(std::ostringstream& ss, const OutputMaterializationContract& materialization) {
+    // Preserve the exact legacy canonical representation for the default
+    // contract so schema-v1 expressions written before output materialization
+    // metadata existed retain their canonical hashes.
+    if (materialization.isDefault()) {
+        return;
+    }
+
+    ss << ";materialization={storage_dtype=" << formatOptionalDTypeCanonical(materialization.storage_dtype)
+       << ";require_distinct_storage=" << (materialization.require_distinct_storage ? "true" : "false") << "}";
+}
+
 static void appendNodeDTypeMetadata(std::string& out, const ExprNode& n) {
     out += ";input=" + formatOptionalDTypeCanonical(n.input_tensor_dtype);
     out += ";out=" + formatOptionalDTypeCanonical(n.output_dtype);
@@ -1895,7 +1907,9 @@ std::string canonicalize(const PhysicalOutputs& outputs) {
             if (i > 0)
                 ss << ",";
             const NamedOutput& output = outputs.outputs[i];
-            ss << "{" << output.name << ":" << output.node_idx << "}";
+            ss << "{" << output.name << ":" << output.node_idx;
+            appendOutputMaterializationCanonical(ss, output.materialization);
+            ss << "}";
         }
         ss << "]";
         return ss.str();
@@ -1911,7 +1925,9 @@ std::string canonicalize(const PhysicalOutputs& outputs) {
         if (output.node_idx >= outputs.expr->nodes.size()) {
             throw std::runtime_error("canonicalize(PhysicalOutputs): output node index out of range.");
         }
-        ss << "{" << output.name << ":" << canonicalizeNode(*outputs.expr, output.node_idx, memo, memoReady) << "}";
+        ss << "{" << output.name << ":" << canonicalizeNode(*outputs.expr, output.node_idx, memo, memoReady);
+        appendOutputMaterializationCanonical(ss, output.materialization);
+        ss << "}";
     }
     ss << "]";
 
@@ -2019,6 +2035,11 @@ void ExpressionDefinition::validate() const {
         if (then_names != else_names) {
             throw std::runtime_error("Conditional ExpressionDefinition then/else output names and ordering must match.");
         }
+        for (size_t i = 0; i < conditional.then_branch.outputs.size(); ++i) {
+            if (conditional.then_branch.outputs[i].materialization != conditional.else_branch.outputs[i].materialization) {
+                throw std::runtime_error("Conditional ExpressionDefinition then/else output materialization contracts must match.");
+            }
+        }
         if (outputs.outputs.size() != then_names.size()) {
             throw std::runtime_error("Conditional ExpressionDefinition root output count must match the branch output count.");
         }
@@ -2037,6 +2058,10 @@ void ExpressionDefinition::validate() const {
             }
             if (output.node_idx != i) {
                 throw std::runtime_error("Conditional ExpressionDefinition root output node indices must be branch-output ordinals.");
+            }
+            if (output.materialization != conditional.then_branch.outputs[i].materialization) {
+                throw std::runtime_error(
+                    "Conditional ExpressionDefinition root output materialization contract must match the branch output contract.");
             }
         }
 
@@ -2390,7 +2415,18 @@ json ExpressionDefinition::architectureJson() const {
         j["nodes"].push_back(exprNodeToJson(node));
     }
     for (const NamedOutput& output : outputs.outputs) {
-        j["outputs"].push_back(json{{"name", output.name}, {"node", output.node_idx}});
+        json output_json{{"name", output.name}, {"node", output.node_idx}};
+        if (!output.materialization.isDefault()) {
+            json materialization = json::object();
+            if (output.materialization.storage_dtype.has_value()) {
+                materialization["storage_dtype"] = output.materialization.storage_dtype.value();
+            }
+            if (output.materialization.require_distinct_storage) {
+                materialization["require_distinct_storage"] = true;
+            }
+            output_json["materialization"] = std::move(materialization);
+        }
+        j["outputs"].push_back(std::move(output_json));
     }
 
     if (outputs.isConditional()) {
@@ -2593,10 +2629,21 @@ ExpressionDefinition ExpressionDefinition::deserialize(const json& j,
     }
 
     for (const json& output_json : expression_json.at("outputs")) {
-        definition.outputs.outputs.push_back(NamedOutput{
+        NamedOutput output{
             .name = output_json.at("name").get<std::string>(),
             .node_idx = output_json.at("node").get<uint32_t>(),
-        });
+        };
+        if (output_json.contains("materialization")) {
+            const json& materialization_json = output_json.at("materialization");
+            if (!materialization_json.is_object()) {
+                throw std::runtime_error("ExpressionDefinition output materialization field must be an object.");
+            }
+            if (materialization_json.contains("storage_dtype")) {
+                output.materialization.storage_dtype = materialization_json.at("storage_dtype").get<DataType>();
+            }
+            output.materialization.require_distinct_storage = materialization_json.value("require_distinct_storage", false);
+        }
+        definition.outputs.outputs.push_back(std::move(output));
     }
 
     if (expression_json.contains("conditional")) {
@@ -5633,6 +5680,11 @@ Outputs Outputs::conditional(const Expression& predicate, const Outputs& then_ou
     if (physicalOutputNames(then_physical) != physicalOutputNames(else_physical)) {
         throw std::runtime_error("Outputs::conditional requires then/else branches to expose the same output names in the same order.");
     }
+    for (size_t i = 0; i < then_physical.outputs.size(); ++i) {
+        if (then_physical.outputs[i].materialization != else_physical.outputs[i].materialization) {
+            throw std::runtime_error("Outputs::conditional requires then/else branches to expose matching output materialization contracts.");
+        }
+    }
 
     auto conditional = std::make_shared<PhysicalConditionalOutputs>();
     conditional->predicate = std::move(predicate_outputs);
@@ -5648,7 +5700,11 @@ Outputs Outputs::conditional(const Expression& predicate, const Outputs& then_ou
     std::vector<NamedOutput> outputs;
     outputs.reserve(conditional->then_branch.outputs.size());
     for (size_t i = 0; i < conditional->then_branch.outputs.size(); ++i) {
-        outputs.push_back(NamedOutput{conditional->then_branch.outputs[i].name, static_cast<uint32_t>(i)});
+        outputs.push_back(NamedOutput{
+            .name = conditional->then_branch.outputs[i].name,
+            .node_idx = static_cast<uint32_t>(i),
+            .materialization = conditional->then_branch.outputs[i].materialization,
+        });
     }
 
     return Outputs(std::move(root_expr), std::move(outputs), std::move(conditional));

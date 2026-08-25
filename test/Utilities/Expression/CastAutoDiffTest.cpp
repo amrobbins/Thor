@@ -80,7 +80,11 @@ TEST(ExpressionCastAutoDiff, Fp32ToBf16CastsIncomingGradientBackToFp32) {
     const std::vector<uint32_t> fp32Casts = castNodesWithOutputDType(backward, DataType::FP32);
     ASSERT_EQ(fp32Casts.size(), 1u);
 
-    const ExprNode& gradientOutput = backward.expr->nodes.at(namedOutput(backward, "x_grad").node_idx);
+    const NamedOutput& xGrad = namedOutput(backward, "x_grad");
+    ASSERT_TRUE(xGrad.materialization.storage_dtype.has_value());
+    EXPECT_EQ(xGrad.materialization.storage_dtype.value(), DataType::FP32);
+
+    const ExprNode& gradientOutput = backward.expr->nodes.at(xGrad.node_idx);
     ASSERT_TRUE(gradientOutput.output_dtype.has_value());
     EXPECT_EQ(gradientOutput.output_dtype.value(), DataType::FP32);
 }
@@ -92,7 +96,11 @@ TEST(ExpressionCastAutoDiff, Bf16ToFp32CastsIncomingGradientBackToBf16) {
     const std::vector<uint32_t> bf16Casts = castNodesWithOutputDType(backward, DataType::BF16);
     ASSERT_EQ(bf16Casts.size(), 1u);
 
-    const ExprNode& gradientOutput = backward.expr->nodes.at(namedOutput(backward, "x_grad").node_idx);
+    const NamedOutput& xGrad = namedOutput(backward, "x_grad");
+    ASSERT_TRUE(xGrad.materialization.storage_dtype.has_value());
+    EXPECT_EQ(xGrad.materialization.storage_dtype.value(), DataType::BF16);
+
+    const ExprNode& gradientOutput = backward.expr->nodes.at(xGrad.node_idx);
     ASSERT_TRUE(gradientOutput.output_dtype.has_value());
     EXPECT_EQ(gradientOutput.output_dtype.value(), DataType::BF16);
 }
@@ -105,7 +113,11 @@ TEST(ExpressionCastAutoDiff, ChainedCastsReverseTheDtypeConversions) {
     EXPECT_EQ(castNodesWithOutputDType(backward, DataType::FP32).size(), 1u);
     EXPECT_EQ(castNodesWithOutputDType(backward, DataType::BF16).size(), 1u);
 
-    const ExprNode& gradientOutput = backward.expr->nodes.at(namedOutput(backward, "x_grad").node_idx);
+    const NamedOutput& xGrad = namedOutput(backward, "x_grad");
+    ASSERT_TRUE(xGrad.materialization.storage_dtype.has_value());
+    EXPECT_EQ(xGrad.materialization.storage_dtype.value(), DataType::BF16);
+
+    const ExprNode& gradientOutput = backward.expr->nodes.at(xGrad.node_idx);
     ASSERT_TRUE(gradientOutput.output_dtype.has_value());
     EXPECT_EQ(gradientOutput.output_dtype.value(), DataType::BF16);
 }

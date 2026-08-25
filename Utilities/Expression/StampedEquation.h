@@ -2053,10 +2053,10 @@ struct StampedExecutionSchedule {
 
 }  // namespace detail
 
-// A caller-provided final output is part of the public execution contract. If the
-// expression terminates in a storage alias rather than an executable stage, the
-// plan materializes that alias after all stages complete and exposes destination
-// through output(name).
+// A final output destination is part of the public execution contract. The
+// destination may be caller-provided or allocated while stamping to satisfy an
+// explicit output-ownership requirement. When a producer cannot write that
+// destination directly, materialize the logical value after all stages complete.
 struct StampedOutputMaterialization {
     Tensor source;
     Tensor destination;

@@ -769,6 +769,104 @@ TEST(ExpressionGraphConditionalOps, ConditionalOutputsExposeContractAndRejectMis
     EXPECT_THROW((void)Outputs::conditional(predicate, then_outputs, mismatched_else), std::runtime_error);
 }
 
+TEST(ExpressionOutputMaterialization, DefaultContractPreservesLegacySerializationAndCanonicalIdentity) {
+    Outputs outputs = Expression::outputs({{"y", Expression::input("x") + Expression::constantScalar(1.0)}});
+    PhysicalOutputs physical = outputs.physicalOutputs();
+
+    ASSERT_EQ(physical.outputs.size(), 1u);
+    EXPECT_TRUE(physical.outputs[0].materialization.isDefault());
+
+    const std::string legacy_canonical = canonicalize(physical);
+    const std::string legacy_hash = expressionHash(physical);
+
+    physical.outputs[0].materialization = OutputMaterializationContract{};
+    EXPECT_EQ(canonicalize(physical), legacy_canonical);
+    EXPECT_EQ(expressionHash(physical), legacy_hash);
+
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(Outputs::fromPhysicalOutputs(physical));
+    nlohmann::json payload = definition.architectureJson();
+    ASSERT_EQ(payload.at("outputs").size(), 1u);
+    EXPECT_FALSE(payload.at("outputs").at(0).contains("materialization"));
+
+    ExpressionDefinition loaded = ExpressionDefinition::deserialize(payload);
+    ASSERT_EQ(loaded.outputs.outputs.size(), 1u);
+    EXPECT_TRUE(loaded.outputs.outputs[0].materialization.isDefault());
+    EXPECT_EQ(loaded.canonical_hash, legacy_hash);
+    EXPECT_EQ(loaded.architectureJson(), payload);
+}
+
+TEST(ExpressionOutputMaterialization, NonDefaultContractChangesCanonicalIdentityAndRoundTrips) {
+    PhysicalOutputs base = Expression::outputs({{"y", Expression::input("x")}}).physicalOutputs();
+    ASSERT_EQ(base.outputs.size(), 1u);
+    const std::string base_hash = expressionHash(base);
+
+    PhysicalOutputs storage_dtype_only = base;
+    storage_dtype_only.outputs[0].materialization.storage_dtype = DataType::FP32;
+    EXPECT_NE(expressionHash(storage_dtype_only), base_hash);
+
+    PhysicalOutputs distinct_storage_only = base;
+    distinct_storage_only.outputs[0].materialization.require_distinct_storage = true;
+    EXPECT_NE(expressionHash(distinct_storage_only), base_hash);
+    EXPECT_NE(expressionHash(distinct_storage_only), expressionHash(storage_dtype_only));
+
+    PhysicalOutputs physical = base;
+    physical.outputs[0].materialization.storage_dtype = DataType::BF16;
+    physical.outputs[0].materialization.require_distinct_storage = true;
+
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(Outputs::fromPhysicalOutputs(physical));
+    nlohmann::json payload = definition.architectureJson();
+    ASSERT_TRUE(payload.at("outputs").at(0).contains("materialization"));
+    EXPECT_EQ(payload.at("outputs").at(0).at("materialization").at("storage_dtype").get<DataType>(), DataType::BF16);
+    EXPECT_TRUE(payload.at("outputs").at(0).at("materialization").at("require_distinct_storage").get<bool>());
+
+    ExpressionDefinition loaded = ExpressionDefinition::deserialize(payload);
+    ASSERT_EQ(loaded.outputs.outputs.size(), 1u);
+    ASSERT_TRUE(loaded.outputs.outputs[0].materialization.storage_dtype.has_value());
+    EXPECT_EQ(loaded.outputs.outputs[0].materialization.storage_dtype.value(), DataType::BF16);
+    EXPECT_TRUE(loaded.outputs.outputs[0].materialization.require_distinct_storage);
+    EXPECT_EQ(loaded.canonical_hash, definition.canonical_hash);
+    EXPECT_EQ(loaded.architectureJson(), payload);
+}
+
+TEST(ExpressionOutputMaterialization, ConditionalOutputsPreserveMatchingBranchContractsAndRejectMismatch) {
+    auto x = Expression::input("x");
+    auto predicate = Expression::input("predicate_value").greaterThan(Expression::constantScalar(0.0));
+
+    OutputMaterializationContract contract;
+    contract.storage_dtype = DataType::FP32;
+    contract.require_distinct_storage = true;
+
+    PhysicalOutputs then_physical = Expression::outputs({{"y", x + Expression::constantScalar(1.0)}}).physicalOutputs();
+    then_physical.outputs[0].materialization = contract;
+    Outputs then_outputs = Outputs::fromPhysicalOutputs(std::move(then_physical));
+
+    PhysicalOutputs else_physical = Expression::outputs({{"y", x - Expression::constantScalar(1.0)}}).physicalOutputs();
+    else_physical.outputs[0].materialization = contract;
+    Outputs else_outputs = Outputs::fromPhysicalOutputs(std::move(else_physical));
+
+    Outputs conditional = Outputs::conditional(predicate, then_outputs, else_outputs);
+    PhysicalOutputs conditional_physical = conditional.physicalOutputs();
+    ASSERT_TRUE(conditional_physical.isConditional());
+    ASSERT_EQ(conditional_physical.outputs.size(), 1u);
+    EXPECT_EQ(conditional_physical.outputs[0].materialization, contract);
+    EXPECT_EQ(conditional_physical.conditional->then_branch.outputs[0].materialization, contract);
+    EXPECT_EQ(conditional_physical.conditional->else_branch.outputs[0].materialization, contract);
+
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(conditional);
+    nlohmann::json payload = definition.architectureJson();
+    ExpressionDefinition loaded = ExpressionDefinition::deserialize(payload);
+    ASSERT_TRUE(loaded.outputs.isConditional());
+    EXPECT_EQ(loaded.outputs.outputs[0].materialization, contract);
+    EXPECT_EQ(loaded.outputs.conditional->then_branch.outputs[0].materialization, contract);
+    EXPECT_EQ(loaded.outputs.conditional->else_branch.outputs[0].materialization, contract);
+    EXPECT_EQ(loaded.architectureJson(), payload);
+
+    PhysicalOutputs mismatched_else_physical = else_outputs.physicalOutputs();
+    mismatched_else_physical.outputs[0].materialization.require_distinct_storage = false;
+    Outputs mismatched_else = Outputs::fromPhysicalOutputs(std::move(mismatched_else_physical));
+    EXPECT_THROW((void)Outputs::conditional(predicate, then_outputs, mismatched_else), std::runtime_error);
+}
+
 TEST(ExpressionGraphConditionalOps, IfElifElseBuildsOrderedNestedElseChainAndRoundTrips) {
     auto x = Expression::input("x");
     auto selector = Expression::input("selector");
@@ -1048,6 +1146,42 @@ TEST(ExpressionGraphConditionalOps, CompileBackwardSupportsNamedSeedsForMultiple
         {{"x", x_tensor}, {"predicate_value", negative}, {"da", da}, {"db", db}}, stream);
     else_plan.run();
     expectNear(copyToCpuValues(else_plan.output("x_grad"), stream), {24.0f, 34.0f});
+}
+
+TEST(ExpressionGraphConditionalOps, ConditionalBackwardPublishesGradientStorageDtypeAcrossMissingInputBranches) {
+    auto x = Expression::input("x", DataType::BF16, DataType::BF16);
+    auto z = Expression::input("z", DataType::BF16, DataType::BF16);
+    auto predicate_value = Expression::input("predicate_value", DataType::FP32, DataType::FP32);
+    Outputs forward = Outputs::conditional(
+        predicate_value.greaterThan(Expression::constantScalar(0.0)),
+        Expression::outputs({{"y", x * Expression::constantScalar(2.0)}}),
+        Expression::outputs({{"y", z * Expression::constantScalar(3.0)}}));
+
+    const std::unordered_map<std::string, std::vector<uint64_t>> forward_input_dims = {
+        {"x", {3}},
+        {"z", {3}},
+        {"predicate_value", {1}},
+    };
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward.physicalOutputs(),
+        {"x", "z"},
+        std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        forward_input_dims);
+
+    ASSERT_TRUE(backward.isConditional());
+    ASSERT_NE(backward.conditional, nullptr);
+    ASSERT_EQ(backward.outputs.size(), 2u);
+    ASSERT_EQ(backward.conditional->then_branch.outputs.size(), 2u);
+    ASSERT_EQ(backward.conditional->else_branch.outputs.size(), 2u);
+
+    for (size_t i = 0; i < backward.outputs.size(); ++i) {
+        ASSERT_TRUE(backward.outputs[i].materialization.storage_dtype.has_value());
+        EXPECT_EQ(backward.outputs[i].materialization.storage_dtype.value(), DataType::BF16);
+        EXPECT_EQ(backward.conditional->then_branch.outputs[i].materialization.storage_dtype,
+                  backward.outputs[i].materialization.storage_dtype);
+        EXPECT_EQ(backward.conditional->else_branch.outputs[i].materialization.storage_dtype,
+                  backward.outputs[i].materialization.storage_dtype);
+    }
 }
 
 TEST(ExpressionGraphConditionalOps, BuildBackwardOutputsRoutesGradientThroughSelectedBranch) {

@@ -11925,10 +11925,25 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         }
     }
 
-    std::unordered_map<std::string, Tensor> finalOutputsByName;
-    finalOutputsByName.reserve(compiled_outputs->final_outputs.size());
+    struct ResolvedFinalOutput {
+        std::string name;
+        Tensor produced;
+        Tensor result;
+        bool caller_preallocated = false;
+        bool require_distinct_storage = false;
+    };
+
+    std::unordered_map<std::string, OutputMaterializationContract> output_materialization_by_name;
+    output_materialization_by_name.reserve(outputs_template.outputs.size());
+    for (const NamedOutput& output : outputs_template.outputs) {
+        output_materialization_by_name.emplace(output.name, output.materialization);
+    }
+
     std::vector<StampedOutputMaterialization> outputMaterializations;
-    outputMaterializations.reserve(compiled_outputs->final_outputs.size());
+    outputMaterializations.reserve(compiled_outputs->final_outputs.size() * 2);
+    std::vector<ResolvedFinalOutput> resolvedFinalOutputs;
+    resolvedFinalOutputs.reserve(compiled_outputs->final_outputs.size());
+
     for (const CompiledStageOutput& final_output : compiled_outputs->final_outputs) {
         auto it = values.find(final_output.value_id);
         if (it == values.end()) {
@@ -11936,28 +11951,88 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         }
 
         Tensor produced = runtimeInputTensor(it->second);
-        auto destinationIt = preallocated_outputs.find(final_output.name);
-        if (destinationIt != preallocated_outputs.end() && produced != destinationIt->second) {
-            const Tensor& destination = destinationIt->second;
-            if (produced.getDescriptor() != destination.getDescriptor()) {
-                throw std::runtime_error("Preallocated final output descriptor does not match expression output for '" +
-                                         final_output.name + "'. Produced " + produced.getDescriptor().toString() +
-                                         ", destination " + destination.getDescriptor().toString() + ".");
-            }
-            if (produced.getPlacement() != destination.getPlacement()) {
-                throw std::runtime_error("Preallocated final output placement does not match expression output for '" +
-                                         final_output.name + "'.");
-            }
-            const bool alreadyAliasesDestination =
-                produced.getMemPtr<void>() == destination.getMemPtr<void>() &&
-                produced.getStridesElements() == destination.getStridesElements();
-            if (!alreadyAliasesDestination) {
-                outputMaterializations.push_back(StampedOutputMaterialization{produced, destination});
-            }
-            finalOutputsByName.emplace(final_output.name, destination);
-        } else {
-            finalOutputsByName.emplace(final_output.name, produced);
+        auto contract_it = output_materialization_by_name.find(final_output.name);
+        if (contract_it == output_materialization_by_name.end()) {
+            throw std::runtime_error("Missing output materialization contract for output: " + final_output.name);
         }
+        const OutputMaterializationContract& contract = contract_it->second;
+
+        ResolvedFinalOutput resolved{
+            .name = final_output.name,
+            .produced = produced,
+            .result = produced,
+            .require_distinct_storage = contract.require_distinct_storage,
+        };
+
+        auto destinationIt = preallocated_outputs.find(final_output.name);
+        if (destinationIt != preallocated_outputs.end()) {
+            const Tensor& destination = destinationIt->second;
+            resolved.caller_preallocated = true;
+            if (produced != destination) {
+                if (produced.getDescriptor() != destination.getDescriptor()) {
+                    throw std::runtime_error("Preallocated final output descriptor does not match expression output for '" +
+                                             final_output.name + "'. Produced " + produced.getDescriptor().toString() +
+                                             ", destination " + destination.getDescriptor().toString() + ".");
+                }
+                if (produced.getPlacement() != destination.getPlacement()) {
+                    throw std::runtime_error("Preallocated final output placement does not match expression output for '" +
+                                             final_output.name + "'.");
+                }
+                const bool alreadyAliasesDestination =
+                    produced.getMemPtr<void>() == destination.getMemPtr<void>() &&
+                    produced.getStridesElements() == destination.getStridesElements();
+                if (!alreadyAliasesDestination) {
+                    outputMaterializations.push_back(StampedOutputMaterialization{produced, destination});
+                }
+                resolved.result = destination;
+            }
+        } else if (contract.require_distinct_storage) {
+            // Distinct output ownership is a stamping/materialization concern. Allocate the
+            // public destination now and copy the logical value after execution; do not add
+            // a fake mathematical node merely to obtain another tensor allocation.
+            Tensor destination(produced.getPlacement(), produced.getDescriptor());
+            outputMaterializations.push_back(StampedOutputMaterialization{produced, destination});
+            resolved.result = destination;
+        }
+
+        resolvedFinalOutputs.push_back(std::move(resolved));
+    }
+
+    // A caller-preallocated distinct output may also have become the direct producer
+    // destination for another, non-preallocated output of the same logical value. Move
+    // those other public outputs to their own stamped destinations. If two caller-provided
+    // outputs intentionally name the same allocation, however, the distinct-storage
+    // contract cannot be satisfied and must fail loudly.
+    for (size_t i = 0; i < resolvedFinalOutputs.size(); ++i) {
+        ResolvedFinalOutput& distinct = resolvedFinalOutputs[i];
+        if (!distinct.require_distinct_storage) {
+            continue;
+        }
+        for (size_t j = 0; j < resolvedFinalOutputs.size(); ++j) {
+            if (i == j) {
+                continue;
+            }
+            ResolvedFinalOutput& other = resolvedFinalOutputs[j];
+            if (distinct.result.getTensorId() != other.result.getTensorId()) {
+                continue;
+            }
+            if (other.caller_preallocated) {
+                throw std::runtime_error(
+                    "Output '" + distinct.name +
+                    "' requires distinct storage, but caller-preallocated output '" + other.name +
+                    "' aliases the same tensor allocation.");
+            }
+
+            Tensor destination(other.produced.getPlacement(), other.produced.getDescriptor());
+            outputMaterializations.push_back(StampedOutputMaterialization{other.produced, destination});
+            other.result = destination;
+        }
+    }
+
+    std::unordered_map<std::string, Tensor> finalOutputsByName;
+    finalOutputsByName.reserve(resolvedFinalOutputs.size());
+    for (ResolvedFinalOutput& resolved : resolvedFinalOutputs) {
+        finalOutputsByName.emplace(std::move(resolved.name), std::move(resolved.result));
     }
 
     return StampedExecutionPlan(

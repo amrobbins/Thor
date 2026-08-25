@@ -3,6 +3,7 @@
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 
 #include <stdexcept>
+#include <unordered_set>
 
 namespace ThorImplementation {
 
@@ -1165,6 +1166,38 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
     }
 
     propagateMaterializedOutputComputeDTypes(expr, materialized_output_nodes, explicit_compute_dtype);
+}
+
+static std::optional<DataType> materializedValueStorageDTypeImpl(const PhysicalExpression& expr,
+                                                                  uint32_t node_idx,
+                                                                  std::unordered_set<uint32_t>& visiting) {
+    if (node_idx >= expr.nodes.size()) {
+        throw std::runtime_error("Materialized value dtype query node index out of range.");
+    }
+    if (!visiting.insert(node_idx).second) {
+        throw std::runtime_error("Materialized value dtype query encountered a cycle.");
+    }
+
+    const ExprNode& node = expr.nodes.at(node_idx);
+    std::optional<DataType> dtype;
+    if (node.op == ExprOp::INPUT) {
+        dtype = node.input_tensor_dtype.has_value() ? node.input_tensor_dtype : node.output_dtype;
+    } else if (isPassthroughViewOp(node.op)) {
+        if (node.lhs == UINT32_MAX) {
+            throw std::runtime_error("Materialized value dtype passthrough node is missing its source.");
+        }
+        dtype = materializedValueStorageDTypeImpl(expr, node.lhs, visiting);
+    } else {
+        dtype = node.output_dtype;
+    }
+
+    visiting.erase(node_idx);
+    return dtype;
+}
+
+std::optional<DataType> materializedValueStorageDType(const PhysicalExpression& expr, uint32_t node_idx) {
+    std::unordered_set<uint32_t> visiting;
+    return materializedValueStorageDTypeImpl(expr, node_idx, visiting);
 }
 
 void resolveExpressionDTypesInPlace(PhysicalExpression& expr, const std::vector<DataType>& root_input_dtypes) {

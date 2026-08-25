@@ -7504,6 +7504,48 @@ static PhysicalExecutionStage buildInPlaceRopeStage(const PhysicalExpression& ex
     };
 }
 
+
+static void lowerOutputStorageDTypes(PhysicalExpression& expr, std::vector<NamedOutput>& outputs) {
+    std::map<std::pair<uint32_t, DataType>, uint32_t> lowered_casts;
+
+    for (NamedOutput& output : outputs) {
+        if (!output.materialization.storage_dtype.has_value()) {
+            continue;
+        }
+        if (output.node_idx >= expr.nodes.size()) {
+            throw std::runtime_error("PhysicalOutputs contains output node_idx out of range.");
+        }
+
+        const DataType requested_dtype = output.materialization.storage_dtype.value();
+        const std::optional<DataType> actual_dtype = materializedValueStorageDType(expr, output.node_idx);
+        if (!actual_dtype.has_value()) {
+            throw std::runtime_error("Named output storage dtype lowering requires resolved producer dtype metadata.");
+        }
+        if (actual_dtype.value() == requested_dtype) {
+            continue;
+        }
+
+        const auto key = std::make_pair(output.node_idx, requested_dtype);
+        auto existing = lowered_casts.find(key);
+        if (existing != lowered_casts.end()) {
+            output.node_idx = existing->second;
+            continue;
+        }
+
+        ExprNode cast_node{};
+        cast_node.op = ExprOp::CAST;
+        cast_node.lhs = output.node_idx;
+        cast_node.output_dtype = requested_dtype;
+        cast_node.compute_dtype = requested_dtype;
+        cast_node.backward_output_dtype = requested_dtype;
+        cast_node.backward_compute_dtype = requested_dtype;
+        const uint32_t cast_idx = static_cast<uint32_t>(expr.nodes.size());
+        expr.nodes.push_back(std::move(cast_node));
+        lowered_casts.emplace(key, cast_idx);
+        output.node_idx = cast_idx;
+    }
+}
+
 static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     if (!outputs.expr) {
         throw std::runtime_error("Cannot split null PhysicalOutputs expression.");
@@ -7513,15 +7555,17 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     }
 
     PhysicalExpression expr = *outputs.expr;
+    std::vector<NamedOutput> requested_outputs = outputs.outputs;
     if (expr.nodes.empty()) {
         throw std::runtime_error("Cannot split empty PhysicalExpression.");
     }
 
-    for (const NamedOutput& output : outputs.outputs) {
+    for (const NamedOutput& output : requested_outputs) {
         if (output.node_idx >= expr.nodes.size()) {
             throw std::runtime_error("PhysicalOutputs contains output node_idx out of range.");
         }
     }
+    lowerOutputStorageDTypes(expr, requested_outputs);
     validateRaggedRuntimeExtentConsumers(expr);
 
     const std::vector<uint32_t> node_use_counts = computeNodeUseCounts(expr);
@@ -7604,12 +7648,12 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     uint32_t next_value_id = expr.numInputs();
 
     std::unordered_map<uint32_t, std::string> final_output_name_by_node;
-    for (const NamedOutput& output : outputs.outputs) {
+    for (const NamedOutput& output : requested_outputs) {
         final_output_name_by_node.emplace(output.node_idx, output.name);
     }
 
     std::unordered_map<uint32_t, std::vector<PendingMatmulBgradOutput>> pending_matmul_bgrad_outputs;
-    for (const NamedOutput& output : outputs.outputs) {
+    for (const NamedOutput& output : requested_outputs) {
         uint32_t matmul_idx = UINT32_MAX;
         if (isMatmulBiasGradientReduction(expr, output.node_idx, matmul_idx)) {
             pending_matmul_bgrad_outputs[matmul_idx].push_back(PendingMatmulBgradOutput{
@@ -8346,7 +8390,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         }
     };
 
-    for (const NamedOutput& named_output : outputs.outputs) {
+    for (const NamedOutput& named_output : requested_outputs) {
         const ExprNode& root = expr.nodes[named_output.node_idx];
 
         // A terminal output that is already a directly-available tensor input
@@ -8867,6 +8911,8 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
     PlannedExecution planned = planExecution(outputs);
     compiled->stages.reserve(planned.stages.size());
 
+    std::unordered_set<uint32_t> ragged_backward_retention_seed_value_ids;
+
     auto registerPaddedRaggedRepresentation = [&](uint32_t value_id,
                                                   uint32_t offsets_value_id,
                                                   const CompiledPaddedRaggedSequenceLayout& layout) {
@@ -8962,6 +9008,7 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
                 registerPaddedRaggedRepresentation(
                     stage.input_value_ids[1], offsets_value_id, dgrad->padded_grad_output_layout);
                 registerPaddedRaggedRepresentation(stage.outputs[0].value_id, offsets_value_id, dgrad->padded_output_layout);
+                ragged_backward_retention_seed_value_ids.insert(stage.outputs[0].value_id);
                 break;
             }
             case PhysicalExecutionStage::Kind::RaggedConv1dCausalBackwardFilter: {
@@ -9103,10 +9150,19 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
         } else if (existing_it->second != propagated) {
             throw std::runtime_error("T8A extent-marker output already has a conflicting padded-ragged representation.");
         }
+        if (ragged_backward_retention_seed_value_ids.contains(source_value_id)) {
+            // Preserve T9C's authoritative backward-region seed across a pure
+            // runtime-extent marker in case planning materializes that marker as
+            // its own metadata stage instead of fusing it into the derivative.
+            ragged_backward_retention_seed_value_ids.insert(stage.outputs[0].value_id);
+        }
     }
 
-    // T8B: retain padded-ragged physical values through shape-preserving fused
-    // valuewise regions that are semantically connected to a ragged Conv1D.
+    // T8B/T9C: retain padded-ragged physical values through shape-preserving
+    // active-local fused regions that are semantically connected to a ragged
+    // Conv1D or ragged Conv1D dgrad. Forward and backward deliberately share
+    // one physical contract: inactive tails are undefined, and no sanitation is
+    // required because an active output never observes another logical element.
     //
     // Representation *capability* alone is not enough to anchor a stage: a
     // packed root may feed both a ragged branch and an ordinary dense branch.
@@ -9120,7 +9176,14 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
         std::optional<uint32_t> marker_offsets_value_id;
         uint64_t marker_elements_per_value = 0;
     };
-    auto t8bValuewiseOp = [](ExprOp op) {
+    // T8B/T9C retained pointwise contract. This list describes *physical locality*,
+    // not differentiability: every output element produced by one of these ops
+    // depends only on values at the same logical element (plus scalar/channel
+    // broadcasts). T8B uses that property in forward regions; T9C deliberately
+    // reuses the exact same property for autodiff-generated local derivatives.
+    // Reductions, normalization, scans, views that change element identity, and
+    // other neighborhood/partition-observing operations must remain boundaries.
+    auto retainedPaddedRaggedActiveLocalOp = [](ExprOp op) {
         switch (op) {
             case ExprOp::INPUT:
             case ExprOp::RUNTIME_SCALAR:
@@ -9201,7 +9264,7 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
         bool supported = true;
         size_t value_ops = 0;
         for (const ExprNode& node : stage.expr.nodes) {
-            if (!t8bValuewiseOp(node.op)) {
+            if (!retainedPaddedRaggedActiveLocalOp(node.op)) {
                 supported = false;
                 break;
             }
@@ -9384,6 +9447,36 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
                 }
             }
         }
+        if (!seed.has_value()) {
+            // T9C: a ragged Conv1D dgrad output is an authoritative retained
+            // backward value. Allow an immediately consuming active-local stage
+            // to inherit that representation even when the pointwise result is
+            // itself the public gradient and therefore has no downstream Conv1D
+            // input to seed it. Restrict this seed to dgrad outputs so an ordinary
+            // dense branch that merely shares a root input with a ragged Conv1D
+            // cannot become padded by capability alone.
+            std::optional<CompiledPaddedRaggedValueRepresentation> dgrad_seed;
+            bool incompatible_dgrad_seeds = false;
+            for (uint32_t input_value_id : stage.input_value_ids) {
+                if (!ragged_backward_retention_seed_value_ids.contains(input_value_id)) {
+                    continue;
+                }
+                const uint64_t prefix = static_cast<uint64_t>(input_value_id) << 32U;
+                for (const auto& [key, representation] : compiled->padded_ragged_values) {
+                    if ((key & 0xffffffff00000000ULL) != prefix) {
+                        continue;
+                    }
+                    if (!dgrad_seed.has_value()) {
+                        dgrad_seed = representation;
+                    } else if (!sameT8bStructuralLayout(dgrad_seed.value(), representation)) {
+                        incompatible_dgrad_seeds = true;
+                    }
+                }
+            }
+            if (!incompatible_dgrad_seeds) {
+                seed = dgrad_seed;
+            }
+        }
         if (seed.has_value()) {
             (void)mergeDesired(stage_idx, seed.value());
         }
@@ -9418,7 +9511,7 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
     };
     (void)propagateDesiredT8bBackward();
 
-    // Materialize the T8B-only compatibility region. Normalization is an explicit
+    // Materialize the T8B/T9C active-local compatibility region. Normalization is an explicit
     // representation boundary because the current cuDNN RMSNorm/LayerNorm plans reject
     // the strided normalized feature dimension exposed by retained [B,C,1,W] storage.
     auto materializeDesiredT8bCapabilities = [&]() {
