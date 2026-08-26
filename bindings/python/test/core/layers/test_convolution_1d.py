@@ -32,7 +32,7 @@ def test_conv1d_defaults_shape_parameters_and_architecture():
 
     assert conv.get_feature_output().get_dimensions() == [5, 14]
     arch = _only_arch(n)
-    assert arch["version"] == "2.0.0"
+    assert arch["version"] == "1.0.0"
     assert arch["data_layout"] == "NCW"
     assert arch["filter_width"] == 3
     assert arch["stride"] == 1
@@ -43,9 +43,26 @@ def test_conv1d_defaults_shape_parameters_and_architecture():
     assert arch["num_output_channels"] == 5
     assert arch["groups"] == 1
     assert arch["has_bias"] is True
+    assert conv.get_compute_data_type() == thor.DataType.fp32
+    assert arch["compute_data_type"] == "fp32"
     assert arch["activation"]["layer_type"] == "gelu"
     assert arch["parameters"]["weights"]["shape"] == [5, 3, 3]
     assert arch["parameters"]["biases"]["shape"] == [5]
+
+
+def test_conv1d_explicit_tf32_compute_requires_fp32_storage():
+    n = _net("test_conv1d_tf32")
+    x = _cw_input(n, 4, 16, thor.DataType.fp32)
+    conv = thor.layers.Convolution1d(
+        n, x, 8, 3, activation=None, compute_data_type=thor.DataType.tf32)
+    assert conv.get_compute_data_type() == thor.DataType.tf32
+    assert _only_arch(n)["compute_data_type"] == "tf32"
+
+    n_bad = _net("test_conv1d_tf32_bad_storage")
+    x_bad = _cw_input(n_bad, 4, 16, thor.DataType.fp16)
+    with pytest.raises(ValueError, match="TF32 compute requires FP32"):
+        thor.layers.Convolution1d(
+            n_bad, x_bad, 8, 3, activation=None, compute_data_type=thor.DataType.tf32)
 
 
 @pytest.mark.parametrize(
@@ -169,3 +186,227 @@ def test_conv1d_rejects_invalid_groups(groups):
     x = _cw_input(n, 8, 16)
     with pytest.raises(ValueError, match="groups"):
         thor.layers.Convolution1d(n, x, num_output_channels=12, filter_width=3, groups=groups)
+
+
+def _ragged_input(
+    n: thor.Network,
+    channels: int = 8,
+    *,
+    max_total_values: int = 96,
+    batch_size: int = 3,
+    max_values_per_row: int | None = 48,
+    name: str = "tokens",
+):
+    return thor.layers.RaggedNetworkInput(
+        n,
+        name,
+        thor.DataType.fp32,
+        [channels],
+        max_total_values=max_total_values,
+        batch_size=batch_size,
+        offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=max_values_per_row,
+    )
+
+
+def test_conv1d_accepts_ragged_input_and_preserves_capacity_contract():
+    n = _net("test_conv1d_ragged_contract")
+    x = _ragged_input(n, channels=8, max_total_values=96, batch_size=3, max_values_per_row=48)
+
+    conv = thor.layers.Convolution1d(
+        n,
+        x,
+        num_output_channels=12,
+        filter_width=5,
+        padding="causal",
+        dilation=7,
+        groups=4,
+        activation=None,
+    )
+    y = conv.get_feature_output()
+
+    assert conv.get_use_ragged() is True
+    assert isinstance(y, thor.RaggedTensor)
+    assert y.values.get_dimensions() == [96, 12]
+    assert y.offsets == x.offsets
+    assert y.batch_size == x.batch_size == 3
+    assert y.max_total_values == x.max_total_values == 96
+    assert y.max_values_per_row == x.max_values_per_row == 48
+
+    arch = _only_arch(n)
+    assert arch["use_ragged"] is True
+    assert arch["dilation"] == 7
+    assert arch["groups"] == 4
+    assert arch["padding_mode"] == "causal"
+    assert arch["ragged_input"]["offsets"]["id"] == arch["ragged_output"]["offsets"]["id"]
+    assert arch["ragged_input"]["max_values_per_row"] == 48
+    assert arch["ragged_output"]["max_values_per_row"] == 48
+    assert arch["parameters"]["weights"]["shape"] == [12, 2, 5]
+
+
+@pytest.mark.parametrize("dilation", [1, 7, 28])
+def test_conv1d_ragged_python_surface_preserves_dilation(dilation):
+    n = _net(f"test_conv1d_ragged_dilation_{dilation}")
+    x = _ragged_input(n, channels=4)
+    conv = thor.layers.Convolution1d(
+        n,
+        x,
+        num_output_channels=6,
+        filter_width=3,
+        padding="causal",
+        dilation=dilation,
+        activation=None,
+    )
+
+    assert isinstance(conv.get_feature_output(), thor.RaggedTensor)
+    arch = _only_arch(n)
+    assert arch["dilation"] == dilation
+    assert arch["padding_left"] == dilation * 2
+    assert arch["padding_right"] == 0
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"stride": 2, "padding": "causal"}, "stride=1"),
+        ({"padding": "valid"}, "padding='causal'"),
+        ({"padding": "same"}, "padding='causal'"),
+        ({"padding": (2, 0)}, "padding='causal'"),
+    ],
+)
+def test_conv1d_ragged_rejects_unsupported_geometry(kwargs, message):
+    n = _net("test_conv1d_ragged_bad_geometry")
+    x = _ragged_input(n, channels=4)
+    with pytest.raises(ValueError, match=message):
+        thor.layers.Convolution1d(n, x, num_output_channels=6, filter_width=3, activation=None, **kwargs)
+
+
+def test_conv1d_ragged_requires_max_values_per_row():
+    n = _net("test_conv1d_ragged_missing_max_row")
+    x = _ragged_input(n, channels=4, max_values_per_row=None)
+    with pytest.raises(ValueError, match="max_values_per_row"):
+        thor.layers.Convolution1d(n, x, num_output_channels=6, filter_width=3, padding="causal", activation=None)
+
+
+def test_conv1d_rejects_non_tensor_feature_input():
+    n = _net("test_conv1d_bad_feature_input_type")
+    with pytest.raises(TypeError, match="Tensor or thor.RaggedTensor"):
+        thor.layers.Convolution1d(n, object(), num_output_channels=6, filter_width=3, padding="causal", activation=None)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    ("channels", "num_output_channels", "groups"),
+    [
+        (8, 12, 4),
+        (8, 8, 8),
+    ],
+)
+def test_conv1d_ragged_grouped_and_depthwise_place(channels, num_output_channels, groups):
+    n = _net(f"test_conv1d_ragged_place_g{groups}")
+    x = _ragged_input(n, channels=channels, max_total_values=96, batch_size=3, max_values_per_row=48)
+    conv = thor.layers.Convolution1d(
+        n,
+        x,
+        num_output_channels=num_output_channels,
+        filter_width=3,
+        padding="causal",
+        dilation=7,
+        groups=groups,
+        activation=None,
+    )
+    thor.layers.RaggedNetworkOutput(n, "output", conv.get_feature_output())
+
+    placed = n.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    assert isinstance(placed, thor.runtime.PlacedNetwork)
+    assert placed.has_network_input("tokens")
+
+
+@pytest.mark.cuda
+def test_conv1d_ragged_places_for_training_with_network_default_optimizer():
+    n = _net("test_conv1d_ragged_training_place")
+    thor.optimizers.Sgd(initial_learning_rate=0.01, network=n)
+    x = _ragged_input(n, channels=8, max_total_values=96, batch_size=3, max_values_per_row=48)
+    conv = thor.layers.Convolution1d(
+        n,
+        x,
+        num_output_channels=12,
+        filter_width=3,
+        padding="causal",
+        dilation=7,
+        groups=4,
+        activation=None,
+    )
+    thor.layers.RaggedNetworkOutput(n, "output", conv.get_feature_output())
+
+    placed = n.place(3, inference_only=False, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    assert isinstance(placed, thor.runtime.PlacedNetwork)
+    assert placed.get_num_trainable_layers() == 1
+    assert {parameter.name for parameter in conv.get_bound_parameters(placed)} == {"weights", "biases"}
+
+
+def test_conv1d_ragged_f2_style_public_layer_chain_preserves_partition_end_to_end():
+    n = _net("test_conv1d_ragged_f2_public_chain")
+    x = _ragged_input(
+        n,
+        channels=6,
+        max_total_values=24,
+        batch_size=3,
+        max_values_per_row=8,
+        name="history",
+    )
+    root_offsets = x.offsets
+
+    stages = []
+    x = thor.layers.FullyConnected(n, x, 10, True, activation=None).get_feature_output()
+    stages.append((x, 10))
+    x = thor.layers.RMSNorm(n, x, normalized_shape=[10], epsilon=1e-5).get_feature_output()
+    stages.append((x, 10))
+    x = thor.layers.FullyConnected(n, x, 8, True, activation=None).get_feature_output()
+    stages.append((x, 8))
+
+    for dilation in (1, 7):
+        x = thor.layers.Convolution1d(
+            n,
+            x,
+            num_output_channels=8,
+            filter_width=3,
+            padding="causal",
+            dilation=dilation,
+            activation=None,
+        ).get_feature_output()
+        stages.append((x, 8))
+        x = thor.activations.Relu().add_to_network(n, x)
+        stages.append((x, 8))
+
+    x = thor.layers.Convolution1d(
+        n,
+        x,
+        num_output_channels=8,
+        filter_width=3,
+        padding="causal",
+        dilation=28,
+        activation=None,
+    ).get_feature_output()
+    stages.append((x, 8))
+    x = thor.layers.FullyConnected(n, x, 6, True, activation=None).get_feature_output()
+    stages.append((x, 6))
+    thor.layers.RaggedNetworkOutput(n, "temporal_output", x)
+
+    for stage, channels in stages:
+        assert isinstance(stage, thor.RaggedTensor)
+        assert stage.values.get_dimensions() == [24, channels]
+        assert stage.offsets == root_offsets
+        assert stage.batch_size == 3
+        assert stage.max_total_values == 24
+        assert stage.max_values_per_row == 8
+
+    arch = json.loads(n.get_architecture_json())
+    convs = [layer for layer in arch["layers"] if layer["layer_type"] == "convolution_1d"]
+    assert [layer["dilation"] for layer in convs] == [1, 7, 28]
+    assert all(layer["use_ragged"] for layer in convs)
+    assert all(layer["padding_mode"] == "causal" and layer["stride"] == 1 for layer in convs)
+    assert all(
+        layer["ragged_input"]["offsets"]["id"] == layer["ragged_output"]["offsets"]["id"]
+        for layer in convs
+    )

@@ -515,6 +515,7 @@ TEST(FullyConnectedApi, RaggedBuilderPreservesRowPartitionAndUsesTokenWiseOutput
                                   .offsetsDataType(DataType::UINT32)
                                   .trailingDimensions({4})
                                   .maxTotalValues(66)
+                                  .maxValuesPerRow(17)
                                   .batchSize(2)
                                   .build();
 
@@ -534,6 +535,8 @@ TEST(FullyConnectedApi, RaggedBuilderPreservesRowPartitionAndUsesTokenWiseOutput
     ASSERT_TRUE(fc.getRaggedFeatureOutput().has_value());
     EXPECT_EQ(fc.getRaggedFeatureInput()->getValues(), input.getValues());
     EXPECT_EQ(fc.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
+    ASSERT_TRUE(fc.getRaggedFeatureOutput()->hasMaxValuesPerRow());
+    EXPECT_EQ(fc.getRaggedFeatureOutput()->getMaxValuesPerRow(), 17u);
     EXPECT_EQ(fc.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{66, 3}));
     ASSERT_EQ(fc.getFeatureInputs().size(), 2u);
     EXPECT_EQ(fc.getFeatureInputs()[0], input.getValues());
@@ -549,6 +552,8 @@ TEST(FullyConnectedApi, RaggedBuilderPreservesRowPartitionAndUsesTokenWiseOutput
     ASSERT_EQ(architecture.at("ragged_inputs").size(), 1u);
     ASSERT_EQ(architecture.at("ragged_outputs").size(), 1u);
     EXPECT_EQ(architecture.at("ragged_outputs").at(0).at("offsets").at("id").get<uint64_t>(), input.getOffsets().getId());
+    EXPECT_EQ(architecture.at("ragged_inputs").at(0).at("max_values_per_row").get<uint64_t>(), 17u);
+    EXPECT_EQ(architecture.at("ragged_outputs").at(0).at("max_values_per_row").get<uint64_t>(), 17u);
 }
 
 TEST(FullyConnectedApi, RaggedMultipleApplicationsExposeIndependentStructuralOffsetsPorts) {
@@ -647,6 +652,7 @@ TEST(FullyConnectedApi, RaggedArchitectureSaveLoadRoundTripPreservesRowPartition
                                       .offsetsDataType(DataType::UINT64)
                                       .trailingDimensions({4})
                                       .maxTotalValues(66)
+                                      .maxValuesPerRow(17)
                                       .batchSize(2)
                                       .build();
         Api::FullyConnected fc = Api::FullyConnected::Builder()
@@ -678,10 +684,17 @@ TEST(FullyConnectedApi, RaggedArchitectureSaveLoadRoundTripPreservesRowPartition
         ASSERT_TRUE(loadedFc->getRaggedFeatureOutput().has_value());
         EXPECT_EQ(loadedFc->getRaggedFeatureInput()->getBatchSize(), 2u);
         EXPECT_EQ(loadedFc->getRaggedFeatureInput()->getMaxTotalValues(), 66u);
+        ASSERT_TRUE(loadedFc->getRaggedFeatureInput()->hasMaxValuesPerRow());
+        EXPECT_EQ(loadedFc->getRaggedFeatureInput()->getMaxValuesPerRow(), 17u);
         EXPECT_EQ(loadedFc->getRaggedFeatureInput()->getOffsetsDataType(), DataType::UINT64);
         EXPECT_EQ(loadedFc->getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{66, 3}));
+        ASSERT_TRUE(loadedFc->getRaggedFeatureOutput()->hasMaxValuesPerRow());
+        EXPECT_EQ(loadedFc->getRaggedFeatureOutput()->getMaxValuesPerRow(), 17u);
         EXPECT_EQ(loadedFc->getRaggedFeatureOutput()->getOffsets(), loadedFc->getRaggedFeatureInput()->getOffsets());
-        EXPECT_TRUE(loadedFc->architectureJson().at("use_ragged").get<bool>());
+        const auto loadedArchitecture = loadedFc->architectureJson();
+        EXPECT_TRUE(loadedArchitecture.at("use_ragged").get<bool>());
+        EXPECT_EQ(loadedArchitecture.at("ragged_inputs").at(0).at("max_values_per_row").get<uint64_t>(), 17u);
+        EXPECT_EQ(loadedArchitecture.at("ragged_outputs").at(0).at("max_values_per_row").get<uint64_t>(), 17u);
     } catch (...) {
         std::filesystem::remove_all(archiveDir);
         throw;

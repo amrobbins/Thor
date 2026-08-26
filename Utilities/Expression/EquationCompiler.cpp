@@ -10,6 +10,7 @@
 #include "CudaSourceEmitter.h"
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <cstdlib>
 #include <cstring>
@@ -60,6 +61,13 @@ static const char* thorCudnnConvolutionFloatingDTypesMessage() {
 }
 
 static bool convolutionComputeDTypeIsCompatibleWithTensorDTypes(const std::vector<DataType>& tensor_dtypes, DataType compute_dtype) {
+    if (compute_dtype == DataType::TF32) {
+        // TF32 is a compute-only opt-in for FP32 convolution tensors. It is not a
+        // storage dtype and must not be used as a generic replacement for FP32
+        // accumulation on FP16/BF16/FP8 inputs.
+        return std::all_of(tensor_dtypes.begin(), tensor_dtypes.end(), [](DataType dtype) { return dtype == DataType::FP32; });
+    }
+
     bool requires_fp32_compute = false;
     for (DataType dtype : tensor_dtypes) {
         if (dtype == DataType::FP32 || dtype == DataType::BF16 || dtype == DataType::FP8_E4M3 || dtype == DataType::FP8_E5M2) {
@@ -122,6 +130,7 @@ static nvrtcResult nvrtcCompileProgramChecked(
         (prog), (num_options), (options), "nvrtcCompileProgram(" #prog ", " #num_options ", " #options ")", __FILE__, __LINE__)
 
 static LruCacheThreadSafe<EquationCacheKey, shared_ptr<CompiledEquation>> compiledEquationCache(10'000);
+static std::atomic<uint64_t> compiledEquationBuildCounterForTests{0};
 
 static shared_ptr<CompiledEquation> cacheLookup(const EquationCacheKey& key) {
     optional<shared_ptr<CompiledEquation>> hit = compiledEquationCache.get(key);
@@ -1964,6 +1973,7 @@ shared_ptr<CompiledEquation> EquationCompiler::loadCubin(const EquationCacheKey&
                                                          const std::vector<DataType>& input_dtypes,
                                                          const std::vector<DataType>& output_dtypes,
                                                          int device_num) {
+    compiledEquationBuildCounterForTests.fetch_add(1, std::memory_order_relaxed);
     CUmodule module;
     CUfunction fn;
 
@@ -2189,6 +2199,14 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
 
     cacheInsert(key, compiled);
     return compiled;
+}
+
+size_t EquationCompiler::compiledEquationCacheEntryCountForTests() {
+    return compiledEquationCache.size() + specializedBroadcastCache.size();
+}
+
+uint64_t EquationCompiler::compiledEquationBuildCountForTests() {
+    return compiledEquationBuildCounterForTests.load(std::memory_order_relaxed);
 }
 
 shared_ptr<CompiledEquation> EquationCompiler::compilePaddedRaggedPointwiseStage(
@@ -3919,7 +3937,8 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
                                                              compute_dtype)) {
         throw std::runtime_error(std::string(fusedOpTag(node.op)) +
                                  " staged path received an unsupported cuDNN compute dtype for the tensor dtypes. "
-                                 "FP8, BF16, and FP32 tensors require FP32 compute; FP16 tensors support FP16 or FP32 compute.");
+                                 "FP8 and BF16 tensors require FP32 compute; FP32 tensors support strict FP32 or explicit TF32 compute; "
+                                 "FP16 tensors support FP16 or FP32 compute.");
     }
 
     if (node.op == ExprOp::CONV2D) {
@@ -3997,7 +4016,8 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
                                                              compute_dtype)) {
         throw std::runtime_error(std::string(fusedOpTag(node.op)) +
                                  " staged path received an unsupported cuDNN compute dtype for the tensor dtypes. "
-                                 "FP8, BF16, and FP32 tensors require FP32 compute; FP16 tensors support FP16 or FP32 compute.");
+                                 "FP8 and BF16 tensors require FP32 compute; FP32 tensors support strict FP32 or explicit TF32 compute; "
+                                 "FP16 tensors support FP16 or FP32 compute.");
     }
 
     if (node.op == ExprOp::CONV2D_BACKWARD_DATA || node.op == ExprOp::CONV2D_BACKWARD_FILTER) {

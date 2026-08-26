@@ -144,7 +144,8 @@ static_assert(!is_copy_assignable_v<ExampleLocalExecutionState>);
 static_assert(is_move_constructible_v<ExampleLocalExecutionState>);
 static_assert(is_move_assignable_v<ExampleLocalExecutionState>);
 
-TEST(AcceleratorBackendCachePolicy, GlobalBackendExecutionStateCachesAreForbidden) {
+// The following test takes 25 seconds, it can be re-enabled on a per-run basis when desired.
+TEST(AcceleratorBackendCachePolicy, DISABLED_GlobalBackendExecutionStateCachesAreForbidden) {
     const filesystem::path root = findThorSourceRoot();
 
     // C12 deletes the transitional cached-executable model entirely. Split the

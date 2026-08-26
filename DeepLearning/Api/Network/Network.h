@@ -402,6 +402,7 @@ class Network {
     // This cache is deliberately scoped to one report-discovery operation and is
     // never retained across graph mutation or a later validation pass.
     struct ReportDiscoveryTraversalCache {
+        std::map<Tensor, bool> modelSpecificParameterDependencyByTensor;
         std::map<Tensor, std::optional<std::string>> sourceNetworkInputNameByTensor;
         std::map<Tensor, std::vector<std::string>> predictionOutputNamesByTensor;
         std::map<Tensor, std::set<std::string>> requiredInputNamesByTensor;

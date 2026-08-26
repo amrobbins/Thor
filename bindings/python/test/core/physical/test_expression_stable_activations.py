@@ -46,6 +46,10 @@ def _run_expr(expr, inputs: dict[str, tuple[np.ndarray, thor.DataType]], gpu_num
     return _copy_gpu_to_numpy(stamped.output(), stream)
 
 
+def _stable_relu_expr(x):
+    return ex.relu(x)
+
+
 def _stable_sigmoid_expr(x):
     # Equivalent to:
     #   x >= 0: 1 / (1 + exp(-x))
@@ -96,6 +100,10 @@ def _stable_hard_swish_expr(x):
 
 def _stable_threshold_expr(x):
     return ex.threshold(x, 0.25, -1.0)
+
+
+def _stable_relu_np(x: np.ndarray) -> np.ndarray:
+    return np.maximum(x, 0.0)
 
 
 def _stable_sigmoid_np(x: np.ndarray) -> np.ndarray:
@@ -156,6 +164,7 @@ def _stable_threshold_np(x: np.ndarray) -> np.ndarray:
 @pytest.mark.parametrize(
     ("name", "expr_builder", "np_builder"),
     [
+        ("relu", _stable_relu_expr, _stable_relu_np),
         ("sigmoid", _stable_sigmoid_expr, _stable_sigmoid_np),
         ("tanh", _stable_tanh_expr, _stable_tanh_np),
         ("softplus", _stable_softplus_expr, _stable_softplus_np),

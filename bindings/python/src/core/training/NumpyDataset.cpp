@@ -15,6 +15,7 @@
 #include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "Utilities/Random/FullPeriodRandom.h"
@@ -700,6 +701,7 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
     // network chooses maxTotalValues through its RaggedNetworkInput contract;
     // the in-memory dataset stores only the actual variable-length rows.
     std::map<DatasetFieldId, uint64_t> raggedActiveValueCounts;
+    std::map<DatasetFieldId, uint64_t> raggedMaxActiveRowLengths;
     for (const auto &[fieldId, queues] : split.raggedQueues) {
         (void)queues;
         const DatasetField &field = dataset->getSchema().getField(fieldId);
@@ -707,12 +709,23 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
         const ThorImplementation::RaggedTensorDescriptor &descriptor =
             fieldRequirements.at(fieldId).raggedTensorDescriptor.value();
         uint64_t activeValueCount = 0;
+        uint64_t maxActiveRowLength = 0;
         for (uint64_t row = 0; row < selectedExampleIndices.size(); ++row) {
             const uint64_t exampleIndex = selectedExampleIndices[row];
             const uint64_t begin = source.offsetAt(exampleIndex);
             const uint64_t end = source.offsetAt(exampleIndex + 1);
             THOR_THROW_IF_FALSE(end >= begin);
             const uint64_t rowValueCount = end - begin;
+            if (descriptor.hasMaxValuesPerRow() &&
+                rowValueCount > descriptor.getMaxValuesPerRow()) {
+                throw std::runtime_error(
+                    "NumpyBatchSession ragged field '" + field.name +
+                    "' selected row " + std::to_string(row) +
+                    " (dataset example " + std::to_string(exampleIndex) +
+                    ") has " + std::to_string(rowValueCount) +
+                    " values, exceeding maxValuesPerRow=" +
+                    std::to_string(descriptor.getMaxValuesPerRow()) + ".");
+            }
             if (rowValueCount > descriptor.getMaxTotalValues() - activeValueCount) {
                 throw std::runtime_error(
                     "NumpyBatchSession ragged field '" + field.name +
@@ -723,8 +736,10 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
                     ", row_values=" + std::to_string(rowValueCount) + ").");
             }
             activeValueCount += rowValueCount;
+            maxActiveRowLength = std::max(maxActiveRowLength, rowValueCount);
         }
         raggedActiveValueCounts.emplace(fieldId, activeValueCount);
+        raggedMaxActiveRowLengths.emplace(fieldId, maxActiveRowLength);
     }
 
     std::map<DatasetFieldId, ThorImplementation::Tensor> tensors;
@@ -739,8 +754,12 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
         ThorImplementation::Tensor offsets;
         THOR_THROW_IF_FALSE(queues.values->getBufferToLoad(values));
         THOR_THROW_IF_FALSE(queues.offsets->getBufferToLoad(offsets));
+        const ThorImplementation::RaggedTensorDescriptor &descriptor =
+            fieldRequirements.at(fieldId).raggedTensorDescriptor.value();
+        ThorImplementation::RowPartitionRuntime rowPartition(
+            offsets, descriptor.getRowPartition());
         raggedTensors.emplace(
-            fieldId, ThorImplementation::RaggedTensor(values, offsets));
+            fieldId, ThorImplementation::RaggedTensor(values, std::move(rowPartition)));
     }
 
     const uint64_t finalValidExampleIndex = selectedExampleIndices.back();
@@ -787,6 +806,11 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
         for (uint64_t row = validExampleCount; row < batchSize; ++row) {
             writeNumpyRaggedOffset(offsets, row + 1, activeValueCount);
         }
+        ThorImplementation::RowPartitionRuntime &rowPartition =
+            ragged.getRowPartitionRuntime();
+        rowPartition.setHostActiveValueCount(activeValueCount);
+        rowPartition.setHostMaxActiveRowLength(
+            raggedMaxActiveRowLengths.at(fieldId));
     }
 
     split.nextBatchNum = (batchNum + 1) % batchesPerEpoch;

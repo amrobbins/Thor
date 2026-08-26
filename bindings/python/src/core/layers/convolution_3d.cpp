@@ -131,7 +131,8 @@ void bind_convolution_3d(nb::module_ &m) {
            shared_ptr<Initializer> biases_initializer,
            nb::object epilogue,
            nb::object epilogue_inputs,
-           uint32_t groups) {
+           uint32_t groups,
+           DataType computeDataType) {
             const auto &dims = featureInput.getDimensions();
             if (dims.size() != 4) {
                 string msg = "Convolution3d instance: feature_input must be a 4D CDHW tensor (no batch) but tensor format is " +
@@ -154,6 +155,10 @@ void bind_convolution_3d(nb::module_ &m) {
             }
             if (groups == 0 || C % groups != 0 || numOutputChannels % groups != 0)
                 throw nb::value_error("Convolution3d instance: groups must divide both input and output channels.");
+            if (computeDataType != DataType::FP32 && computeDataType != DataType::TF32)
+                throw nb::value_error("Convolution3d instance: compute_data_type must be thor.DataType.fp32 or thor.DataType.tf32.");
+            if (computeDataType == DataType::TF32 && featureInput.getDataType() != DataType::FP32)
+                throw nb::value_error("Convolution3d instance: TF32 compute requires FP32 input/weights/output storage.");
             if (filterDepth == 0 || filterHeight == 0 || filterWidth == 0) {
                 throw nb::value_error("Convolution3d instance: filter_depth, filter_height, and filter_width must be >= 1.");
             }
@@ -184,6 +189,7 @@ void bind_convolution_3d(nb::module_ &m) {
                 .verticalStride(verticalStride)
                 .horizontalStride(horizontalStride)
                 .groups(groups)
+                .computeDataType(computeDataType)
                 .hasBias(hasBias);
 
             applyPythonActivation(builder, activation);
@@ -216,7 +222,8 @@ void bind_convolution_3d(nb::module_ &m) {
         "biases_initializer"_a = nb::none(),
         "epilogue"_a.none() = nb::none(),
         "epilogue_inputs"_a.none() = nb::none(),
-        "groups"_a = 1);
+        "groups"_a = 1,
+        "compute_data_type"_a = DataType::FP32);
 
     convolution_3d.def_static(
         "epilogue_input",
@@ -248,6 +255,8 @@ void bind_convolution_3d(nb::module_ &m) {
             Return the output tensor produced by this layer.
             )nbdoc");
 
+    convolution_3d.def("get_compute_data_type", &Convolution3d::getComputeDataType);
+
     convolution_3d.attr("__doc__") = R"nbdoc(
         3D convolution layer.
 
@@ -260,5 +269,8 @@ void bind_convolution_3d(nb::module_ &m) {
         expression before the implementation CustomLayer is constructed.
         ``epilogue`` may be a ``thor.physical.Expression`` built from
         ``Convolution3d.epilogue_input()`` and is applied after activation.
+        ``compute_data_type=thor.DataType.fp32`` requests strict FP32 convolution
+        math. ``thor.DataType.tf32`` explicitly permits TensorFloat-32 execution
+        for FP32 input, weight, and output storage.
         )nbdoc";
 }

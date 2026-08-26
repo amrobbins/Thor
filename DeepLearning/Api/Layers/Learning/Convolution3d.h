@@ -41,6 +41,7 @@ class Convolution3d : public TrainableLayer {
     virtual uint32_t getVerticalPadding() { return verticalPadding; }
     virtual uint32_t getHorizontalPadding() { return horizontalPadding; }
     virtual uint32_t getGroups() const { return groups; }
+    DataType getComputeDataType() const { return computeDataType; }
 
     std::string getLayerType() const override { return "Convolution3d"; }
 
@@ -145,6 +146,7 @@ class Convolution3d : public TrainableLayer {
     uint32_t horizontalPadding;
     uint32_t groups = 1;
     bool hasBias;
+    DataType computeDataType = DataType::FP32;
     std::shared_ptr<Initializer> weightsInitializer;
     std::shared_ptr<Initializer> biasInitializer;
     std::shared_ptr<Activation> activation;
@@ -193,6 +195,8 @@ class Convolution3d::Builder {
             _groups = 1;
         if (!_hasBias.has_value())
             _hasBias = false;
+        if (!_computeDataType.has_value())
+            _computeDataType = DataType::FP32;
         if (_weightsInitializer == nullptr)
             _weightsInitializer = Glorot::Builder().build();
         if (_biasesInitializer == nullptr)
@@ -241,6 +245,7 @@ class Convolution3d::Builder {
                                                       convolution3d.horizontalPadding);
 
         convolution3d.hasBias = _hasBias.value();
+        convolution3d.computeDataType = _computeDataType.value();
         convolution3d.weightsInitializer = _weightsInitializer->clone();
         convolution3d.biasInitializer = _biasesInitializer->clone();
         if (_activation != nullptr)
@@ -249,6 +254,8 @@ class Convolution3d::Builder {
         convolution3d.biasesOptimizer = _biasesOptimizer;
 
         const DataType convolutionDataType = convolution3d.featureInputs.front().getDataType();
+        if (convolution3d.computeDataType == DataType::TF32 && convolutionDataType != DataType::FP32)
+            throw std::invalid_argument("Convolution3d TF32 compute requires FP32 input/weights/output storage.");
         const DataType weightsDataType = convolutionDataType;
         const uint64_t inputChannels = convolution3d.featureInputs.front().getDimensions()[0];
         if (inputChannels % convolution3d.groups != 0 || convolution3d.numOutputChannels % convolution3d.groups != 0)
@@ -383,6 +390,14 @@ class Convolution3d::Builder {
         this->_hasBias = value;
         return *this;
     }
+
+    virtual Convolution3d::Builder& computeDataType(DataType value) {
+        THOR_THROW_IF_FALSE(!_computeDataType.has_value());
+        if (value != DataType::FP32 && value != DataType::TF32)
+            throw std::invalid_argument("Convolution3d computeDataType must be fp32 or tf32.");
+        _computeDataType = value;
+        return *this;
+    }
     virtual Convolution3d::Builder& weightsInitializer(std::shared_ptr<Initializer> initializer) {
         THOR_THROW_IF_FALSE(this->_weightsInitializer == nullptr);
         this->_weightsInitializer = initializer->clone();
@@ -459,6 +474,7 @@ class Convolution3d::Builder {
     std::optional<uint32_t> _horizontalPadding;
     std::optional<uint32_t> _groups;
     std::optional<bool> _hasBias;
+    std::optional<DataType> _computeDataType;
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasesInitializer;
     std::shared_ptr<Activation> _activation;

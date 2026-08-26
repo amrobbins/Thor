@@ -68,14 +68,11 @@ TEST(CudnnFrontendPlanSelection, SerializedAutotuneWinnerDoesNotRequireStructure
 TEST(CudnnFrontendPlanSelectionCache, RejectsInvalidSelectorResultBeforePublication) {
     CudnnFrontendPlanSelectionCache<int> cache(4);
 
-    EXPECT_THROW(
-        cache.getOrSelect(1, []() { return CudnnFrontendPlanSelection{}; }),
-        invalid_argument);
+    EXPECT_THROW((void)cache.getOrSelect(1, []() { return CudnnFrontendPlanSelection{}; }), invalid_argument);
     EXPECT_EQ(cache.size(), 0U);
     EXPECT_EQ(cache.missCount(), 1U);
 
-    const CudnnFrontendPlanSelection valid =
-        cache.getOrSelect(1, []() { return CudnnFrontendPlanSelection(13, {{8, 2}, {3, 9}}, 128); });
+    const CudnnFrontendPlanSelection valid = cache.getOrSelect(1, []() { return CudnnFrontendPlanSelection(13, {{8, 2}, {3, 9}}, 128); });
     EXPECT_EQ(valid, (CudnnFrontendPlanSelection(13, {{3, 9}, {8, 2}}, 128)));
     EXPECT_EQ(cache.size(), 1U);
     EXPECT_EQ(cache.missCount(), 2U);

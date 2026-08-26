@@ -202,7 +202,8 @@ void bind_convolution_2d(nb::module_ &m) {
            nb::object epilogue,
            nb::object epilogue_inputs,
            nb::object dilation,
-           uint32_t groups) {
+           uint32_t groups,
+           DataType computeDataType) {
             const auto &dims = featureInput.getDimensions();
             if (dims.size() != 3) {
                 string msg = "Convolution2d instance: feature_input must be a 3D CHW tensor (no batch) but tensor format is " +
@@ -225,6 +226,10 @@ void bind_convolution_2d(nb::module_ &m) {
             }
             if (groups == 0 || C % groups != 0 || numOutputChannels % groups != 0)
                 throw nb::value_error("Convolution2d instance: groups must divide both input and output channels.");
+            if (computeDataType != DataType::FP32 && computeDataType != DataType::TF32)
+                throw nb::value_error("Convolution2d instance: compute_data_type must be thor.DataType.fp32 or thor.DataType.tf32.");
+            if (computeDataType == DataType::TF32 && featureInput.getDataType() != DataType::FP32)
+                throw nb::value_error("Convolution2d instance: TF32 compute requires FP32 input/weights/output storage.");
             if (filterHeight == 0 || filterWidth == 0) {
                 string msg =
                     "Convolution2d instance: filter_height and filter_width must be >= 1. "
@@ -278,6 +283,7 @@ void bind_convolution_2d(nb::module_ &m) {
                 .horizontalStride(horizontalStride)
                 .verticalDilation(dilationH)
                 .horizontalDilation(dilationW)
+                .computeDataType(computeDataType)
                 .hasBias(hasBias);
             switch (paddingSpec.mode) {
                 case ConvolutionPaddingMode::VALID:
@@ -322,7 +328,8 @@ void bind_convolution_2d(nb::module_ &m) {
         "epilogue"_a.none() = nb::none(),
         "epilogue_inputs"_a.none() = nb::none(),
         "dilation"_a = nb::int_(1),
-        "groups"_a = 1);
+        "groups"_a = 1,
+        "compute_data_type"_a = DataType::FP32);
 
     convolution_2d.def_static(
         "epilogue_input",
@@ -358,6 +365,8 @@ void bind_convolution_2d(nb::module_ &m) {
             thor.Tensor
                 The feature output tensor handle.
             )nbdoc");
+
+    convolution_2d.def("get_compute_data_type", &Convolution2d::getComputeDataType);
 
     convolution_2d.attr("__doc__") = R"nbdoc(
         2D convolution layer.
@@ -416,5 +425,8 @@ void bind_convolution_2d(nb::module_ &m) {
             Spacing between kernel elements. An integer applies the same dilation
             vertically and horizontally; a length-2 sequence specifies
             ``(vertical_dilation, horizontal_dilation)``.
+        compute_data_type : thor.DataType, default thor.DataType.fp32
+            ``fp32`` requests strict FP32 convolution math. ``tf32`` explicitly
+            permits TensorFloat-32 execution for FP32 input, weight, and output storage.
         )nbdoc";
 }

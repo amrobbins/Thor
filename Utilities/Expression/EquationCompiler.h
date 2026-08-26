@@ -79,6 +79,11 @@ class EquationCompiler {
         const std::vector<PaddedRaggedPointwiseInputAccess>& input_access,
         uint64_t batch_size,
         uint64_t channels);
+    // T9F placement/runtime diagnostics. These are read-only process-global
+    // counters for proving that stamped retained-width execution performs no
+    // fused-kernel compilation or cache population at runtime.
+    [[nodiscard]] static size_t compiledEquationCacheEntryCountForTests();
+    [[nodiscard]] static uint64_t compiledEquationBuildCountForTests();
     static std::vector<PhysicalExecutionStage> splitAtReductionBoundaries(const PhysicalOutputs& outputs);
 
     static std::shared_ptr<CompiledReduction> compileReduction(const PhysicalExpression& expr);

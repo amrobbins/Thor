@@ -10010,6 +10010,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             if (stage.kind == CompiledExecutionStage::Kind::RaggedConv1dCausalBackwardFilter) return input_idx == 0 || input_idx == 1;
             return false;
         };
+        const bool is_logical_reduction_consumer =
+            stage.kind == CompiledExecutionStage::Kind::Reduction ||
+            stage.kind == CompiledExecutionStage::Kind::ArgMinMax ||
+            stage.kind == CompiledExecutionStage::Kind::SegmentedReduction ||
+            stage.kind == CompiledExecutionStage::Kind::ReduceMinMaxBackward;
 
         std::vector<RuntimeInputValue> stageInputs;
         stageInputs.reserve(stage.input_value_ids.size());
@@ -10027,7 +10032,23 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 continue;
             }
 
+            // T9D consumer-responsibility contract: reductions are logical-value
+            // consumers, never padded-storage consumers. If an active-local producer
+            // exists only in retained [B,C,1,W] form, materialize its packed logical
+            // view here before the reduction sees it. ensurePackedValue() inserts the
+            // unpack without invalidating the authoritative padded sibling, so a dX
+            // branch may continue through retained backward stages while a parameter-
+            // gradient fanout exits through this reduction boundary.
+            //
+            // Generic non-retained consumers use the same packed materialization path;
+            // spelling the reduction case out here makes it an enforced ownership
+            // boundary rather than relying on undefined padded tails being benign.
             ensurePackedValue(value_id);
+            if (is_logical_reduction_consumer && authoritative_padded_key_by_value_id.contains(value_id) &&
+                !values.contains(value_id)) {
+                throw std::runtime_error(
+                    "T9D logical reduction consumer failed to materialize its retained ragged input as packed values.");
+            }
             auto it = values.find(value_id);
             if (it == values.end()) {
                 throw std::runtime_error("Missing input value for staged execution plan.");

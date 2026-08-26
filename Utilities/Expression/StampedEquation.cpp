@@ -2482,6 +2482,10 @@ RaggedConv1dStageDiagnostic StampedRaggedConv1dCausal::diagnostic() const {
     }
     const RaggedConv1dPaddedForwardState& state = *padded_forward_state;
     out.cudnn_workspace_bytes = state.cudnn_workspace_bytes;
+    out.cudnn_workspace_state_id =
+        state.cudnn_workspace.has_value()
+            ? reinterpret_cast<uintptr_t>(state.cudnn_workspace->getMemPtr<void>())
+            : 0;
     out.width_capacity_count = state.width_capacity_family.size();
     out.prebuilt_cudnn_plan_count = state.prebuilt_convolutions.size();
     if (!state.input_padded || !state.output_padded) {
@@ -2606,6 +2610,10 @@ RaggedConv1dStageDiagnostic StampedRaggedConv1dCausalBackwardData::diagnostic() 
     }
     const RaggedConv1dPaddedBackwardDataState& state = *padded_backward_data_state;
     out.cudnn_workspace_bytes = state.cudnn_workspace_bytes;
+    out.cudnn_workspace_state_id =
+        state.cudnn_workspace.has_value()
+            ? reinterpret_cast<uintptr_t>(state.cudnn_workspace->getMemPtr<void>())
+            : 0;
     out.width_capacity_count = state.width_capacity_family.size();
     out.prebuilt_cudnn_plan_count = state.prebuilt_dgrads.size();
     if (!state.grad_output_padded || !state.sanitized_grad_output || !state.output_padded) {
@@ -2706,6 +2714,10 @@ RaggedConv1dStageDiagnostic StampedRaggedConv1dCausalBackwardFilter::diagnostic(
     if (!padded_backward_filter_state) return out;
     const auto& state = *padded_backward_filter_state;
     out.cudnn_workspace_bytes = state.cudnn_workspace_bytes;
+    out.cudnn_workspace_state_id =
+        state.cudnn_workspace.has_value()
+            ? reinterpret_cast<uintptr_t>(state.cudnn_workspace->getMemPtr<void>())
+            : 0;
     out.width_capacity_count = state.width_capacity_family.size();
     out.prebuilt_cudnn_plan_count = state.prebuilt_wgrads.size();
     if (!state.input_padded || !state.grad_output_padded || !state.sanitized_input || !state.sanitized_grad_output) return out;
@@ -5815,6 +5827,10 @@ static cudnnTensorDescriptor_t createCudnnSoftmaxTensorDescriptor(std::vector<ui
 static fe::DataType_t toFrontendDataType(DataType dtype) {
     switch (dtype) {
         case DataType::FP32:
+        case DataType::TF32:
+            // cuDNN represents both strict FP32 and TF32 convolution compute with
+            // FLOAT graph compute. Thor distinguishes the two through execution-plan
+            // numerical-note filtering below; TF32 is never a storage dtype.
             return fe::DataType_t::FLOAT;
         case DataType::FP16:
             return fe::DataType_t::HALF;
@@ -5924,7 +5940,10 @@ static void checkFrontendStatus(cudnn_frontend::error_t status, const std::strin
 static void buildFrontendConvolutionCandidatePlans(fe::graph::Graph& graph,
                                                    const Stream& stream,
                                                    const char* op_name,
-                                                   bool require_deterministic) {
+                                                   bool require_deterministic,
+                                                   DataType compute_dtype,
+                                                   DataType lhs_dtype,
+                                                   DataType rhs_dtype) {
     ScopedGpu scopedGpu(stream.getGpuNum());
     checkFrontendStatus(graph.validate(), std::string("Failed to validate cuDNN Frontend ") + op_name + " graph");
     checkFrontendStatus(graph.build_operation_graph(stream.getCudnnHandle()),
@@ -5938,6 +5957,33 @@ static void buildFrontendConvolutionCandidatePlans(fe::graph::Graph& graph,
         // training gradients. Frontend exposes the same property as a numerical
         // note; filter it before support/build/autotune so it can never win timing.
         graph.deselect_numeric_notes({fe::NumericalNote_t::NONDETERMINISTIC});
+    }
+    const bool fp32_compute_contract = compute_dtype == DataType::FP32 || compute_dtype == DataType::TF32;
+    const bool both_operands_fp32 = lhs_dtype == DataType::FP32 && rhs_dtype == DataType::FP32;
+    const bool any_operand_fp32 = lhs_dtype == DataType::FP32 || rhs_dtype == DataType::FP32;
+    if (compute_dtype == DataType::FP32 && both_operands_fp32) {
+        // cuDNN represents strict FP32 and TensorFloat-32 with FLOAT graph compute.
+        // For FP32 operands Thor's DataType::FP32 contract is strict: no TF32 tensor
+        // core multiply, no implicit input down-conversion, and no reduced-precision
+        // reduction.
+        graph.deselect_numeric_notes({fe::NumericalNote_t::TENSOR_CORE,
+                                      fe::NumericalNote_t::DOWN_CONVERT_INPUTS,
+                                      fe::NumericalNote_t::REDUCED_PRECISION_REDUCTION});
+    } else if (compute_dtype == DataType::TF32) {
+        // TF32 is an explicit permission to use tensor cores, not permission to
+        // down-convert FP32 storage to FP16/BF16 or to reduce below FP32 precision.
+        graph.deselect_numeric_notes(
+            {fe::NumericalNote_t::DOWN_CONVERT_INPUTS, fe::NumericalNote_t::REDUCED_PRECISION_REDUCTION});
+    } else if (fp32_compute_contract && any_operand_fp32) {
+        // Mixed-storage expression convolutions may still contain an FP32 operand.
+        // Do not silently down-convert it merely to reach another engine family.
+        graph.deselect_numeric_notes(
+            {fe::NumericalNote_t::DOWN_CONVERT_INPUTS, fe::NumericalNote_t::REDUCED_PRECISION_REDUCTION});
+    } else if (fp32_compute_contract) {
+        // FP16/BF16/FP8 storage may legitimately use tensor cores while accumulating
+        // in FP32, but an engine advertising reduced-precision reduction violates
+        // that compute contract.
+        graph.deselect_numeric_notes({fe::NumericalNote_t::REDUCED_PRECISION_REDUCTION});
     }
     checkFrontendStatus(graph.check_support(stream.getCudnnHandle()),
                         std::string("Failed to check support for cuDNN Frontend ") + op_name + " execution plans");
@@ -6390,6 +6436,9 @@ static CudnnFrontendPlanSelection autotuneFrontendConvolutionSelection(
     const char* op_name,
     const std::function<std::shared_ptr<fe::graph::Graph>()>& graph_factory,
     bool require_deterministic,
+    DataType compute_dtype,
+    DataType lhs_dtype,
+    DataType rhs_dtype,
     const FrontendConvolutionCorrectnessValidation& correctness_validation) {
     if (!graph_factory) {
         throw std::runtime_error(std::string("cuDNN Frontend ") + op_name + " autotune requires a graph factory.");
@@ -6400,7 +6449,8 @@ static CudnnFrontendPlanSelection autotuneFrontendConvolutionSelection(
         throw std::runtime_error(std::string("cuDNN Frontend ") + op_name +
                                  " autotune requires a pristine operation-local scratch graph.");
     }
-    buildFrontendConvolutionCandidatePlans(*autotune_graph, stream, op_name, require_deterministic);
+    buildFrontendConvolutionCandidatePlans(
+        *autotune_graph, stream, op_name, require_deterministic, compute_dtype, lhs_dtype, rhs_dtype);
 
     const int64_t plan_count = autotune_graph->get_execution_plan_count();
     if (plan_count <= 0) {
@@ -6726,6 +6776,9 @@ static void prepareFrontendConvolutionExecutable(
     const char* op_name,
     const CudnnFrontendGraphFactory& graph_factory,
     bool require_deterministic,
+    DataType compute_dtype,
+    DataType lhs_dtype,
+    DataType rhs_dtype,
     const FrontendConvolutionCorrectnessValidation& correctness_validation) {
     ScopedGpu scoped_gpu(stream.getGpuNum());
 
@@ -6740,6 +6793,9 @@ static void prepareFrontendConvolutionExecutable(
                                                     op_name,
                                                     graph_factory,
                                                     require_deterministic,
+                                                    compute_dtype,
+                                                    lhs_dtype,
+                                                    rhs_dtype,
                                                     correctness_validation);
     });
 
@@ -7410,6 +7466,9 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
                                          is_3d ? "CONV3D forward" : "CONV2D forward",
                                          graph_factory,
                                          false,
+                                         compiled_convolution->compute_dtype,
+                                         compiled_convolution->input_dtype,
+                                         compiled_convolution->filter_dtype,
                                          correctness_validation);
     return built;
 }
@@ -7559,6 +7618,9 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
                                              is_3d ? "CONV3D backward-data" : "CONV2D backward-data",
                                              graph_factory,
                                              false,
+                                             compiled_convolution_backward->compute_dtype,
+                                             compiled_convolution_backward->input_dtype,
+                                             compiled_convolution_backward->grad_output_dtype,
                                              correctness_validation);
         return built;
     }
@@ -7644,6 +7706,9 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
                                          is_3d ? "CONV3D backward-filter" : "CONV2D backward-filter",
                                          graph_factory,
                                          true,
+                                         compiled_convolution_backward->compute_dtype,
+                                         compiled_convolution_backward->input_dtype,
+                                         compiled_convolution_backward->grad_output_dtype,
                                          correctness_validation);
     return built;
 }

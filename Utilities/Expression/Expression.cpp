@@ -4535,6 +4535,8 @@ Expression Expression::layerNorm(const Expression& input,
 
 Expression Expression::mish() const { return *this * this->softplus().tanh(); }
 
+Expression Expression::relu() const { return this->max(Expression(0.0)); }
+
 Expression Expression::relu6() const { return this->max(Expression(0.0)).min(Expression(6.0)); }
 
 Expression Expression::hardTanh(double min_value, double max_value) const {

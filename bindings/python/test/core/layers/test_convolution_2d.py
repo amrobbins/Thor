@@ -84,12 +84,29 @@ def test_conv2d_constructs_defaults_architecture_parameters_and_output_shape_dty
     assert arch["num_output_channels"] == 16
     assert arch["groups"] == 1
     assert arch["has_bias"] is True
+    assert conv.get_compute_data_type() == thor.DataType.fp32
+    assert arch["compute_data_type"] == "fp32"
     assert arch["activation"]["layer_type"] == "gelu"
     assert arch["epilogue"] is None
     assert len(arch["inputs"]) == 1
     assert len(arch["outputs"]) == 1
     _assert_parameter_shape(arch, "weights", [16, 3, 3, 3])
     _assert_parameter_shape(arch, "biases", [16])
+
+
+def test_conv2d_explicit_tf32_compute_requires_fp32_storage():
+    n = _net("test_conv2d_tf32")
+    x = _chw_input(n, 4, 8, 8, thor.DataType.fp32)
+    conv = thor.layers.Convolution2d(
+        n, x, 8, 3, 3, activation=None, compute_data_type=thor.DataType.tf32)
+    assert conv.get_compute_data_type() == thor.DataType.tf32
+    assert _only_layer_architecture(n, "convolution_2d")["compute_data_type"] == "tf32"
+
+    n_bad = _net("test_conv2d_tf32_bad_storage")
+    x_bad = _chw_input(n_bad, 4, 8, 8, thor.DataType.fp16)
+    with pytest.raises(ValueError, match="TF32 compute requires FP32"):
+        thor.layers.Convolution2d(
+            n_bad, x_bad, 8, 3, 3, activation=None, compute_data_type=thor.DataType.tf32)
 
 
 @pytest.mark.parametrize(

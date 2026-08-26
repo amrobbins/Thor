@@ -560,6 +560,8 @@ TEST(Convolution3dApi, DefaultsToGeluAndExplicitNoActivationShape) {
     ASSERT_TRUE(defaultJson.contains("activation"));
     ASSERT_FALSE(defaultJson.at("activation").is_null());
     EXPECT_EQ(defaultJson.at("activation").at("layer_type").get<string>(), "gelu");
+    EXPECT_EQ(defaultConv.getComputeDataType(), DataType::FP32);
+    EXPECT_EQ(defaultJson.at("compute_data_type").get<DataType>(), DataType::FP32);
 
     Api::Network explicitNetwork("conv3dExplicit");
     Api::NetworkInput explicitInput =
@@ -586,6 +588,39 @@ TEST(Convolution3dApi, DefaultsToGeluAndExplicitNoActivationShape) {
     ASSERT_TRUE(explicitJson.contains("activation"));
     EXPECT_TRUE(explicitJson.at("activation").is_null());
     EXPECT_TRUE(explicitJson.at("has_bias").get<bool>());
+}
+
+TEST(Convolution3dApi, ExplicitTf32ComputeIsUserSelectableAndRequiresFp32Storage) {
+    Api::Network network("conv3dTf32");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({4, 6, 6, 6}).dataType(DataType::FP32).build();
+    Api::Convolution3d conv = Api::Convolution3d::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .numOutputChannels(8)
+                                  .filterDepth(3)
+                                  .filterHeight(3)
+                                  .filterWidth(3)
+                                  .computeDataType(DataType::TF32)
+                                  .noActivation()
+                                  .build();
+    EXPECT_EQ(conv.getComputeDataType(), DataType::TF32);
+    EXPECT_EQ(conv.architectureJson().at("compute_data_type").get<DataType>(), DataType::TF32);
+
+    Api::Network fp16Network("conv3dTf32RejectFp16");
+    Api::NetworkInput fp16Input =
+        Api::NetworkInput::Builder().network(fp16Network).name("input").dimensions({4, 6, 6, 6}).dataType(DataType::FP16).build();
+    EXPECT_THROW((void)Api::Convolution3d::Builder()
+                     .network(fp16Network)
+                     .featureInput(fp16Input.getFeatureOutput().value())
+                     .numOutputChannels(8)
+                     .filterDepth(3)
+                     .filterHeight(3)
+                     .filterWidth(3)
+                     .computeDataType(DataType::TF32)
+                     .noActivation()
+                     .build(),
+                 std::invalid_argument);
 }
 
 TEST(Convolution3dApi, StampsAsPhysicalCustomLayerAllocatesParametersAndSerializesOptimizers) {

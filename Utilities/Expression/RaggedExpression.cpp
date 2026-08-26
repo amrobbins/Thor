@@ -352,7 +352,7 @@ RaggedExpression RaggedExpression::ln() const { return unaryValuewise(ExprOp::LN
 
 RaggedExpression RaggedExpression::relu() const {
     validateInitialized("relu");
-    return withValues(values.max(Expression::constantScalar(0.0)), descriptor);
+    return withValues(values.relu(), descriptor);
 }
 
 RaggedExpression RaggedExpression::softmax() const { return segment_softmax(); }

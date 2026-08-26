@@ -36,6 +36,7 @@ ConvolutionPaddingMode convolutionPaddingModeFromName(const std::string& name) {
 ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
                                                                    uint32_t groups,
                                                                    ThorImplementation::ConvolutionSpatial2d spatial,
+                                                                   ThorImplementation::DataType computeDataType,
                                                                    ThorImplementation::TensorPlacement placement,
                                                                    std::shared_ptr<Thor::Activation> activation,
                                                                    std::optional<ThorImplementation::Expression> epilogue,
@@ -58,6 +59,7 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
                              [hasBias,
                               groups,
                               spatial,
+                              computeDataType,
                               placement,
                               activation = std::move(activation),
                               epilogue,
@@ -117,7 +119,7 @@ ThorImplementation::DynamicExpression buildConvolution2dExpression(bool hasBias,
         auto fin = Expression::input("feature_input");
         auto w = Expression::input("weights", weightsDType, weightsDType);
 
-        Expression fout = Expression::conv2d(fin, w, spatial, ImplDataType::FP32, featureOutputDType, groups);
+        Expression fout = Expression::conv2d(fin, w, spatial, computeDataType, featureOutputDType, groups);
 
         if (hasBias) {
             const Tensor& bTensor = inputs.at("biases");
@@ -303,7 +305,8 @@ std::shared_ptr<ThorImplementation::Layer> Convolution2d::stamp(ThorImplementati
     }
 
     std::shared_ptr<ThorImplementation::CustomLayer> physicalConvolution2d = std::make_shared<ThorImplementation::CustomLayer>(
-        buildConvolution2dExpression(hasBias, groups, spatial, placement, activation, epilogue, epilogueAuxInputNames()),
+        buildConvolution2dExpression(
+            hasBias, groups, spatial, computeDataType, placement, activation, epilogue, epilogueAuxInputNames()),
         [&]() {
             std::vector<std::string> inputNames = {"feature_input"};
             std::vector<std::string> auxNames = epilogueAuxInputNames();
@@ -434,6 +437,7 @@ json Convolution2d::architectureJson() const {
     j["num_output_channels"] = numOutputChannels;
     j["groups"] = groups;
     j["has_bias"] = hasBias;
+    j["compute_data_type"] = computeDataType;
     if (activation != nullptr) {
         j["activation"] = activation->architectureJson();
     } else {
@@ -546,6 +550,11 @@ void Convolution2d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
     if (convolution2d.groups == 0)
         throw runtime_error("Convolution2d serialized groups must be positive.");
     convolution2d.hasBias = j.at("has_bias").get<bool>();
+    // Archives written before compute_data_type existed used FLOAT cuDNN compute without
+    // filtering tensor-core plans, which is the permissive policy now named TF32.
+    convolution2d.computeDataType = j.value("compute_data_type", DataType::TF32);
+    if (convolution2d.computeDataType != DataType::FP32 && convolution2d.computeDataType != DataType::TF32)
+        throw runtime_error("Convolution2d serialized compute_data_type must be fp32 or tf32.");
 
     if (j.contains("activation") && !j.at("activation").is_null()) {
         convolution2d.activation = Activation::deserializeTemplate(j.at("activation"));
@@ -560,6 +569,8 @@ void Convolution2d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
         convolution2d.featureInputs.front().getDimensions()[0] % convolution2d.groups != 0 ||
         convolution2d.numOutputChannels % convolution2d.groups != 0)
         throw runtime_error("Convolution2d serialized grouped channel geometry is invalid.");
+    if (convolution2d.computeDataType == DataType::TF32 && convolution2d.featureInputs.front().getDataType() != DataType::FP32)
+        throw runtime_error("Convolution2d serialized TF32 compute requires FP32 input/weights/output storage.");
     if (convolution2d.paddingMode == ConvolutionPaddingMode::SAME_UPPER) {
         if (convolution2d.featureInputs.empty()) {
             throw runtime_error("Convolution2d serialized SAME_UPPER padding requires at least one feature input.");

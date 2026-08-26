@@ -596,7 +596,7 @@ RMSNorm RMSNorm::Builder::build() {
         layer.outputTensorFromInputTensor[layer.featureInputs[i]] = out;
         layer.inputTensorFromOutputTensor[out] = layer.featureInputs[i];
         if (!layer.raggedFeatureInputs.empty()) {
-            layer.raggedFeatureOutputs.emplace_back(out, layer.raggedFeatureInputs[i].getOffsets());
+            layer.raggedFeatureOutputs.push_back(layer.raggedFeatureInputs[i].withValues(out));
         }
     }
     for (const auto& [name, tensor] : layer.epilogueInputBindings) {
@@ -887,16 +887,24 @@ void RMSNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const
         for (uint32_t i = 0; i < layer.featureInputs.size(); ++i) {
             const json& raggedInputJson = j.at("ragged_inputs").at(i);
             const uint64_t inputOffsetsId = raggedInputJson.at("offsets").at("id").get<uint64_t>();
-            RaggedTensor raggedInput(layer.featureInputs[i], network->getApiTensorByOriginalId(inputOffsetsId));
+            Tensor inputOffsets = network->getApiTensorByOriginalId(inputOffsetsId);
+            RaggedTensor raggedInput = raggedInputJson.contains("max_values_per_row")
+                ? RaggedTensor(layer.featureInputs[i], inputOffsets, raggedInputJson.at("max_values_per_row").get<uint64_t>())
+                : RaggedTensor(layer.featureInputs[i], inputOffsets);
             if (raggedInput.getBatchSize() != raggedInputJson.at("batch_size").get<uint64_t>() ||
                 raggedInput.getMaxTotalValues() != raggedInputJson.at("max_total_values").get<uint64_t>()) {
                 throw runtime_error("RMSNorm serialized ragged input metadata does not match reconstructed tensors.");
             }
             layer.raggedFeatureInputs.push_back(raggedInput);
-            layer.raggedFeatureOutputs.emplace_back(layer.featureOutputs[i], raggedInput.getOffsets());
+            layer.raggedFeatureOutputs.push_back(raggedInput.withValues(layer.featureOutputs[i]));
             const json& raggedOutputJson = j.at("ragged_outputs").at(i);
-            if (raggedOutputJson.at("offsets").at("id").get<uint64_t>() != inputOffsetsId) {
-                throw runtime_error("RMSNorm serialized ragged output must preserve the input row partition.");
+            if (raggedOutputJson.at("offsets").at("id").get<uint64_t>() != inputOffsetsId ||
+                raggedOutputJson.at("batch_size").get<uint64_t>() != raggedInput.getBatchSize() ||
+                raggedOutputJson.at("max_total_values").get<uint64_t>() != raggedInput.getMaxTotalValues() ||
+                (raggedOutputJson.contains("max_values_per_row") &&
+                 (!raggedInput.hasMaxValuesPerRow() ||
+                  raggedOutputJson.at("max_values_per_row").get<uint64_t>() != raggedInput.getMaxValuesPerRow()))) {
+                throw runtime_error("RMSNorm serialized ragged output must preserve the input row partition and capacity metadata.");
             }
         }
     }

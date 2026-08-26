@@ -152,7 +152,10 @@ __device__ __forceinline__ float convolutionValidationTolerance(float expected,
                                                                  uint32_t max_reduction_terms) {
     const DataType compute_type = static_cast<DataType>(compute_dtype);
     constexpr uint32_t kFp32ExactIntegerTerms = 1U << 24;
-    if (compute_type == DataType::FP32 && max_reduction_terms <= kFp32ExactIntegerTerms) {
+    if ((compute_type == DataType::FP32 || compute_type == DataType::TF32) &&
+        max_reduction_terms <= kFp32ExactIntegerTerms) {
+        // The validator's +/-1/16 operands and +/-1/256 products are exactly
+        // representable in both FP32 and TF32, so the integer oracle remains exact.
         return 0.0f;
     }
 
@@ -780,8 +783,8 @@ DeviceConvolutionValidationProblem makeDeviceProblem(const Tensor& lhs,
         !isSupportedValidationDType(output.getDataType())) {
         throw std::runtime_error("Convolution kernel validation received unsupported floating tensor dtype.");
     }
-    if (spec.compute_dtype != DataType::FP16 && spec.compute_dtype != DataType::FP32) {
-        throw std::runtime_error("Convolution kernel validation supports FP16 or FP32 convolution compute.");
+    if (spec.compute_dtype != DataType::FP16 && spec.compute_dtype != DataType::FP32 && spec.compute_dtype != DataType::TF32) {
+        throw std::runtime_error("Convolution kernel validation supports FP16, FP32, or TF32 convolution compute.");
     }
 
     // The CUDA oracle is deliberately a 32-bit implementation.  Validation is a

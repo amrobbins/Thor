@@ -53,6 +53,7 @@ class Convolution2d : public TrainableLayer {
     virtual uint32_t getPaddingLeft() { return static_cast<uint32_t>(spatial.pre_padding_w); }
     virtual uint32_t getPaddingRight() { return static_cast<uint32_t>(spatial.post_padding_w); }
     virtual ConvolutionPaddingMode getPaddingMode() const { return paddingMode; }
+    DataType getComputeDataType() const { return computeDataType; }
 
     std::string getLayerType() const override { return "Convolution2d"; }
     std::string getLayerVersion() const override { return "4.0.0"; }
@@ -181,6 +182,7 @@ class Convolution2d : public TrainableLayer {
     ThorImplementation::ConvolutionSpatial2d spatial;
     ConvolutionPaddingMode paddingMode = ConvolutionPaddingMode::VALID;
     bool hasBias;
+    DataType computeDataType = DataType::FP32;
     std::shared_ptr<Initializer> weightsInitializer;
     std::shared_ptr<Initializer> biasInitializer;
     std::shared_ptr<Activation> activation;
@@ -234,6 +236,8 @@ class Convolution2d::Builder {
             _paddingMode = ConvolutionPaddingMode::VALID;
         if (!_hasBias.has_value())
             _hasBias = false;
+        if (!_computeDataType.has_value())
+            _computeDataType = DataType::FP32;
         if (_weightsInitializer == nullptr)
             _weightsInitializer = Glorot::Builder().build();
         if (_biasesInitializer == nullptr)
@@ -314,6 +318,7 @@ class Convolution2d::Builder {
                                                       static_cast<uint32_t>(convolution2d.spatial.dilation_w));
 
         convolution2d.hasBias = _hasBias.value();
+        convolution2d.computeDataType = _computeDataType.value();
         convolution2d.weightsInitializer = _weightsInitializer->clone();
         convolution2d.biasInitializer = _biasesInitializer->clone();
         if (_activation != nullptr)
@@ -328,6 +333,8 @@ class Convolution2d::Builder {
         convolution2d.biasesOptimizer = _biasesOptimizer;
 
         const DataType convolutionDataType = convolution2d.featureInputs.front().getDataType();
+        if (convolution2d.computeDataType == DataType::TF32 && convolutionDataType != DataType::FP32)
+            throw std::invalid_argument("Convolution2d TF32 compute requires FP32 input/weights/output storage.");
         const DataType weightsDataType = convolutionDataType;
         const uint64_t inputChannels = convolution2d.featureInputs.front().getDimensions()[0];
         if (inputChannels % convolution2d.groups != 0 || convolution2d.numOutputChannels % convolution2d.groups != 0)
@@ -490,6 +497,14 @@ class Convolution2d::Builder {
         return *this;
     }
 
+    virtual Convolution2d::Builder &computeDataType(DataType value) {
+        THOR_THROW_IF_FALSE(!_computeDataType.has_value());
+        if (value != DataType::FP32 && value != DataType::TF32)
+            throw std::invalid_argument("Convolution2d computeDataType must be fp32 or tf32.");
+        _computeDataType = value;
+        return *this;
+    }
+
     virtual Convolution2d::Builder &weightsInitializer(std::shared_ptr<Initializer> &_weightsInitializer) {
         THOR_THROW_IF_FALSE(this->_weightsInitializer == nullptr);
         this->_weightsInitializer = _weightsInitializer->clone();
@@ -642,6 +657,7 @@ class Convolution2d::Builder {
     std::optional<uint32_t> _paddingLeft;
     std::optional<uint32_t> _paddingRight;
     std::optional<bool> _hasBias;
+    std::optional<DataType> _computeDataType;
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasesInitializer;
     std::shared_ptr<Activation> _activation;

@@ -23,7 +23,9 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
+#include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <memory>
 #include <limits>
 
@@ -36,6 +38,29 @@ namespace Impl = ThorImplementation;
 namespace {
 
 Impl::TensorPlacement rmsCpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
+
+std::filesystem::path rmsMakeUniqueTestArchiveDir(const std::string& testName) {
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    std::filesystem::path dir = std::filesystem::temp_directory_path() / (testName + "_" + std::to_string(now));
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    return dir;
+}
+
+template <typename LayerT>
+std::shared_ptr<LayerT> rmsFindOnlyLayerOfType(Api::Network& network) {
+    std::shared_ptr<LayerT> found;
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < network.getNumLayers(); ++i) {
+        std::shared_ptr<LayerT> candidate = std::dynamic_pointer_cast<LayerT>(network.getLayer(i));
+        if (candidate != nullptr) {
+            found = candidate;
+            ++count;
+        }
+    }
+    EXPECT_EQ(count, 1u);
+    return found;
+}
 
 uint64_t rmsTensorNumel(const Impl::Tensor& tensor) {
     uint64_t numel = 1;
@@ -623,6 +648,7 @@ TEST(UtilityApiLayers, RMSNormAcceptsRaggedTensorPreservesPartitionAndUsesPacked
                              .offsetsDataType(DataType::UINT32)
                              .trailingDimensions({hidden})
                              .maxTotalValues(fullRows)
+                             .maxValuesPerRow(17)
                              .batchSize(logicalBatchSize)
                              .build();
 
@@ -636,6 +662,8 @@ TEST(UtilityApiLayers, RMSNormAcceptsRaggedTensorPreservesPartitionAndUsesPacked
     EXPECT_EQ(layer.getNormalizedShape(), (vector<uint64_t>{hidden}));
     EXPECT_EQ(layer.getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{fullRows, hidden}));
     EXPECT_EQ(layer.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
+    ASSERT_TRUE(layer.getRaggedFeatureOutput()->hasMaxValuesPerRow());
+    EXPECT_EQ(layer.getRaggedFeatureOutput()->getMaxValuesPerRow(), 17u);
     EXPECT_EQ(layer.getOutputTensorBytes(logicalBatchSize), layer.getFeatureOutput().value().getTotalSizeInBytes());
 
     const json architecture = layer.architectureJson();
@@ -644,6 +672,8 @@ TEST(UtilityApiLayers, RMSNormAcceptsRaggedTensorPreservesPartitionAndUsesPacked
     ASSERT_EQ(architecture.at("ragged_outputs").size(), 1u);
     EXPECT_EQ(architecture.at("ragged_inputs").at(0).at("offsets").at("id").get<uint64_t>(),
               architecture.at("ragged_outputs").at(0).at("offsets").at("id").get<uint64_t>());
+    EXPECT_EQ(architecture.at("ragged_inputs").at(0).at("max_values_per_row").get<uint64_t>(), 17u);
+    EXPECT_EQ(architecture.at("ragged_outputs").at(0).at("max_values_per_row").get<uint64_t>(), 17u);
 
     Network badNetwork("rms_norm_ragged_reject_packed_row_normalization");
     RaggedTensor badInput = RaggedNetworkInput::Builder()
@@ -657,6 +687,67 @@ TEST(UtilityApiLayers, RMSNormAcceptsRaggedTensorPreservesPartitionAndUsesPacked
                                 .build();
     EXPECT_THROW(RMSNorm::Builder().network(badNetwork).featureInput(badInput).normalizedShape({fullRows, hidden}).build(),
                  std::invalid_argument);
+}
+
+TEST(UtilityApiLayers, RaggedRMSNormArchitectureSaveLoadPreservesCapacityContract) {
+    constexpr uint64_t fullRows = 66;
+    constexpr uint64_t hidden = 4;
+    constexpr uint64_t maxValuesPerRow = 17;
+    constexpr uint32_t logicalBatchSize = 2;
+    const std::string networkName = "ragged_rms_norm_arch_round_trip";
+    std::filesystem::path archiveDir = rmsMakeUniqueTestArchiveDir(networkName);
+
+    try {
+        Network network(networkName);
+        RaggedTensor input = RaggedNetworkInput::Builder()
+                                 .network(network)
+                                 .name("tokens")
+                                 .valuesDataType(DataType::FP32)
+                                 .offsetsDataType(DataType::UINT64)
+                                 .trailingDimensions({hidden})
+                                 .maxTotalValues(fullRows)
+                                 .maxValuesPerRow(maxValuesPerRow)
+                                 .batchSize(logicalBatchSize)
+                                 .build();
+        RMSNorm rmsNorm = RMSNorm::Builder().network(network).featureInput(input).build();
+        ASSERT_TRUE(rmsNorm.getRaggedFeatureOutput().has_value());
+        (void)NetworkOutput::Builder()
+            .network(network)
+            .name("output")
+            .inputTensor(rmsNorm.getRaggedFeatureOutput()->getValues())
+            .dataType(DataType::FP32)
+            .build();
+
+        network.save(archiveDir.string(), true);
+
+        Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+        std::shared_ptr<RMSNorm> loadedRmsNorm = rmsFindOnlyLayerOfType<RMSNorm>(loadedNetwork);
+        ASSERT_NE(loadedRmsNorm, nullptr);
+        ASSERT_TRUE(loadedRmsNorm->getUseRagged());
+        ASSERT_TRUE(loadedRmsNorm->getRaggedFeatureInput().has_value());
+        ASSERT_TRUE(loadedRmsNorm->getRaggedFeatureOutput().has_value());
+        EXPECT_EQ(loadedRmsNorm->getRaggedFeatureInput()->getBatchSize(), logicalBatchSize);
+        EXPECT_EQ(loadedRmsNorm->getRaggedFeatureInput()->getMaxTotalValues(), fullRows);
+        ASSERT_TRUE(loadedRmsNorm->getRaggedFeatureInput()->hasMaxValuesPerRow());
+        EXPECT_EQ(loadedRmsNorm->getRaggedFeatureInput()->getMaxValuesPerRow(), maxValuesPerRow);
+        EXPECT_EQ(loadedRmsNorm->getRaggedFeatureInput()->getOffsetsDataType(), DataType::UINT64);
+        EXPECT_EQ(loadedRmsNorm->getRaggedFeatureOutput()->getValuesDimensions(),
+                  (vector<uint64_t>{fullRows, hidden}));
+        EXPECT_EQ(loadedRmsNorm->getRaggedFeatureOutput()->getOffsets(),
+                  loadedRmsNorm->getRaggedFeatureInput()->getOffsets());
+        ASSERT_TRUE(loadedRmsNorm->getRaggedFeatureOutput()->hasMaxValuesPerRow());
+        EXPECT_EQ(loadedRmsNorm->getRaggedFeatureOutput()->getMaxValuesPerRow(), maxValuesPerRow);
+        const json loadedArchitecture = loadedRmsNorm->architectureJson();
+        EXPECT_EQ(loadedArchitecture.at("ragged_inputs").at(0).at("max_values_per_row").get<uint64_t>(),
+                  maxValuesPerRow);
+        EXPECT_EQ(loadedArchitecture.at("ragged_outputs").at(0).at("max_values_per_row").get<uint64_t>(),
+                  maxValuesPerRow);
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        throw;
+    }
+    std::filesystem::remove_all(archiveDir);
 }
 
 TEST(UtilityApiLayers, RaggedRMSNormBf16PlacesWithFp32Scale) {

@@ -988,7 +988,7 @@ FullyConnected FullyConnected::Builder::build() {
         fullyConnected.outputTensorFromInputTensor[fullyConnected.featureInputs[i]] = out;
         fullyConnected.inputTensorFromOutputTensor[out] = fullyConnected.featureInputs[i];
         if (!fullyConnected.raggedFeatureInputs.empty()) {
-            fullyConnected.raggedFeatureOutputs.emplace_back(out, fullyConnected.raggedFeatureInputs[i].getOffsets());
+            fullyConnected.raggedFeatureOutputs.push_back(fullyConnected.raggedFeatureInputs[i].withValues(out));
         }
     }
     if (fullyConnected.residualInput.has_value()) {
@@ -1418,16 +1418,26 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
         for (uint32_t i = 0; i < fullyConnected.featureInputs.size(); ++i) {
             const json& raggedInputJson = j.at("ragged_inputs").at(i);
             const uint64_t inputOffsetsId = raggedInputJson.at("offsets").at("id").get<uint64_t>();
-            RaggedTensor raggedInput(fullyConnected.featureInputs[i], network->getApiTensorByOriginalId(inputOffsetsId));
+            Tensor inputOffsets = network->getApiTensorByOriginalId(inputOffsetsId);
+            RaggedTensor raggedInput = raggedInputJson.contains("max_values_per_row")
+                ? RaggedTensor(fullyConnected.featureInputs[i],
+                               inputOffsets,
+                               raggedInputJson.at("max_values_per_row").get<uint64_t>())
+                : RaggedTensor(fullyConnected.featureInputs[i], inputOffsets);
             if (raggedInput.getBatchSize() != raggedInputJson.at("batch_size").get<uint64_t>() ||
                 raggedInput.getMaxTotalValues() != raggedInputJson.at("max_total_values").get<uint64_t>()) {
                 throw runtime_error("FullyConnected serialized ragged input metadata does not match reconstructed tensors.");
             }
             fullyConnected.raggedFeatureInputs.push_back(raggedInput);
-            fullyConnected.raggedFeatureOutputs.emplace_back(fullyConnected.featureOutputs[i], raggedInput.getOffsets());
+            fullyConnected.raggedFeatureOutputs.push_back(raggedInput.withValues(fullyConnected.featureOutputs[i]));
             const json& raggedOutputJson = j.at("ragged_outputs").at(i);
-            if (raggedOutputJson.at("offsets").at("id").get<uint64_t>() != inputOffsetsId) {
-                throw runtime_error("FullyConnected serialized ragged output must preserve the input row partition.");
+            if (raggedOutputJson.at("offsets").at("id").get<uint64_t>() != inputOffsetsId ||
+                raggedOutputJson.at("batch_size").get<uint64_t>() != raggedInput.getBatchSize() ||
+                raggedOutputJson.at("max_total_values").get<uint64_t>() != raggedInput.getMaxTotalValues() ||
+                (raggedOutputJson.contains("max_values_per_row") &&
+                 (!raggedInput.hasMaxValuesPerRow() ||
+                  raggedOutputJson.at("max_values_per_row").get<uint64_t>() != raggedInput.getMaxValuesPerRow()))) {
+                throw runtime_error("FullyConnected serialized ragged output must preserve the input row partition and capacity metadata.");
             }
         }
     }
@@ -1445,8 +1455,15 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
             }
             const json& residualJson = j.at("ragged_residual_input");
             const uint64_t offsetsId = residualJson.at("offsets").at("id").get<uint64_t>();
-            RaggedTensor raggedResidual(residualInput.value(), network->getApiTensorByOriginalId(offsetsId));
+            Tensor residualOffsets = network->getApiTensorByOriginalId(offsetsId);
             const RaggedTensor& raggedFeature = fullyConnected.raggedFeatureInputs.front();
+            const std::optional<uint64_t> residualMaxValuesPerRow = residualJson.contains("max_values_per_row")
+                ? std::optional<uint64_t>(residualJson.at("max_values_per_row").get<uint64_t>())
+                : (raggedFeature.hasMaxValuesPerRow() ? std::optional<uint64_t>(raggedFeature.getMaxValuesPerRow())
+                                                      : std::nullopt);
+            RaggedTensor raggedResidual = residualMaxValuesPerRow.has_value()
+                ? RaggedTensor(residualInput.value(), residualOffsets, residualMaxValuesPerRow.value())
+                : RaggedTensor(residualInput.value(), residualOffsets);
             if (raggedResidual.getOffsets() != raggedFeature.getOffsets() ||
                 raggedResidual.getBatchSize() != raggedFeature.getBatchSize() ||
                 raggedResidual.getMaxTotalValues() != raggedFeature.getMaxTotalValues()) {

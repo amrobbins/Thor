@@ -171,7 +171,11 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
         }
     }
 
-    if (isMatmulOp(op) && requested_compute_dtype == DataType::TF32) {
+    if ((isMatmulOp(op) || isConvolutionOp(op)) && requested_compute_dtype == DataType::TF32) {
+        // TF32 is a compute-only token for operations that explicitly expose
+        // reduced FP32 multiply precision. It is deliberately not a generic
+        // fusion/storage dtype, so recognize it before the generic floating
+        // dtype guard below instead of adding it to isSupportedFusionFloatingType().
         return DataType::TF32;
     }
 
@@ -200,6 +204,8 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
         switch (requested_compute_dtype) {
             case DataType::FP16:
                 return DataType::FP16;
+            case DataType::TF32:
+                return DataType::TF32;
             case DataType::FP8_E4M3:
             case DataType::FP8_E5M2:
             case DataType::BF16:

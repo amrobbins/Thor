@@ -211,6 +211,34 @@ void expectUnaryBackwardValues(const std::string& case_name,
 
 }  // namespace
 
+TEST(ExpressionConvenienceOps, ReluLowersToMaxWithZero) {
+    auto x = Expression::input("x");
+
+    auto outputs = Expression::outputs({{"y", x.relu()}}).physicalOutputs();
+
+    const ExprNode& maxNode = outputNode(outputs);
+    ASSERT_EQ(maxNode.op, ExprOp::MAX);
+    ASSERT_NE(maxNode.lhs, UINT32_MAX);
+    ASSERT_NE(maxNode.rhs, UINT32_MAX);
+    EXPECT_EQ(outputs.expr->nodes.at(maxNode.lhs).op, ExprOp::INPUT);
+
+    const ExprNode& zeroNode = outputs.expr->nodes.at(maxNode.rhs);
+    ASSERT_EQ(zeroNode.op, ExprOp::SCALAR_FP);
+    EXPECT_DOUBLE_EQ(zeroNode.scalar_fp, 0.0);
+}
+
+TEST(ExpressionConvenienceOps, ReluBackwardProducesExpectedGradients) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    const std::vector<float> values = {-2.0f, -0.5f, 0.25f, 3.0f};
+    const std::vector<float> upstream = {1.5f, -2.0f, 0.75f, -0.25f};
+    const std::vector<float> expected = {0.0f, 0.0f, 0.75f, -0.25f};
+
+    expectUnaryBackwardValues(
+        "relu", values, upstream, [](const Expression& x) { return x.relu(); }, expected, 1.0e-6f, stream);
+}
+
 TEST(ExpressionConvenienceOps, ClampWithScalarBoundsLowersToMaxThenMin) {
     auto x = Expression::input("x");
 

@@ -1,11 +1,14 @@
 #include "DeepLearning/Api/Layers/Learning/Convolution1d.h"
 
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Expression/RaggedExpression.h"
 
 #include <map>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -71,6 +74,7 @@ ThorImplementation::DynamicExpression buildConvolution1dExpression(
     bool hasBias,
     uint32_t groups,
     ThorImplementation::ConvolutionSpatial1d spatial,
+    ThorImplementation::DataType computeDataType,
     ThorImplementation::TensorPlacement placement,
     shared_ptr<Thor::Activation> activation,
     optional<ThorImplementation::Expression> epilogue,
@@ -93,6 +97,7 @@ ThorImplementation::DynamicExpression buildConvolution1dExpression(
                              [hasBias,
                               groups,
                               spatial,
+                              computeDataType,
                               placement,
                               activation = std::move(activation),
                               epilogue,
@@ -140,7 +145,7 @@ ThorImplementation::DynamicExpression buildConvolution1dExpression(
         const ImplDataType weightsDType = wTensor.getDescriptor().getDataType();
         auto fin = Expression::input("feature_input");
         auto w = Expression::input("weights", weightsDType, weightsDType);
-        Expression fout = Expression::conv1d(fin, w, spatial, ImplDataType::FP32, featureOutputDType, groups);
+        Expression fout = Expression::conv1d(fin, w, spatial, computeDataType, featureOutputDType, groups);
 
         if (hasBias) {
             const Tensor &bTensor = inputs.at("biases");
@@ -186,6 +191,53 @@ ThorImplementation::DynamicExpression buildConvolution1dExpression(
     });
 }
 
+bool supportedRaggedConvolutionStorageType(ThorImplementation::DataType dataType) {
+    using ThorImplementation::DataType;
+    return dataType == DataType::FP16 || dataType == DataType::BF16 || dataType == DataType::FP32;
+}
+
+ThorImplementation::DynamicExpression buildRaggedConvolution1dExpression(
+    bool hasBias,
+    uint32_t groups,
+    uint32_t filterWidth,
+    uint32_t dilation,
+    DataType computeDataType,
+    const RaggedTensor &featureInput,
+    const RaggedTensor &featureOutput,
+    shared_ptr<Thor::Activation> activation) {
+    using ThorImplementation::DataType;
+    using ThorImplementation::DynamicExpression;
+    using ThorImplementation::Expression;
+    using ThorImplementation::ExpressionDefinition;
+    using ThorImplementation::RaggedExpression;
+
+    const DataType storageDType = featureInput.getValuesDataType();
+    RaggedExpression input =
+        RaggedExpression::input("feature_input", "feature_offsets", featureInput.getDescriptor());
+    Expression filter = Expression::input("weights", storageDType, storageDType);
+    RaggedExpression output = input.causalConv1d(filter,
+                                                  featureOutput.getTrailingDimensions().front(),
+                                                  filterWidth,
+                                                  dilation,
+                                                  computeDataType,
+                                                  storageDType,
+                                                  groups);
+    if (hasBias) {
+        Expression bias = Expression::input("biases", storageDType, storageDType);
+        output = output.mapValues([&](const Expression &values) { return values + bias; });
+    }
+    if (activation != nullptr)
+        output = activation->toRaggedExpression(output);
+
+    if (output.getDescriptor() != featureOutput.getDescriptor()) {
+        throw runtime_error("Ragged Convolution1d expression output descriptor does not match its API output.");
+    }
+
+    ExpressionDefinition definition =
+        ExpressionDefinition::fromOutputs(Expression::outputs({{"feature_output", output.getValues()}}));
+    return DynamicExpression::fromExpressionDefinition(definition);
+}
+
 }  // namespace
 
 Convolution1d Convolution1d::Builder::build() {
@@ -204,12 +256,42 @@ Convolution1d Convolution1d::Builder::build() {
         _paddingMode = Convolution1dPaddingMode::VALID;
     if (!_hasBias.has_value())
         _hasBias = false;
+    if (!_computeDataType.has_value())
+        _computeDataType = DataType::FP32;
     if (_weightsInitializer == nullptr)
         _weightsInitializer = Glorot::Builder().build();
     if (_biasesInitializer == nullptr)
         _biasesInitializer = Glorot::Builder().build();
     if (_activation == nullptr && !_activationExplicitlyRemoved)
         _activation = Gelu::Builder().build();
+
+    const bool useRagged = _raggedFeatureInput.has_value();
+    if (useRagged) {
+        const RaggedTensor &ragged = _raggedFeatureInput.value();
+        if (!ragged.hasMaxValuesPerRow()) {
+            throw invalid_argument(
+                "Convolution1d(RaggedTensor) requires max_values_per_row so placement can prebuild the finite causal Conv1D width family.");
+        }
+        if (ragged.getValuesDimensions().size() != 2 || ragged.getTrailingDimensions().size() != 1) {
+            throw invalid_argument(
+                "Convolution1d(RaggedTensor) currently requires packed values shaped [max_total_values, channels].");
+        }
+        if (_stride.value() != 1)
+            throw invalid_argument("Convolution1d(RaggedTensor) currently supports only stride=1.");
+        if (_paddingMode.value() != Convolution1dPaddingMode::CAUSAL)
+            throw invalid_argument("Convolution1d(RaggedTensor) currently supports only causal padding.");
+        if (_epilogue.has_value() || !_epilogueInputBindings.empty()) {
+            throw invalid_argument(
+                "Convolution1d(RaggedTensor) does not support the dense Convolution1d custom epilogue surface.");
+        }
+        if (_activation != nullptr && !_activation->supportsRaggedStandalone()) {
+            throw invalid_argument("Convolution1d(RaggedTensor) requires a ragged-compatible expression-backed activation.");
+        }
+        if (!supportedRaggedConvolutionStorageType(ragged.getValuesDataType())) {
+            throw invalid_argument(
+                "Convolution1d(RaggedTensor) currently supports FP16, BF16, and FP32 values/weights/output storage only.");
+        }
+    }
 
     if (!_epilogueInputBindings.empty() && _featureInputs.size() != 1)
         throw invalid_argument("Convolution1d epilogue auxiliary inputs currently require exactly one feature input.");
@@ -220,21 +302,29 @@ Convolution1d Convolution1d::Builder::build() {
 
     Convolution1d convolution1d(_epilogue, _epilogueInputBindings);
     convolution1d.featureInputs = _featureInputs;
+    convolution1d.raggedFeatureInput = _raggedFeatureInput;
     convolution1d.numOutputChannels = _numOutputChannels.value();
     convolution1d.filterWidth = _filterWidth.value();
     convolution1d.groups = _groups.value();
     convolution1d.paddingMode = _paddingMode.value();
     const uint32_t explicitLeft = _paddingLeft.value_or(0);
     const uint32_t explicitRight = _paddingRight.value_or(0);
-    const uint32_t inputWidth = static_cast<uint32_t>(_featureInputs.front().getDimensions()[1]);
-    convolution1d.spatial = resolveSpatial(convolution1d.paddingMode,
-                                           inputWidth,
-                                           convolution1d.filterWidth,
-                                           _stride.value(),
-                                           _dilation.value(),
-                                           explicitLeft,
-                                           explicitRight);
-    const uint32_t outputWidth = computeOutputWidth(inputWidth, convolution1d.filterWidth, convolution1d.spatial);
+
+    uint32_t outputWidth = 0;
+    if (useRagged) {
+        convolution1d.spatial = ThorImplementation::ConvolutionSpatial1d::causal(
+            convolution1d.filterWidth, 1, static_cast<int32_t>(_dilation.value()));
+    } else {
+        const uint32_t inputWidth = static_cast<uint32_t>(_featureInputs.front().getDimensions()[1]);
+        convolution1d.spatial = resolveSpatial(convolution1d.paddingMode,
+                                               inputWidth,
+                                               convolution1d.filterWidth,
+                                               _stride.value(),
+                                               _dilation.value(),
+                                               explicitLeft,
+                                               explicitRight);
+        outputWidth = computeOutputWidth(inputWidth, convolution1d.filterWidth, convolution1d.spatial);
+    }
 
     convolution1d.hasBias = _hasBias.value();
     convolution1d.weightsInitializer = _weightsInitializer->clone();
@@ -245,7 +335,11 @@ Convolution1d Convolution1d::Builder::build() {
     convolution1d.biasesOptimizer = _biasesOptimizer;
 
     const DataType dataType = convolution1d.featureInputs.front().getDataType();
-    const uint64_t inputChannels = convolution1d.featureInputs.front().getDimensions()[0];
+    convolution1d.computeDataType = _computeDataType.value();
+    if (convolution1d.computeDataType == DataType::TF32 && dataType != DataType::FP32)
+        throw invalid_argument("Convolution1d TF32 compute requires FP32 input/weights/output storage.");
+    const uint64_t inputChannels = useRagged ? convolution1d.raggedFeatureInput->getTrailingDimensions().front()
+                                             : convolution1d.featureInputs.front().getDimensions()[0];
     if (inputChannels % convolution1d.groups != 0 || convolution1d.numOutputChannels % convolution1d.groups != 0)
         throw invalid_argument("Convolution1d requires input and output channels divisible by groups.");
 
@@ -272,10 +366,19 @@ Convolution1d Convolution1d::Builder::build() {
     }
 
     convolution1d.initialized = true;
-    for (uint32_t i = 0; i < convolution1d.featureInputs.size(); ++i) {
-        convolution1d.featureOutputs.push_back(Tensor(dataType, {convolution1d.numOutputChannels, outputWidth}));
-        convolution1d.outputTensorFromInputTensor[convolution1d.featureInputs[i]] = convolution1d.featureOutputs[i];
-        convolution1d.inputTensorFromOutputTensor[convolution1d.featureOutputs[i]] = convolution1d.featureInputs[i];
+    if (useRagged) {
+        const RaggedTensor &raggedInput = convolution1d.raggedFeatureInput.value();
+        Tensor outputValues(dataType, {raggedInput.getMaxTotalValues(), convolution1d.numOutputChannels});
+        convolution1d.featureOutputs.push_back(outputValues);
+        convolution1d.raggedFeatureOutput = raggedInput.withValues(outputValues);
+        convolution1d.outputTensorFromInputTensor[raggedInput.getValues()] = outputValues;
+        convolution1d.inputTensorFromOutputTensor[outputValues] = raggedInput.getValues();
+    } else {
+        for (uint32_t i = 0; i < convolution1d.featureInputs.size(); ++i) {
+            convolution1d.featureOutputs.push_back(Tensor(dataType, {convolution1d.numOutputChannels, outputWidth}));
+            convolution1d.outputTensorFromInputTensor[convolution1d.featureInputs[i]] = convolution1d.featureOutputs[i];
+            convolution1d.inputTensorFromOutputTensor[convolution1d.featureOutputs[i]] = convolution1d.featureInputs[i];
+        }
     }
     for (const auto &[name, tensor] : convolution1d.epilogueInputBindings) {
         (void)name;
@@ -312,6 +415,9 @@ vector<string> Convolution1d::epilogueAuxInputNames() const {
 }
 
 vector<Tensor> Convolution1d::getFeatureInputs() const {
+    if (raggedFeatureInput.has_value())
+        return {raggedFeatureInput->getValues(), raggedFeatureInput->getOffsets()};
+
     vector<Tensor> inputs = featureInputs;
     inputs.reserve(inputs.size() + epilogueInputBindings.size());
     for (const auto &[name, tensor] : epilogueInputBindings) {
@@ -323,6 +429,14 @@ vector<Tensor> Convolution1d::getFeatureInputs() const {
 
 vector<uint32_t> Convolution1d::inputPortIndicesForTensor(Tensor tensor) const {
     vector<uint32_t> ports;
+    if (raggedFeatureInput.has_value()) {
+        if (tensor.getOriginalId() == raggedFeatureInput->getValues().getOriginalId())
+            ports.push_back(0);
+        if (tensor.getOriginalId() == raggedFeatureInput->getOffsets().getOriginalId())
+            ports.push_back(1);
+        return ports;
+    }
+
     if (!featureInputs.empty() && tensor.getOriginalId() == featureInputs[0].getOriginalId())
         ports.push_back(0);
     for (uint32_t i = 0; i < epilogueInputBindings.size(); ++i) {
@@ -340,6 +454,15 @@ Tensor Convolution1d::getFeatureOutput(Tensor inputTensor) const {
 }
 
 vector<Tensor> Convolution1d::getOutputsFromInput(Tensor inputTensor) {
+    if (raggedFeatureInput.has_value()) {
+        if (inputPortIndicesForTensor(inputTensor).empty())
+            throw runtime_error("Convolution1d received an unknown ragged input tensor.");
+        if (emittedFeatureOutputAfterAllInputsConnected || connectedInputPortIndices.size() != 2)
+            return {};
+        emittedFeatureOutputAfterAllInputsConnected = true;
+        return {featureOutputs[0]};
+    }
+
     if (epilogueInputBindings.empty())
         return {getFeatureOutput(inputTensor)};
     (void)getFeatureOutput(inputTensor);
@@ -353,6 +476,16 @@ vector<Tensor> Convolution1d::getOutputsFromInput(Tensor inputTensor) {
 }
 
 void Convolution1d::informThatInputConnectionMade(Tensor inputTensor) {
+    if (raggedFeatureInput.has_value()) {
+        const vector<uint32_t> ports = inputPortIndicesForTensor(inputTensor);
+        if (ports.empty())
+            throw runtime_error("Convolution1d informed of connection for unknown ragged input tensor.");
+        uint32_t &cursor = nextTraversalInputCursorByTensorOriginalId[inputTensor.getOriginalId()];
+        connectedInputPortIndices.insert(ports[cursor % ports.size()]);
+        ++cursor;
+        return;
+    }
+
     if (epilogueInputBindings.empty())
         return;
     const vector<uint32_t> ports = inputPortIndicesForTensor(inputTensor);
@@ -366,6 +499,7 @@ void Convolution1d::resetGraphTraversalState() {
     connectedInputPortIndices.clear();
     emittedFeatureOutputAfterAllInputsConnected = false;
     nextInputConnectionCursorByTensorOriginalId.clear();
+    nextTraversalInputCursorByTensorOriginalId.clear();
 }
 
 int Convolution1d::getConnectionType(Tensor connectingTensor) const {
@@ -391,7 +525,10 @@ shared_ptr<ThorImplementation::Layer> Convolution1d::stamp(ThorImplementation::T
     (void)drivingLayer;
     (void)drivingApiLayer;
     THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+    if (raggedFeatureInput.has_value())
+        THOR_THROW_IF_FALSE(!inputPortIndicesForTensor(connectingApiTensor).empty());
+    else
+        THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
 
     vector<shared_ptr<ThorImplementation::PhysicalParameter>> physicalParameters;
     for (const auto &parameter : getParameters()) {
@@ -399,8 +536,37 @@ shared_ptr<ThorImplementation::Layer> Convolution1d::stamp(ThorImplementation::T
         physicalParameters.push_back(parameter->stamp());
     }
 
+    if (raggedFeatureInput.has_value()) {
+        THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
+        const uint64_t inputElementsPerValue = raggedFeatureInput->getTrailingDimensions().front();
+        const uint64_t outputElementsPerValue = raggedFeatureOutput->getTrailingDimensions().front();
+        auto physicalConvolution1d = make_shared<ThorImplementation::RaggedCustomLayer>(
+            buildRaggedConvolution1dExpression(hasBias,
+                                               groups,
+                                               filterWidth,
+                                               static_cast<uint32_t>(spatial.dilation),
+                                               computeDataType,
+                                               raggedFeatureInput.value(),
+                                               raggedFeatureOutput.value(),
+                                               activation),
+            vector<string>{"feature_input", "feature_offsets"},
+            vector<string>{"feature_output"},
+            placement,
+            physicalParameters,
+            inferenceOnly,
+            raggedFeatureInput->getMaxTotalValues(),
+            vector<uint64_t>{inputElementsPerValue},
+            vector<uint64_t>{outputElementsPerValue},
+            vector<uint32_t>{0},
+            1,
+            getId());
+        physicalConvolution1d->setLayerName(getLayerType() + "#" + to_string(getId()));
+        return physicalConvolution1d;
+    }
+
     auto physicalConvolution1d = make_shared<ThorImplementation::CustomLayer>(
-        buildConvolution1dExpression(hasBias, groups, spatial, placement, activation, epilogue, epilogueAuxInputNames()),
+        buildConvolution1dExpression(
+            hasBias, groups, spatial, computeDataType, placement, activation, epilogue, epilogueAuxInputNames()),
         [&]() {
             vector<string> inputNames = {"feature_input"};
             const vector<string> auxNames = epilogueAuxInputNames();
@@ -432,7 +598,14 @@ json Convolution1d::architectureJson() const {
     j["num_output_channels"] = numOutputChannels;
     j["groups"] = groups;
     j["has_bias"] = hasBias;
+    j["compute_data_type"] = computeDataType;
     j["activation"] = activation != nullptr ? activation->architectureJson() : json(nullptr);
+    j["use_ragged"] = raggedFeatureInput.has_value();
+    if (raggedFeatureInput.has_value()) {
+        THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
+        j["ragged_input"] = raggedFeatureInput->architectureJson();
+        j["ragged_output"] = raggedFeatureOutput->architectureJson();
+    }
 
     if (epilogue.has_value()) {
         if (!serializableEpilogue.has_value())
@@ -471,12 +644,14 @@ json Convolution1d::serialize(thor_file::TarWriter &archiveWriter,
 }
 
 void Convolution1d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader, const json &j, Network *network) {
-    if (j.at("version").get<string>() != "2.0.0")
+    if (j.at("version").get<string>() != "1.0.0")
         throw runtime_error("Unsupported version in Convolution1d::deserialize: " + j.at("version").get<string>());
     if (j.at("layer_type").get<string>() != "convolution_1d")
         throw runtime_error("Layer type mismatch in Convolution1d::deserialize: " + j.at("layer_type").get<string>());
     if (j.at("data_layout").get<string>() != "NCW")
         throw runtime_error("Convolution1d only supports serialized NCW data_layout, got " + j.at("data_layout").get<string>());
+
+    const bool useRagged = j.at("use_ragged").get<bool>();
 
     vector<pair<string, Tensor>> epilogueInputBindings;
     if (j.contains("epilogue_inputs")) {
@@ -487,6 +662,9 @@ void Convolution1d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
             epilogueInputBindings.emplace_back(inputName, network->getApiTensorByOriginalId(originalTensorId));
         }
     }
+    if (useRagged && !epilogueInputBindings.empty())
+        throw runtime_error("Ragged Convolution1d archives cannot contain dense custom epilogue inputs.");
+
     vector<string> auxInputNames;
     for (const auto &[name, tensor] : epilogueInputBindings) {
         (void)tensor;
@@ -501,12 +679,17 @@ void Convolution1d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
     } else if (!epilogueInputBindings.empty()) {
         throw runtime_error("Convolution1d serialized epilogue_inputs require a non-null epilogue expression.");
     }
+    if (useRagged && epilogue.has_value())
+        throw runtime_error("Ragged Convolution1d archives cannot contain the dense custom epilogue surface.");
 
     Convolution1d convolution1d(epilogue, epilogueInputBindings);
     convolution1d.filterWidth = j.at("filter_width").get<uint32_t>();
     convolution1d.numOutputChannels = j.at("num_output_channels").get<uint32_t>();
     convolution1d.groups = j.at("groups").get<uint32_t>();
     convolution1d.hasBias = j.at("has_bias").get<bool>();
+    convolution1d.computeDataType = j.at("compute_data_type").get<DataType>();
+    if (convolution1d.computeDataType != DataType::FP32 && convolution1d.computeDataType != DataType::TF32)
+        throw runtime_error("Convolution1d serialized compute_data_type must be fp32 or tf32.");
     if (convolution1d.filterWidth == 0 || convolution1d.numOutputChannels == 0 || convolution1d.groups == 0)
         throw runtime_error("Convolution1d serialized filter_width, num_output_channels, and groups must be positive.");
     convolution1d.paddingMode = paddingModeFromName(j.at("padding_mode").get<string>());
@@ -521,53 +704,149 @@ void Convolution1d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
 
     if (j.contains("activation") && !j.at("activation").is_null())
         convolution1d.activation = Activation::deserializeTemplate(j.at("activation"));
+    if (useRagged && convolution1d.activation != nullptr && !convolution1d.activation->supportsRaggedStandalone())
+        throw runtime_error("Ragged Convolution1d serialized activation is not ragged-compatible.");
 
     for (const json &inputJson : j.at("inputs")) {
         const uint64_t originalTensorId = inputJson.at("id").get<uint64_t>();
         convolution1d.featureInputs.push_back(network->getApiTensorByOriginalId(originalTensorId));
-        convolution1d.standaloneLayerFeatureInputs.push_back(convolution1d.featureInputs.back());
     }
     if (convolution1d.featureInputs.size() != 1)
         throw runtime_error("Convolution1d deserialize expected exactly one feature input.");
-    if (convolution1d.featureInputs.front().getDimensions().size() != 2 ||
-        convolution1d.featureInputs.front().getDimensions()[0] == 0 ||
-        convolution1d.featureInputs.front().getDimensions()[1] == 0) {
-        throw runtime_error("Convolution1d serialized feature input must be a non-empty CW tensor.");
-    }
-    if (convolution1d.featureInputs.front().getDimensions()[0] % convolution1d.groups != 0 ||
-        convolution1d.numOutputChannels % convolution1d.groups != 0)
-        throw runtime_error("Convolution1d serialized grouped channel geometry is invalid.");
+    if (convolution1d.computeDataType == DataType::TF32 && convolution1d.featureInputs.front().getDataType() != DataType::FP32)
+        throw runtime_error("Convolution1d serialized TF32 compute requires FP32 input/weights/output storage.");
 
-    const auto expectedSpatial = resolveSpatial(convolution1d.paddingMode,
-                                                static_cast<uint32_t>(convolution1d.featureInputs.front().getDimensions()[1]),
-                                                convolution1d.filterWidth,
-                                                static_cast<uint32_t>(convolution1d.spatial.stride),
-                                                static_cast<uint32_t>(convolution1d.spatial.dilation),
-                                                static_cast<uint32_t>(convolution1d.spatial.pre_padding),
-                                                static_cast<uint32_t>(convolution1d.spatial.post_padding));
-    if (expectedSpatial.pre_padding != convolution1d.spatial.pre_padding ||
-        expectedSpatial.post_padding != convolution1d.spatial.post_padding) {
-        throw runtime_error("Convolution1d serialized padding does not match its padding mode, input shape, stride, dilation, and filter.");
-    }
+    for (const json &outputJson : j.at("outputs"))
+        convolution1d.featureOutputs.push_back(Tensor::deserialize(outputJson, archiveReader.get()));
+    if (convolution1d.featureOutputs.size() != 1)
+        throw runtime_error("Convolution1d deserialize expected exactly one feature output.");
 
-    for (const json &outputJson : j.at("outputs")) {
-        Tensor output = Tensor::deserialize(outputJson, archiveReader.get());
-        convolution1d.featureOutputs.push_back(output);
-        convolution1d.standaloneLayerFeatureOutputs.push_back(output);
-    }
-    if (convolution1d.featureInputs.size() != convolution1d.featureOutputs.size())
-        throw runtime_error("Convolution1d deserialize expected equal numbers of inputs and outputs.");
+    if (useRagged) {
+        if (!j.contains("ragged_input") || !j.at("ragged_input").is_object() ||
+            !j.contains("ragged_output") || !j.at("ragged_output").is_object()) {
+            throw runtime_error("Ragged Convolution1d 1.0.0 requires ragged_input and ragged_output metadata.");
+        }
+        const json &raggedInputJson = j.at("ragged_input");
+        const json &raggedOutputJson = j.at("ragged_output");
+        if (raggedInputJson.at("version").get<string>() != "1.1.0" ||
+            raggedOutputJson.at("version").get<string>() != "1.1.0") {
+            throw runtime_error("Ragged Convolution1d 1.0.0 requires RaggedTensor 1.1.0 metadata.");
+        }
+        if (!raggedInputJson.contains("max_values_per_row") || !raggedOutputJson.contains("max_values_per_row")) {
+            throw runtime_error("Ragged Convolution1d 1.0.0 requires max_values_per_row on both input and output metadata.");
+        }
+        if (raggedInputJson.at("ragged_rank").get<uint32_t>() != 1 ||
+            raggedOutputJson.at("ragged_rank").get<uint32_t>() != 1) {
+            throw runtime_error("Ragged Convolution1d 1.0.0 requires ragged_rank=1.");
+        }
+        if (convolution1d.paddingMode != Convolution1dPaddingMode::CAUSAL || convolution1d.spatial.stride != 1) {
+            throw runtime_error("Ragged Convolution1d 1.0.0 supports only causal stride-1 geometry.");
+        }
+        const ThorImplementation::ConvolutionSpatial1d expectedSpatial = ThorImplementation::ConvolutionSpatial1d::causal(
+            convolution1d.filterWidth, 1, convolution1d.spatial.dilation);
+        if (expectedSpatial.pre_padding != convolution1d.spatial.pre_padding ||
+            expectedSpatial.post_padding != convolution1d.spatial.post_padding) {
+            throw runtime_error("Ragged Convolution1d serialized padding does not match causal geometry.");
+        }
 
-    const uint32_t expectedOutputWidth = Builder::computeOutputWidth(
-        static_cast<uint32_t>(convolution1d.featureInputs.front().getDimensions()[1]), convolution1d.filterWidth, convolution1d.spatial);
-    for (uint32_t i = 0; i < convolution1d.featureInputs.size(); ++i) {
-        if (convolution1d.featureInputs[i].getDimensions().size() != 2 || convolution1d.featureOutputs[i].getDimensions().size() != 2 ||
-            convolution1d.featureOutputs[i].getDimensions()[0] != convolution1d.numOutputChannels ||
-            convolution1d.featureOutputs[i].getDimensions()[1] != expectedOutputWidth) {
+        const auto validateTensorMetadata = [](const json &tensorJson, const Tensor &tensor, const string &fieldName) {
+            if (tensorJson.at("version").get<string>() != "1.0.0" ||
+                tensorJson.at("id").get<uint64_t>() != tensor.getOriginalId() ||
+                tensorJson.at("dimensions").get<vector<uint64_t>>() != tensor.getDimensions() ||
+                tensorJson.at("data_type").get<DataType>() != tensor.getDataType()) {
+                throw runtime_error("Ragged Convolution1d serialized " + fieldName + " tensor metadata is inconsistent.");
+            }
+        };
+
+        const uint64_t serializedInputValuesId = raggedInputJson.at("values").at("id").get<uint64_t>();
+        const uint64_t serializedOutputValuesId = raggedOutputJson.at("values").at("id").get<uint64_t>();
+        if (serializedInputValuesId != j.at("inputs").at(0).at("id").get<uint64_t>() ||
+            serializedOutputValuesId != j.at("outputs").at(0).at("id").get<uint64_t>()) {
+            throw runtime_error("Ragged Convolution1d serialized ragged values must match its primary input/output tensors.");
+        }
+        validateTensorMetadata(raggedInputJson.at("values"), convolution1d.featureInputs.front(), "input values");
+        validateTensorMetadata(raggedOutputJson.at("values"), convolution1d.featureOutputs.front(), "output values");
+
+        const uint64_t inputOffsetsId = raggedInputJson.at("offsets").at("id").get<uint64_t>();
+        const uint64_t outputOffsetsId = raggedOutputJson.at("offsets").at("id").get<uint64_t>();
+        if (inputOffsetsId != outputOffsetsId)
+            throw runtime_error("Ragged Convolution1d serialized output must preserve the exact input offsets tensor.");
+        Tensor inputOffsets = network->getApiTensorByOriginalId(inputOffsetsId);
+        validateTensorMetadata(raggedInputJson.at("offsets"), inputOffsets, "input offsets");
+        validateTensorMetadata(raggedOutputJson.at("offsets"), inputOffsets, "output offsets");
+
+        const uint64_t inputMaxValuesPerRow = raggedInputJson.at("max_values_per_row").get<uint64_t>();
+        const uint64_t outputMaxValuesPerRow = raggedOutputJson.at("max_values_per_row").get<uint64_t>();
+        if (inputMaxValuesPerRow == 0 || outputMaxValuesPerRow != inputMaxValuesPerRow)
+            throw runtime_error("Ragged Convolution1d serialized output must preserve max_values_per_row exactly.");
+
+        RaggedTensor raggedInput(convolution1d.featureInputs.front(), inputOffsets, inputMaxValuesPerRow);
+        if (raggedInput.getBatchSize() != raggedInputJson.at("batch_size").get<uint64_t>() ||
+            raggedInput.getMaxTotalValues() != raggedInputJson.at("max_total_values").get<uint64_t>()) {
+            throw runtime_error("Ragged Convolution1d serialized input metadata does not match reconstructed tensors.");
+        }
+        if (raggedInput.getValuesDimensions().size() != 2 || raggedInput.getTrailingDimensions().size() != 1 ||
+            raggedInput.getTrailingDimensions().front() == 0) {
+            throw runtime_error("Ragged Convolution1d serialized input values must be [max_total_values, channels].");
+        }
+        if (!supportedRaggedConvolutionStorageType(raggedInput.getValuesDataType()))
+            throw runtime_error("Ragged Convolution1d serialized input storage must be FP16, BF16, or FP32.");
+
+        const uint64_t inputChannels = raggedInput.getTrailingDimensions().front();
+        if (inputChannels % convolution1d.groups != 0 || convolution1d.numOutputChannels % convolution1d.groups != 0)
+            throw runtime_error("Ragged Convolution1d serialized grouped channel geometry is invalid.");
+
+        Tensor outputValues = convolution1d.featureOutputs.front();
+        if (outputValues.getDataType() != raggedInput.getValuesDataType() ||
+            outputValues.getDimensions() != vector<uint64_t>{raggedInput.getMaxTotalValues(), convolution1d.numOutputChannels}) {
+            throw runtime_error("Ragged Convolution1d serialized output values descriptor is inconsistent with its input/capacity geometry.");
+        }
+        RaggedTensor raggedOutput = raggedInput.withValues(outputValues);
+        if (raggedOutputJson.at("batch_size").get<uint64_t>() != raggedOutput.getBatchSize() ||
+            raggedOutputJson.at("max_total_values").get<uint64_t>() != raggedOutput.getMaxTotalValues() ||
+            outputMaxValuesPerRow != raggedOutput.getMaxValuesPerRow()) {
+            throw runtime_error("Ragged Convolution1d serialized output metadata does not match the reconstructed output.");
+        }
+
+        convolution1d.raggedFeatureInput = raggedInput;
+        convolution1d.raggedFeatureOutput = raggedOutput;
+        convolution1d.outputTensorFromInputTensor[raggedInput.getValues()] = outputValues;
+        convolution1d.inputTensorFromOutputTensor[outputValues] = raggedInput.getValues();
+    } else {
+        if (j.contains("ragged_input") || j.contains("ragged_output"))
+            throw runtime_error("Dense Convolution1d 1.0.0 archives cannot contain ragged_input/ragged_output metadata.");
+        if (convolution1d.featureInputs.front().getDimensions().size() != 2 ||
+            convolution1d.featureInputs.front().getDimensions()[0] == 0 ||
+            convolution1d.featureInputs.front().getDimensions()[1] == 0) {
+            throw runtime_error("Convolution1d serialized feature input must be a non-empty CW tensor.");
+        }
+        if (convolution1d.featureInputs.front().getDimensions()[0] % convolution1d.groups != 0 ||
+            convolution1d.numOutputChannels % convolution1d.groups != 0)
+            throw runtime_error("Convolution1d serialized grouped channel geometry is invalid.");
+
+        const auto expectedSpatial = resolveSpatial(convolution1d.paddingMode,
+                                                    static_cast<uint32_t>(convolution1d.featureInputs.front().getDimensions()[1]),
+                                                    convolution1d.filterWidth,
+                                                    static_cast<uint32_t>(convolution1d.spatial.stride),
+                                                    static_cast<uint32_t>(convolution1d.spatial.dilation),
+                                                    static_cast<uint32_t>(convolution1d.spatial.pre_padding),
+                                                    static_cast<uint32_t>(convolution1d.spatial.post_padding));
+        if (expectedSpatial.pre_padding != convolution1d.spatial.pre_padding ||
+            expectedSpatial.post_padding != convolution1d.spatial.post_padding) {
+            throw runtime_error("Convolution1d serialized padding does not match its padding mode, input shape, stride, dilation, and filter.");
+        }
+
+        const uint32_t expectedOutputWidth = Builder::computeOutputWidth(
+            static_cast<uint32_t>(convolution1d.featureInputs.front().getDimensions()[1]),
+            convolution1d.filterWidth,
+            convolution1d.spatial);
+        if (convolution1d.featureOutputs.front().getDimensions().size() != 2 ||
+            convolution1d.featureOutputs.front().getDimensions()[0] != convolution1d.numOutputChannels ||
+            convolution1d.featureOutputs.front().getDimensions()[1] != expectedOutputWidth) {
             throw runtime_error("Convolution1d serialized input/output shape is inconsistent with its convolution geometry.");
         }
-        convolution1d.outputTensorFromInputTensor[convolution1d.featureInputs[i]] = convolution1d.featureOutputs[i];
-        convolution1d.inputTensorFromOutputTensor[convolution1d.featureOutputs[i]] = convolution1d.featureInputs[i];
+        convolution1d.outputTensorFromInputTensor[convolution1d.featureInputs.front()] = convolution1d.featureOutputs.front();
+        convolution1d.inputTensorFromOutputTensor[convolution1d.featureOutputs.front()] = convolution1d.featureInputs.front();
     }
 
     if (!convolution1d.epilogueInputBindings.empty()) {
@@ -597,6 +876,8 @@ void Convolution1d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
     if (convolution1d.hasBias && !convolution1d.hasParameter("biases"))
         throw runtime_error("Convolution1d deserialize did not find required biases parameter.");
 
+    convolution1d.standaloneLayerFeatureInputs = convolution1d.featureInputs;
+    convolution1d.standaloneLayerFeatureOutputs = convolution1d.featureOutputs;
     convolution1d.initialized = true;
     convolution1d.addToNetwork(network);
 }

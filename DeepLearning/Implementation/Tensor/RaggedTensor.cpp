@@ -7,7 +7,7 @@
 namespace ThorImplementation {
 namespace {
 
-RowPartitionRuntime makeRowPartitionRuntime(const Tensor &values, const Tensor &offsets) {
+RowPartitionRuntime makeRowPartitionRuntime(const Tensor &values, const Tensor &offsets, uint64_t maxValuesPerRow = 0) {
     THOR_THROW_IF_FALSE(values.isInitialized());
     THOR_THROW_IF_FALSE(offsets.isInitialized());
     THOR_THROW_IF_FALSE(values.getPlacement() == offsets.getPlacement());
@@ -21,13 +21,23 @@ RowPartitionRuntime makeRowPartitionRuntime(const Tensor &values, const Tensor &
 
     const uint64_t batchSize = offsetsDescriptor.getDimensions()[0] - 1;
     const uint64_t maxTotalValues = valuesDescriptor.getDimensions()[0];
-    return RowPartitionRuntime(offsets, RowPartitionDescriptor(batchSize, maxTotalValues, offsetsDescriptor.getDataType()));
+    THOR_THROW_IF_FALSE(maxValuesPerRow == 0 || maxValuesPerRow <= maxTotalValues);
+    return RowPartitionRuntime(
+        offsets, RowPartitionDescriptor(batchSize, maxTotalValues, offsetsDescriptor.getDataType(), maxValuesPerRow));
+}
+
+RowPartitionRuntime makeBoundedRowPartitionRuntime(const Tensor& values, const Tensor& offsets, uint64_t maxValuesPerRow) {
+    THOR_THROW_IF_FALSE(maxValuesPerRow > 0);
+    return makeRowPartitionRuntime(values, offsets, maxValuesPerRow);
 }
 
 }  // namespace
 
 RaggedTensor::RaggedTensor(Tensor values, Tensor offsets)
     : RaggedTensor(values, makeRowPartitionRuntime(values, offsets)) {}
+
+RaggedTensor::RaggedTensor(Tensor values, Tensor offsets, uint64_t maxValuesPerRow)
+    : RaggedTensor(values, makeBoundedRowPartitionRuntime(values, offsets, maxValuesPerRow)) {}
 
 RaggedTensor::RaggedTensor(Tensor values, RowPartitionRuntime rowPartition)
     : values(std::move(values)), rowPartition(std::move(rowPartition)) {

@@ -684,6 +684,10 @@ struct RaggedConv1dStageDiagnostic {
     uint64_t output_padded_value_bytes = 0;
     uint64_t allocated_padded_value_bytes = 0;
     uint64_t cudnn_workspace_bytes = 0;
+    // Read-only identity of the operation-local cuDNN workspace allocation.
+    // Zero means this stage requires no workspace. T9F uses this to prove that
+    // runtime width transitions never replace the stamp-time allocation.
+    uintptr_t cudnn_workspace_state_id = 0;
     uint64_t width_capacity_count = 0;
     uint64_t prebuilt_cudnn_plan_count = 0;
     // Thor never constructs im2col/unfold storage for the padded path. cuDNN's

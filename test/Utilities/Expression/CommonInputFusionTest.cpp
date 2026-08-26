@@ -922,6 +922,14 @@ TEST(ExpressionDTypeResolution, CanonicalUnsignedMetadataSubtractionPreservesInt
     EXPECT_EQ(toSupportedComputeDType(ExprOp::SUB, DataType::UINT64), DataType::UINT64);
 }
 
+TEST(ExpressionDTypeResolution, Tf32IsComputeOnlyForMatmulAndConvolution) {
+    EXPECT_EQ(toSupportedComputeDType(ExprOp::MATMUL, DataType::TF32), DataType::TF32);
+    EXPECT_EQ(toSupportedComputeDType(ExprOp::CONV2D, DataType::TF32), DataType::TF32);
+    EXPECT_EQ(toSupportedComputeDType(ExprOp::CONV2D_BACKWARD_DATA, DataType::TF32), DataType::TF32);
+    EXPECT_EQ(toSupportedComputeDType(ExprOp::CONV2D_BACKWARD_FILTER, DataType::TF32), DataType::TF32);
+    EXPECT_THROW((void)toSupportedComputeDType(ExprOp::ADD, DataType::TF32), std::runtime_error);
+}
+
 TEST(ExpressionDTypeResolution, DenseValueAndArgReductionsPreserveInputStorageDtypes) {
     EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_SUM, DataType::BF16), DataType::BF16);
     EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_MAX, DataType::BF16), DataType::BF16);

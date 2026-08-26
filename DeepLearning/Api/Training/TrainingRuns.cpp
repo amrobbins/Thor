@@ -976,12 +976,11 @@ std::vector<ResolvedEnsembleMetric> resolveTrainingRunsReportedMetrics(
 }
 
 bool trainingRunsLossCanParticipateInComposedEvaluation(const ResolvedEnsembleLoss& loss) {
-    (void)loss;
-    // Loss reportability is established by the source network exposing the loss
-    // tensor through a NetworkOutput.  Whether that loss can be represented in a
-    // particular composed evaluator is decided when the evaluator is built from
-    // the tensors that composition actually contains.
-    return true;
+    // A composed loss needs an explicit prediction cut point so member predictions
+    // can be averaged before the loss is reconstructed. A loss whose prediction is
+    // hidden remains reportable on its source network, but it cannot be represented
+    // by an ensemble evaluator without cloning one member's private prediction path.
+    return !loss.predictionOutputName.empty();
 }
 
 bool trainingRunsMetricCanParticipateInComposedEvaluation(const ResolvedEnsembleMetric& metric) {
@@ -3795,6 +3794,13 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
             requestedReportNames.empty() ? requestedReportNames : activeRequestedReportNames,
             context);
         artifacts.losses = resolveTrainingRunsSelectedLossReports(referenceAvailableLosses, selections.lossNames, context);
+        artifacts.losses.erase(
+            std::remove_if(artifacts.losses.begin(),
+                           artifacts.losses.end(),
+                           [](const ResolvedEnsembleLoss& loss) {
+                               return !trainingRunsLossCanParticipateInComposedEvaluation(loss);
+                           }),
+            artifacts.losses.end());
         artifacts.metrics = resolveTrainingRunsSelectedMetricReports(referenceAvailableMetrics, selections.metricNames, context);
         artifacts.metrics.erase(
             std::remove_if(artifacts.metrics.begin(),

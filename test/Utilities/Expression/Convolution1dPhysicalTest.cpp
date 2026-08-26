@@ -186,10 +186,10 @@ std::vector<float> filterGradReference(const std::vector<float>& input,
     return grad_filter;
 }
 
-Outputs conv1dOutputs(const ConvolutionSpatial1d& spatial, uint64_t groups = 1) {
+Outputs conv1dOutputs(const ConvolutionSpatial1d& spatial, uint64_t groups = 1, DataType compute_dtype = DataType::FP32) {
     const Expression input = Expression::input("input", DataType::FP32, DataType::FP32);
     const Expression filter = Expression::input("filter", DataType::FP32, DataType::FP32);
-    return Expression::outputs({{"output", Expression::conv1d(input, filter, spatial, DataType::FP32, DataType::FP32, groups)}});
+    return Expression::outputs({{"output", Expression::conv1d(input, filter, spatial, compute_dtype, DataType::FP32, groups)}});
 }
 
 Outputs explicitSingletonConv2dOutputs(const ConvolutionSpatial1d& spatial, uint64_t groups = 1) {
@@ -240,6 +240,18 @@ TEST(ExpressionConv1d, SingletonHeightReshapesRemainStorageAliasesAroundOneConvo
     const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(outputs);
     ASSERT_EQ(stages.size(), 1u);
     EXPECT_EQ(stages.front().kind, PhysicalExecutionStage::Kind::Convolution);
+}
+
+TEST(ExpressionConv1d, ExplicitTf32ComputeSurvivesDTypeResolution) {
+    const ConvolutionSpatial1d spatial = ConvolutionSpatial1d::causal(3, 1, 2);
+    PhysicalOutputs outputs = conv1dOutputs(spatial, 1, DataType::TF32).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::FP32, DataType::FP32});
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(outputs);
+    ASSERT_EQ(stages.size(), 1u);
+    ASSERT_EQ(stages.front().kind, PhysicalExecutionStage::Kind::Convolution);
+    const ExprNode& root = stages.front().expr.nodes.at(stages.front().expr.output_node);
+    ASSERT_TRUE(root.compute_dtype.has_value());
+    EXPECT_EQ(root.compute_dtype.value(), DataType::TF32);
 }
 
 TEST(ExpressionConv1d, ForwardAndBackwardMatchIndependentCpuReference) {
@@ -318,6 +330,27 @@ TEST(ExpressionConv1d, ForwardAndBackwardMatchIndependentCpuReference) {
     EXPECT_EQ(cachedCudnnFrontendConvolutionSelectionCountForTests(), 3u);
     EXPECT_EQ(cudnnFrontendConvolutionSelectionCacheMissCountForTests() - initial_cache_misses, 3u);
     EXPECT_EQ(cudnnFrontendConvolutionSelectionCacheHitCountForTests() - initial_cache_hits, 21u);
+
+    // TF32 is a separate explicit compute contract. It shares FLOAT storage with
+    // strict FP32 in cuDNN, but the selection key and numerical-note policy must
+    // remain distinct. The relaxed tolerance reflects legal TF32 multiply error.
+    FusedEquation tf32_forward = FusedEquation::compile(conv1dOutputs(spatial, 1, DataType::TF32).physicalOutputs(), 0);
+    StampedExecutionPlan tf32_forward_plan = tf32_forward.stamp({{"input", input_gpu}, {"filter", filter_gpu}}, stream);
+    tf32_forward_plan.run();
+    stream.synchronize();
+    expectClose(copyToCpu(tf32_forward_plan.output("output"), stream), expected_forward, 1.0e-3F);
+    EXPECT_EQ(cachedCudnnFrontendConvolutionSelectionCountForTests(), 4u);
+    EXPECT_EQ(cudnnFrontendConvolutionSelectionCacheMissCountForTests() - initial_cache_misses, 4u);
+
+    FusedEquation tf32_backward = tf32_forward.compileBackward({"input", "filter"}, std::optional<std::string>{"doutput"});
+    StampedExecutionPlan tf32_backward_plan =
+        tf32_backward.stamp({{"input", input_gpu}, {"filter", filter_gpu}, {"doutput", grad_gpu}}, stream);
+    tf32_backward_plan.run();
+    stream.synchronize();
+    expectClose(copyToCpu(tf32_backward_plan.output("input_grad"), stream), expected_input_grad, 1.0e-3F);
+    expectClose(copyToCpu(tf32_backward_plan.output("filter_grad"), stream), expected_filter_grad, 1.0e-3F);
+    EXPECT_EQ(cachedCudnnFrontendConvolutionSelectionCountForTests(), 6u);
+    EXPECT_EQ(cudnnFrontendConvolutionSelectionCacheMissCountForTests() - initial_cache_misses, 6u);
     clearCudnnFrontendConvolutionSelectionCacheForTests();
 }
 

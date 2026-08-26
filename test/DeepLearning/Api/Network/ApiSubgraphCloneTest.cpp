@@ -1,10 +1,13 @@
 #include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Learning/CustomLayer.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
+#include "DeepLearning/Api/Layers/Learning/Convolution1d.h"
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 #include "DeepLearning/Api/Layers/Metrics/Mean.h"
 #include "DeepLearning/Api/Layers/Metrics/WeightedMean.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedReduction.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "Utilities/Expression/DynamicExpression.h"
@@ -332,6 +335,43 @@ TEST(ApiSubgraphClone, SourceOnlyMetricDoesNotUseParameterizedMemberPathAsInputS
     const std::vector<NetworkMetricReference> reportableMetrics = source.getReportableMetrics();
     ASSERT_EQ(reportableMetrics.size(), 1u);
     EXPECT_EQ(reportableMetrics.front().metricName, "hidden_mean");
+    EXPECT_EQ(reportableMetrics.front().aggregation, MetricAggregation::MEAN_BY_EXAMPLE);
+    EXPECT_TRUE(reportableMetrics.front().predictionOutputName.empty());
+    EXPECT_FALSE(reportableMetrics.front().inputSourceName.has_value());
+    EXPECT_EQ(reportableMetrics.front().requiredInputNames, (std::vector<std::string>{"features"}));
+}
+
+TEST(ApiSubgraphClone, SourceOnlyMetricDoesNotUseRaggedOffsetsToBypassParameterizedMemberPath) {
+    Network source("source_hidden_parameterized_ragged_metric_network");
+    RaggedTensor features = RaggedNetworkInput::Builder()
+                                .network(source)
+                                .name("features")
+                                .valuesDataType(DataType::FP32)
+                                .offsetsDataType(DataType::UINT32)
+                                .trailingDimensions({3})
+                                .maxTotalValues(16)
+                                .maxValuesPerRow(8)
+                                .batchSize(2)
+                                .build();
+    Convolution1d hidden = Convolution1d::Builder()
+                               .network(source)
+                               .featureInput(features)
+                               .numOutputChannels(3)
+                               .filterWidth(3)
+                               .causalPadding()
+                               .noActivation()
+                               .build();
+    SegmentedReduction pooled = SegmentedReduction::Builder()
+                                    .network(source)
+                                    .featureInput(hidden.getRaggedFeatureOutput().value())
+                                    .reductionType(SegmentedReduction::Type::MEAN)
+                                    .build();
+    Mean hiddenMean = Mean::Builder().network(source).values(pooled.getFeatureOutput().value()).build();
+    NetworkOutput::Builder().network(source).name("hidden_ragged_mean").inputTensor(hiddenMean.getMetric()).build();
+
+    const std::vector<NetworkMetricReference> reportableMetrics = source.getReportableMetrics();
+    ASSERT_EQ(reportableMetrics.size(), 1u);
+    EXPECT_EQ(reportableMetrics.front().metricName, "hidden_ragged_mean");
     EXPECT_EQ(reportableMetrics.front().aggregation, MetricAggregation::MEAN_BY_EXAMPLE);
     EXPECT_TRUE(reportableMetrics.front().predictionOutputName.empty());
     EXPECT_FALSE(reportableMetrics.front().inputSourceName.has_value());

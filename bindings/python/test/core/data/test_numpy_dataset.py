@@ -288,6 +288,109 @@ def test_numpy_dataset_ragged_batches_train_through_canonical_ctc_with_exact_par
         assert not report.used
 
 
+def _numpy_ragged_conv_training_fixture(*, max_values_per_row: int):
+    batch_size = 3
+    channels = 2
+    output_channels = 3
+    row_lengths = [5, 2, 4, 1]
+    offsets = np.ascontiguousarray(
+        np.asarray([0, 5, 7, 11, 12], dtype=np.uint32)
+    )
+    values = np.ascontiguousarray(
+        np.linspace(-0.75, 0.75, offsets[-1] * channels, dtype=np.float32).reshape(
+            int(offsets[-1]), channels
+        )
+    )
+    labels = np.ascontiguousarray(
+        np.linspace(-0.2, 0.2, len(row_lengths) * output_channels, dtype=np.float32).reshape(
+            len(row_lengths), output_channels
+        )
+    )
+    dataset = thor.data.NumpyDataset(
+        {"labels": labels},
+        ragged_tensors={"history": thor.data.RaggedBatch(values, offsets)},
+    )
+    data = thor.data.TrainingData(
+        dataset=dataset,
+        splits=thor.data.DatasetSplitManifest(
+            dataset=dataset,
+            train_indices=[0, 1, 2],
+            validate_indices=[],
+        ),
+        batching=thor.data.BatchPolicy(batch_size=batch_size, randomize_train=False),
+        # N1 specifically covers the host-backed NumpyBatchSession adapter.
+        device_storage="off",
+    )
+
+    network = thor.Network(f"numpy_ragged_conv_max_row_{max_values_per_row}")
+    history = thor.layers.RaggedNetworkInput(
+        network,
+        "history",
+        thor.DataType.fp32,
+        [channels],
+        max_total_values=12,
+        batch_size=batch_size,
+        offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=max_values_per_row,
+    )
+    labels_input = thor.layers.NetworkInput(
+        network, "labels", [output_channels], thor.DataType.fp32
+    )
+    convolved = thor.layers.Convolution1d(
+        network,
+        history,
+        num_output_channels=output_channels,
+        filter_width=3,
+        padding="causal",
+        dilation=2,
+        activation=None,
+        weights_initializer=thor.initializers.UniformRandom(-0.05, 0.05),
+        biases_initializer=thor.initializers.UniformRandom(0.0, 0.0),
+    ).get_feature_output()
+    pooled = thor.layers.SegmentedReduction(
+        network, convolved, thor.layers.SegmentedReduction.Type.mean
+    ).get_feature_output()
+    loss = thor.losses.MSE(
+        network,
+        pooled,
+        labels_input.get_feature_output(),
+        thor.DataType.fp32,
+        thor.losses.LossShape.batch,
+    )
+    thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
+
+    trainer = thor.training.Trainer(
+        network=network,
+        data=data,
+        input_bindings=thor.training.DatasetInputBindings.by_exact_name(
+            network=network, dataset=dataset
+        ),
+        optimizer=thor.optimizers.Sgd(initial_learning_rate=0.01, momentum=0.0),
+        debug_synchronous=True,
+        stats_interval_s=0.0,
+        max_in_flight_batches=1,
+        stats_color="never",
+    )
+    return trainer
+
+
+@pytest.mark.cuda
+def test_numpy_dataset_preserves_ragged_capacity_and_runtime_extent_for_conv1d_training():
+    trainer = _numpy_ragged_conv_training_fixture(max_values_per_row=5)
+
+    result = trainer.fit(1)
+
+    assert result.status == "completed"
+
+
+@pytest.mark.cuda
+def test_numpy_dataset_rejects_selected_row_exceeding_requested_max_values_per_row():
+    trainer = _numpy_ragged_conv_training_fixture(max_values_per_row=4)
+
+    with pytest.raises(RuntimeError, match=r"exceeding maxValuesPerRow=4"):
+        trainer.fit(1)
+
+
 @pytest.mark.cuda
 def test_numpy_dataset_device_residency_supports_all_empty_ragged_storage():
     num_examples = 3

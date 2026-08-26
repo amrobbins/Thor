@@ -772,6 +772,7 @@ class Expression {
 
     // Numerically stable activation-shaped expression helpers. These prefer dedicated CUDA special-function
     // expression ops where available (tanhf, log1pf, expm1f, normcdff).
+    [[nodiscard]] Expression relu() const;
     [[nodiscard]] Expression sigmoid() const;
     [[nodiscard]] Expression tanh() const;
     [[nodiscard]] Expression softplus() const;

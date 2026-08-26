@@ -14,6 +14,7 @@
 #include "DeepLearning/Api/Layers/Learning/Convolution1d.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Expression/Expression.h"
 #include "bindings/python/src/core/cast.h"
@@ -133,7 +134,7 @@ void bind_convolution_1d(nb::module_ &m) {
         "__init__",
         [](Convolution1d *self,
            Network &network,
-           Tensor featureInput,
+           nb::object featureInput,
            uint32_t numOutputChannels,
            uint32_t filterWidth,
            uint32_t stride,
@@ -145,15 +146,39 @@ void bind_convolution_1d(nb::module_ &m) {
            nb::object epilogue,
            nb::object epilogueInputs,
            uint32_t dilation,
-           uint32_t groups) {
-            const auto &dims = featureInput.getDimensions();
-            if (dims.size() != 2) {
-                const string msg = "Convolution1d instance: feature_input must be a 2D CW tensor (no batch) but tensor format is " +
-                                   featureInput.getDescriptorString();
-                throw nb::value_error(msg.c_str());
+           uint32_t groups,
+           DataType computeDataType) {
+            const bool useRagged = nb::isinstance<RaggedTensor>(featureInput);
+            const bool useDense = nb::isinstance<Tensor>(featureInput);
+            if (!useRagged && !useDense)
+                throw nb::type_error("Convolution1d feature_input must be thor.Tensor or thor.RaggedTensor.");
+
+            uint64_t inputChannels = 0;
+            optional<Tensor> denseFeatureInput;
+            optional<RaggedTensor> raggedFeatureInput;
+            if (useRagged) {
+                raggedFeatureInput = nb::cast<RaggedTensor>(featureInput);
+                const auto &trailingDims = raggedFeatureInput->getTrailingDimensions();
+                if (trailingDims.size() != 1 || trailingDims.front() == 0)
+                    throw nb::value_error(
+                        "Convolution1d instance: ragged feature_input must have exactly one non-zero trailing channel dimension.");
+                if (!raggedFeatureInput->hasMaxValuesPerRow())
+                    throw nb::value_error("Convolution1d instance: ragged feature_input requires max_values_per_row.");
+                inputChannels = trailingDims.front();
+            } else {
+                denseFeatureInput = nb::cast<Tensor>(featureInput);
+                const auto &dims = denseFeatureInput->getDimensions();
+                if (dims.size() != 2) {
+                    const string msg =
+                        "Convolution1d instance: feature_input must be a 2D CW tensor (no batch) but tensor format is " +
+                        denseFeatureInput->getDescriptorString();
+                    throw nb::value_error(msg.c_str());
+                }
+                if (dims[0] == 0 || dims[1] == 0)
+                    throw nb::value_error("Convolution1d instance: feature_input dimensions must all be > 0.");
+                inputChannels = dims[0];
             }
-            if (dims[0] == 0 || dims[1] == 0)
-                throw nb::value_error("Convolution1d instance: feature_input dimensions must all be > 0.");
+
             if (numOutputChannels == 0)
                 throw nb::value_error("Convolution1d instance: num_output_channels must be > 0.");
             if (filterWidth == 0)
@@ -162,28 +187,50 @@ void bind_convolution_1d(nb::module_ &m) {
                 throw nb::value_error("Convolution1d instance: stride must be >= 1.");
             if (dilation == 0)
                 throw nb::value_error("Convolution1d instance: dilation must be >= 1.");
-            if (groups == 0 || dims[0] % groups != 0 || numOutputChannels % groups != 0)
+            if (groups == 0 || inputChannels % groups != 0 || numOutputChannels % groups != 0)
                 throw nb::value_error("Convolution1d instance: groups must divide both input and output channels.");
+            if (computeDataType != DataType::FP32 && computeDataType != DataType::TF32)
+                throw nb::value_error("Convolution1d instance: compute_data_type must be thor.DataType.fp32 or thor.DataType.tf32.");
+            const DataType inputStorageDataType = useRagged ? raggedFeatureInput->getValuesDataType() : denseFeatureInput->getDataType();
+            if (computeDataType == DataType::TF32 && inputStorageDataType != DataType::FP32)
+                throw nb::value_error("Convolution1d instance: TF32 compute requires FP32 input/weights/output storage.");
 
             const PythonPaddingSpec paddingSpec = paddingFromPython(padding);
-            const uint64_t effectiveFilter = uint64_t(dilation) * (uint64_t(filterWidth) - 1ULL) + 1ULL;
-            if (paddingSpec.mode != Convolution1dPaddingMode::SAME_UPPER && paddingSpec.mode != Convolution1dPaddingMode::CAUSAL) {
-                const uint64_t paddedWidth = dims[1] + uint64_t(paddingSpec.explicitPadding[0]) + paddingSpec.explicitPadding[1];
-                if (effectiveFilter > paddedWidth) {
-                    const string msg = "Convolution1d instance: effective filter width " + to_string(effectiveFilter) +
-                                       " is larger than padded input width " + to_string(paddedWidth) + ".";
-                    throw nb::value_error(msg.c_str());
+            if (useRagged) {
+                if (stride != 1)
+                    throw nb::value_error("Convolution1d instance: ragged feature_input requires stride=1.");
+                if (paddingSpec.mode != Convolution1dPaddingMode::CAUSAL)
+                    throw nb::value_error("Convolution1d instance: ragged feature_input requires padding='causal'.");
+                if (!epilogue.is_none() || !epilogueInputs.is_none())
+                    throw nb::value_error(
+                        "Convolution1d instance: ragged feature_input does not support custom epilogues or epilogue_inputs.");
+            } else {
+                const auto &dims = denseFeatureInput->getDimensions();
+                const uint64_t effectiveFilter = uint64_t(dilation) * (uint64_t(filterWidth) - 1ULL) + 1ULL;
+                if (paddingSpec.mode != Convolution1dPaddingMode::SAME_UPPER &&
+                    paddingSpec.mode != Convolution1dPaddingMode::CAUSAL) {
+                    const uint64_t paddedWidth =
+                        dims[1] + uint64_t(paddingSpec.explicitPadding[0]) + paddingSpec.explicitPadding[1];
+                    if (effectiveFilter > paddedWidth) {
+                        const string msg = "Convolution1d instance: effective filter width " + to_string(effectiveFilter) +
+                                           " is larger than padded input width " + to_string(paddedWidth) + ".";
+                        throw nb::value_error(msg.c_str());
+                    }
                 }
             }
 
             Convolution1d::Builder builder;
-            builder.network(network)
-                .featureInput(featureInput)
-                .numOutputChannels(numOutputChannels)
+            builder.network(network);
+            if (useRagged)
+                builder.featureInput(raggedFeatureInput.value());
+            else
+                builder.featureInput(denseFeatureInput.value());
+            builder.numOutputChannels(numOutputChannels)
                 .filterWidth(filterWidth)
                 .groups(groups)
                 .stride(stride)
                 .dilation(dilation)
+                .computeDataType(computeDataType)
                 .hasBias(hasBias);
             switch (paddingSpec.mode) {
                 case Convolution1dPaddingMode::VALID:
@@ -223,7 +270,8 @@ void bind_convolution_1d(nb::module_ &m) {
         "epilogue"_a.none() = nb::none(),
         "epilogue_inputs"_a.none() = nb::none(),
         "dilation"_a = 1,
-        "groups"_a = 1);
+        "groups"_a = 1,
+        "compute_data_type"_a = DataType::FP32);
 
     convolution_1d.def_static("epilogue_input",
                               &makePythonEpilogueInput,
@@ -234,15 +282,27 @@ void bind_convolution_1d(nb::module_ &m) {
                               "name"_a,
                               "output_dtype"_a.none() = nb::none(),
                               "compute_dtype"_a.none() = nb::none());
-    convolution_1d.def("get_feature_output", [](Convolution1d &self) -> Tensor { return self.getFeatureOutput().value(); });
+    convolution_1d.def(
+        "get_feature_output",
+        [](Convolution1d &self) -> nb::object {
+            if (std::optional<RaggedTensor> raggedOutput = self.getRaggedFeatureOutput(); raggedOutput.has_value())
+                return nb::cast(raggedOutput.value());
+            return nb::cast(self.getFeatureOutput().value());
+        });
+    convolution_1d.def("get_use_ragged", &Convolution1d::getUseRagged);
+    convolution_1d.def("get_compute_data_type", &Convolution1d::getComputeDataType);
 
     convolution_1d.attr("__doc__") = R"nbdoc(
-        Trainable dense 1D convolution over a CW API tensor.
+        Trainable 1D convolution over a dense CW ``thor.Tensor`` or a logical ``thor.RaggedTensor``.
 
-        ``padding`` accepts ``"valid"``, ``"same"`` (SAME_UPPER), ``"causal"``,
-        or an explicit ``(left, right)`` pair. Causal padding is
-        ``left = dilation * (filter_width - 1), right = 0``.
-        The physical implementation lowers to the shared Conv2D backend using a
-        singleton height dimension; it does not materialize an im2col/unfold tensor.
+        Dense inputs retain the existing padding surface: ``"valid"``, ``"same"``
+        (SAME_UPPER), ``"causal"``, or an explicit ``(left, right)`` pair. Ragged
+        inputs deliberately support only stride-1 causal convolution and preserve
+        the exact input row partition while changing the trailing channel count.
+        The ragged path lowers to Thor's qualified ragged causal Conv1D backend; it
+        does not materialize a dense tensor or an im2col/unfold temporary.
+        ``compute_data_type=thor.DataType.fp32`` requests strict FP32 convolution
+        math. ``thor.DataType.tf32`` explicitly permits TensorFloat-32 execution
+        for FP32 input, weight, and output storage.
         )nbdoc";
 }

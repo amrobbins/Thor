@@ -463,3 +463,95 @@ def test_ragged_network_output_infer_returns_one_logical_physical_ragged_tensor(
     loaded_values = loaded_result.values.numpy()
     assert loaded_values.shape == values_np.shape
     assert np.array_equal(loaded_values[:active_values], values_np[:active_values])
+
+
+def test_physical_ragged_tensor_constructor_accepts_optional_max_values_per_row():
+    values_np = np.zeros((8, 2), dtype=np.float32)
+    offsets_np = np.array([0, 3, 5], dtype=np.uint32)
+    values = _cpu_tensor(values_np, thor.DataType.fp32)
+    offsets = _cpu_tensor(offsets_np, thor.DataType.uint32)
+
+    unbounded = thor.physical.PhysicalRaggedTensor(values, offsets)
+    assert unbounded.batch_size == 2
+    assert unbounded.max_total_values == 8
+    assert unbounded.max_values_per_row is None
+
+    bounded = thor.physical.PhysicalRaggedTensor(values, offsets, max_values_per_row=4)
+    assert bounded.batch_size == 2
+    assert bounded.max_total_values == 8
+    assert bounded.max_values_per_row == 4
+    assert bounded.values is not None
+    assert bounded.offsets is not None
+
+    with pytest.raises(ValueError, match="max_values_per_row"):
+        thor.physical.PhysicalRaggedTensor(values, offsets, max_values_per_row=0)
+
+
+@pytest.mark.cuda
+def test_physical_ragged_tensor_with_capacity_directly_infers_through_ragged_conv1d():
+    batch_size = 2
+    max_total_values = 8
+    max_values_per_row = 4
+    channels = 2
+
+    net = thor.Network("pytest_physical_ragged_conv1d_direct_infer")
+    x = thor.layers.RaggedNetworkInput(
+        net,
+        "tokens",
+        thor.DataType.fp32,
+        [channels],
+        max_total_values=max_total_values,
+        batch_size=batch_size,
+        offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=max_values_per_row,
+    )
+    conv = thor.layers.Convolution1d(
+        net,
+        x,
+        num_output_channels=3,
+        filter_width=3,
+        stride=1,
+        dilation=2,
+        padding="causal",
+        activation=None,
+    )
+    thor.layers.RaggedNetworkOutput(net, "encoded", conv.get_feature_output())
+
+    placed = net.place(
+        batch_size,
+        inference_only=True,
+        forced_devices=[0],
+        forced_num_stamps_per_gpu=1,
+    )
+
+    values_np = np.array(
+        [
+            [1.0, -1.0],
+            [2.0, 0.5],
+            [3.0, 1.5],
+            [-2.0, 4.0],
+            [0.25, -0.75],
+            [99.0, 99.0],
+            [99.0, 99.0],
+            [99.0, 99.0],
+        ],
+        dtype=np.float32,
+    )
+    offsets_np = np.array([0, 3, 5], dtype=np.uint32)
+    physical = thor.physical.PhysicalRaggedTensor(
+        _cpu_tensor(values_np, thor.DataType.fp32),
+        _cpu_tensor(offsets_np, thor.DataType.uint32),
+        max_values_per_row=max_values_per_row,
+    )
+
+    outputs = placed.infer({"tokens": physical})
+
+    assert set(outputs) == {"encoded"}
+    encoded = outputs["encoded"]
+    assert isinstance(encoded, thor.physical.PhysicalRaggedTensor)
+    assert encoded.batch_size == batch_size
+    assert encoded.max_total_values == max_total_values
+    assert encoded.max_values_per_row == max_values_per_row
+    assert np.array_equal(encoded.offsets.numpy(), offsets_np)
+    assert encoded.values.numpy().shape == (max_total_values, 3)
+    assert np.isfinite(encoded.values.numpy()[: int(offsets_np[-1])]).all()

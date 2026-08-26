@@ -1821,6 +1821,43 @@ std::vector<NetworkLossReference> Network::collectReportableLossesFromCurrentGra
     // hidden/intermediate tensor that cannot be remapped in a composed ensemble
     // evaluator.  Composition-time reporting decides whether that loss exists
     // for that composition.
+    auto dependsOnModelSpecificParameters = [&](const Tensor& tensor) -> bool {
+        std::set<Tensor> visiting;
+        std::function<bool(const Tensor&)> visit = [&](const Tensor& current) -> bool {
+            auto memoIt = traversalCache->modelSpecificParameterDependencyByTensor.find(current);
+            if (memoIt != traversalCache->modelSpecificParameterDependencyByTensor.end()) {
+                return memoIt->second;
+            }
+            if (visiting.count(current) != 0) {
+                return false;
+            }
+            visiting.insert(current);
+
+            bool depends = false;
+            auto driverIt = apiTensorToApiDrivingLayer.find(current);
+            if (driverIt != apiTensorToApiDrivingLayer.end() && driverIt->second != nullptr) {
+                std::shared_ptr<Layer> driver = driverIt->second;
+                depends = hasModelSpecificParameters(driver);
+                if (!depends) {
+                    auto inputsIt = apiLayerToApiInputTensors.find(driver);
+                    if (inputsIt != apiLayerToApiInputTensors.end()) {
+                        for (const Tensor& upstream : inputsIt->second) {
+                            if (visit(upstream)) {
+                                depends = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            visiting.erase(current);
+            traversalCache->modelSpecificParameterDependencyByTensor[current] = depends;
+            return depends;
+        };
+        return visit(tensor);
+    };
+
     auto sourceNetworkInputName = [&](const Tensor& tensor) -> std::optional<std::string> {
         std::set<Tensor> visiting;
         std::function<std::optional<std::string>(const Tensor&)> visit = [&](const Tensor& current) -> std::optional<std::string> {
@@ -1832,6 +1869,12 @@ std::vector<NetworkLossReference> Network::collectReportableLossesFromCurrentGra
                 return std::nullopt;
             }
             visiting.insert(current);
+
+            if (dependsOnModelSpecificParameters(current)) {
+                visiting.erase(current);
+                traversalCache->sourceNetworkInputNameByTensor[current] = std::nullopt;
+                return std::nullopt;
+            }
 
             std::optional<std::string> result;
             auto driverIt = apiTensorToApiDrivingLayer.find(current);
@@ -2160,6 +2203,43 @@ std::vector<NetworkMetricReference> Network::collectReportableMetricsFromCurrent
     if (traversalCache == nullptr) {
         traversalCache = &localTraversalCache;
     }
+    auto dependsOnModelSpecificParameters = [&](const Tensor& tensor) -> bool {
+        std::set<Tensor> visiting;
+        std::function<bool(const Tensor&)> visit = [&](const Tensor& current) -> bool {
+            auto memoIt = traversalCache->modelSpecificParameterDependencyByTensor.find(current);
+            if (memoIt != traversalCache->modelSpecificParameterDependencyByTensor.end()) {
+                return memoIt->second;
+            }
+            if (visiting.count(current) != 0) {
+                return false;
+            }
+            visiting.insert(current);
+
+            bool depends = false;
+            auto driverIt = apiTensorToApiDrivingLayer.find(current);
+            if (driverIt != apiTensorToApiDrivingLayer.end() && driverIt->second != nullptr) {
+                std::shared_ptr<Layer> driver = driverIt->second;
+                depends = hasModelSpecificParameters(driver);
+                if (!depends) {
+                    auto inputsIt = apiLayerToApiInputTensors.find(driver);
+                    if (inputsIt != apiLayerToApiInputTensors.end()) {
+                        for (const Tensor& upstream : inputsIt->second) {
+                            if (visit(upstream)) {
+                                depends = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            visiting.erase(current);
+            traversalCache->modelSpecificParameterDependencyByTensor[current] = depends;
+            return depends;
+        };
+        return visit(tensor);
+    };
+
     auto sourceNetworkInputName = [&](const Tensor& tensor) -> std::optional<std::string> {
         std::set<Tensor> visiting;
         std::function<std::optional<std::string>(const Tensor&)> visit = [&](const Tensor& current) -> std::optional<std::string> {
@@ -2171,6 +2251,12 @@ std::vector<NetworkMetricReference> Network::collectReportableMetricsFromCurrent
                 return std::nullopt;
             }
             visiting.insert(current);
+
+            if (dependsOnModelSpecificParameters(current)) {
+                visiting.erase(current);
+                traversalCache->sourceNetworkInputNameByTensor[current] = std::nullopt;
+                return std::nullopt;
+            }
 
             auto driverIt = apiTensorToApiDrivingLayer.find(current);
             if (driverIt == apiTensorToApiDrivingLayer.end() || driverIt->second == nullptr) {

@@ -521,16 +521,20 @@ class Concatenate(Layer):
 
 class Convolution1d(TrainableLayer):
     """
-    Trainable dense 1D convolution over a CW API tensor.
+    Trainable 1D convolution over a dense CW ``thor.Tensor`` or a logical ``thor.RaggedTensor``.
 
-    ``padding`` accepts ``"valid"``, ``"same"`` (SAME_UPPER), ``"causal"``,
-    or an explicit ``(left, right)`` pair. Causal padding is
-    ``left = dilation * (filter_width - 1), right = 0``.
-    The physical implementation lowers to the shared Conv2D backend using a
-    singleton height dimension; it does not materialize an im2col/unfold tensor.
+    Dense inputs retain the existing padding surface: ``"valid"``, ``"same"``
+    (SAME_UPPER), ``"causal"``, or an explicit ``(left, right)`` pair. Ragged
+    inputs deliberately support only stride-1 causal convolution and preserve
+    the exact input row partition while changing the trailing channel count.
+    The ragged path lowers to Thor's qualified ragged causal Conv1D backend; it
+    does not materialize a dense tensor or an im2col/unfold temporary.
+    ``compute_data_type=thor.DataType.fp32`` requests strict FP32 convolution
+    math. ``thor.DataType.tf32`` explicitly permits TensorFloat-32 execution
+    for FP32 input, weight, and output storage.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_channels: int, filter_width: int, stride: int = 1, padding: object = 'valid', has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, dilation: int = 1, groups: int = 1) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: object, num_output_channels: int, filter_width: int, stride: int = 1, padding: object = 'valid', has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, dilation: int = 1, groups: int = 1, compute_data_type: thor.DataType = thor.DataType.fp32) -> None: ...
 
     @staticmethod
     def epilogue_input(output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression: ...
@@ -538,7 +542,11 @@ class Convolution1d(TrainableLayer):
     @staticmethod
     def epilogue_aux_input(name: str, output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression: ...
 
-    def get_feature_output(self) -> thor.Tensor: ...
+    def get_feature_output(self) -> object: ...
+
+    def get_use_ragged(self) -> bool: ...
+
+    def get_compute_data_type(self) -> thor.DataType: ...
 
 class Convolution2d(TrainableLayer):
     """
@@ -598,9 +606,12 @@ class Convolution2d(TrainableLayer):
         Spacing between kernel elements. An integer applies the same dilation
         vertically and horizontally; a length-2 sequence specifies
         ``(vertical_dilation, horizontal_dilation)``.
+    compute_data_type : thor.DataType, default thor.DataType.fp32
+        ``fp32`` requests strict FP32 convolution math. ``tf32`` explicitly
+        permits TensorFloat-32 execution for FP32 input, weight, and output storage.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_channels: int, filter_height: int, filter_width: int, vertical_stride: int = 1, horizontal_stride: int = 1, padding: object = 'valid', has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, dilation: object = 1, groups: int = 1) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_channels: int, filter_height: int, filter_width: int, vertical_stride: int = 1, horizontal_stride: int = 1, padding: object = 'valid', has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, dilation: object = 1, groups: int = 1, compute_data_type: thor.DataType = thor.DataType.fp32) -> None: ...
 
     @staticmethod
     def epilogue_input(output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression:
@@ -625,6 +636,8 @@ class Convolution2d(TrainableLayer):
             The feature output tensor handle.
         """
 
+    def get_compute_data_type(self) -> thor.DataType: ...
+
 class Convolution3d(TrainableLayer):
     """
     3D convolution layer.
@@ -638,9 +651,12 @@ class Convolution3d(TrainableLayer):
     expression before the implementation CustomLayer is constructed.
     ``epilogue`` may be a ``thor.physical.Expression`` built from
     ``Convolution3d.epilogue_input()`` and is applied after activation.
+    ``compute_data_type=thor.DataType.fp32`` requests strict FP32 convolution
+    math. ``thor.DataType.tf32`` explicitly permits TensorFloat-32 execution
+    for FP32 input, weight, and output storage.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_channels: int, filter_depth: int, filter_height: int, filter_width: int, depth_stride: int = 1, vertical_stride: int = 1, horizontal_stride: int = 1, depth_padding: int = 0, vertical_padding: int = 0, horizontal_padding: int = 0, has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, groups: int = 1) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_channels: int, filter_depth: int, filter_height: int, filter_width: int, depth_stride: int = 1, vertical_stride: int = 1, horizontal_stride: int = 1, depth_padding: int = 0, vertical_padding: int = 0, horizontal_padding: int = 0, has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, groups: int = 1, compute_data_type: thor.DataType = thor.DataType.fp32) -> None: ...
 
     @staticmethod
     def epilogue_input(output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression:
@@ -657,6 +673,8 @@ class Convolution3d(TrainableLayer):
 
     def get_feature_output(self) -> thor.Tensor:
         """Return the output tensor produced by this layer."""
+
+    def get_compute_data_type(self) -> thor.DataType: ...
 
 class Flatten(Layer):
     def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_dimensions: int) -> None:

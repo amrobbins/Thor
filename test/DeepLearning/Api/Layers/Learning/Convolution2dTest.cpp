@@ -562,6 +562,8 @@ TEST(Convolution2dApi, DefaultsToNoPaddingGeluActivationAndCanDisableActivation)
     EXPECT_EQ(defaultJson.at("padding_right").get<uint32_t>(), 0u);
     EXPECT_EQ(defaultJson.at("vertical_dilation").get<uint32_t>(), 1u);
     EXPECT_EQ(defaultJson.at("horizontal_dilation").get<uint32_t>(), 1u);
+    EXPECT_EQ(defaultConv.getComputeDataType(), DataType::FP32);
+    EXPECT_EQ(defaultJson.at("compute_data_type").get<DataType>(), DataType::FP32);
 
     Api::Network explicitNetwork("conv2dExplicit");
     Api::NetworkInput explicitInput =
@@ -594,6 +596,37 @@ TEST(Convolution2dApi, DefaultsToNoPaddingGeluActivationAndCanDisableActivation)
     EXPECT_EQ(explicitJson.at("padding_bottom").get<uint32_t>(), 2u);
     EXPECT_EQ(explicitJson.at("padding_left").get<uint32_t>(), 3u);
     EXPECT_EQ(explicitJson.at("padding_right").get<uint32_t>(), 0u);
+}
+
+TEST(Convolution2dApi, ExplicitTf32ComputeIsUserSelectableAndRequiresFp32Storage) {
+    Api::Network network("conv2dTf32");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({4, 8, 8}).dataType(DataType::FP32).build();
+    Api::Convolution2d conv = Api::Convolution2d::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .numOutputChannels(8)
+                                  .filterHeight(3)
+                                  .filterWidth(3)
+                                  .computeDataType(DataType::TF32)
+                                  .noActivation()
+                                  .build();
+    EXPECT_EQ(conv.getComputeDataType(), DataType::TF32);
+    EXPECT_EQ(conv.architectureJson().at("compute_data_type").get<DataType>(), DataType::TF32);
+
+    Api::Network fp16Network("conv2dTf32RejectFp16");
+    Api::NetworkInput fp16Input =
+        Api::NetworkInput::Builder().network(fp16Network).name("input").dimensions({4, 8, 8}).dataType(DataType::FP16).build();
+    EXPECT_THROW((void)Api::Convolution2d::Builder()
+                     .network(fp16Network)
+                     .featureInput(fp16Input.getFeatureOutput().value())
+                     .numOutputChannels(8)
+                     .filterHeight(3)
+                     .filterWidth(3)
+                     .computeDataType(DataType::TF32)
+                     .noActivation()
+                     .build(),
+                 std::invalid_argument);
 }
 
 TEST(Convolution2dApi, DilationUsesEffectiveKernelAndSerializes) {

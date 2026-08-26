@@ -8,6 +8,7 @@
 #include "DeepLearning/Api/Layers/Activations/Gelu.h"
 #include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "Utilities/Exceptions.h"
 #include "Utilities/Expression/ConvolutionSpatial.h"
 
@@ -50,9 +51,13 @@ class Convolution1d : public TrainableLayer {
     uint32_t getPaddingRight() const { return static_cast<uint32_t>(spatial.post_padding); }
     Convolution1dPaddingMode getPaddingMode() const { return paddingMode; }
     bool getHasBias() const { return hasBias; }
+    DataType getComputeDataType() const { return computeDataType; }
+    bool getUseRagged() const { return raggedFeatureInput.has_value(); }
+    std::optional<RaggedTensor> getRaggedFeatureInput() const { return raggedFeatureInput; }
+    std::optional<RaggedTensor> getRaggedFeatureOutput() const { return raggedFeatureOutput; }
 
     std::string getLayerType() const override { return "Convolution1d"; }
-    std::string getLayerVersion() const override { return "2.0.0"; }
+    std::string getLayerVersion() const override { return "1.0.0"; }
 
     nlohmann::json serialize(thor_file::TarWriter &archiveWriter,
                              Stream stream,
@@ -118,7 +123,7 @@ class Convolution1d : public TrainableLayer {
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;
-    bool mustConnectAllInputsToDriveOutput() const override { return !epilogueInputBindings.empty(); }
+    bool mustConnectAllInputsToDriveOutput() const override { return raggedFeatureInput.has_value() || !epilogueInputBindings.empty(); }
 
    protected:
     void preOptimize(Tensor inputTensor, uint64_t batchSize, Stream stream) override {
@@ -150,6 +155,7 @@ class Convolution1d : public TrainableLayer {
     ThorImplementation::ConvolutionSpatial1d spatial;
     Convolution1dPaddingMode paddingMode = Convolution1dPaddingMode::VALID;
     bool hasBias = false;
+    DataType computeDataType = DataType::FP32;
     std::shared_ptr<Initializer> weightsInitializer;
     std::shared_ptr<Initializer> biasInitializer;
     std::shared_ptr<Activation> activation;
@@ -159,6 +165,8 @@ class Convolution1d : public TrainableLayer {
     const std::optional<ThorImplementation::Expression> epilogue;
     std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
+    std::optional<RaggedTensor> raggedFeatureInput;
+    std::optional<RaggedTensor> raggedFeatureOutput;
 
     std::vector<std::string> epilogueAuxInputNames() const;
     std::vector<uint32_t> inputPortIndicesForTensor(Tensor tensor) const;
@@ -166,6 +174,7 @@ class Convolution1d : public TrainableLayer {
     std::set<uint32_t> connectedInputPortIndices;
     bool emittedFeatureOutputAfterAllInputsConnected = false;
     mutable std::unordered_map<uint64_t, uint32_t> nextInputConnectionCursorByTensorOriginalId;
+    std::unordered_map<uint64_t, uint32_t> nextTraversalInputCursorByTensorOriginalId;
 };
 
 class Convolution1d::Builder {
@@ -184,9 +193,21 @@ class Convolution1d::Builder {
     Builder &featureInput(Tensor featureInput) {
         THOR_THROW_IF_FALSE(featureInput.getDimensions().size() == 2);
         THOR_THROW_IF_FALSE(_featureInputs.empty());
+        THOR_THROW_IF_FALSE(!_raggedFeatureInput.has_value());
         THOR_THROW_IF_FALSE(featureInput.getDimensions()[0] > 0);
         THOR_THROW_IF_FALSE(featureInput.getDimensions()[1] > 0);
         _featureInputs.push_back(featureInput);
+        return *this;
+    }
+
+    Builder &featureInput(RaggedTensor featureInput) {
+        THOR_THROW_IF_FALSE(_featureInputs.empty());
+        THOR_THROW_IF_FALSE(!_raggedFeatureInput.has_value());
+        THOR_THROW_IF_FALSE(featureInput.getValuesDimensions().size() == 2);
+        THOR_THROW_IF_FALSE(featureInput.getTrailingDimensions().size() == 1);
+        THOR_THROW_IF_FALSE(featureInput.getTrailingDimensions().front() > 0);
+        _raggedFeatureInput = featureInput;
+        _featureInputs.push_back(featureInput.getValues());
         return *this;
     }
 
@@ -254,6 +275,14 @@ class Convolution1d::Builder {
     Builder &hasBias(bool value) {
         THOR_THROW_IF_FALSE(!_hasBias.has_value());
         _hasBias = value;
+        return *this;
+    }
+
+    Builder &computeDataType(DataType value) {
+        THOR_THROW_IF_FALSE(!_computeDataType.has_value());
+        if (value != DataType::FP32 && value != DataType::TF32)
+            throw std::invalid_argument("Convolution1d computeDataType must be fp32 or tf32.");
+        _computeDataType = value;
         return *this;
     }
 
@@ -333,6 +362,7 @@ class Convolution1d::Builder {
    private:
     std::optional<Network *> _network;
     std::vector<Tensor> _featureInputs;
+    std::optional<RaggedTensor> _raggedFeatureInput;
     std::optional<uint32_t> _numOutputChannels;
     std::optional<uint32_t> _filterWidth;
     std::optional<uint32_t> _groups;
@@ -342,6 +372,7 @@ class Convolution1d::Builder {
     std::optional<uint32_t> _paddingLeft;
     std::optional<uint32_t> _paddingRight;
     std::optional<bool> _hasBias;
+    std::optional<DataType> _computeDataType;
     std::shared_ptr<Initializer> _weightsInitializer;
     std::shared_ptr<Initializer> _biasesInitializer;
     std::shared_ptr<Activation> _activation;

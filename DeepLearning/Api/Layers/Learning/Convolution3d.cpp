@@ -19,6 +19,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
                                                                     uint32_t padD,
                                                                     uint32_t padH,
                                                                     uint32_t padW,
+                                                                    ThorImplementation::DataType computeDataType,
                                                                     ThorImplementation::TensorPlacement placement,
                                                                     std::shared_ptr<Thor::Activation> activation,
                                                                     std::optional<ThorImplementation::Expression> epilogue,
@@ -46,6 +47,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
                               padD,
                               padH,
                               padW,
+                              computeDataType,
                               placement,
                               activation = std::move(activation),
                               epilogue,
@@ -101,7 +103,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
         auto w = Expression::input("weights", weightsDType, weightsDType);
 
         Expression fout =
-            Expression::conv3d(fin, w, strideD, strideH, strideW, padD, padH, padW, ImplDataType::FP32, featureOutputDType, groups);
+            Expression::conv3d(fin, w, strideD, strideH, strideW, padD, padH, padW, computeDataType, featureOutputDType, groups);
 
         if (hasBias) {
             const Tensor& bTensor = inputs.at("biases");
@@ -302,6 +304,7 @@ std::shared_ptr<ThorImplementation::Layer> Convolution3d::stamp(ThorImplementati
                                      depthPadding,
                                      verticalPadding,
                                      horizontalPadding,
+                                     computeDataType,
                                      placement,
                                      activation,
                                      epilogue,
@@ -399,6 +402,7 @@ json Convolution3d::architectureJson() const {
     j["num_output_channels"] = numOutputChannels;
     j["groups"] = groups;
     j["has_bias"] = hasBias;
+    j["compute_data_type"] = computeDataType;
     if (activation != nullptr) {
         j["activation"] = activation->architectureJson();
     } else {
@@ -492,6 +496,11 @@ void Convolution3d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
     if (convolution3d.groups == 0)
         throw runtime_error("Convolution3d serialized groups must be positive.");
     convolution3d.hasBias = j.at("has_bias").get<bool>();
+    // Archives written before compute_data_type existed used FLOAT cuDNN compute without
+    // filtering tensor-core plans, which is the permissive policy now named TF32.
+    convolution3d.computeDataType = j.value("compute_data_type", DataType::TF32);
+    if (convolution3d.computeDataType != DataType::FP32 && convolution3d.computeDataType != DataType::TF32)
+        throw runtime_error("Convolution3d serialized compute_data_type must be fp32 or tf32.");
 
     if (j.contains("activation") && !j.at("activation").is_null()) {
         convolution3d.activation = Activation::deserializeTemplate(j.at("activation"));
@@ -509,6 +518,10 @@ void Convolution3d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
     }
     if (convolution3d.featureInputs.size() != convolution3d.featureOutputs.size()) {
         throw runtime_error("Convolution3d deserialize expected equal numbers of inputs and outputs.");
+    }
+    if (convolution3d.computeDataType == DataType::TF32 &&
+        (!convolution3d.featureInputs.empty() && convolution3d.featureInputs.front().getDataType() != DataType::FP32)) {
+        throw runtime_error("Convolution3d serialized TF32 compute requires FP32 input/weights/output storage.");
     }
     for (const Tensor& input : convolution3d.featureInputs) {
         if (input.getDimensions().empty() || input.getDimensions()[0] % convolution3d.groups != 0 ||

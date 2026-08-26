@@ -123,3 +123,30 @@ TEST(RaggedTensorImplementation, HostActiveValueCountDelegatesEntirelyToRowParti
     // With no explicit cache, CPU offsets remain the semantic source of truth.
     EXPECT_EQ(ragged.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(5));
 }
+
+TEST(RaggedTensorImplementation, ValuesOffsetsCapacityConstructorPublishesBoundAndCpuRuntimeExtent) {
+    constexpr uint64_t batchSize = 3;
+    constexpr uint64_t maxTotalValues = 10;
+    constexpr uint64_t maxValuesPerRow = 4;
+    Tensor values(
+        TensorPlacement(TensorPlacement::MemDevices::CPU), TensorDescriptor(DataType::FP32, {maxTotalValues, 2}));
+    Tensor offsets(
+        TensorPlacement(TensorPlacement::MemDevices::CPU), TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    uint32_t* rawOffsets = offsets.getMemPtr<uint32_t>();
+    rawOffsets[0] = 0;
+    rawOffsets[1] = 3;
+    rawOffsets[2] = 3;
+    rawOffsets[3] = 7;
+
+    RaggedTensor ragged(values, offsets, maxValuesPerRow);
+
+    ASSERT_TRUE(ragged.hasMaxValuesPerRow());
+    EXPECT_EQ(ragged.getMaxValuesPerRow(), maxValuesPerRow);
+    EXPECT_EQ(ragged.getDescriptor().getRowPartition().getMaxValuesPerRow(), maxValuesPerRow);
+    EXPECT_EQ(ragged.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(7));
+    EXPECT_EQ(ragged.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(4));
+    EXPECT_EQ(ragged.getRowPartitionRuntime().requireHostMaxActiveRowLength(), 4u);
+
+    EXPECT_THROW((void)RaggedTensor(values, offsets, 0), std::logic_error);
+    EXPECT_THROW((void)RaggedTensor(values, offsets, maxTotalValues + 1), std::logic_error);
+}

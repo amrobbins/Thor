@@ -24,6 +24,7 @@ class RaggedTensor {
    public:
     RaggedTensor() = default;
     RaggedTensor(Tensor values, Tensor offsets);
+    RaggedTensor(Tensor values, Tensor offsets, uint64_t maxValuesPerRow);
     RaggedTensor(Tensor values, RowPartitionRuntime rowPartition);
 
     bool isInitialized() const { return initialized; }

@@ -51,7 +51,19 @@ std::vector<uint64_t> normalizedReductionUnsqueezeAxes(const std::vector<uint64_
     }
 
     const std::vector<uint64_t> unsqueezed_output_dims = StampedEquation::computeReductionOutputDims(input_dims, resolved_axes, {});
-    return normalizeSqueezeAxesForInputDims(unsqueezed_output_dims, squeeze_axes);
+    std::vector<uint64_t> unsqueeze_axes = normalizeSqueezeAxesForInputDims(unsqueezed_output_dims, squeeze_axes);
+
+    // Thor represents a fully squeezed scalar tensor as shape [1] rather than
+    // rank zero.  That synthetic singleton dimension is already present in the
+    // upstream gradient, so undoing the squeeze must restore only N-1 axes when
+    // every axis of the unsqueezed reduction result was squeezed.  Without this
+    // adjustment a rank-1 full reduction, for example, turns grad shape [1]
+    // into [1,1] and can no longer broadcast back to the rank-1 input.
+    if (!unsqueezed_output_dims.empty() && unsqueeze_axes.size() == unsqueezed_output_dims.size()) {
+        unsqueeze_axes.pop_back();
+    }
+
+    return unsqueeze_axes;
 }
 
 std::vector<uint64_t> normalizeUnsqueezeAxesForInputDims(const std::vector<uint64_t>& input_dims,

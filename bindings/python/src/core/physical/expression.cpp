@@ -1789,6 +1789,7 @@ Return the elementwise standard normal CDF of the input expression x.
 This lowers to Thor's NORMCDF expression op, which is emitted with CUDA's built-in normcdf implementation.
 )nbdoc");
 
+    expr.def_static("relu", [](const Expression& x) { return x.relu(); }, "x"_a);
     expr.def_static("sigmoid", [](const Expression& x) { return x.sigmoid(); }, "x"_a);
     expr.def_static("softplus", [](const Expression& x) { return x.softplus(); }, "x"_a);
     expr.def_static("elu", [](const Expression& x, double alpha) { return x.elu(alpha); }, "x"_a, "alpha"_a = 1.0);

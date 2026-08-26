@@ -1501,6 +1501,8 @@ AutoDiff.ConditionalDuplicateGradientOwnershipIsPromotedAcrossBranches:
 ExpressionGraphConditionalOps.ConditionalBackwardPublishesGradientStorageDtypeAcrossMissingInputBranches:
 ExpressionOutputMaterialization.*:
 BroadcastToExpression.*:
+SqueezeAxes.*:
+ExpressionConvenienceOps.DotProductBackwardProducesExpectedGradients:
 ExpressionConvenienceOps.StridedViewBackwardComposesWithBroadcastChildWithoutMaterialization:
 ExpressionConvenienceOps.MultipleStridedViewBackwardNodesSharingBroadcastChildFuseWithoutCodegenNameCollisions:
 ExpressionConvenienceOps.StridedViewBackwardBroadcastChildHonorsRuntimeStridedInputLayout:
@@ -1523,6 +1525,32 @@ add_custom_target(check-materialization-broadcast-cpp
         DEPENDS thor_tests
         USES_TERMINAL
         COMMENT "Thor: running M11 C++ materialization/broadcast production gate"
+        VERBATIM
+)
+
+# T10 retained-ragged training production gate. T9A-T9G establish the individual
+# correctness/ownership/runtime-family contracts; the T10 tests add mixed-dtype,
+# grouped/depthwise multilayer qualification and an explicit retained-vs-packed
+# timing comparison. The disabled preflight prevents a GPU-less machine from
+# passing the gate because the ordinary CUDA tests skipped.
+set(THOR_RETAINED_RAGGED_TRAINING_GTEST_FILTER
+        "RetainedRaggedTrainingProductionGate.DISABLED_RequiresCudaDevice:
+RaggedExpression.*T9*:
+RaggedExpression.CausalConv1dM7*:
+RaggedExpression.*T10*:
+RaggedCapacityPerformance.*T10*")
+string(REPLACE "\n" "" THOR_RETAINED_RAGGED_TRAINING_GTEST_FILTER "${THOR_RETAINED_RAGGED_TRAINING_GTEST_FILTER}")
+
+add_custom_target(check-retained-ragged-training-production-gate
+        COMMAND ${CMAKE_COMMAND} -E env
+        "THOR_T10_RETAINED_RAGGED_TRAINING_GATE=1"
+        $<TARGET_FILE:thor_tests>
+        --gtest_color=yes
+        --gtest_also_run_disabled_tests
+        "--gtest_filter=${THOR_RETAINED_RAGGED_TRAINING_GTEST_FILTER}"
+        DEPENDS thor_tests
+        USES_TERMINAL
+        COMMENT "Thor: running T10 retained-ragged training production qualification"
         VERBATIM
 )
 

@@ -297,7 +297,16 @@ class PhysicalTensor:
         """
 
 class PhysicalRaggedTensor:
-    def __init__(self, values: PhysicalTensor, offsets: PhysicalTensor) -> None: ...
+    def __init__(self, values: PhysicalTensor, offsets: PhysicalTensor, max_values_per_row: int | None = None) -> None:
+        """
+        Construct a physical ragged tensor from packed values and canonical row offsets.
+
+        ``max_values_per_row`` is optional placement-time structural metadata. Supply it
+        when the logical network input declares the same bound (for example ragged
+        causal Conv1D). CPU offsets remain the semantic source of runtime row extents;
+        Thor does not introduce an implicit device-to-host synchronization for GPU
+        resident offsets.
+        """
 
     @property
     def values(self) -> PhysicalTensor: ...
@@ -312,7 +321,7 @@ class PhysicalRaggedTensor:
     def max_total_values(self) -> int: ...
 
     @property
-    def max_values_per_row(self) -> object: ...
+    def max_values_per_row(self) -> int | None: ...
 
     @property
     def values_data_type(self) -> thor.DataType: ...
@@ -1279,6 +1288,9 @@ class Expression:
 
         This lowers to Thor's NORMCDF expression op, which is emitted with CUDA's built-in normcdf implementation.
         """
+
+    @staticmethod
+    def relu(x: Expression) -> Expression: ...
 
     @staticmethod
     def sigmoid(x: Expression) -> Expression: ...
