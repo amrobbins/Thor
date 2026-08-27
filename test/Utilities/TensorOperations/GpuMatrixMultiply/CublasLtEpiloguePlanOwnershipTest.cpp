@@ -79,6 +79,32 @@ TEST(CublasLtEpiloguePlanOwnership, EquivalentPlansShareSelectionOnlyAndSurviveS
     ASSERT_EQ(cublas.ltMatmulAlgorithmSelectionMissCountForTests(), 1u);
     ASSERT_EQ(cublas.ltMatmulAlgorithmSelectionTuneCountForTests(), 1u);
 
+    // Workspace availability is a lookup constraint, not part of immutable
+    // algorithm identity.  A cache miss preselects both the preferred algorithm
+    // and a zero-workspace fallback for this stable matmul key.
+    auto zeroWorkspace = cublas.buildGemmWithEpiloguePlan(gpuNum,
+                                                           m,
+                                                           k,
+                                                           k,
+                                                           n,
+                                                           k,
+                                                           n,
+                                                           n,
+                                                           n,
+                                                           false,
+                                                           false,
+                                                           dataTypes,
+                                                           CublasMatrixMultiply::EpilogueFusion::Relu,
+                                                           std::nullopt,
+                                                           false,
+                                                           std::nullopt,
+                                                           0u);
+    ASSERT_NE(zeroWorkspace, nullptr);
+    EXPECT_EQ(zeroWorkspace->algorithm.workspace_size_in_bytes, 0u);
+    EXPECT_EQ(cublas.cachedLtMatmulAlgorithmSelectionCountForTests(), 1u);
+    EXPECT_EQ(cublas.ltMatmulAlgorithmSelectionTuneCountForTests(), 1u);
+    EXPECT_GE(cublas.ltMatmulAlgorithmSelectionHitCountForTests(), 1u);
+
     auto second = cublas.buildGemmWithEpiloguePlan(gpuNum,
                                                     m,
                                                     k,
@@ -95,10 +121,10 @@ TEST(CublasLtEpiloguePlanOwnership, EquivalentPlansShareSelectionOnlyAndSurviveS
                                                     std::nullopt,
                                                     false);
     ASSERT_NE(second, nullptr);
-    EXPECT_EQ(cublas.ltMatmulPlanBuildCountForTests(), buildsBefore + 2);
+    EXPECT_EQ(cublas.ltMatmulPlanBuildCountForTests(), buildsBefore + 3);
     EXPECT_EQ(cublas.cachedLtMatmulAlgorithmSelectionCountForTests(), 1u);
     EXPECT_EQ(cublas.ltMatmulAlgorithmSelectionTuneCountForTests(), 1u);
-    EXPECT_GE(cublas.ltMatmulAlgorithmSelectionHitCountForTests(), 1u);
+    EXPECT_GE(cublas.ltMatmulAlgorithmSelectionHitCountForTests(), 2u);
     EXPECT_EQ(first->algorithm.workspace_size_in_bytes, second->algorithm.workspace_size_in_bytes);
 
     EXPECT_NE(first->executionStateId(), 0u);

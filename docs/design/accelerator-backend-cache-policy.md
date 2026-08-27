@@ -206,12 +206,17 @@ owner retained through a `unique_ptr`; its cuBLASLt operation descriptors and ma
 can no longer be shared through a process-global expression cache.
 
 Forward and backward epilogue contests now publish only copyable
-`LtMatmulAlgorithmSelection` recipes into a process-global selection repository. The
-repository uses per-key singleflight so expensive empirical contests for unrelated shapes
-may proceed independently while equivalent concurrent stamps share one selection effort.
-Cache hits materialize fresh local `LtMatmulPlan` descriptors. Clearing the selection
-repository after stamping cannot invalidate or alter already-prepared plans, and stamped
-runtime execution never consults or repopulates the selection cache.
+`LtMatmulAlgorithmSelection` recipes into a process-global selection repository. Each stable
+matmul key owns a preferred-workspace selection plus a preselected zero-workspace fallback;
+workspace availability is not part of the key. The preferred contest uses a stable policy
+cap derived from device capacity rather than instantaneous free memory. A caller-provided
+workspace maximum is therefore a lookup constraint: Thor returns the preferred selection
+when it fits, otherwise the zero-workspace fallback, without retuning or fragmenting the
+cache. The repository uses per-key singleflight so expensive empirical contests for
+unrelated shapes may proceed independently while equivalent concurrent stamps share one
+selection effort. Cache hits materialize fresh local `LtMatmulPlan` descriptors. Clearing
+the selection repository after stamping cannot invalidate or alter already-prepared plans,
+and stamped runtime execution never consults or repopulates the selection cache.
 
 ### Classic cuDNN cleanup
 

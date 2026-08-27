@@ -453,7 +453,12 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
             THOR_THROW_IF_FALSE(raggedIt != raggedInputNamed.end());
             const RaggedInputBinding& binding = raggedIt->second;
             RaggedTensor raggedTensor = std::get<RaggedTensor>(value);
-            THOR_THROW_IF_FALSE(raggedTensor.getDescriptor() == binding.descriptor);
+            if (raggedTensor.getDescriptor() != binding.descriptor) {
+                throw std::runtime_error(
+                    "StampedNetwork::sendBatch ragged input '" + name +
+                    "' descriptor mismatch: received=" + raggedTensor.getDescriptor().toString() +
+                    " expected=" + binding.descriptor.toString() + ".");
+            }
             requireConsistentBatchCapacity(raggedTensor.getBatchSize());
             const std::optional<uint64_t> activeValueCount =
                 raggedTensor.getHostActiveValueCountIfAvailable();

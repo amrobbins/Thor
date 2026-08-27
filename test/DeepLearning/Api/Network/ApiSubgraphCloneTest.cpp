@@ -318,6 +318,78 @@ TEST(ApiSubgraphClone, TrainingReportBoundaryIncludesAuxiliaryLossInputs) {
 }
 
 
+
+TEST(ApiSubgraphClone, ComposedMetricTracksAllPredictionOutputsAsOneReport) {
+    Network source("source_composed_metric_network");
+    NetworkInput features =
+        NetworkInput::Builder().network(source).name("features").dimensions({3}).dataType(DataType::FP32).build();
+    std::shared_ptr<Activation> predictionA =
+        Relu::Builder().network(source).featureInput(features.getFeatureOutput().value()).build();
+    std::shared_ptr<Activation> predictionB =
+        Relu::Builder().network(source).featureInput(features.getFeatureOutput().value()).build();
+
+    NetworkOutput predictionAOutput = NetworkOutput::Builder()
+                                                 .network(source)
+                                                 .name("prediction_a")
+                                                 .inputTensor(predictionA->getFeatureOutput().value())
+                                                 .build();
+    NetworkOutput predictionBOutput = NetworkOutput::Builder()
+                                                 .network(source)
+                                                 .name("prediction_b")
+                                                 .inputTensor(predictionB->getFeatureOutput().value())
+                                                 .build();
+
+    ThorImplementation::Expression a =
+        ThorImplementation::Expression::input("a", ThorImplementation::DataType::FP32, ThorImplementation::DataType::FP32);
+    ThorImplementation::Expression b =
+        ThorImplementation::Expression::input("b", ThorImplementation::DataType::FP32, ThorImplementation::DataType::FP32);
+    ThorImplementation::ExpressionDefinition sumDefinition =
+        ThorImplementation::ExpressionDefinition::fromOutputs(
+            ThorImplementation::Expression::outputs({{"sum", a + b}}));
+    CustomLayer sum = CustomLayer::Builder()
+                          .network(source)
+                          .expression(ThorImplementation::DynamicExpression::fromExpressionDefinition(sumDefinition))
+                          .inputNames({"a", "b"})
+                          .outputNames({"sum"})
+                          .inputInterface({{"a", predictionA->getFeatureOutput().value()},
+                                           {"b", predictionB->getFeatureOutput().value()}})
+                          .build();
+    Mean composedMean = Mean::Builder().network(source).values(sum.getOutput("sum")).build();
+    NetworkOutput::Builder().network(source).name("composed_mean").inputTensor(composedMean.getMetric()).build();
+
+    const std::vector<NetworkMetricReference> reportableMetrics = source.getReportableMetrics();
+    ASSERT_EQ(reportableMetrics.size(), 1u);
+    EXPECT_EQ(reportableMetrics.front().metricName, "composed_mean");
+    EXPECT_EQ(reportableMetrics.front().predictionOutputNames,
+              (std::vector<std::string>{"prediction_a", "prediction_b"}));
+    EXPECT_TRUE(reportableMetrics.front().predictionOutputName.empty());
+
+    Network destination("destination_composed_metric_network");
+    NetworkInput averagedA = NetworkInput::Builder()
+                                 .network(destination)
+                                 .name("averaged_a")
+                                 .dimensions({3})
+                                 .dataType(DataType::FP32)
+                                 .build();
+    NetworkInput averagedB = NetworkInput::Builder()
+                                 .network(destination)
+                                 .name("averaged_b")
+                                 .dimensions({3})
+                                 .dataType(DataType::FP32)
+                                 .build();
+
+    ApiTensorRemap remap;
+    remap.map(predictionAOutput.getFeatureInput().value(), averagedA.getFeatureOutput().value());
+    remap.map(predictionBOutput.getFeatureInput().value(), averagedB.getFeatureOutput().value());
+
+    ApiSubgraphCloneOptions options;
+    options.inferenceOnly = false;
+    ApiSubgraphCloneResult cloneResult = destination.cloneSubgraphInto(source, {"composed_mean"}, remap, options);
+    ASSERT_TRUE(cloneResult.outputTensorsByName.count("composed_mean"));
+    EXPECT_EQ(cloneResult.outputTensorsByName.at("composed_mean").getDataType(), DataType::FP32);
+}
+
+
 TEST(ApiSubgraphClone, SourceOnlyMetricDoesNotUseParameterizedMemberPathAsInputSource) {
     Network source("source_hidden_parameterized_metric_network");
     NetworkInput features =

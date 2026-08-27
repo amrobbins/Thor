@@ -2471,7 +2471,8 @@ std::vector<NetworkMetricReference> Network::collectReportableMetricsFromCurrent
             continue;
         }
 
-        const std::vector<std::string> predictionOutputNames = predictionOutputNamesForTensor(predictions);
+        std::vector<std::string> predictionOutputNames = predictionOutputNamesForTensor(predictions);
+        std::sort(predictionOutputNames.begin(), predictionOutputNames.end());
         std::optional<std::string> inputSourceName;
         if (predictionOutputNames.empty()) {
             // A metric explicitly exposed through NetworkOutput is reportable even
@@ -2487,26 +2488,17 @@ std::vector<NetworkMetricReference> Network::collectReportableMetricsFromCurrent
         }
 
         for (const std::string& metricName : metricNames) {
-            if (!predictionOutputNames.empty()) {
-                for (const std::string& outputName : predictionOutputNames) {
-                    NetworkMetricReference reference;
-                    reference.metricName = metricName;
-                    reference.predictionOutputName = outputName;
-                    reference.targetInputName = labelInputName;
-                    reference.inputSourceName = inputSourceName;
-                    reference.metricLayerType = metric->getLayerType();
-                    reference.aggregation = metric->getAggregation();
-                    references.push_back(std::move(reference));
-                }
-            } else {
-                NetworkMetricReference reference;
-                reference.metricName = metricName;
-                reference.targetInputName = labelInputName;
-                reference.inputSourceName = inputSourceName;
-                reference.metricLayerType = metric->getLayerType();
-                reference.aggregation = metric->getAggregation();
-                references.push_back(std::move(reference));
+            NetworkMetricReference reference;
+            reference.metricName = metricName;
+            reference.predictionOutputNames = predictionOutputNames;
+            if (predictionOutputNames.size() == 1) {
+                reference.predictionOutputName = predictionOutputNames.front();
             }
+            reference.targetInputName = labelInputName;
+            reference.inputSourceName = inputSourceName;
+            reference.metricLayerType = metric->getLayerType();
+            reference.aggregation = metric->getAggregation();
+            references.push_back(std::move(reference));
         }
     }
 
@@ -2524,8 +2516,8 @@ std::vector<NetworkMetricReference> Network::collectReportableMetricsFromCurrent
         if (lhs.metricName != rhs.metricName) {
             return lhs.metricName < rhs.metricName;
         }
-        if (lhs.predictionOutputName != rhs.predictionOutputName) {
-            return lhs.predictionOutputName < rhs.predictionOutputName;
+        if (lhs.predictionOutputNames != rhs.predictionOutputNames) {
+            return lhs.predictionOutputNames < rhs.predictionOutputNames;
         }
         if (lhs.targetInputName != rhs.targetInputName) {
             return lhs.targetInputName < rhs.targetInputName;

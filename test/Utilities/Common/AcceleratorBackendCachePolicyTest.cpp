@@ -409,7 +409,7 @@ TEST(AcceleratorBackendCachePolicy, KnownGlobalSelectionCachesRemainSelectionOnl
                                  {"Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"},
                                  "known-good cuBLASLt heuristic algorithm-selection cache");
     expectOnlyListedCacheSites(root,
-                                 "LruCacheThreadSafe<std::string, CublasMatrixMultiply::LtMatmulAlgorithmSelection>",
+                                 "LruCacheThreadSafe<std::string, LtMatmulAlgorithmSelectionSet>",
                                  {"Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.cpp"},
                                  "measured cuBLASLt epilogue algorithm-selection cache");
 }
@@ -465,8 +465,10 @@ TEST(AcceleratorBackendCachePolicy, C9ExpressionAndEpilogueMatmulStateIsOperatio
     EXPECT_NE(matrixHeader.find("struct LtMatmulAlgorithmSelection : AcceleratorBackendSelectionRecipeTag"), string::npos);
     EXPECT_NE(matrixHeader.find("struct LtMatmulPlan : AcceleratorBackendLocalExecutionStateTag"), string::npos);
     EXPECT_NE(matrixHeader.find("LtMatmulPlan(const LtMatmulPlan &) = delete"), string::npos);
-    EXPECT_NE(matrixSource.find("LruCacheThreadSafe<std::string, CublasMatrixMultiply::LtMatmulAlgorithmSelection> selections"),
-              string::npos);
+    EXPECT_NE(matrixSource.find("struct LtMatmulAlgorithmSelectionSet : AcceleratorBackendSelectionRecipeTag"), string::npos);
+    EXPECT_NE(matrixSource.find("LruCacheThreadSafe<std::string, LtMatmulAlgorithmSelectionSet> selections"), string::npos);
+    EXPECT_EQ(matrixSource.find(":workspace="), string::npos);
+    EXPECT_EQ(matrixSource.find("getFreeMemBytes(gpuNum)"), string::npos);
     EXPECT_EQ(matrixSource.find("LruCacheThreadSafe<std::string, CublasMatrixMultiply::LtMatmulPlan>"), string::npos);
     EXPECT_EQ(matrixSource.find("LruCacheThreadSafe<std::string, std::shared_ptr<CublasMatrixMultiply::LtMatmulPlan>>"), string::npos);
 

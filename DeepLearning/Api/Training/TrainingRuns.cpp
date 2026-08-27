@@ -738,6 +738,7 @@ struct ResolvedEnsembleLoss {
 
 struct ResolvedEnsembleMetric {
     std::string metricName{};
+    std::vector<std::string> predictionOutputNames{};
     std::string predictionOutputName{};
     std::optional<std::string> targetInputName{};
     std::optional<std::string> inputSourceName{};
@@ -877,8 +878,9 @@ std::vector<ResolvedEnsembleLoss> resolveTrainingRunsReportedLosses(
 }
 
 bool trainingRunsReportableMetricsCompatible(const NetworkMetricReference& lhs, const NetworkMetricReference& rhs) {
-    return lhs.metricName == rhs.metricName && lhs.predictionOutputName == rhs.predictionOutputName &&
-           lhs.targetInputName == rhs.targetInputName && lhs.inputSourceName == rhs.inputSourceName &&
+    return lhs.metricName == rhs.metricName && lhs.predictionOutputNames == rhs.predictionOutputNames &&
+           lhs.predictionOutputName == rhs.predictionOutputName && lhs.targetInputName == rhs.targetInputName &&
+           lhs.inputSourceName == rhs.inputSourceName &&
            lhs.requiredInputNames == rhs.requiredInputNames && lhs.metricLayerType == rhs.metricLayerType &&
            lhs.aggregation == rhs.aggregation;
 }
@@ -886,8 +888,19 @@ bool trainingRunsReportableMetricsCompatible(const NetworkMetricReference& lhs, 
 std::string trainingRunsReportableMetricDescription(const NetworkMetricReference& reference) {
     std::ostringstream out;
     out << "metric_name='" << reference.metricName << "'";
-    if (!reference.predictionOutputName.empty()) {
-        out << ", prediction_output_name='" << reference.predictionOutputName << "'";
+    if (!reference.predictionOutputNames.empty()) {
+        if (reference.predictionOutputNames.size() == 1) {
+            out << ", prediction_output_name='" << reference.predictionOutputNames.front() << "'";
+        } else {
+            out << ", prediction_output_names=[";
+            for (size_t i = 0; i < reference.predictionOutputNames.size(); ++i) {
+                if (i != 0) {
+                    out << ",";
+                }
+                out << "'" << reference.predictionOutputNames[i] << "'";
+            }
+            out << "]";
+        }
     }
     if (reference.targetInputName.has_value()) {
         out << ", target_input_name='" << *reference.targetInputName << "'";
@@ -964,6 +977,7 @@ std::vector<ResolvedEnsembleMetric> resolveTrainingRunsReportedMetrics(
         const NetworkMetricReference& reference = byName.at(metricName);
         ResolvedEnsembleMetric metric;
         metric.metricName = reference.metricName;
+        metric.predictionOutputNames = reference.predictionOutputNames;
         metric.predictionOutputName = reference.predictionOutputName;
         metric.targetInputName = reference.targetInputName;
         metric.inputSourceName = reference.inputSourceName;
@@ -984,11 +998,11 @@ bool trainingRunsLossCanParticipateInComposedEvaluation(const ResolvedEnsembleLo
 }
 
 bool trainingRunsMetricCanParticipateInComposedEvaluation(const ResolvedEnsembleMetric& metric) {
-    // A composed metric must have an explicit semantic cut point: either an
-    // ensemble-averaged prediction or a direct source input. The required input
+    // A composed metric must have an explicit semantic cut point: either one
+    // or more ensemble-averaged predictions or a direct source input. The required input
     // boundary supplies auxiliary values but must not by itself authorize cloning
     // an arbitrary hidden member subgraph from the reference model.
-    return !metric.predictionOutputName.empty() || metric.inputSourceName.has_value();
+    return !metric.predictionOutputNames.empty() || metric.inputSourceName.has_value();
 }
 
 
@@ -2498,11 +2512,13 @@ void TrainingRuns::validateReportedMetrics() const {
         const std::vector<ResolvedEnsembleMetric> resolvedMetrics = resolveTrainingRunsSelectedMetricReports(
             availableMetrics, selections.metricNames, context);
         for (const ResolvedEnsembleMetric& resolved : resolvedMetrics) {
-            if (!resolved.predictionOutputName.empty()) {
-                const TrainingRunOutputSignature* referenceOutput = findOutputSignatureItem(state.outputSignature, resolved.predictionOutputName);
+            for (const std::string& predictionOutputName : resolved.predictionOutputNames) {
+                const TrainingRunOutputSignature* referenceOutput =
+                    findOutputSignatureItem(state.outputSignature, predictionOutputName);
                 if (referenceOutput == nullptr) {
                     throw std::runtime_error(context + " resolved metric '" + resolved.metricName + "' to prediction output '" +
-                                             resolved.predictionOutputName + "', but run has outputs " + outputSignatureToString(state.outputSignature) + ".");
+                                             predictionOutputName + "', but run has outputs " +
+                                             outputSignatureToString(state.outputSignature) + ".");
                 }
             }
             if (resolved.targetInputName.has_value() && findInputSignatureItem(state.inputSignature, *resolved.targetInputName) == nullptr) {
@@ -2534,9 +2550,6 @@ void TrainingRuns::validateReportedMetrics() const {
             referenceAvailableMetrics, referenceSelections.metricNames, context + " reference run '" + referenceMember.runName + "'");
 
         for (const ResolvedEnsembleMetric& resolved : referenceMetrics) {
-            const TrainingRunOutputSignature* referenceOutput = resolved.predictionOutputName.empty()
-                ? nullptr
-                : findOutputSignatureItem(referenceMember.outputSignature, resolved.predictionOutputName);
             const TrainingRunInputSignature* referenceTarget = resolved.targetInputName.has_value()
                 ? findInputSignatureItem(referenceMember.inputSignature, *resolved.targetInputName)
                 : nullptr;
@@ -2562,6 +2575,7 @@ void TrainingRuns::validateReportedMetrics() const {
                 }
                 NetworkMetricReference reference;
                 reference.metricName = resolved.metricName;
+                reference.predictionOutputNames = resolved.predictionOutputNames;
                 reference.predictionOutputName = resolved.predictionOutputName;
                 reference.targetInputName = resolved.targetInputName;
                 reference.inputSourceName = resolved.inputSourceName;
@@ -2570,6 +2584,7 @@ void TrainingRuns::validateReportedMetrics() const {
                 reference.aggregation = resolved.aggregation;
                 NetworkMetricReference memberReference;
                 memberReference.metricName = memberResolvedIt->metricName;
+                memberReference.predictionOutputNames = memberResolvedIt->predictionOutputNames;
                 memberReference.predictionOutputName = memberResolvedIt->predictionOutputName;
                 memberReference.targetInputName = memberResolvedIt->targetInputName;
                 memberReference.inputSourceName = memberResolvedIt->inputSourceName;
@@ -2583,10 +2598,15 @@ void TrainingRuns::validateReportedMetrics() const {
                                              trainingRunsReportableMetricDescription(memberReference) + ".");
                 }
 
-                if (!resolved.predictionOutputName.empty()) {
-                    const TrainingRunOutputSignature* memberOutput = findOutputSignatureItem(member.outputSignature, resolved.predictionOutputName);
-                    if (referenceOutput != nullptr && (memberOutput == nullptr || !referenceOutput->compatibleWith(*memberOutput))) {
-                        throw std::runtime_error(memberContext + " has incompatible prediction output '" + resolved.predictionOutputName + "'.");
+                for (const std::string& predictionOutputName : resolved.predictionOutputNames) {
+                    const TrainingRunOutputSignature* referenceOutput =
+                        findOutputSignatureItem(referenceMember.outputSignature, predictionOutputName);
+                    const TrainingRunOutputSignature* memberOutput =
+                        findOutputSignatureItem(member.outputSignature, predictionOutputName);
+                    if (referenceOutput == nullptr || memberOutput == nullptr ||
+                        !referenceOutput->compatibleWith(*memberOutput)) {
+                        throw std::runtime_error(
+                            memberContext + " has incompatible prediction output '" + predictionOutputName + "'.");
                     }
                 }
                 if (referenceTarget != nullptr) {
@@ -2908,15 +2928,18 @@ RaggedTensor buildMatchingRaggedNetworkInput(Network& destination,
                                              const RaggedNetworkInputReference& source,
                                              const std::string& inputName) {
     const ThorImplementation::RaggedTensorDescriptor descriptor = source.raggedTensor.getDescriptor();
-    RaggedTensor result = RaggedNetworkInput::Builder()
-                              .network(destination)
-                              .name(inputName)
-                              .valuesDataType(descriptor.getValuesDataType())
-                              .offsetsDataType(descriptor.getOffsetsDataType())
-                              .trailingDimensions(descriptor.getTrailingDimensions())
-                              .maxTotalValues(descriptor.getMaxTotalValues())
-                              .batchSize(descriptor.getBatchSize())
-                              .build();
+    RaggedNetworkInput::Builder builder = RaggedNetworkInput::Builder()
+                                              .network(destination)
+                                              .name(inputName)
+                                              .valuesDataType(descriptor.getValuesDataType())
+                                              .offsetsDataType(descriptor.getOffsetsDataType())
+                                              .trailingDimensions(descriptor.getTrailingDimensions())
+                                              .maxTotalValues(descriptor.getMaxTotalValues())
+                                              .batchSize(descriptor.getBatchSize());
+    if (descriptor.hasMaxValuesPerRow()) {
+        builder.maxValuesPerRow(descriptor.getMaxValuesPerRow());
+    }
+    RaggedTensor result = builder.build();
 
     // A logical ragged boundary always owns both physical components even when a
     // particular bounded subgraph uses only values or only offsets. Stub both
@@ -3518,7 +3541,6 @@ Tensor cloneTrainingRunsEvaluatorMetricFromReference(TrainingRunsComposedEnsembl
                                                     const std::map<std::string, std::shared_ptr<NetworkInput>>& referenceInputsByName,
                                                     const std::map<std::string, std::shared_ptr<NetworkOutput>>& referenceOutputsByName,
                                                     const ResolvedEnsembleMetric& metric,
-                                                    std::optional<Tensor> averagedPredictions,
                                                     std::optional<Tensor> labels,
                                                     std::optional<Tensor> inputSource) {
     std::shared_ptr<NetworkOutput> metricOutput = requiredApiNetworkOutputByName(
@@ -3528,17 +3550,18 @@ Tensor cloneTrainingRunsEvaluatorMetricFromReference(TrainingRunsComposedEnsembl
         "TrainingRuns composed ensemble evaluator reference metric output for reported metric '" + metric.metricName + "'");
 
     ApiTensorRemap remap;
-    if (!metric.predictionOutputName.empty()) {
-        if (!averagedPredictions.has_value()) {
+    for (const std::string& predictionOutputName : metric.predictionOutputNames) {
+        const auto predictionIt = evaluator.averagedOutputTensorsByName.find(predictionOutputName);
+        if (predictionIt == evaluator.averagedOutputTensorsByName.end()) {
             throw std::runtime_error("TrainingRuns composed ensemble evaluator did not build averaged prediction output '" +
-                                     metric.predictionOutputName + "' for reported metric '" + metric.metricName + "'.");
+                                     predictionOutputName + "' for reported metric '" + metric.metricName + "'.");
         }
         std::shared_ptr<NetworkOutput> predictionOutput = requiredApiNetworkOutputByName(
             referenceMember,
             referenceOutputsByName,
-            metric.predictionOutputName,
+            predictionOutputName,
             "TrainingRuns composed ensemble evaluator reference prediction output for reported metric '" + metric.metricName + "'");
-        remap.map(predictionOutput->getFeatureInput().value(), *averagedPredictions);
+        remap.map(predictionOutput->getFeatureInput().value(), predictionIt->second);
     }
     if (metric.inputSourceName.has_value()) {
         if (!inputSource.has_value()) {
@@ -3602,8 +3625,10 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         }
     }
     for (const ResolvedEnsembleMetric& metric : metrics) {
-        if (!metric.predictionOutputName.empty() && seenOutputs.insert(metric.predictionOutputName).second) {
-            outputNames.push_back(metric.predictionOutputName);
+        for (const std::string& predictionOutputName : metric.predictionOutputNames) {
+            if (seenOutputs.insert(predictionOutputName).second) {
+                outputNames.push_back(predictionOutputName);
+            }
         }
     }
 
@@ -3682,16 +3707,17 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
     std::vector<ResolvedEnsembleMetric> activeMetrics;
     activeMetrics.reserve(metrics.size());
     for (const ResolvedEnsembleMetric& metric : metrics) {
-        std::optional<Tensor> averagedPredictions;
-        if (!metric.predictionOutputName.empty()) {
-            const auto predictionIt = evaluator.averagedOutputTensorsByName.find(metric.predictionOutputName);
-            if (predictionIt == evaluator.averagedOutputTensorsByName.end()) {
-                // The metric's prediction source is not present in this composed
-                // evaluator.  In this composition the metric does not exist, so do
-                // not expose or report it.
-                continue;
-            }
-            averagedPredictions = predictionIt->second;
+        const bool allPredictionOutputsPresent = std::all_of(
+            metric.predictionOutputNames.begin(),
+            metric.predictionOutputNames.end(),
+            [&](const std::string& predictionOutputName) {
+                return evaluator.averagedOutputTensorsByName.find(predictionOutputName) !=
+                       evaluator.averagedOutputTensorsByName.end();
+            });
+        if (!allPredictionOutputsPresent) {
+            // At least one semantic prediction source is not present in this
+            // composition, so the composed metric does not exist here.
+            continue;
         }
 
         std::optional<Tensor> labels;
@@ -3711,7 +3737,7 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
             if (!inputSource.has_value()) {
                 continue;
             }
-        } else if (metric.predictionOutputName.empty()) {
+        } else if (metric.predictionOutputNames.empty()) {
             // Without an averaged prediction or direct source input there is no
             // safe semantic cut point. Do not clone an arbitrary hidden member
             // subgraph from the reference model merely because its external input
@@ -3723,7 +3749,7 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
             throw std::runtime_error("TrainingRuns composed ensemble evaluator cannot expose duplicate report output '" + metric.metricName + "'.");
         }
         Tensor metricTensor = cloneTrainingRunsEvaluatorMetricFromReference(
-            evaluator, referenceMember, referenceInputsByName, referenceOutputsByName, metric, averagedPredictions, labels, inputSource);
+            evaluator, referenceMember, referenceInputsByName, referenceOutputsByName, metric, labels, inputSource);
         evaluator.metricOutputTensorsByName[metric.metricName] = metricTensor;
         NetworkOutput::Builder().network(*evaluator.network).name(metric.metricName).inputTensor(metricTensor).dataType(DataType::FP32).build();
         activeMetrics.push_back(metric);
@@ -3875,6 +3901,7 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
             }
             NetworkMetricReference reference;
             reference.metricName = referenceMetric.metricName;
+            reference.predictionOutputNames = referenceMetric.predictionOutputNames;
             reference.predictionOutputName = referenceMetric.predictionOutputName;
             reference.targetInputName = referenceMetric.targetInputName;
             reference.inputSourceName = referenceMetric.inputSourceName;
@@ -3883,6 +3910,7 @@ TrainingRunsComposedEvaluatorArtifacts loadTrainingRunsComposedEvaluatorArtifact
             reference.aggregation = referenceMetric.aggregation;
             NetworkMetricReference memberReference;
             memberReference.metricName = memberMetricIt->metricName;
+            memberReference.predictionOutputNames = memberMetricIt->predictionOutputNames;
             memberReference.predictionOutputName = memberMetricIt->predictionOutputName;
             memberReference.targetInputName = memberMetricIt->targetInputName;
             memberReference.inputSourceName = memberMetricIt->inputSourceName;

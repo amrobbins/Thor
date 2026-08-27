@@ -197,6 +197,25 @@ void resolveCustomLayerForwardDTypesInPlace(
     }
     if (!outputs.isConditional()) {
         resolveOutputsDTypesInPlace(outputs, customLayerRuntimeInputDTypesForOutputs(outputs, tensorInputs, tensorScalarInputs));
+
+        // A CustomLayer expression may intentionally promote a physical feature input
+        // for forward compute, for example BF16 storage -> FP32 logical value via
+        // context.input(..., output_dtype=FP32).  The gradient exposed back to the
+        // surrounding graph is nevertheless the gradient of the *physical input
+        // tensor* and must therefore materialize in that tensor's storage dtype.
+        //
+        // resolveOutputsDTypesInPlace() defaults INPUT.backward_output_dtype to the
+        // logical forward output dtype.  Without correcting that default here, a
+        // promoted BF16 input asks AutoDiff for an FP32 dInput even though the
+        // already-connected upstream error buffer is BF16.  FusedEquation then
+        // correctly rejects stamping that FP32 compiled output into the BF16
+        // preallocated tensor.  Keep FP32 backward_compute_dtype when requested,
+        // but restore the graph-boundary storage contract for every tensor INPUT.
+        for (ExprNode& node : outputs.expr->nodes) {
+            if (node.op == ExprOp::INPUT && node.input_tensor_dtype.has_value()) {
+                node.backward_output_dtype = node.input_tensor_dtype.value();
+            }
+        }
         return;
     }
 
@@ -2809,6 +2828,24 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         numBackwardApplicationsCompletedThisPass = 0;
         weightsAreUpToDateEvent.reset();
 
+        std::unordered_set<Loss*> fusedCustomLossOwners;
+        for (const ApplicationState& app : applications) {
+            if (!app.backwardRanThisPass) {
+                continue;
+            }
+            for (const auto& [outputName, fusedLossGradient] : app.fusedCustomLossGradientsByOutput) {
+                (void)outputName;
+                if (fusedLossGradient.ownerLoss != nullptr) {
+                    fusedCustomLossOwners.insert(fusedLossGradient.ownerLoss);
+                }
+            }
+        }
+        auto notifyFusedCustomLossOwners = [&](const Event& consumersDone) {
+            for (Loss* ownerLoss : fusedCustomLossOwners) {
+                ownerLoss->notifyFusedGradientConsumptionComplete(consumersDone);
+            }
+        };
+
         if (gradientUpdateStream.has_value()) {
             const bool emitApplyDiagnostics = layerSubmitDiagnosticsActive();
             const auto waitErrorOutputsStart = emitApplyDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
@@ -2817,6 +2854,17 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             }
             const uint64_t waitErrorOutputsMicros =
                 emitApplyDiagnostics ? layerSubmitDiagnosticElapsedMicros(waitErrorOutputsStart, layerSubmitDiagnosticNow()) : 0;
+
+            // Parameter-gradient/fused-optimizer work was already submitted on
+            // gradientUpdateStream for every application above, and this stream
+            // has now joined every backward-error compute event.  Therefore an
+            // event recorded here is the local last-use point for any labels or
+            // batch-validity-mask tensors captured by a fused CustomLoss gradient.
+            // Return that dependency to the owning loss before the next batch can
+            // enqueue reuse of those tensors on its labels/loss streams.
+            if (!fusedCustomLossOwners.empty()) {
+                notifyFusedCustomLossOwners(gradientUpdateStream.value().putEvent());
+            }
 
 
             const auto applyTotalStart = emitApplyDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
@@ -2941,6 +2989,16 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             }
             if (anyWeightsUpdated) {
                 weightsAreUpToDateEvent = gradientUpdateStream.value().putEvent();
+            }
+        } else {
+            // A parameterless CustomLayer has no gradient-update stream to serve
+            // as the join point.  In that case the only fused-gradient readers are
+            // the backward-error plans themselves, so make the owning loss wait
+            // on each of their completion events directly.
+            if (!fusedCustomLossOwners.empty()) {
+                for (const Event& eOutComputedEvent : errorOutHasBeenComputedEvents) {
+                    notifyFusedCustomLossOwners(eOutComputedEvent);
+                }
             }
         }
         errorOutHasBeenComputedEvents.clear();

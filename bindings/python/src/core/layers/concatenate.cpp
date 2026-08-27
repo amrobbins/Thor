@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/Concatenate.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
 #include "bindings/python/src/core/cast.h"
@@ -20,6 +21,11 @@ Tensor tensorFromFeatureInputs(const nb::list& featureInputs, size_t index) {
     return pybind::castOrTypeError<Tensor>(featureInputs[index], context, "thor.Tensor", false);
 }
 
+RaggedTensor raggedFromFeatureInputs(const nb::list& featureInputs, size_t index) {
+    const std::string context = "Concatenate() argument 'feature_inputs'[" + std::to_string(index) + "]";
+    return pybind::castOrTypeError<RaggedTensor>(featureInputs[index], context, "thor.RaggedTensor", false);
+}
+
 }  // namespace
 
 void bind_concatenate(nb::module_ &m) {
@@ -30,9 +36,27 @@ void bind_concatenate(nb::module_ &m) {
         "__init__",
         [](Concatenate *self, Network &network, nb::object feature_inputs_obj, uint32_t concatenation_axis) {
             nb::list feature_inputs = pybind::castArgument<nb::list>(
-                feature_inputs_obj, "Concatenate", "feature_inputs", "list[thor.Tensor]", false);
+                feature_inputs_obj, "Concatenate", "feature_inputs", "list[thor.Tensor | thor.RaggedTensor]", false);
             if (feature_inputs.size() == 0) {
-                throw nb::value_error("Concatenate instance: feature_inputs must be a non-empty list of thor.Tensor.");
+                throw nb::value_error("Concatenate instance: feature_inputs must be a non-empty list of thor.Tensor or thor.RaggedTensor.");
+            }
+
+            if (nb::isinstance<RaggedTensor>(feature_inputs[0])) {
+                Concatenate::Builder builder;
+                builder.network(network).concatenationAxis(concatenation_axis);
+                for (size_t i = 0; i < feature_inputs.size(); ++i) {
+                    if (!nb::isinstance<RaggedTensor>(feature_inputs[i])) {
+                        throw nb::type_error("Concatenate cannot mix thor.Tensor and thor.RaggedTensor inputs.");
+                    }
+                    builder.featureInput(raggedFromFeatureInputs(feature_inputs, i));
+                }
+                new (self) Concatenate(std::move(builder.build()));
+                return;
+            }
+            for (size_t i = 0; i < feature_inputs.size(); ++i) {
+                if (nb::isinstance<RaggedTensor>(feature_inputs[i])) {
+                    throw nb::type_error("Concatenate cannot mix thor.Tensor and thor.RaggedTensor inputs.");
+                }
             }
 
             // Use first tensor as reference
@@ -112,8 +136,8 @@ void bind_concatenate(nb::module_ &m) {
             ----------
             network : thor.Network
                 Network the layer should be added to.
-            feature_inputs : list[thor.Tensor]
-                List of input feature tensors for this layer.
+            feature_inputs : list[thor.Tensor] | list[thor.RaggedTensor]
+                Dense feature tensors, or ragged tensors sharing the exact same row partition.
             concatenation_axis : int
                 Axis along which to concatenate the input tensors.
 
@@ -131,6 +155,10 @@ void bind_concatenate(nb::module_ &m) {
 
     concatenate.def(
         "get_feature_output",
-        [](Concatenate &self) { return self.getFeatureOutput().value(); },
-        R"nbdoc(Return the concatenated feature output tensor.)nbdoc");
+        [](Concatenate &self) -> nb::object {
+            if (self.getUseRagged()) return nb::cast(self.getRaggedFeatureOutput().value());
+            return nb::cast(self.getFeatureOutput().value());
+        },
+        R"nbdoc(Return the concatenated dense or ragged feature output.)nbdoc");
+    concatenate.def_prop_ro("use_ragged", &Concatenate::getUseRagged);
 }

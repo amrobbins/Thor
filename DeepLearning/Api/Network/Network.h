@@ -76,8 +76,12 @@ struct NetworkLossReference {
 
 struct NetworkMetricReference {
     std::string metricName{};
-    // Non-empty when the metric is directly associated with a NetworkOutput
-    // prediction tensor that can be remapped to an ensemble-averaged output.
+    // Prediction NetworkOutputs that form the metric's semantic model boundary.
+    // A simple metric normally has one; composed metrics may depend on several
+    // independently averaged ensemble outputs.
+    std::vector<std::string> predictionOutputNames{};
+    // Backward-compatible convenience alias populated only for the single-output
+    // case. New composed-evaluation code should use predictionOutputNames.
     std::string predictionOutputName{};
     // Label input used by label-aware metrics such as Accuracy/LossMetric.
     std::optional<std::string> targetInputName{};

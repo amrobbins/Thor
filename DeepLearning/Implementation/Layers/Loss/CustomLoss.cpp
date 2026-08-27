@@ -275,6 +275,19 @@ void CustomLoss::notifyFusedGradientUnregisteredFromDrivingLayer(const Tensor& p
     }
 }
 
+void CustomLoss::notifyFusedGradientConsumptionComplete(const Event& consumersDone) {
+    THOR_THROW_IF_FALSE(gradientFusedIntoDrivingLayer);
+    THOR_THROW_IF_FALSE(consumersDone.isInitialized());
+
+    // The fused gradient is a deferred consumer of both tensors.  Their ordinary
+    // forward-side waits only cover the CustomLoss forward expression; they do
+    // not cover the later read performed from the driving CustomLayer's backward
+    // expression.  Make that deferred lifetime explicit on the streams that are
+    // allowed to reuse/rewrite the tensors for the next batch.
+    labelsStream.waitEvent(consumersDone);
+    stream.waitEvent(consumersDone);
+}
+
 std::optional<Tensor> CustomLoss::connectToPredictionsInputLayer(Layer* predictionsInputLayer,
                                                                  std::optional<Tensor> featureInput,
                                                                  Stream stream,

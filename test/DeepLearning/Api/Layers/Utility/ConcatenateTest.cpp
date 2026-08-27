@@ -1,4 +1,7 @@
 #include "DeepLearning/Api/Layers/Utility/Concatenate.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/Slice.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 
@@ -20,7 +23,7 @@ TEST(UtilityApiLayers, ConcatenateBuilds) {
     uint32_t concatenationAxis = rand() % numDimensions;
     uint32_t concatenationAxisSize = 1 + (rand() % 50);
     vector<uint64_t> concatenatedDimensions(numDimensions, 0U);
-    uint32_t numTensors = 1 + (rand() % 5);
+    uint32_t numTensors = 2 + (rand() % 4);
 
     DataType dataType = rand() % 2 ? DataType::FP32 : DataType::FP16;
 
@@ -444,4 +447,118 @@ TEST(UtilityImplementationLayers, ConcatenateReportsAllPhysicalShapesAndMismatch
         EXPECT_NE(message.find("name='tide_temporal_decoder_concat'"), std::string::npos);
         EXPECT_NE(message.find("implementation axis includes the batch dimension"), std::string::npos);
     }
+}
+
+
+TEST(UtilityApiLayers, RaggedConcatenateBuildsPreservesPartitionAndStampsDedicatedImplementation) {
+    constexpr uint64_t batchSize = 3;
+    constexpr uint64_t maxTotalValues = 9;
+    constexpr uint64_t maxValuesPerRow = 4;
+
+    Network network("ragged_concatenate_build_stamp");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("history")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({2, 5})
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(maxValuesPerRow)
+                             .batchSize(batchSize)
+                             .build();
+    Slice first = Slice::Builder().network(network).featureInput(input).axis(1).start(0).length(2).build();
+    Slice second = Slice::Builder().network(network).featureInput(input).axis(1).start(2).length(3).build();
+    ASSERT_TRUE(first.getRaggedFeatureOutput().has_value());
+    ASSERT_TRUE(second.getRaggedFeatureOutput().has_value());
+
+    Concatenate concatenate = Concatenate::Builder()
+                                  .network(network)
+                                  .featureInput(first.getRaggedFeatureOutput().value())
+                                  .featureInput(second.getRaggedFeatureOutput().value())
+                                  .concatenationAxis(1)
+                                  .build();
+    ASSERT_TRUE(concatenate.getUseRagged());
+    ASSERT_TRUE(concatenate.getRaggedFeatureOutput().has_value());
+    const RaggedTensor output = concatenate.getRaggedFeatureOutput().value();
+    EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{maxTotalValues, 2, 5}));
+    EXPECT_EQ(output.getOffsets(), input.getOffsets());
+    EXPECT_EQ(output.getBatchSize(), batchSize);
+    EXPECT_EQ(output.getMaxTotalValues(), maxTotalValues);
+    ASSERT_TRUE(output.hasMaxValuesPerRow());
+    EXPECT_EQ(output.getMaxValuesPerRow(), maxValuesPerRow);
+
+    const json architecture = concatenate.architectureJson();
+    EXPECT_TRUE(architecture.at("use_ragged").get<bool>());
+    ASSERT_EQ(architecture.at("ragged_inputs").size(), 2u);
+    EXPECT_EQ(architecture.at("ragged_output").at("offsets").at("id").get<uint64_t>(),
+              architecture.at("ragged_inputs").at(0).at("offsets").at("id").get<uint64_t>());
+
+    (void)RaggedNetworkOutput::Builder().network(network).name("joined").inputTensor(output).build();
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placed = network.place(static_cast<uint32_t>(batchSize), initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event &event : initDoneEvents) event.synchronize();
+
+    auto physical = dynamic_pointer_cast<ThorImplementation::RaggedConcatenate>(
+        placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(concatenate.getId()));
+    ASSERT_NE(physical, nullptr);
+    EXPECT_EQ(physical->getType(), "RaggedConcatenate");
+    ASSERT_EQ(physical->getFeatureInputs().size(), 3u);
+    ASSERT_EQ(physical->getFeatureOutputs().size(), 1u);
+    ASSERT_TRUE(physical->getFeatureOutputs()[0].has_value());
+    EXPECT_EQ(physical->getFeatureOutputs()[0]->getDimensions(), (vector<uint64_t>{maxTotalValues, 2, 5}));
+}
+
+TEST(UtilityApiLayers, RaggedConcatenateRejectsDifferentPartitionsAndDuplicateValuePorts) {
+    constexpr uint64_t batchSize = 3;
+    constexpr uint64_t maxTotalValues = 9;
+
+    Network network("ragged_concatenate_validation");
+    RaggedTensor left = RaggedNetworkInput::Builder()
+                            .network(network)
+                            .name("left")
+                            .valuesDataType(DataType::FP32)
+                            .offsetsDataType(DataType::UINT32)
+                            .trailingDimensions({2})
+                            .maxTotalValues(maxTotalValues)
+                            .maxValuesPerRow(4)
+                            .batchSize(batchSize)
+                            .build();
+    RaggedTensor right = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("right")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({3})
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(4)
+                             .batchSize(batchSize)
+                             .build();
+
+    EXPECT_THROW((void)Concatenate::Builder()
+                     .network(network)
+                     .featureInput(left)
+                     .featureInput(right)
+                     .concatenationAxis(0)
+                     .build(),
+                 std::logic_error);
+
+    Network duplicateNetwork("ragged_concatenate_duplicate_values");
+    RaggedTensor duplicate = RaggedNetworkInput::Builder()
+                                 .network(duplicateNetwork)
+                                 .name("duplicate")
+                                 .valuesDataType(DataType::FP32)
+                                 .offsetsDataType(DataType::UINT32)
+                                 .trailingDimensions({2})
+                                 .maxTotalValues(maxTotalValues)
+                                 .maxValuesPerRow(4)
+                                 .batchSize(batchSize)
+                                 .build();
+    EXPECT_THROW((void)Concatenate::Builder()
+                     .network(duplicateNetwork)
+                     .featureInput(duplicate)
+                     .featureInput(duplicate)
+                     .concatenationAxis(0)
+                     .build(),
+                 std::logic_error);
 }

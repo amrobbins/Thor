@@ -91,12 +91,17 @@ CublasKernel materializeCublasKernel(const CublasKernelRequirement& requirement,
     return CublasKernel(requirement, selection, requirement.kernelRequirement.gpuType);
 }
 
+struct LtMatmulAlgorithmSelectionSet : AcceleratorBackendSelectionRecipeTag {
+    std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> preferred;
+    std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> zero_workspace;
+};
+
 class LtMatmulAlgorithmSelectionRepository {
    public:
     static constexpr size_t CAPACITY = 25000;
 
     template <class Selector>
-    std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> getOrSelect(const std::string& key, Selector&& selector) {
+    std::optional<LtMatmulAlgorithmSelectionSet> getOrSelect(const std::string& key, Selector&& selector) {
         if (auto hit = selections.get(key); hit.has_value()) {
             hit_count.fetch_add(1, std::memory_order_relaxed);
             return hit;
@@ -138,7 +143,7 @@ class LtMatmulAlgorithmSelectionRepository {
             }
         }
 
-        std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> selected;
+        std::optional<LtMatmulAlgorithmSelectionSet> selected;
         std::exception_ptr error;
         try {
             selected = selector();
@@ -190,11 +195,11 @@ class LtMatmulAlgorithmSelectionRepository {
         std::condition_variable cv;
         uint64_t generation = 0;
         bool done = false;
-        std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> selection;
+        std::optional<LtMatmulAlgorithmSelectionSet> selection;
         std::exception_ptr error;
     };
 
-    LruCacheThreadSafe<std::string, CublasMatrixMultiply::LtMatmulAlgorithmSelection> selections{CAPACITY};
+    LruCacheThreadSafe<std::string, LtMatmulAlgorithmSelectionSet> selections{CAPACITY};
     mutable std::mutex in_flight_mutex;
     std::unordered_map<std::string, std::shared_ptr<InFlight>> in_flight;
     uint64_t generation = 0;
@@ -224,8 +229,7 @@ std::string ltMatmulAlgorithmSelectionKey(const char* direction,
                                           int epilogue,
                                           bool hasAddend,
                                           bool secondaryFlag,
-                                          int64_t epilogueAuxLd,
-                                          uint64_t workspaceLimitBytes) {
+                                          int64_t epilogueAuxLd) {
     std::ostringstream key;
     key << direction << ":gpu=" << MachineEvaluator::instance().getGpuType(gpuNum) << ":A=" << A_rows << 'x' << A_cols
         << ":B=" << B_rows << 'x' << B_cols << ":ld=" << ld_A << ',' << ld_B << ',' << ld_C << ',' << ld_D
@@ -233,8 +237,28 @@ std::string ltMatmulAlgorithmSelectionKey(const char* direction,
         << static_cast<int>(dataTypes.A) << ',' << static_cast<int>(dataTypes.B) << ',' << static_cast<int>(dataTypes.C) << ','
         << static_cast<int>(dataTypes.D) << ',' << static_cast<int>(dataTypes.compute) << ":epilogue=" << epilogue
         << ":addend=" << static_cast<int>(hasAddend) << ":secondary=" << static_cast<int>(secondaryFlag)
-        << ":auxld=" << epilogueAuxLd << ":workspace=" << workspaceLimitBytes;
+        << ":auxld=" << epilogueAuxLd;
     return key.str();
+}
+
+std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> chooseLtMatmulAlgorithmSelection(
+    const LtMatmulAlgorithmSelectionSet& selections, std::optional<uint64_t> maxWorkspaceSizeInBytes) {
+    if (!maxWorkspaceSizeInBytes.has_value()) {
+        if (selections.preferred.has_value()) {
+            return selections.preferred;
+        }
+        return selections.zero_workspace;
+    }
+
+    if (selections.preferred.has_value() &&
+        selections.preferred->workspace_size_in_bytes <= maxWorkspaceSizeInBytes.value()) {
+        return selections.preferred;
+    }
+    if (selections.zero_workspace.has_value()) {
+        THOR_THROW_IF_FALSE(selections.zero_workspace->workspace_size_in_bytes == 0);
+        return selections.zero_workspace;
+    }
+    return std::nullopt;
 }
 
 }  // namespace
@@ -2213,19 +2237,17 @@ static cublasLtEpilogue_t toCublasLtBackwardEpilogue(CublasMatrixMultiply::Backw
     throw std::runtime_error("Unknown cuBLASLt GEMM backward epilogue fusion kind.");
 }
 
-static uint64_t cublasLtEpilogueWorkspacePolicyLimitBytes(int gpuNum) {
+static uint64_t cublasLtEpiloguePreferredWorkspacePolicyLimitBytes(int gpuNum) {
+    // This is a stable selection-time policy. Instantaneous free memory must not
+    // participate in global algorithm identity; runtime workspace pressure is
+    // handled by choosing the preselected zero-workspace fallback instead.
     constexpr uint64_t EPILOGUE_WORKSPACE_ABSOLUTE_CAP_BYTES = 1ull * 1024ull * 1024ull * 1024ull;
     constexpr uint64_t EPILOGUE_WORKSPACE_TOTAL_MEM_DIVISOR = 20ull;  // At most 5% of device memory.
-    constexpr uint64_t EPILOGUE_WORKSPACE_FREE_MEM_DIVISOR = 4ull;    // Leave at least 75% of currently-free memory alone.
 
     uint64_t maxWorkspaceBytes = EPILOGUE_WORKSPACE_ABSOLUTE_CAP_BYTES;
     const uint64_t totalMemBytes = static_cast<uint64_t>(MachineEvaluator::instance().getTotalGlobalMemBytes(gpuNum));
-    const uint64_t freeMemBytes = static_cast<uint64_t>(MachineEvaluator::instance().getFreeMemBytes(gpuNum));
     if (totalMemBytes > 0) {
         maxWorkspaceBytes = std::min(maxWorkspaceBytes, totalMemBytes / EPILOGUE_WORKSPACE_TOTAL_MEM_DIVISOR);
-    }
-    if (freeMemBytes > 0) {
-        maxWorkspaceBytes = std::min(maxWorkspaceBytes, freeMemBytes / EPILOGUE_WORKSPACE_FREE_MEM_DIVISOR);
     }
     return maxWorkspaceBytes;
 }
@@ -2932,8 +2954,7 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
     validateMatmulDataTypesOrThrow(dataTypes, "CublasMatrixMultiply::selectGemmWithEpilogueAlgorithm");
     validateFp8MatmulScaleConfigurationOrThrow(dataTypes, Fp8MatmulScales::none(), "CublasMatrixMultiply::selectGemmWithEpilogueAlgorithm");
 
-    const uint64_t workspaceLimitBytes =
-        maxWorkspaceSizeInBytes.value_or(cublasLtEpilogueWorkspacePolicyLimitBytes(gpuNum));
+    const uint64_t preferredWorkspaceLimitBytes = cublasLtEpiloguePreferredWorkspacePolicyLimitBytes(gpuNum);
     const std::string selectionKey = ltMatmulAlgorithmSelectionKey("forward",
                                                                    gpuNum,
                                                                    A_rows,
@@ -2950,10 +2971,9 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
                                                                    static_cast<int>(epilogue),
                                                                    hasAddend,
                                                                    addendIsBiasVector,
-                                                                   0,
-                                                                   workspaceLimitBytes);
-    return ltMatmulAlgorithmSelectionRepository().getOrSelect(
-        selectionKey, [&]() -> std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> {
+                                                                   0);
+    auto selections = ltMatmulAlgorithmSelectionRepository().getOrSelect(
+        selectionKey, [&]() -> std::optional<LtMatmulAlgorithmSelectionSet> {
             ScopedGpu scopedGpu(gpuNum);
             OperationType operationType = makeOperationType(dataTypes);
             validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
@@ -3046,28 +3066,48 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
             const float betaZero = 0.0f;
             const float betaOne = 1.0f;
             const float *effectiveBeta = (hasAddend && !addendIsBiasVector) ? &betaOne : &betaZero;
-            auto selection = cublasLtSelectMeasuredContestAlgorithm(gpuNum,
-                                                                    operationDesc,
-                                                                    ADesc,
-                                                                    BDesc,
-                                                                    CDesc,
-                                                                    DDesc,
-                                                                    &alphaOne,
-                                                                    effectiveBeta,
-                                                                    contestInstances,
-                                                                    addendIsBiasVector,
-                                                                    false,
-                                                                    workspaceLimitBytes,
-                                                                    operationBytes,
-                                                                    "CublasMatrixMultiply::selectGemmWithEpilogueAlgorithm");
+            auto selectForWorkspaceLimit = [&](uint64_t workspaceLimitBytes) {
+                return cublasLtSelectMeasuredContestAlgorithm(gpuNum,
+                                                               operationDesc,
+                                                               ADesc,
+                                                               BDesc,
+                                                               CDesc,
+                                                               DDesc,
+                                                               &alphaOne,
+                                                               effectiveBeta,
+                                                               contestInstances,
+                                                               addendIsBiasVector,
+                                                               false,
+                                                               workspaceLimitBytes,
+                                                               operationBytes,
+                                                               "CublasMatrixMultiply::selectGemmWithEpilogueAlgorithm");
+            };
+
+            LtMatmulAlgorithmSelectionSet selected;
+            selected.preferred = selectForWorkspaceLimit(preferredWorkspaceLimitBytes);
+            if (selected.preferred.has_value() && selected.preferred->workspace_size_in_bytes == 0) {
+                selected.zero_workspace = selected.preferred;
+            } else {
+                selected.zero_workspace = selectForWorkspaceLimit(0);
+            }
+            if (!selected.preferred.has_value()) {
+                selected.preferred = selected.zero_workspace;
+            }
 
             CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
             CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
             CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
             CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
             CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
-            return selection;
+            if (!selected.preferred.has_value()) {
+                return std::nullopt;
+            }
+            return selected;
         });
+    if (!selections.has_value()) {
+        return std::nullopt;
+    }
+    return chooseLtMatmulAlgorithmSelection(selections.value(), maxWorkspaceSizeInBytes);
 }
 
 uint64_t CublasMatrixMultiply::getGemmWithEpilogueWorkspaceSizeInBytes(int gpuNum,
@@ -3131,8 +3171,7 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
     validateFp8MatmulScaleConfigurationOrThrow(
         dataTypes, Fp8MatmulScales::none(), "CublasMatrixMultiply::selectGemmWithBackwardEpilogueAlgorithm");
 
-    const uint64_t workspaceLimitBytes =
-        maxWorkspaceSizeInBytes.value_or(cublasLtEpilogueWorkspacePolicyLimitBytes(gpuNum));
+    const uint64_t preferredWorkspaceLimitBytes = cublasLtEpiloguePreferredWorkspacePolicyLimitBytes(gpuNum);
     const std::string selectionKey = ltMatmulAlgorithmSelectionKey("backward",
                                                                    gpuNum,
                                                                    A_rows,
@@ -3149,10 +3188,9 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
                                                                    static_cast<int>(epilogue),
                                                                    hasAddend,
                                                                    hasBiasGradient,
-                                                                   epilogueAuxLd,
-                                                                   workspaceLimitBytes);
-    return ltMatmulAlgorithmSelectionRepository().getOrSelect(
-        selectionKey, [&]() -> std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> {
+                                                                   epilogueAuxLd);
+    auto selections = ltMatmulAlgorithmSelectionRepository().getOrSelect(
+        selectionKey, [&]() -> std::optional<LtMatmulAlgorithmSelectionSet> {
             ScopedGpu scopedGpu(gpuNum);
             OperationType operationType = makeOperationType(dataTypes);
             validateFp8RowMajorGemmShapeAndLayoutOrThrow(operationType,
@@ -3262,28 +3300,48 @@ std::optional<CublasMatrixMultiply::LtMatmulAlgorithmSelection> CublasMatrixMult
             const float betaZero = 0.0f;
             const float betaOne = 1.0f;
             const float *effectiveBeta = hasAddend ? &betaOne : &betaZero;
-            auto selection = cublasLtSelectMeasuredContestAlgorithm(gpuNum,
-                                                                    operationDesc,
-                                                                    ADesc,
-                                                                    BDesc,
-                                                                    CDesc,
-                                                                    DDesc,
-                                                                    &alphaOne,
-                                                                    effectiveBeta,
-                                                                    contestInstances,
-                                                                    hasBiasGradient,
-                                                                    true,
-                                                                    workspaceLimitBytes,
-                                                                    operationBytes,
-                                                                    "CublasMatrixMultiply::selectGemmWithBackwardEpilogueAlgorithm");
+            auto selectForWorkspaceLimit = [&](uint64_t workspaceLimitBytes) {
+                return cublasLtSelectMeasuredContestAlgorithm(gpuNum,
+                                                               operationDesc,
+                                                               ADesc,
+                                                               BDesc,
+                                                               CDesc,
+                                                               DDesc,
+                                                               &alphaOne,
+                                                               effectiveBeta,
+                                                               contestInstances,
+                                                               hasBiasGradient,
+                                                               true,
+                                                               workspaceLimitBytes,
+                                                               operationBytes,
+                                                               "CublasMatrixMultiply::selectGemmWithBackwardEpilogueAlgorithm");
+            };
+
+            LtMatmulAlgorithmSelectionSet selected;
+            selected.preferred = selectForWorkspaceLimit(preferredWorkspaceLimitBytes);
+            if (selected.preferred.has_value() && selected.preferred->workspace_size_in_bytes == 0) {
+                selected.zero_workspace = selected.preferred;
+            } else {
+                selected.zero_workspace = selectForWorkspaceLimit(0);
+            }
+            if (!selected.preferred.has_value()) {
+                selected.preferred = selected.zero_workspace;
+            }
 
             CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(DDesc));
             CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(CDesc));
             CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(BDesc));
             CHECK_CUBLAS(cublasLtMatrixLayoutDestroy(ADesc));
             CHECK_CUBLAS(cublasLtMatmulDescDestroy(operationDesc));
-            return selection;
+            if (!selected.preferred.has_value()) {
+                return std::nullopt;
+            }
+            return selected;
         });
+    if (!selections.has_value()) {
+        return std::nullopt;
+    }
+    return chooseLtMatmulAlgorithmSelection(selections.value(), maxWorkspaceSizeInBytes);
 }
 
 uint64_t CublasMatrixMultiply::getGemmWithBackwardEpilogueWorkspaceSizeInBytes(int gpuNum,

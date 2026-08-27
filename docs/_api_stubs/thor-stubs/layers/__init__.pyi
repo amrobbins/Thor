@@ -500,8 +500,8 @@ class Concatenate(Layer):
         ----------
         network : thor.Network
             Network the layer should be added to.
-        feature_inputs : list[thor.Tensor]
-            List of input feature tensors for this layer.
+        feature_inputs : list[thor.Tensor] | list[thor.RaggedTensor]
+            Dense feature tensors, or ragged tensors sharing the exact same row partition.
         concatenation_axis : int
             Axis along which to concatenate the input tensors.
 
@@ -516,8 +516,11 @@ class Concatenate(Layer):
         Note that all dimensions must match to perform Contcatenate, except for the concatenation_axis dimension.
         """
 
-    def get_feature_output(self) -> thor.Tensor:
-        """Return the concatenated feature output tensor."""
+    def get_feature_output(self) -> object:
+        """Return the concatenated dense or ragged feature output."""
+
+    @property
+    def use_ragged(self) -> bool: ...
 
 class Convolution1d(TrainableLayer):
     """

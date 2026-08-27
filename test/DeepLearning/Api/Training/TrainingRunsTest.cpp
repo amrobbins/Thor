@@ -107,6 +107,7 @@ std::shared_ptr<Network> makeRaggedRowLengthMemberNetwork(const std::string& net
                                .trailingDimensions({2})
                                .maxTotalValues(8)
                                .batchSize(4)
+                               .maxValuesPerRow(3)
                                .build();
 
     // The prediction below intentionally depends only on offsets. Keep the
@@ -2163,6 +2164,8 @@ TEST(TrainingRunsResult, SaveSingleMemberEnsemblePreservesLogicalRaggedInputBoun
     EXPECT_EQ(raggedInputs.front().name, "history");
     EXPECT_EQ(raggedInputs.front().raggedTensor.getBatchSize(), 4u);
     EXPECT_EQ(raggedInputs.front().raggedTensor.getMaxTotalValues(), 8u);
+    ASSERT_TRUE(raggedInputs.front().raggedTensor.hasMaxValuesPerRow());
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getMaxValuesPerRow(), 3u);
 
     std::filesystem::remove_all(root);
 }
@@ -2209,6 +2212,8 @@ TEST(TrainingRunsResult, SaveMultiMemberEnsemblePreservesLogicalRaggedInputBound
     EXPECT_EQ(raggedInputs.front().name, "history");
     EXPECT_EQ(raggedInputs.front().raggedTensor.getBatchSize(), 4u);
     EXPECT_EQ(raggedInputs.front().raggedTensor.getMaxTotalValues(), 8u);
+    ASSERT_TRUE(raggedInputs.front().raggedTensor.hasMaxValuesPerRow());
+    EXPECT_EQ(raggedInputs.front().raggedTensor.getMaxValuesPerRow(), 3u);
 
     std::filesystem::remove_all(root);
 }

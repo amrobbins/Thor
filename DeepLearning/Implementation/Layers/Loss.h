@@ -324,6 +324,14 @@ class Loss : public Layer {
     // gradient tensor instead of leaving an unpopulated errorOutput in the graph.
     virtual void notifyFusedGradientUnregisteredFromDrivingLayer(const Tensor &predictions) { (void)predictions; }
 
+    // A fused CustomLoss gradient is evaluated by the CustomLayer that produced
+    // the predictions rather than by the loss itself.  The driving layer calls
+    // this hook after every stream that can read the fused gradient inputs has
+    // reached `consumersDone`.  CustomLoss uses the event to extend the local
+    // reuse lifetime of labels and its batch-validity mask through the deferred
+    // backward read instead of relying on the network-wide end-of-batch barrier.
+    virtual void notifyFusedGradientConsumptionComplete(const Event &consumersDone) { (void)consumersDone; }
+
     virtual void pruneTrainingBackpropPathIfInactive() {
         if (trainingActive || trainingBackpropPathPruned || isInferenceOnly() || !errorOutput.has_value()) {
             return;

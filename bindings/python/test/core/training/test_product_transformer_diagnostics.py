@@ -510,3 +510,71 @@ def test_product_transformer_dense_query_ragged_kv_decoder_with_fused_residual_d
     thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
 
     _place_training(network)
+
+
+@pytest.mark.cuda
+def test_product_transformer_ragged_fp32_diagnostic_custom_layer_backpropagates_to_bf16_producer():
+    """A promoted diagnostic expression must return dInput in BF16 storage.
+
+    ProductTransformer's F3 diagnostics intentionally inspect BF16 ragged temporal
+    values in FP32.  Forward promotion is a logical compute choice; the gradient
+    crossing back into the BF16 producer still has to match that producer's
+    preallocated graph-level error tensor.
+    """
+
+    network = thor.Network("diagnostic_product_transformer_ragged_fp32_observer_backward")
+    optimizer = _diagnostic_optimizer()
+    history = thor.layers.RaggedNetworkInput(
+        network,
+        "history",
+        thor.DataType.bf16,
+        [MODEL_WIDTH],
+        max_total_values=HISTORY_CAPACITY,
+        batch_size=BATCH_SIZE,
+        offsets_data_type=thor.DataType.uint32,
+        max_values_per_row=HISTORY_CAPACITY,
+    )
+    projected = thor.layers.FullyConnected(
+        network,
+        history,
+        MODEL_WIDTH,
+        True,
+        activation=None,
+        preserve_prefix_dimensions=True,
+        weights_data_type=thor.DataType.bf16,
+        compute_data_type=thor.DataType.fp32,
+        output_data_type=thor.DataType.bf16,
+        weights_optimizer=optimizer,
+        biases_optimizer=optimizer,
+    ).get_feature_output()
+
+    def square_fp32(context: thor.layers.CustomLayerBuildContext) -> dict[str, thor.physical.Expression]:
+        x = context.input("values", output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32)
+        return {"square": x * x}
+
+    square = thor.layers.CustomLayer(
+        network=network,
+        inputs={"values": projected},
+        output_names=["square"],
+        build=square_fp32,
+        parameters=[],
+    )["square"]
+    assert isinstance(square, thor.RaggedTensor)
+    assert square.get_values_data_type() == thor.DataType.fp32
+
+    pooled = thor.layers.SegmentedReduction(
+        network, square, thor.layers.SegmentedReduction.Type.mean
+    ).get_feature_output()
+    labels = thor.layers.NetworkInput(
+        network, "labels", [MODEL_WIDTH], thor.DataType.fp32
+    ).get_feature_output()
+    loss = thor.losses.MSE(
+        network,
+        pooled,
+        labels,
+        thor.DataType.fp32,
+        thor.losses.LossShape.batch,
+    )
+    thor.layers.NetworkOutput(network, "loss", loss.get_loss(), thor.DataType.fp32)
+
+    _place_training(network)

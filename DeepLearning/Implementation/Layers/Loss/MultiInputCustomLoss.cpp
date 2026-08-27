@@ -220,7 +220,13 @@ optional<Tensor> MultiInputCustomLoss::connectToPreviousLayer(
     previousLayers[inputIndex] = previousLayer;
     featureInputs[inputIndex] = featureInput.value();
     inputStreams[inputIndex] = stream;
-    if (gradientNames[inputIndex].has_value() && backPropagateError && !isInferenceOnly())
+    // Losses are gradient origins during training. A differentiable input must
+    // therefore have gradient storage even when the upstream layer currently
+    // reports that it does not need a back-prop error. That can happen when a
+    // non-training consumer (for example a NetworkOutput used for reporting)
+    // was connected first. This mirrors Loss::connectToPredictionsInputLayer().
+    const bool createTrainingErrorOutput = backPropagateError || !isInferenceOnly();
+    if (gradientNames[inputIndex].has_value() && createTrainingErrorOutput && !isInferenceOnly())
         errorOutputs[inputIndex] = featureInput.value().clone();
     else
         errorOutputs[inputIndex] = nullopt;

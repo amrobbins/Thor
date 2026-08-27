@@ -10197,7 +10197,10 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                         }
                         if (outputTensor.getDescriptor().getDataType() != compiledEq->output_dtypes.at(output_idx)) {
                             throw std::runtime_error(
-                                "Preallocated fused-stage output tensor dtype does not match the compiled output dtype.");
+                                "Preallocated fused-stage output tensor dtype does not match the compiled output dtype for output '" +
+                                stageOutput.name + "': preallocated=" +
+                                TensorDescriptor::getElementTypeName(outputTensor.getDescriptor().getDataType()) +
+                                ", compiled=" + TensorDescriptor::getElementTypeName(compiledEq->output_dtypes.at(output_idx)) + ".");
                         }
                         if (outputTensor.getDimensions() != expected_output_dims[output_idx]) {
                             throw std::runtime_error(

@@ -867,6 +867,72 @@ TEST(MSEApi, PublicBuilderBacksRawLossWithCustomLoss) {
     ASSERT_FALSE(foundRawMSE);
 }
 
+TEST(MultiInputCustomLossApi, WeightedMseKeepsTrainingGradientWhenPredictionIsReportedFirst) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Weighted MSE gradient-origin regression requires a GPU";
+
+    shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+
+    Network network("weighted_mse_reported_prediction_gradient_origin");
+    NetworkInput features =
+        NetworkInput::Builder().network(network).name("features").dimensions({1}).dataType(DataType::FP32).build();
+    FullyConnected prediction = FullyConnected::Builder()
+                                    .network(network)
+                                    .featureInput(features.getFeatureOutput().value())
+                                    .numOutputFeatures(1)
+                                    .hasBias(false)
+                                    .weightsDataType(DataType::FP32)
+                                    .computeDataType(DataType::FP32)
+                                    .outputDataType(DataType::FP32)
+                                    .weightsOptimizer(sgd)
+                                    .noActivation()
+                                    .build();
+
+    // Connect a reporting-only consumer before the weighted loss. The physical
+    // producer may consequently report backPropagateError=false when the loss
+    // later connects, but the loss is itself the training gradient origin.
+    NetworkOutput::Builder()
+        .network(network)
+        .name("prediction")
+        .inputTensor(prediction.getFeatureOutput().value())
+        .dataType(DataType::FP32)
+        .build();
+
+    NetworkInput labels =
+        NetworkInput::Builder().network(network).name("labels").dimensions({1}).dataType(DataType::FP32).build();
+    NetworkInput weights =
+        NetworkInput::Builder().network(network).name("weights").dimensions({1}).dataType(DataType::FP32).build();
+    MSE mse = MSE::Builder()
+                  .network(network)
+                  .predictions(prediction.getFeatureOutput().value())
+                  .labels(labels.getFeatureOutput().value())
+                  .exampleWeights(weights.getFeatureOutput().value())
+                  .lossDataType(DataType::FP32)
+                  .reportsRawLoss()
+                  .build();
+    NetworkOutput::Builder().network(network).name("loss").inputTensor(mse.getLoss()).dataType(DataType::FP32).build();
+
+    vector<Event> initializationDone;
+    shared_ptr<PlacedNetwork> placed = network.place(/*batchSize=*/2, initializationDone, /*inferenceOnly=*/false);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initializationDone)
+        event.synchronize();
+
+    shared_ptr<MultiInputCustomLoss> rawLoss;
+    for (uint32_t i = 0; i < network.getNumLayers(); ++i) {
+        rawLoss = dynamic_pointer_cast<MultiInputCustomLoss>(network.getLayer(i));
+        if (rawLoss != nullptr)
+            break;
+    }
+    ASSERT_NE(rawLoss, nullptr);
+
+    Impl::StampedNetwork& stampedNetwork = placed->getStampedNetwork(0);
+    auto physicalRawLoss =
+        dynamic_pointer_cast<Impl::MultiInputCustomLoss>(stampedNetwork.getPhysicalLayerFromApiLayer(rawLoss->getId()));
+    ASSERT_NE(physicalRawLoss, nullptr);
+    ASSERT_TRUE(physicalRawLoss->getErrorOutput(0).has_value());
+}
+
 TEST(CustomLossApi, PartialBatchMasksFusedGradientAndNormalizesUpdateByValidExamples) {
     if (MachineEvaluator::instance().getNumGpus() == 0)
         GTEST_SKIP() << "CustomLoss partial-batch execution test requires a GPU";
