@@ -1093,6 +1093,8 @@ def _build_byte_transformer_lm(name: str):
         attention = thor.layers.Attention(
             network,
             norm.get_feature_output(),
+            norm.get_feature_output(),
+            norm.get_feature_output(),
             num_heads=BYTE_LM_NUM_HEADS,
             head_dim=head_dim,
             output_features=BYTE_LM_HIDDEN_DIM,

@@ -832,7 +832,8 @@ class FusedEquation {
         Tensor& scale,
         Tensor& bias,
         const std::optional<Tensor>& preallocatedOutput,
-        const Stream& stream) const;
+        const Stream& stream,
+        const std::optional<Tensor>& rowPartitionOffsets = std::nullopt) const;
 
     [[nodiscard]] std::shared_ptr<StampedRmsNormBackward> stampRmsNormBackward(
         const std::shared_ptr<CompiledRmsNormBackward>& compiledStage,

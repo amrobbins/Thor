@@ -146,6 +146,12 @@ class Metric : public Layer {
         batchCardinalitySet = false;
     }
 
+    void cleanup() override {
+        labelsReadyEvent = Event();
+        labelsReusableEvent = Event();
+        Layer::cleanup();
+    }
+
     void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t validExampleCount = 0) override {
         THOR_THROW_IF_FALSE(running);
 
@@ -207,6 +213,11 @@ class Metric : public Layer {
    protected:
     std::optional<Tensor> labelsInput;
     Stream labelsStream;
+    Event labelsReadyEvent;
+    Event labelsReusableEvent;
+
+    void waitForLabelsReady() { stream.waitFor(labelsStream, labelsReadyEvent); }
+    void markLabelsReusableAfterCompute() { labelsStream.waitFor(stream, labelsReusableEvent); }
 
     bool featureInputReceived;
     bool labelsReceived;
@@ -254,9 +265,9 @@ class Metric : public Layer {
             // finished consuming them before it may overwrite the statically
             // connected labels tensor for a later queued batch. Loss layers use the
             // same two-way stream handshake.
-            stream.waitEvent(labelsStream.putEvent());
+            waitForLabelsReady();
             computeMetric(labelsInput.value(), featureInput.value(), featureOutput.value(), stream, currentValidExampleCount);
-            labelsStream.waitEvent(stream.putEvent());
+            markLabelsReusableAfterCompute();
             labelsReceived = false;
         } else {
             computeMetric(featureInput.value(), featureInput.value(), featureOutput.value(), stream, currentValidExampleCount);

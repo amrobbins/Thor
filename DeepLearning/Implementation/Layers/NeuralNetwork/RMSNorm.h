@@ -65,6 +65,10 @@ class RMSNorm : public TrainableLayer {
     std::vector<Tensor> saveInvVariance;
     std::vector<Tensor> scratchDScale;
     std::optional<Tensor> scratchErrorOutput;
+    // One stable dependency event per connection. The returned Event copy is
+    // consumed immediately by TrainableLayer; subsequent passes re-record the
+    // same cudaEvent_t after all waits for the previous generation were issued.
+    std::vector<Event> backwardCompletionEvents;
     // Every independently scheduled connection owns its own finalized cuDNN
     // Frontend executable(s) and scratch. Equivalent connections may share only
     // immutable process-global selection recipes.

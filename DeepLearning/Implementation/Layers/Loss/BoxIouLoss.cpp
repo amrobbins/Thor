@@ -119,7 +119,6 @@ void BoxIouLoss::infer(optional<Tensor> predictions, optional<Tensor> loss, Stre
     THOR_THROW_IF_FALSE(predictions.value() == featureInput.value());
     THOR_THROW_IF_FALSE(loss.value() == featureOutput.value());
 
-    stream.waitEvent(labelsStream.putEvent());
     launchKernel(!isInferenceOnly(), stream);
 }
 

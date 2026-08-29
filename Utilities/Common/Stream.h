@@ -53,11 +53,23 @@ class Stream {
 
     virtual ~Stream() = default;
 
+    // Value-returning putEvent() creates a distinct CUDA event and transfers
+    // ownership of that completion token to the caller. Recurring dependency
+    // edges should instead own an Event and use the in-place overload below.
     Event putEvent(bool enableTiming = false, bool expectingHostToWaitOnThisOne = false) const;
 
+    // Lazily creates event once, then re-records the same cudaEvent_t. Creation
+    // flags are immutable: GPU, timing, and blocking-sync intent must match on
+    // every reuse.
     void putEvent(Event &event, bool enableTiming = false, bool expectingHostToWaitOnThisOne = false) const;
 
     void waitEvent(Event event) const;
+
+    // Record a reusable synchronization-only event on producer and enqueue this
+    // stream's wait for that recorded generation. The caller owns the Event and
+    // therefore owns the logical dependency edge; Thor intentionally does not
+    // cache events implicitly by stream pair.
+    void waitFor(const Stream &producer, Event &reusableEvent) const;
 
     void synchronize() const;
 

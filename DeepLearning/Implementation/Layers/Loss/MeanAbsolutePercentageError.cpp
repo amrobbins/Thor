@@ -75,8 +75,6 @@ void MeanAbsolutePercentageError::infer(std::optional<Tensor> predictions, std::
     THOR_THROW_IF_FALSE(predictions.value().getDescriptor().getDataType() == DataType::FP16 ||
            predictions.value().getDescriptor().getDataType() == DataType::FP32);
 
-    stream.waitEvent(labelsStream.putEvent());
-
     if (predictions.value().getDescriptor().getDataType() == DataType::FP16) {
         launchMeanAbsolutePercentageErrorWithFP16Predictions();
     } else if (predictions.value().getDescriptor().getDataType() == DataType::FP32) {

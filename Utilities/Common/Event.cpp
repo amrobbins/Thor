@@ -23,7 +23,8 @@ void reportCudaCleanupFailure(const char *operation, cudaError_t status) noexcep
 }  // namespace
 
 struct Event::State {
-    State(int32_t gpuNum, bool blockingSync, uint64_t id) : gpuNum(gpuNum), blockingSync(blockingSync), id(id) {}
+    State(int32_t gpuNum, bool timingEnabled, bool blockingSync, uint64_t id)
+        : gpuNum(gpuNum), timingEnabled(timingEnabled), blockingSync(blockingSync), id(id) {}
 
     ~State() noexcept {
         ThorImplementation::SharedOwnership::cleanupNoThrow("Event", "release CUDA event", [&]() {
@@ -60,6 +61,7 @@ struct Event::State {
 
     int32_t gpuNum;
     cudaEvent_t cudaEvent = nullptr;
+    bool timingEnabled;
     bool blockingSync;
     uint64_t id;
 };
@@ -88,6 +90,11 @@ int32_t Event::getGpuNum() const {
 }
 
 bool Event::isInitialized() const { return state != nullptr; }
+
+bool Event::usesTiming() const {
+    THOR_THROW_IF_FALSE(isInitialized());
+    return state->timingEnabled;
+}
 
 bool Event::usesBlockingSync() const {
     THOR_THROW_IF_FALSE(isInitialized());
@@ -124,6 +131,7 @@ void Event::construct(int32_t gpuNum, bool enableTiming, bool expectingHostToWai
         flags |= cudaEventBlockingSync;
 
     auto newState = std::make_shared<State>(gpuNum,
+                                            enableTiming,
                                             expectingHostToWaitOnThisOne,
                                             nextEventId.fetch_add(1, std::memory_order_relaxed));
     CUDA_CHECK(cudaEventCreateWithFlags(&newState->cudaEvent, flags));

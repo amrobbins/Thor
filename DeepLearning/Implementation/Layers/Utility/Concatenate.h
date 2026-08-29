@@ -69,6 +69,7 @@ class Concatenate : public MultiConnectionLayer {
         featureInputs.resize(expectedNumInputs);
         streams.resize(expectedNumInputs);
         errorOutputs.resize(expectedNumInputs);
+        forwardInputReadyEvents.resize(expectedNumInputs);
     }
 
     std::optional<Tensor> createFeatureOutputTensor() override {
@@ -282,10 +283,10 @@ class Concatenate : public MultiConnectionLayer {
                         streams[0]);
         }
 
-        Event readyEvent = streams[0].putEvent();
+        streams[0].putEvent(backwardOutputsReadyEvent);
         previousLayers[0].value()->backward(errorOutputs[0], batchSize);
         for (unsigned int i = 1; i < errorOutputs.size(); ++i) {
-            streams[i].waitEvent(readyEvent);
+            streams[i].waitEvent(backwardOutputsReadyEvent);
             previousLayers[i].value()->backward(errorOutputs[i], batchSize);
         }
     }
@@ -324,7 +325,7 @@ class Concatenate : public MultiConnectionLayer {
         stillWaitingForFeatureInputTensors = allFeatureInputTensorIds;
 
         for (unsigned int i = 1; i < featureInputs.size(); ++i)
-            streams[0].waitEvent(streams[i].putEvent());
+            streams[0].waitFor(streams[i], forwardInputReadyEvents[i]);
 
         refreshFeatureInputMemoryArray(streams[0]);
 
@@ -382,6 +383,9 @@ class Concatenate : public MultiConnectionLayer {
             CUDA_CHECK(cudaFree(stridePerSplitTensorDimension_d));
             stridePerSplitTensorDimension_d = nullptr;
         }
+        for (Event& event : forwardInputReadyEvents)
+            event = Event();
+        backwardOutputsReadyEvent = Event();
     }
 
     void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
@@ -528,6 +532,9 @@ class Concatenate : public MultiConnectionLayer {
     std::set<unsigned long> stillWaitingForFeatureInputTensors;
     uint32_t currentValidExampleCount = 0;
     bool batchCardinalitySet = false;
+
+    std::vector<Event> forwardInputReadyEvents;
+    Event backwardOutputsReadyEvent;
 };
 
 }  // namespace ThorImplementation

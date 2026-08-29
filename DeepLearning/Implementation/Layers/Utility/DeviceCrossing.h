@@ -33,7 +33,11 @@ class DeviceCrossing : public Layer {
         THOR_THROW_IF_FALSE(!uninitialized);
         THOR_THROW_IF_FALSE(featureInput.has_value());
         outputBuffer = featureInput.value().clone();
-        finishedCopyEvent = stream.putEvent();
+        // This event always belongs to the destination-side stream. It marks the
+        // output buffer as reusable by the source stream after the prior offload
+        // (or immediately on the first pass). Keeping its producer GPU stable is
+        // required for owner-scoped event reuse.
+        otherDeviceStream.putEvent(finishedCopyEvent);
         return Tensor(outputPlacement, featureInput.value().getDescriptor());
     }
 
@@ -57,16 +61,16 @@ class DeviceCrossing : public Layer {
         // output stream waits for copy to buffer to complete
         // output buffer is offloaded to the other device
         // an event is placed on the output stream to indicate when the offload copy is complete
-        otherDeviceStream.waitEvent(stream.putEvent());
+        otherDeviceStream.waitFor(stream, bufferReadyForOffloadEvent);
         outputTensor.value().copyFromAsync(outputBuffer, otherDeviceStream);
-        finishedCopyEvent = otherDeviceStream.putEvent();
+        otherDeviceStream.putEvent(finishedCopyEvent);
     }
 
     // Crosses from dest device to source device
     void backProp(std::optional<Tensor> dataIn, std::optional<Tensor> errorIn, std::optional<Tensor> errorOut, Stream stream) override {
         THOR_THROW_IF_FALSE(!uninitialized);
         if (errorOut.has_value()) {
-            stream.waitEvent(otherDeviceStream.putEvent());
+            stream.waitFor(otherDeviceStream, backwardErrorReadyEvent);
             errorOut.value().copyFromAsync(errorIn.value(), stream);
         }
     }
@@ -113,6 +117,13 @@ class DeviceCrossing : public Layer {
         return Layer::connectToPreviousLayer(previousLayer, featureInput, stream, backPropagateError);
     }
 
+    void cleanup() override {
+        finishedCopyEvent = Event();
+        bufferReadyForOffloadEvent = Event();
+        backwardErrorReadyEvent = Event();
+        Layer::cleanup();
+    }
+
     void ensureNoDeviceCrossing() override {
         // device crossing allowed here.
     }
@@ -125,6 +136,8 @@ class DeviceCrossing : public Layer {
     Stream otherDeviceStream;
     Tensor outputBuffer;
     Event finishedCopyEvent;
+    Event bufferReadyForOffloadEvent;
+    Event backwardErrorReadyEvent;
 };
 
 }  // namespace ThorImplementation

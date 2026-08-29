@@ -238,6 +238,8 @@ void InstanceNorm::compileImpl() {
     scratchDScale.clear();
     scratchDBias.clear();
     scratchErrorOutput.reset();
+    backwardCompletionEvents.clear();
+    backwardCompletionEvents.resize(featureInputs.size());
     forwardPlans.clear();
     backwardPlans.clear();
     forwardWorkspaces.clear();
@@ -313,11 +315,12 @@ void InstanceNorm::cleanup() {
     scratchDScale.clear();
     scratchDBias.clear();
     scratchErrorOutput.reset();
+    backwardCompletionEvents.clear();
     forwardPlans.clear();
     backwardPlans.clear();
     forwardWorkspaces.clear();
     backwardWorkspaces.clear();
-    Layer::cleanup();
+    TrainableLayer::cleanup();
 }
 
 void InstanceNorm::computeFeatureOut(uint32_t connectionNumber) {
@@ -427,7 +430,9 @@ optional<Event> InstanceNorm::computeErrorOutAccumulateWeightsGradienFused(uint3
                                              executionStream);
     }
 
-    return executionStream.putEvent();
+    THOR_THROW_IF_FALSE(connectionNumber < backwardCompletionEvents.size());
+    executionStream.putEvent(backwardCompletionEvents[connectionNumber]);
+    return backwardCompletionEvents[connectionNumber];
 }
 
 void InstanceNorm::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {

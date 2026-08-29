@@ -1431,13 +1431,19 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
 
     auto statsReporter =
         std::make_shared<TrainingRunsStatsReporter>(stdout, combinedTrainingRunsColorMode(runs), maxSummaryLogsPerSecond);
+    std::vector<std::optional<std::string>> phaseHistoryLabels;
+    std::vector<std::vector<std::string>> phaseReportOrders;
+    phaseHistoryLabels.reserve(runs.size());
+    phaseReportOrders.reserve(runs.size());
     for (const TrainingRunsSpec& spec : runs) {
         const TrainingRuntimeConfig& runtime = spec.trainer->getRuntimeConfig();
+        phaseHistoryLabels.push_back(spec.trainer->currentTrainingPhaseHistoryLabel());
+        phaseReportOrders.push_back(reportedScalarTensorNamesForSpec(spec));
         statsReporter->configureRun(spec.runName,
                                     TrainingRunsStatsReporter::RunConfig{runtime.statsIntervalSeconds,
                                                                          spec.ensembleGroup,
                                                                          spec.ensembleWeight,
-                                                                         reportedScalarTensorNamesForSpec(spec)});
+                                                                         phaseReportOrders.back()});
     }
 
     const size_t maxActiveRuns = getEffectiveMaxParallelRuns();
@@ -1463,6 +1469,8 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
                                   &schedulingChanged,
                                   &workerFinished,
                                   &cancellationRequestedByFailure,
+                                  &phaseHistoryLabels,
+                                  &phaseReportOrders,
                                   initialDeviceStartupOrder,
                                   statsReporter,
                                   i]() {
@@ -1495,7 +1503,7 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
                 // TrainingRuns flushes the shared reporter after all workers join.
                 TrainingStatsSinkObserver observer(
                     statsReporter, runs[i].runName, /*flushSinkOnFlush=*/false);
-                const std::vector<std::string> reportedScalarTensorNames = reportedScalarTensorNamesForSpec(runs[i]);
+                const std::vector<std::string>& reportedScalarTensorNames = phaseReportOrders[i];
                 const std::set<std::string> additionalScalarTensorsToReport(reportedScalarTensorNames.begin(), reportedScalarTensorNames.end());
                 const TrainingCancellationToken cancellationToken =
                     cancellationSource.token();
@@ -1686,8 +1694,55 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
         evaluateEnsemblesOnTestData(results, ensembleResultsByGroup, evaluationOptions.testData);
     }
 
+    // Persist one immutable summary snapshot only after post-fit evaluation has
+    // finished so a later phase replays the same terminal result that this fit
+    // would have printed on its own, including any test metrics added above.
+    for (size_t i = 0; i < runs.size(); ++i) {
+        if (phaseHistoryLabels[i].has_value()) {
+            runs[i].trainer->recordTrainingRunsPhaseResult(
+                phaseHistoryLabels[i].value(), results[i], phaseReportOrders[i]);
+        }
+    }
+
     statsReporter->flush();
+
+    size_t historyLength = 0;
+    for (const TrainingRunsSpec& spec : runs) {
+        historyLength = std::max(historyLength, spec.trainer->trainingPhaseRunHistory.size());
+    }
+
+    // Preserve the existing per-fit terminal summary. Once the same Trainers
+    // have completed more than one staged phase, prepare a cumulative history
+    // block that will be emitted after the current ensemble report so the last
+    // TrainingRuns output is the complete staged-training recap.
     statsReporter->emitFinalReport(results);
+
+    std::vector<TrainingRunsStatsReporter::TrainingPhaseReport> phaseReports;
+    if (historyLength > 1) {
+        std::map<std::pair<std::string, size_t>, size_t> phaseReportIndexByKey;
+        for (const TrainingRunsSpec& spec : runs) {
+            std::map<std::string, size_t> occurrenceByPhaseName;
+            for (const Trainer::TrainingPhaseRunHistoryEntry& historyEntry :
+                 spec.trainer->trainingPhaseRunHistory) {
+                const size_t occurrence = occurrenceByPhaseName[historyEntry.phaseName]++;
+                const std::pair<std::string, size_t> key{historyEntry.phaseName, occurrence};
+                auto reportIt = phaseReportIndexByKey.find(key);
+                if (reportIt == phaseReportIndexByKey.end()) {
+                    TrainingRunsStatsReporter::TrainingPhaseReport phaseReport;
+                    phaseReport.phaseName = historyEntry.phaseName;
+                    if (occurrence > 0) {
+                        phaseReport.phaseName += "#" + std::to_string(occurrence + 1);
+                    }
+                    const size_t reportIndex = phaseReports.size();
+                    phaseReports.push_back(std::move(phaseReport));
+                    reportIt = phaseReportIndexByKey.emplace(key, reportIndex).first;
+                }
+                phaseReports[reportIt->second].runs.push_back(
+                    TrainingRunsStatsReporter::HistoricalRunResult{
+                        historyEntry.result, historyEntry.reportOrder});
+            }
+        }
+    }
 
     std::vector<TrainingEnsembleResult> ensembleResults;
     ensembleResults.reserve(ensembleResultsByGroup.size());
@@ -1697,6 +1752,9 @@ TrainingRunsResult TrainingRuns::fit(const TrainerFitOptions& options, const Tra
 
     statsReporter->flush();
     statsReporter->emitEnsembleReport(ensembleResults);
+    if (!phaseReports.empty()) {
+        statsReporter->emitTrainingHistoryReport(phaseReports);
+    }
     statsReporter->close();
 
     return TrainingRunsResult(std::move(results), std::move(ensembleResults));

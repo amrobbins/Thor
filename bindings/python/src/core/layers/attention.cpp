@@ -98,14 +98,6 @@ std::string rotaryScalingKindName(RotaryScalingKind value) {
     return "unknown";
 }
 
-bool attentionUsesPackedQkvProjection(const Attention& self) {
-    if constexpr (!Attention::USE_PACKED_QKV_PROJECTION) {
-        return false;
-    } else {
-        return !self.getUseRope() && !self.getUseCrossAttention();
-    }
-}
-
 std::optional<DataType> optionalDataTypeFromPython(const nb::object& obj,
                                                    const char* functionName,
                                                    const char* argumentName) {
@@ -164,7 +156,9 @@ void bind_attention(nb::module_& layers) {
         "__init__",
         [](Attention* self,
            Network& network,
-           nb::object feature_input,
+           nb::object query_input,
+           nb::object key_input,
+           nb::object value_input,
            uint32_t num_heads,
            std::optional<uint32_t> num_key_value_heads,
            std::optional<uint32_t> head_dim,
@@ -203,7 +197,6 @@ void bind_attention(nb::module_& layers) {
            int64_t sdpa_dropout_offset,
            std::optional<Tensor> query_sequence_lengths,
            std::optional<Tensor> key_value_sequence_lengths,
-           nb::object context_input,
            std::optional<Tensor> score_bias_input,
            nb::object epilogue,
            nb::object epilogue_inputs,
@@ -275,24 +268,28 @@ void bind_attention(nb::module_& layers) {
             }
             Attention::Builder builder;
             builder.network(network);
-            if (nb::isinstance<RaggedTensor>(feature_input)) {
-                builder.featureInput(nb::cast<RaggedTensor>(feature_input));
-            } else if (nb::isinstance<Tensor>(feature_input)) {
-                builder.featureInput(nb::cast<Tensor>(feature_input));
+            if (nb::isinstance<RaggedTensor>(query_input)) {
+                builder.queryInput(nb::cast<RaggedTensor>(query_input));
+            } else if (nb::isinstance<Tensor>(query_input)) {
+                builder.queryInput(nb::cast<Tensor>(query_input));
             } else {
-                throw nb::type_error("Attention feature_input must be thor.Tensor or thor.RaggedTensor.");
+                throw nb::type_error("Attention query_input must be thor.Tensor or thor.RaggedTensor.");
+            }
+            if (nb::isinstance<RaggedTensor>(key_input)) {
+                builder.keyInput(nb::cast<RaggedTensor>(key_input));
+            } else if (nb::isinstance<Tensor>(key_input)) {
+                builder.keyInput(nb::cast<Tensor>(key_input));
+            } else {
+                throw nb::type_error("Attention key_input must be thor.Tensor or thor.RaggedTensor.");
+            }
+            if (nb::isinstance<RaggedTensor>(value_input)) {
+                builder.valueInput(nb::cast<RaggedTensor>(value_input));
+            } else if (nb::isinstance<Tensor>(value_input)) {
+                builder.valueInput(nb::cast<Tensor>(value_input));
+            } else {
+                throw nb::type_error("Attention value_input must be thor.Tensor or thor.RaggedTensor.");
             }
             builder.numHeads(num_heads).hasBias(has_bias).maskKind(parseAttentionMaskKind(mask_kind));
-
-            if (!context_input.is_none()) {
-                if (nb::isinstance<RaggedTensor>(context_input)) {
-                    builder.contextInput(nb::cast<RaggedTensor>(context_input));
-                } else if (nb::isinstance<Tensor>(context_input)) {
-                    builder.contextInput(nb::cast<Tensor>(context_input));
-                } else {
-                    throw nb::type_error("Attention context_input must be thor.Tensor, thor.RaggedTensor, or None.");
-                }
-            }
             if (score_bias_input.has_value()) {
                 builder.scoreBiasInput(score_bias_input.value());
             }
@@ -400,7 +397,9 @@ void bind_attention(nb::module_& layers) {
             new (self) Attention(std::move(builder.build()));
         },
         "network"_a,
-        "feature_input"_a,
+        "query_input"_a,
+        "key_input"_a,
+        "value_input"_a,
         "num_heads"_a,
         "num_key_value_heads"_a.none() = nb::none(),
         "head_dim"_a.none() = nb::none(),
@@ -439,7 +438,6 @@ void bind_attention(nb::module_& layers) {
         "sdpa_dropout_offset"_a = int64_t{0},
         "query_sequence_lengths"_a.none() = nb::none(),
         "key_value_sequence_lengths"_a.none() = nb::none(),
-        "context_input"_a = nb::none(),
         "score_bias_input"_a.none() = nb::none(),
         "epilogue"_a.none() = nb::none(),
         "epilogue_inputs"_a.none() = nb::none(),
@@ -457,9 +455,10 @@ void bind_attention(nb::module_& layers) {
 Public transformer attention layer built from learned Q/K/V/O projections and the
 cuDNN scaled-dot-product attention stage.
 
-API tensor shapes omit batch.  ``feature_input`` is ``[Sq, input_features]`` and
-``context_input``, when supplied for cross-attention, is ``[Skv, context_features]``.
-Placement adds the batch dimension, so the cuDNN hot path consumes semantic
+API tensor shapes omit batch. ``query_input`` is ``[Sq, query_features]``;
+``key_input`` and ``value_input`` are independently supplied as ``[Skv, key_features]``
+and ``[Skv, value_features]``. K and V must share sequence geometry, but their feature
+widths and source tensors are independent. Placement adds the batch dimension, so the cuDNN hot path consumes semantic
 ``[B, H, S, D]`` tensors after projection.
 
 Supported production dtype surface:
@@ -472,7 +471,9 @@ Supported production dtype surface:
 
 Supported features for FP16/BF16:
 
-* Self-attention and cross-attention through ``context_input``.
+* Q, K, and V are independent inputs. Self-attention is expressed by passing the same
+  tensor for all three; conventional cross-attention passes the decoder state as Q and
+  the encoder state as both K and V.
 * MHA, GQA, and MQA: ``num_heads`` must be an integer multiple of
   ``num_key_value_heads``.
 * RoPE with ``none``, ``linear``, ``dynamic_ntk``, ``yarn``, ``longrope``, and
@@ -514,10 +515,11 @@ Supported features for FP16/BF16:
   query row partition.
 * Padding masks use ``query_sequence_lengths`` and ``key_value_sequence_lengths``
   together, both int32 logical ``[1]`` tensors.
-* ``feature_input`` and ``context_input`` independently accept ``thor.Tensor`` or
-  ``thor.RaggedTensor``. The output domain follows the query: dense Q produces dense O,
-  while ragged Q preserves the query row partition on O. Cross-attention supports all
-  four dense/ragged Q/O and K/V combinations. RoPE positions reset at each packed row;
+* ``query_input``, ``key_input``, and ``value_input`` accept ``thor.Tensor`` or
+  ``thor.RaggedTensor``. K and V must both be dense or both ragged and must share the same
+  sequence geometry; their feature widths and source tensors may differ. The output domain
+  follows Q: dense Q produces dense O, while ragged Q preserves the query row partition on O.
+  All four dense/ragged Q/O and K/V combinations are supported. RoPE positions reset at each packed row;
   scalar origins apply to a dense side or every row of a ragged side, while the optional
   per-row origin tensors replace the scalar origin for the corresponding ragged domain.
   Q and K need only have the same logical batch size.
@@ -593,16 +595,20 @@ Important combination rules:
         const std::optional<Tensor> residual = self.getResidualInput();
         return residual.has_value() ? nb::cast(residual.value()) : nb::none();
     });
-    attention.def("get_use_cross_attention", &Attention::getUseCrossAttention);
     attention.def("get_use_ragged", &Attention::getUseRagged);
     attention.def("get_query_ragged", &Attention::getQueryRagged);
     attention.def("get_key_value_ragged", &Attention::getKeyValueRagged);
-    attention.def("get_context_input", [](Attention& self) -> nb::object {
-        if (self.getRaggedContextInput().has_value()) {
-            return nb::cast(self.getRaggedContextInput().value());
-        }
-        const std::optional<Tensor> context = self.getContextInput();
-        return context.has_value() ? nb::cast(context.value()) : nb::none();
+    attention.def("get_query_input", [](Attention& self) -> nb::object {
+        if (self.getRaggedQueryInput().has_value()) return nb::cast(self.getRaggedQueryInput().value());
+        return nb::cast(self.getQueryInput());
+    });
+    attention.def("get_key_input", [](Attention& self) -> nb::object {
+        if (self.getRaggedKeyInput().has_value()) return nb::cast(self.getRaggedKeyInput().value());
+        return nb::cast(self.getKeyInput());
+    });
+    attention.def("get_value_input", [](Attention& self) -> nb::object {
+        if (self.getRaggedValueInput().has_value()) return nb::cast(self.getRaggedValueInput().value());
+        return nb::cast(self.getValueInput());
     });
     attention.def("get_use_score_bias", &Attention::getUseScoreBias);
     attention.def("get_score_bias_input", [](Attention& self) { return self.getScoreBiasInput(); });
@@ -622,9 +628,5 @@ Important combination rules:
         }
         return names;
     });
-
-    attention.def("_debug_uses_packed_qkv_projection", &attentionUsesPackedQkvProjection);
-    attention.def("_debug_qkv_projection_mode",
-                  [](Attention& self) { return attentionUsesPackedQkvProjection(self) ? "packed" : "split"; });
     attention.def("_debug_expression", [](Attention& self) { return self.getExpression(); });
 }

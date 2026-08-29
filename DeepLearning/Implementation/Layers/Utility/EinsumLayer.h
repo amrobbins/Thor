@@ -55,6 +55,7 @@ class EinsumLayer : public MultiConnectionLayer {
         featureInputs.resize(expectedNumInputs);
         streams.resize(expectedNumInputs);
         errorOutputs.resize(expectedNumInputs);
+        forwardInputReadyEvents.resize(expectedNumInputs);
     }
 
     ~EinsumLayer() override = default;
@@ -125,6 +126,9 @@ class EinsumLayer : public MultiConnectionLayer {
         allFeatureInputTensorIds.clear();
         currentValidExampleCount = 0;
         batchCardinalitySet = false;
+        for (Event& event : forwardInputReadyEvents)
+            event = Event();
+        backwardErrorReadyEvent = Event();
         Layer::cleanup();
     }
 
@@ -182,7 +186,7 @@ class EinsumLayer : public MultiConnectionLayer {
             if (!joinedStreamIds.insert(streams[i].getId()).second) {
                 continue;
             }
-            streams[0].waitEvent(streams[i].putEvent());
+            streams[0].waitFor(streams[i], forwardInputReadyEvents[i]);
         }
 
         Stream runStream = streams[0];
@@ -212,7 +216,7 @@ class EinsumLayer : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(resolvedBatchSize >= 1);
         THOR_THROW_IF_FALSE(resolvedBatchSize <= capacity);
 
-        const Event errorReady = streams[0].putEvent();
+        streams[0].putEvent(backwardErrorReadyEvent);
         std::set<uint64_t> streamsWaitingOnError;
         streamsWaitingOnError.insert(streams[0].getId());
 
@@ -226,7 +230,7 @@ class EinsumLayer : public MultiConnectionLayer {
 
             Stream& runStream = streams[operandIndex];
             if (streamsWaitingOnError.insert(runStream.getId()).second) {
-                runStream.waitEvent(errorReady);
+                runStream.waitEvent(backwardErrorReadyEvent);
             }
 
             execution.contraction->runOn(runStream);
@@ -684,6 +688,9 @@ class EinsumLayer : public MultiConnectionLayer {
     std::set<uint64_t> stillWaitingForFeatureInputTensorIds;
     uint32_t currentValidExampleCount = 0;
     bool batchCardinalitySet = false;
+
+    std::vector<Event> forwardInputReadyEvents;
+    Event backwardErrorReadyEvent;
 };
 
 }  // namespace ThorImplementation

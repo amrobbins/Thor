@@ -25,6 +25,74 @@ std::FILE* requireTrainingRunsOutput(std::FILE* output) {
 
 const char* terminalStatusName(const TrainingRunResult& result) { return result.resultName(); }
 
+struct TrainingRunStatusCounts {
+    size_t completed = 0;
+    size_t failed = 0;
+    size_t cancelled = 0;
+    size_t interrupted = 0;
+    size_t oom = 0;
+    size_t notStarted = 0;
+    size_t starting = 0;
+    size_t waitingToStart = 0;
+    size_t waitingForMemory = 0;
+    size_t running = 0;
+};
+
+TrainingRunStatusCounts countTrainingRunStatuses(const std::vector<TrainingRunResult>& results) {
+    TrainingRunStatusCounts counts;
+    for (const TrainingRunResult& result : results) {
+        switch (result.status) {
+            case TrainingRunStatus::NOT_STARTED:
+                ++counts.notStarted;
+                break;
+            case TrainingRunStatus::STARTING:
+                ++counts.starting;
+                break;
+            case TrainingRunStatus::WAITING_TO_START:
+                ++counts.waitingToStart;
+                break;
+            case TrainingRunStatus::WAITING_FOR_MEMORY:
+                ++counts.waitingForMemory;
+                break;
+            case TrainingRunStatus::RUNNING:
+                ++counts.running;
+                break;
+            case TrainingRunStatus::COMPLETED:
+                ++counts.completed;
+                break;
+            case TrainingRunStatus::FAILED:
+                ++counts.failed;
+                break;
+            case TrainingRunStatus::CANCELLED:
+                ++counts.cancelled;
+                break;
+            case TrainingRunStatus::INTERRUPTED:
+                ++counts.interrupted;
+                break;
+            case TrainingRunStatus::OUT_OF_MEMORY:
+                ++counts.oom;
+                break;
+        }
+    }
+    return counts;
+}
+
+std::string formatStatusCountsLine(std::string prefix, size_t total, const TrainingRunStatusCounts& counts) {
+    std::string line = std::move(prefix);
+    line += " total=" + std::to_string(total);
+    line += " not_started=" + std::to_string(counts.notStarted);
+    line += " waiting_to_start=" + std::to_string(counts.waitingToStart);
+    line += " starting=" + std::to_string(counts.starting);
+    line += " waiting_for_memory=" + std::to_string(counts.waitingForMemory);
+    line += " running=" + std::to_string(counts.running);
+    line += " completed=" + std::to_string(counts.completed);
+    line += " failed=" + std::to_string(counts.failed);
+    line += " cancelled=" + std::to_string(counts.cancelled);
+    line += " interrupted=" + std::to_string(counts.interrupted);
+    line += " oom=" + std::to_string(counts.oom);
+    return line;
+}
+
 enum class PadAlignment { LEFT, RIGHT };
 
 std::string formatScientificString(double value, int precision) {
@@ -300,6 +368,9 @@ void appendPhasePairedMetricColumns(std::string& line,
 std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
                                     std::string_view runLabel,
                                     size_t runPrefixWidth,
+                                    std::optional<double> latestScore,
+                                    std::optional<uint64_t> bestEpoch,
+                                    std::optional<double> bestScore,
                                     std::optional<double> trainLoss,
                                     std::optional<double> validateLoss,
                                     const std::unordered_map<std::string, double>* trainingMetrics,
@@ -316,6 +387,20 @@ std::string formatRunsStatsLineBase(const TrainingStatsSnapshot& stats,
     } else if (stats.epoch > 0) {
         appendSummaryDimKey(line, "epoch", useColor);
         appendStyledPadded(line, formatUnsigned(stats.epoch), 10, SummaryAnsi::progress, useColor);
+    }
+
+    if (latestScore.has_value() && bestEpoch.has_value() && bestScore.has_value()) {
+        char buffer[64];
+        appendSummaryDimKey(line, "score", useColor);
+        std::snprintf(buffer, sizeof(buffer), "%.6f", latestScore.value());
+        line += styledText(buffer, SummaryAnsi::progress, useColor);
+
+        appendSummaryDimKey(line, "best_epoch", useColor);
+        line += styledText(formatUnsigned(bestEpoch.value()), SummaryAnsi::progress, useColor);
+
+        appendSummaryDimKey(line, "best_score", useColor);
+        std::snprintf(buffer, sizeof(buffer), "%.6f", bestScore.value());
+        line += styledText(buffer, SummaryAnsi::progress, useColor);
     }
 
     if (stats.stepsPerEpoch > 0) {
@@ -533,69 +618,12 @@ void TrainingRunsStatsReporter::emitFinalReport(const std::vector<TrainingRunRes
         runPrefixWidth = std::max(runPrefixWidth, std::string("INFO runs[").size() + runLabel.size() + std::string("]:").size());
     }
 
-    size_t completed = 0;
-    size_t failed = 0;
-    size_t cancelled = 0;
-    size_t interrupted = 0;
-    size_t oom = 0;
-    size_t notStarted = 0;
-    size_t starting = 0;
-    size_t waitingToStart = 0;
-    size_t waitingForMemory = 0;
-    size_t running = 0;
-    for (const TrainingRunResult& result : results) {
-        switch (result.status) {
-            case TrainingRunStatus::NOT_STARTED:
-                ++notStarted;
-                break;
-            case TrainingRunStatus::STARTING:
-                ++starting;
-                break;
-            case TrainingRunStatus::WAITING_TO_START:
-                ++waitingToStart;
-                break;
-            case TrainingRunStatus::WAITING_FOR_MEMORY:
-                ++waitingForMemory;
-                break;
-            case TrainingRunStatus::RUNNING:
-                ++running;
-                break;
-            case TrainingRunStatus::COMPLETED:
-                ++completed;
-                break;
-            case TrainingRunStatus::FAILED:
-                ++failed;
-                break;
-            case TrainingRunStatus::CANCELLED:
-                ++cancelled;
-                break;
-            case TrainingRunStatus::INTERRUPTED:
-                ++interrupted;
-                break;
-            case TrainingRunStatus::OUT_OF_MEMORY:
-                ++oom;
-                break;
-        }
-    }
-
+    const TrainingRunStatusCounts counts = countTrainingRunStatuses(results);
     const bool useColor = shouldUseColorLocked();
 
     emitLineLocked("");
     emitLineLocked(styled("INFO runs final: ==================== final results ====================", FinalReportAnsi::border, useColor));
-
-    std::string line = "INFO runs final:";
-    line += " total=" + std::to_string(results.size());
-    line += " not_started=" + std::to_string(notStarted);
-    line += " waiting_to_start=" + std::to_string(waitingToStart);
-    line += " starting=" + std::to_string(starting);
-    line += " waiting_for_memory=" + std::to_string(waitingForMemory);
-    line += " running=" + std::to_string(running);
-    line += " completed=" + std::to_string(completed);
-    line += " failed=" + std::to_string(failed);
-    line += " cancelled=" + std::to_string(cancelled);
-    line += " interrupted=" + std::to_string(interrupted);
-    line += " oom=" + std::to_string(oom);
-    emitLineLocked(line);
+    emitLineLocked(formatStatusCountsLine("INFO runs final:", results.size(), counts));
 
     for (const TrainingRunResult& result : results) {
         const auto stateIt = runStateIndices.find(result.runName);
@@ -606,6 +634,53 @@ void TrainingRunsStatsReporter::emitFinalReport(const std::vector<TrainingRunRes
         writeResultLineLocked(result, runPrefixWidth, reportOrder);
     }
     emitLineLocked(styled("INFO runs final: =====================================================", FinalReportAnsi::border, useColor));
+    emitLineLocked("");
+    flushOutputLocked();
+}
+
+void TrainingRunsStatsReporter::emitTrainingHistoryReport(const std::vector<TrainingPhaseReport>& phases) {
+    if (phases.empty()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex);
+    const bool useColor = shouldUseColorLocked();
+
+    size_t runPrefixWidth = runPrefixWidthLocked();
+    for (const TrainingPhaseReport& phase : phases) {
+        for (const HistoricalRunResult& historicalRun : phase.runs) {
+            const TrainingRunResult& result = historicalRun.result;
+            const std::string runLabel = formatRunLabel(result.runName, result.ensembleGroup);
+            runPrefixWidth = std::max(
+                runPrefixWidth,
+                std::string("INFO runs[").size() + runLabel.size() + std::string("]:").size());
+        }
+    }
+
+    emitLineLocked("");
+    emitLineLocked(styled(
+        "INFO runs final: ================== training history ==================",
+        FinalReportAnsi::border,
+        useColor));
+
+    for (const TrainingPhaseReport& phase : phases) {
+        std::vector<TrainingRunResult> phaseResults;
+        phaseResults.reserve(phase.runs.size());
+        for (const HistoricalRunResult& historicalRun : phase.runs) {
+            phaseResults.push_back(historicalRun.result);
+        }
+        const TrainingRunStatusCounts counts = countTrainingRunStatuses(phaseResults);
+        const std::string phasePrefix = "INFO runs phase[" + phase.phaseName + "]:";
+        emitLineLocked(formatStatusCountsLine(phasePrefix, phaseResults.size(), counts));
+        for (const HistoricalRunResult& historicalRun : phase.runs) {
+            writeResultLineLocked(historicalRun.result, runPrefixWidth, historicalRun.reportOrder);
+        }
+    }
+
+    emitLineLocked(styled(
+        "INFO runs final: ======================================================",
+        FinalReportAnsi::border,
+        useColor));
     emitLineLocked("");
     flushOutputLocked();
 }
@@ -731,6 +806,32 @@ void TrainingRunsStatsReporter::processEvent(const ReporterEvent& event) {
             dirty = true;
             break;
         case ReporterEventType::RUN_STATS:
+            if (event.stats.type == TrainingEventType::EPOCH_STARTED &&
+                event.stats.stats.phase == TrainingEventPhase::TRAIN) {
+                // Score metadata belongs to the training epoch that just started,
+                // but the visible row remains based on batch STATS. Remember the
+                // tuple now and expose it once progress reaches this epoch.
+                const auto latestScoreIt = event.stats.stats.metrics.find("latest_score");
+                const auto bestEpochIt = event.stats.stats.metrics.find("best_epoch");
+                const auto bestScoreIt = event.stats.stats.metrics.find("best_score");
+                if (latestScoreIt != event.stats.stats.metrics.end() &&
+                    bestEpochIt != event.stats.stats.metrics.end() &&
+                    bestScoreIt != event.stats.stats.metrics.end() &&
+                    std::isfinite(latestScoreIt->second) &&
+                    std::isfinite(bestEpochIt->second) && bestEpochIt->second >= 0.0 &&
+                    std::isfinite(bestScoreIt->second)) {
+                    state.latestScore = latestScoreIt->second;
+                    state.bestEpoch = static_cast<uint64_t>(bestEpochIt->second);
+                    state.bestScore = bestScoreIt->second;
+                    state.scoreDisplayEpoch = event.stats.stats.epoch;
+                } else {
+                    state.latestScore.reset();
+                    state.bestEpoch.reset();
+                    state.bestScore.reset();
+                    state.scoreDisplayEpoch.reset();
+                }
+                break;
+            }
             if (event.stats.type != TrainingEventType::STATS) {
                 break;
             }
@@ -825,14 +926,22 @@ void TrainingRunsStatsReporter::updateSmoothedScalarState(SmoothedScalarState& s
     if (stats.stepsPerEpoch > 0) {
         const uint64_t effectiveStepInEpoch =
             stats.stepInEpoch > 0 ? stats.stepInEpoch : scalarState.currentEpochValueCount;
+        if (effectiveStepInEpoch >= stats.stepsPerEpoch) {
+            // Previous-epoch smoothing exists only to stabilize an in-progress
+            // epoch. Once the current epoch is complete, publish its exact
+            // aggregate so model-selection scores can be audited against the
+            // completed validation loss shown on the next training row.
+            scalarState.displayedValue = currentEpochValue;
+            return;
+        }
         progress = static_cast<double>(effectiveStepInEpoch) /
                    static_cast<double>(stats.stepsPerEpoch);
         progress = std::clamp(progress, 0.0, 1.0);
     }
 
     scalarState.displayedValue =
-        (scalarState.previousEpochValue.value() + currentEpochValue * progress) /
-        (1.0 + progress);
+        (1.0 - progress) * scalarState.previousEpochValue.value() +
+        progress * currentEpochValue;
 }
 
 void TrainingRunsStatsReporter::updateSmoothedLossState(SmoothedScalarState& lossState,
@@ -883,15 +992,20 @@ void TrainingRunsStatsReporter::updateSmoothedMetricState(
         const uint64_t effectiveStepInEpoch =
             stats.stepInEpoch > 0 ? stats.stepInEpoch
                                   : metricState.currentEpochValueCount;
+        if (effectiveStepInEpoch >= stats.stepsPerEpoch) {
+            // As with scalar losses, smoothing is only for a partial epoch.
+            // Completed metrics must expose their exact declared aggregate.
+            metricState.displayedValue = currentEpochValue;
+            return;
+        }
         progress = static_cast<double>(effectiveStepInEpoch) /
                    static_cast<double>(stats.stepsPerEpoch);
         progress = std::clamp(progress, 0.0, 1.0);
     }
 
     metricState.displayedValue =
-        (metricState.previousEpochValue.value() +
-         currentEpochValue.value() * progress) /
-        (1.0 + progress);
+        (1.0 - progress) * metricState.previousEpochValue.value() +
+        progress * currentEpochValue.value();
 }
 
 void TrainingRunsStatsReporter::updateSmoothedMetricStates(
@@ -1041,9 +1155,14 @@ void TrainingRunsStatsReporter::writeRunLineLocked(const RunState& state, size_t
             displayedMetricValues(state.trainingMetrics);
         const std::unordered_map<std::string, double> validationMetrics =
             displayedMetricValues(state.validationMetrics);
+        const bool showScore = state.scoreDisplayEpoch.has_value() &&
+                               progressEvent.stats.epoch >= state.scoreDisplayEpoch.value();
         std::string line = formatRunsStatsLineBase(progressEvent.stats,
                                                   formatRunLabel(state.runName, state.config.ensembleGroup),
                                                   runPrefixWidth,
+                                                  showScore ? state.latestScore : std::nullopt,
+                                                  showScore ? state.bestEpoch : std::nullopt,
+                                                  showScore ? state.bestScore : std::nullopt,
                                                   displayedValueFromState(state.trainingLoss),
                                                   displayedValueFromState(state.validationLoss),
                                                   trainingMetrics.empty() ? nullptr : &trainingMetrics,

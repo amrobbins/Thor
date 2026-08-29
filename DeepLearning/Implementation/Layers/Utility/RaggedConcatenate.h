@@ -34,6 +34,7 @@ class RaggedConcatenate : public MultiConnectionLayer {
         featureInputs.resize(totalInputCount);
         streams.resize(totalInputCount);
         errorOutputs.resize(totalInputCount);
+        forwardInputReadyEvents.resize(totalInputCount);
     }
 
     ~RaggedConcatenate() override = default;
@@ -185,7 +186,8 @@ class RaggedConcatenate : public MultiConnectionLayer {
         if (!stillWaitingForFeatureInputTensors.empty()) return;
         stillWaitingForFeatureInputTensors = allFeatureInputTensorIds;
 
-        for (uint32_t i = 1; i < featureInputs.size(); ++i) streams[0].waitEvent(streams[i].putEvent());
+        for (uint32_t i = 1; i < featureInputs.size(); ++i)
+            streams[0].waitFor(streams[i], forwardInputReadyEvents[i]);
         refreshValueInputMemoryArray(streams[0]);
 
         const TensorDescriptor& outputDescriptor = featureOutputs[0]->getDescriptor();
@@ -247,9 +249,9 @@ class RaggedConcatenate : public MultiConnectionLayer {
                 streams[0]);
         }
 
-        Event readyEvent = streams[0].putEvent();
+        streams[0].putEvent(backwardOutputsReadyEvent);
         for (uint32_t i = 0; i < valueInputCount; ++i) {
-            if (i != 0) streams[i].waitEvent(readyEvent);
+            if (i != 0) streams[i].waitEvent(backwardOutputsReadyEvent);
             if (previousLayers[i].has_value())
                 previousLayers[i].value()->backward(errorOutputs[i], resolvedValidExampleCount);
         }
@@ -269,6 +271,9 @@ class RaggedConcatenate : public MultiConnectionLayer {
         stridePerPackedTensorDimension_d = nullptr;
         stridePerSplitTensorDimension_d = nullptr;
         discardedErrorOutputs.clear();
+        for (Event& event : forwardInputReadyEvents)
+            event = Event();
+        backwardOutputsReadyEvent = Event();
         MultiConnectionLayer::cleanup();
     }
 
@@ -337,6 +342,9 @@ class RaggedConcatenate : public MultiConnectionLayer {
     std::set<uint64_t> stillWaitingForFeatureInputTensors;
     uint32_t currentValidExampleCount = 0;
     bool batchCardinalitySet = false;
+
+    std::vector<Event> forwardInputReadyEvents;
+    Event backwardOutputsReadyEvent;
 };
 
 }  // namespace ThorImplementation

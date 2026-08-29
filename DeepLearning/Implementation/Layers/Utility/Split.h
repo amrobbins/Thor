@@ -85,6 +85,9 @@ class Split : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(featureOutputs.size() == axisElements.size());
         THOR_THROW_IF_FALSE(nextLayers.size() == featureOutputs.size());
         THOR_THROW_IF_FALSE(streams.size() == featureOutputs.size());
+        backwardInputReadyEvents.clear();
+        backwardInputReadyEvents.resize(streams.size());
+        outputsReadyEvent = Event();
         for (unsigned int i = 0; i < axisElements.size(); ++i) {
             THOR_THROW_IF_FALSE(featureOutputs[i].has_value());
             THOR_THROW_IF_FALSE(featureOutputs[i].value().getDescriptor().getDimensions()[axis] == axisElements[i]);
@@ -210,10 +213,10 @@ class Split : public MultiConnectionLayer {
                     stridePerSplitTensorDimension_d,
                     streams[0]);
 
-        Event readyEvent = streams[0].putEvent();
+        streams[0].putEvent(outputsReadyEvent);
         nextLayers[0].value()->forward(featureOutputs[0], validationPass, batchSize);
         for (unsigned int i = 1; i < featureOutputs.size(); ++i) {
-            streams[i].waitEvent(readyEvent);
+            streams[i].waitEvent(outputsReadyEvent);
             nextLayers[i].value()->forward(featureOutputs[i], validationPass, batchSize);
         }
     }
@@ -235,7 +238,7 @@ class Split : public MultiConnectionLayer {
         }
 
         for (unsigned int i = 1; i < errorInputs.size(); ++i)
-            streams[0].waitEvent(streams[i].putEvent());
+            streams[0].waitFor(streams[i], backwardInputReadyEvents[i]);
 
         launchConcatenate(
             errorOutputs[0].value().getMemPtr(),
@@ -278,6 +281,8 @@ class Split : public MultiConnectionLayer {
             CUDA_CHECK(cudaFree(stridePerSplitTensorDimension_d));
             stridePerSplitTensorDimension_d = nullptr;
         }
+        outputsReadyEvent = Event();
+        backwardInputReadyEvents.clear();
     }
 
     void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
@@ -340,6 +345,8 @@ class Split : public MultiConnectionLayer {
     long *stridePerSplitTensorDimension_d;
     long *axisElementsPerSplitTensor_d;
 
+    Event outputsReadyEvent;
+    std::vector<Event> backwardInputReadyEvents;
 };
 
 }  // namespace ThorImplementation

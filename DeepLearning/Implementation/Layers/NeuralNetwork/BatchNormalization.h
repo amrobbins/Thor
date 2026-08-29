@@ -107,6 +107,10 @@ class BatchNormalization : public TrainableLayer {
     // Since weights gradients and error gradient is a fused operation, then when back prop is pruned
     // we still need some valid chunk of memory to write values in, which we ignore.
     std::optional<Tensor> scratchErrorOutput = std::nullopt;
+    // One stable dependency event per connection. The returned Event copy is
+    // consumed immediately by TrainableLayer; subsequent passes re-record the
+    // same cudaEvent_t after all waits for the previous generation were issued.
+    std::vector<Event> backwardCompletionEvents;
 };
 
 }  // namespace ThorImplementation

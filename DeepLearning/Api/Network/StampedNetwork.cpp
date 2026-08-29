@@ -46,7 +46,59 @@ constexpr uint64_t elapsedMicros(BatchTimingTimePoint, BatchTimingTimePoint) {
 }
 #endif
 
+uint64_t checkedFlopAdd(uint64_t lhs, uint64_t rhs, const char* where) {
+    if (rhs > std::numeric_limits<uint64_t>::max() - lhs) {
+        throw std::runtime_error(std::string(where) + " FLOP count overflow.");
+    }
+    return lhs + rhs;
+}
+
+uint64_t checkedFlopMul(uint64_t lhs, uint64_t rhs, const char* where) {
+    if (lhs != 0 && rhs > std::numeric_limits<uint64_t>::max() / lhs) {
+        throw std::runtime_error(std::string(where) + " FLOP count overflow.");
+    }
+    return lhs * rhs;
+}
+
 }  // namespace
+
+uint64_t StampedNetwork::getFloatingPointOperationsCurrentBatchForward() {
+    uint64_t total = 0;
+    for (ThorImplementation::TrainableLayer* layer : trainableLayers) {
+        THOR_THROW_IF_FALSE(layer != nullptr);
+        total = checkedFlopAdd(total, layer->flopCountForward(), "StampedNetwork forward");
+    }
+    for (ThorImplementation::Layer* layer : otherLayers) {
+        THOR_THROW_IF_FALSE(layer != nullptr);
+        total = checkedFlopAdd(
+            total,
+            checkedFlopMul(layer->floatingPointOperationsPerExampleForward(), batchSize, "StampedNetwork forward"),
+            "StampedNetwork forward");
+    }
+    return total;
+}
+
+uint64_t StampedNetwork::getFloatingPointOperationsCurrentBatchBackward() {
+    uint64_t total = 0;
+    for (ThorImplementation::TrainableLayer* layer : trainableLayers) {
+        THOR_THROW_IF_FALSE(layer != nullptr);
+        total = checkedFlopAdd(total, layer->flopCountBackward(), "StampedNetwork backward");
+    }
+    for (ThorImplementation::Layer* layer : otherLayers) {
+        THOR_THROW_IF_FALSE(layer != nullptr);
+        total = checkedFlopAdd(
+            total,
+            checkedFlopMul(layer->floatingPointOperationsPerExampleBackward(), batchSize, "StampedNetwork backward"),
+            "StampedNetwork backward");
+    }
+    return total;
+}
+
+uint64_t StampedNetwork::getFloatingPointOperationsCurrentBatchTraining() {
+    return checkedFlopAdd(getFloatingPointOperationsCurrentBatchForward(),
+                          getFloatingPointOperationsCurrentBatchBackward(),
+                          "StampedNetwork training");
+}
 
 
 void StampedNetwork::initializeProcessingDataStreamJoin() {

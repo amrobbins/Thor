@@ -24,9 +24,10 @@ namespace Thor {
 
 // Training-first transformer attention layer.
 //
-// Dense query input API shape:   [query_sequence, query_features]
-// Dense context input API shape: [key_value_sequence, context_features] when contextInput() is provided.
-// Dense output API shape:        [query_sequence, output_features]
+// Dense query input API shape: [query_sequence, query_features]
+// Dense key input API shape:   [key_value_sequence, key_features]
+// Dense value input API shape: [key_value_sequence, value_features]
+// Dense output API shape:      [query_sequence, output_features]
 // Ragged inputs use canonical RaggedTensor values [max_total_values, features] plus UINT32/UINT64 row partitions;
 // the logical ragged output reuses the query row partition.
 //
@@ -68,14 +69,16 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
               int64_t outputDropoutSeed,
               std::optional<Tensor> residualInput,
               std::optional<RaggedTensor> raggedResidualInput,
-              std::optional<Tensor> contextInput,
+              Tensor keyInput,
+              Tensor valueInput,
               std::optional<Tensor> scoreBiasInput,
               std::optional<Tensor> querySequenceLengthsInput,
               std::optional<Tensor> keyValueSequenceLengthsInput,
               std::optional<Tensor> queryRopePositionOffsetsInput,
               std::optional<Tensor> keyRopePositionOffsetsInput,
-              std::optional<RaggedTensor> raggedFeatureInput,
-              std::optional<RaggedTensor> raggedContextInput,
+              std::optional<RaggedTensor> raggedQueryInput,
+              std::optional<RaggedTensor> raggedKeyInput,
+              std::optional<RaggedTensor> raggedValueInput,
               DataType weightsDataType,
               DataType computeDataType,
               DataType outputDataType)
@@ -90,8 +93,8 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
                       false,
                       [&]() {
                           std::set<std::string> names;
-                          if (raggedFeatureInput.has_value()) {
-                              names.insert("feature_input");
+                          if (raggedQueryInput.has_value()) {
+                              names.insert("query_input");
                               names.insert("query_row_partition");
                               if (raggedResidualInput.has_value()) {
                                   names.insert("residual_input");
@@ -101,20 +104,18 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
                                   names.insert(name);
                               }
                           }
-                          if (raggedContextInput.has_value()) {
-                              names.insert("context_input");
-                              names.insert("key_value_row_partition");
-                          } else if (raggedFeatureInput.has_value() && !contextInput.has_value()) {
-                              // Ragged self-attention shares the query partition with K/V.
+                          if (raggedKeyInput.has_value()) {
+                              names.insert("key_input");
+                              names.insert("value_input");
                               names.insert("key_value_row_partition");
                           }
                           return names;
                       }(),
-                      raggedFeatureInput.has_value() ? std::set<std::string>{"feature_output"} : std::set<std::string>{},
-                      raggedFeatureInput.has_value()
-                          ? std::optional<uint32_t>(static_cast<uint32_t>(raggedFeatureInput->getBatchSize()))
-                          : (raggedContextInput.has_value()
-                                 ? std::optional<uint32_t>(static_cast<uint32_t>(raggedContextInput->getBatchSize()))
+                      raggedQueryInput.has_value() ? std::set<std::string>{"feature_output"} : std::set<std::string>{},
+                      raggedQueryInput.has_value()
+                          ? std::optional<uint32_t>(static_cast<uint32_t>(raggedQueryInput->getBatchSize()))
+                          : (raggedKeyInput.has_value()
+                                 ? std::optional<uint32_t>(static_cast<uint32_t>(raggedKeyInput->getBatchSize()))
                                  : std::nullopt)),
           numHeads(numHeads),
           numKeyValueHeads(numKeyValueHeads),
@@ -141,27 +142,25 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
           raggedResidualInput(std::move(raggedResidualInput)),
           epilogue(std::move(epilogue)),
           epilogueInputBindings(std::move(epilogueInputBindings)),
-          contextInput(std::move(contextInput)),
+          keyInput(std::move(keyInput)),
+          valueInput(std::move(valueInput)),
           scoreBiasInput(std::move(scoreBiasInput)),
           querySequenceLengthsInput(std::move(querySequenceLengthsInput)),
           keyValueSequenceLengthsInput(std::move(keyValueSequenceLengthsInput)),
           queryRopePositionOffsetsInput(std::move(queryRopePositionOffsetsInput)),
           keyRopePositionOffsetsInput(std::move(keyRopePositionOffsetsInput)),
-          raggedFeatureInput(std::move(raggedFeatureInput)),
-          raggedContextInput(std::move(raggedContextInput)),
+          raggedQueryInput(std::move(raggedQueryInput)),
+          raggedKeyInput(std::move(raggedKeyInput)),
+          raggedValueInput(std::move(raggedValueInput)),
           weightsDataType(weightsDataType),
           computeDataType(computeDataType),
           outputDataType(outputDataType) {
-        if (this->raggedFeatureInput.has_value()) {
-            raggedFeatureOutput = this->raggedFeatureInput->withValues(getOutput("feature_output"));
+        if (this->raggedQueryInput.has_value()) {
+            raggedFeatureOutput = this->raggedQueryInput->withValues(getOutput("feature_output"));
         }
     }
 
     ~Attention() override = default;
-
-    // Dormant compile-time experiment switch for benchmarking packed QKV projection against the maintained split-Q/K/V path.
-    // Packed QKV is intentionally not updated by split-path projection/RoPE fusion work unless a future use case reactivates it.
-    static constexpr bool USE_PACKED_QKV_PROJECTION = false;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Attention>(*this); }
     std::string getLayerType() const override { return "Attention"; }
@@ -263,9 +262,10 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
     std::optional<Tensor> getResidualInput() const { return residualInput; }
     std::optional<RaggedTensor> getRaggedResidualInput() const { return raggedResidualInput; }
     bool getUseResidual() const { return residualInput.has_value(); }
-    std::optional<Tensor> getFeatureInput() const override { return getInputInterface().at("feature_input"); }
-    std::optional<Tensor> getContextInput() const { return contextInput; }
-    bool getUseCrossAttention() const { return contextInput.has_value(); }
+    std::optional<Tensor> getFeatureInput() const override { return getInputInterface().at("query_input"); }
+    Tensor getQueryInput() const { return getInputInterface().at("query_input"); }
+    Tensor getKeyInput() const { return keyInput; }
+    Tensor getValueInput() const { return valueInput; }
     std::optional<Tensor> getScoreBiasInput() const { return scoreBiasInput; }
     bool getUseScoreBias() const { return scoreBiasInput.has_value(); }
     std::optional<Tensor> getQuerySequenceLengthsInput() const { return querySequenceLengthsInput; }
@@ -275,13 +275,12 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
     // API shape is [1]; at runtime the normal batch dimension yields one INT32 origin per logical ragged row.
     std::optional<Tensor> getQueryRopePositionOffsetsInput() const { return queryRopePositionOffsetsInput; }
     std::optional<Tensor> getKeyRopePositionOffsetsInput() const { return keyRopePositionOffsetsInput; }
-    bool getUseRagged() const { return raggedFeatureInput.has_value() || raggedContextInput.has_value(); }
-    bool getQueryRagged() const { return raggedFeatureInput.has_value(); }
-    bool getKeyValueRagged() const {
-        return raggedContextInput.has_value() || (raggedFeatureInput.has_value() && !contextInput.has_value());
-    }
-    std::optional<RaggedTensor> getRaggedFeatureInput() const { return raggedFeatureInput; }
-    std::optional<RaggedTensor> getRaggedContextInput() const { return raggedContextInput; }
+    bool getUseRagged() const { return raggedQueryInput.has_value() || raggedKeyInput.has_value(); }
+    bool getQueryRagged() const { return raggedQueryInput.has_value(); }
+    bool getKeyValueRagged() const { return raggedKeyInput.has_value(); }
+    std::optional<RaggedTensor> getRaggedQueryInput() const { return raggedQueryInput; }
+    std::optional<RaggedTensor> getRaggedKeyInput() const { return raggedKeyInput; }
+    std::optional<RaggedTensor> getRaggedValueInput() const { return raggedValueInput; }
     std::optional<RaggedTensor> getRaggedFeatureOutput() const { return raggedFeatureOutput; }
     DataType getWeightsDataType() const { return weightsDataType; }
     DataType getComputeDataType() const { return computeDataType; }
@@ -331,14 +330,16 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
     const std::optional<ThorImplementation::Expression> epilogue;
     std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
-    std::optional<Tensor> contextInput;
+    Tensor keyInput;
+    Tensor valueInput;
     std::optional<Tensor> scoreBiasInput;
     std::optional<Tensor> querySequenceLengthsInput;
     std::optional<Tensor> keyValueSequenceLengthsInput;
     std::optional<Tensor> queryRopePositionOffsetsInput;
     std::optional<Tensor> keyRopePositionOffsetsInput;
-    std::optional<RaggedTensor> raggedFeatureInput;
-    std::optional<RaggedTensor> raggedContextInput;
+    std::optional<RaggedTensor> raggedQueryInput;
+    std::optional<RaggedTensor> raggedKeyInput;
+    std::optional<RaggedTensor> raggedValueInput;
     std::optional<RaggedTensor> raggedFeatureOutput;
     DataType weightsDataType;
     DataType computeDataType;
@@ -357,33 +358,48 @@ class Attention::Builder {
         return *this;
     }
 
-    virtual Attention::Builder& featureInput(Tensor input) {
-        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
-        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
-        this->_featureInput = input;
+    virtual Attention::Builder& queryInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_queryInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedQueryInput.has_value());
+        this->_queryInput = input;
         return *this;
     }
 
-    virtual Attention::Builder& featureInput(RaggedTensor input) {
-        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
-        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
-        this->_raggedFeatureInput = input;
-        this->_featureInput = input.getValues();
+    virtual Attention::Builder& queryInput(RaggedTensor input) {
+        THOR_THROW_IF_FALSE(!this->_queryInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedQueryInput.has_value());
+        this->_raggedQueryInput = input;
+        this->_queryInput = input.getValues();
         return *this;
     }
 
-    virtual Attention::Builder& contextInput(Tensor input) {
-        THOR_THROW_IF_FALSE(!this->_contextInput.has_value());
-        THOR_THROW_IF_FALSE(!this->_raggedContextInput.has_value());
-        this->_contextInput = input;
+    virtual Attention::Builder& keyInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_keyInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedKeyInput.has_value());
+        this->_keyInput = input;
         return *this;
     }
 
-    virtual Attention::Builder& contextInput(RaggedTensor input) {
-        THOR_THROW_IF_FALSE(!this->_contextInput.has_value());
-        THOR_THROW_IF_FALSE(!this->_raggedContextInput.has_value());
-        this->_raggedContextInput = input;
-        this->_contextInput = input.getValues();
+    virtual Attention::Builder& keyInput(RaggedTensor input) {
+        THOR_THROW_IF_FALSE(!this->_keyInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedKeyInput.has_value());
+        this->_raggedKeyInput = input;
+        this->_keyInput = input.getValues();
+        return *this;
+    }
+
+    virtual Attention::Builder& valueInput(Tensor input) {
+        THOR_THROW_IF_FALSE(!this->_valueInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedValueInput.has_value());
+        this->_valueInput = input;
+        return *this;
+    }
+
+    virtual Attention::Builder& valueInput(RaggedTensor input) {
+        THOR_THROW_IF_FALSE(!this->_valueInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedValueInput.has_value());
+        this->_raggedValueInput = input;
+        this->_valueInput = input.getValues();
         return *this;
     }
 
@@ -669,10 +685,12 @@ class Attention::Builder {
     void verifyConfig() const;
 
     std::optional<Network*> _network;
-    std::optional<Tensor> _featureInput;
-    std::optional<Tensor> _contextInput;
-    std::optional<RaggedTensor> _raggedFeatureInput;
-    std::optional<RaggedTensor> _raggedContextInput;
+    std::optional<Tensor> _queryInput;
+    std::optional<Tensor> _keyInput;
+    std::optional<Tensor> _valueInput;
+    std::optional<RaggedTensor> _raggedQueryInput;
+    std::optional<RaggedTensor> _raggedKeyInput;
+    std::optional<RaggedTensor> _raggedValueInput;
     std::optional<Tensor> _scoreBiasInput;
     std::optional<uint32_t> _numHeads;
     std::optional<uint32_t> _numKeyValueHeads;

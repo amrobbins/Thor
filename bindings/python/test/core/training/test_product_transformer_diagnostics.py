@@ -203,7 +203,7 @@ def _ragged_attention_for_diagnostic(
     )
     if use_residual:
         kwargs["residual_input"] = history
-    return thor.layers.Attention(network, history, **kwargs).get_feature_output()
+    return thor.layers.Attention(network, history, history, history, **kwargs).get_feature_output()
 
 
 @pytest.mark.cuda
@@ -373,6 +373,8 @@ def test_product_transformer_ragged_encoder_block_with_fused_residual_dropout_pl
     encoded = thor.layers.Attention(
         network,
         attention_norm,
+        attention_norm,
+        attention_norm,
         num_heads=2,
         head_dim=MODEL_WIDTH // 2,
         output_features=MODEL_WIDTH,
@@ -444,6 +446,8 @@ def test_product_transformer_dense_query_ragged_kv_decoder_with_fused_residual_d
     future_x = thor.layers.Attention(
         network,
         self_norm,
+        self_norm,
+        self_norm,
         num_heads=2,
         head_dim=MODEL_WIDTH // 2,
         output_features=MODEL_WIDTH,
@@ -474,6 +478,8 @@ def test_product_transformer_dense_query_ragged_kv_decoder_with_fused_residual_d
     future_x = thor.layers.Attention(
         network,
         cross_norm,
+        history,
+        history,
         num_heads=2,
         head_dim=MODEL_WIDTH // 2,
         output_features=MODEL_WIDTH,
@@ -483,7 +489,6 @@ def test_product_transformer_dense_query_ragged_kv_decoder_with_fused_residual_d
         rope_rotary_dim=MODEL_WIDTH // 2,
         rope_query_position_offset=HISTORY_BOUNDARY,
         rope_key_position_offsets=origins,
-        context_input=history,
         weights_data_type=thor.DataType.bf16,
         compute_data_type=thor.DataType.fp32,
         output_data_type=thor.DataType.bf16,

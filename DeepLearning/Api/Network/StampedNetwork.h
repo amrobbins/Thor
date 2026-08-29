@@ -119,6 +119,13 @@ class StampedNetwork {
     uint64_t getFloatingPointOperationsPerExampleTraining() const {
         return floatingPointOperationsPerExampleForward + floatingPointOperationsPerExampleBackward;
     }
+    // Batch-local logical FLOP totals. Trainable layers expose their stamped
+    // execution-plan counts directly, which lets ragged Attention replace its
+    // capacity estimate with the row lengths published for the current batch.
+    // Non-trainable layers retain their existing fixed per-example accounting.
+    [[nodiscard]] uint64_t getFloatingPointOperationsCurrentBatchForward();
+    [[nodiscard]] uint64_t getFloatingPointOperationsCurrentBatchBackward();
+    [[nodiscard]] uint64_t getFloatingPointOperationsCurrentBatchTraining();
     struct RaggedInputBinding {
         std::string valuesInputName;
         std::string offsetsInputName;

@@ -239,6 +239,8 @@ void RMSNorm::compileImpl() {
     saveInvVariance.clear();
     scratchDScale.clear();
     scratchErrorOutput.reset();
+    backwardCompletionEvents.clear();
+    backwardCompletionEvents.resize(featureInputs.size());
     forwardExecutablePlans.clear();
     backwardExecutablePlans.clear();
     forwardWorkspaces.clear();
@@ -308,11 +310,12 @@ void RMSNorm::cleanup() {
     saveInvVariance.clear();
     scratchDScale.clear();
     scratchErrorOutput.reset();
+    backwardCompletionEvents.clear();
     forwardExecutablePlans.clear();
     backwardExecutablePlans.clear();
     forwardWorkspaces.clear();
     backwardWorkspaces.clear();
-    Layer::cleanup();
+    TrainableLayer::cleanup();
 }
 
 void RMSNorm::computeFeatureOut(uint32_t connectionNumber) {
@@ -398,7 +401,9 @@ optional<Event> RMSNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t c
                                              executionStream);
     }
 
-    return executionStream.putEvent();
+    THOR_THROW_IF_FALSE(connectionNumber < backwardCompletionEvents.size());
+    executionStream.putEvent(backwardCompletionEvents[connectionNumber]);
+    return backwardCompletionEvents[connectionNumber];
 }
 
 void RMSNorm::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {

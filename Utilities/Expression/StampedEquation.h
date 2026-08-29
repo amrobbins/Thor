@@ -637,6 +637,7 @@ class StampedSegmentedReduction {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
 
     StampedSegmentedReduction(std::shared_ptr<CompiledSegmentedReduction> compiled,
                               const Tensor& input,
@@ -661,6 +662,7 @@ class StampedSegmentedBroadcast {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
 
     StampedSegmentedBroadcast(std::shared_ptr<CompiledSegmentedBroadcast> compiled,
                               const Tensor& per_segment_values,
@@ -783,6 +785,8 @@ class StampedRaggedConv1dCausal {
 
     uint32_t gpuNum() const;
 
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+
     [[nodiscard]] RaggedConv1dStageDiagnostic diagnostic() const;
 
     StampedRaggedConv1dCausal(std::shared_ptr<CompiledRaggedConv1dCausal> compiled,
@@ -807,6 +811,8 @@ class StampedRaggedConv1dCausalBackwardData {
 
     uint32_t gpuNum() const;
 
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+
     [[nodiscard]] RaggedConv1dStageDiagnostic diagnostic() const;
 
     StampedRaggedConv1dCausalBackwardData(std::shared_ptr<CompiledRaggedConv1dCausalBackwardData> compiled,
@@ -830,6 +836,8 @@ class StampedRaggedConv1dCausalBackwardFilter {
     void runOn(Stream& run_stream) const;
 
     uint32_t gpuNum() const;
+
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
 
     [[nodiscard]] RaggedConv1dStageDiagnostic diagnostic() const;
 
@@ -857,6 +865,7 @@ class StampedScan {
 
     Tensor getOutputTensor() const { return output; }
     Tensor getValueOutputTensor() const { return value_output; }
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
 
     StampedScan(std::shared_ptr<CompiledScan> compiled,
                 const Tensor& input,
@@ -929,6 +938,7 @@ class StampedLayerNorm {
     void runOn(Stream& run_stream) const;
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
     Tensor getOutputTensor() const { return output; }
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
     uintptr_t executablePlanId() const {
         return executable_plan.has_value() ? executable_plan->executableId() : 0;
     }
@@ -944,13 +954,15 @@ class StampedLayerNorm {
                      Tensor scale,
                      Tensor bias,
                      Tensor output,
-                     const Stream& stream);
+                     const Stream& stream,
+                     std::optional<Tensor> row_partition_offsets = std::nullopt);
 
    private:
     const std::shared_ptr<CompiledLayerNorm> compiled_layer_norm;
     const Tensor input;
     const Tensor scale;
     const Tensor bias;
+    const std::optional<Tensor> row_partition_offsets;
     Tensor output;
     Stream stream;
     std::optional<CudnnLayerNormExecutablePlan> executable_plan;
@@ -965,6 +977,7 @@ class StampedRmsNorm {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
     std::shared_ptr<RmsNormForwardState> getForwardState() const { return forward_state; }
     [[nodiscard]] uint64_t workspaceSizeInBytes() const {
         return workspace.has_value() ? workspace->getArraySizeInBytes() : 0;
@@ -1019,6 +1032,7 @@ class StampedRmsNormBackward {
 
     uint32_t gpuNum() const { return dX.getPlacement().getDeviceNum(); }
     const std::vector<Tensor>& getOutputTensors() const { return outputs; }
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
     [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes() const {
         return backward_workspace.has_value() ? backward_workspace->getArraySizeInBytes() : 0;
     }
@@ -1132,6 +1146,12 @@ class StampedMatmul {
 
     [[nodiscard]] std::optional<std::string> alphaRuntimeName() const { return alpha_runtime_name; }
     [[nodiscard]] std::optional<std::string> betaRuntimeName() const { return beta_runtime_name; }
+    // Runtime logical FLOP accounting for packed-row ragged MATMUL. The
+    // physical cuBLASLt consumer may execute a larger selected capacity bucket,
+    // but reporting counts only matrix work over the batch's active logical rows.
+    // Dense MATMUL/GEMM keeps using the existing static FLOP estimate.
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+
     [[nodiscard]] StampedMatmulKernelDiagnostic kernelDiagnostic() const;
     [[nodiscard]] std::optional<PackedRowConsumerDiagnostic> packedRowConsumerDiagnostic() const;
 
@@ -1171,6 +1191,13 @@ class StampedAttention {
    public:
     void run();
     void runOn(Stream& run_stream) const;
+
+    // Runtime logical FLOP accounting for ragged Attention.  The compiled
+    // stage's static FLOP count is capacity based because row lengths are not
+    // known while stamping.  Once a batch has published its row-partition host
+    // mirrors, report only score pairs belonging to logical rows.  Dense
+    // Attention deliberately keeps using the existing static accounting.
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
 
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
@@ -1267,6 +1294,8 @@ class StampedAttentionBackward {
    public:
     void run();
     void runOn(Stream& run_stream) const;
+
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
 
     uint32_t gpuNum() const { return dQ.getPlacement().getDeviceNum(); }
 
@@ -1403,6 +1432,7 @@ class StampedScanMinMaxBackward {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
 
     StampedScanMinMaxBackward(std::shared_ptr<CompiledScanMinMaxBackward> compiled,
                               std::shared_ptr<StampedScan> arg_scan,
@@ -1432,6 +1462,7 @@ class StampedReduceMinMaxBackward {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
 
     StampedReduceMinMaxBackward(std::shared_ptr<BuiltReduction> built,
                                 const Tensor& input,
@@ -1533,6 +1564,16 @@ class StampedConditional {
     mutable std::vector<detail::ConditionalRuntimeScalarKernelBinding> runtime_scalar_kernel_bindings;
 };
 
+struct RuntimeRaggedFusedFlopAccounting {
+    Tensor row_partition_offsets;
+    uint64_t batch_size = 0;
+    uint64_t max_active_values = 0;
+    uint64_t flops_per_active_value = 0;
+    uint64_t fixed_flops_when_nonempty = 0;
+
+    [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
+};
+
 struct StampedExecutionStage {
     enum class Kind {
         FusedKernel,
@@ -1631,6 +1672,7 @@ struct StampedExecutionStage {
     std::vector<uint32_t> dependency_stage_indices;
     const uint32_t gpu_num;
     const uint64_t flop_count = 0;
+    const std::optional<RuntimeRaggedFusedFlopAccounting> runtime_ragged_fused_flop_accounting = std::nullopt;
 
     const std::shared_ptr<StampedEquation> kernel = nullptr;
     const std::shared_ptr<StampedCudaKernel> cuda_kernel = nullptr;
@@ -1662,11 +1704,13 @@ struct StampedExecutionStage {
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedEquation>& fused,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   std::optional<RuntimeRaggedFusedFlopAccounting> runtime_ragged_fused_flop_accounting = std::nullopt)
         : kind(Kind::FusedKernel),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(fused->gpuNum()),
           flop_count(flop_count),
+          runtime_ragged_fused_flop_accounting(std::move(runtime_ragged_fused_flop_accounting)),
           kernel(fused) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedCudaKernel>& cuda_kernel,
@@ -1725,11 +1769,13 @@ struct StampedExecutionStage {
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedPaddedRaggedPointwise>& padded_ragged_pointwise,
                                    std::vector<uint32_t> dependency_stage_indices = {},
-                                   uint64_t flop_count = 0)
+                                   uint64_t flop_count = 0,
+                                   std::optional<RuntimeRaggedFusedFlopAccounting> runtime_ragged_fused_flop_accounting = std::nullopt)
         : kind(Kind::PaddedRaggedPointwise),
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(padded_ragged_pointwise->gpuNum()),
           flop_count(flop_count),
+          runtime_ragged_fused_flop_accounting(std::move(runtime_ragged_fused_flop_accounting)),
           padded_ragged_pointwise(padded_ragged_pointwise) {}
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedRaggedConv1dCausal>& ragged_conv1d_causal,
@@ -1919,7 +1965,88 @@ struct StampedExecutionStage {
           flop_count(0) {}
 
    public:
-    [[nodiscard]] uint64_t flopCount() const { return flop_count; }
+    [[nodiscard]] uint64_t flopCount() const {
+        if (runtime_ragged_fused_flop_accounting.has_value()) {
+            if (const std::optional<uint64_t> runtime_flops = runtime_ragged_fused_flop_accounting->runtimeLogicalFlopCount();
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::LayerNorm && layer_norm != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = layer_norm->runtimeLogicalFlopCount(); runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::RmsNorm && rms_norm != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = rms_norm->runtimeLogicalFlopCount(); runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::RmsNormBackward && rms_norm_backward != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = rms_norm_backward->runtimeLogicalFlopCount(); runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::SegmentedReduction && segmented_reduction != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = segmented_reduction->runtimeLogicalFlopCount(); runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::SegmentedBroadcast && segmented_broadcast != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = segmented_broadcast->runtimeLogicalFlopCount(); runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::Scan && scan != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = scan->runtimeLogicalFlopCount(); runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::ReduceMinMaxBackward && reduce_minmax_backward != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = reduce_minmax_backward->runtimeLogicalFlopCount(); runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::ScanMinMaxBackward && scan_minmax_backward != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = scan_minmax_backward->runtimeLogicalFlopCount(); runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::Attention && attention != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = attention->runtimeLogicalFlopCount(); runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::AttentionBackward && attention_backward != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = attention_backward->runtimeLogicalFlopCount(); runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::RaggedConv1dCausal && ragged_conv1d_causal != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = ragged_conv1d_causal->runtimeLogicalFlopCount();
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::RaggedConv1dCausalBackwardData && ragged_conv1d_causal_backward_data != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = ragged_conv1d_causal_backward_data->runtimeLogicalFlopCount();
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::RaggedConv1dCausalBackwardFilter && ragged_conv1d_causal_backward_filter != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = ragged_conv1d_causal_backward_filter->runtimeLogicalFlopCount();
+                runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        if (kind == Kind::Matmul && matmul != nullptr) {
+            if (const std::optional<uint64_t> runtime_flops = matmul->runtimeLogicalFlopCount(); runtime_flops.has_value()) {
+                return runtime_flops.value();
+            }
+        }
+        return flop_count;
+    }
 
     // Thor gives operation-local cuDNN Frontend convolution plans stamping-stream
     // affinity so plan/workspace/autotuning state remains within one execution domain.

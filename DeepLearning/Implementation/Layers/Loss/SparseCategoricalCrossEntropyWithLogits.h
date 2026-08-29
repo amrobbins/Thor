@@ -29,6 +29,7 @@ class SparseCategoricalCrossEntropyWithLogits : public Loss {
     std::optional<Tensor> connectToMaskInputLayer(Layer *maskLayer, std::optional<Tensor> mask, Stream maskStream);
 
     void initialize() override;
+    void cleanup() override;
     void compileImpl() override;
     void infer(std::optional<Tensor> logits, std::optional<Tensor> loss, Stream stream) override;
     void backProp(std::optional<Tensor> labels, std::optional<Tensor> logits, std::optional<Tensor> lossGradient, Stream stream) override;
@@ -49,6 +50,8 @@ class SparseCategoricalCrossEntropyWithLogits : public Loss {
 
     std::optional<Tensor> maskInput;
     Stream maskStream;
+    Event maskReadyEvent;
+    Event maskReusableEvent;
     bool maskReceived = false;
     uint32_t numRows = 0;
     uint32_t numClasses = 0;

@@ -89,6 +89,9 @@ class CtcLoss : public Loss {
 
     Stream labelOffsetsStream;
     Stream inputLengthsStream;
+    Event labelOffsetsReadyEvent;
+    Event inputLengthsReadyEvent;
+    Event auxiliaryInputsReusableEvent;
 
     bool labelOffsetsReceived = false;
     bool inputLengthsReceived = false;

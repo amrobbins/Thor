@@ -133,7 +133,10 @@ void CtcLoss::cleanup() {
     numClasses = 0;
     maxTotalLabelValues = 0;
     backendMaxLabelLength = 0;
-    Layer::cleanup();
+    labelOffsetsReadyEvent = Event();
+    inputLengthsReadyEvent = Event();
+    auxiliaryInputsReusableEvent = Event();
+    Loss::cleanup();
 }
 
 void CtcLoss::validateConnectedDescriptors() {
@@ -290,15 +293,7 @@ void CtcLoss::infer(optional<Tensor> probabilities, optional<Tensor> loss, Strea
     THOR_THROW_IF_FALSE(loss.value() == featureOutput.value());
 
     ScopedGpu scopedGpu(probabilities.value().getPlacement().getDeviceNum());
-    stream.waitEvent(labelsStream.putEvent());
-    stream.waitEvent(labelOffsetsStream.putEvent());
-    stream.waitEvent(inputLengthsStream.putEvent());
-
     runCudnn(stream);
-
-    labelsStream.waitEvent(stream.putEvent());
-    labelOffsetsStream.waitEvent(stream.putEvent());
-    inputLengthsStream.waitEvent(stream.putEvent());
 }
 
 void CtcLoss::backProp(optional<Tensor> labels, optional<Tensor> probabilities, optional<Tensor> lossGradient, Stream stream) {
@@ -364,6 +359,12 @@ void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_
     infer(featureInput, featureOutput, stream);
     maskInvalidLossTail();
 
+    stream.putEvent(auxiliaryInputsReusableEvent);
+    labelOffsetsStream.waitEvent(auxiliaryInputsReusableEvent);
+    inputLengthsStream.waitEvent(auxiliaryInputsReusableEvent);
+    if (isInferenceOnly() || validationPass)
+        markLabelsReusableAfterCompute();
+
     if (nextLayer.has_value())
         nextLayer.value()->forward(featureOutput, validationPass, currentValidExampleCount);
 
@@ -376,9 +377,9 @@ void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_
 
 void CtcLoss::advanceDataIfReady(bool validationPass) {
     if (featureInputReceived && labelsReceived && labelOffsetsReceived && inputLengthsReceived) {
-        stream.waitEvent(labelsStream.putEvent());
-        stream.waitEvent(labelOffsetsStream.putEvent());
-        stream.waitEvent(inputLengthsStream.putEvent());
+        waitForLabelsReady();
+        stream.waitFor(labelOffsetsStream, labelOffsetsReadyEvent);
+        stream.waitFor(inputLengthsStream, inputLengthsReadyEvent);
         forward(nullopt, validationPass);
     }
 }

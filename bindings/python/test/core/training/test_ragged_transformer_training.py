@@ -112,6 +112,8 @@ def _build_network(name: str):
     self_attention = thor.layers.Attention(
         network,
         encoded,
+        encoded,
+        encoded,
         rope_query_position_offsets=history_origins.get_feature_output(),
         rope_key_position_offsets=history_origins.get_feature_output(),
         **attention_kwargs,
@@ -131,7 +133,8 @@ def _build_network(name: str):
     dense_ragged = thor.layers.Attention(
         network,
         future.get_feature_output(),
-        context_input=history_states,
+        history_states,
+        history_states,
         rope_query_position_offset=HISTORY_BOUNDARY,
         rope_key_position_offsets=history_origins.get_feature_output(),
         **attention_kwargs,
@@ -142,7 +145,8 @@ def _build_network(name: str):
     ragged_dense = thor.layers.Attention(
         network,
         history_states,
-        context_input=future.get_feature_output(),
+        future.get_feature_output(),
+        future.get_feature_output(),
         rope_query_position_offsets=history_origins.get_feature_output(),
         rope_key_position_offset=HISTORY_BOUNDARY,
         **attention_kwargs,

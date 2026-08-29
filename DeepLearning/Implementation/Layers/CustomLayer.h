@@ -91,6 +91,7 @@ class CustomLayer : public TrainableLayer {
         Layer* previousLayer, std::optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType = 0) override;
     void replaceErrorInput(std::optional<Tensor> oldErrorInput, std::optional<Tensor> newErrorInput) override;
     void initialize() override;
+    void cleanup() override;
 
     uint64_t flopCountForward() override;
     uint64_t flopCountBackward() override;
@@ -206,6 +207,12 @@ class CustomLayer : public TrainableLayer {
         bool batchCardinalitySet = false;
         std::unordered_map<std::string, Tensor> backwardAdditionalInputsByName;
         std::unordered_map<std::string, Tensor> backwardInputGradOutputsByName;
+
+        // Recurring synchronization edges owned by this application. These are
+        // re-recorded every pass rather than allocating a fresh CUDA event.
+        std::vector<Event> forwardInputReadyEvents;
+        Event errorInputReadyEvent;
+        Event backwardErrorReadyEvent;
     };
 
     struct DecodedConnection {
@@ -300,6 +307,7 @@ class CustomLayer : public TrainableLayer {
     uint32_t numBackwardApplications = 0;
     uint32_t numBackwardApplicationsCompletedThisPass = 0;
     std::unordered_map<std::string, uint64_t> effectiveBatchSizeByParameterName;
+    Event fusedLossConsumersDoneEvent;
 
     std::unordered_map<std::string, uint32_t> inputNameToPort;
     std::unordered_map<std::string, uint32_t> outputNameToPort;

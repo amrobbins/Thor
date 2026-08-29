@@ -68,8 +68,13 @@ def _tensor_bytes(shape: tuple[int, ...], dtype: thor.DataType) -> int:
     return prod(shape) * _bytes_per_element(dtype)
 
 
-def _input_bytes_per_slot(input_shapes: dict[str, tuple[int, ...]], dtype: thor.DataType) -> int:
-    return sum(_tensor_bytes(shape, dtype) for shape in input_shapes.values())
+def _input_bytes_per_slot(
+    input_shapes: dict[str, tuple[int, ...]],
+    dtype: thor.DataType,
+    input_aliases: dict[str, str] | None = None,
+) -> int:
+    aliases = input_aliases or {}
+    return sum(_tensor_bytes(shape, dtype) for name, shape in input_shapes.items() if name not in aliases)
 
 
 def _choose_pool_slots(input_bytes_per_slot: int) -> int:
@@ -102,15 +107,72 @@ def _gpu_tensor(shape: tuple[int, ...], dtype: thor.DataType) -> PhysicalTensor:
     return _physical_tensor(DeviceType.gpu, shape, dtype)
 
 
-def _zero_cpu_tensors(input_shapes: dict[str, tuple[int, ...]], dtype: thor.DataType) -> dict[str, PhysicalTensor]:
+def _resolve_input_alias(name: str, input_aliases: dict[str, str]) -> str:
+    seen: set[str] = set()
+    current = name
+    while current in input_aliases:
+        if current in seen:
+            raise AssertionError(f"Cyclic benchmark input alias involving {name!r}")
+        seen.add(current)
+        current = input_aliases[current]
+    return current
+
+
+def _allocate_inputs(
+    device_type: DeviceType,
+    input_shapes: dict[str, tuple[int, ...]],
+    dtype: thor.DataType,
+    input_aliases: dict[str, str] | None = None,
+) -> dict[str, PhysicalTensor]:
+    aliases = input_aliases or {}
+    inputs: dict[str, PhysicalTensor] = {}
+
+    for name, shape in input_shapes.items():
+        if name in aliases:
+            continue
+        inputs[name] = _physical_tensor(device_type, shape, dtype)
+
+    for name, shape in input_shapes.items():
+        if name not in aliases:
+            continue
+        canonical = _resolve_input_alias(name, aliases)
+        if canonical not in input_shapes:
+            raise AssertionError(f"Benchmark input alias {name!r} targets missing input {canonical!r}")
+        if input_shapes[canonical] != shape:
+            raise AssertionError(
+                f"Benchmark input alias {name!r}->{canonical!r} requires identical shapes, "
+                f"got {shape} versus {input_shapes[canonical]}"
+            )
+        inputs[name] = inputs[canonical]
+
+    return inputs
+
+
+def _gpu_inputs(
+    input_shapes: dict[str, tuple[int, ...]],
+    dtype: thor.DataType,
+    input_aliases: dict[str, str] | None = None,
+) -> dict[str, PhysicalTensor]:
+    return _allocate_inputs(DeviceType.gpu, input_shapes, dtype, input_aliases)
+
+
+def _zero_cpu_tensors(
+    input_shapes: dict[str, tuple[int, ...]],
+    dtype: thor.DataType,
+    input_aliases: dict[str, str] | None = None,
+) -> dict[str, PhysicalTensor]:
     if not INITIALIZE_INPUTS:
         return {}
 
-    zeros: dict[str, PhysicalTensor] = {}
-    for name, shape in input_shapes.items():
-        tensor = _physical_tensor(DeviceType.cpu, shape, dtype)
+    aliases = input_aliases or {}
+    zeros = _allocate_inputs(DeviceType.cpu, input_shapes, dtype, aliases)
+    initialized: set[str] = set()
+    for name, tensor in zeros.items():
+        canonical = _resolve_input_alias(name, aliases)
+        if canonical in initialized:
+            continue
         tensor.numpy().fill(0)
-        zeros[name] = tensor
+        initialized.add(canonical)
     return zeros
 
 
@@ -138,11 +200,10 @@ def _debug_program_stage_kinds(
     input_shapes: dict[str, tuple[int, ...]],
     dtype: thor.DataType,
     stream: Stream,
+    input_aliases: dict[str, str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Return logical compiled stages and concrete stamped runtime stages for a benchmark case."""
-    inputs = {
-        name: _gpu_tensor(shape, dtype) for name, shape in input_shapes.items()
-    }
+    inputs = _gpu_inputs(input_shapes, dtype, input_aliases)
 
     if isinstance(program, thor.physical.DynamicExpression):
         prepared = program.prepare(inputs, {}, stream)
@@ -168,7 +229,13 @@ def _stage_count(stage_kinds: list[str], prefix: str) -> int:
     return sum(1 for stage in stage_kinds if stage.startswith(prefix))
 
 
-def _make_stamped_launch_pool(program, input_shapes: dict[str, tuple[int, ...]], dtype: thor.DataType, stream: Stream):
+def _make_stamped_launch_pool(
+    program,
+    input_shapes: dict[str, tuple[int, ...]],
+    dtype: thor.DataType,
+    stream: Stream,
+    input_aliases: dict[str, str] | None = None,
+):
     """
     Build a pool of independently addressed device inputs and stamped programs.
 
@@ -178,18 +245,21 @@ def _make_stamped_launch_pool(program, input_shapes: dict[str, tuple[int, ...]],
     large enough to exceed normal cache capacity while still keeping allocation,
     stamping, and output materialization outside the timed region.
     """
-    input_bytes = _input_bytes_per_slot(input_shapes, dtype)
+    input_bytes = _input_bytes_per_slot(input_shapes, dtype, input_aliases)
     pool_slots = _choose_pool_slots(input_bytes)
 
-    zero_inputs = _zero_cpu_tensors(input_shapes, dtype)
+    zero_inputs = _zero_cpu_tensors(input_shapes, dtype, input_aliases)
     launches: list[Callable[[], None]] = []
     for _ in range(pool_slots):
-        inputs = {
-            name: _gpu_tensor(shape, dtype) for name, shape in input_shapes.items()
-        }
+        inputs = _gpu_inputs(input_shapes, dtype, input_aliases)
+        copied: set[str] = set()
+        aliases = input_aliases or {}
         for name, tensor in inputs.items():
-            if name in zero_inputs:
-                tensor.copy_from_async(zero_inputs[name], stream)
+            canonical = _resolve_input_alias(name, aliases)
+            if canonical in copied or name not in zero_inputs:
+                continue
+            tensor.copy_from_async(zero_inputs[name], stream)
+            copied.add(canonical)
         stamped = _stamp_program(program, inputs, stream)
         _ = stamped.output()
 
@@ -690,6 +760,8 @@ def _build_public_attention_layer_case(
         layer = thor.layers.Attention(
             network,
             feature_input,
+            feature_input,
+            feature_input,
             num_heads=query_heads,
             num_key_value_heads=kv_heads,
             head_dim=qk_dim,
@@ -717,23 +789,21 @@ def _build_public_attention_layer_case(
         merged_width = query_heads * v_dim
 
         input_shapes = {
-            "feature_input": (batch, sequence, input_features)
+            "query_input": (batch, sequence, input_features),
+            "key_input": (batch, sequence, input_features),
+            "value_input": (batch, sequence, input_features),
         }
-        projection_mode = layer._debug_qkv_projection_mode()
-        if projection_mode == "packed":
-            input_shapes["qkv_weights"] = (input_features, qkv_width)
-            if has_bias:
-                input_shapes["qkv_bias"] = (qkv_width,)
-        elif projection_mode == "split":
-            input_shapes["query_weights"] = (input_features, q_width)
-            input_shapes["key_weights"] = (input_features, k_width)
-            input_shapes["value_weights"] = (input_features, v_width)
-            if has_bias:
-                input_shapes["query_bias"] = (q_width,)
-                input_shapes["key_bias"] = (k_width,)
-                input_shapes["value_bias"] = (v_width,)
-        else:
-            raise AssertionError(f"Unexpected public Attention projection mode: {projection_mode}")
+        # Public Attention always owns independent Q/K/V projections now. Packed QKV
+        # remains useful as an expression-level benchmark, but is no longer a public
+        # Attention implementation mode or API contract.
+        projection_mode = "split"
+        input_shapes["query_weights"] = (input_features, q_width)
+        input_shapes["key_weights"] = (input_features, k_width)
+        input_shapes["value_weights"] = (input_features, v_width)
+        if has_bias:
+            input_shapes["query_bias"] = (q_width,)
+            input_shapes["key_bias"] = (k_width,)
+            input_shapes["value_bias"] = (v_width,)
         input_shapes["output_weights"] = (merged_width, output_features)
         if has_bias:
             input_shapes["output_bias"] = (output_features,)
@@ -752,6 +822,14 @@ def _build_public_attention_layer_case(
         metadata = {
             "source": "thor.layers.Attention",
             "qkv_projection_mode": projection_mode,
+            # These public benchmark cases intentionally exercise self-attention. The
+            # generalized physical expression has three named Q/K/V inputs, but all
+            # three names must bind the same device tensor to preserve the public
+            # layer's Q=K=V source aliasing and its real memory/cache behavior.
+            "input_aliases": {
+                "key_input": "query_input",
+                "value_input": "query_input",
+            },
             "has_bias": has_bias,
             "use_rope": use_rope,
             "rope_in_place": rope_in_place,
@@ -1299,9 +1377,7 @@ def test_public_attention_projection_biases_compile_as_gemm_epilogues(dtype: tho
 
     stream = Stream(Placement(DeviceType.gpu, GPU_NUM))
     program, input_shapes, output_shape, _, metadata = _unpack_built_case(case.builder(dtype))
-    inputs = {
-        name: _gpu_tensor(shape, dtype) for name, shape in input_shapes.items()
-    }
+    inputs = _gpu_inputs(input_shapes, dtype, metadata.get("input_aliases"))
 
     # DynamicExpression does not expose _debug_stage_kinds directly. Prepare it first,
     # then inspect the underlying FusedEquation with the exact stamp-time bindings chosen
@@ -1403,7 +1479,9 @@ def test_rope_qk_materialization_policy_controls_in_place_stage(dtype: thor.Data
 
     for case in cases:
         program, input_shapes, output_shape, _, metadata = _unpack_built_case(case.builder(dtype))
-        compiled_stage_kinds, runtime_stage_kinds = _debug_program_stage_kinds(program, input_shapes, dtype, stream)
+        compiled_stage_kinds, runtime_stage_kinds = _debug_program_stage_kinds(
+            program, input_shapes, dtype, stream, metadata.get("input_aliases")
+        )
 
         record_property(f"{case.name}_compiled_stage_kinds", str(compiled_stage_kinds))
         record_property(f"{case.name}_runtime_stage_kinds", str(runtime_stage_kinds))
@@ -1433,8 +1511,13 @@ def test_attention_layer_real_size_throughput(case: AttentionPerfCase, dtype: th
 
     stream = Stream(Placement(DeviceType.gpu, GPU_NUM))
     program, input_shapes, output_shape, flops_per_launch, metadata = _unpack_built_case(case.builder(dtype))
-    compiled_stage_kinds, runtime_stage_kinds = _debug_program_stage_kinds(program, input_shapes, dtype, stream)
-    launches, input_bytes, pool_slots = _make_stamped_launch_pool(program, input_shapes, dtype, stream)
+    input_aliases = metadata.get("input_aliases")
+    compiled_stage_kinds, runtime_stage_kinds = _debug_program_stage_kinds(
+        program, input_shapes, dtype, stream, input_aliases
+    )
+    launches, input_bytes, pool_slots = _make_stamped_launch_pool(
+        program, input_shapes, dtype, stream, input_aliases
+    )
 
     elapsed_s = _benchmark_rotating_launches(launches, stream)
     ms_per_launch = (elapsed_s / MEASURE_ITERS) * 1_000.0

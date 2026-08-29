@@ -277,7 +277,7 @@ void CustomMetric::cleanup() {
     }
     ratioStatisticSlots.clear();
     ratioStatisticDownloadStream.reset();
-    Layer::cleanup();
+    Metric::cleanup();
 }
 
 void CustomMetric::computeMetric(

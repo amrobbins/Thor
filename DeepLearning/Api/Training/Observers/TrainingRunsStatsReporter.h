@@ -28,6 +28,16 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
         std::vector<std::string> reportOrder{};
     };
 
+    struct HistoricalRunResult {
+        TrainingRunResult result{};
+        std::vector<std::string> reportOrder{};
+    };
+
+    struct TrainingPhaseReport {
+        std::string phaseName{};
+        std::vector<HistoricalRunResult> runs{};
+    };
+
     explicit TrainingRunsStatsReporter(std::FILE* output = stdout,
                                        LineStatsColorMode colorMode = LineStatsColorMode::AUTO,
                                        double maxSummaryLogsPerSecond = 2.0);
@@ -41,6 +51,7 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
     void markRunStatus(const std::string& runName, TrainingRunStatus status);
     void markRunFinished(const TrainingRunResult& result);
     void emitFinalReport(const std::vector<TrainingRunResult>& results);
+    void emitTrainingHistoryReport(const std::vector<TrainingPhaseReport>& phases);
     void emitEnsembleReport(const std::vector<TrainingEnsembleResult>& ensembles);
     void onStatsEvent(const TrainingStatsEvent& event) override;
     void flush() override;
@@ -100,6 +111,10 @@ class TrainingRunsStatsReporter : public TrainingStatsSink {
         std::unordered_map<
             std::string,
             std::unordered_map<std::string, SmoothedMetricState>> namedValidationMetrics{};
+        std::optional<double> latestScore{};
+        std::optional<uint64_t> bestEpoch{};
+        std::optional<double> bestScore{};
+        std::optional<uint64_t> scoreDisplayEpoch{};
         std::optional<TrainingRunResult> terminalResult{};
         bool validationStatsPendingEmission = false;
         bool dirty = false;

@@ -85,6 +85,7 @@ struct NativeBatchCompletionParams {
     uint64_t epochBatchNum = 0;
     uint64_t batchesInEpoch = 0;
     uint64_t validExampleCount = 0;
+    uint64_t floatingPointOperations = 0;
     uint64_t slotIndex = 0;
     BatchLease batchLease;
     std::map<std::string, ThorImplementation::Tensor> batchOutput;
@@ -101,6 +102,7 @@ struct QueuedBatchSlot {
     uint64_t epochBatchNum = 0;
     uint64_t batchesInEpoch = 0;
     uint64_t validExampleCount = 0;
+    uint64_t floatingPointOperations = 0;
     uint64_t doneInEpochAtComplete = 0;
     uint64_t validExamplesThroughBatch = 0;
     uint64_t paramsIndex = 0;
@@ -166,6 +168,8 @@ struct WallThroughputEmaState {
     double lastElapsedSeconds = 0.0;
     uint64_t lastCompletedBatches = 0;
     uint64_t lastCompletedSamples = 0;
+    uint64_t totalCompletedFloatingPointOperations = 0;
+    uint64_t lastCompletedFloatingPointOperations = 0;
     double samplesPerSecond = 0.0;
     double batchesPerSecond = 0.0;
     double floatingPointOperationsPerSecond = 0.0;
@@ -178,8 +182,8 @@ void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
                                WallThroughputEmaState& state,
                                uint64_t completedBatches,
                                uint64_t completedSamples,
-                               uint64_t floatingPointOperationsPerBatch) {
-    snapshot.floatingPointOperationsPerBatch = floatingPointOperationsPerBatch;
+                               uint64_t floatingPointOperationsThisBatch) {
+    snapshot.floatingPointOperationsPerBatch = floatingPointOperationsThisBatch;
     if (snapshot.elapsedSeconds <= 0.0 || completedBatches == 0 || completedSamples == 0) {
         return;
     }
@@ -193,22 +197,37 @@ void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
     };
 
     if (!state.initialized) {
+        // Preserve the prior startup/resume convention for the first rate
+        // sample: when earlier batches predate this observer state, approximate
+        // them with the first observed batch. From this point onward every
+        // completed batch contributes its exact runtime logical FLOP count.
+        if (floatingPointOperationsThisBatch != 0 &&
+            completedBatches > std::numeric_limits<uint64_t>::max() / floatingPointOperationsThisBatch) {
+            throw std::runtime_error("Wall throughput cumulative FLOP count overflow.");
+        }
+        state.totalCompletedFloatingPointOperations = completedBatches * floatingPointOperationsThisBatch;
         const double batchesPerSecond = static_cast<double>(completedBatches) / snapshot.elapsedSeconds;
         const double samplesPerSecond =
             static_cast<double>(completedSamples) / snapshot.elapsedSeconds;
         const double floatingPointOperationsPerSecond =
-            (static_cast<double>(completedBatches) * static_cast<double>(floatingPointOperationsPerBatch)) /
-            snapshot.elapsedSeconds;
+            static_cast<double>(state.totalCompletedFloatingPointOperations) / snapshot.elapsedSeconds;
         state.initialized = true;
         state.lastElapsedSeconds = snapshot.elapsedSeconds;
         state.lastCompletedBatches = completedBatches;
         state.lastCompletedSamples = completedSamples;
+        state.lastCompletedFloatingPointOperations = state.totalCompletedFloatingPointOperations;
         state.batchesPerSecond = batchesPerSecond;
         state.samplesPerSecond = samplesPerSecond;
         state.floatingPointOperationsPerSecond = floatingPointOperationsPerSecond;
         assignRates(batchesPerSecond, samplesPerSecond, floatingPointOperationsPerSecond);
         return;
     }
+
+    if (floatingPointOperationsThisBatch >
+        std::numeric_limits<uint64_t>::max() - state.totalCompletedFloatingPointOperations) {
+        throw std::runtime_error("Wall throughput cumulative FLOP count overflow.");
+    }
+    state.totalCompletedFloatingPointOperations += floatingPointOperationsThisBatch;
 
     if (snapshot.elapsedSeconds <= state.lastElapsedSeconds ||
         completedBatches <= state.lastCompletedBatches ||
@@ -232,10 +251,12 @@ void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
         static_cast<double>(completedBatches - state.lastCompletedBatches);
     const double intervalSamples =
         static_cast<double>(completedSamples - state.lastCompletedSamples);
+    const double intervalFloatingPointOperations = static_cast<double>(
+        state.totalCompletedFloatingPointOperations - state.lastCompletedFloatingPointOperations);
     const double intervalBatchesPerSecond = intervalBatches / intervalSeconds;
     const double intervalSamplesPerSecond = intervalSamples / intervalSeconds;
     const double intervalFloatingPointOperationsPerSecond =
-        (intervalBatches * static_cast<double>(floatingPointOperationsPerBatch)) / intervalSeconds;
+        intervalFloatingPointOperations / intervalSeconds;
 
     state.batchesPerSecond = (WALL_THROUGHPUT_EMA_ALPHA * intervalBatchesPerSecond) +
                              ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.batchesPerSecond);
@@ -248,6 +269,7 @@ void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
     state.lastElapsedSeconds = snapshot.elapsedSeconds;
     state.lastCompletedBatches = completedBatches;
     state.lastCompletedSamples = completedSamples;
+    state.lastCompletedFloatingPointOperations = state.totalCompletedFloatingPointOperations;
     assignRates(state.batchesPerSecond, state.samplesPerSecond, state.floatingPointOperationsPerSecond);
 }
 
@@ -1888,6 +1910,7 @@ struct BatchPopResult {
     uint64_t poppedInEpoch = 0;
     uint64_t batchesInEpoch = 0;
     uint64_t validExampleCount = 0;
+    uint64_t floatingPointOperations = 0;
     uint64_t validExamplesInEpoch = 0;
     std::chrono::high_resolution_clock::time_point completionTime{};
     std::vector<ScalarStatSlot> scalarStats;
@@ -1918,6 +1941,7 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     result.doneInEpoch = slot.doneInEpochAtComplete;
     result.batchesInEpoch = slot.batchesInEpoch;
     result.validExampleCount = slot.validExampleCount;
+    result.floatingPointOperations = slot.floatingPointOperations;
     result.validExamplesInEpoch =
         slot.validExamplesThroughBatch;
     result.completionTime = slot.completionTime;
@@ -1931,6 +1955,7 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     params.completionCallbackLaunched = false;
     params.completionCallbackFinished = false;
     params.validExampleCount = 0;
+    params.floatingPointOperations = 0;
     params.state.reset();
     for (ScalarStatSlot& scalarStat : slot.scalarStats) {
         scalarStat.present = false;
@@ -1957,6 +1982,7 @@ BatchPopResult popBatchData(const std::shared_ptr<QueuedTrainingState>& state) {
     slot.epochBatchNum = 0;
     slot.batchesInEpoch = 0;
     slot.validExampleCount = 0;
+    slot.floatingPointOperations = 0;
     slot.doneInEpochAtComplete = 0;
     slot.validExamplesThroughBatch = 0;
     state->headSlot = (state->headSlot + 1) % state->slots.size();
@@ -2041,6 +2067,7 @@ void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<Queued
         params.completionCallbackLaunched = false;
         params.completionCallbackFinished = false;
         params.validExampleCount = 0;
+        params.floatingPointOperations = 0;
         params.state.reset();
     }
 
@@ -2051,6 +2078,7 @@ void releaseQueuedTrainingStateReferencesAfterAbort(const std::shared_ptr<Queued
         slot.epochBatchNum = 0;
         slot.batchesInEpoch = 0;
         slot.validExampleCount = 0;
+        slot.floatingPointOperations = 0;
         slot.doneInEpochAtComplete = 0;
         slot.validExamplesThroughBatch = 0;
         slot.paramsIndex = 0;
@@ -2236,6 +2264,7 @@ class NativeQueuedEpochScheduler {
                 slot.epochBatchNum = epochBatchNum;
                 slot.batchesInEpoch = batchesPerEpoch;
                 slot.validExampleCount = 0;
+                slot.floatingPointOperations = 0;
                 slot.doneInEpochAtComplete = 0;
                 slot.validExamplesThroughBatch = 0;
                 slot.paramsIndex = slotIndex;
@@ -2271,6 +2300,7 @@ class NativeQueuedEpochScheduler {
             params->epochBatchNum = epochBatchNum;
             params->batchesInEpoch = batchesPerEpoch;
             params->validExampleCount = 0;
+            params->floatingPointOperations = 0;
             params->slotIndex = slotIndex;
             params->batchLease.reset();
             params->batchOutput.clear();
@@ -2387,8 +2417,24 @@ class NativeQueuedEpochScheduler {
                     if (collectQueueDiagnostics) {
                         ThorImplementation::accumulateBatchSubmissionTiming(submitTiming, singleSubmitTiming);
                     }
+                    ThorImplementation::StampedNetwork& submittedStamp =
+                        placedNetwork->getStampedNetwork(nextStampToProcess);
+                    const uint64_t submitFlops = diagnosticPhase == TrainingEventPhase::TRAIN
+                        ? submittedStamp.getFloatingPointOperationsCurrentBatchTraining()
+                        : submittedStamp.getFloatingPointOperationsCurrentBatchForward();
+                    if (submitFlops > std::numeric_limits<uint64_t>::max() - params->floatingPointOperations) {
+                        throw std::runtime_error("Native queued batch logical FLOP count overflow.");
+                    }
+                    params->floatingPointOperations += submitFlops;
                     submitCalls += 1;
                 }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                QueuedBatchSlot& slot = state->slots[slotIndex];
+                THOR_THROW_IF_FALSE(slot.occupied);
+                slot.floatingPointOperations = params->floatingPointOperations;
             }
             const auto submitFinish = diagnosticNow(collectQueueDiagnostics);
 
@@ -3684,15 +3730,6 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
         placedNetwork,
         placedNetwork->getStampedNetwork(0).getGpuNum());
 
-    ThorImplementation::StampedNetwork& statsStampedNetwork =
-        placedNetwork->getStampedNetwork(0);
-    const uint64_t forwardFlopsPerBatch =
-        statsStampedNetwork.getFloatingPointOperationsPerExampleForward() *
-        batchSize;
-    const uint64_t trainingFlopsPerBatch =
-        statsStampedNetwork.getFloatingPointOperationsPerExampleTraining() *
-        batchSize;
-
     THOR_THROW_IF_FALSE(firstEpochExecution.has_value());
     const auto runStart = firstEpochExecution->startedAt;
     const double initialElapsedSeconds =
@@ -3816,9 +3853,23 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                 const size_t index = queuedPhaseIndex(work.phase);
                 if (!phaseStarted[index]) {
                     phaseStarted[index] = true;
-                    emitTrainingEvent(observer,
-                                      TrainingEvent::epochStarted(
-                                          makeBaseSnapshot(work.phase, cumulativeEpoch, batchSize, work.batchesPerEpoch, state)));
+                    TrainingStatsSnapshot startedStats =
+                        makeBaseSnapshot(work.phase, cumulativeEpoch, batchSize, work.batchesPerEpoch, state);
+                    // Model-selection scoring happens after an epoch's validation
+                    // phases complete. Carry that latest completed score on the next
+                    // TRAIN epoch lifecycle event so live reporters can show it beside
+                    // the epoch that is now in progress without treating it as a batch metric.
+                    if (work.phase == TrainingEventPhase::TRAIN &&
+                        latestModelSelectionScore.has_value() &&
+                        std::isfinite(latestModelSelectionScore.value()) &&
+                        trainingArtifacts.getBestEpoch().has_value() &&
+                        trainingArtifacts.getBestScore().has_value()) {
+                        startedStats.metrics["latest_score"] = latestModelSelectionScore.value();
+                        startedStats.metrics["best_epoch"] =
+                            static_cast<double>(trainingArtifacts.getBestEpoch().value());
+                        startedStats.metrics["best_score"] = trainingArtifacts.getBestScore().value();
+                    }
+                    emitTrainingEvent(observer, TrainingEvent::epochStarted(std::move(startedStats)));
                 }
 
                 const QueuedPhaseProgress& progress = phaseProgress(*state, work.phase);
@@ -3932,19 +3983,16 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                             completedBatch.validExamplesInEpoch;
                     }
 
-                    // Samples use the exact valid-example count. Batches and
-                    // FLOPs remain physical-execution quantities because the
-                    // fixed-capacity graph still runs for the tail batch.
+                    // Samples use the exact valid-example count. FLOPs use the
+                    // logical work captured for this submitted batch. In
+                    // particular, ragged Attention counts only score pairs from
+                    // the published row partitions rather than packed capacity.
                     const uint64_t completedBatchesForThroughput = snapshot.step;
-                    const uint64_t phaseFlopsPerBatch =
-                        completedBatch.phase == TrainingEventPhase::TRAIN
-                            ? trainingFlopsPerBatch
-                            : forwardFlopsPerBatch;
                     updateWallThroughputRates(snapshot,
                                               throughputByPhase[completedBatch.phase],
                                               completedBatchesForThroughput,
                                               snapshot.samplesProcessed,
-                                              phaseFlopsPerBatch);
+                                              completedBatch.floatingPointOperations);
 
                     assignScalarStatsToSnapshot(snapshot,
                                                 state->scalarTensorNames,
@@ -4078,7 +4126,7 @@ void runNativeQueuedTraining(const TrainingRunRequest& request, TrainingObserver
                         validationThroughput,
                         snapshot.step,
                         snapshot.samplesProcessed,
-                        forwardFlopsPerBatch);
+                        completedBatch.floatingPointOperations);
                     assignScalarStatsToSnapshot(
                         snapshot,
                         validationState->scalarTensorNames,

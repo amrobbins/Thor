@@ -3697,7 +3697,7 @@ TEST(RaggedExpression, CausalConv1dT7CGroupedAndDepthwiseMatchCpuAndDenseRows) {
                                                    {},
                                                    {{"y", packed_output}});
         const uint64_t expected_flops =
-            2 * max_total_values * output_channels * input_channels_per_group * kernel_width;
+            2 * offsets.back() * output_channels * input_channels_per_group * kernel_width;
         EXPECT_EQ(plan.flopCount(), expected_flops);
         plan.run();
         stream.synchronize();

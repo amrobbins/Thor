@@ -1,6 +1,7 @@
 #include "Utilities/Expression/StampedEquation.h"
 #include "Utilities/ComputeTopology/MachineEvaluator.h"
 #include "Utilities/Common/GpuMemoryDiagnostics.h"
+#include "Utilities/Common/ReusableEventPool.h"
 #include "Utilities/CudaDriver/CudaGraphConditional.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/Expression/ConvolutionKernelValidation.h"
@@ -654,9 +655,189 @@ uint64_t attentionRaggedBatchSize(bool use_ragged_offsets,
     return qOffsetDims[0] - 1;
 }
 
+uint64_t attentionFlopCheckedMul(uint64_t lhs, uint64_t rhs, const char* where) {
+    if (lhs != 0 && rhs > std::numeric_limits<uint64_t>::max() / lhs) {
+        throw std::runtime_error(std::string("FLOP count overflow in ") + where + ".");
+    }
+    return lhs * rhs;
+}
+
+uint64_t attentionFlopCheckedAdd(uint64_t lhs, uint64_t rhs, const char* where) {
+    if (rhs > std::numeric_limits<uint64_t>::max() - lhs) {
+        throw std::runtime_error(std::string("FLOP count overflow in ") + where + ".");
+    }
+    return lhs + rhs;
+}
+
+uint64_t raggedFlopCheckedMul(uint64_t lhs, uint64_t rhs, const char* where) {
+    if (lhs != 0 && rhs > std::numeric_limits<uint64_t>::max() / lhs) {
+        throw std::runtime_error(std::string("FLOP count overflow in ") + where + ".");
+    }
+    return lhs * rhs;
+}
+
+uint64_t raggedFlopCheckedAdd(uint64_t lhs, uint64_t rhs, const char* where) {
+    if (rhs > std::numeric_limits<uint64_t>::max() - lhs) {
+        throw std::runtime_error(std::string("FLOP count overflow in ") + where + ".");
+    }
+    return lhs + rhs;
+}
+
+std::optional<uint64_t> runtimeRaggedActiveValueCount(const Tensor& offsets,
+                                                       uint64_t batch_size,
+                                                       uint64_t max_active_values) {
+    if (batch_size == 0 || max_active_values == 0) {
+        return std::nullopt;
+    }
+    RowPartitionRuntime row_partition(
+        offsets,
+        RowPartitionDescriptor(batch_size, max_active_values, offsets.getDataType()));
+    return row_partition.getHostActiveValueCountIfAvailable();
+}
+
+std::optional<std::vector<uint64_t>> runtimeRaggedHostOffsets(const Tensor& offsets,
+                                                              uint64_t batch_size,
+                                                              uint64_t max_active_values) {
+    if (batch_size == 0 || max_active_values == 0) {
+        return std::nullopt;
+    }
+    RowPartitionRuntime row_partition(
+        offsets,
+        RowPartitionDescriptor(batch_size, max_active_values, offsets.getDataType()));
+    return row_partition.getHostOffsetsIfAvailable();
+}
+
+std::optional<uint64_t> runtimePackedLogicalNumel(const Tensor& offsets,
+                                                   uint64_t batch_size,
+                                                   uint64_t packed_row_capacity,
+                                                   const Tensor& values,
+                                                   const char* where) {
+    if (batch_size == 0 || packed_row_capacity == 0 || values.getTotalNumElements() % packed_row_capacity != 0) {
+        return std::nullopt;
+    }
+    const std::optional<uint64_t> active_rows =
+        runtimeRaggedActiveValueCount(offsets, batch_size, packed_row_capacity);
+    if (!active_rows.has_value()) {
+        return std::nullopt;
+    }
+    const uint64_t elements_per_packed_row = values.getTotalNumElements() / packed_row_capacity;
+    return raggedFlopCheckedMul(active_rows.value(), elements_per_packed_row, where);
+}
+
+std::optional<std::vector<uint64_t>> attentionHostOffsetsIfAvailable(const Tensor& offsets,
+                                                                     uint64_t batch_size,
+                                                                     uint64_t max_total_values) {
+    if (batch_size == 0 || max_total_values == 0) {
+        return std::nullopt;
+    }
+    RowPartitionRuntime row_partition(
+        offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, offsets.getDataType()));
+    return row_partition.getHostOffsetsIfAvailable();
+}
+
+std::optional<uint64_t> runtimeLogicalAttentionFlops(const CompiledAttention& attention,
+                                                     const Tensor& q,
+                                                     const Tensor& k,
+                                                     const Tensor& output,
+                                                     const std::optional<Tensor>& q_ragged_offsets,
+                                                     const std::optional<Tensor>& kv_ragged_offsets) {
+    if (!attention.use_ragged_offsets) {
+        return std::nullopt;
+    }
+    const uint64_t batch_size = attentionRaggedBatchSize(
+        true, q_ragged_offsets, kv_ragged_offsets, "runtimeLogicalAttentionFlops");
+    THOR_THROW_IF_FALSE(q_ragged_offsets.has_value());
+    THOR_THROW_IF_FALSE(kv_ragged_offsets.has_value());
+
+    const std::vector<uint64_t> q_dims = q.getDimensions();
+    const std::vector<uint64_t> k_dims = k.getDimensions();
+    const std::vector<uint64_t> out_dims = output.getDimensions();
+    const bool query_packed = q_dims.size() == 3;
+    const bool kv_packed = k_dims.size() == 3;
+
+    const AttentionTensorLogicalDims q_logical = query_packed
+        ? AttentionTensorLogicalDims{static_cast<int64_t>(batch_size),
+                                     static_cast<int64_t>(q_dims.at(1)),
+                                     static_cast<int64_t>(q_dims.at(0)),
+                                     static_cast<int64_t>(q_dims.at(2))}
+        : logicalAttentionDims(q_dims, attention.q_layout, "q");
+    const AttentionTensorLogicalDims k_logical = kv_packed
+        ? AttentionTensorLogicalDims{static_cast<int64_t>(batch_size),
+                                     static_cast<int64_t>(k_dims.at(1)),
+                                     static_cast<int64_t>(k_dims.at(0)),
+                                     static_cast<int64_t>(k_dims.at(2))}
+        : logicalAttentionDims(k_dims, attention.k_layout, "k");
+    const uint64_t value_dim = query_packed
+        ? out_dims.at(2)
+        : static_cast<uint64_t>(logicalAttentionDims(out_dims, attention.o_layout, "o").head_dim);
+
+    const uint64_t q_capacity = query_packed
+        ? q_dims.at(0)
+        : attentionFlopCheckedMul(batch_size,
+                                  static_cast<uint64_t>(q_logical.sequence_length),
+                                  "runtimeLogicalAttentionFlops q capacity");
+    const uint64_t kv_capacity = kv_packed
+        ? k_dims.at(0)
+        : attentionFlopCheckedMul(batch_size,
+                                  static_cast<uint64_t>(k_logical.sequence_length),
+                                  "runtimeLogicalAttentionFlops kv capacity");
+
+    const std::optional<std::vector<uint64_t>> q_offsets = attentionHostOffsetsIfAvailable(
+        q_ragged_offsets.value(), batch_size, q_capacity);
+    const std::optional<std::vector<uint64_t>> kv_offsets = attentionHostOffsetsIfAvailable(
+        kv_ragged_offsets.value(), batch_size, kv_capacity);
+
+    // Ragged offsets define the logical sequence domain even when the physical
+    // operand is rank-4 BSHD storage. Without both exact row partitions there is
+    // no truthful runtime useful-work count, so fall back to the stage's static
+    // capacity estimate rather than silently treating a padded row as active.
+    if (!q_offsets.has_value() || !kv_offsets.has_value()) {
+        return std::nullopt;
+    }
+
+    uint64_t logical_score_pairs = 0;
+    for (uint64_t row = 0; row < batch_size; ++row) {
+        const uint64_t q_len = q_offsets->at(row + 1) - q_offsets->at(row);
+        const uint64_t kv_len = kv_offsets->at(row + 1) - kv_offsets->at(row);
+        logical_score_pairs = attentionFlopCheckedAdd(
+            logical_score_pairs,
+            attentionFlopCheckedMul(q_len, kv_len, "runtimeLogicalAttentionFlops score pairs"),
+            "runtimeLogicalAttentionFlops score pairs");
+    }
+
+    uint64_t scores = attentionFlopCheckedMul(
+        logical_score_pairs,
+        static_cast<uint64_t>(q_logical.heads),
+        "runtimeLogicalAttentionFlops scores");
+    uint64_t qk_flops = attentionFlopCheckedMul(
+        attentionFlopCheckedMul(scores,
+                                static_cast<uint64_t>(q_logical.head_dim),
+                                "runtimeLogicalAttentionFlops qk"),
+        2,
+        "runtimeLogicalAttentionFlops qk");
+    uint64_t pv_flops = attentionFlopCheckedMul(
+        attentionFlopCheckedMul(scores, value_dim, "runtimeLogicalAttentionFlops pv"),
+        2,
+        "runtimeLogicalAttentionFlops pv");
+    const uint64_t softmax_flops = attentionFlopCheckedMul(scores, 5, "runtimeLogicalAttentionFlops softmax");
+    return attentionFlopCheckedAdd(
+        attentionFlopCheckedAdd(qk_flops, pv_flops, "runtimeLogicalAttentionFlops total"),
+        softmax_flops,
+        "runtimeLogicalAttentionFlops total");
+}
+
 }  // namespace
 
 void StampedAttention::run() { runOn(stream); }
+
+std::optional<uint64_t> StampedAttention::runtimeLogicalFlopCount() const {
+    if (!compiled_attention) {
+        return std::nullopt;
+    }
+    return runtimeLogicalAttentionFlops(
+        *compiled_attention, q, k, output, q_ragged_offsets, kv_ragged_offsets);
+}
 
 void StampedAttention::runOn(Stream& run_stream) const {
     if (!compiled_attention) {
@@ -910,6 +1091,38 @@ void StampedAttention::retainForwardStateForBackward() {
 }
 
 void StampedAttentionBackward::run() { runOn(stream); }
+
+std::optional<uint64_t> StampedAttentionBackward::runtimeLogicalFlopCount() const {
+    if (!compiled_attention_backward) {
+        return std::nullopt;
+    }
+    CompiledAttention forward;
+    forward.q_layout = compiled_attention_backward->q_layout;
+    forward.k_layout = compiled_attention_backward->k_layout;
+    forward.v_layout = compiled_attention_backward->v_layout;
+    forward.o_layout = compiled_attention_backward->o_layout;
+    forward.mask_kind = compiled_attention_backward->mask_kind;
+    forward.diagonal_left_bound = compiled_attention_backward->diagonal_left_bound;
+    forward.diagonal_right_bound = compiled_attention_backward->diagonal_right_bound;
+    forward.attention_scale = compiled_attention_backward->attention_scale;
+    forward.use_alibi_mask = compiled_attention_backward->use_alibi_mask;
+    forward.use_bias = compiled_attention_backward->use_bias;
+    forward.use_padding_mask = compiled_attention_backward->use_padding_mask;
+    forward.use_ragged_offsets = compiled_attention_backward->use_ragged_offsets;
+    forward.use_paged_kv_cache = compiled_attention_backward->use_paged_kv_cache;
+    forward.paged_kv_max_sequence_length = compiled_attention_backward->paged_kv_max_sequence_length;
+    forward.dropout_probability = compiled_attention_backward->dropout_probability;
+    forward.compute_dtype = compiled_attention_backward->compute_dtype;
+    forward.output_dtype = dO.getDataType();
+    forward.debug_name = compiled_attention_backward->debug_name;
+
+    const std::optional<uint64_t> forward_flops = runtimeLogicalAttentionFlops(
+        forward, q, k, dO, q_ragged_offsets, kv_ragged_offsets);
+    if (!forward_flops.has_value()) {
+        return std::nullopt;
+    }
+    return attentionFlopCheckedMul(forward_flops.value(), 4, "StampedAttentionBackward::runtimeLogicalFlopCount");
+}
 
 void StampedAttentionBackward::runOn(Stream& run_stream) const {
     if (!compiled_attention_backward) {
@@ -1475,6 +1688,21 @@ void StampedArgMinMax::runOn(Stream& run_stream) const {
     cub_arg_reduction->runOn(run_stream);
 }
 
+std::optional<uint64_t> RuntimeRaggedFusedFlopAccounting::runtimeLogicalFlopCount() const {
+    const std::optional<uint64_t> active_values =
+        runtimeRaggedActiveValueCount(row_partition_offsets, batch_size, max_active_values);
+    if (!active_values.has_value()) {
+        return std::nullopt;
+    }
+    if (active_values.value() == 0) {
+        return 0;
+    }
+    return raggedFlopCheckedAdd(
+        raggedFlopCheckedMul(active_values.value(), flops_per_active_value, "RuntimeRaggedFusedFlopAccounting"),
+        fixed_flops_when_nonempty,
+        "RuntimeRaggedFusedFlopAccounting");
+}
+
 StampedSegmentedReduction::StampedSegmentedReduction(std::shared_ptr<CompiledSegmentedReduction> compiled,
                                                      const Tensor& input,
                                                      const Tensor& output,
@@ -1519,6 +1747,46 @@ StampedSegmentedReduction::StampedSegmentedReduction(std::shared_ptr<CompiledSeg
     THOR_THROW_IF_FALSE(cub_segmented_reduction->getPath() == CubReductionPath::OffsetSegmented);
 }
 
+std::optional<uint64_t> StampedSegmentedReduction::runtimeLogicalFlopCount() const {
+    const std::vector<uint64_t> offset_dims = segment_offsets.getDimensions();
+    if (offset_dims.size() != 1 || offset_dims[0] < 2 || input.getDimensions().empty()) {
+        return std::nullopt;
+    }
+    const uint64_t batch_size = offset_dims[0] - 1;
+    const uint64_t max_active_values = input.getDimensions()[0];
+    const std::optional<uint64_t> active_values =
+        runtimeRaggedActiveValueCount(segment_offsets, batch_size, max_active_values);
+    if (!active_values.has_value()) {
+        return std::nullopt;
+    }
+
+    uint64_t flops = raggedFlopCheckedMul(active_values.value(),
+                                          compiled_segmented_reduction->elements_per_value,
+                                          "StampedSegmentedReduction");
+    if (compiled_segmented_reduction->op == ExprOp::SEGMENTED_REDUCE_MEAN) {
+        // Mean adds one division per output channel for each segment that
+        // actually contains a logical value. The full row partition is needed
+        // only for this non-empty-row count; sum/min/max need just the active
+        // value count above.
+        const std::optional<std::vector<uint64_t>> host_offsets =
+            runtimeRaggedHostOffsets(segment_offsets, batch_size, max_active_values);
+        if (!host_offsets.has_value() || host_offsets->size() != batch_size + 1) {
+            return std::nullopt;
+        }
+        uint64_t nonempty_segments = 0;
+        for (uint64_t row = 0; row < batch_size; ++row) {
+            nonempty_segments += ((*host_offsets)[row + 1] != (*host_offsets)[row]);
+        }
+        flops = raggedFlopCheckedAdd(
+            flops,
+            raggedFlopCheckedMul(nonempty_segments,
+                                 compiled_segmented_reduction->elements_per_value,
+                                 "StampedSegmentedReduction mean"),
+            "StampedSegmentedReduction mean");
+    }
+    return flops;
+}
+
 void StampedSegmentedReduction::run() { runOn(stream); }
 
 void StampedSegmentedReduction::runOn(Stream& run_stream) const {
@@ -1561,6 +1829,28 @@ StampedSegmentedBroadcast::StampedSegmentedBroadcast(std::shared_ptr<CompiledSeg
             compiled_segmented_broadcast->elements_per_value) {
         throw std::runtime_error("StampedSegmentedBroadcast elements-per-value metadata does not match tensor shapes.");
     }
+}
+
+std::optional<uint64_t> StampedSegmentedBroadcast::runtimeLogicalFlopCount() const {
+    const std::vector<uint64_t> offset_dims = segment_offsets.getDimensions();
+    if (offset_dims.size() != 1 || offset_dims[0] < 2) {
+        return std::nullopt;
+    }
+    const uint64_t batch_size = offset_dims[0] - 1;
+    const std::optional<uint64_t> active_values =
+        runtimeRaggedActiveValueCount(segment_offsets,
+                                      batch_size,
+                                      compiled_segmented_broadcast->max_output_values);
+    if (!active_values.has_value()) {
+        return std::nullopt;
+    }
+    uint64_t flops = raggedFlopCheckedMul(active_values.value(),
+                                          compiled_segmented_broadcast->elements_per_value,
+                                          "StampedSegmentedBroadcast");
+    if (compiled_segmented_broadcast->normalize_by_segment_length) {
+        flops = raggedFlopCheckedMul(flops, 2, "StampedSegmentedBroadcast normalized");
+    }
+    return flops;
 }
 
 void StampedSegmentedBroadcast::run() { runOn(stream); }
@@ -1625,6 +1915,37 @@ uint64_t t7r5CheckedMul(uint64_t lhs, uint64_t rhs, const char* label) {
         throw std::invalid_argument(std::string(label) + " overflows uint64_t.");
     }
     return lhs * rhs;
+}
+
+std::optional<uint64_t> runtimeLogicalRaggedConv1dFlops(const Tensor& row_offsets,
+                                                        uint64_t batch_size,
+                                                        uint64_t max_active_values,
+                                                        uint64_t max_values_per_row,
+                                                        uint64_t input_channels,
+                                                        uint64_t output_channels,
+                                                        uint64_t kernel_width,
+                                                        uint64_t groups,
+                                                        const char* operation_name) {
+    if (groups == 0 || input_channels % groups != 0 || output_channels % groups != 0) {
+        throw std::runtime_error(std::string(operation_name) +
+                                 " has invalid grouped channel metadata while computing runtime logical FLOPs.");
+    }
+
+    RowPartitionRuntime row_partition(
+        row_offsets,
+        RowPartitionDescriptor(batch_size, max_active_values, row_offsets.getDataType(), max_values_per_row));
+    const std::optional<uint64_t> active_values = row_partition.getHostActiveValueCountIfAvailable();
+    if (!active_values.has_value()) {
+        // Reporting must never synchronize the device merely to discover a
+        // ragged extent. Fall back to the compiled capacity estimate when the
+        // producer has not published the host-side logical extent.
+        return std::nullopt;
+    }
+
+    uint64_t macs = t7r5CheckedMul(active_values.value(), output_channels, operation_name);
+    macs = t7r5CheckedMul(macs, input_channels / groups, operation_name);
+    macs = t7r5CheckedMul(macs, kernel_width, operation_name);
+    return t7r5CheckedMul(macs, 2, operation_name);
 }
 
 uint64_t t7r5ElementSizeBytes(DataType dtype) {
@@ -2439,6 +2760,22 @@ uint32_t StampedRaggedConv1dCausal::gpuNum() const {
     return padded_forward_state->output_padded->getPaddedValuesStorage().getPlacement().getDeviceNum();
 }
 
+std::optional<uint64_t> StampedRaggedConv1dCausal::runtimeLogicalFlopCount() const {
+    if (!compiled_ragged_conv1d_causal) {
+        return std::nullopt;
+    }
+    const CompiledRaggedConv1dCausal& conv = *compiled_ragged_conv1d_causal;
+    return runtimeLogicalRaggedConv1dFlops(row_offsets,
+                                          conv.batch_size,
+                                          conv.max_active_values,
+                                          conv.max_values_per_row,
+                                          conv.input_channels,
+                                          conv.output_channels,
+                                          conv.kernel_width,
+                                          conv.groups,
+                                          "StampedRaggedConv1dCausal::runtimeLogicalFlopCount");
+}
+
 void StampedRaggedConv1dCausal::run() { runOn(stream); }
 
 void StampedRaggedConv1dCausal::runOn(Stream& run_stream) const {
@@ -2565,6 +2902,22 @@ uint32_t StampedRaggedConv1dCausalBackwardData::gpuNum() const {
     return padded_backward_data_state->output_padded->getPaddedValuesStorage().getPlacement().getDeviceNum();
 }
 
+std::optional<uint64_t> StampedRaggedConv1dCausalBackwardData::runtimeLogicalFlopCount() const {
+    if (!compiled_ragged_conv1d_causal_backward_data) {
+        return std::nullopt;
+    }
+    const CompiledRaggedConv1dCausalBackwardData& conv = *compiled_ragged_conv1d_causal_backward_data;
+    return runtimeLogicalRaggedConv1dFlops(row_offsets,
+                                          conv.batch_size,
+                                          conv.max_active_values,
+                                          conv.max_values_per_row,
+                                          conv.input_channels,
+                                          conv.output_channels,
+                                          conv.kernel_width,
+                                          conv.groups,
+                                          "StampedRaggedConv1dCausalBackwardData::runtimeLogicalFlopCount");
+}
+
 void StampedRaggedConv1dCausalBackwardData::run() { runOn(stream); }
 
 void StampedRaggedConv1dCausalBackwardData::runOn(Stream& run_stream) const {
@@ -2681,6 +3034,23 @@ StampedRaggedConv1dCausalBackwardFilter::StampedRaggedConv1dCausalBackwardFilter
 }
 
 uint32_t StampedRaggedConv1dCausalBackwardFilter::gpuNum() const { return output.getPlacement().getDeviceNum(); }
+
+std::optional<uint64_t> StampedRaggedConv1dCausalBackwardFilter::runtimeLogicalFlopCount() const {
+    if (!compiled_ragged_conv1d_causal_backward_filter) {
+        return std::nullopt;
+    }
+    const CompiledRaggedConv1dCausalBackwardFilter& conv = *compiled_ragged_conv1d_causal_backward_filter;
+    return runtimeLogicalRaggedConv1dFlops(row_offsets,
+                                          conv.batch_size,
+                                          conv.max_active_values,
+                                          conv.max_values_per_row,
+                                          conv.input_channels,
+                                          conv.output_channels,
+                                          conv.kernel_width,
+                                          conv.groups,
+                                          "StampedRaggedConv1dCausalBackwardFilter::runtimeLogicalFlopCount");
+}
+
 void StampedRaggedConv1dCausalBackwardFilter::run() { runOn(stream); }
 void StampedRaggedConv1dCausalBackwardFilter::runOn(Stream& run_stream) const {
     if (run_stream != stream) {
@@ -2837,6 +3207,18 @@ StampedScan::StampedScan(std::shared_ptr<CompiledScan> compiled,
     }
 
     temp_storage = Tensor(input.getPlacement(), TensorDescriptor(DataType::UINT8, {std::max<size_t>(temp_storage_bytes, 1)}));
+}
+
+std::optional<uint64_t> StampedScan::runtimeLogicalFlopCount() const {
+    if (!compiled_scan || !compiled_scan->segmented_by_offsets || !segment_offsets.has_value()) {
+        return std::nullopt;
+    }
+    const std::vector<uint64_t> offset_dims = segment_offsets->getDimensions();
+    if (offset_dims.size() != 1 || offset_dims[0] < 2) {
+        return std::nullopt;
+    }
+    const uint64_t batch_size = offset_dims[0] - 1;
+    return runtimeRaggedActiveValueCount(segment_offsets.value(), batch_size, input.getTotalNumElements());
 }
 
 void StampedScan::run() { runOn(stream); }
@@ -3087,14 +3469,20 @@ StampedLayerNorm::StampedLayerNorm(std::shared_ptr<CompiledLayerNorm> compiled,
                                        Tensor scale,
                                        Tensor bias,
                                        Tensor output,
-                                       const Stream& stream)
+                                       const Stream& stream,
+                                       std::optional<Tensor> row_partition_offsets)
     : compiled_layer_norm(std::move(compiled)),
       input(std::move(input)),
       scale(std::move(scale)),
       bias(std::move(bias)),
+      row_partition_offsets(std::move(row_partition_offsets)),
       output(std::move(output)),
       stream(stream) {
     if (!compiled_layer_norm) throw std::invalid_argument("StampedLayerNorm requires a compiled stage.");
+    const bool packed = compiled_layer_norm->packed_row_capacity != 0;
+    if (packed != this->row_partition_offsets.has_value()) {
+        throw std::runtime_error("LayerNorm row-partition binding does not match the compiled packed-row contract.");
+    }
     const CudnnLayerNormDescriptor descriptor =
         compiled_layer_norm->descriptorFor(this->input, this->scale, this->bias, this->output);
     executable_plan.emplace(CudnnLayerNorm::instance().prepareForward(descriptor, stream));
@@ -3103,6 +3491,25 @@ StampedLayerNorm::StampedLayerNorm(std::shared_ptr<CompiledLayerNorm> compiled,
                                     executable_plan->workspaceBytes(),
                                     "layernorm_forward",
                                     "hidden=" + std::to_string(compiled_layer_norm->normalized_feature_count));
+}
+
+std::optional<uint64_t> StampedLayerNorm::runtimeLogicalFlopCount() const {
+    if (!compiled_layer_norm || compiled_layer_norm->packed_row_capacity == 0) {
+        return std::nullopt;
+    }
+    if (!row_partition_offsets.has_value() || compiled_layer_norm->ragged_batch_size == 0) {
+        return std::nullopt;
+    }
+    const std::optional<uint64_t> logical_numel = runtimePackedLogicalNumel(
+        row_partition_offsets.value(),
+        compiled_layer_norm->ragged_batch_size,
+        compiled_layer_norm->packed_row_capacity,
+        input,
+        "StampedLayerNorm::runtimeLogicalFlopCount");
+    if (!logical_numel.has_value()) {
+        return std::nullopt;
+    }
+    return raggedFlopCheckedMul(logical_numel.value(), 8, "StampedLayerNorm::runtimeLogicalFlopCount");
 }
 
 void StampedLayerNorm::runOn(Stream& run_stream) const {
@@ -3238,6 +3645,32 @@ StampedRmsNorm::StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
         this->forward_state->inv_variance =
             Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input.getDimensions().at(0)}));
     }
+}
+
+std::optional<uint64_t> StampedRmsNorm::runtimeLogicalFlopCount() const {
+    if (!compiled_rms_norm || compiled_rms_norm->packed_row_capacity == 0) {
+        return std::nullopt;
+    }
+    if (!row_partition_offsets.has_value() || compiled_rms_norm->ragged_batch_size == 0) {
+        return std::nullopt;
+    }
+    const std::optional<uint64_t> logical_numel = runtimePackedLogicalNumel(
+        row_partition_offsets.value(),
+        compiled_rms_norm->ragged_batch_size,
+        compiled_rms_norm->packed_row_capacity,
+        input,
+        "StampedRmsNorm::runtimeLogicalFlopCount");
+    if (!logical_numel.has_value()) {
+        return std::nullopt;
+    }
+    uint64_t flops = raggedFlopCheckedMul(logical_numel.value(), 6, "StampedRmsNorm::runtimeLogicalFlopCount");
+    if (compiled_rms_norm->fused_activation == CudnnRmsNormFusedActivation::SWISH) {
+        flops = raggedFlopCheckedAdd(
+            flops,
+            raggedFlopCheckedMul(logical_numel.value(), 5, "StampedRmsNorm::runtimeLogicalFlopCount swish"),
+            "StampedRmsNorm::runtimeLogicalFlopCount swish");
+    }
+    return flops;
 }
 
 void StampedRmsNorm::run() { runOn(stream); }
@@ -3551,6 +3984,25 @@ void StampedRmsNormBackward::prepareBackwardExecutableFamilies() {
     }
 }
 
+std::optional<uint64_t> StampedRmsNormBackward::runtimeLogicalFlopCount() const {
+    if (!compiled_rms_norm_backward || compiled_rms_norm_backward->packed_row_capacity == 0) {
+        return std::nullopt;
+    }
+    if (!row_partition_offsets.has_value() || compiled_rms_norm_backward->ragged_batch_size == 0) {
+        return std::nullopt;
+    }
+    const std::optional<uint64_t> logical_numel = runtimePackedLogicalNumel(
+        row_partition_offsets.value(),
+        compiled_rms_norm_backward->ragged_batch_size,
+        compiled_rms_norm_backward->packed_row_capacity,
+        input,
+        "StampedRmsNormBackward::runtimeLogicalFlopCount");
+    if (!logical_numel.has_value()) {
+        return std::nullopt;
+    }
+    return raggedFlopCheckedMul(logical_numel.value(), 12, "StampedRmsNormBackward::runtimeLogicalFlopCount");
+}
+
 StampedRmsNormBackward::StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBackward> compiled,
                                                const Tensor& input,
                                                const Tensor& scale,
@@ -3822,6 +4274,106 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
         }
         THOR_THROW_IF_FALSE(workspace.value().getArraySizeInBytes() >= built_matmul->workspace_bytes);
     }
+}
+
+std::optional<uint64_t> StampedMatmul::runtimeLogicalFlopCount() const {
+    if (!compiled_matmul || compiled_matmul->packed_row_binding == MatmulPackedRowBinding::None) {
+        return std::nullopt;
+    }
+    if (!row_partition_offsets.has_value() || compiled_matmul->packed_row_capacity == 0 ||
+        compiled_matmul->ragged_batch_size == 0) {
+        return std::nullopt;
+    }
+
+    const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
+    RowPartitionRuntime row_partition(
+        row_partition_offsets.value(),
+        RowPartitionDescriptor(compiled_matmul->ragged_batch_size,
+                               compiled_matmul->packed_row_capacity,
+                               offsets_descriptor.getDataType()));
+    const std::optional<uint64_t> active_rows = row_partition.getHostActiveValueCountIfAvailable();
+    if (!active_rows.has_value()) {
+        // FLOP reporting must not introduce a device synchronization. If the
+        // producer has not published the logical host extent, retain the static
+        // capacity estimate stored on the stamped execution stage.
+        return std::nullopt;
+    }
+
+    const std::vector<uint64_t> lhs_dims = lhs.getDimensions();
+    const std::vector<uint64_t> rhs_dims = rhs.getDimensions();
+    if (lhs_dims.size() != 2 || rhs_dims.size() != 2) {
+        throw std::runtime_error("Packed-row MATMUL logical FLOP accounting requires rank-2 matrix operands.");
+    }
+
+    uint64_t lhs_rows = lhs_dims[0];
+    const uint64_t lhs_cols = lhs_dims[1];
+    uint64_t rhs_rows = rhs_dims[0];
+    const uint64_t rhs_cols = rhs_dims[1];
+
+    const bool binds_lhs = compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsA ||
+                           compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB;
+    const bool binds_rhs = compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsB ||
+                           compiled_matmul->packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB;
+    if (binds_lhs) {
+        if (lhs_rows != compiled_matmul->packed_row_capacity) {
+            throw std::runtime_error("Packed-row MATMUL lhs rows do not match the declared capacity while computing logical FLOPs.");
+        }
+        lhs_rows = active_rows.value();
+    }
+    if (binds_rhs) {
+        if (rhs_rows != compiled_matmul->packed_row_capacity) {
+            throw std::runtime_error("Packed-row MATMUL rhs rows do not match the declared capacity while computing logical FLOPs.");
+        }
+        rhs_rows = active_rows.value();
+    }
+
+    const uint64_t m = compiled_matmul->transpose_lhs ? lhs_cols : lhs_rows;
+    const uint64_t lhs_k = compiled_matmul->transpose_lhs ? lhs_rows : lhs_cols;
+    const uint64_t rhs_k = compiled_matmul->transpose_rhs ? rhs_cols : rhs_rows;
+    const uint64_t n = compiled_matmul->transpose_rhs ? rhs_rows : rhs_cols;
+    if (lhs_k != rhs_k) {
+        throw std::runtime_error("Packed-row MATMUL logical active extent produces incompatible inner dimensions.");
+    }
+
+    auto checked_mul = [](uint64_t a, uint64_t b, const char* where) -> uint64_t {
+        if (a != 0 && b > std::numeric_limits<uint64_t>::max() / a) {
+            throw std::runtime_error(std::string("FLOP count overflow in ") + where + ".");
+        }
+        return a * b;
+    };
+    auto checked_add = [](uint64_t a, uint64_t b, const char* where) -> uint64_t {
+        if (b > std::numeric_limits<uint64_t>::max() - a) {
+            throw std::runtime_error(std::string("FLOP count overflow in ") + where + ".");
+        }
+        return a + b;
+    };
+
+    const uint64_t out_numel = checked_mul(m, n, "StampedMatmul::runtimeLogicalFlopCount output");
+    const bool alpha_dynamic = compiled_matmul->alpha_input_slot != UINT32_MAX;
+    const bool beta_dynamic = compiled_matmul->beta_input_slot != UINT32_MAX;
+    const bool has_matmul_term = alpha_dynamic || compiled_matmul->alpha != 0.0;
+    const bool has_beta_term = compiled_matmul->op == ExprOp::GEMM && (beta_dynamic || compiled_matmul->beta != 0.0);
+
+    uint64_t total = 0;
+    if (has_matmul_term) {
+        const uint64_t mac_flops = checked_mul(
+            checked_mul(out_numel, lhs_k, "StampedMatmul::runtimeLogicalFlopCount matmul"),
+            2,
+            "StampedMatmul::runtimeLogicalFlopCount matmul");
+        total = checked_add(total, mac_flops, "StampedMatmul::runtimeLogicalFlopCount total");
+        if (alpha_dynamic || compiled_matmul->alpha != 1.0) {
+            total = checked_add(total, out_numel, "StampedMatmul::runtimeLogicalFlopCount alpha");
+        }
+    }
+    if (has_beta_term) {
+        if (beta_dynamic || compiled_matmul->beta != 1.0) {
+            total = checked_add(total, out_numel, "StampedMatmul::runtimeLogicalFlopCount beta");
+        }
+        if (has_matmul_term) {
+            total = checked_add(total, out_numel, "StampedMatmul::runtimeLogicalFlopCount accumulation");
+        }
+    }
+    return total;
 }
 
 StampedMatmulKernelDiagnostic StampedMatmul::kernelDiagnostic() const {
@@ -4532,6 +5084,17 @@ StampedScanMinMaxBackward::StampedScanMinMaxBackward(std::shared_ptr<CompiledSca
     }
 }
 
+std::optional<uint64_t> StampedScanMinMaxBackward::runtimeLogicalFlopCount() const {
+    if (!compiled_scan_minmax_backward || !compiled_scan_minmax_backward->segmented_by_offsets || !arg_scan) {
+        return std::nullopt;
+    }
+    const std::optional<uint64_t> active_values = arg_scan->runtimeLogicalFlopCount();
+    if (!active_values.has_value()) {
+        return std::nullopt;
+    }
+    return raggedFlopCheckedMul(active_values.value(), 4, "StampedScanMinMaxBackward");
+}
+
 void StampedScanMinMaxBackward::run() { runOn(stream); }
 
 void StampedScanMinMaxBackward::runOn(Stream& run_stream) {
@@ -4633,6 +5196,27 @@ StampedReduceMinMaxBackward::StampedReduceMinMaxBackward(CubArgReductionOp segme
     }
     cub_segmented_arg_reduction = CubSegmentedArgReduction(segmented_op, indices.getDataType())
                                       .stampRuntimeOffsets(input, indices, segment_offsets, stream);
+}
+
+std::optional<uint64_t> StampedReduceMinMaxBackward::runtimeLogicalFlopCount() const {
+    if (!segment_offsets.has_value() || input.getDimensions().empty()) {
+        return std::nullopt;
+    }
+    const std::vector<uint64_t> offset_dims = segment_offsets->getDimensions();
+    if (offset_dims.size() != 1 || offset_dims[0] < 2) {
+        return std::nullopt;
+    }
+    const uint64_t batch_size = offset_dims[0] - 1;
+    const uint64_t max_active_values = input.getDimensions()[0];
+    const std::optional<uint64_t> active_values =
+        runtimeRaggedActiveValueCount(segment_offsets.value(), batch_size, max_active_values);
+    if (!active_values.has_value()) {
+        return std::nullopt;
+    }
+    uint64_t flops = raggedFlopCheckedMul(active_values.value(),
+                                          segmented_elements_per_value,
+                                          "StampedReduceMinMaxBackward");
+    return raggedFlopCheckedMul(flops, 2, "StampedReduceMinMaxBackward");
 }
 
 void StampedReduceMinMaxBackward::run() { runOn(stream); }
@@ -5342,57 +5926,6 @@ void StampedExecutionPlan::materializeOutputsOn(Stream& run_stream) const {
     }
 }
 
-namespace {
-
-class StampedExecutionEventPool {
-   public:
-    Event acquire(uint32_t gpu_num) {
-        auto& gpu_events = free_events_[gpu_num];
-        if (gpu_events.empty()) {
-            return Event(static_cast<int32_t>(gpu_num), /*enableTiming=*/false, /*expectingHostToWaitOnThisOne=*/false);
-        }
-
-        Event event = gpu_events.back();
-        gpu_events.pop_back();
-        return event;
-    }
-
-    void release(const Event& event) { free_events_[static_cast<uint32_t>(event.getGpuNum())].push_back(event); }
-
-   private:
-    std::unordered_map<uint32_t, std::vector<Event>> free_events_;
-};
-
-// Submission is already host-thread local. A thread-local pool avoids both CUDA event create/destroy calls and a
-// contended global lease lock in the hot path. Events are returned after all record/wait API calls for this submission
-// have been issued; CUDA stream waits retain the captured event generation even if the handle is recorded again later.
-StampedExecutionEventPool& stampedExecutionEventPool() {
-    thread_local StampedExecutionEventPool pool;
-    return pool;
-}
-
-class StampedExecutionEventLeases {
-   public:
-    explicit StampedExecutionEventLeases(size_t expected_event_count) { leased_events_.reserve(expected_event_count); }
-
-    Event acquire(uint32_t gpu_num) {
-        Event event = stampedExecutionEventPool().acquire(gpu_num);
-        leased_events_.push_back(event);
-        return event;
-    }
-
-    ~StampedExecutionEventLeases() {
-        for (const Event& event : leased_events_) {
-            stampedExecutionEventPool().release(event);
-        }
-    }
-
-   private:
-    std::vector<Event> leased_events_;
-};
-
-}  // namespace
-
 detail::StampedExecutionSchedule detail::buildStampedExecutionSchedule(const std::vector<StampedExecutionStage>& steps,
                                                                         uint32_t caller_gpu_num) {
     StampedExecutionSchedule schedule;
@@ -5589,7 +6122,7 @@ void StampedExecutionPlan::runOn(Stream& run_stream, const std::unordered_map<st
         expected_event_count += needs_event ? 1 : 0;
     }
 
-    StampedExecutionEventLeases event_leases(expected_event_count);
+    ReusableEventLeases event_leases(expected_event_count);
     std::optional<Event> caller_stream_ready;
     if (schedule.needs_caller_ready_event) {
         caller_stream_ready = event_leases.acquire(static_cast<uint32_t>(run_stream.getGpuNum()));

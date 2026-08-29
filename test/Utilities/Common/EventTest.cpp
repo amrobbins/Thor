@@ -27,6 +27,75 @@ TEST(Event, PreservesBlockingSynchronizationIntentAcrossCopies) {
     blockingEvent.synchronize();
 }
 
+TEST(Event, PreservesTimingIntentAcrossCopies) {
+    Stream stream(0);
+
+    Event untimedEvent = stream.putEvent(/*enableTiming=*/false);
+    Event timedEvent = stream.putEvent(/*enableTiming=*/true);
+    Event copiedTimedEvent = timedEvent;
+
+    EXPECT_FALSE(untimedEvent.usesTiming());
+    EXPECT_TRUE(timedEvent.usesTiming());
+    EXPECT_TRUE(copiedTimedEvent.usesTiming());
+
+    untimedEvent.synchronize();
+    timedEvent.synchronize();
+}
+
+TEST(Event, RejectsChangingTimingIntentWhenReused) {
+    Stream stream(0);
+    Event event;
+
+    stream.putEvent(event,
+                    /*enableTiming=*/false,
+                    /*expectingHostToWaitOnThisOne=*/false);
+    EXPECT_FALSE(event.usesTiming());
+
+    EXPECT_THROW(stream.putEvent(event,
+                                 /*enableTiming=*/true,
+                                 /*expectingHostToWaitOnThisOne=*/false),
+                 std::logic_error);
+
+    event.synchronize();
+}
+
+TEST(Event, RepeatedInPlacePutEventPreservesCudaEventIdentity) {
+    Stream stream(0);
+    Event event;
+
+    stream.putEvent(event);
+    ASSERT_TRUE(event.isInitialized());
+    const uint64_t eventId = event.getId();
+    const cudaEvent_t cudaEvent = event.getEvent();
+
+    for (uint32_t repetition = 0; repetition < 64; ++repetition) {
+        stream.putEvent(event);
+        EXPECT_EQ(event.getId(), eventId);
+        EXPECT_EQ(event.getEvent(), cudaEvent);
+    }
+
+    event.synchronize();
+}
+
+TEST(Event, StreamWaitForReusesCallerOwnedDependencyEvent) {
+    Stream producer(0);
+    Stream consumer(0);
+    Event dependencyEvent;
+
+    consumer.waitFor(producer, dependencyEvent);
+    ASSERT_TRUE(dependencyEvent.isInitialized());
+    const uint64_t eventId = dependencyEvent.getId();
+    const cudaEvent_t cudaEvent = dependencyEvent.getEvent();
+
+    for (uint32_t repetition = 0; repetition < 64; ++repetition) {
+        consumer.waitFor(producer, dependencyEvent);
+        EXPECT_EQ(dependencyEvent.getId(), eventId);
+        EXPECT_EQ(dependencyEvent.getEvent(), cudaEvent);
+    }
+
+    consumer.synchronize();
+}
+
 TEST(Event, RejectsChangingBlockingSynchronizationIntentWhenReused) {
     Stream stream(0);
     Event event;

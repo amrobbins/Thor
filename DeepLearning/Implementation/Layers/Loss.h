@@ -151,6 +151,12 @@ class Loss : public Layer {
         batchCardinalitySet = false;
     }
 
+    void cleanup() override {
+        labelsReadyEvent = Event();
+        labelsReusableEvent = Event();
+        Layer::cleanup();
+    }
+
     void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t validExampleCount = 0) override {
         const bool emitDiagnostics = layerSubmitDiagnosticsActive();
         const auto totalStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
@@ -200,11 +206,16 @@ class Loss : public Layer {
                 inferMicros = layerSubmitDiagnosticElapsedMicros(inferStart, layerSubmitDiagnosticNow());
             }
 
-            // Labels stream waits for infer to finish
-            const auto labelsWaitStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-            labelsStream.waitEvent(stream.putEvent());
-            if (emitDiagnostics) {
-                labelsWaitMicros = layerSubmitDiagnosticElapsedMicros(labelsWaitStart, layerSubmitDiagnosticNow());
+            // A training pass may still consume labels during backProp(), so
+            // publish labels as reusable here only when no backward pass will
+            // follow. Training publishes the same owner-scoped event after
+            // backProp() reaches the local last use.
+            if (isInferenceOnly() || validationPass || !trainingActive) {
+                const auto labelsWaitStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+                markLabelsReusableAfterCompute();
+                if (emitDiagnostics) {
+                    labelsWaitMicros = layerSubmitDiagnosticElapsedMicros(labelsWaitStart, layerSubmitDiagnosticNow());
+                }
             }
         }
         if (emitDiagnostics) {
@@ -261,9 +272,11 @@ class Loss : public Layer {
             if (emitDiagnostics) {
                 backPropMicros = layerSubmitDiagnosticElapsedMicros(backPropStart, layerSubmitDiagnosticNow());
             }
-            // Labels stream waits for backProp to finish
+            // Labels become reusable only after the training pass has reached
+            // its local last use. Re-record the owner-scoped event rather than
+            // creating/destroying a CUDA event for every batch.
             const auto labelsWaitStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-            labelsStream.waitEvent(stream.putEvent());
+            markLabelsReusableAfterCompute();
             if (emitDiagnostics) {
                 labelsWaitMicros = layerSubmitDiagnosticElapsedMicros(labelsWaitStart, layerSubmitDiagnosticNow());
             }
@@ -355,6 +368,13 @@ class Loss : public Layer {
     // FIXME: only const for now for convenience
     static constexpr float lossScalingFactor = 1.0f;
     Stream labelsStream;
+    Event labelsReadyEvent;
+    Event labelsReusableEvent;
+
+    // Canonical two-way labels handshake for ordinary Loss subclasses. The
+    // events are owned by this placed loss and re-recorded every batch.
+    void waitForLabelsReady() { stream.waitFor(labelsStream, labelsReadyEvent); }
+    void markLabelsReusableAfterCompute() { labelsStream.waitFor(stream, labelsReusableEvent); }
 
     bool featureInputReceived;
     bool labelsReceived;
@@ -426,8 +446,9 @@ class Loss : public Layer {
 
     virtual void advanceDataIfReady(bool validationPass) {
         if (featureInputReceived && labelsReceived) {
-            // DataStream waits for labels to arrive
-            stream.waitEvent(labelsStream.putEvent());
+            // DataStream waits for labels to arrive using the recurring
+            // dependency event owned by this placed Loss.
+            waitForLabelsReady();
             forward(std::nullopt, validationPass);
         } else {
             return;

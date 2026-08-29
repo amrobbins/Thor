@@ -387,7 +387,6 @@ void CustomLoss::infer(std::optional<Tensor> predictions, std::optional<Tensor> 
     THOR_THROW_IF_FALSE(labelsInput.has_value());
     THOR_THROW_IF_FALSE(lossStamped != nullptr);
 
-    runStream.waitEvent(labelsStream.putEvent());
     if (gradientFusedIntoDrivingLayer || batchValidityMaskEnabled)
         writeBatchValidityMask(batchValidityMask, getValidExampleCount(), runStream);
     if (lossPreRunHook)
@@ -399,7 +398,6 @@ void CustomLoss::infer(std::optional<Tensor> predictions, std::optional<Tensor> 
             gradientPreRunHook(this->stream);
         gradientStamped->run();
     }
-    labelsStream.waitEvent(runStream.putEvent());
 }
 
 void CustomLoss::backProp(std::optional<Tensor> labels,

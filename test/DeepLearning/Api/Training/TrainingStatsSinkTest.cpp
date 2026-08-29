@@ -118,7 +118,7 @@ bool tokensAppearInOrder(const std::string& line, std::initializer_list<const ch
 }
 
 bool hasTokenWithValue(const std::string& line, const std::string& key, const std::string& expectedValue) {
-    const std::string prefix = key + "=";
+    const std::string prefix = " " + key + "=";
     const size_t keyPos = line.find(prefix);
     if (keyPos == std::string::npos) {
         return false;
@@ -213,7 +213,94 @@ TEST(TrainingRunsStatsReporter, EmitsConfiguredRunSummaryWithoutDependingOnColum
     EXPECT_TRUE(hasTokenWithValue(runningLine, "epoch", "2/5")) << runningLine;
     EXPECT_TRUE(hasTokenWithValue(runningLine, "batch", "7/100")) << runningLine;
     EXPECT_TRUE(hasTokenWithValue(runningLine, "step", "17")) << runningLine;
+    EXPECT_EQ(runningLine.find(" score="), std::string::npos) << runningLine;
+    EXPECT_EQ(runningLine.find(" best_epoch="), std::string::npos) << runningLine;
+    EXPECT_EQ(runningLine.find(" best_score="), std::string::npos) << runningLine;
     EXPECT_TRUE(hasLineWithAll(output, {"INFO runs[fold_1]:", "status=not_started"})) << output;
+}
+
+TEST(TrainingRunsStatsReporter, RunningSummaryShowsLatestModelSelectionScoreFromPreviousEpoch) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun("fold_0", TrainingRunsStatsReporter::RunConfig{0.0});
+
+    TrainingStatsSnapshot epoch1Stats = makeStats(TrainingEventPhase::TRAIN, 0.30);
+    epoch1Stats.epoch = 1;
+    epoch1Stats.stepInEpoch = 100;
+    epoch1Stats.stepsPerEpoch = 100;
+
+    reporter.markRunStarting("fold_0");
+    reporter.onStatsEvent(
+        TrainingStatsEvent::fromTrainingEvent(
+            TrainingEvent::statsUpdated(epoch1Stats), "fold_0"));
+    reporter.flush();
+
+    TrainingStatsSnapshot epoch2Started = makeStats(TrainingEventPhase::TRAIN, 0.0);
+    epoch2Started.epoch = 2;
+    epoch2Started.step = 0;
+    epoch2Started.stepInEpoch = 0;
+    epoch2Started.metrics["latest_score"] = -5.31;
+    epoch2Started.metrics["best_epoch"] = 1.0;
+    epoch2Started.metrics["best_score"] = -5.31;
+    reporter.onStatsEvent(
+        TrainingStatsEvent::fromTrainingEvent(
+            TrainingEvent::epochStarted(epoch2Started), "fold_0"));
+
+    TrainingStatsSnapshot epoch2Stats = makeStats(TrainingEventPhase::TRAIN, 0.25);
+    epoch2Stats.epoch = 2;
+    epoch2Stats.stepInEpoch = 7;
+    epoch2Stats.stepsPerEpoch = 100;
+    reporter.onStatsEvent(
+        TrainingStatsEvent::fromTrainingEvent(
+            TrainingEvent::statsUpdated(epoch2Stats), "fold_0"));
+    reporter.flush();
+
+    TrainingStatsSnapshot epoch3Started = epoch2Started;
+    epoch3Started.epoch = 3;
+    epoch3Started.metrics["latest_score"] = -5.20;
+    epoch3Started.metrics["best_epoch"] = 1.0;
+    epoch3Started.metrics["best_score"] = -5.31;
+    reporter.onStatsEvent(
+        TrainingStatsEvent::fromTrainingEvent(
+            TrainingEvent::epochStarted(epoch3Started), "fold_0"));
+
+    TrainingStatsSnapshot epoch3Stats = makeStats(TrainingEventPhase::TRAIN, 0.20);
+    epoch3Stats.epoch = 3;
+    epoch3Stats.stepInEpoch = 8;
+    epoch3Stats.stepsPerEpoch = 100;
+    reporter.onStatsEvent(
+        TrainingStatsEvent::fromTrainingEvent(
+            TrainingEvent::statsUpdated(epoch3Stats), "fold_0"));
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    std::string epoch2Line;
+    std::string epoch3Line;
+    for (const std::string& line : splitLines(output)) {
+        if (line.find("INFO runs[fold_0]:") == std::string::npos) {
+            continue;
+        }
+        if (hasTokenWithValue(line, "epoch", "2/5") &&
+            hasTokenWithValue(line, "score", "-5.310000")) {
+            epoch2Line = line;
+        }
+        if (hasTokenWithValue(line, "epoch", "3/5") &&
+            hasTokenWithValue(line, "score", "-5.200000")) {
+            epoch3Line = line;
+        }
+    }
+
+    ASSERT_FALSE(epoch2Line.empty()) << output;
+    EXPECT_TRUE(hasTokenWithValue(epoch2Line, "best_epoch", "1")) << epoch2Line;
+    EXPECT_TRUE(hasTokenWithValue(epoch2Line, "best_score", "-5.310000")) << epoch2Line;
+    EXPECT_TRUE(tokensAppearInOrder(
+        epoch2Line,
+        {"epoch=", "score=", "best_epoch=", "best_score=", "batch="}))
+        << epoch2Line;
+
+    ASSERT_FALSE(epoch3Line.empty()) << output;
+    EXPECT_TRUE(hasTokenWithValue(epoch3Line, "best_epoch", "1")) << epoch3Line;
+    EXPECT_TRUE(hasTokenWithValue(epoch3Line, "best_score", "-5.310000")) << epoch3Line;
 }
 
 TEST(TrainingRunsStatsReporter, ReportsStartupWaitStates) {
@@ -422,7 +509,7 @@ TEST(TrainingRunsStatsReporter, RunningSummaryReportsTrainAndValidateMetricsInCo
     EXPECT_EQ(line.find("daily_quantile_low_loss="), std::string::npos) << line;
 }
 
-TEST(TrainingRunsStatsReporter, RunningSummarySmoothsScalarMetricsLikePhaseLosses) {
+TEST(TrainingRunsStatsReporter, RunningSummarySmoothsPartialEpochsButPublishesCompletedEpochsExactly) {
     std::FILE* out = std::tmpfile();
     TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
     reporter.configureRun(
@@ -480,21 +567,144 @@ TEST(TrainingRunsStatsReporter, RunningSummarySmoothsScalarMetricsLikePhaseLosse
     reporter.close();
 
     const std::string output = readAndCloseFile(out);
-    // The overall loss and named metric use the exact same smoothing rule:
-    // previous epoch mean blended with the current epoch running mean according
-    // to current-epoch progress. These values intentionally differ sharply from
-    // the latest batch values (100/1000, 80/800, and 90/900).
+    // Epoch-two training is only halfway complete, so it remains stabilized
+    // against epoch one. Both validation populations are complete (1/1), so
+    // their exact epoch-two aggregates must replace any previous-epoch blend.
     EXPECT_TRUE(hasLineWithAll(output,
                                {"INFO runs[fold_0|sku_demand_cv5]:",
-                                "train_loss=41.333333",
-                                "validate_loss=50.000000",
-                                "train_daily_central_loss=413.333333",
-                                "validate_daily_central_loss=500.000000",
-                                "validate_seen_sku_loss=60.000000",
-                                "validate_seen_sku_daily_central_loss=600.000000"}))
+                                "train_loss=56.000000",
+                                "validate_loss=80.000000",
+                                "train_daily_central_loss=560.000000",
+                                "validate_daily_central_loss=800.000000",
+                                "validate_seen_sku_loss=90.000000",
+                                "validate_seen_sku_daily_central_loss=900.000000"}))
         << output;
 }
 
+TEST(TrainingRunsStatsReporter, RunningSummaryWeightsPreviousEpochByRemainingFraction) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun(
+        "fold_0",
+        TrainingRunsStatsReporter::RunConfig{
+            0.0,
+            std::string("progress_weighting"),
+            1.0,
+            {"tracked_metric"}});
+
+    auto makeTrainStats = [](uint64_t epoch,
+                             uint64_t stepInEpoch,
+                             uint64_t stepsPerEpoch,
+                             double value) {
+        TrainingStatsSnapshot stats = makeStats(TrainingEventPhase::TRAIN, value);
+        stats.epoch = epoch;
+        stats.stepInEpoch = stepInEpoch;
+        stats.stepsPerEpoch = stepsPerEpoch;
+        stats.metrics["tracked_metric"] = value * 10.0;
+        return stats;
+    };
+
+    reporter.markRunStarting("fold_0");
+
+    // Establish an exact completed previous epoch value of 10 (metric 100).
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(
+        TrainingEvent::statsUpdated(makeTrainStats(1, 10, 10, 10.0)), "fold_0"));
+
+    // Keep the current epoch running aggregate fixed at 100 (metric 1000) so
+    // the expected display values isolate only the progress weighting:
+    //   10%:  0.90*10 + 0.10*100 = 19
+    //   50%:  0.50*10 + 0.50*100 = 55
+    //   90%:  0.10*10 + 0.90*100 = 91
+    //  100%:  exact current epoch value = 100.
+    for (uint64_t stepInEpoch : {1U, 5U, 9U, 10U}) {
+        reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(
+            TrainingEvent::statsUpdated(makeTrainStats(2, stepInEpoch, 10, 100.0)), "fold_0"));
+    }
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    EXPECT_TRUE(hasLineWithAll(output,
+                               {"INFO runs[fold_0|progress_weighting]:",
+                                "batch=         1/10",
+                                "train_loss=19.000000",
+                                "train_tracked_metric=190.000000"}))
+        << output;
+    EXPECT_TRUE(hasLineWithAll(output,
+                               {"INFO runs[fold_0|progress_weighting]:",
+                                "batch=         5/10",
+                                "train_loss=55.000000",
+                                "train_tracked_metric=550.000000"}))
+        << output;
+    EXPECT_TRUE(hasLineWithAll(output,
+                               {"INFO runs[fold_0|progress_weighting]:",
+                                "batch=         9/10",
+                                "train_loss=91.000000",
+                                "train_tracked_metric=910.000000"}))
+        << output;
+    EXPECT_TRUE(hasLineWithAll(output,
+                               {"INFO runs[fold_0|progress_weighting]:",
+                                "batch=        10/10",
+                                "train_loss=100.000000",
+                                "train_tracked_metric=1000.000000"}))
+        << output;
+}
+
+TEST(TrainingRunsStatsReporter, CompletedValidationMetricMatchesScoreShownDuringNextEpoch) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+    reporter.configureRun(
+        "fold_0",
+        TrainingRunsStatsReporter::RunConfig{
+            0.0,
+            std::string("product_transformer_cv"),
+            1.0,
+            {"transformer_loss"}});
+
+    auto validationStats = [](uint64_t epoch, double transformerLoss) {
+        TrainingStatsSnapshot stats = makeStats(TrainingEventPhase::VALIDATE, transformerLoss);
+        stats.epoch = epoch;
+        stats.stepInEpoch = 1;
+        stats.stepsPerEpoch = 1;
+        stats.metrics["transformer_loss"] = transformerLoss;
+        return stats;
+    };
+
+    reporter.markRunStarting("fold_0");
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(
+        TrainingEvent::statsUpdated(validationStats(406, -4.707376)), "fold_0"));
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(
+        TrainingEvent::statsUpdated(validationStats(407, -4.871078)), "fold_0"));
+
+    TrainingStatsSnapshot epoch408Started = makeStats(TrainingEventPhase::TRAIN, 0.0);
+    epoch408Started.epoch = 408;
+    epoch408Started.metrics["latest_score"] = -4.871078;
+    epoch408Started.metrics["best_epoch"] = 407.0;
+    epoch408Started.metrics["best_score"] = -4.871078;
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(
+        TrainingEvent::epochStarted(epoch408Started), "fold_0"));
+
+    TrainingStatsSnapshot epoch408Train = makeStats(TrainingEventPhase::TRAIN, -8.450872);
+    epoch408Train.epoch = 408;
+    epoch408Train.epochs = 2905;
+    epoch408Train.step = 181022;
+    epoch408Train.stepInEpoch = 314;
+    epoch408Train.stepsPerEpoch = 444;
+    reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(
+        TrainingEvent::statsUpdated(epoch408Train), "fold_0"));
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    const std::string line = findLineWithAll(
+        output,
+        {"INFO runs[fold_0|product_transformer_cv]:",
+         "epoch=",
+         "score=-4.871078",
+         "best_epoch=407",
+         "best_score=-4.871078",
+         "validate_transformer_loss=-4.871078"});
+    ASSERT_FALSE(line.empty()) << output;
+    EXPECT_TRUE(hasTokenWithValue(line, "epoch", "408/2905")) << line;
+}
 
 TEST(TrainingRunsStatsReporter, RunningSummaryUsesDeclaredMetricAggregationContracts) {
     std::FILE* out = std::tmpfile();
@@ -587,11 +797,11 @@ TEST(TrainingRunsStatsReporter, RunningSummaryUsesDeclaredMetricAggregationContr
     // batch scalars or arithmetic means of batch-level sums/extrema/ratios.
     EXPECT_TRUE(hasLineWithAll(output,
                                {"INFO runs[fold_0|exact_metrics]:",
-                                "train_mean=10.000000",
-                                "train_sum=33.333333",
-                                "train_min=-1.333333",
-                                "train_max=20.666667",
-                                "train_ratio=11.060606"}))
+                                "train_mean=12.500000",
+                                "train_sum=35.000000",
+                                "train_min=-0.500000",
+                                "train_max=25.500000",
+                                "train_ratio=12.045455"}))
         << output;
 }
 
@@ -783,6 +993,55 @@ TEST(TrainingRunsStatsReporter, FinalReportIncludesStatusCountsAndAvailablePhase
                                 "test_top5_accuracy="}))
         << output;
     EXPECT_TRUE(hasLineWithAll(output, {"INFO runs[failed_fold]:", "status=failed", "message=\"boom\""})) << output;
+}
+
+TEST(TrainingRunsStatsReporter, TrainingHistoryReportPrintsEveryCompletedPhaseWithItsOwnReportOrder) {
+    std::FILE* out = std::tmpfile();
+    TrainingRunsStatsReporter reporter(out, LineStatsColorMode::NEVER, 0.0);
+
+    TrainingStatsSnapshot baseTrain = makeStats(TrainingEventPhase::TRAIN, 0.80);
+    baseTrain.metrics["base_metric"] = 1.25;
+    TrainingStatsSnapshot baseValidate = makeStats(TrainingEventPhase::VALIDATE, 0.70);
+    baseValidate.metrics["base_metric"] = 1.10;
+    TrainingRunResult baseResult = TrainingRunResult::completedResult("fold_0", baseTrain, baseValidate);
+
+    TrainingStatsSnapshot transformerTrain = makeStats(TrainingEventPhase::TRAIN, 0.50);
+    transformerTrain.metrics["transformer_metric"] = 2.25;
+    TrainingStatsSnapshot transformerValidate = makeStats(TrainingEventPhase::VALIDATE, 0.40);
+    transformerValidate.metrics["transformer_metric"] = 2.10;
+    TrainingRunResult transformerResult =
+        TrainingRunResult::completedResult("fold_0", transformerTrain, transformerValidate);
+
+    reporter.emitTrainingHistoryReport({
+        TrainingRunsStatsReporter::TrainingPhaseReport{
+            "poisson_glm_pretrain",
+            {TrainingRunsStatsReporter::HistoricalRunResult{baseResult, {"base_metric"}}}},
+        TrainingRunsStatsReporter::TrainingPhaseReport{
+            "transformer_residual",
+            {TrainingRunsStatsReporter::HistoricalRunResult{transformerResult, {"transformer_metric"}}}},
+    });
+    reporter.close();
+
+    const std::string output = readAndCloseFile(out);
+    EXPECT_TRUE(output.find("INFO runs final: ================== training history ==================") != std::string::npos) << output;
+    EXPECT_TRUE(hasLineWithAll(output,
+                               {"INFO runs phase[poisson_glm_pretrain]:", "total=1", "completed=1"}))
+        << output;
+    EXPECT_TRUE(hasLineWithAll(output,
+                               {"INFO runs phase[transformer_residual]:", "total=1", "completed=1"}))
+        << output;
+    EXPECT_TRUE(hasLineWithAll(output,
+                               {"INFO runs[fold_0]:", "train_base_metric=1.250000", "validate_base_metric=1.100000"}))
+        << output;
+    EXPECT_TRUE(hasLineWithAll(output,
+                               {"INFO runs[fold_0]:", "train_transformer_metric=2.250000", "validate_transformer_metric=2.100000"}))
+        << output;
+
+    const size_t basePhasePosition = output.find("INFO runs phase[poisson_glm_pretrain]:");
+    const size_t transformerPhasePosition = output.find("INFO runs phase[transformer_residual]:");
+    ASSERT_NE(basePhasePosition, std::string::npos);
+    ASSERT_NE(transformerPhasePosition, std::string::npos);
+    EXPECT_LT(basePhasePosition, transformerPhasePosition) << output;
 }
 
 TEST(TrainingRunsStatsReporter, EnsembleReportShowsEvaluationMetricsAndIncompleteStatusCounts) {

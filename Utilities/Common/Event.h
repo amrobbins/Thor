@@ -43,6 +43,11 @@ class Event {
 
     bool isInitialized() const;
 
+    // Event creation flags are immutable for the lifetime of the underlying
+    // cudaEvent_t. Reusable events must therefore be re-recorded only with the
+    // same timing and blocking-synchronization intent they were created with.
+    [[nodiscard]] bool usesTiming() const;
+
     // True when the CUDA event was created with cudaEventBlockingSync for a
     // host thread that will call synchronize().
     [[nodiscard]] bool usesBlockingSync() const;

@@ -245,14 +245,15 @@ class AdaptiveLayerNorm(MultiConnectionLayer):
     def get_scale_bias_data_type(self) -> thor.DataType: ...
 
 class Attention(CustomLayer):
-    def __init__(self, network: thor.Network, feature_input: object, num_heads: int, num_key_value_heads: int | None = None, head_dim: int | None = None, value_dim: int | None = None, output_features: int | None = None, has_bias: bool | None = False, mask_kind: str = 'none', diagonal_left_bound: int = 0, diagonal_right_bound: int = 0, use_alibi_mask: bool = False, attention_scale: float | None = None, use_rope: bool | None = False, rope_rotary_dim: int = 0, rope_base: float = 10000.0, rope_position_offset: int = 0, rope_interleaved: bool = False, rope_scaling_kind: str = 'none', rope_scaling_factor: float = 1.0, rope_original_max_position_embeddings: int = 0, rope_attention_factor: float | None = None, rope_yarn_beta_fast: float | None = 32.0, rope_yarn_beta_slow: float = 1.0, rope_llama3_low_freq_factor: float = 1.0, rope_llama3_high_freq_factor: float = 4.0, rope_long_rope_short_factors: Sequence[float] = [], rope_long_rope_long_factors: Sequence[float] = [], weights_data_type: thor.DataType | None = None, compute_data_type: thor.DataType | None = thor.DataType.fp32, output_data_type: thor.DataType | None = None, weights_initializer: thor.initializers.Initializer | None = None, bias_initializer: thor.initializers.Initializer | None = None, optimizer: thor.optimizers.Optimizer | None = None, rope_in_place: bool = False, sdpa_dropout_probability: float = 0.0, sdpa_dropout_seed: int = 0, sdpa_dropout_offset: int = 0, query_sequence_lengths: thor.Tensor | None = None, key_value_sequence_lengths: thor.Tensor | None = None, context_input: object | None = None, score_bias_input: thor.Tensor | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, rope_query_position_offset: int | None = None, rope_key_position_offset: int | None = None, rope_query_position_offsets: thor.Tensor | None = None, rope_key_position_offsets: thor.Tensor | None = None, output_dropout_probability: float | None = 0.0, output_dropout_seed: int | None = None, residual_input: object | None = None, dropout_probability: float | None = None, dropout_seed: int | None = None, dropout_offset: int | None = None) -> None:
+    def __init__(self, network: thor.Network, query_input: object, key_input: object, value_input: object, num_heads: int, num_key_value_heads: int | None = None, head_dim: int | None = None, value_dim: int | None = None, output_features: int | None = None, has_bias: bool | None = False, mask_kind: str = 'none', diagonal_left_bound: int = 0, diagonal_right_bound: int = 0, use_alibi_mask: bool = False, attention_scale: float | None = None, use_rope: bool | None = False, rope_rotary_dim: int = 0, rope_base: float = 10000.0, rope_position_offset: int = 0, rope_interleaved: bool = False, rope_scaling_kind: str = 'none', rope_scaling_factor: float = 1.0, rope_original_max_position_embeddings: int = 0, rope_attention_factor: float | None = None, rope_yarn_beta_fast: float | None = 32.0, rope_yarn_beta_slow: float = 1.0, rope_llama3_low_freq_factor: float = 1.0, rope_llama3_high_freq_factor: float = 4.0, rope_long_rope_short_factors: Sequence[float] = [], rope_long_rope_long_factors: Sequence[float] = [], weights_data_type: thor.DataType | None = None, compute_data_type: thor.DataType | None = thor.DataType.fp32, output_data_type: thor.DataType | None = None, weights_initializer: thor.initializers.Initializer | None = None, bias_initializer: thor.initializers.Initializer | None = None, optimizer: thor.optimizers.Optimizer | None = None, rope_in_place: bool = False, sdpa_dropout_probability: float = 0.0, sdpa_dropout_seed: int = 0, sdpa_dropout_offset: int = 0, query_sequence_lengths: thor.Tensor | None = None, key_value_sequence_lengths: thor.Tensor | None = None, score_bias_input: thor.Tensor | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, rope_query_position_offset: int | None = None, rope_key_position_offset: int | None = None, rope_query_position_offsets: thor.Tensor | None = None, rope_key_position_offsets: thor.Tensor | None = None, output_dropout_probability: float | None = 0.0, output_dropout_seed: int | None = None, residual_input: object | None = None, dropout_probability: float | None = None, dropout_seed: int | None = None, dropout_offset: int | None = None) -> None:
         """
         Public transformer attention layer built from learned Q/K/V/O projections and the
         cuDNN scaled-dot-product attention stage.
 
-        API tensor shapes omit batch.  ``feature_input`` is ``[Sq, input_features]`` and
-        ``context_input``, when supplied for cross-attention, is ``[Skv, context_features]``.
-        Placement adds the batch dimension, so the cuDNN hot path consumes semantic
+        API tensor shapes omit batch. ``query_input`` is ``[Sq, query_features]``;
+        ``key_input`` and ``value_input`` are independently supplied as ``[Skv, key_features]``
+        and ``[Skv, value_features]``. K and V must share sequence geometry, but their feature
+        widths and source tensors are independent. Placement adds the batch dimension, so the cuDNN hot path consumes semantic
         ``[B, H, S, D]`` tensors after projection.
 
         Supported production dtype surface:
@@ -265,7 +266,9 @@ class Attention(CustomLayer):
 
         Supported features for FP16/BF16:
 
-        * Self-attention and cross-attention through ``context_input``.
+        * Q, K, and V are independent inputs. Self-attention is expressed by passing the same
+          tensor for all three; conventional cross-attention passes the decoder state as Q and
+          the encoder state as both K and V.
         * MHA, GQA, and MQA: ``num_heads`` must be an integer multiple of
           ``num_key_value_heads``.
         * RoPE with ``none``, ``linear``, ``dynamic_ntk``, ``yarn``, ``longrope``, and
@@ -307,10 +310,11 @@ class Attention(CustomLayer):
           query row partition.
         * Padding masks use ``query_sequence_lengths`` and ``key_value_sequence_lengths``
           together, both int32 logical ``[1]`` tensors.
-        * ``feature_input`` and ``context_input`` independently accept ``thor.Tensor`` or
-          ``thor.RaggedTensor``. The output domain follows the query: dense Q produces dense O,
-          while ragged Q preserves the query row partition on O. Cross-attention supports all
-          four dense/ragged Q/O and K/V combinations. RoPE positions reset at each packed row;
+        * ``query_input``, ``key_input``, and ``value_input`` accept ``thor.Tensor`` or
+          ``thor.RaggedTensor``. K and V must both be dense or both ragged and must share the same
+          sequence geometry; their feature widths and source tensors may differ. The output domain
+          follows Q: dense Q produces dense O, while ragged Q preserves the query row partition on O.
+          All four dense/ragged Q/O and K/V combinations are supported. RoPE positions reset at each packed row;
           scalar origins apply to a dense side or every row of a ragged side, while the optional
           per-row origin tensors replace the scalar origin for the corresponding ragged domain.
           Q and K need only have the same logical batch size.
@@ -401,15 +405,17 @@ class Attention(CustomLayer):
 
     def get_residual_input(self) -> object: ...
 
-    def get_use_cross_attention(self) -> bool: ...
-
     def get_use_ragged(self) -> bool: ...
 
     def get_query_ragged(self) -> bool: ...
 
     def get_key_value_ragged(self) -> bool: ...
 
-    def get_context_input(self) -> object: ...
+    def get_query_input(self) -> object: ...
+
+    def get_key_input(self) -> object: ...
+
+    def get_value_input(self) -> object: ...
 
     def get_use_score_bias(self) -> bool: ...
 

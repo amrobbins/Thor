@@ -600,6 +600,9 @@ void CustomLayer::ensureApplicationStorageAllocated(uint32_t applicationIndex) {
     if (applications.size() <= applicationIndex) {
         applications.resize(applicationIndex + 1);
     }
+    if (applications[applicationIndex].forwardInputReadyEvents.size() < inputNames.size()) {
+        applications[applicationIndex].forwardInputReadyEvents.resize(inputNames.size());
+    }
 
     const size_t requiredInputs = static_cast<size_t>(applicationIndex + 1) * inputNames.size();
     const size_t requiredOutputs = static_cast<size_t>(applicationIndex + 1) * outputNames.size();
@@ -2374,8 +2377,9 @@ void CustomLayer::synchronizeComputeStreamForForwardInputs(uint32_t applicationI
         if (flat == runFlat || flat >= streams.size() || !featureInputs[flat].has_value()) {
             continue;
         }
-        Event readyEvent = streams[flat].putEvent();
-        runStream.waitEvent(readyEvent);
+        ApplicationState& app = applications[applicationIndex];
+        THOR_THROW_IF_FALSE(inputPort < app.forwardInputReadyEvents.size());
+        runStream.waitFor(streams[flat], app.forwardInputReadyEvents[inputPort]);
     }
 }
 
@@ -2414,12 +2418,12 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
     THOR_THROW_IF_FALSE(!candidateApplications.empty());
 
     if (isStartOfForward) {
-        if (weightsAreUpToDateEvent.has_value()) {
+        if (weightsAreUpToDateEventValid) {
             for (const Stream& dataStream : uniqueDataStreams) {
-                dataStream.waitEvent(weightsAreUpToDateEvent.value());
+                dataStream.waitEvent(weightsAreUpToDateEvent);
             }
         }
-        weightsAreUpToDateEvent.reset();
+        weightsAreUpToDateEventValid = false;
         isStartOfForward = false;
         isStartOfBackward = true;
         clearGradientFirstThisBackwardPass = false;
@@ -2711,10 +2715,11 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
 
         app.backwardRanThisPass = true;
 
-        std::optional<Event> errorInputReadyEvent = std::nullopt;
+        Event* errorInputReadyEvent = nullptr;
         if (gradientUpdateStream.has_value()) {
             const auto readyEventStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-            errorInputReadyEvent = computeStream(applicationIndex).putEvent();
+            computeStream(applicationIndex).putEvent(app.errorInputReadyEvent);
+            errorInputReadyEvent = &app.errorInputReadyEvent;
             if (emitLayerDiagnostics) {
                 readyEventMicros = layerSubmitDiagnosticElapsedMicros(readyEventStart, layerSubmitDiagnosticNow());
             }
@@ -2755,9 +2760,9 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             }
         }
 
-        if (gradientUpdateStream.has_value() && errorInputReadyEvent.has_value()) {
+        if (gradientUpdateStream.has_value() && errorInputReadyEvent != nullptr) {
             const auto waitStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-            gradientUpdateStream.value().waitEvent(errorInputReadyEvent.value());
+            gradientUpdateStream.value().waitEvent(*errorInputReadyEvent);
             if (emitLayerDiagnostics) {
                 waitErrorInputMicros = layerSubmitDiagnosticElapsedMicros(waitStart, layerSubmitDiagnosticNow());
             }
@@ -2826,7 +2831,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                          gradientUpdateStream.has_value() ? 1 : 0);
         }
         numBackwardApplicationsCompletedThisPass = 0;
-        weightsAreUpToDateEvent.reset();
+        weightsAreUpToDateEventValid = false;
 
         std::unordered_set<Loss*> fusedCustomLossOwners;
         for (const ApplicationState& app : applications) {
@@ -2863,7 +2868,8 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             // Return that dependency to the owning loss before the next batch can
             // enqueue reuse of those tensors on its labels/loss streams.
             if (!fusedCustomLossOwners.empty()) {
-                notifyFusedCustomLossOwners(gradientUpdateStream.value().putEvent());
+                gradientUpdateStream.value().putEvent(fusedLossConsumersDoneEvent);
+                notifyFusedCustomLossOwners(fusedLossConsumersDoneEvent);
             }
 
 
@@ -2988,7 +2994,8 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
                              anyWeightsUpdated ? 1 : 0);
             }
             if (anyWeightsUpdated) {
-                weightsAreUpToDateEvent = gradientUpdateStream.value().putEvent();
+                gradientUpdateStream.value().putEvent(weightsAreUpToDateEvent);
+                weightsAreUpToDateEventValid = true;
             }
         } else {
             // A parameterless CustomLayer has no gradient-update stream to serve
@@ -3088,7 +3095,8 @@ std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
         runMicros = layerSubmitDiagnosticElapsedMicros(runStart, layerSubmitDiagnosticNow());
     }
     const auto eventStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-    Event readyEvent = computeStream(decoded.applicationIndex).putEvent();
+    ApplicationState& app = applications[decoded.applicationIndex];
+    computeStream(decoded.applicationIndex).putEvent(app.backwardErrorReadyEvent);
     if (emitDiagnostics) {
         eventMicros = layerSubmitDiagnosticElapsedMicros(eventStart, layerSubmitDiagnosticNow());
         emitLayerSubmitDiagnostic("custom_backward_error_compute",
@@ -3101,7 +3109,7 @@ std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
                                    {"put_event_us", eventMicros},
                                    {"flops", variant.backwardError->flopCount()}});
     }
-    return readyEvent;
+    return app.backwardErrorReadyEvent;
 }
 
 void CustomLayer::accumulateWeightsGradientForApplication(uint32_t applicationIndex, bool clearGradientFirst, uint32_t batchSize) {
@@ -3184,6 +3192,18 @@ void CustomLayer::accumulateWeightsGradientForApplication(uint32_t applicationIn
 void CustomLayer::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {
     DecodedConnection decoded = decodeInputConnectionType(static_cast<int>(connectionNumber));
     accumulateWeightsGradientForApplication(decoded.applicationIndex, clearGradientFirst, 0);
+}
+
+void CustomLayer::cleanup() {
+    for (ApplicationState& app : applications) {
+        for (Event& event : app.forwardInputReadyEvents) {
+            event = Event();
+        }
+        app.errorInputReadyEvent = Event();
+        app.backwardErrorReadyEvent = Event();
+    }
+    fusedLossConsumersDoneEvent = Event();
+    TrainableLayer::cleanup();
 }
 
 uint64_t CustomLayer::flopCountForward() {

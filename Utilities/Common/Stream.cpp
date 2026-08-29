@@ -185,6 +185,7 @@ void Stream::putEvent(Event &event, bool enableTiming, bool expectingHostToWaitO
         event = Event(state->gpuNum, enableTiming, expectingHostToWaitOnThisOne);
     } else {
         THOR_THROW_IF_FALSE(event.getGpuNum() == state->gpuNum);
+        THOR_THROW_IF_FALSE(event.usesTiming() == enableTiming);
         THOR_THROW_IF_FALSE(event.usesBlockingSync() == expectingHostToWaitOnThisOne);
     }
     event.record(*this);
@@ -300,6 +301,16 @@ void Stream::waitEvent(Event event) const {
     ScopedGpu scopedGpu(state->gpuNum);
 
     CUDA_CHECK(cudaStreamWaitEvent(state->cudaStream, event.getEvent(), 0));
+}
+
+void Stream::waitFor(const Stream &producer, Event &reusableEvent) const {
+    THOR_THROW_IF_FALSE(!uninitialized());
+    THOR_THROW_IF_FALSE(producer.isInitialized());
+
+    producer.putEvent(reusableEvent,
+                      /*enableTiming=*/false,
+                      /*expectingHostToWaitOnThisOne=*/false);
+    waitEvent(reusableEvent);
 }
 
 void Stream::synchronize() const {

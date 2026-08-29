@@ -123,7 +123,7 @@ AuditGraph buildAuditGraph(Api::Network& network, bool addExternalOutputs) {
     const Impl::RotaryPositionEmbeddingOptions rope = auditRopeOptions();
     Api::Attention selfAttention = Api::Attention::Builder()
                                        .network(network)
-                                       .featureInput(encoded)
+                                       .queryInput(encoded).keyInput(encoded).valueInput(encoded)
                                        .numHeads(1)
                                        .headDim(kFeatures)
                                        .ropeOptions(rope)
@@ -134,8 +134,9 @@ AuditGraph buildAuditGraph(Api::Network& network, bool addExternalOutputs) {
 
     Api::Attention futureAttention = Api::Attention::Builder()
                                          .network(network)
-                                         .featureInput(graph.future.getFeatureOutput().value())
-                                         .contextInput(graph.historyStates)
+                                         .queryInput(graph.future.getFeatureOutput().value())
+                                         .keyInput(graph.historyStates)
+                                         .valueInput(graph.historyStates)
                                          .numHeads(1)
                                          .headDim(kFeatures)
                                          .ropeOptions(rope)
@@ -146,8 +147,9 @@ AuditGraph buildAuditGraph(Api::Network& network, bool addExternalOutputs) {
 
     Api::Attention historyToFuture = Api::Attention::Builder()
                                          .network(network)
-                                         .featureInput(graph.historyStates)
-                                         .contextInput(graph.future.getFeatureOutput().value())
+                                         .queryInput(graph.historyStates)
+                                         .keyInput(graph.future.getFeatureOutput().value())
+                                         .valueInput(graph.future.getFeatureOutput().value())
                                          .numHeads(1)
                                          .headDim(kFeatures)
                                          .ropeOptions(rope)

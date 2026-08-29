@@ -226,6 +226,8 @@ void LayerNorm::compileImpl() {
     scratchDScale.clear();
     scratchDBias.clear();
     scratchErrorOutput.reset();
+    backwardCompletionEvents.clear();
+    backwardCompletionEvents.resize(featureInputs.size());
     forwardPlans.clear();
     backwardPlans.clear();
     forwardWorkspaces.clear();
@@ -300,11 +302,12 @@ void LayerNorm::cleanup() {
     scratchDScale.clear();
     scratchDBias.clear();
     scratchErrorOutput.reset();
+    backwardCompletionEvents.clear();
     forwardPlans.clear();
     backwardPlans.clear();
     forwardWorkspaces.clear();
     backwardWorkspaces.clear();
-    Layer::cleanup();
+    TrainableLayer::cleanup();
 }
 
 void LayerNorm::computeFeatureOut(uint32_t connectionNumber) {
@@ -414,7 +417,9 @@ optional<Event> LayerNorm::computeErrorOutAccumulateWeightsGradienFused(uint32_t
                                              executionStream);
     }
 
-    return executionStream.putEvent();
+    THOR_THROW_IF_FALSE(connectionNumber < backwardCompletionEvents.size());
+    executionStream.putEvent(backwardCompletionEvents[connectionNumber]);
+    return backwardCompletionEvents[connectionNumber];
 }
 
 void LayerNorm::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {

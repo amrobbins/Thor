@@ -718,6 +718,68 @@ TrainingRunResult Trainer::fit(const TrainerFitOptions& options) {
 }
 
 
+std::optional<std::string> Trainer::currentTrainingPhaseHistoryLabel() const {
+    if (!trainingProgramUsesPhases(trainingProgram)) {
+        return std::nullopt;
+    }
+
+    auto collectPhaseNames = [&](bool trainingEnabledOnly) {
+        std::vector<std::string> names;
+        std::unordered_set<std::string> seen;
+        for (const std::shared_ptr<TrainingStep>& step : trainingProgram->getSteps()) {
+            if (step == nullptr || !step->isInitialized() || !step->isEnabled()) {
+                continue;
+            }
+            for (const std::shared_ptr<TrainingPhase>& phase : step->getPhases()) {
+                if (phase == nullptr || !phase->isInitialized() || !phase->isEnabled() ||
+                    phase->getNetwork() == nullptr) {
+                    continue;
+                }
+                if (trainingEnabledOnly && phase->getNetwork()->getTrainableParameterReferences().empty()) {
+                    continue;
+                }
+                if (seen.insert(phase->getName()).second) {
+                    names.push_back(phase->getName());
+                }
+            }
+        }
+        return names;
+    };
+
+    // A later staged fit commonly leaves prior phases enabled for forward
+    // dependencies but freezes their parameters. Name the phase(s) that can
+    // actually update during this fit, not every graph fragment that happens
+    // to remain active. Fall back to active phase names for parameter-free
+    // phases so their fit still has a useful history label.
+    std::vector<std::string> phaseNames = collectPhaseNames(/*trainingEnabledOnly=*/true);
+    if (phaseNames.empty()) {
+        phaseNames = collectPhaseNames(/*trainingEnabledOnly=*/false);
+    }
+    if (phaseNames.empty()) {
+        return std::nullopt;
+    }
+
+    std::ostringstream label;
+    for (size_t i = 0; i < phaseNames.size(); ++i) {
+        if (i != 0) {
+            label << "+";
+        }
+        label << phaseNames[i];
+    }
+    return label.str();
+}
+
+void Trainer::recordTrainingRunsPhaseResult(std::string phaseName,
+                                            TrainingRunResult result,
+                                            std::vector<std::string> reportOrder) {
+    if (phaseName.empty()) {
+        return;
+    }
+    trainingPhaseRunHistory.push_back(TrainingPhaseRunHistoryEntry{
+        std::move(phaseName), std::move(result), std::move(reportOrder)});
+}
+
+
 void Trainer::setTrainingData(std::shared_ptr<const TrainingData> data) {
     if (data == nullptr) {
         throw std::invalid_argument("Trainer::setTrainingData requires non-null TrainingData.");

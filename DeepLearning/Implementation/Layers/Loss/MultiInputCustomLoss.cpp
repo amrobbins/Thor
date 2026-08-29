@@ -43,6 +43,7 @@ MultiInputCustomLoss::MultiInputCustomLoss(DynamicExpression lossExpression,
     featureInputs.resize(this->inputNames.size(), std::nullopt);
     errorOutputs.resize(this->inputNames.size(), std::nullopt);
     inputStreams.resize(this->inputNames.size());
+    inputReadyEvents.resize(this->inputNames.size());
     previousLayers.resize(this->inputNames.size(), std::nullopt);
 }
 
@@ -365,7 +366,10 @@ void MultiInputCustomLoss::cleanup() {
     gradientPrepared.reset();
     gradientPreRunHook = nullptr;
     batchValidityMask.dropReference();
-    Layer::cleanup();
+    for (Event& event : inputReadyEvents)
+        event = Event();
+    inputsReusableEvent = Event();
+    Loss::cleanup();
 }
 
 void MultiInputCustomLoss::resetForwardBookkeeping() {
@@ -452,7 +456,7 @@ void MultiInputCustomLoss::synchronizeComputeStreamForInputs() {
         THOR_THROW_IF_FALSE(inputStreams[i].isInitialized());
         if (i == 0)
             continue;
-        runStream.waitEvent(inputStreams[i].putEvent());
+        runStream.waitFor(inputStreams[i], inputReadyEvents[i]);
     }
 }
 
@@ -500,9 +504,9 @@ void MultiInputCustomLoss::forward(optional<Tensor> featureInput, bool validatio
         }
     }
 
-    Event lossReady = computeStream().putEvent();
+    computeStream().putEvent(inputsReusableEvent);
     for (size_t i = 1; i < inputStreams.size(); ++i)
-        inputStreams[i].waitEvent(lossReady);
+        inputStreams[i].waitEvent(inputsReusableEvent);
 
     resetForwardBookkeeping();
 

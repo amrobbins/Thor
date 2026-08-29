@@ -4818,6 +4818,8 @@ def test_public_attention_accepts_rope_scaling_parameterizations(scaling_kind, k
     layer = thor.layers.Attention(
         network,
         feature_input,
+        feature_input,
+        feature_input,
         num_heads=2,
         num_key_value_heads=2,
         head_dim=8,
@@ -4836,7 +4838,9 @@ def test_public_attention_accepts_rope_scaling_parameterizations(scaling_kind, k
         **kwargs,
     )
     assert layer.get_feature_output().get_dimensions() == [7, 32]
-    assert layer._debug_qkv_projection_mode() == "split"
+    assert layer.get_query_input() == feature_input
+    assert layer.get_key_input() == feature_input
+    assert layer.get_value_input() == feature_input
 
 
 def test_public_attention_exposes_dropout_configuration():
@@ -4848,6 +4852,8 @@ def test_public_attention_exposes_dropout_configuration():
     feature_input = thor.layers.NetworkInput(network, "feature_input", [7, 32], dtype).get_feature_output()
     layer = thor.layers.Attention(
         network,
+        feature_input,
+        feature_input,
         feature_input,
         num_heads=2,
         num_key_value_heads=2,
@@ -4882,6 +4888,8 @@ def test_public_attention_rejects_invalid_dropout_configuration():
         thor.layers.Attention(
             network,
             feature_input,
+            feature_input,
+            feature_input,
             num_heads=2,
             dropout_probability=1.0,
         )
@@ -4889,6 +4897,8 @@ def test_public_attention_rejects_invalid_dropout_configuration():
     with pytest.raises((RuntimeError, ValueError), match="dropout"):
         thor.layers.Attention(
             network,
+            feature_input,
+            feature_input,
             feature_input,
             num_heads=2,
             mask_kind="sliding_window_bottom_right",

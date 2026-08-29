@@ -1560,17 +1560,24 @@ TEST(DeviceCrossing, Crosses) {
 
     Tensor outputGpu = layers.back()->getFeatureOutput().value();
 
-    // Network is runnable here
-    layers[0]->forward(sourceCpu, false);
+    // Network is runnable here. Repeat the crossing so DeviceCrossing must
+    // re-record each owner-scoped dependency event many times; E1 rejects
+    // accidentally reusing one event across producer GPUs.
     Stream outputStream = networkOutput->getStream();
-    destCpu.copyFromAsync(outputGpu, outputStream);
-    outputStream.synchronize();
-
-    ASSERT_TRUE(outputGpu.getPlacement() == gpu1Placement);
-
     float *destMem = (float *)destCpu.getMemPtr();
-    for (int i = 0; i < numElements; ++i) {
-        ASSERT_EQ(destMem[i], sourceMem[i]);
+    for (int repetition = 0; repetition < 16; ++repetition) {
+        for (int i = 0; i < numElements; ++i) {
+            sourceMem[i] = ((repetition + 1) * 1000.0f) + static_cast<float>(i);
+        }
+
+        layers[0]->forward(sourceCpu, false);
+        destCpu.copyFromAsync(outputGpu, outputStream);
+        outputStream.synchronize();
+
+        ASSERT_TRUE(outputGpu.getPlacement() == gpu1Placement);
+        for (int i = 0; i < numElements; ++i) {
+            ASSERT_EQ(destMem[i], sourceMem[i]);
+        }
     }
 
     LayerTestHelper::tearDownNetwork(layers);

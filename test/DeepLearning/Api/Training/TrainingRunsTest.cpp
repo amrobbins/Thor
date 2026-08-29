@@ -1286,6 +1286,48 @@ std::shared_ptr<Trainer> makeTrainerWithData(std::shared_ptr<Network> network,
                                          .build());
 }
 
+std::shared_ptr<Network> makePhaseHistoryNetwork(const std::string& networkName,
+                                                     const std::string& predictionName,
+                                                     const std::string& lossName) {
+    auto network = std::make_shared<Network>(networkName);
+    NetworkInput features = NetworkInput::Builder()
+                                .network(*network)
+                                .name("features")
+                                .dimensions({4})
+                                .dataType(DataType::FP32)
+                                .build();
+    NetworkInput labels = NetworkInput::Builder()
+                              .network(*network)
+                              .name("labels")
+                              .dimensions({1})
+                              .dataType(DataType::FP32)
+                              .build();
+    FullyConnected prediction = FullyConnected::Builder()
+                                    .network(*network)
+                                    .featureInput(features.getFeatureOutput().value())
+                                    .numOutputFeatures(1)
+                                    .hasBias(true)
+                                    .noActivation()
+                                    .build();
+    MSE loss = MSE::Builder()
+                   .network(*network)
+                   .predictions(prediction.getFeatureOutput().value())
+                   .labels(labels.getFeatureOutput().value())
+                   .lossDataType(DataType::FP32)
+                   .build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name(predictionName)
+        .inputTensor(prediction.getFeatureOutput().value())
+        .build();
+    NetworkOutput::Builder()
+        .network(*network)
+        .name(lossName)
+        .inputTensor(loss.getLoss())
+        .build();
+    return network;
+}
+
 std::shared_ptr<Trainer> makePhaseTrainerForValidation(const std::string& name,
                                                                     std::shared_ptr<TrainingExecutor> executor) {
     auto phaseNetwork = std::make_shared<Network>(name + "_phase");
@@ -1567,6 +1609,72 @@ TEST(TrainingRuns, PhaseBackedStartupValidatesEveryPhaseNetworkOnceAndReusesSnap
     EXPECT_TRUE(result.allCompleted());
     EXPECT_EQ(activeNetwork->trainingValidationCount(), 1U);
     EXPECT_EQ(futureNetwork->trainingValidationCount(), 1U);
+}
+
+TEST(TrainingRuns, FinalReportAccumulatesPhaseHistoryAcrossFreshTrainingRunsInstances) {
+    auto baseNetwork = makePhaseHistoryNetwork(
+        "training-runs-history-base", "base_prediction", "base_loss");
+    auto transformerNetwork = makePhaseHistoryNetwork(
+        "training-runs-history-transformer", "transformer_prediction", "transformer_loss");
+    auto basePhase = std::make_shared<TrainingPhase>("poisson_glm_pretrain", baseNetwork, true);
+    auto transformerPhase =
+        std::make_shared<TrainingPhase>("transformer_residual", transformerNetwork, false);
+    auto step = std::make_shared<TrainingStep>(
+        "staged_fit",
+        std::vector<std::shared_ptr<TrainingPhase>>{basePhase, transformerPhase},
+        Sgd::Builder().initialLearningRate(0.01f).build(),
+        std::vector<ParameterReference>{});
+    auto program = std::make_shared<TrainingProgram>(
+        std::vector<std::shared_ptr<TrainingStep>>{step});
+    auto executor = std::make_shared<RestartProgressExecutor>(
+        std::vector<std::vector<double>>{{0.8}, {0.4}});
+    auto trainer = std::make_shared<Trainer>(Trainer::Builder()
+                                                 .data(makeFakeTrainingData())
+                                                 .executor(executor)
+                                                 .observer(std::make_shared<NullTrainingObserver>())
+                                                 .trainingProgram(program)
+                                                 .build());
+
+    testing::internal::CaptureStdout();
+    TrainingRuns baseRuns({TrainingRunsSpec{"fold_0", trainer}},
+                          TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+                          0.0,
+                          1);
+    TrainingRunsResult baseResult = baseRuns.fit(TrainerFitOptions{.epochs = 1});
+    const std::string baseOutput = testing::internal::GetCapturedStdout();
+    ASSERT_TRUE(baseResult.allCompleted());
+    EXPECT_NE(baseOutput.find("INFO runs final: ==================== final results ===================="), std::string::npos)
+        << baseOutput;
+    EXPECT_EQ(baseOutput.find("INFO runs final: ================== training history =================="), std::string::npos)
+        << baseOutput;
+
+    // Keep the already-trained base phase active for forward graph composition,
+    // exactly like staged production training, but exclude its parameters from
+    // optimization while the next phase becomes trainable.
+    baseNetwork->freezeTraining();
+    transformerPhase->enable();
+
+    testing::internal::CaptureStdout();
+    TrainingRuns transformerRuns({TrainingRunsSpec{"fold_0", trainer}},
+                                 TrainingRunsFailurePolicy::CANCEL_SIBLINGS,
+                                 0.0,
+                                 1);
+    TrainingRunsResult transformerResult = transformerRuns.fit(TrainerFitOptions{.epochs = 1});
+    const std::string transformerOutput = testing::internal::GetCapturedStdout();
+    ASSERT_TRUE(transformerResult.allCompleted());
+    EXPECT_NE(transformerOutput.find("INFO runs final: ==================== final results ===================="), std::string::npos)
+        << transformerOutput;
+    EXPECT_NE(transformerOutput.find("INFO runs final: ================== training history =================="), std::string::npos)
+        << transformerOutput;
+
+    const size_t basePhasePosition = transformerOutput.find("INFO runs phase[poisson_glm_pretrain]:");
+    const size_t transformerPhasePosition = transformerOutput.find("INFO runs phase[transformer_residual]:");
+    ASSERT_NE(basePhasePosition, std::string::npos) << transformerOutput;
+    ASSERT_NE(transformerPhasePosition, std::string::npos) << transformerOutput;
+    EXPECT_LT(basePhasePosition, transformerPhasePosition) << transformerOutput;
+    EXPECT_EQ(transformerOutput.find("INFO runs phase[poisson_glm_pretrain+transformer_residual]:"),
+              std::string::npos)
+        << transformerOutput;
 }
 
 TEST(TrainingRuns, UsesTrainingPhaseSignaturesForEnsembleValidation) {

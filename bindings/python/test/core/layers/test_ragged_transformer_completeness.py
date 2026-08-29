@@ -72,6 +72,8 @@ def _build_network(name: str) -> thor.Network:
     self_attention = thor.layers.Attention(
         network,
         encoded,
+        encoded,
+        encoded,
         1,
         head_dim=FEATURES,
         use_rope=True,
@@ -86,9 +88,10 @@ def _build_network(name: str) -> thor.Network:
     future_attention = thor.layers.Attention(
         network,
         future.get_feature_output(),
+        history_states,
+        history_states,
         1,
         head_dim=FEATURES,
-        context_input=history_states,
         use_rope=True,
         rope_rotary_dim=FEATURES,
         rope_query_position_offset=HISTORY_BOUNDARY,
@@ -107,9 +110,10 @@ def _build_network(name: str) -> thor.Network:
     history_to_future = thor.layers.Attention(
         network,
         history_states,
+        future.get_feature_output(),
+        future.get_feature_output(),
         1,
         head_dim=FEATURES,
-        context_input=future.get_feature_output(),
         use_rope=True,
         rope_rotary_dim=FEATURES,
         rope_query_position_offsets=history_origins.get_feature_output(),

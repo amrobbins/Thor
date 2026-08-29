@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -165,6 +166,22 @@ void expectAllClose(const vector<float>& actual, const vector<float>& expected, 
         const float tol = atol + rtol * fabs(expected[i]);
         EXPECT_LE(diff, tol) << "mismatch at index " << i << ": actual=" << actual[i] << ", expected=" << expected[i];
     }
+}
+
+vector<float> elementwiseSum(std::initializer_list<vector<float>> terms) {
+    if (terms.size() == 0) return {};
+
+    const size_t size = terms.begin()->size();
+    vector<float> sum(size, 0.0f);
+    for (const vector<float>& term : terms) {
+        if (term.size() != size) {
+            throw runtime_error("Cannot sum gradient vectors with different sizes.");
+        }
+        for (size_t i = 0; i < size; ++i) {
+            sum[i] += term[i];
+        }
+    }
+    return sum;
 }
 
 void expectNotAllClose(const vector<float>& lhs, const vector<float>& rhs, float atol = 6e-2f, float rtol = 6e-2f) {
@@ -400,7 +417,6 @@ struct AttentionReferenceInputs {
 uint32_t qWidth(const AttentionReferenceCase& c) { return c.numHeads * c.headDim; }
 uint32_t kWidth(const AttentionReferenceCase& c) { return c.numKeyValueHeads * c.headDim; }
 uint32_t vWidth(const AttentionReferenceCase& c) { return c.numKeyValueHeads * c.valueDim; }
-uint32_t qkvWidth(const AttentionReferenceCase& c) { return qWidth(c) + kWidth(c) + vWidth(c); }
 uint32_t mergedWidth(const AttentionReferenceCase& c) { return c.numHeads * c.valueDim; }
 
 uint32_t effectiveSequenceLength(const AttentionReferenceCase& c, uint32_t batch) {
@@ -408,41 +424,6 @@ uint32_t effectiveSequenceLength(const AttentionReferenceCase& c, uint32_t batch
         return c.sequenceLength;
     return static_cast<uint32_t>(c.sequenceLengths.at(batch));
 }
-
-constexpr bool attentionUsesPackedQkv(bool useRope) {
-    if constexpr (!Api::Attention::USE_PACKED_QKV_PROJECTION) {
-        return false;
-    } else {
-        return !useRope;
-    }
-}
-
-bool attentionUsesPackedQkv(const AttentionReferenceCase& c) { return attentionUsesPackedQkv(c.useRope); }
-
-vector<float> packQkvWeights(const AttentionReferenceInputs& inputs, const AttentionReferenceCase& c) {
-    vector<float> qkv(static_cast<uint64_t>(c.inputFeatures) * qkvWidth(c), 0.0f);
-    for (uint32_t f = 0; f < c.inputFeatures; ++f) {
-        const uint64_t packedRow = static_cast<uint64_t>(f) * qkvWidth(c);
-        const uint64_t qRow = static_cast<uint64_t>(f) * qWidth(c);
-        const uint64_t kRow = static_cast<uint64_t>(f) * kWidth(c);
-        const uint64_t vRow = static_cast<uint64_t>(f) * vWidth(c);
-        std::copy(inputs.queryWeights.begin() + qRow, inputs.queryWeights.begin() + qRow + qWidth(c), qkv.begin() + packedRow);
-        std::copy(inputs.keyWeights.begin() + kRow, inputs.keyWeights.begin() + kRow + kWidth(c), qkv.begin() + packedRow + qWidth(c));
-        std::copy(inputs.valueWeights.begin() + vRow,
-                  inputs.valueWeights.begin() + vRow + vWidth(c),
-                  qkv.begin() + packedRow + qWidth(c) + kWidth(c));
-    }
-    return qkv;
-}
-
-vector<float> packQkvBias(const AttentionReferenceInputs& inputs, const AttentionReferenceCase& c) {
-    vector<float> qkv(qkvWidth(c), 0.0f);
-    std::copy(inputs.queryBias.begin(), inputs.queryBias.end(), qkv.begin());
-    std::copy(inputs.keyBias.begin(), inputs.keyBias.end(), qkv.begin() + qWidth(c));
-    std::copy(inputs.valueBias.begin(), inputs.valueBias.end(), qkv.begin() + qWidth(c) + kWidth(c));
-    return qkv;
-}
-
 vector<float> makePatternVector(uint64_t count, float scale, int64_t a, int64_t b, int64_t modulus) {
     vector<float> values(count, 0.0f);
     for (uint64_t i = 0; i < count; ++i) {
@@ -971,22 +952,14 @@ void setAttentionParameters(const shared_ptr<Impl::CustomLayer>& physicalAttenti
                             const AttentionReferenceInputs& inputs,
                             const AttentionReferenceCase& c,
                             Stream& stream) {
-    if (attentionUsesPackedQkv(c)) {
-        setParameterTensor(physicalAttention->getParameter("qkv_weights"), packQkvWeights(inputs, c), stream);
-    } else {
-        setParameterTensor(physicalAttention->getParameter("query_weights"), inputs.queryWeights, stream);
-        setParameterTensor(physicalAttention->getParameter("key_weights"), inputs.keyWeights, stream);
-        setParameterTensor(physicalAttention->getParameter("value_weights"), inputs.valueWeights, stream);
-    }
+    setParameterTensor(physicalAttention->getParameter("query_weights"), inputs.queryWeights, stream);
+    setParameterTensor(physicalAttention->getParameter("key_weights"), inputs.keyWeights, stream);
+    setParameterTensor(physicalAttention->getParameter("value_weights"), inputs.valueWeights, stream);
     setParameterTensor(physicalAttention->getParameter("output_weights"), inputs.outputWeights, stream);
     if (c.hasBias) {
-        if (attentionUsesPackedQkv(c)) {
-            setParameterTensor(physicalAttention->getParameter("qkv_bias"), packQkvBias(inputs, c), stream);
-        } else {
-            setParameterTensor(physicalAttention->getParameter("query_bias"), inputs.queryBias, stream);
-            setParameterTensor(physicalAttention->getParameter("key_bias"), inputs.keyBias, stream);
-            setParameterTensor(physicalAttention->getParameter("value_bias"), inputs.valueBias, stream);
-        }
+        setParameterTensor(physicalAttention->getParameter("query_bias"), inputs.queryBias, stream);
+        setParameterTensor(physicalAttention->getParameter("key_bias"), inputs.keyBias, stream);
+        setParameterTensor(physicalAttention->getParameter("value_bias"), inputs.valueBias, stream);
         setParameterTensor(physicalAttention->getParameter("output_bias"), inputs.outputBias, stream);
     }
     stream.synchronize();
@@ -1006,7 +979,7 @@ void runAttentionApiReferenceCaseWithInputs(const std::string& networkName,
                                   .build();
     Api::Attention::Builder builder;
     builder.network(network)
-        .featureInput(input.getFeatureOutput().value())
+        .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
         .numHeads(c.numHeads)
         .numKeyValueHeads(c.numKeyValueHeads)
         .headDim(c.headDim)
@@ -1133,7 +1106,7 @@ RaggedAttentionPoisonTrainingResult runRaggedQueryAttentionPoisonTrainingCase(
 
     Api::Attention::Builder builder;
     builder.network(network)
-        .featureInput(queryForAttention)
+        .queryInput(queryForAttention)
         .numHeads(1)
         .headDim(features)
         .valueDim(features)
@@ -1144,7 +1117,11 @@ RaggedAttentionPoisonTrainingResult runRaggedQueryAttentionPoisonTrainingCase(
         .computeDataType(DataType::FP32)
         .outputDataType(dataType)
         .optimizer(sgd);
-    if (denseContext) builder.contextInput(contextRivet->getFeatureOutput().value());
+    if (denseContext) {
+        builder.keyInput(contextRivet->getFeatureOutput().value()).valueInput(contextRivet->getFeatureOutput().value());
+    } else {
+        builder.keyInput(queryForAttention).valueInput(queryForAttention);
+    }
     Api::Attention attention = builder.build();
     if (!attention.getRaggedFeatureOutput().has_value()) {
         throw runtime_error("Ragged Attention poison training case expected a ragged output.");
@@ -1251,28 +1228,34 @@ RaggedAttentionPoisonTrainingResult runRaggedQueryAttentionPoisonTrainingCase(
     // produce gradients, so count allocated tensors rather than assuming the
     // vector size equals the number of differentiable inputs.
     const vector<optional<Impl::Tensor>> errorOutputs = physicalAttention->getErrorOutputs();
-    const size_t expectedGradientOutputs = denseContext ? 2U : 1U;
+    // Attention now exposes Q, K, and V as three independent differentiable ports.
+    // Structural ragged row-partition ports remain non-differentiable.
     const size_t actualGradientOutputs =
         static_cast<size_t>(std::count_if(errorOutputs.begin(), errorOutputs.end(), [](const auto& errorOutput) {
             return errorOutput.has_value();
         }));
-    if (actualGradientOutputs != expectedGradientOutputs) {
-        throw runtime_error("Ragged Attention poison training case produced an unexpected upstream gradient count.");
-    }
-    if (errorOutputs.empty() || !errorOutputs.at(0).has_value()) {
-        throw runtime_error("Ragged Attention poison training case did not produce a query gradient.");
-    }
-    if (denseContext && (errorOutputs.size() < 2U || !errorOutputs.at(1).has_value())) {
-        throw runtime_error("Ragged Attention poison training case did not produce a context gradient.");
+    if (actualGradientOutputs != 3U || errorOutputs.size() < 3U || !errorOutputs.at(0).has_value() ||
+        !errorOutputs.at(1).has_value() || !errorOutputs.at(2).has_value()) {
+        throw runtime_error("Ragged Attention poison training case produced an unexpected Q/K/V upstream gradient layout.");
     }
 
-    const vector<float> queryGradient =
+    const vector<float> queryPortGradient =
         readCpuTensor(copyTensorToCpu(errorOutputs.at(0).value(), stream));
+    const vector<float> keyPortGradient =
+        readCpuTensor(copyTensorToCpu(errorOutputs.at(1).value(), stream));
+    const vector<float> valuePortGradient =
+        readCpuTensor(copyTensorToCpu(errorOutputs.at(2).value(), stream));
+
+    // Report gradients with respect to the logical source tensors used by this test.
+    // Self-attention aliases Q=K=V, so its source gradient is dQ+dK+dV.
+    // Conventional cross-attention uses an independent Q source and aliases K=V
+    // to one context source, so the context gradient is dK+dV.
+    const vector<float> queryGradient =
+        denseContext ? queryPortGradient : elementwiseSum({queryPortGradient, keyPortGradient, valuePortGradient});
     result.queryGradientActive.assign(
         queryGradient.begin(), queryGradient.begin() + activeQueryRows * features);
     if (denseContext) {
-        result.contextGradient =
-            readCpuTensor(copyTensorToCpu(errorOutputs.at(1).value(), stream));
+        result.contextGradient = elementwiseSum({keyPortGradient, valuePortGradient});
     }
     for (const string& parameterName : physicalAttention->listParameters()) {
         result.parametersAfter.emplace(
@@ -1394,7 +1377,7 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
 
     Api::Attention::Builder builder;
     builder.network(network)
-        .featureInput(queryRivet.getFeatureOutput().value())
+        .queryInput(queryRivet.getFeatureOutput().value())
         .numHeads(numHeads)
         .numKeyValueHeads(numKeyValueHeads)
         .headDim(headDim)
@@ -1406,7 +1389,9 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
         .outputDataType(dataType)
         .optimizer(sgd);
     if (crossAttention) {
-        builder.contextInput(contextRivet->getFeatureOutput().value());
+        builder.keyInput(contextRivet->getFeatureOutput().value()).valueInput(contextRivet->getFeatureOutput().value());
+    } else {
+        builder.keyInput(queryRivet.getFeatureOutput().value()).valueInput(queryRivet.getFeatureOutput().value());
     }
     if (dropoutProbability > 0.0f) {
         builder.dropout(dropoutProbability, 1234, 5678);
@@ -1515,9 +1500,9 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
             "Residual attention test expected exactly one downstream error input.");
     require(physicalTerminal->getErrorInputs().front().has_value(),
             "Residual attention test downstream error input was not allocated.");
-    const size_t expectedAttentionErrorOutputs = crossAttention ? (fused ? 3U : 2U) : (fused ? 2U : 1U);
+    const size_t expectedAttentionErrorOutputs = fused ? 4U : 3U;
     require(physicalAttention->getErrorOutputs().size() == expectedAttentionErrorOutputs,
-            "Residual attention test produced an unexpected number of Attention upstream gradients.");
+            "Residual attention test produced an unexpected number of Attention Q/K/V[/residual] upstream gradients.");
     for (const optional<Impl::Tensor>& errorOutput : physicalAttention->getErrorOutputs()) {
         require(errorOutput.has_value(), "Residual attention test Attention upstream gradient was not allocated.");
     }
@@ -1535,15 +1520,21 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
     errorInput.copyFromAsync(errorInputHost, terminalStream);
     physicalTerminal->backward(errorInput, batchSize);
 
-    result.queryGradient = readCpuTensor(copyTensorToCpu(physicalAttention->getErrorOutputs().at(0).value(), stream));
-    size_t nextErrorOutput = 1;
+    const vector<float> queryPortGradient =
+        readCpuTensor(copyTensorToCpu(physicalAttention->getErrorOutputs().at(0).value(), stream));
+    const vector<float> keyPortGradient =
+        readCpuTensor(copyTensorToCpu(physicalAttention->getErrorOutputs().at(1).value(), stream));
+    const vector<float> valuePortGradient =
+        readCpuTensor(copyTensorToCpu(physicalAttention->getErrorOutputs().at(2).value(), stream));
     if (crossAttention) {
-        result.contextGradient =
-            readCpuTensor(copyTensorToCpu(physicalAttention->getErrorOutputs().at(nextErrorOutput++).value(), stream));
+        result.queryGradient = queryPortGradient;
+        result.contextGradient = elementwiseSum({keyPortGradient, valuePortGradient});
+    } else {
+        result.queryGradient = elementwiseSum({queryPortGradient, keyPortGradient, valuePortGradient});
     }
     result.residualGradient = fused
                                   ? readCpuTensor(copyTensorToCpu(
-                                        physicalAttention->getErrorOutputs().at(nextErrorOutput).value(), stream))
+                                        physicalAttention->getErrorOutputs().at(3).value(), stream))
                                   : readCpuTensor(copyTensorToCpu(
                                         physicalResidualAdd->getErrorOutputs().at(1).value(), terminalStream));
 
@@ -1594,10 +1585,10 @@ TEST(AttentionApi, BuildsComposedCausalSelfAttention) {
         Api::NetworkInput::Builder().network(network).name("tokens").dimensions({16, 64}).dataType(DataType::FP16).build();
 
     Api::Attention attention =
-        Api::Attention::Builder().network(network).featureInput(input.getFeatureOutput().value()).numHeads(4).causal().build();
+        Api::Attention::Builder().network(network).queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value()).numHeads(4).causal().build();
 
     EXPECT_EQ(attention.getLayerType(), "Attention");
-    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"feature_input"}));
+    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"query_input", "key_input", "value_input"}));
     EXPECT_EQ(attention.getOutputNames(), (std::vector<std::string>{"feature_output"}));
     EXPECT_EQ(attention.getOutput("feature_output").getDataType(), DataType::FP16);
     EXPECT_EQ(attention.getOutput("feature_output").getDimensions(), (std::vector<uint64_t>{16, 64}));
@@ -1613,6 +1604,66 @@ TEST(AttentionApi, BuildsComposedCausalSelfAttention) {
     EXPECT_TRUE(attention.architectureJson().at("epilogue_inputs").empty());
 }
 
+TEST(AttentionApi, AcceptsIndependentQueryKeyValueSourcesAndProjectionWidths) {
+    Api::Network network("attention_api_independent_qkv_sources");
+    Api::NetworkInput query =
+        Api::NetworkInput::Builder().network(network).name("query").dimensions({5, 32}).dataType(DataType::FP16).build();
+    Api::NetworkInput key =
+        Api::NetworkInput::Builder().network(network).name("key").dimensions({7, 48}).dataType(DataType::FP16).build();
+    Api::NetworkInput value =
+        Api::NetworkInput::Builder().network(network).name("value").dimensions({7, 24}).dataType(DataType::FP16).build();
+
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .queryInput(query.getFeatureOutput().value())
+                                   .keyInput(key.getFeatureOutput().value())
+                                   .valueInput(value.getFeatureOutput().value())
+                                   .numHeads(4)
+                                   .numKeyValueHeads(2)
+                                   .headDim(8)
+                                   .valueDim(6)
+                                   .outputFeatures(40)
+                                   .hasBias(true)
+                                   .build();
+
+    EXPECT_EQ(attention.getQueryInput(), query.getFeatureOutput().value());
+    EXPECT_EQ(attention.getKeyInput(), key.getFeatureOutput().value());
+    EXPECT_EQ(attention.getValueInput(), value.getFeatureOutput().value());
+    EXPECT_EQ(attention.getInputNames(),
+              (std::vector<std::string>{"query_input", "key_input", "value_input"}));
+    EXPECT_EQ(attention.getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{5, 40}));
+
+    const nlohmann::json arch = attention.architectureJson();
+    EXPECT_EQ(arch.at("version").get<std::string>(), "2.0.0");
+    EXPECT_EQ(arch.at("query_input").at("dimensions"), nlohmann::json::array({5, 32}));
+    EXPECT_EQ(arch.at("key_input").at("dimensions"), nlohmann::json::array({7, 48}));
+    EXPECT_EQ(arch.at("value_input").at("dimensions"), nlohmann::json::array({7, 24}));
+    EXPECT_EQ(arch.at("parameters").at("query_weights").at("shape"), nlohmann::json::array({32, 32}));
+    EXPECT_EQ(arch.at("parameters").at("key_weights").at("shape"), nlohmann::json::array({48, 16}));
+    EXPECT_EQ(arch.at("parameters").at("value_weights").at("shape"), nlohmann::json::array({24, 12}));
+    EXPECT_EQ(arch.at("parameters").at("output_weights").at("shape"), nlohmann::json::array({24, 40}));
+}
+
+TEST(AttentionApi, RejectsKeyValueSequenceGeometryMismatch) {
+    Api::Network network("attention_api_rejects_kv_sequence_mismatch");
+    Api::NetworkInput query =
+        Api::NetworkInput::Builder().network(network).name("query").dimensions({5, 32}).dataType(DataType::FP16).build();
+    Api::NetworkInput key =
+        Api::NetworkInput::Builder().network(network).name("key").dimensions({7, 48}).dataType(DataType::FP16).build();
+    Api::NetworkInput value =
+        Api::NetworkInput::Builder().network(network).name("value").dimensions({6, 24}).dataType(DataType::FP16).build();
+
+    EXPECT_THROW(Api::Attention::Builder()
+                     .network(network)
+                     .queryInput(query.getFeatureOutput().value())
+                     .keyInput(key.getFeatureOutput().value())
+                     .valueInput(value.getFeatureOutput().value())
+                     .numHeads(4)
+                     .headDim(8)
+                     .build(),
+                 std::invalid_argument);
+}
+
 TEST(AttentionApi, FirstClassResidualSeparatesSdpaAndOutputDropoutConfiguration) {
     Api::Network network("attention_api_first_class_residual_dropout_configuration");
     Api::NetworkInput input =
@@ -1622,7 +1673,7 @@ TEST(AttentionApi, FirstClassResidualSeparatesSdpaAndOutputDropoutConfiguration)
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
+                                   .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                                    .numHeads(2)
                                    .headDim(4)
                                    .weightsDataType(DataType::BF16)
@@ -1647,11 +1698,11 @@ TEST(AttentionApi, FirstClassResidualSeparatesSdpaAndOutputDropoutConfiguration)
     EXPECT_TRUE(attention.getUseResidual());
     ASSERT_TRUE(attention.getResidualInput().has_value());
     EXPECT_EQ(attention.getResidualInput()->getOriginalId(), residual.getFeatureOutput()->getOriginalId());
-    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"feature_input", "residual_input"}));
+    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"query_input", "key_input", "value_input", "residual_input"}));
     EXPECT_FALSE(attention.hasEpilogue());
 
     const nlohmann::json architecture = attention.architectureJson();
-    EXPECT_EQ(architecture.at("version").get<std::string>(), "1.1.0");
+    EXPECT_EQ(architecture.at("version").get<std::string>(), "2.0.0");
     EXPECT_FLOAT_EQ(architecture.at("sdpa_dropout_probability").get<float>(), 0.20f);
     EXPECT_FLOAT_EQ(architecture.at("dropout_probability").get<float>(), 0.20f);
     EXPECT_EQ(architecture.at("sdpa_dropout_seed").get<int64_t>(), 11);
@@ -1679,7 +1730,7 @@ TEST(AttentionApi, FirstClassResidualPreservesRaggedQueryPartition) {
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input)
+                                   .queryInput(input).keyInput(input).valueInput(input)
                                    .numHeads(2)
                                    .headDim(4)
                                    .weightsDataType(DataType::BF16)
@@ -1694,7 +1745,7 @@ TEST(AttentionApi, FirstClassResidualPreservesRaggedQueryPartition) {
     ASSERT_TRUE(attention.getRaggedResidualInput().has_value());
     EXPECT_EQ(attention.getRaggedResidualInput()->getOffsets(), input.getOffsets());
     EXPECT_EQ(attention.getInputNames(),
-              (std::vector<std::string>{"feature_input", "query_row_partition", "key_value_row_partition", "residual_input"}));
+              (std::vector<std::string>{"query_input", "key_input", "value_input", "query_row_partition", "key_value_row_partition", "residual_input"}));
     ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{12, 8}));
@@ -1710,7 +1761,7 @@ TEST(AttentionApi, FirstClassResidualPreservesRaggedQueryPartition) {
                                                .build();
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input)
+                     .queryInput(input).keyInput(input).valueInput(input)
                      .numHeads(2)
                      .headDim(4)
                      .weightsDataType(DataType::BF16)
@@ -1730,7 +1781,7 @@ TEST(AttentionApi, FirstClassResidualAndOutputDropoutDeserializeRoundTrip) {
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
+                                   .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                                    .numHeads(2)
                                    .headDim(4)
                                    .weightsDataType(DataType::BF16)
@@ -1758,7 +1809,7 @@ TEST(AttentionApi, FirstClassResidualAndOutputDropoutDeserializeRoundTrip) {
     EXPECT_TRUE(restored->getUseResidual());
     ASSERT_TRUE(restored->getResidualInput().has_value());
     EXPECT_EQ(restored->getResidualInput()->getOriginalId(), residual.getFeatureOutput()->getOriginalId());
-    EXPECT_EQ(restored->getInputNames(), (std::vector<std::string>{"feature_input", "residual_input"}));
+    EXPECT_EQ(restored->getInputNames(), (std::vector<std::string>{"query_input", "key_input", "value_input", "residual_input"}));
 
     nlohmann::json falselyLegacy = attention.architectureJson();
     falselyLegacy["version"] = "1.0.0";
@@ -1778,7 +1829,7 @@ TEST(AttentionApi, RejectsInvalidFirstClassResidualAndOutputDropoutConfiguration
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(2)
                      .headDim(4)
                      .outputDropoutProbability(1.0f)
@@ -1787,7 +1838,7 @@ TEST(AttentionApi, RejectsInvalidFirstClassResidualAndOutputDropoutConfiguration
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(2)
                      .headDim(4)
                      .outputDataType(DataType::BF16)
@@ -1797,7 +1848,7 @@ TEST(AttentionApi, RejectsInvalidFirstClassResidualAndOutputDropoutConfiguration
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(2)
                      .headDim(4)
                      .outputDataType(DataType::BF16)
@@ -1808,7 +1859,7 @@ TEST(AttentionApi, RejectsInvalidFirstClassResidualAndOutputDropoutConfiguration
     Impl::Expression projected = Api::Attention::epilogueInput(DataType::FP32, DataType::BF16);
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(2)
                      .headDim(4)
                      .outputDataType(DataType::BF16)
@@ -1819,7 +1870,7 @@ TEST(AttentionApi, RejectsInvalidFirstClassResidualAndOutputDropoutConfiguration
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(2)
                      .headDim(4)
                      .outputDataType(DataType::BF16)
@@ -1829,13 +1880,15 @@ TEST(AttentionApi, RejectsInvalidFirstClassResidualAndOutputDropoutConfiguration
                  std::invalid_argument);
 }
 
-TEST(AttentionApi, DeserializeAcceptsPreEpilogueVersionOneMetadata) {
-    Api::Network network("attention_api_deserialize_accepts_pre_epilogue_v1_metadata");
+TEST(AttentionApi, DeserializeRejectsVersionOneAttentionSourceInterface) {
+    Api::Network network("attention_api_deserialize_rejects_v1_source_interface");
     Api::NetworkInput input =
         Api::NetworkInput::Builder().network(network).name("tokens").dimensions({5, 8}).dataType(DataType::BF16).build();
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
+                                   .queryInput(input.getFeatureOutput().value())
+                                   .keyInput(input.getFeatureOutput().value())
+                                   .valueInput(input.getFeatureOutput().value())
                                    .numHeads(2)
                                    .headDim(4)
                                    .weightsDataType(DataType::BF16)
@@ -1845,24 +1898,8 @@ TEST(AttentionApi, DeserializeAcceptsPreEpilogueVersionOneMetadata) {
 
     nlohmann::json legacyArchitecture = attention.architectureJson();
     legacyArchitecture["version"] = "1.0.0";
-    legacyArchitecture.erase("sdpa_dropout_probability");
-    legacyArchitecture.erase("sdpa_dropout_seed");
-    legacyArchitecture.erase("sdpa_dropout_offset");
-    legacyArchitecture.erase("output_dropout_probability");
-    legacyArchitecture.erase("output_dropout_seed");
-    legacyArchitecture.erase("use_residual");
-    legacyArchitecture.erase("epilogue");
-    legacyArchitecture.erase("epilogue_inputs");
-
-    const uint32_t previousTrainableLayerCount = network.getNumTrainableLayers();
     std::shared_ptr<thor_file::TarReader> archiveReader;
-    Api::Attention::deserialize(archiveReader, legacyArchitecture, &network);
-    ASSERT_EQ(network.getNumTrainableLayers(), previousTrainableLayerCount + 1);
-    auto restored = std::dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(previousTrainableLayerCount));
-    ASSERT_NE(restored, nullptr);
-    EXPECT_FALSE(restored->hasEpilogue());
-    EXPECT_TRUE(restored->getEpilogueInputBindings().empty());
-    EXPECT_EQ(restored->getInputNames(), (std::vector<std::string>{"feature_input"}));
+    EXPECT_THROW(Api::Attention::deserialize(archiveReader, legacyArchitecture, &network), std::runtime_error);
 }
 
 TEST(AttentionApi, BuildsSelfAttentionWithResidualAddEpilogue) {
@@ -1876,7 +1913,7 @@ TEST(AttentionApi, BuildsSelfAttentionWithResidualAddEpilogue) {
     Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::BF16);
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
+                                   .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                                    .numHeads(2)
                                    .headDim(4)
                                    .weightsDataType(DataType::BF16)
@@ -1887,7 +1924,7 @@ TEST(AttentionApi, BuildsSelfAttentionWithResidualAddEpilogue) {
                                    .build();
 
     EXPECT_TRUE(attention.hasEpilogue());
-    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"feature_input", "residual"}));
+    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"query_input", "key_input", "value_input", "residual"}));
     ASSERT_EQ(attention.getEpilogueInputBindings().size(), 1U);
     EXPECT_EQ(attention.getEpilogueInputBindings().front().first, "residual");
     EXPECT_EQ(attention.getEpilogueInputBindings().front().second.getOriginalId(), residual.getFeatureOutput()->getOriginalId());
@@ -1908,8 +1945,8 @@ TEST(AttentionApi, BuildsCrossAttentionWithResidualAddEpilogue) {
     Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::BF16);
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(query.getFeatureOutput().value())
-                                   .contextInput(context.getFeatureOutput().value())
+                                   .queryInput(query.getFeatureOutput().value())
+                                   .keyInput(context.getFeatureOutput().value()).valueInput(context.getFeatureOutput().value())
                                    .numHeads(2)
                                    .numKeyValueHeads(1)
                                    .headDim(4)
@@ -1922,9 +1959,10 @@ TEST(AttentionApi, BuildsCrossAttentionWithResidualAddEpilogue) {
                                    .epilogue(attentionOutput + residualInput)
                                    .build();
 
-    EXPECT_TRUE(attention.getUseCrossAttention());
+    EXPECT_EQ(attention.getKeyInput(), context.getFeatureOutput().value());
+    EXPECT_EQ(attention.getValueInput(), context.getFeatureOutput().value());
     EXPECT_TRUE(attention.hasEpilogue());
-    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"feature_input", "context_input", "residual"}));
+    EXPECT_EQ(attention.getInputNames(), (std::vector<std::string>{"query_input", "key_input", "value_input", "residual"}));
     ASSERT_EQ(attention.getEpilogueInputBindings().size(), 1U);
     EXPECT_EQ(attention.getEpilogueInputBindings().front().first, "residual");
     EXPECT_EQ(attention.getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{5, 8}));
@@ -1942,7 +1980,7 @@ TEST(AttentionApi, SelfAttentionResidualEpilogueDeserializeRoundTrip) {
     Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::BF16);
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
+                                   .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                                    .numHeads(2)
                                    .headDim(4)
                                    .weightsDataType(DataType::BF16)
@@ -1958,7 +1996,9 @@ TEST(AttentionApi, SelfAttentionResidualEpilogueDeserializeRoundTrip) {
     ASSERT_EQ(network.getNumTrainableLayers(), previousTrainableLayerCount + 1);
     auto restored = std::dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(previousTrainableLayerCount));
     ASSERT_NE(restored, nullptr);
-    EXPECT_FALSE(restored->getUseCrossAttention());
+    EXPECT_EQ(restored->getQueryInput(), input.getFeatureOutput().value());
+    EXPECT_EQ(restored->getKeyInput(), input.getFeatureOutput().value());
+    EXPECT_EQ(restored->getValueInput(), input.getFeatureOutput().value());
     EXPECT_TRUE(restored->hasEpilogue());
     ASSERT_EQ(restored->getEpilogueInputBindings().size(), 1U);
     EXPECT_EQ(restored->getEpilogueInputBindings().front().first, "residual");
@@ -1979,8 +2019,8 @@ TEST(AttentionApi, ResidualEpilogueArchitectureJsonAndDeserializeRoundTrip) {
     Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::BF16);
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(query.getFeatureOutput().value())
-                                   .contextInput(context.getFeatureOutput().value())
+                                   .queryInput(query.getFeatureOutput().value())
+                                   .keyInput(context.getFeatureOutput().value()).valueInput(context.getFeatureOutput().value())
                                    .numHeads(2)
                                    .headDim(4)
                                    .weightsDataType(DataType::BF16)
@@ -2012,7 +2052,8 @@ TEST(AttentionApi, ResidualEpilogueArchitectureJsonAndDeserializeRoundTrip) {
     auto restored = std::dynamic_pointer_cast<Api::Attention>(network.getTrainableLayer(previousTrainableLayerCount));
     ASSERT_NE(restored, nullptr);
     EXPECT_TRUE(restored->hasEpilogue());
-    EXPECT_TRUE(restored->getUseCrossAttention());
+    EXPECT_EQ(restored->getKeyInput(), context.getFeatureOutput().value());
+    EXPECT_EQ(restored->getValueInput(), context.getFeatureOutput().value());
     ASSERT_EQ(restored->getEpilogueInputBindings().size(), 1U);
     EXPECT_EQ(restored->getEpilogueInputBindings().front().first, "residual");
     EXPECT_EQ(restored->getEpilogueInputBindings().front().second.getOriginalId(),
@@ -2036,7 +2077,7 @@ TEST(AttentionApi, RejectsInvalidResidualEpilogueBindings) {
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(2)
                      .headDim(4)
                      .outputDataType(DataType::BF16)
@@ -2045,7 +2086,7 @@ TEST(AttentionApi, RejectsInvalidResidualEpilogueBindings) {
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(2)
                      .headDim(4)
                      .outputDataType(DataType::BF16)
@@ -2055,7 +2096,7 @@ TEST(AttentionApi, RejectsInvalidResidualEpilogueBindings) {
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(2)
                      .headDim(4)
                      .outputDataType(DataType::BF16)
@@ -2066,7 +2107,7 @@ TEST(AttentionApi, RejectsInvalidResidualEpilogueBindings) {
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(2)
                      .headDim(4)
                      .outputDataType(DataType::BF16)
@@ -2079,7 +2120,7 @@ TEST(AttentionApi, RejectsInvalidResidualEpilogueBindings) {
         Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::FP16);
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(2)
                      .headDim(4)
                      .outputDataType(DataType::BF16)
@@ -2090,19 +2131,22 @@ TEST(AttentionApi, RejectsInvalidResidualEpilogueBindings) {
 
     Api::Attention::Builder duplicateBuilder;
     duplicateBuilder.network(network)
-        .featureInput(input.getFeatureOutput().value())
+        .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
         .numHeads(2)
         .headDim(4)
         .epilogueInput("residual", residual.getFeatureOutput().value());
     EXPECT_THROW(duplicateBuilder.epilogueInput("residual", residual.getFeatureOutput().value()), std::invalid_argument);
 
-    EXPECT_THROW(static_cast<void>(
-                     Api::Attention::epilogueAuxInput("feature_input", DataType::FP32, DataType::BF16)),
+    EXPECT_THROW(static_cast<void>(Api::Attention::epilogueAuxInput("query_input", DataType::FP32, DataType::BF16)),
+                 std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(Api::Attention::epilogueAuxInput("key_input", DataType::FP32, DataType::BF16)),
+                 std::invalid_argument);
+    EXPECT_THROW(static_cast<void>(Api::Attention::epilogueAuxInput("value_input", DataType::FP32, DataType::BF16)),
                  std::invalid_argument);
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(2)
                      .headDim(4)
                      .outputDataType(DataType::BF16)
@@ -2120,7 +2164,7 @@ TEST(AttentionApi, DeserializeRejectsInvalidResidualEpilogueMetadata) {
     Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, DataType::BF16);
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
+                                   .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                                    .numHeads(2)
                                    .headDim(4)
                                    .weightsDataType(DataType::BF16)
@@ -2185,7 +2229,7 @@ TEST(AttentionApi, TrainingDropoutFusedAdamWUpdateBindsTensorRuntimeScalars) {
         Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(inputRivet.getFeatureOutput().value())
+                                   .queryInput(inputRivet.getFeatureOutput().value()).keyInput(inputRivet.getFeatureOutput().value()).valueInput(inputRivet.getFeatureOutput().value())
                                    .numHeads(2)
                                    .headDim(8)
                                    .weightsDataType(dataType)
@@ -2278,7 +2322,7 @@ TEST(AttentionApi, OutputDropoutResidualUsesResidualPlusDroppedProjectionAndIden
         Api::GradientRivet::Builder().network(network).tensor(residual.getFeatureOutput().value()).build();
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(inputRivet.getFeatureOutput().value())
+                                   .queryInput(inputRivet.getFeatureOutput().value()).keyInput(inputRivet.getFeatureOutput().value()).valueInput(inputRivet.getFeatureOutput().value())
                                    .numHeads(1)
                                    .headDim(8)
                                    .weightsDataType(dataType)
@@ -2360,8 +2404,8 @@ TEST(AttentionApi, OutputDropoutResidualUsesResidualPlusDroppedProjectionAndIden
 
     ASSERT_EQ(physicalAttention->getErrorInputs().size(), 1U);
     ASSERT_TRUE(physicalAttention->getErrorInputs().front().has_value());
-    ASSERT_EQ(physicalAttention->getErrorOutputs().size(), 2U);
-    ASSERT_TRUE(physicalAttention->getErrorOutputs().at(1).has_value());
+    ASSERT_EQ(physicalAttention->getErrorOutputs().size(), 4U);
+    ASSERT_TRUE(physicalAttention->getErrorOutputs().at(3).has_value());
     const vector<float> upstreamGradient = deterministicValues(numElements, 0.10f, 0.31f);
     Impl::Tensor errorInput = physicalAttention->getErrorInputs().front().value();
     Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
@@ -2370,7 +2414,7 @@ TEST(AttentionApi, OutputDropoutResidualUsesResidualPlusDroppedProjectionAndIden
     errorInput.copyFromAsync(errorInputHost, computeStream);
     physicalAttention->backward(errorInput, batchSize);
     const vector<float> residualGradient =
-        readCpuTensor(copyTensorToCpu(physicalAttention->getErrorOutputs().at(1).value(), computeStream));
+        readCpuTensor(copyTensorToCpu(physicalAttention->getErrorOutputs().at(3).value(), computeStream));
     expectAllClose(residualGradient, upstreamGradient, 2.0e-2f, 2.0e-2f);
     computeStream.synchronize();
 }
@@ -2408,7 +2452,7 @@ TEST(AttentionApi, OutputDropoutResidualFusedAdamWUpdateBindsTensorRuntimeScalar
         Api::GradientRivet::Builder().network(network).tensor(residual.getFeatureOutput().value()).build();
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(inputRivet.getFeatureOutput().value())
+                                   .queryInput(inputRivet.getFeatureOutput().value()).keyInput(inputRivet.getFeatureOutput().value()).valueInput(inputRivet.getFeatureOutput().value())
                                    .numHeads(2)
                                    .headDim(8)
                                    .weightsDataType(dataType)
@@ -2515,7 +2559,7 @@ TEST(AttentionApi, DynamicNtkRejectsSequenceLengthMetadataBeyondFp32ExactInteger
     rope.position_offset = static_cast<int64_t>(maxExactFp32Integer - 64);
     EXPECT_NO_THROW((Api::Attention::Builder()
                          .network(boundaryNetwork)
-                         .featureInput(boundaryInput.getFeatureOutput().value())
+                         .queryInput(boundaryInput.getFeatureOutput().value()).keyInput(boundaryInput.getFeatureOutput().value()).valueInput(boundaryInput.getFeatureOutput().value())
                          .numHeads(1)
                          .headDim(8)
                          .ropeOptions(rope)
@@ -2531,7 +2575,7 @@ TEST(AttentionApi, DynamicNtkRejectsSequenceLengthMetadataBeyondFp32ExactInteger
     rope.position_offset = static_cast<int64_t>(maxExactFp32Integer - 63);
     EXPECT_THROW((Api::Attention::Builder()
                       .network(overflowNetwork)
-                      .featureInput(overflowInput.getFeatureOutput().value())
+                      .queryInput(overflowInput.getFeatureOutput().value()).keyInput(overflowInput.getFeatureOutput().value()).valueInput(overflowInput.getFeatureOutput().value())
                       .numHeads(1)
                       .headDim(8)
                       .ropeOptions(rope)
@@ -2548,7 +2592,7 @@ TEST(AttentionApi, DynamicNtkRejectsSequenceLengthMetadataBeyondFp32ExactInteger
     rope.position_offset = 0;
     EXPECT_THROW((Api::Attention::Builder()
                       .network(independentOverflowNetwork)
-                      .featureInput(independentOverflowInput.getFeatureOutput().value())
+                      .queryInput(independentOverflowInput.getFeatureOutput().value()).keyInput(independentOverflowInput.getFeatureOutput().value()).valueInput(independentOverflowInput.getFeatureOutput().value())
                       .numHeads(1)
                       .headDim(8)
                       .ropeOptions(rope)
@@ -2581,7 +2625,7 @@ TEST(AttentionApi, RaggedDynamicNtkRejectsCapacityBeyondFp32ExactIntegerRange) {
 
     EXPECT_THROW((Api::Attention::Builder()
                       .network(network)
-                      .featureInput(tokens)
+                      .queryInput(tokens).keyInput(tokens).valueInput(tokens)
                       .numHeads(1)
                       .headDim(8)
                       .ropeOptions(rope)
@@ -2608,7 +2652,7 @@ TEST(AttentionApi, LongRopeRejectsOriginalMaxBeyondFp32ExactIntegerRangeAndDeser
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
+                                   .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                                    .numHeads(1)
                                    .headDim(8)
                                    .ropeOptions(rope)
@@ -2625,7 +2669,7 @@ TEST(AttentionApi, LongRopeRejectsOriginalMaxBeyondFp32ExactIntegerRangeAndDeser
                                          .build();
     EXPECT_THROW((Api::Attention::Builder()
                       .network(invalidNetwork)
-                      .featureInput(invalidInput.getFeatureOutput().value())
+                      .queryInput(invalidInput.getFeatureOutput().value()).keyInput(invalidInput.getFeatureOutput().value()).valueInput(invalidInput.getFeatureOutput().value())
                       .numHeads(1)
                       .headDim(8)
                       .ropeOptions(invalidRope)
@@ -2652,7 +2696,7 @@ TEST(AttentionApi, BuildsComposedGqaAttentionWithExplicitDimsBiasAndRope) {
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
+                                   .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                                    .numHeads(6)
                                    .numKeyValueHeads(2)
                                    .headDim(16)
@@ -2697,8 +2741,8 @@ TEST(AttentionApi, RopePositionOffsetsSupportSharedConvenienceAndIndependentQuer
 
     Api::Attention legacyShared = Api::Attention::Builder()
                                       .network(network)
-                                      .featureInput(query.getFeatureOutput().value())
-                                      .contextInput(context.getFeatureOutput().value())
+                                      .queryInput(query.getFeatureOutput().value())
+                                      .keyInput(context.getFeatureOutput().value()).valueInput(context.getFeatureOutput().value())
                                       .numHeads(4)
                                       .headDim(8)
                                       .ropeOptions(rope)
@@ -2708,8 +2752,8 @@ TEST(AttentionApi, RopePositionOffsetsSupportSharedConvenienceAndIndependentQuer
 
     Api::Attention explicitShared = Api::Attention::Builder()
                                         .network(network)
-                                        .featureInput(query.getFeatureOutput().value())
-                                        .contextInput(context.getFeatureOutput().value())
+                                        .queryInput(query.getFeatureOutput().value())
+                                        .keyInput(context.getFeatureOutput().value()).valueInput(context.getFeatureOutput().value())
                                         .numHeads(4)
                                         .headDim(8)
                                         .ropeOptions(rope)
@@ -2721,8 +2765,8 @@ TEST(AttentionApi, RopePositionOffsetsSupportSharedConvenienceAndIndependentQuer
 
     Api::Attention independent = Api::Attention::Builder()
                                      .network(network)
-                                     .featureInput(query.getFeatureOutput().value())
-                                     .contextInput(context.getFeatureOutput().value())
+                                     .queryInput(query.getFeatureOutput().value())
+                                     .keyInput(context.getFeatureOutput().value()).valueInput(context.getFeatureOutput().value())
                                      .numHeads(4)
                                      .headDim(8)
                                      .ropeOptions(rope)
@@ -2766,7 +2810,7 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveReleaseCriticalOptions)
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
+                                   .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                                    .numHeads(6)
                                    .numKeyValueHeads(2)
                                    .headDim(16)
@@ -2801,7 +2845,10 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveReleaseCriticalOptions)
     EXPECT_EQ(arch.at("diagonal_left_bound").get<int64_t>(), 3);
     EXPECT_TRUE(arch.at("use_alibi_mask").get<bool>());
     EXPECT_DOUBLE_EQ(arch.at("attention_scale").get<double>(), 0.25);
+    EXPECT_FLOAT_EQ(arch.at("sdpa_dropout_probability").get<float>(), 0.2f);
     EXPECT_FLOAT_EQ(arch.at("dropout_probability").get<float>(), 0.2f);
+    EXPECT_EQ(arch.at("sdpa_dropout_seed").get<int64_t>(), 424242LL);
+    EXPECT_EQ(arch.at("sdpa_dropout_offset").get<int64_t>(), 31337LL);
     EXPECT_EQ(arch.at("dropout_seed").get<int64_t>(), 424242LL);
     EXPECT_EQ(arch.at("dropout_offset").get<int64_t>(), 31337LL);
     EXPECT_EQ(arch.at("parameters").size(), 8U);
@@ -2879,7 +2926,7 @@ TEST(AttentionApi, RejectsProjectionStorageDtypeMismatchInsteadOfDeferringToExpr
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(4)
                      .weightsDataType(DataType::FP16)
                      .outputDataType(DataType::BF16)
@@ -2888,7 +2935,7 @@ TEST(AttentionApi, RejectsProjectionStorageDtypeMismatchInsteadOfDeferringToExpr
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(4)
                      .weightsDataType(DataType::BF16)
                      .outputDataType(DataType::FP16)
@@ -2903,7 +2950,7 @@ TEST(AttentionApi, RejectsInvalidHeadConfiguration) {
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(6)
                      .numKeyValueHeads(4)
                      .headDim(16)
@@ -2918,7 +2965,7 @@ TEST(AttentionApi, RejectsInvalidDropoutProbability) {
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(4)
                      .dropoutProbability(-0.01f)
                      .build(),
@@ -2926,7 +2973,7 @@ TEST(AttentionApi, RejectsInvalidDropoutProbability) {
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(4)
                      .dropoutProbability(1.0f)
                      .build(),
@@ -2938,7 +2985,7 @@ TEST(AttentionApi, RejectsRank3FeatureInputForComposedAttention) {
     Api::NetworkInput input =
         Api::NetworkInput::Builder().network(network).name("tokens").dimensions({2, 8, 64}).dataType(DataType::FP16).build();
 
-    EXPECT_THROW(Api::Attention::Builder().network(network).featureInput(input.getFeatureOutput().value()).numHeads(4).build(),
+    EXPECT_THROW(Api::Attention::Builder().network(network).queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value()).numHeads(4).build(),
                  std::invalid_argument);
 }
 
@@ -2949,7 +2996,7 @@ TEST(AttentionApi, RejectsBottomRightMaskWithAlibi) {
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(4)
                      .maskKind(Impl::AttentionMaskKind::SlidingWindowBottomRight)
                      .diagonalLeftBound(4)
@@ -2965,7 +3012,7 @@ TEST(AttentionApi, RejectsBottomRightMaskWithDropout) {
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(4)
                      .maskKind(Impl::AttentionMaskKind::SlidingWindowBottomRight)
                      .diagonalLeftBound(4)
@@ -2987,15 +3034,15 @@ TEST(AttentionApi, BuildsComposedAttentionWithCanonicalRaggedTensorInput) {
                                   .batchSize(2)
                                   .build();
 
-    Api::Attention attention = Api::Attention::Builder().network(network).featureInput(input).numHeads(4).headDim(16).build();
+    Api::Attention attention = Api::Attention::Builder().network(network).queryInput(input).keyInput(input).valueInput(input).numHeads(4).headDim(16).build();
 
     EXPECT_EQ(attention.getInputNames(),
-              (std::vector<std::string>{"feature_input", "query_row_partition", "key_value_row_partition"}));
+              (std::vector<std::string>{"query_input", "key_input", "value_input", "query_row_partition", "key_value_row_partition"}));
     EXPECT_FALSE(attention.getUseSequenceLengths());
     EXPECT_TRUE(attention.getUseRagged());
-    ASSERT_TRUE(attention.getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(attention.getRaggedQueryInput().has_value());
     ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
-    EXPECT_EQ(attention.getRaggedFeatureInput()->getOffsets(), input.getOffsets());
+    EXPECT_EQ(attention.getRaggedQueryInput()->getOffsets(), input.getOffsets());
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{8, 64}));
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getBatchSize(), 2u);
@@ -3016,7 +3063,7 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveCanonicalRaggedTensorIn
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input)
+                                   .queryInput(input).keyInput(input).valueInput(input)
                                    .numHeads(4)
                                    .headDim(16)
                                    .attentionScale(0.25)
@@ -3028,9 +3075,9 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveCanonicalRaggedTensorIn
     EXPECT_FALSE(arch.contains("use_ragged_offsets"));
     EXPECT_FALSE(arch.contains("query_ragged_offsets_input"));
     EXPECT_FALSE(arch.contains("key_value_ragged_offsets_input"));
-    ASSERT_TRUE(arch.contains("ragged_feature_input"));
+    ASSERT_TRUE(arch.contains("ragged_query_input"));
     ASSERT_TRUE(arch.contains("ragged_feature_output"));
-    EXPECT_EQ(arch.at("ragged_feature_input").at("offsets").at("data_type").get<DataType>(), DataType::UINT64);
+    EXPECT_EQ(arch.at("ragged_query_input").at("offsets").at("data_type").get<DataType>(), DataType::UINT64);
 
     const uint32_t previousTrainableLayerCount = network.getNumTrainableLayers();
     shared_ptr<thor_file::TarReader> archiveReader;
@@ -3040,12 +3087,12 @@ TEST(AttentionApi, ArchitectureJsonAndDeserializePreserveCanonicalRaggedTensorIn
     ASSERT_NE(restored, nullptr);
     EXPECT_FALSE(restored->getUseSequenceLengths());
     EXPECT_TRUE(restored->getUseRagged());
-    ASSERT_TRUE(restored->getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(restored->getRaggedQueryInput().has_value());
     ASSERT_TRUE(restored->getRaggedFeatureOutput().has_value());
-    EXPECT_EQ(restored->getRaggedFeatureInput()->getOffsetsDataType(), DataType::UINT64);
-    EXPECT_EQ(restored->getRaggedFeatureOutput()->getOffsets(), restored->getRaggedFeatureInput()->getOffsets());
+    EXPECT_EQ(restored->getRaggedQueryInput()->getOffsetsDataType(), DataType::UINT64);
+    EXPECT_EQ(restored->getRaggedFeatureOutput()->getOffsets(), restored->getRaggedQueryInput()->getOffsets());
     EXPECT_EQ(restored->getInputNames(),
-              (std::vector<std::string>{"feature_input", "query_row_partition", "key_value_row_partition"}));
+              (std::vector<std::string>{"query_input", "key_input", "value_input", "query_row_partition", "key_value_row_partition"}));
 }
 
 TEST(AttentionApi, DeserializeRejectsRemovedRawRaggedMetadataFields) {
@@ -3059,7 +3106,7 @@ TEST(AttentionApi, DeserializeRejectsRemovedRawRaggedMetadataFields) {
                                   .maxTotalValues(8)
                                   .batchSize(2)
                                   .build();
-    Api::Attention attention = Api::Attention::Builder().network(network).featureInput(input).numHeads(4).headDim(16).build();
+    Api::Attention attention = Api::Attention::Builder().network(network).queryInput(input).keyInput(input).valueInput(input).numHeads(4).headDim(16).build();
     const nlohmann::json arch = attention.architectureJson();
     shared_ptr<thor_file::TarReader> archiveReader;
 
@@ -3097,8 +3144,8 @@ TEST(AttentionApi, BuildsRaggedCrossAttentionWithIndependentPartitionsWithoutRop
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(decoder)
-                                   .contextInput(encoder)
+                                   .queryInput(decoder)
+                                   .keyInput(encoder).valueInput(encoder)
                                    .numHeads(4)
                                    .numKeyValueHeads(2)
                                    .headDim(8)
@@ -3107,16 +3154,17 @@ TEST(AttentionApi, BuildsRaggedCrossAttentionWithIndependentPartitionsWithoutRop
                                    .dropout(0.125f, 17, 23)
                                    .build();
 
-    EXPECT_TRUE(attention.getUseCrossAttention());
+    EXPECT_EQ(attention.getRaggedKeyInput().value(), encoder);
+    EXPECT_EQ(attention.getRaggedValueInput().value(), encoder);
     EXPECT_TRUE(attention.getUseRagged());
-    ASSERT_TRUE(attention.getRaggedContextInput().has_value());
+    ASSERT_TRUE(attention.getRaggedKeyInput().has_value());
     ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
-    EXPECT_EQ(attention.getRaggedFeatureInput()->getOffsetsDataType(), DataType::UINT32);
-    EXPECT_EQ(attention.getRaggedContextInput()->getOffsetsDataType(), DataType::UINT64);
+    EXPECT_EQ(attention.getRaggedQueryInput()->getOffsetsDataType(), DataType::UINT32);
+    EXPECT_EQ(attention.getRaggedKeyInput()->getOffsetsDataType(), DataType::UINT64);
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getValuesDimensions(), (std::vector<uint64_t>{5, 40}));
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), decoder.getOffsets());
     EXPECT_EQ(attention.getInputNames(),
-              (std::vector<std::string>{"feature_input", "context_input", "query_row_partition", "key_value_row_partition"}));
+              (std::vector<std::string>{"query_input", "key_input", "value_input", "query_row_partition", "key_value_row_partition"}));
 }
 
 
@@ -3146,8 +3194,8 @@ TEST(AttentionApi, DenseQueryRaggedKvInfersMixedModeAndRoundTripsArchitecture) {
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(query.getFeatureOutput().value())
-                                   .contextInput(context)
+                                   .queryInput(query.getFeatureOutput().value())
+                                   .keyInput(context).valueInput(context)
                                    .numHeads(4)
                                    .headDim(8)
                                    .ropeOptions(rope)
@@ -3158,21 +3206,21 @@ TEST(AttentionApi, DenseQueryRaggedKvInfersMixedModeAndRoundTripsArchitecture) {
     EXPECT_TRUE(attention.getUseRagged());
     EXPECT_FALSE(attention.getQueryRagged());
     EXPECT_TRUE(attention.getKeyValueRagged());
-    EXPECT_FALSE(attention.getRaggedFeatureInput().has_value());
-    ASSERT_TRUE(attention.getRaggedContextInput().has_value());
+    EXPECT_FALSE(attention.getRaggedQueryInput().has_value());
+    ASSERT_TRUE(attention.getRaggedKeyInput().has_value());
     EXPECT_FALSE(attention.getRaggedFeatureOutput().has_value());
     ASSERT_TRUE(attention.getFeatureOutput().has_value());
     EXPECT_EQ(attention.getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{5, 32}));
     EXPECT_EQ(attention.getInputNames(),
-              (std::vector<std::string>{"feature_input", "context_input", "key_value_row_partition", "key_rope_position_offsets"}));
+              (std::vector<std::string>{"query_input", "key_input", "value_input", "key_value_row_partition", "key_rope_position_offsets"}));
 
     const nlohmann::json arch = attention.architectureJson();
     EXPECT_TRUE(arch.at("use_ragged").get<bool>());
     EXPECT_FALSE(arch.at("query_ragged").get<bool>());
     EXPECT_TRUE(arch.at("key_value_ragged").get<bool>());
-    EXPECT_FALSE(arch.contains("ragged_feature_input"));
+    EXPECT_FALSE(arch.contains("ragged_query_input"));
     EXPECT_FALSE(arch.contains("ragged_feature_output"));
-    EXPECT_TRUE(arch.contains("ragged_context_input"));
+    EXPECT_TRUE(arch.contains("ragged_key_input"));
     EXPECT_EQ(arch.at("rope_query_position_offset").get<int64_t>(), 371);
 
     const uint32_t beforeRestoreCount = network.getNumTrainableLayers();
@@ -3183,8 +3231,8 @@ TEST(AttentionApi, DenseQueryRaggedKvInfersMixedModeAndRoundTripsArchitecture) {
     EXPECT_FALSE(restored->getQueryRagged());
     EXPECT_TRUE(restored->getKeyValueRagged());
     EXPECT_FALSE(restored->getRaggedFeatureOutput().has_value());
-    ASSERT_TRUE(restored->getRaggedContextInput().has_value());
-    EXPECT_EQ(restored->getRaggedContextInput()->getOffsetsDataType(), DataType::UINT64);
+    ASSERT_TRUE(restored->getRaggedKeyInput().has_value());
+    EXPECT_EQ(restored->getRaggedKeyInput()->getOffsetsDataType(), DataType::UINT64);
     EXPECT_EQ(restored->getQueryRopePositionOffset(), 371);
 }
 
@@ -3214,8 +3262,8 @@ TEST(AttentionApi, RaggedQueryDenseKvInfersMixedModeAndRoundTripsArchitecture) {
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(query)
-                                   .contextInput(context.getFeatureOutput().value())
+                                   .queryInput(query)
+                                   .keyInput(context.getFeatureOutput().value()).valueInput(context.getFeatureOutput().value())
                                    .numHeads(4)
                                    .headDim(8)
                                    .ropeOptions(rope)
@@ -3226,19 +3274,19 @@ TEST(AttentionApi, RaggedQueryDenseKvInfersMixedModeAndRoundTripsArchitecture) {
     EXPECT_TRUE(attention.getUseRagged());
     EXPECT_TRUE(attention.getQueryRagged());
     EXPECT_FALSE(attention.getKeyValueRagged());
-    ASSERT_TRUE(attention.getRaggedFeatureInput().has_value());
-    EXPECT_FALSE(attention.getRaggedContextInput().has_value());
+    ASSERT_TRUE(attention.getRaggedQueryInput().has_value());
+    EXPECT_FALSE(attention.getRaggedKeyInput().has_value());
     ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), query.getOffsets());
     EXPECT_EQ(attention.getInputNames(),
-              (std::vector<std::string>{"feature_input", "context_input", "query_row_partition", "query_rope_position_offsets"}));
+              (std::vector<std::string>{"query_input", "key_input", "value_input", "query_row_partition", "query_rope_position_offsets"}));
 
     const nlohmann::json arch = attention.architectureJson();
     EXPECT_TRUE(arch.at("query_ragged").get<bool>());
     EXPECT_FALSE(arch.at("key_value_ragged").get<bool>());
-    EXPECT_TRUE(arch.contains("ragged_feature_input"));
+    EXPECT_TRUE(arch.contains("ragged_query_input"));
     EXPECT_TRUE(arch.contains("ragged_feature_output"));
-    EXPECT_FALSE(arch.contains("ragged_context_input"));
+    EXPECT_FALSE(arch.contains("ragged_key_input"));
 
     const uint32_t beforeRestoreCount = network.getNumTrainableLayers();
     std::shared_ptr<thor_file::TarReader> archiveReader;
@@ -3248,7 +3296,7 @@ TEST(AttentionApi, RaggedQueryDenseKvInfersMixedModeAndRoundTripsArchitecture) {
     EXPECT_TRUE(restored->getQueryRagged());
     EXPECT_FALSE(restored->getKeyValueRagged());
     ASSERT_TRUE(restored->getRaggedFeatureOutput().has_value());
-    EXPECT_EQ(restored->getRaggedFeatureOutput()->getOffsets(), restored->getRaggedFeatureInput()->getOffsets());
+    EXPECT_EQ(restored->getRaggedFeatureOutput()->getOffsets(), restored->getRaggedQueryInput()->getOffsets());
     EXPECT_EQ(restored->getKeyRopePositionOffset(), 40);
 }
 
@@ -3284,8 +3332,8 @@ TEST(AttentionApi, MixedCrossAttentionModesPlaceWithRopeForTraining) {
         rope.output_dtype = DataType::FP16;
         Api::Attention attention = Api::Attention::Builder()
                                        .network(network)
-                                       .featureInput(query.getFeatureOutput().value())
-                                       .contextInput(context)
+                                       .queryInput(query.getFeatureOutput().value())
+                                       .keyInput(context).valueInput(context)
                                        .numHeads(1)
                                        .headDim(16)
                                        .ropeOptions(rope)
@@ -3337,8 +3385,8 @@ TEST(AttentionApi, MixedCrossAttentionModesPlaceWithRopeForTraining) {
         rope.output_dtype = DataType::FP16;
         Api::Attention attention = Api::Attention::Builder()
                                        .network(network)
-                                       .featureInput(query)
-                                       .contextInput(context.getFeatureOutput().value())
+                                       .queryInput(query)
+                                       .keyInput(context.getFeatureOutput().value()).valueInput(context.getFeatureOutput().value())
                                        .numHeads(1)
                                        .headDim(16)
                                        .ropeOptions(rope)
@@ -3419,8 +3467,8 @@ TEST(AttentionApi, DenseQueryRaggedKvRopeMatchesUniformRaggedQueryReference) {
 
     Api::Attention mixed = Api::Attention::Builder()
                                .network(network)
-                               .featureInput(denseQuery.getFeatureOutput().value())
-                               .contextInput(context)
+                               .queryInput(denseQuery.getFeatureOutput().value())
+                               .keyInput(context).valueInput(context)
                                .numHeads(1)
                                .headDim(features)
                                .valueDim(features)
@@ -3435,8 +3483,8 @@ TEST(AttentionApi, DenseQueryRaggedKvRopeMatchesUniformRaggedQueryReference) {
                                .build();
     Api::Attention raggedReference = Api::Attention::Builder()
                                          .network(network)
-                                         .featureInput(raggedQuery)
-                                         .contextInput(context)
+                                         .queryInput(raggedQuery)
+                                         .keyInput(context).valueInput(context)
                                          .numHeads(1)
                                          .headDim(features)
                                          .valueDim(features)
@@ -3632,8 +3680,8 @@ TEST(AttentionApi, DenseQueryRaggedKvMatchesRightAlignedPaddedMaskedReference) {
 
     Api::Attention nativeRagged = Api::Attention::Builder()
                                       .network(network)
-                                      .featureInput(query.getFeatureOutput().value())
-                                      .contextInput(raggedContext)
+                                      .queryInput(query.getFeatureOutput().value())
+                                      .keyInput(raggedContext).valueInput(raggedContext)
                                       .numHeads(1)
                                       .headDim(features)
                                       .valueDim(features)
@@ -3649,8 +3697,8 @@ TEST(AttentionApi, DenseQueryRaggedKvMatchesRightAlignedPaddedMaskedReference) {
                                       .build();
     Api::Attention paddedReference = Api::Attention::Builder()
                                          .network(network)
-                                         .featureInput(query.getFeatureOutput().value())
-                                         .contextInput(paddedContext.getFeatureOutput().value())
+                                         .queryInput(query.getFeatureOutput().value())
+                                         .keyInput(paddedContext.getFeatureOutput().value()).valueInput(paddedContext.getFeatureOutput().value())
                                          .scoreBiasInput(paddedMask.getFeatureOutput().value())
                                          .numHeads(1)
                                          .headDim(features)
@@ -3850,8 +3898,8 @@ TEST(AttentionApi, RaggedQueryDenseKvMatchesRightAlignedPaddedQueryReference) {
 
     Api::Attention nativeRagged = Api::Attention::Builder()
                                       .network(network)
-                                      .featureInput(raggedQuery)
-                                      .contextInput(context.getFeatureOutput().value())
+                                      .queryInput(raggedQuery)
+                                      .keyInput(context.getFeatureOutput().value()).valueInput(context.getFeatureOutput().value())
                                       .numHeads(1)
                                       .headDim(features)
                                       .valueDim(features)
@@ -3867,8 +3915,8 @@ TEST(AttentionApi, RaggedQueryDenseKvMatchesRightAlignedPaddedQueryReference) {
                                       .build();
     Api::Attention paddedReference = Api::Attention::Builder()
                                          .network(network)
-                                         .featureInput(paddedQuery.getFeatureOutput().value())
-                                         .contextInput(context.getFeatureOutput().value())
+                                         .queryInput(paddedQuery.getFeatureOutput().value())
+                                         .keyInput(context.getFeatureOutput().value()).valueInput(context.getFeatureOutput().value())
                                          .numHeads(1)
                                          .headDim(features)
                                          .valueDim(features)
@@ -4041,7 +4089,7 @@ TEST(AttentionApi, RaggedRopeAllowsSelfAttentionAndIndependentCrossPartitions) {
                                       .build();
         EXPECT_NO_THROW(Api::Attention::Builder()
                             .network(network)
-                            .featureInput(input)
+                            .queryInput(input).keyInput(input).valueInput(input)
                             .numHeads(4)
                             .headDim(16)
                             .ropeOptions(rope)
@@ -4070,19 +4118,18 @@ TEST(AttentionApi, RaggedRopeAllowsSelfAttentionAndIndependentCrossPartitions) {
                                         .build();
         Api::Attention attention = Api::Attention::Builder()
                                        .network(network)
-                                       .featureInput(query)
-                                       .contextInput(context)
+                                       .queryInput(query)
+                                       .keyInput(context).valueInput(context)
                                        .numHeads(4)
                                        .headDim(16)
                                        .ropeOptions(rope)
                                        .build();
         EXPECT_EQ(attention.getInputNames(),
-                  (std::vector<std::string>{"feature_input",
-                                            "context_input",
+                  (std::vector<std::string>{"query_input", "key_input", "value_input",
                                             "query_row_partition",
                                             "key_value_row_partition"}));
-        EXPECT_EQ(attention.getRaggedFeatureInput()->getOffsetsDataType(), DataType::UINT32);
-        EXPECT_EQ(attention.getRaggedContextInput()->getOffsetsDataType(), DataType::UINT64);
+        EXPECT_EQ(attention.getRaggedQueryInput()->getOffsetsDataType(), DataType::UINT32);
+        EXPECT_EQ(attention.getRaggedKeyInput()->getOffsetsDataType(), DataType::UINT64);
     }
 }
 
@@ -4117,8 +4164,8 @@ TEST(AttentionApi, RaggedRopePerRowOriginsArePublicInputsAndRoundTripThroughArch
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(query)
-                                   .contextInput(context)
+                                   .queryInput(query)
+                                   .keyInput(context).valueInput(context)
                                    .numHeads(4)
                                    .headDim(8)
                                    .ropeOptions(rope)
@@ -4131,8 +4178,7 @@ TEST(AttentionApi, RaggedRopePerRowOriginsArePublicInputsAndRoundTripThroughArch
     EXPECT_EQ(attention.getQueryRopePositionOffsetsInput().value(), queryOrigins.getFeatureOutput().value());
     EXPECT_EQ(attention.getKeyRopePositionOffsetsInput().value(), keyOrigins.getFeatureOutput().value());
     EXPECT_EQ(attention.getInputNames(),
-              (std::vector<std::string>{"feature_input",
-                                        "context_input",
+              (std::vector<std::string>{"query_input", "key_input", "value_input",
                                         "query_row_partition",
                                         "key_value_row_partition",
                                         "query_rope_position_offsets",
@@ -4155,8 +4201,8 @@ TEST(AttentionApi, RaggedRopePerRowOriginsArePublicInputsAndRoundTripThroughArch
     ASSERT_TRUE(restored->getKeyRopePositionOffsetsInput().has_value());
     EXPECT_EQ(restored->getQueryRopePositionOffsetsInput().value(), queryOrigins.getFeatureOutput().value());
     EXPECT_EQ(restored->getKeyRopePositionOffsetsInput().value(), keyOrigins.getFeatureOutput().value());
-    EXPECT_EQ(restored->getRaggedFeatureInput()->getOffsetsDataType(), DataType::UINT32);
-    EXPECT_EQ(restored->getRaggedContextInput()->getOffsetsDataType(), DataType::UINT64);
+    EXPECT_EQ(restored->getRaggedQueryInput()->getOffsetsDataType(), DataType::UINT32);
+    EXPECT_EQ(restored->getRaggedKeyInput()->getOffsetsDataType(), DataType::UINT64);
 }
 
 TEST(AttentionApi, RaggedRopePerRowOriginsRejectInvalidInputsAndDenseMode) {
@@ -4171,7 +4217,7 @@ TEST(AttentionApi, RaggedRopePerRowOriginsRejectInvalidInputsAndDenseMode) {
             Api::NetworkInput::Builder().network(network).name("origins").dimensions({1}).dataType(DataType::INT32).build();
         EXPECT_THROW(Api::Attention::Builder()
                          .network(network)
-                         .featureInput(tokens.getFeatureOutput().value())
+                         .queryInput(tokens.getFeatureOutput().value()).keyInput(tokens.getFeatureOutput().value()).valueInput(tokens.getFeatureOutput().value())
                          .numHeads(4)
                          .headDim(8)
                          .ropeOptions(rope)
@@ -4197,7 +4243,7 @@ TEST(AttentionApi, RaggedRopePerRowOriginsRejectInvalidInputsAndDenseMode) {
 
         EXPECT_THROW(Api::Attention::Builder()
                          .network(network)
-                         .featureInput(tokens)
+                         .queryInput(tokens).keyInput(tokens).valueInput(tokens)
                          .numHeads(4)
                          .headDim(8)
                          .ropeOptions(rope)
@@ -4206,7 +4252,7 @@ TEST(AttentionApi, RaggedRopePerRowOriginsRejectInvalidInputsAndDenseMode) {
                      std::invalid_argument);
         EXPECT_THROW(Api::Attention::Builder()
                          .network(network)
-                         .featureInput(tokens)
+                         .queryInput(tokens).keyInput(tokens).valueInput(tokens)
                          .numHeads(4)
                          .headDim(8)
                          .ropeOptions(rope)
@@ -4236,8 +4282,8 @@ TEST(AttentionApi, RaggedRopePerRowOriginsRejectInvalidInputsAndDenseMode) {
 
         EXPECT_THROW(Api::Attention::Builder()
                          .network(network)
-                         .featureInput(query)
-                         .contextInput(context)
+                         .queryInput(query)
+                         .keyInput(context).valueInput(context)
                          .numHeads(4)
                          .headDim(8)
                          .ropeOptions(rope)
@@ -4284,8 +4330,8 @@ TEST(AttentionApi, RaggedCrossAttentionRopePerRowOriginsExecuteWithIndependentPa
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(query)
-                                   .contextInput(context)
+                                   .queryInput(query)
+                                   .keyInput(context).valueInput(context)
                                    .numHeads(1)
                                    .headDim(features)
                                    .valueDim(features)
@@ -4433,8 +4479,8 @@ TEST(AttentionApi, RaggedCrossAttentionWithRopeAllowsSharedPartition) {
     rope.base = 10000.0;
     EXPECT_NO_THROW(Api::Attention::Builder()
                         .network(network)
-                        .featureInput(query)
-                        .contextInput(context)
+                        .queryInput(query)
+                        .keyInput(context).valueInput(context)
                         .numHeads(4)
                         .headDim(8)
                         .ropeOptions(rope)
@@ -4454,7 +4500,7 @@ TEST(AttentionApi, RejectsInvalidVariableLengthInputs) {
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .querySequenceLengthsInput(badSequenceLengthsDtype.getFeatureOutput().value())
                      .keyValueSequenceLengthsInput(badSequenceLengthsDtype.getFeatureOutput().value())
                      .numHeads(4)
@@ -4462,7 +4508,7 @@ TEST(AttentionApi, RejectsInvalidVariableLengthInputs) {
                  std::invalid_argument);
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .querySequenceLengthsInput(badSequenceLengthsShape.getFeatureOutput().value())
                      .keyValueSequenceLengthsInput(badSequenceLengthsShape.getFeatureOutput().value())
                      .numHeads(4)
@@ -4479,7 +4525,7 @@ TEST(AttentionApi, RejectsInvalidVariableLengthInputs) {
                                    .build();
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(ragged)
+                     .queryInput(ragged).keyInput(ragged).valueInput(ragged)
                      .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
                      .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
                      .numHeads(4)
@@ -4530,7 +4576,7 @@ TEST(AttentionApi, ForwardWithCanonicalRaggedTensorMatchesPackedReference) {
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input)
+                                   .queryInput(input).keyInput(input).valueInput(input)
                                    .numHeads(c.numHeads)
                                    .numKeyValueHeads(c.numKeyValueHeads)
                                    .headDim(c.headDim)
@@ -4606,7 +4652,7 @@ TEST(AttentionApi, RaggedAttentionResidualAddUsesOffsetsRuntimeWithoutValuesMeta
                                   .build();
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input)
+                                   .queryInput(input).keyInput(input).valueInput(input)
                                    .numHeads(2)
                                    .headDim(16)
                                    .hasBias(false)
@@ -4754,7 +4800,7 @@ TEST(AttentionApi, RaggedDynamicNtkUsesLongestLogicalRowNotPackedCapacity) {
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input)
+                                   .queryInput(input).keyInput(input).valueInput(input)
                                    .numHeads(c.numHeads)
                                    .numKeyValueHeads(c.numKeyValueHeads)
                                    .headDim(c.headDim)
@@ -4852,7 +4898,7 @@ TEST(AttentionApi, ForwardWithSequenceLengthsMatchesPaddingMaskReference) {
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
+                                   .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                                    .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
                      .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
                                    .numHeads(c.numHeads)
@@ -4934,7 +4980,7 @@ TEST(AttentionApi, DenseVariableLengthLongRopeUsesActiveMaximumNotPaddedSequence
 
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
+                                   .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                                    .querySequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
                                    .keyValueSequenceLengthsInput(sequenceLengths.getFeatureOutput().value())
                                    .numHeads(c.numHeads)
@@ -5009,7 +5055,7 @@ TEST(AttentionApi, DropoutIsTrainingOnlyForValidationAndInference) {
                                       .build();
         Api::Attention::Builder builder;
         builder.network(network)
-            .featureInput(input.getFeatureOutput().value())
+            .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
             .numHeads(c.numHeads)
             .numKeyValueHeads(c.numKeyValueHeads)
             .headDim(c.headDim)
@@ -5085,7 +5131,7 @@ TEST(AttentionApi, ForwardUniformAttentionMatchesBshdProjectionLayoutReference) 
         Api::NetworkInput::Builder().network(network).name("tokens").dimensions({sequenceLength, inputFeatures}).dataType(dataType).build();
     Api::Attention attention = Api::Attention::Builder()
                                    .network(network)
-                                   .featureInput(input.getFeatureOutput().value())
+                                   .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                                    .numHeads(numHeads)
                                    .numKeyValueHeads(numHeads)
                                    .headDim(headDim)
@@ -5106,12 +5152,8 @@ TEST(AttentionApi, ForwardUniformAttentionMatchesBshdProjectionLayoutReference) 
 
     PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, input, output, attention, batchSize, true);
     ASSERT_EQ(fixture.stampedNetwork->getNumTrainableLayers(), 1u);
-    if constexpr (Api::Attention::USE_PACKED_QKV_PROJECTION) {
-        ASSERT_EQ(fixture.physicalAttention->listParameters(), (vector<string>{"qkv_weights", "output_weights"}));
-    } else {
-        ASSERT_EQ(fixture.physicalAttention->listParameters(),
-                  (vector<string>{"query_weights", "key_weights", "value_weights", "output_weights"}));
-    }
+    ASSERT_EQ(fixture.physicalAttention->listParameters(),
+              (vector<string>{"query_weights", "key_weights", "value_weights", "output_weights"}));
 
     vector<float> queryWeights(inputFeatures * numHeads * headDim, 0.0f);
     vector<float> keyWeights(inputFeatures * numHeads * headDim, 0.0f);
@@ -5384,7 +5426,7 @@ TEST(AttentionApi, PlacedSaveLoadRoundTripRestoresBf16ProjectionBytesAndExecutio
                                       .build();
         Api::Attention attention = Api::Attention::Builder()
                                        .network(network)
-                                       .featureInput(input.getFeatureOutput().value())
+                                       .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                                        .numHeads(1)
                                        .headDim(featureWidth)
                                        .valueDim(featureWidth)
@@ -5510,7 +5552,7 @@ TEST(AttentionApi, RejectsCausalTopLeftAlibiWithPositiveRightBound) {
 
     EXPECT_THROW(Api::Attention::Builder()
                      .network(network)
-                     .featureInput(input.getFeatureOutput().value())
+                     .queryInput(input.getFeatureOutput().value()).keyInput(input.getFeatureOutput().value()).valueInput(input.getFeatureOutput().value())
                      .numHeads(4)
                      .maskKind(Impl::AttentionMaskKind::CausalTopLeft)
                      .diagonalRightBound(1)

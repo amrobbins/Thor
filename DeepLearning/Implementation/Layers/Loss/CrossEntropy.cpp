@@ -144,8 +144,6 @@ void CrossEntropy::infer(std::optional<Tensor> predictions, std::optional<Tensor
     THOR_THROW_IF_FALSE(predictions.value().getDescriptor().getDataType() == DataType::FP16 ||
                         predictions.value().getDescriptor().getDataType() == DataType::FP32);
 
-    stream.waitEvent(labelsStream.putEvent());
-
     if (predictions.value().getDescriptor().getDataType() == DataType::FP16)
         launchCrossEntropyWithFP16Predictions();
     else if (predictions.value().getDescriptor().getDataType() == DataType::FP32)

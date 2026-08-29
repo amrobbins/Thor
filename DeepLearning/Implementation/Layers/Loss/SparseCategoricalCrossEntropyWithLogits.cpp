@@ -115,6 +115,12 @@ void SparseCategoricalCrossEntropyWithLogits::initialize() {
     maskReceived = false;
 }
 
+void SparseCategoricalCrossEntropyWithLogits::cleanup() {
+    maskReadyEvent = Event();
+    maskReusableEvent = Event();
+    Loss::cleanup();
+}
+
 void SparseCategoricalCrossEntropyWithLogits::compileImpl() {
     Layer::compileImpl();
     THOR_THROW_IF_FALSE(featureInput.has_value());
@@ -166,15 +172,7 @@ void SparseCategoricalCrossEntropyWithLogits::infer(optional<Tensor> logits, opt
     THOR_THROW_IF_FALSE(compiled);
 
     ScopedGpu scopedGpu(logits.value().getPlacement().getDeviceNum());
-    stream.waitEvent(labelsStream.putEvent());
-    if (maskInput.has_value())
-        stream.waitEvent(maskStream.putEvent());
-
     launchForCurrentTypes();
-
-    labelsStream.waitEvent(stream.putEvent());
-    if (maskInput.has_value())
-        maskStream.waitEvent(stream.putEvent());
 }
 
 void SparseCategoricalCrossEntropyWithLogits::backProp(optional<Tensor> labels, optional<Tensor> logits, optional<Tensor> lossGradient, Stream stream) {
@@ -209,11 +207,7 @@ void SparseCategoricalCrossEntropyWithLogits::forward(optional<Tensor> inputTens
         if (maskInput.has_value() && inputTensor.value() == maskInput.value()) {
             THOR_THROW_IF_FALSE(maskReceived == false);
             maskReceived = true;
-            if (featureInputReceived && labelsReceived) {
-                stream.waitEvent(labelsStream.putEvent());
-                stream.waitEvent(maskStream.putEvent());
-                forward(nullopt, validationPass);
-            }
+            advanceDataIfReady(validationPass);
             return;
         }
         THOR_UNREACHABLE();
@@ -231,6 +225,11 @@ void SparseCategoricalCrossEntropyWithLogits::forward(optional<Tensor> inputTens
     infer(featureInput, featureOutput, stream);
     maskInvalidLossTail();
 
+    if (maskInput.has_value())
+        maskStream.waitFor(stream, maskReusableEvent);
+    if (isInferenceOnly() || validationPass)
+        markLabelsReusableAfterCompute();
+
     if (nextLayer.has_value())
         nextLayer.value()->forward(featureOutput, validationPass, currentValidExampleCount);
 
@@ -244,9 +243,9 @@ void SparseCategoricalCrossEntropyWithLogits::forward(optional<Tensor> inputTens
 
 void SparseCategoricalCrossEntropyWithLogits::advanceDataIfReady(bool validationPass) {
     if (featureInputReceived && labelsReceived && (!maskInput.has_value() || maskReceived)) {
-        stream.waitEvent(labelsStream.putEvent());
+        waitForLabelsReady();
         if (maskInput.has_value())
-            stream.waitEvent(maskStream.putEvent());
+            stream.waitFor(maskStream, maskReadyEvent);
         forward(nullopt, validationPass);
     }
 }

@@ -64,6 +64,10 @@ class InstanceNorm : public TrainableLayer {
     std::vector<Tensor> scratchDScale;
     std::vector<Tensor> scratchDBias;
     std::optional<Tensor> scratchErrorOutput;
+    // One stable dependency event per connection. The returned Event copy is
+    // consumed immediately by TrainableLayer; subsequent passes re-record the
+    // same cudaEvent_t after all waits for the previous generation were issued.
+    std::vector<Event> backwardCompletionEvents;
 
     // InstanceNorm is a MultiConnectionLayer. Every connection owns both its
     // finalized cuDNN Frontend executable and mutable workspace. Equivalent

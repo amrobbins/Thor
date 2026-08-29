@@ -104,6 +104,9 @@ class TensorFanout : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(placement.getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
         const uint32_t presentErrorInputCount = numPresentTensors(errorInputs);
+        backwardInputReadyEvents.clear();
+        backwardInputReadyEvents.resize(streams.size());
+        inputReadyEvent = Event();
         CUDA_CHECK(cudaMalloc(&errorInputArray_d, presentErrorInputCount * sizeof(void *)));
 
         if (presentErrorInputCount > 0) {
@@ -240,6 +243,8 @@ class TensorFanout : public MultiConnectionLayer {
             CUDA_CHECK(cudaFree(errorInputArray_d));
         }
         errorInputArray_d = nullptr;
+        inputReadyEvent = Event();
+        backwardInputReadyEvents.clear();
     }
 
     void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream, unsigned int connectionNumber) override {}
@@ -251,7 +256,7 @@ class TensorFanout : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(featureInput.value() == featureInputs[0]);
 
         // Synchronize all streams at the point at which inputTensor is populated.
-        Event inputReadyEvent = streams[0].putEvent();
+        streams[0].putEvent(inputReadyEvent);
         for (unsigned int i = 1; i < streams.size(); ++i)
             streams[i].waitEvent(inputReadyEvent);
 
@@ -281,7 +286,7 @@ class TensorFanout : public MultiConnectionLayer {
                 // error tensor is also the upstream error tensor.  In that case
                 // backprop is a stream sync plus a direct upstream call.
                 for (unsigned int i = 1; i < errorInputs.size(); ++i)
-                    streams[0].waitEvent(streams[i].putEvent());
+                    streams[0].waitFor(streams[i], backwardInputReadyEvents[i]);
                 previousLayers[0].value()->backward(errorOutputs[0], batchSize);
                 return;
             }
@@ -300,7 +305,7 @@ class TensorFanout : public MultiConnectionLayer {
         stillWaitingForErrorInputTensors = allErrorInputTensorIds;
 
         for (unsigned int i = 1; i < errorInputs.size(); ++i)
-            streams[0].waitEvent(streams[i].putEvent());
+            streams[0].waitFor(streams[i], backwardInputReadyEvents[i]);
 
         sumErrorInputsByDType();
 
@@ -385,6 +390,8 @@ class TensorFanout : public MultiConnectionLayer {
     }
 
     void *errorInputArray_d = nullptr;
+    Event inputReadyEvent;
+    std::vector<Event> backwardInputReadyEvents;
 };
 
 }  // namespace ThorImplementation

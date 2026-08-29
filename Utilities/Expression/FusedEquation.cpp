@@ -1,5 +1,6 @@
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Common/GpuMemoryDiagnostics.h"
+#include "Utilities/Common/ReusableEventPool.h"
 #include <optional>
 #include <array>
 #include <algorithm>
@@ -4342,6 +4343,150 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
     return node_dims;
 }
 
+static uint64_t computeFusedStageNodeFlops(const PhysicalExpression& expr,
+                                            const std::vector<std::vector<uint64_t>>& node_dims,
+                                            size_t node_idx) {
+    if (node_idx >= expr.nodes.size() || node_idx >= node_dims.size()) {
+        throw std::runtime_error("Fused-stage FLOP accounting node index is out of range.");
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    switch (node.op) {
+        case ExprOp::INPUT:
+        case ExprOp::RUNTIME_SCALAR:
+        case ExprOp::TENSOR_RUNTIME_SCALAR:
+        case ExprOp::SCALAR_FP:
+        case ExprOp::FILL:
+        case ExprOp::RAGGED_VALUEWISE_EXTENT:
+        case ExprOp::RESHAPE:
+        case ExprOp::STRIDED_VIEW:
+        case ExprOp::STRIDED_VIEW_BACKWARD:
+        case ExprOp::UNSQUEEZE:
+        case ExprOp::SQUEEZE:
+        case ExprOp::TRANSPOSE:
+        case ExprOp::TAKE_ALONG_AXIS:
+            return 0;
+
+        case ExprOp::ADD:
+        case ExprOp::SUB:
+        case ExprOp::MUL:
+        case ExprOp::DIV:
+        case ExprOp::POW:
+        case ExprOp::EQUAL:
+        case ExprOp::NOT_EQUAL:
+        case ExprOp::LESS:
+        case ExprOp::LESS_EQUAL:
+        case ExprOp::GREATER:
+        case ExprOp::GREATER_EQUAL:
+        case ExprOp::LOGICAL_AND:
+        case ExprOp::LOGICAL_OR:
+        case ExprOp::WHERE:
+        case ExprOp::NEG:
+        case ExprOp::ABS:
+        case ExprOp::CEIL:
+        case ExprOp::FLOOR:
+        case ExprOp::ROUND:
+        case ExprOp::TRUNC:
+        case ExprOp::SIN:
+        case ExprOp::COS:
+        case ExprOp::TAN:
+        case ExprOp::ASIN:
+        case ExprOp::ACOS:
+        case ExprOp::ATAN:
+        case ExprOp::SINH:
+        case ExprOp::COSH:
+        case ExprOp::ASINH:
+        case ExprOp::ACOSH:
+        case ExprOp::ATANH:
+        case ExprOp::ERF:
+        case ExprOp::ERFC:
+        case ExprOp::ERFCX:
+        case ExprOp::ERFINV:
+        case ExprOp::ERFCINV:
+        case ExprOp::TGAMMA:
+        case ExprOp::LGAMMA:
+        case ExprOp::DIGAMMA:
+        case ExprOp::EXP:
+        case ExprOp::EXPM1:
+        case ExprOp::EXP2:
+        case ExprOp::EXP10:
+        case ExprOp::LN:
+        case ExprOp::LOG1P:
+        case ExprOp::LOG2:
+        case ExprOp::LOG10:
+        case ExprOp::SQRT:
+        case ExprOp::TANH:
+        case ExprOp::NORMCDF:
+        case ExprOp::LOGICAL_NOT:
+        case ExprOp::CAST:
+        case ExprOp::BROADCAST_TO:
+        case ExprOp::ROPE:
+        case ExprOp::MIN:
+        case ExprOp::MAX:
+        case ExprOp::MIN_GRAD_LEFT:
+        case ExprOp::MIN_GRAD_RIGHT:
+        case ExprOp::MAX_GRAD_LEFT:
+        case ExprOp::MAX_GRAD_RIGHT:
+            return checkedMulU64(
+                numelFromDims(node_dims[node_idx]), perElementSemanticFlops(node.op), "computeFusedStageFlops");
+
+        case ExprOp::REDUCE_SUM:
+        case ExprOp::REDUCE_PROD:
+        case ExprOp::REDUCE_MIN:
+        case ExprOp::REDUCE_MAX:
+        case ExprOp::REDUCE_ARGMIN:
+        case ExprOp::REDUCE_ARGMAX:
+        case ExprOp::REDUCE_AVG:
+        case ExprOp::REDUCE_NORM1:
+        case ExprOp::REDUCE_NORM2: {
+            const uint64_t out_numel = numelFromDims(node_dims[node_idx]);
+            const uint64_t red_extent = reductionExtent(node_dims[node.lhs], node.reduction_axes);
+            return reductionSemanticFlops(node.op, out_numel, red_extent);
+        }
+
+        case ExprOp::CUDA_KERNEL_OUTPUT:
+        case ExprOp::SCAN:
+        case ExprOp::SEGMENTED_SCAN:
+        case ExprOp::SEGMENTED_REDUCE_SUM:
+        case ExprOp::SEGMENTED_REDUCE_MIN:
+        case ExprOp::SEGMENTED_REDUCE_MAX:
+        case ExprOp::SEGMENTED_REDUCE_MEAN:
+        case ExprOp::SEGMENTED_BROADCAST:
+        case ExprOp::EMBEDDING_LOOKUP:
+        case ExprOp::SOFTMAX:
+        case ExprOp::ATTENTION:
+        case ExprOp::ATTENTION_BACKWARD_Q:
+        case ExprOp::ATTENTION_BACKWARD_K:
+        case ExprOp::ATTENTION_BACKWARD_V:
+        case ExprOp::ATTENTION_BACKWARD_BIAS:
+        case ExprOp::MATMUL:
+        case ExprOp::GEMM:
+        case ExprOp::CONV2D:
+        case ExprOp::CONV2D_BACKWARD_DATA:
+        case ExprOp::CONV2D_BACKWARD_FILTER:
+        case ExprOp::CONV3D:
+        case ExprOp::CONV3D_BACKWARD_DATA:
+        case ExprOp::CONV3D_BACKWARD_FILTER:
+        case ExprOp::RAGGED_CONV1D_CAUSAL:
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA:
+        case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER:
+        case ExprOp::RMSNORM:
+        case ExprOp::LAYERNORM:
+        case ExprOp::RMSNORM_BACKWARD_X:
+        case ExprOp::RMSNORM_BACKWARD_SCALE:
+        case ExprOp::REDUCE_MIN_BACKWARD:
+        case ExprOp::REDUCE_MAX_BACKWARD:
+        case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
+        case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
+        case ExprOp::SCAN_MIN_BACKWARD:
+        case ExprOp::SCAN_MAX_BACKWARD:
+        case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
+        case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD:
+            throw std::runtime_error("Unexpected staged op inside fused kernel while computing FLOPs.");
+    }
+    throw std::runtime_error("Unknown fused expression op while computing FLOPs.");
+}
+
 static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
                                        const std::vector<std::vector<uint64_t>>& stage_input_dims,
                                        const std::vector<CompiledStageOutput>& outputs) {
@@ -4350,157 +4495,202 @@ static uint64_t computeFusedStageFlops(const PhysicalExpression& expr,
         collectReachableLocalNodes(expr, out.local_node_idx, reachable_nodes);
     }
 
-    const std::vector<std::vector<uint64_t>> node_dims = inferFusedStageNodeDimsForReachable(expr, stage_input_dims, reachable_nodes);
+    const std::vector<std::vector<uint64_t>> node_dims =
+        inferFusedStageNodeDimsForReachable(expr, stage_input_dims, reachable_nodes);
 
     uint64_t total = 0;
+    for (size_t i = 0; i < expr.nodes.size(); ++i) {
+        if (!reachable_nodes.contains(static_cast<uint32_t>(i))) {
+            continue;
+        }
+        total = checkedAddU64(total, computeFusedStageNodeFlops(expr, node_dims, i), "computeFusedStageFlops");
+    }
+    return total;
+}
+
+struct RaggedFusedStageFlopModelSpec {
+    uint32_t offsets_input_slot = UINT32_MAX;
+    uint64_t batch_size = 0;
+    uint64_t max_active_values = 0;
+    uint64_t flops_per_active_value = 0;
+    uint64_t fixed_flops_when_nonempty = 0;
+};
+
+static std::optional<RaggedFusedStageFlopModelSpec> computeActiveExtentFusedStageFlopModel(
+    const PhysicalExpression& expr,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims,
+    const std::vector<CompiledStageOutput>& outputs,
+    uint64_t max_active_values,
+    const std::unordered_set<uint32_t>& active_extent_input_slots) {
+    if (max_active_values == 0 || active_extent_input_slots.empty()) {
+        return std::nullopt;
+    }
+
+    std::unordered_set<uint32_t> reachable_nodes;
+    for (const CompiledStageOutput& out : outputs) {
+        collectReachableLocalNodes(expr, out.local_node_idx, reachable_nodes);
+    }
+    const std::vector<std::vector<uint64_t>> node_dims =
+        inferFusedStageNodeDimsForReachable(expr, stage_input_dims, reachable_nodes);
+
+    auto carries_active_extent = [&](const std::vector<uint64_t>& dims) {
+        if (dims.empty()) {
+            return false;
+        }
+        if (dims.size() >= 2) {
+            return dims.front() == max_active_values;
+        }
+        return dims.front() >= max_active_values && dims.front() % max_active_values == 0;
+    };
+
+    // Track whether each fused node belongs to the packed-ragged value domain.
+    // This is intentionally driven from the actual packed input slots, not by
+    // inventing smaller synthetic tensor shapes.  Views, autodiff scatters and
+    // row-local broadcasts can preserve the runtime active prefix while keeping
+    // placement-time capacity shapes that are not mutually broadcastable after
+    // an artificial capacity rewrite.
+    std::vector<bool> active_extent_node(expr.nodes.size(), false);
+    uint64_t flops_per_active_value = 0;
+    uint64_t fixed_flops_when_nonempty = 0;
 
     for (size_t i = 0; i < expr.nodes.size(); ++i) {
-        const uint32_t node_idx = static_cast<uint32_t>(i);
-        if (!reachable_nodes.contains(node_idx)) {
+        if (!reachable_nodes.contains(static_cast<uint32_t>(i))) {
             continue;
         }
 
         const ExprNode& node = expr.nodes[i];
-        switch (node.op) {
-            case ExprOp::INPUT:
-            case ExprOp::RUNTIME_SCALAR:
-            case ExprOp::TENSOR_RUNTIME_SCALAR:
-            case ExprOp::SCALAR_FP:
-            case ExprOp::FILL:
-            case ExprOp::RAGGED_VALUEWISE_EXTENT:
-            case ExprOp::RESHAPE:
-            case ExprOp::STRIDED_VIEW:
-            case ExprOp::STRIDED_VIEW_BACKWARD:
-            case ExprOp::UNSQUEEZE:
-            case ExprOp::SQUEEZE:
-            case ExprOp::TRANSPOSE:
-            case ExprOp::TAKE_ALONG_AXIS:
-                break;
+        if (node.op == ExprOp::INPUT) {
+            active_extent_node[i] = active_extent_input_slots.contains(node.input_slot);
+        } else {
+            auto inherit = [&](uint32_t input_node) {
+                return input_node != UINT32_MAX && input_node < i && active_extent_node[input_node];
+            };
+            active_extent_node[i] = inherit(node.lhs) || inherit(node.rhs) || inherit(node.aux);
+        }
 
-            case ExprOp::ADD:
-            case ExprOp::SUB:
-            case ExprOp::MUL:
-            case ExprOp::DIV:
-            case ExprOp::POW:
-            case ExprOp::EQUAL:
-            case ExprOp::NOT_EQUAL:
-            case ExprOp::LESS:
-            case ExprOp::LESS_EQUAL:
-            case ExprOp::GREATER:
-            case ExprOp::GREATER_EQUAL:
-            case ExprOp::LOGICAL_AND:
-            case ExprOp::LOGICAL_OR:
-            case ExprOp::WHERE:
-            case ExprOp::NEG:
-            case ExprOp::ABS:
-            case ExprOp::CEIL:
-            case ExprOp::FLOOR:
-            case ExprOp::ROUND:
-            case ExprOp::TRUNC:
-            case ExprOp::SIN:
-            case ExprOp::COS:
-            case ExprOp::TAN:
-            case ExprOp::ASIN:
-            case ExprOp::ACOS:
-            case ExprOp::ATAN:
-            case ExprOp::SINH:
-            case ExprOp::COSH:
-            case ExprOp::ASINH:
-            case ExprOp::ACOSH:
-            case ExprOp::ATANH:
-            case ExprOp::ERF:
-            case ExprOp::ERFC:
-            case ExprOp::ERFCX:
-            case ExprOp::ERFINV:
-            case ExprOp::ERFCINV:
-            case ExprOp::TGAMMA:
-            case ExprOp::LGAMMA:
-            case ExprOp::DIGAMMA:
-            case ExprOp::EXP:
-            case ExprOp::EXPM1:
-            case ExprOp::EXP2:
-            case ExprOp::EXP10:
-            case ExprOp::LN:
-            case ExprOp::LOG1P:
-            case ExprOp::LOG2:
-            case ExprOp::LOG10:
-            case ExprOp::SQRT:
-            case ExprOp::TANH:
-            case ExprOp::NORMCDF:
-            case ExprOp::LOGICAL_NOT:
-            case ExprOp::CAST:
-            case ExprOp::BROADCAST_TO:
-            case ExprOp::ROPE:
-            case ExprOp::MIN:
-            case ExprOp::MAX:
-            case ExprOp::MIN_GRAD_LEFT:
-            case ExprOp::MIN_GRAD_RIGHT:
-            case ExprOp::MAX_GRAD_LEFT:
-            case ExprOp::MAX_GRAD_RIGHT: {
-                const uint64_t n = numelFromDims(node_dims[i]);
-                total = checkedAddU64(
-                    total, checkedMulU64(n, perElementSemanticFlops(node.op), "computeFusedStageFlops"), "computeFusedStageFlops");
-                break;
+        const uint64_t node_flops = computeFusedStageNodeFlops(expr, node_dims, i);
+        if (node_flops == 0) {
+            continue;
+        }
+
+        if (active_extent_node[i]) {
+            if (!carries_active_extent(node_dims[i])) {
+                // A non-zero fused computation that consumes the active packed
+                // domain but reduces it to a fixed-size result needs a different
+                // runtime model.  Such reductions are normally split into their
+                // own stages; preserve correctness by declining dynamic fused
+                // accounting if one is ever encountered here.
+                return std::nullopt;
             }
-
-            case ExprOp::REDUCE_SUM:
-            case ExprOp::REDUCE_PROD:
-            case ExprOp::REDUCE_MIN:
-            case ExprOp::REDUCE_MAX:
-            case ExprOp::REDUCE_ARGMIN:
-            case ExprOp::REDUCE_ARGMAX:
-            case ExprOp::REDUCE_AVG:
-            case ExprOp::REDUCE_NORM1:
-            case ExprOp::REDUCE_NORM2: {
-                const uint64_t out_numel = numelFromDims(node_dims[i]);
-                const uint64_t red_extent = reductionExtent(node_dims[node.lhs], node.reduction_axes);
-                total = checkedAddU64(total, reductionSemanticFlops(node.op, out_numel, red_extent), "computeFusedStageFlops");
-                break;
+            if (node_flops % max_active_values != 0) {
+                return std::nullopt;
             }
-
-            case ExprOp::CUDA_KERNEL_OUTPUT:
-            case ExprOp::SCAN:
-            case ExprOp::SEGMENTED_SCAN:
-            case ExprOp::SEGMENTED_REDUCE_SUM:
-            case ExprOp::SEGMENTED_REDUCE_MIN:
-            case ExprOp::SEGMENTED_REDUCE_MAX:
-            case ExprOp::SEGMENTED_REDUCE_MEAN:
-            case ExprOp::SEGMENTED_BROADCAST:
-            case ExprOp::EMBEDDING_LOOKUP:
-            case ExprOp::SOFTMAX:
-            case ExprOp::ATTENTION:
-            case ExprOp::ATTENTION_BACKWARD_Q:
-            case ExprOp::ATTENTION_BACKWARD_K:
-            case ExprOp::ATTENTION_BACKWARD_V:
-            case ExprOp::ATTENTION_BACKWARD_BIAS:
-            case ExprOp::MATMUL:
-            case ExprOp::GEMM:
-            case ExprOp::CONV2D:
-            case ExprOp::CONV2D_BACKWARD_DATA:
-            case ExprOp::CONV2D_BACKWARD_FILTER:
-            case ExprOp::CONV3D:
-            case ExprOp::CONV3D_BACKWARD_DATA:
-            case ExprOp::CONV3D_BACKWARD_FILTER:
-            case ExprOp::RAGGED_CONV1D_CAUSAL:
-            case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA:
-            case ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER:
-            case ExprOp::RMSNORM:
-            case ExprOp::LAYERNORM:
-            case ExprOp::RMSNORM_BACKWARD_X:
-            case ExprOp::RMSNORM_BACKWARD_SCALE:
-            case ExprOp::REDUCE_MIN_BACKWARD:
-            case ExprOp::REDUCE_MAX_BACKWARD:
-            case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
-            case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
-            case ExprOp::SCAN_MIN_BACKWARD:
-            case ExprOp::SCAN_MAX_BACKWARD:
-            case ExprOp::SEGMENTED_SCAN_MIN_BACKWARD:
-            case ExprOp::SEGMENTED_SCAN_MAX_BACKWARD:
-                throw std::runtime_error("Unexpected staged op inside fused kernel while computing FLOPs.");
+            flops_per_active_value = checkedAddU64(
+                flops_per_active_value,
+                node_flops / max_active_values,
+                "computeActiveExtentFusedStageFlopModel");
+        } else {
+            fixed_flops_when_nonempty = checkedAddU64(
+                fixed_flops_when_nonempty, node_flops, "computeActiveExtentFusedStageFlopModel");
         }
     }
 
-    return total;
+    return RaggedFusedStageFlopModelSpec{
+        .offsets_input_slot = UINT32_MAX,
+        .batch_size = 0,
+        .max_active_values = max_active_values,
+        .flops_per_active_value = flops_per_active_value,
+        .fixed_flops_when_nonempty = fixed_flops_when_nonempty,
+    };
+}
+
+static std::optional<RaggedFusedStageFlopModelSpec> computeRaggedFusedStageFlopModel(
+    const PhysicalExpression& expr,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims,
+    const std::vector<CompiledStageOutput>& outputs) {
+    struct MarkerMetadata {
+        uint32_t offsets_input_slot = UINT32_MAX;
+        uint64_t batch_size = 0;
+        uint64_t max_active_values = 0;
+        std::unordered_set<uint64_t> elements_per_value;
+    };
+
+    std::optional<MarkerMetadata> marker_metadata;
+    for (const ExprNode& node : expr.nodes) {
+        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            continue;
+        }
+        if (node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
+            throw std::runtime_error("Ragged fused FLOP accounting encountered an invalid runtime-extent marker.");
+        }
+        const ExprNode& offsets_node = expr.nodes[node.rhs];
+        if (offsets_node.op != ExprOp::INPUT || offsets_node.input_slot >= stage_input_dims.size()) {
+            throw std::runtime_error("Ragged fused FLOP accounting requires a direct offsets input.");
+        }
+        if (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
+            node.ragged_runtime_elements_per_value == 0) {
+            throw std::runtime_error("Ragged fused FLOP accounting requires non-zero runtime-extent metadata.");
+        }
+
+        if (!marker_metadata.has_value()) {
+            marker_metadata = MarkerMetadata{
+                .offsets_input_slot = offsets_node.input_slot,
+                .batch_size = node.ragged_runtime_batch_size,
+                .max_active_values = node.ragged_runtime_max_active_values,
+                .elements_per_value = {},
+            };
+        } else if (marker_metadata->offsets_input_slot != offsets_node.input_slot ||
+                   marker_metadata->batch_size != node.ragged_runtime_batch_size ||
+                   marker_metadata->max_active_values != node.ragged_runtime_max_active_values) {
+            // Independent row partitions cannot share one runtime active-value
+            // counter.  Keep the valid graph and use its existing static stage
+            // estimate instead of attaching an incorrect dynamic model.
+            return std::nullopt;
+        }
+        marker_metadata->elements_per_value.insert(node.ragged_runtime_elements_per_value);
+    }
+
+    if (!marker_metadata.has_value()) {
+        return std::nullopt;
+    }
+    const MarkerMetadata& metadata = marker_metadata.value();
+    if (stage_input_dims.at(metadata.offsets_input_slot) != std::vector<uint64_t>{metadata.batch_size + 1}) {
+        throw std::runtime_error("Ragged fused FLOP accounting offsets shape does not match [B+1].");
+    }
+
+    std::unordered_set<uint32_t> active_extent_input_slots;
+    for (uint32_t input_slot = 0; input_slot < stage_input_dims.size(); ++input_slot) {
+        if (input_slot == metadata.offsets_input_slot) {
+            continue;
+        }
+        const std::vector<uint64_t>& dims = stage_input_dims[input_slot];
+        if (dims.empty()) {
+            continue;
+        }
+        if (dims.size() >= 2 && dims.front() == metadata.max_active_values) {
+            active_extent_input_slots.insert(input_slot);
+            continue;
+        }
+        if (dims.size() == 1) {
+            for (uint64_t elements_per_value : metadata.elements_per_value) {
+                const uint64_t packed_numel = checkedMulU64(
+                    metadata.max_active_values, elements_per_value, "computeRaggedFusedStageFlopModel");
+                if (dims.front() == packed_numel) {
+                    active_extent_input_slots.insert(input_slot);
+                    break;
+                }
+            }
+        }
+    }
+
+    std::optional<RaggedFusedStageFlopModelSpec> model = computeActiveExtentFusedStageFlopModel(
+        expr, stage_input_dims, outputs, metadata.max_active_values, active_extent_input_slots);
+    if (!model.has_value()) {
+        return std::nullopt;
+    }
+    model->offsets_input_slot = metadata.offsets_input_slot;
+    model->batch_size = metadata.batch_size;
+    return model;
 }
 
 static uint64_t computeReductionStageFlops(const CompiledReduction& reduction, const std::vector<std::vector<uint64_t>>& stage_input_dims) {
@@ -7944,7 +8134,8 @@ std::shared_ptr<StampedLayerNorm> FusedEquation::stampLayerNorm(
     Tensor& scale,
     Tensor& bias,
     const std::optional<Tensor>& preallocatedOutput,
-    const Stream& stream) const {
+    const Stream& stream,
+    const std::optional<Tensor>& rowPartitionOffsets) const {
     if (!compiledStage) {
         throw std::runtime_error("stampLayerNorm requires non-null compiled stage.");
     }
@@ -7967,7 +8158,7 @@ std::shared_ptr<StampedLayerNorm> FusedEquation::stampLayerNorm(
     } else {
         output = Tensor(input.getPlacement(), TensorDescriptor(compiledStage->output_dtype, output_dims));
     }
-    return std::make_shared<StampedLayerNorm>(compiledStage, input, scale, bias, output, stream);
+    return std::make_shared<StampedLayerNorm>(compiledStage, input, scale, bias, output, stream, rowPartitionOffsets);
 }
 
 std::shared_ptr<StampedRmsNormBackward> FusedEquation::stampRmsNormBackward(
@@ -9958,6 +10149,29 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     }
                 }
                 const uint64_t stage_flops = computeStageFlops(stage, logical_input_dims);
+                std::unordered_set<uint32_t> padded_value_input_slots;
+                for (uint32_t input_idx = 0; input_idx < input_access.size(); ++input_idx) {
+                    if (input_access[input_idx] == PaddedRaggedPointwiseInputAccess::PaddedValue) {
+                        padded_value_input_slots.insert(input_idx);
+                    }
+                }
+                const std::optional<RaggedFusedStageFlopModelSpec> ragged_flop_model =
+                    computeActiveExtentFusedStageFlopModel(stage.expr,
+                                                           logical_input_dims,
+                                                           stage.outputs,
+                                                           anchor_layout.max_total_values,
+                                                           padded_value_input_slots);
+                if (!ragged_flop_model.has_value()) {
+                    throw std::runtime_error(
+                        "Retained padded ragged pointwise stage could not derive useful-work FLOP accounting.");
+                }
+                RuntimeRaggedFusedFlopAccounting runtime_flop_accounting{
+                    .row_partition_offsets = offsets_tensor,
+                    .batch_size = anchor_layout.batch_size,
+                    .max_active_values = anchor_layout.max_total_values,
+                    .flops_per_active_value = ragged_flop_model->flops_per_active_value,
+                    .fixed_flops_when_nonempty = ragged_flop_model->fixed_flops_when_nonempty,
+                };
 
                 const uint32_t pointwise_stage_idx = static_cast<uint32_t>(stampedStages.size());
                 std::shared_ptr<StampedPaddedRaggedPointwise> stamped_pointwise =
@@ -9969,7 +10183,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                                   padded_outputs,
                                                                   anchor_representation.width_capacities,
                                                                   stream);
-                stampedStages.emplace_back(stamped_pointwise, std::move(dependencies), stage_flops);
+                stampedStages.emplace_back(
+                    stamped_pointwise, std::move(dependencies), stage_flops, std::move(runtime_flop_accounting));
 
                 for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
                     const CompiledStageOutput& output = stage.outputs[output_idx];
@@ -10121,6 +10336,10 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         }
 
         const uint64_t stage_flops = computeStageFlops(stage, stage_input_dims);
+        std::optional<RaggedFusedStageFlopModelSpec> ragged_fused_flop_model;
+        if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
+            ragged_fused_flop_model = computeRaggedFusedStageFlopModel(stage.expr, stage_input_dims, stage.outputs);
+        }
 
         switch (stage.kind) {
             case CompiledExecutionStage::Kind::FusedKernel: {
@@ -10225,7 +10444,22 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
                 std::shared_ptr<StampedEquation> stampedKernel =
                     stampEquation(compiledEq, stageInputNames, stageInputs, stageOutputs, stream);
-                stampedStages.emplace_back(stampedKernel, std::move(dependency_stage_indices), stage_flops);
+                std::optional<RuntimeRaggedFusedFlopAccounting> runtime_flop_accounting;
+                if (ragged_fused_flop_model.has_value()) {
+                    const uint32_t offsets_slot = ragged_fused_flop_model->offsets_input_slot;
+                    if (offsets_slot >= stageInputs.size() || !runtimeInputIsTensor(stageInputs[offsets_slot])) {
+                        throw std::runtime_error("Ragged fused FLOP accounting could not bind the runtime offsets tensor.");
+                    }
+                    runtime_flop_accounting = RuntimeRaggedFusedFlopAccounting{
+                        .row_partition_offsets = runtimeInputTensor(stageInputs[offsets_slot]),
+                        .batch_size = ragged_fused_flop_model->batch_size,
+                        .max_active_values = ragged_fused_flop_model->max_active_values,
+                        .flops_per_active_value = ragged_fused_flop_model->flops_per_active_value,
+                        .fixed_flops_when_nonempty = ragged_fused_flop_model->fixed_flops_when_nonempty,
+                    };
+                }
+                stampedStages.emplace_back(
+                    stampedKernel, std::move(dependency_stage_indices), stage_flops, std::move(runtime_flop_accounting));
                 break;
             }
             case CompiledExecutionStage::Kind::CudaKernel: {
@@ -11004,12 +11238,19 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
                 Tensor scaleTensor = runtimeInputTensor(stageInputs[1]);
                 Tensor biasTensor = runtimeInputTensor(stageInputs[2]);
+                std::optional<Tensor> rowPartitionOffsets = std::nullopt;
+                if (stage.layer_norm->ragged_offsets_input_slot != UINT32_MAX) {
+                    if (stage.layer_norm->ragged_offsets_input_slot >= stageInputs.size()) {
+                        throw std::runtime_error("LayerNorm row-partition runtime input slot is out of range.");
+                    }
+                    rowPartitionOffsets = runtimeInputTensor(stageInputs[stage.layer_norm->ragged_offsets_input_slot]);
+                }
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
                 std::optional<Tensor> preallocated = preallocatedForStageOutput(stageOutput, output_dims);
 
                 std::shared_ptr<StampedLayerNorm> stampedLayerNorm =
-                    stampLayerNorm(stage.layer_norm, inputTensor, scaleTensor, biasTensor, preallocated, stream);
+                    stampLayerNorm(stage.layer_norm, inputTensor, scaleTensor, biasTensor, preallocated, stream, rowPartitionOffsets);
                 Tensor outputTensor = stampedLayerNorm->getOutputTensor();
                 values[stageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[stageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
@@ -12271,8 +12512,11 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
         }
     }
 
+    ReusableEventLeases helperCompletionEvents(helper_streams_used.size());
     for (Stream& helper_stream : helper_streams_used) {
-        stream.waitEvent(helper_stream.putEvent());
+        Event helperDoneEvent = helperCompletionEvents.acquire(helper_stream.getGpuNum());
+        helper_stream.putEvent(helperDoneEvent);
+        stream.waitEvent(helperDoneEvent);
     }
 }
 

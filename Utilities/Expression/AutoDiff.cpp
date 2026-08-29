@@ -4715,10 +4715,31 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
             }
 
             case ExprOp::RMSNORM: {
-                if (node.rms_norm_packed_row_capacity == 0) {
-                    if (!has_forward_dims) {
-                        throw std::runtime_error("Autodiff RMSNorm backward requires forward shape information.");
+                if (!has_forward_dims) {
+                    if (node.rms_norm_fused_activation != CudnnRmsNormFusedActivation::NONE) {
+                        throw std::runtime_error(
+                            "Training autodiff cannot use a fused RMSNorm activation; keep the activation as a separate expression.");
                     }
+                    if (allow_shape_deferred_placeholders) {
+                        // FusedEquation::compileBackward first builds a shape-deferred
+                        // template before runtime forward-input dimensions are known.
+                        // RMSNorm backward needs those dimensions to construct the real
+                        // dX/dscale operators, so keep only the requested adjoint routes
+                        // alive in this template. buildShapeSpecializedOutputs() rebuilds
+                        // the backward graph with concrete forward shapes before it is
+                        // compiled or executed.
+                        if (node_reaches_requested_inputs.at(node.lhs)) {
+                            builder.addContribution(node.lhs, grad);
+                        }
+                        if (node_reaches_requested_inputs.at(node.rhs)) {
+                            builder.addContribution(node.rhs, grad);
+                        }
+                        break;
+                    }
+                    throw std::runtime_error("Autodiff RMSNorm backward requires forward shape information.");
+                }
+
+                if (node.rms_norm_packed_row_capacity == 0) {
                     if (node.rms_norm_fused_activation != CudnnRmsNormFusedActivation::NONE) {
                         throw std::runtime_error(
                             "Training autodiff cannot use a fused RMSNorm activation; keep the activation as a separate expression.");
@@ -4774,9 +4795,6 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     break;
                 }
 
-                if (!has_forward_dims) {
-                    throw std::runtime_error("Autodiff RMSNorm backward requires forward shape information.");
-                }
                 if (node.rms_norm_fused_activation != CudnnRmsNormFusedActivation::NONE) {
                     throw std::runtime_error(
                         "Training autodiff cannot use a fused RMSNorm activation; keep the activation as a separate expression.");

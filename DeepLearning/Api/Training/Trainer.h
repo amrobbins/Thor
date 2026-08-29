@@ -167,6 +167,17 @@ class Trainer {
                                                TrainingObserver& observer,
                                                const TrainingCancellationToken& cancellationToken);
 
+    struct TrainingPhaseRunHistoryEntry {
+        std::string phaseName{};
+        TrainingRunResult result{};
+        std::vector<std::string> reportOrder{};
+    };
+
+    [[nodiscard]] std::optional<std::string> currentTrainingPhaseHistoryLabel() const;
+    void recordTrainingRunsPhaseResult(std::string phaseName,
+                                       TrainingRunResult result,
+                                       std::vector<std::string> reportOrder);
+
     friend class TrainingRuns;
 
     std::shared_ptr<Network> network = nullptr;
@@ -186,6 +197,7 @@ class Trainer {
     std::optional<std::string> lastCompletedArtifactNetworkName{};
     uint64_t completedTrainingEpochs = 0;
     double completedTrainingElapsedSeconds = 0.0;
+    std::vector<TrainingPhaseRunHistoryEntry> trainingPhaseRunHistory{};
 };
 
 class Trainer::Builder {

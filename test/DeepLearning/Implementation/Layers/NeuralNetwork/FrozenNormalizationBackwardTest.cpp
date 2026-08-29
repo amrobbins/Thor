@@ -935,6 +935,10 @@ class OrderingProbeTrainableLayer final : public Impl::TrainableLayer {
         errorInputs.emplace_back(featureInputs.back()->clone());
         errorOutputs.emplace_back(featureInputs.back()->clone());
         streams.push_back(dataStream);
+        // This white-box fixture bypasses TrainableLayer::compileImpl(), which normally
+        // allocates one reusable incoming-error readiness event per data stream. Mirror
+        // that compile-owned state so backward() exercises the production E4 path.
+        errorInputReadyEvents.resize(streams.size());
         previousLayers.emplace_back(&previousLayer);
         nextLayers.emplace_back(nullopt);
 

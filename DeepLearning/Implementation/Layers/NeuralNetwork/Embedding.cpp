@@ -241,8 +241,9 @@ void Embedding::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
     }
 
     if (!isInferenceOnly() && gradientUpdateStream.has_value() && parameters[0]->isTrainingEnabled()) {
-        Event errorInputReady = streams[connectionNumber].putEvent();
-        gradientUpdateStream.value().waitEvent(errorInputReady);
+        THOR_THROW_IF_FALSE(connectionNumber < errorInputReadyEvents.size());
+        streams[connectionNumber].putEvent(errorInputReadyEvents[connectionNumber]);
+        gradientUpdateStream.value().waitEvent(errorInputReadyEvents[connectionNumber]);
         THOR_THROW_IF_FALSE(weightsSparseGradient.has_value());
         THOR_THROW_IF_FALSE(weightsSparseGradientProducer != nullptr);
         THOR_THROW_IF_FALSE(weightsSparseGradientGraphExecutable.has_value());
@@ -264,9 +265,10 @@ void Embedding::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
     THOR_THROW_IF_FALSE(numBackwardConnectionsMade < numBackwardConnections);
 
     if (gradientComplete) {
-        weightsAreUpToDateEvent.reset();
+        weightsAreUpToDateEventValid = false;
         if (!isInferenceOnly() && gradientUpdateStream.has_value() && parameters[0]->isTrainingEnabled()) {
-            weightsAreUpToDateEvent = gradientUpdateStream.value().putEvent();
+            gradientUpdateStream.value().putEvent(weightsAreUpToDateEvent);
+            weightsAreUpToDateEventValid = true;
         }
         isStartOfForward = true;
     }

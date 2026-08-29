@@ -177,6 +177,244 @@ TEST(RaggedCapacityPerformance, RepresentativeExpressionChainsContainOnlyLogical
     }
 }
 
+TEST(RaggedCapacityPerformance, RaggedAttentionFlopsUseRuntimeLogicalRowPairs) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t capacity = 8;
+    constexpr uint64_t heads = 1;
+    constexpr uint64_t head_dim = 8;
+
+    Tensor q(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+    Tensor k(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+    Tensor v(gpuPlacement, TensorDescriptor(DataType::FP16, {capacity, heads, head_dim}));
+    Tensor q_offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+    Tensor kv_offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+
+    RowPartitionRuntime q_partition(
+        q_offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    RowPartitionRuntime kv_partition(
+        kv_offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    q_partition.setHostOffsets({0, 2, 5});       // lengths [2, 3]
+    kv_partition.setHostOffsets({0, 4, 5});      // lengths [4, 1]
+
+    const Expression q_expr = Expression::input("q", DataType::FP32, DataType::FP16);
+    const Expression k_expr = Expression::input("k", DataType::FP32, DataType::FP16);
+    const Expression v_expr = Expression::input("v", DataType::FP32, DataType::FP16);
+    const Expression q_offsets_expr = Expression::input("q_offsets", DataType::UINT32, DataType::UINT32);
+    const Expression kv_offsets_expr = Expression::input("kv_offsets", DataType::UINT32, DataType::UINT32);
+
+    AttentionOptions options;
+    options.q_layout = AttentionTensorLayout::BSHD;
+    options.k_layout = AttentionTensorLayout::BSHD;
+    options.v_layout = AttentionTensorLayout::BSHD;
+    options.o_layout = AttentionTensorLayout::BSHD;
+    options.compute_dtype = DataType::FP32;
+    options.output_dtype = DataType::FP16;
+
+    const Expression attention = Expression::scaledDotProductAttentionRagged(
+        q_expr, k_expr, v_expr, q_offsets_expr, kv_offsets_expr, options);
+    FusedEquation equation =
+        FusedEquation::compile(Expression::outputs({{"y", attention}}).physicalOutputs(), 0);
+    Stream stream(0);
+    StampedExecutionPlan plan = equation.stamp({{"q", q},
+                                                {"k", k},
+                                                {"v", v},
+                                                {"q_offsets", q_offsets},
+                                                {"kv_offsets", kv_offsets}},
+                                               stream);
+
+    // Useful score pairs are per-row, never the Cartesian product of packed
+    // capacities: 2*4 + 3*1 = 11. The existing Attention convention charges
+    // 2*D for QK, 2*D for PV, and 5 softmax/mask/scale FLOPs per score.
+    constexpr uint64_t flops_per_score = (2 * head_dim) + (2 * head_dim) + 5;
+    EXPECT_EQ(plan.flopCount(), 11u * heads * flops_per_score);
+
+    // FLOP accounting is runtime metadata, not a stamp-time constant. Reuse the
+    // same plan with a different logical partition and require the count to move
+    // with the useful work while physical capacity remains unchanged.
+    q_partition.setHostOffsets({0, 1, 2});       // lengths [1, 1]
+    kv_partition.setHostOffsets({0, 1, 3});      // lengths [1, 2]
+    EXPECT_EQ(plan.flopCount(), 3u * heads * flops_per_score);
+}
+
+TEST(RaggedCapacityPerformance, MixedDenseQueryRaggedKvAttentionFlopsUseRuntimeLogicalRowPairs) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t query_length = 2;
+    constexpr uint64_t kv_capacity = 8;
+    constexpr uint64_t heads = 1;
+    constexpr uint64_t head_dim = 8;
+
+    Tensor q(gpuPlacement, TensorDescriptor(DataType::FP16, {batch_size, query_length, heads, head_dim}));
+    Tensor k(gpuPlacement, TensorDescriptor(DataType::FP16, {kv_capacity, heads, head_dim}));
+    Tensor v(gpuPlacement, TensorDescriptor(DataType::FP16, {kv_capacity, heads, head_dim}));
+    Tensor q_offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+    Tensor kv_offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+
+    RowPartitionRuntime q_partition(
+        q_offsets, RowPartitionDescriptor(batch_size, batch_size * query_length, DataType::UINT32));
+    RowPartitionRuntime kv_partition(
+        kv_offsets, RowPartitionDescriptor(batch_size, kv_capacity, DataType::UINT32));
+    q_partition.setHostOffsets({0, 2, 4});       // fixed dense query lengths [2, 2]
+    kv_partition.setHostOffsets({0, 4, 5});      // ragged K/V lengths [4, 1]
+
+    const Expression q_expr = Expression::input("q", DataType::FP32, DataType::FP16);
+    const Expression k_expr = Expression::input("k", DataType::FP32, DataType::FP16);
+    const Expression v_expr = Expression::input("v", DataType::FP32, DataType::FP16);
+    const Expression q_offsets_expr = Expression::input("q_offsets", DataType::UINT32, DataType::UINT32);
+    const Expression kv_offsets_expr = Expression::input("kv_offsets", DataType::UINT32, DataType::UINT32);
+
+    AttentionOptions options;
+    options.q_layout = AttentionTensorLayout::BSHD;
+    options.k_layout = AttentionTensorLayout::BSHD;
+    options.v_layout = AttentionTensorLayout::BSHD;
+    options.o_layout = AttentionTensorLayout::BSHD;
+    options.compute_dtype = DataType::FP32;
+    options.output_dtype = DataType::FP16;
+
+    const Expression attention = Expression::scaledDotProductAttentionRagged(
+        q_expr, k_expr, v_expr, q_offsets_expr, kv_offsets_expr, options);
+    FusedEquation equation =
+        FusedEquation::compile(Expression::outputs({{"y", attention}}).physicalOutputs(), 0);
+    Stream stream(0);
+    StampedExecutionPlan plan = equation.stamp({{"q", q},
+                                                {"k", k},
+                                                {"v", v},
+                                                {"q_offsets", q_offsets},
+                                                {"kv_offsets", kv_offsets}},
+                                               stream);
+
+    // 2*4 + 2*1 = 10 useful Q/K score pairs. This is the ProductTransformer-style
+    // dense-Q / ragged-KV case; K/V packed capacity must not enter the logical
+    // FLOP count.
+    constexpr uint64_t flops_per_score = (2 * head_dim) + (2 * head_dim) + 5;
+    EXPECT_EQ(plan.flopCount(), 10u * heads * flops_per_score);
+}
+
+TEST(RaggedCapacityPerformance, PackedMatmulFlopsUseRuntimeActiveRowsForForwardDgradAndWgrad) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t capacity = 16;
+    constexpr uint64_t input_width = 4;
+    constexpr uint64_t output_width = 6;
+
+    Tensor x(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, input_width}));
+    Tensor w(gpuPlacement, TensorDescriptor(DataType::FP32, {input_width, output_width}));
+    Tensor dy(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, output_width}));
+    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+
+    RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    partition.setHostOffsets({0, 2, 5});  // 5 useful packed token rows.
+
+    const Expression x_expr = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression w_expr = Expression::input("w", DataType::FP32, DataType::FP32);
+    const Expression offsets_expr = Expression::input("offsets", DataType::UINT32, DataType::UINT32);
+    const Expression y = Expression::matmul(packedExtent(x_expr, offsets_expr, capacity, input_width),
+                                            w_expr,
+                                            false,
+                                            false,
+                                            DataType::FP32,
+                                            DataType::FP32,
+                                            capacity);
+
+    FusedEquation forward = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+    FusedEquation dgrad = forward.compileBackward({"x"}, "dy");
+    FusedEquation wgrad = forward.compileBackward({"w"}, "dy");
+
+    Stream stream(0);
+    StampedExecutionPlan forward_plan =
+        forward.stamp({{"x", x}, {"w", w}, {"offsets", offsets}}, stream);
+    StampedExecutionPlan dgrad_plan =
+        dgrad.stamp({{"x", x}, {"w", w}, {"offsets", offsets}, {"dy", dy}}, stream);
+    StampedExecutionPlan wgrad_plan =
+        wgrad.stamp({{"x", x}, {"w", w}, {"offsets", offsets}, {"dy", dy}}, stream);
+
+    constexpr uint64_t flops_per_active_row = input_width * output_width * 2;
+    EXPECT_EQ(forward_plan.flopCount(), 5u * flops_per_active_row);
+    EXPECT_EQ(dgrad_plan.flopCount(), 5u * flops_per_active_row);
+    EXPECT_EQ(wgrad_plan.flopCount(), 5u * flops_per_active_row);
+
+    // The same stamped kernels retain full capacity, but useful-work reporting
+    // follows the runtime row partition rather than the selected cuBLASLt bucket.
+    partition.setHostOffsets({0, 1, 2});
+    EXPECT_EQ(forward_plan.flopCount(), 2u * flops_per_active_row);
+    EXPECT_EQ(dgrad_plan.flopCount(), 2u * flops_per_active_row);
+    EXPECT_EQ(wgrad_plan.flopCount(), 2u * flops_per_active_row);
+
+    partition.setHostOffsets({0, 0, 0});
+    EXPECT_EQ(forward_plan.flopCount(), 0u);
+    EXPECT_EQ(dgrad_plan.flopCount(), 0u);
+    EXPECT_EQ(wgrad_plan.flopCount(), 0u);
+}
+
+TEST(RaggedCapacityPerformance, RaggedCausalConv1dFlopsUseRuntimeActiveValuesForForwardDgradAndWgrad) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 16;
+    constexpr uint64_t max_values_per_row = 8;
+    constexpr uint64_t input_channels = 4;
+    constexpr uint64_t output_channels = 6;
+    constexpr uint64_t kernel_width = 3;
+    constexpr uint64_t groups = 2;
+
+    Tensor x(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, input_channels}));
+    Tensor filter(gpuPlacement,
+                  TensorDescriptor(DataType::FP32, {output_channels, input_channels / groups, kernel_width}));
+    Tensor dy(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, output_channels}));
+    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+
+    RowPartitionRuntime partition(
+        offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_values_per_row));
+    partition.setHostOffsets({0, 2, 5});  // 5 useful logical convolution positions.
+
+    const RaggedTensorDescriptor descriptor(DataType::FP32,
+                                            {input_channels},
+                                            batch_size,
+                                            max_total_values,
+                                            max_values_per_row,
+                                            DataType::UINT32);
+    const RaggedExpression input = RaggedExpression::input("tokens", descriptor);
+    const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression output = input.causalConv1d(filter_expr,
+                                                       output_channels,
+                                                       kernel_width,
+                                                       1,
+                                                       DataType::FP32,
+                                                       DataType::FP32,
+                                                       groups);
+    FusedEquation forward =
+        FusedEquation::compile(Expression::outputs({{"y", output.getValues()}}).physicalOutputs(), 0);
+    FusedEquation dgrad = forward.compileBackward({"tokens.values"}, "dy");
+    FusedEquation wgrad = forward.compileBackward({"filter"}, "dy");
+
+    Stream stream(0);
+    StampedExecutionPlan forward_plan =
+        forward.stamp({{"tokens.values", x}, {"tokens.offsets", offsets}, {"filter", filter}}, stream);
+    StampedExecutionPlan dgrad_plan = dgrad.stamp(
+        {{"tokens.values", x}, {"tokens.offsets", offsets}, {"filter", filter}, {"dy", dy}}, stream);
+    StampedExecutionPlan wgrad_plan = wgrad.stamp(
+        {{"tokens.values", x}, {"tokens.offsets", offsets}, {"filter", filter}, {"dy", dy}}, stream);
+
+    constexpr uint64_t flops_per_active_value =
+        output_channels * (input_channels / groups) * kernel_width * 2;
+    EXPECT_EQ(forward_plan.flopCount(), 5u * flops_per_active_value);
+    EXPECT_EQ(dgrad_plan.flopCount(), 5u * flops_per_active_value);
+    EXPECT_EQ(wgrad_plan.flopCount(), 5u * flops_per_active_value);
+
+    // Reusing the exact same stamped plans with a smaller logical batch must
+    // reduce reported useful FLOPs even though packed/padded capacity is fixed.
+    partition.setHostOffsets({0, 1, 2});
+    EXPECT_EQ(forward_plan.flopCount(), 2u * flops_per_active_value);
+    EXPECT_EQ(dgrad_plan.flopCount(), 2u * flops_per_active_value);
+    EXPECT_EQ(wgrad_plan.flopCount(), 2u * flops_per_active_value);
+
+    partition.setHostOffsets({0, 0, 0});
+    EXPECT_EQ(forward_plan.flopCount(), 0u);
+    EXPECT_EQ(dgrad_plan.flopCount(), 0u);
+    EXPECT_EQ(wgrad_plan.flopCount(), 0u);
+}
+
 TEST(RaggedCapacityPerformance, PackedConsumerSanitationAccountingTracksSelectedBucketNotFullCapacity) {
     REQUIRE_CUDA_DEVICE();
     constexpr uint64_t capacity = 100;
@@ -504,4 +742,234 @@ TEST(RaggedCapacityPerformance, CausalConv1dT10RetainedTrainingDoesNotMaterially
     for (const RaggedConv1dStageDiagnostic& diagnostic : retained_backward_plan.raggedConv1dStageDiagnostics()) {
         EXPECT_EQ(diagnostic.explicit_unfold_workspace_bytes, 0u);
     }
+}
+
+TEST(RaggedCapacityPerformance, RaggedFusedValuewiseFlopsUseRuntimeActiveValues) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t capacity = 16;
+    constexpr uint64_t width = 4;
+
+    Tensor x(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, width}));
+    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+    RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    partition.setHostOffsets({0, 2, 5});
+
+    const Expression x_expr = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression offsets_expr = Expression::input("offsets", DataType::UINT32, DataType::UINT32);
+    const Expression active_x = packedExtent(x_expr, offsets_expr, capacity, width);
+    const Expression y = active_x.abs();
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+    Stream stream(0);
+    StampedExecutionPlan plan = equation.stamp({{"x", x}, {"offsets", offsets}}, stream);
+
+    EXPECT_EQ(plan.flopCount(), 5u * width);
+
+    partition.setHostOffsets({0, 0, 2});
+    EXPECT_EQ(plan.flopCount(), 2u * width);
+
+    partition.setHostOffsets({0, 0, 0});
+    EXPECT_EQ(plan.flopCount(), 0u);
+}
+
+TEST(RaggedCapacityPerformance, RaggedFusedValuewiseFlopsKeepDenseSideComputationFixed) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t capacity = 16;
+    constexpr uint64_t width = 4;
+
+    Tensor x(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, width}));
+    Tensor scale(gpuPlacement, TensorDescriptor(DataType::FP32, {width}));
+    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+    RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    partition.setHostOffsets({0, 2, 5});
+
+    const Expression x_expr = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression scale_expr = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression offsets_expr = Expression::input("offsets", DataType::UINT32, DataType::UINT32);
+    const Expression active_x = packedExtent(x_expr, offsets_expr, capacity, width);
+    const Expression y = active_x * scale_expr.exp();
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", y}}).physicalOutputs(), 0);
+    Stream stream(0);
+    StampedExecutionPlan plan = equation.stamp({{"x", x}, {"scale", scale}, {"offsets", offsets}}, stream);
+
+    // EXP(scale) is one dense side computation (10 FLOPs per channel) while
+    // the multiply scales with the logical packed population.
+    EXPECT_EQ(plan.flopCount(), 5u * width + 10u * width);
+
+    partition.setHostOffsets({0, 0, 2});
+    EXPECT_EQ(plan.flopCount(), 2u * width + 10u * width);
+
+    // With no logical ragged values, the fused operation has no useful output
+    // work, so even fixed side expressions contribute zero useful FLOPs.
+    partition.setHostOffsets({0, 0, 0});
+    EXPECT_EQ(plan.flopCount(), 0u);
+}
+
+TEST(RaggedCapacityPerformance, RaggedSegmentedMeanFlopsUseRuntimeActiveValuesAndNonemptyRows) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t capacity = 16;
+    constexpr uint64_t width = 4;
+
+    Tensor values(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, width}));
+    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+    RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    partition.setHostOffsets({0, 2, 5});
+
+    const RaggedTensorDescriptor descriptor(
+        DataType::FP32, {width}, batch_size, capacity, capacity, DataType::UINT32);
+    const RaggedExpression input = RaggedExpression::input("tokens", descriptor);
+    const Expression mean = input.segment_mean();
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"mean", mean}}).physicalOutputs(), 0);
+    Stream stream(0);
+    StampedExecutionPlan plan = equation.stamp(
+        {{"tokens.values", values}, {"tokens.offsets", offsets}}, stream);
+
+    // Five useful packed values contribute four channel reductions each, plus
+    // one mean division per channel for each of the two non-empty rows.
+    EXPECT_EQ(plan.flopCount(), 5u * width + 2u * width);
+
+    partition.setHostOffsets({0, 0, 2});
+    EXPECT_EQ(plan.flopCount(), 2u * width + 1u * width);
+
+    partition.setHostOffsets({0, 0, 0});
+    EXPECT_EQ(plan.flopCount(), 0u);
+}
+
+TEST(RaggedCapacityPerformance, SegmentedScanFlopsUseRuntimeActiveValues) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t capacity = 16;
+
+    Tensor values(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity}));
+    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+    RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    partition.setHostOffsets({0, 2, 5});
+
+    const Expression values_expr = Expression::input("values", DataType::FP32, DataType::FP32);
+    const Expression offsets_expr = Expression::input("offsets", DataType::UINT32, DataType::UINT32);
+    const Expression scan = Expression::segmentedScan(values_expr, offsets_expr, ScanOp::Sum, true, false);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"scan", scan}}).physicalOutputs(), 0);
+    Stream stream(0);
+    StampedExecutionPlan plan = equation.stamp({{"values", values}, {"offsets", offsets}}, stream);
+
+    EXPECT_EQ(plan.flopCount(), 5u);
+
+    partition.setHostOffsets({0, 0, 2});
+    EXPECT_EQ(plan.flopCount(), 2u);
+
+    partition.setHostOffsets({0, 0, 0});
+    EXPECT_EQ(plan.flopCount(), 0u);
+}
+
+TEST(RaggedCapacityPerformance, RetainedPaddedRaggedPointwiseFlopsUseRuntimeActiveValues) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t capacity = 16;
+    constexpr uint64_t max_values_per_row = 8;
+    constexpr uint64_t channels = 4;
+    constexpr uint64_t kernel_width = 1;
+
+    Tensor values(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, channels}));
+    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+    Tensor filter1(gpuPlacement, TensorDescriptor(DataType::FP32, {channels, channels, kernel_width}));
+    Tensor filter2(gpuPlacement, TensorDescriptor(DataType::FP32, {channels, channels, kernel_width}));
+    RowPartitionRuntime partition(
+        offsets,
+        RowPartitionDescriptor(batch_size, capacity, DataType::UINT32, max_values_per_row));
+    partition.setHostOffsets({0, 2, 5});
+
+    const RaggedTensorDescriptor descriptor(
+        DataType::FP32, {channels}, batch_size, capacity, max_values_per_row, DataType::UINT32);
+    const RaggedExpression input = RaggedExpression::input("tokens", descriptor);
+    const Expression filter1_expr = Expression::input("filter1", std::nullopt, DataType::FP32);
+    const Expression filter2_expr = Expression::input("filter2", std::nullopt, DataType::FP32);
+    const RaggedExpression hidden =
+        input.causalConv1d(filter1_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32).relu();
+    const RaggedExpression output =
+        hidden.causalConv1d(filter2_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", output.getValues()}}).physicalOutputs(), 0);
+    Stream stream(0);
+    StampedExecutionPlan plan = equation.stamp({{"tokens.values", values},
+                                                {"tokens.offsets", offsets},
+                                                {"filter1", filter1},
+                                                {"filter2", filter2}},
+                                               stream);
+
+    ASSERT_EQ(plan.stageKindNames(),
+              (std::vector<std::string>{"PaddedRaggedPack",
+                                        "RaggedConv1dCausal",
+                                        "PaddedRaggedPointwise",
+                                        "RaggedConv1dCausal",
+                                        "PaddedRaggedUnpack"}));
+
+    // Each 1x1 convolution uses 2*C*C FLOPs per logical row. ReLU is one
+    // useful comparison per channel and pack/unpack are data movement, not FLOPs.
+    EXPECT_EQ(plan.stageFlopCounts(), (std::vector<uint64_t>{0, 5u * 32u, 5u * channels, 5u * 32u, 0}));
+
+    partition.setHostOffsets({0, 0, 2});
+    EXPECT_EQ(plan.stageFlopCounts(), (std::vector<uint64_t>{0, 2u * 32u, 2u * channels, 2u * 32u, 0}));
+
+    partition.setHostOffsets({0, 0, 0});
+    EXPECT_EQ(plan.stageFlopCounts(), (std::vector<uint64_t>{0, 0, 0, 0, 0}));
+}
+
+TEST(RaggedCapacityPerformance, RaggedNormalizationFlopsUseRuntimeActiveValues) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t capacity = 16;
+    constexpr uint64_t width = 4;
+
+    Tensor values(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, width}));
+    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {batch_size + 1}));
+    Tensor scale(gpuPlacement, TensorDescriptor(DataType::FP32, {width}));
+    Tensor bias(gpuPlacement, TensorDescriptor(DataType::FP32, {width}));
+    Tensor dy(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, width}));
+    RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    partition.setHostOffsets({0, 2, 5});
+
+    const RaggedTensorDescriptor descriptor(
+        DataType::FP32, {width}, batch_size, capacity, capacity, DataType::UINT32);
+    const RaggedExpression input = RaggedExpression::input("tokens", descriptor);
+    const Expression scale_expr = Expression::input("scale", std::nullopt, DataType::FP32);
+    const Expression bias_expr = Expression::input("bias", std::nullopt, DataType::FP32);
+
+    FusedEquation rms_equation = FusedEquation::compile(
+        Expression::outputs({{"y", input.rmsNorm(scale_expr, 1.0e-5, DataType::FP32, DataType::FP32).getValues()}})
+            .physicalOutputs(),
+        0);
+    FusedEquation layer_equation = FusedEquation::compile(
+        Expression::outputs(
+            {{"y", input.layerNorm(scale_expr, bias_expr, 1.0e-5, DataType::FP32, DataType::FP32).getValues()}})
+            .physicalOutputs(),
+        0);
+
+    Stream stream(0);
+    StampedExecutionPlan rms_plan =
+        rms_equation.stamp({{"tokens.values", values}, {"tokens.offsets", offsets}, {"scale", scale}}, stream);
+    StampedExecutionPlan layer_plan = layer_equation.stamp(
+        {{"tokens.values", values}, {"tokens.offsets", offsets}, {"scale", scale}, {"bias", bias}}, stream);
+    FusedEquation rms_backward_equation = rms_equation.compileBackward({"tokens.values", "scale"}, "dy");
+    StampedExecutionPlan rms_backward_plan = rms_backward_equation.stamp(
+        {{"tokens.values", values}, {"tokens.offsets", offsets}, {"scale", scale}, {"dy", dy}}, stream);
+
+    EXPECT_EQ(rms_plan.flopCount(), 5u * width * 6u);
+    EXPECT_EQ(layer_plan.flopCount(), 5u * width * 8u);
+    EXPECT_EQ(rms_backward_plan.flopCount(), 5u * width * 12u);
+
+    partition.setHostOffsets({0, 0, 2});
+    EXPECT_EQ(rms_plan.flopCount(), 2u * width * 6u);
+    EXPECT_EQ(layer_plan.flopCount(), 2u * width * 8u);
+    EXPECT_EQ(rms_backward_plan.flopCount(), 2u * width * 12u);
+
+    partition.setHostOffsets({0, 0, 0});
+    EXPECT_EQ(rms_plan.flopCount(), 0u);
+    EXPECT_EQ(layer_plan.flopCount(), 0u);
+    EXPECT_EQ(rms_backward_plan.flopCount(), 0u);
 }

@@ -79,6 +79,8 @@ class MultiInputCustomLoss : public Loss {
     std::vector<std::optional<Tensor>> featureInputs;
     std::vector<std::optional<Tensor>> errorOutputs;
     std::vector<Stream> inputStreams;
+    std::vector<Event> inputReadyEvents;
+    Event inputsReusableEvent;
     std::vector<std::optional<Layer*>> previousLayers;
 
     std::set<unsigned long> allForwardInputTensorIds;

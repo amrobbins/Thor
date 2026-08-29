@@ -364,6 +364,9 @@ void AdaptiveLayerNorm::cleanup() {
     backwardWorkspace.reset();
     allForwardInputTensorIds.clear();
     stillWaitingForForwardInputTensorIds.clear();
+    for (Event& event : forwardInputReadyEvents)
+        event = Event();
+    gradientsReadyEvent = Event();
     Layer::cleanup();
 }
 
@@ -398,7 +401,7 @@ void AdaptiveLayerNorm::forward(optional<Tensor> featureInput, bool validationPa
 
     for (uint32_t i = 1; i < NUM_INPUT_PORTS; ++i) {
         THOR_THROW_IF_FALSE(adaptiveStreams[i].has_value());
-        computeStream().waitEvent(adaptiveStreams[i].value().putEvent());
+        computeStream().waitFor(adaptiveStreams[i].value(), forwardInputReadyEvents[i]);
     }
 
     THOR_THROW_IF_FALSE(forwardPlan.has_value());
@@ -456,14 +459,14 @@ void AdaptiveLayerNorm::backward(optional<Tensor> errorInput, uint32_t batchSize
 
     CudnnAdaptiveLayerNorm::instance().backward(backwardPlan.value(), args, backwardWorkspace, computeStream());
 
-    Event gradientsReady = computeStream().putEvent();
+    computeStream().putEvent(gradientsReadyEvent);
     for (uint32_t i = 0; i < NUM_INPUT_PORTS; ++i) {
         if (!adaptivePreviousLayers[i].has_value() || !adaptiveErrorOutputs[i].has_value()) {
             continue;
         }
         if (i != DATA) {
             THOR_THROW_IF_FALSE(adaptiveStreams[i].has_value());
-            adaptiveStreams[i].value().waitEvent(gradientsReady);
+            adaptiveStreams[i].value().waitEvent(gradientsReadyEvent);
         }
         adaptivePreviousLayers[i].value()->backward(adaptiveErrorOutputs[i], batchSize);
     }

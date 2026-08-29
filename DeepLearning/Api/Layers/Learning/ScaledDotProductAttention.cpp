@@ -626,10 +626,18 @@ ThorImplementation::DynamicExpression makeAttentionExpression(bool useBias,
                 if (!ThorImplementation::isCanonicalRowPartitionOffsetDataType(offsets.getDataType())) {
                     throw std::runtime_error(std::string("ScaledDotProductAttention ") + name + " dtype must be UINT32 or UINT64.");
                 }
-                if (offsets.getTotalNumElements() < batch + 1) {
-                    throw std::runtime_error(std::string("ScaledDotProductAttention ") + name + " must contain at least batch+1 elements.");
+                if (offsets.getDimensions() != std::vector<uint64_t>{batch + 1}) {
+                    throw std::runtime_error(std::string("ScaledDotProductAttention ") + name + " must have canonical shape [batch+1].");
                 }
-                stampInputs[name] = offsets.aliasView({batch + 1}, {1}, 0);
+                // Canonical RaggedTensor offsets are structural row-partition tensors, not ordinary
+                // value views.  Preserve the canonical tensor handle exactly: aliasView() marks even
+                // a dense [B+1] prefix as a custom-strided view, which correctly violates
+                // RowPartitionRuntime's one-canonical-allocation invariant.
+                if (!offsets.isDenseContiguous() || offsets.getStorageElementOffset() != 0 || offsets.hasCustomStrides()) {
+                    throw std::runtime_error(std::string("ScaledDotProductAttention ") + name +
+                                             " must be a canonical contiguous row-partition tensor, not a view.");
+                }
+                stampInputs[name] = std::move(offsets);
             };
 
             if (useSequenceLengths) {

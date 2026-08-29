@@ -31,6 +31,8 @@ def test_attention_rejects_invalid_public_sequence_length_inputs():
         thor.layers.Attention(
             n,
             x,
+            x,
+            x,
             4,
             query_sequence_lengths=bad_q_lengths_dtype,
             key_value_sequence_lengths=kv_lengths,
@@ -39,6 +41,8 @@ def test_attention_rejects_invalid_public_sequence_length_inputs():
     with pytest.raises((RuntimeError, ValueError), match="querySequenceLengthsInput"):
         thor.layers.Attention(
             n,
+            x,
+            x,
             x,
             4,
             query_sequence_lengths=bad_q_lengths_shape,
@@ -52,17 +56,29 @@ def test_attention_legacy_single_metadata_python_kwargs_are_removed():
     ragged_offsets = _input_tensor(n, "ragged_offsets", [2], thor.DataType.uint32)
 
     with pytest.raises(TypeError, match="sequence_lengths"):
-        thor.layers.Attention(n, x, 4, sequence_lengths=sequence_lengths)
+        thor.layers.Attention(n, x, x, x, 4, sequence_lengths=sequence_lengths)
 
     with pytest.raises(TypeError, match="ragged_offsets"):
-        thor.layers.Attention(n, x, 4, ragged_offsets=ragged_offsets)
+        thor.layers.Attention(n, x, x, x, 4, ragged_offsets=ragged_offsets)
 
     with pytest.raises(TypeError, match="query_ragged_offsets"):
-        thor.layers.Attention(n, x, 4, query_ragged_offsets=ragged_offsets)
+        thor.layers.Attention(n, x, x, x, 4, query_ragged_offsets=ragged_offsets)
 
     with pytest.raises(TypeError, match="key_value_ragged_offsets"):
-        thor.layers.Attention(n, x, 4, key_value_ragged_offsets=ragged_offsets)
+        thor.layers.Attention(n, x, x, x, 4, key_value_ragged_offsets=ragged_offsets)
 
+
+
+def test_attention_legacy_self_cross_source_interface_is_removed():
+    n = _net("test_net_attention_legacy_source_interface_removed")
+    query = _input_tensor(n, "query", [5, 32], thor.DataType.fp16)
+    context = _input_tensor(n, "context", [7, 32], thor.DataType.fp16)
+
+    with pytest.raises(TypeError):
+        thor.layers.Attention(n, query, 4)
+
+    with pytest.raises(TypeError):
+        thor.layers.Attention(n, query, query, query, 4, context_input=context)
 
 
 def test_attention_accepts_and_returns_canonical_ragged_tensor():
@@ -77,16 +93,17 @@ def test_attention_accepts_and_returns_canonical_ragged_tensor():
         offsets_data_type=thor.DataType.uint64,
     )
 
-    attention = thor.layers.Attention(n, tokens, 4, head_dim=8, output_features=24)
+    attention = thor.layers.Attention(n, tokens, tokens, tokens, 4, head_dim=8, output_features=24)
 
     assert isinstance(attention.get_feature_output(), thor.RaggedTensor)
     assert attention.get_feature_output().values.get_dimensions() == [11, 24]
     assert attention.get_feature_output().offsets == tokens.offsets
-    assert attention.get_context_input() is None
+    assert attention.get_key_input() == attention.get_query_input()
+    assert attention.get_value_input() == attention.get_query_input()
 
     arch = _only_layer_architecture(n, "attention")
     assert arch["use_ragged"] is True
-    assert "ragged_feature_input" in arch
+    assert "ragged_query_input" in arch
     assert "ragged_feature_output" in arch
     assert "query_ragged_offsets_input" not in arch
     assert "key_value_ragged_offsets_input" not in arch
@@ -116,15 +133,17 @@ def test_attention_ragged_cross_attention_rope_allows_independent_partitions():
     attention = thor.layers.Attention(
         n,
         query,
+        context,
+        context,
         4,
         head_dim=8,
-        context_input=context,
         use_rope=True,
         rope_rotary_dim=8,
     )
 
     assert attention.get_feature_output().offsets == query.offsets
-    assert attention.get_context_input() == context
+    assert attention.get_key_input() == context
+    assert attention.get_value_input() == context
 
 
 def test_attention_ragged_cross_attention_accepts_per_row_rope_origins():
@@ -141,9 +160,10 @@ def test_attention_ragged_cross_attention_accepts_per_row_rope_origins():
     attention = thor.layers.Attention(
         n,
         query,
+        context,
+        context,
         4,
         head_dim=8,
-        context_input=context,
         use_rope=True,
         rope_rotary_dim=8,
         rope_query_position_offsets=query_origins,
@@ -165,11 +185,13 @@ def test_attention_per_row_rope_origins_require_rope_and_ragged_inputs():
     origins = _input_tensor(n, "origins", [1], thor.DataType.int32)
 
     with pytest.raises((RuntimeError, ValueError), match="require use_rope=True"):
-        thor.layers.Attention(n, dense, 4, head_dim=8, rope_query_position_offsets=origins)
+        thor.layers.Attention(n, dense, dense, dense, 4, head_dim=8, rope_query_position_offsets=origins)
 
     with pytest.raises((RuntimeError, ValueError), match="Ragged|ragged|per-row"):
         thor.layers.Attention(
             n,
+            dense,
+            dense,
             dense,
             4,
             head_dim=8,
@@ -187,8 +209,9 @@ def test_attention_cross_attention_exposes_independent_rope_query_key_offsets():
     attention = thor.layers.Attention(
         n,
         query,
+        context,
+        context,
         4,
-        context_input=context,
         head_dim=8,
         use_rope=True,
         rope_rotary_dim=8,
@@ -212,6 +235,8 @@ def test_attention_shared_rope_position_offset_remains_query_key_default():
     attention = thor.layers.Attention(
         n,
         x,
+        x,
+        x,
         4,
         head_dim=8,
         use_rope=True,
@@ -228,7 +253,7 @@ def test_attention_independent_rope_offsets_require_rope_enabled():
     x = _input_tensor(n, "tokens", [4, 32], thor.DataType.fp16)
 
     with pytest.raises((RuntimeError, ValueError), match="require use_rope=True"):
-        thor.layers.Attention(n, x, 4, head_dim=8, rope_query_position_offset=4)
+        thor.layers.Attention(n, x, x, x, 4, head_dim=8, rope_query_position_offset=4)
 
 
 def _assert_parameter_shape(arch, name: str, shape):
@@ -237,16 +262,18 @@ def _assert_parameter_shape(arch, name: str, shape):
     assert arch["parameters"][name]["shape"] == shape
 
 
-def test_attention_exposes_context_input_and_splits_query_context_parameter_shapes():
-    n = _net("test_net_attention_context_input_split_parameter_shapes")
-    decoder = _input_tensor(n, "decoder_tokens", [5, 32], thor.DataType.fp16)
-    encoder = _input_tensor(n, "encoder_tokens", [7, 48], thor.DataType.fp16)
+def test_attention_accepts_independent_query_key_value_sources_and_projection_widths():
+    n = _net("test_net_attention_independent_qkv_sources")
+    query = _input_tensor(n, "query_tokens", [5, 32], thor.DataType.fp16)
+    key = _input_tensor(n, "key_tokens", [7, 48], thor.DataType.fp16)
+    value = _input_tensor(n, "value_tokens", [7, 24], thor.DataType.fp16)
 
     attention = thor.layers.Attention(
         n,
-        decoder,
+        query,
+        key,
+        value,
         4,
-        context_input=encoder,
         num_key_value_heads=2,
         head_dim=8,
         value_dim=6,
@@ -254,19 +281,21 @@ def test_attention_exposes_context_input_and_splits_query_context_parameter_shap
         has_bias=True,
     )
 
-    assert attention.get_use_cross_attention()
-    assert attention.get_context_input().get_dimensions() == [7, 48]
+    assert attention.get_query_input() == query
+    assert attention.get_key_input() == key
+    assert attention.get_value_input() == value
     assert attention.get_feature_output().get_dimensions() == [5, 40]
 
     arch = _only_layer_architecture(n, "attention")
-    assert arch["use_cross_attention"] is True
-    assert arch["feature_input"]["dimensions"] == [5, 32]
-    assert arch["context_input"]["dimensions"] == [7, 48]
+    assert arch["version"] == "2.0.0"
+    assert arch["query_input"]["dimensions"] == [5, 32]
+    assert arch["key_input"]["dimensions"] == [7, 48]
+    assert arch["value_input"]["dimensions"] == [7, 24]
     assert arch["feature_output"]["dimensions"] == [5, 40]
 
     _assert_parameter_shape(arch, "query_weights", [32, 32])
     _assert_parameter_shape(arch, "key_weights", [48, 16])
-    _assert_parameter_shape(arch, "value_weights", [48, 12])
+    _assert_parameter_shape(arch, "value_weights", [24, 12])
     _assert_parameter_shape(arch, "output_weights", [24, 40])
     _assert_parameter_shape(arch, "query_bias", [32])
     _assert_parameter_shape(arch, "key_bias", [16])
@@ -274,30 +303,39 @@ def test_attention_exposes_context_input_and_splits_query_context_parameter_shap
     _assert_parameter_shape(arch, "output_bias", [40])
 
 
-def test_attention_self_attention_architecture_remains_context_free():
-    n = _net("test_net_attention_self_attention_context_free")
+def test_attention_rejects_key_value_sequence_geometry_mismatch():
+    n = _net("test_net_attention_rejects_kv_sequence_mismatch")
+    query = _input_tensor(n, "query", [5, 32], thor.DataType.fp16)
+    key = _input_tensor(n, "key", [7, 48], thor.DataType.fp16)
+    value = _input_tensor(n, "value", [6, 24], thor.DataType.fp16)
+
+    with pytest.raises((RuntimeError, ValueError), match="key and value inputs must have the same sequence length"):
+        thor.layers.Attention(n, query, key, value, 4, head_dim=8)
+
+def test_attention_self_attention_is_explicit_q_equals_k_equals_v():
+    n = _net("test_net_attention_self_attention_explicit_qkv")
     x = _input_tensor(n, "tokens", [8, 64], thor.DataType.fp16)
 
-    attention = thor.layers.Attention(n, x, 4, head_dim=16)
+    attention = thor.layers.Attention(n, x, x, x, 4, head_dim=16)
 
-    assert not attention.get_use_cross_attention()
-    assert attention.get_context_input() is None
+    assert attention.get_key_input() == attention.get_query_input()
+    assert attention.get_value_input() == attention.get_query_input()
 
     arch = _only_layer_architecture(n, "attention")
-    assert arch["use_cross_attention"] is False
-    assert "context_input" not in arch
+    assert "key_input" in arch
+    assert "value_input" in arch
     _assert_parameter_shape(arch, "query_weights", [64, 64])
     _assert_parameter_shape(arch, "key_weights", [64, 64])
     _assert_parameter_shape(arch, "value_weights", [64, 64])
 
 
-def test_attention_context_input_rejects_invalid_current_scope_inputs():
-    n = _net("test_net_attention_context_input_validation")
+def test_attention_rejects_mismatched_query_key_value_dtypes():
+    n = _net("test_net_attention_qkv_dtype_validation")
     decoder = _input_tensor(n, "decoder_tokens", [5, 32], thor.DataType.fp16)
     encoder_bf16 = _input_tensor(n, "encoder_tokens_bf16", [7, 48], thor.DataType.bf16)
 
-    with pytest.raises((RuntimeError, ValueError), match="context input dtype"):
-        thor.layers.Attention(n, decoder, 4, context_input=encoder_bf16, head_dim=8)
+    with pytest.raises((RuntimeError, ValueError), match="query, key, and value input dtypes must match"):
+        thor.layers.Attention(n, decoder, encoder_bf16, encoder_bf16, 4, head_dim=8)
 
 
 def test_attention_cross_attention_accepts_query_key_value_sequence_lengths():
@@ -310,8 +348,9 @@ def test_attention_cross_attention_accepts_query_key_value_sequence_lengths():
     attention = thor.layers.Attention(
         n,
         decoder,
+        encoder,
+        encoder,
         4,
-        context_input=encoder,
         query_sequence_lengths=q_lengths,
         key_value_sequence_lengths=kv_lengths,
         num_key_value_heads=2,
@@ -320,21 +359,19 @@ def test_attention_cross_attention_accepts_query_key_value_sequence_lengths():
         output_features=40,
     )
 
-    assert attention.get_use_cross_attention()
     assert attention.get_use_sequence_lengths()
     assert attention.get_query_sequence_lengths_input().get_dimensions() == [1]
     assert attention.get_key_value_sequence_lengths_input().get_dimensions() == [1]
     assert attention.get_feature_output().get_dimensions() == [5, 40]
 
     arch = _only_layer_architecture(n, "attention")
-    assert arch["use_cross_attention"] is True
     assert arch["use_sequence_lengths"] is True
     assert "use_separate_sequence_lengths" not in arch
     assert "sequence_lengths_input" not in arch
     assert arch["query_sequence_lengths_input"]["dimensions"] == [1]
     assert arch["key_value_sequence_lengths_input"]["dimensions"] == [1]
-    assert arch["feature_input"]["dimensions"] == [5, 32]
-    assert arch["context_input"]["dimensions"] == [7, 48]
+    assert arch["query_input"]["dimensions"] == [5, 32]
+    assert arch["key_input"]["dimensions"] == [7, 48]
     assert arch["feature_output"]["dimensions"] == [5, 40]
 
     _assert_parameter_shape(arch, "query_weights", [32, 32])
@@ -352,17 +389,18 @@ def test_attention_rejects_incomplete_query_key_value_sequence_lengths():
     bad_q_lengths = _input_tensor(n, "bad_query_sequence_lengths", [2], thor.DataType.int32)
 
     with pytest.raises((RuntimeError, ValueError), match="query_sequence_lengths and key_value_sequence_lengths"):
-        thor.layers.Attention(n, decoder, 4, query_sequence_lengths=q_lengths, head_dim=8)
+        thor.layers.Attention(n, decoder, decoder, decoder, 4, query_sequence_lengths=q_lengths, head_dim=8)
 
     with pytest.raises((RuntimeError, ValueError), match="query_sequence_lengths and key_value_sequence_lengths"):
-        thor.layers.Attention(n, decoder, 4, key_value_sequence_lengths=kv_lengths, head_dim=8)
+        thor.layers.Attention(n, decoder, decoder, decoder, 4, key_value_sequence_lengths=kv_lengths, head_dim=8)
 
     with pytest.raises((RuntimeError, ValueError), match="querySequenceLengthsInput"):
         thor.layers.Attention(
             n,
             decoder,
+            encoder,
+            encoder,
             4,
-            context_input=encoder,
             query_sequence_lengths=bad_q_lengths,
             key_value_sequence_lengths=kv_lengths,
             head_dim=8,
@@ -378,6 +416,8 @@ def test_attention_exposes_public_score_bias_input_and_preserves_projection_bias
 
     attention = thor.layers.Attention(
         n,
+        x,
+        x,
         x,
         4,
         head_dim=8,
@@ -408,8 +448,9 @@ def test_attention_score_bias_accepts_head_broadcast_and_cross_attention_key_val
     attention = thor.layers.Attention(
         n,
         decoder,
+        encoder,
+        encoder,
         4,
-        context_input=encoder,
         score_bias_input=score_bias,
         num_key_value_heads=2,
         head_dim=8,
@@ -417,17 +458,15 @@ def test_attention_score_bias_accepts_head_broadcast_and_cross_attention_key_val
         output_features=40,
     )
 
-    assert attention.get_use_cross_attention()
     assert attention.get_use_score_bias()
     assert attention.get_score_bias_input().get_dimensions() == [1, 3, 7]
     assert attention.get_feature_output().get_dimensions() == [3, 40]
 
     arch = _only_layer_architecture(n, "attention")
-    assert arch["use_cross_attention"] is True
     assert arch["use_score_bias"] is True
     assert arch["score_bias_input"]["dimensions"] == [1, 3, 7]
-    assert arch["feature_input"]["dimensions"] == [3, 32]
-    assert arch["context_input"]["dimensions"] == [7, 48]
+    assert arch["query_input"]["dimensions"] == [3, 32]
+    assert arch["key_input"]["dimensions"] == [7, 48]
     _assert_parameter_shape(arch, "query_weights", [32, 32])
     _assert_parameter_shape(arch, "key_weights", [48, 16])
     _assert_parameter_shape(arch, "value_weights", [48, 12])
@@ -442,8 +481,9 @@ def test_attention_score_bias_accepts_sequence_broadcast_shape():
     attention = thor.layers.Attention(
         n,
         decoder,
+        encoder,
+        encoder,
         4,
-        context_input=encoder,
         score_bias_input=score_bias,
         num_key_value_heads=2,
         head_dim=8,
@@ -467,17 +507,19 @@ def test_attention_score_bias_rejects_invalid_shape_dtype_and_decode_masks():
     bad_dtype_score_bias = _input_tensor(n, "bad_dtype_score_bias", [1, 5, 5], thor.DataType.fp16)
 
     with pytest.raises((RuntimeError, ValueError), match="scoreBiasInput dimensions"):
-        thor.layers.Attention(n, x, 4, head_dim=8, score_bias_input=bad_head_score_bias)
+        thor.layers.Attention(n, x, x, x, 4, head_dim=8, score_bias_input=bad_head_score_bias)
 
     with pytest.raises((RuntimeError, ValueError), match="scoreBiasInput dimensions"):
-        thor.layers.Attention(n, x, 4, head_dim=8, score_bias_input=bad_sequence_score_bias)
+        thor.layers.Attention(n, x, x, x, 4, head_dim=8, score_bias_input=bad_sequence_score_bias)
 
     with pytest.raises((RuntimeError, ValueError), match="scoreBiasInput dtype"):
-        thor.layers.Attention(n, x, 4, head_dim=8, score_bias_input=bad_dtype_score_bias)
+        thor.layers.Attention(n, x, x, x, 4, head_dim=8, score_bias_input=bad_dtype_score_bias)
 
     with pytest.raises((RuntimeError, ValueError), match="scoreBiasInput"):
         thor.layers.Attention(
             n,
+            x,
+            x,
             x,
             4,
             head_dim=8,
@@ -506,6 +548,8 @@ def test_attention_python_binding_builds_self_attention_residual_epilogue():
 
     attention = thor.layers.Attention(
         n,
+        x,
+        x,
         x,
         2,
         head_dim=4,
@@ -541,8 +585,9 @@ def test_attention_python_binding_builds_cross_attention_residual_epilogue():
     attention = thor.layers.Attention(
         n,
         query,
+        context,
+        context,
         2,
-        context_input=context,
         num_key_value_heads=1,
         head_dim=4,
         value_dim=4,
@@ -554,7 +599,6 @@ def test_attention_python_binding_builds_cross_attention_residual_epilogue():
         epilogue_inputs={"residual": residual},
     )
 
-    assert attention.get_use_cross_attention()
     assert attention.get_has_epilogue()
     assert attention.get_epilogue_input_names() == ["residual"]
     assert attention.get_feature_output().get_dimensions() == [5, 8]
@@ -571,6 +615,8 @@ def test_attention_python_binding_rejects_invalid_residual_epilogue_bindings():
         thor.layers.Attention(
             n,
             x,
+            x,
+            x,
             2,
             head_dim=4,
             output_data_type=thor.DataType.bf16,
@@ -580,6 +626,8 @@ def test_attention_python_binding_rejects_invalid_residual_epilogue_bindings():
     with pytest.raises((RuntimeError, ValueError), match="shape must match"):
         thor.layers.Attention(
             n,
+            x,
+            x,
             x,
             2,
             head_dim=4,
@@ -591,6 +639,8 @@ def test_attention_python_binding_rejects_invalid_residual_epilogue_bindings():
     with pytest.raises((RuntimeError, ValueError), match="dtype must match"):
         thor.layers.Attention(
             n,
+            x,
+            x,
             x,
             2,
             head_dim=4,
@@ -614,6 +664,8 @@ def test_attention_python_binding_rejects_invalid_residual_epilogue_bindings():
         thor.layers.Attention(
             n,
             x,
+            x,
+            x,
             2,
             head_dim=4,
             output_data_type=thor.DataType.bf16,
@@ -628,6 +680,8 @@ def test_attention_python_binding_rejects_invalid_residual_epilogue_bindings():
     with pytest.raises((RuntimeError, ValueError), match="input mismatch"):
         thor.layers.Attention(
             n,
+            x,
+            x,
             x,
             2,
             head_dim=4,
@@ -645,6 +699,8 @@ def test_attention_python_binding_rejects_invalid_residual_epilogue_bindings():
         thor.layers.Attention(
             n,
             x,
+            x,
+            x,
             2,
             head_dim=4,
             output_data_type=thor.DataType.bf16,
@@ -653,7 +709,7 @@ def test_attention_python_binding_rejects_invalid_residual_epilogue_bindings():
         )
 
     with pytest.raises((RuntimeError, ValueError), match="reserved"):
-        thor.layers.Attention.epilogue_aux_input("feature_input")
+        thor.layers.Attention.epilogue_aux_input("query_input")
 
     shape_changing = thor.layers.Attention.epilogue_input(
         output_dtype=thor.DataType.bf16,
@@ -662,6 +718,8 @@ def test_attention_python_binding_rejects_invalid_residual_epilogue_bindings():
     with pytest.raises((RuntimeError, ValueError), match="preserve the output projection shape"):
         thor.layers.Attention(
             n,
+            x,
+            x,
             x,
             2,
             head_dim=4,
@@ -673,12 +731,12 @@ def test_attention_python_binding_rejects_invalid_residual_epilogue_bindings():
 def test_attention_python_binding_without_epilogue_is_unchanged():
     n = _net("test_attention_python_without_epilogue_is_unchanged")
     x = _input_tensor(n, "tokens", [5, 8], thor.DataType.bf16)
-    attention = thor.layers.Attention(n, x, 2, head_dim=4)
+    attention = thor.layers.Attention(n, x, x, x, 2, head_dim=4)
 
     assert not attention.get_has_epilogue()
     assert attention.get_epilogue_input_names() == []
     arch = _only_layer_architecture(n, "attention")
-    assert arch["version"] == "1.0.0"
+    assert arch["version"] == "2.0.0"
     assert arch["epilogue"] is None
     assert arch["epilogue_inputs"] == []
 
@@ -690,6 +748,8 @@ def test_attention_first_class_residual_and_output_dropout_surface():
 
     attention = thor.layers.Attention(
         n,
+        x,
+        x,
         x,
         2,
         head_dim=4,
@@ -704,7 +764,7 @@ def test_attention_first_class_residual_and_output_dropout_surface():
     assert attention.get_use_residual() is True
     assert attention.get_residual_input() == residual
     arch = _only_layer_architecture(n, "attention")
-    assert arch["version"] == "1.1.0"
+    assert arch["version"] == "2.0.0"
     assert arch["output_dropout_probability"] == pytest.approx(0.10)
     assert arch["output_dropout_seed"] == 17
     assert arch["use_residual"] is True
@@ -716,6 +776,8 @@ def test_attention_exposes_transient_training_dropout_control():
     x = _input_tensor(n, "tokens", [4, 32], thor.DataType.fp16)
     attention = thor.layers.Attention(
         n,
+        x,
+        x,
         x,
         2,
         head_dim=16,
@@ -753,6 +815,8 @@ def test_attention_legacy_sdpa_dropout_keywords_remain_aliases():
     attention = thor.layers.Attention(
         n,
         x,
+        x,
+        x,
         2,
         head_dim=16,
         dropout_probability=0.25,
@@ -768,6 +832,8 @@ def test_attention_legacy_sdpa_dropout_keywords_remain_aliases():
         thor.layers.Attention(
             n,
             x,
+            x,
+            x,
             2,
             head_dim=16,
             sdpa_dropout_probability=0.10,
@@ -776,6 +842,8 @@ def test_attention_legacy_sdpa_dropout_keywords_remain_aliases():
     with pytest.raises(ValueError, match="sdpa_dropout_seed and legacy dropout_seed disagree"):
         thor.layers.Attention(
             n,
+            x,
+            x,
             x,
             2,
             head_dim=16,
@@ -786,6 +854,8 @@ def test_attention_legacy_sdpa_dropout_keywords_remain_aliases():
     with pytest.raises(ValueError, match="sdpa_dropout_offset and legacy dropout_offset disagree"):
         thor.layers.Attention(
             n,
+            x,
+            x,
             x,
             2,
             head_dim=16,
@@ -812,9 +882,10 @@ def test_attention_dense_query_ragged_kv_infers_mixed_mode_and_key_rope_origins(
     attention = thor.layers.Attention(
         n,
         query,
+        context,
+        context,
         4,
         head_dim=8,
-        context_input=context,
         use_rope=True,
         rope_rotary_dim=8,
         rope_query_position_offset=371,
@@ -824,16 +895,19 @@ def test_attention_dense_query_ragged_kv_infers_mixed_mode_and_key_rope_origins(
     assert isinstance(attention.get_feature_output(), thor.Tensor)
     assert not isinstance(attention.get_feature_output(), thor.RaggedTensor)
     assert attention.get_feature_output().get_dimensions() == [5, 32]
-    assert attention.get_context_input() == context
+    assert attention.get_key_input() == context
+    assert attention.get_value_input() == context
     assert attention.get_rope_key_position_offsets_input() == key_origins
 
     arch = _only_layer_architecture(n, "attention")
     assert arch["use_ragged"] is True
     assert arch["query_ragged"] is False
     assert arch["key_value_ragged"] is True
-    assert "ragged_feature_input" not in arch
+    assert "ragged_query_input" not in arch
     assert "ragged_feature_output" not in arch
-    assert "ragged_context_input" in arch
+    assert "ragged_key_input" in arch
+    assert "ragged_value_input" in arch
+    assert arch["ragged_key_input"]["offsets"]["id"] == arch["ragged_value_input"]["offsets"]["id"]
     assert arch["rope_query_position_offset"] == 371
 
 
@@ -854,9 +928,10 @@ def test_attention_ragged_query_dense_kv_infers_mixed_mode():
     attention = thor.layers.Attention(
         n,
         query,
+        context,
+        context,
         4,
         head_dim=8,
-        context_input=context,
         use_rope=True,
         rope_rotary_dim=8,
         rope_query_position_offsets=query_origins,
@@ -872,7 +947,8 @@ def test_attention_ragged_query_dense_kv_infers_mixed_mode():
     assert arch["use_ragged"] is True
     assert arch["query_ragged"] is True
     assert arch["key_value_ragged"] is False
-    assert "ragged_feature_input" in arch
+    assert "ragged_query_input" in arch
     assert "ragged_feature_output" in arch
-    assert "ragged_context_input" not in arch
+    assert "ragged_key_input" not in arch
+    assert "ragged_value_input" not in arch
     assert arch["rope_key_position_offset"] == 40

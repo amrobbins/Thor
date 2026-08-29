@@ -323,6 +323,8 @@ void BatchNormalization::compileImpl() {
     scratchDScale.clear();
     scratchDBias.clear();
     scratchErrorOutput.reset();
+    backwardCompletionEvents.clear();
+    backwardCompletionEvents.resize(featureInputs.size());
 
     resultSaveMean.reserve(featureInputs.size());
     resultSaveInvVariance.reserve(featureInputs.size());
@@ -378,8 +380,9 @@ void BatchNormalization::cleanup() {
     scratchDScale.clear();
     scratchDBias.clear();
     scratchErrorOutput.reset();
+    backwardCompletionEvents.clear();
 
-    Layer::cleanup();
+    TrainableLayer::cleanup();
 }
 
 void BatchNormalization::runForward(std::optional<Tensor> inputTensor,
@@ -476,7 +479,9 @@ std::optional<Event> BatchNormalization::computeErrorOutAccumulateWeightsGradien
                                                   epsilon,
                                                   numChannels,
                                                   streams[connectionNumber]);
-        return streams[connectionNumber].putEvent();
+        THOR_THROW_IF_FALSE(connectionNumber < backwardCompletionEvents.size());
+        streams[connectionNumber].putEvent(backwardCompletionEvents[connectionNumber]);
+        return backwardCompletionEvents[connectionNumber];
     }
 
     THOR_THROW_IF_FALSE(connectionNumber < scratchDScale.size());
@@ -563,7 +568,9 @@ std::optional<Event> BatchNormalization::computeErrorOutAccumulateWeightsGradien
                                              executionStream);
     }
 
-    return executionStream.putEvent();
+    THOR_THROW_IF_FALSE(connectionNumber < backwardCompletionEvents.size());
+    executionStream.putEvent(backwardCompletionEvents[connectionNumber]);
+    return backwardCompletionEvents[connectionNumber];
 }
 
 void BatchNormalization::accumulateWeightsGradient(uint32_t connectionNumber, bool clearGradientFirst) {

@@ -89,6 +89,8 @@ class AdaptiveLayerNorm : public Layer {
     std::array<std::optional<Tensor>, NUM_INPUT_PORTS> adaptiveErrorOutputs;
     std::array<std::optional<Layer*>, NUM_INPUT_PORTS> adaptivePreviousLayers;
     std::array<std::optional<Stream>, NUM_INPUT_PORTS> adaptiveStreams;
+    std::array<Event, NUM_INPUT_PORTS> forwardInputReadyEvents;
+    Event gradientsReadyEvent;
 
     std::set<unsigned long> allForwardInputTensorIds;
     std::set<unsigned long> stillWaitingForForwardInputTensorIds;
