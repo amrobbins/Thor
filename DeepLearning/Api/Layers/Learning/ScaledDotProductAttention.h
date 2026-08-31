@@ -23,7 +23,8 @@ namespace Thor {
 // This layer consumes already-projected multi-head tensors.  The API tensor dimensions omit the runtime batch dimension.
 // The default API layout is BHSD-without-B, i.e. [heads, sequence, head_dim].  BSHD-without-B, i.e.
 // [sequence, heads, head_dim], is also supported so higher-level transformer layers can keep token-major projection
-// outputs without an extra transpose.
+// outputs without an extra transpose. Query and key/value domains may be dense or canonical RaggedTensor independently;
+// key/value must share a domain, and any mixed/ragged execution uses BSHD. The output is ragged exactly when query is ragged.
 class ScaledDotProductAttention : public CustomLayer {
    public:
     class Builder;
@@ -73,13 +74,25 @@ class ScaledDotProductAttention : public CustomLayer {
                       SerializationContract::LAYER_PROVIDES_OWN_ARCHITECTURE,
                       false,
                       false,
-                      queryRaggedInput.has_value()
-                          ? std::set<std::string>{"query", "key", "value", "query_ragged_offsets", "key_value_ragged_offsets"}
-                          : std::set<std::string>{},
+                      [&]() {
+                          std::set<std::string> names;
+                          if (queryRaggedInput.has_value()) {
+                              names.insert("query");
+                              names.insert("query_ragged_offsets");
+                          }
+                          if (keyRaggedInput.has_value()) {
+                              names.insert("key");
+                              names.insert("value");
+                              names.insert("key_value_ragged_offsets");
+                          }
+                          return names;
+                      }(),
                       queryRaggedInput.has_value() ? std::set<std::string>{"output"} : std::set<std::string>{},
                       queryRaggedInput.has_value()
                           ? std::optional<uint32_t>(static_cast<uint32_t>(queryRaggedInput->getBatchSize()))
-                          : std::nullopt),
+                          : (keyRaggedInput.has_value()
+                                 ? std::optional<uint32_t>(static_cast<uint32_t>(keyRaggedInput->getBatchSize()))
+                                 : std::nullopt)),
           tensorLayout(tensorLayout),
           maskKind(maskKind),
           diagonalLeftBound(diagonalLeftBound),
@@ -131,7 +144,9 @@ class ScaledDotProductAttention : public CustomLayer {
     int64_t getDropoutSeed() const { return dropoutSeed; }
     int64_t getDropoutOffset() const { return dropoutOffset; }
     bool getUseSequenceLengths() const { return querySequenceLengthsInput.has_value(); }
-    bool getUseRaggedInput() const { return queryRaggedInput.has_value(); }
+    bool getUseRaggedInput() const { return queryRaggedInput.has_value() || keyRaggedInput.has_value(); }
+    bool getQueryIsRagged() const { return queryRaggedInput.has_value(); }
+    bool getKeyValueIsRagged() const { return keyRaggedInput.has_value(); }
     bool getUseBias() const { return getInputInterface().contains("bias"); }
     bool getUseFp8ForwardScaling() const { return fp8DescaleQInput.has_value(); }
     std::optional<Tensor> getBiasInput() const {

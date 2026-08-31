@@ -191,3 +191,35 @@ TEST(UtilityApiLayers, ReshapeSerializeDeserialize) {
     ASSERT_EQ(stampedReshape->getFeatureInput().value().getDataType(), dataType);
     ASSERT_EQ(stampedReshape->getFeatureOutput().value().getDataType(), dataType);
 }
+
+TEST(UtilityApiLayers, RaggedReshapePreservesPartitionAndReshapesOnlyTrailingValues) {
+    Network network("raggedReshape");
+    RaggedTensor input(DataType::FP32, {2, 3, 4}, 3, 8, DataType::UINT64);
+
+    Reshape reshape = Reshape::Builder().network(network).featureInput(input).newDimensions({4, 6}).build();
+
+    ASSERT_TRUE(reshape.getUseRagged());
+    ASSERT_TRUE(reshape.getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(reshape.getRaggedFeatureOutput().has_value());
+    const RaggedTensor output = reshape.getRaggedFeatureOutput().value();
+    EXPECT_EQ(output.getValuesDimensions(), std::vector<uint64_t>({8, 4, 6}));
+    EXPECT_EQ(output.getTrailingDimensions(), std::vector<uint64_t>({4, 6}));
+    EXPECT_EQ(output.getOffsets(), input.getOffsets());
+    EXPECT_EQ(output.getBatchSize(), input.getBatchSize());
+    EXPECT_EQ(output.getMaxTotalValues(), input.getMaxTotalValues());
+    EXPECT_EQ(output.getOffsetsDataType(), DataType::UINT64);
+    ASSERT_TRUE(reshape.getFeatureOutput().has_value());
+    EXPECT_TRUE(reshape.outputTensorDimensionsIncludeBatch(reshape.getFeatureOutput().value()));
+
+    const json architecture = reshape.architectureJson();
+    EXPECT_TRUE(architecture.at("use_ragged").get<bool>());
+    EXPECT_EQ(architecture.at("ragged_feature_output").at("offsets").at("id").get<uint64_t>(), input.getOffsets().getId());
+}
+
+TEST(UtilityApiLayers, RaggedReshapeRejectsChangingElementsPerPackedValue) {
+    Network network("raggedReshapeRejectsChangingWidth");
+    RaggedTensor input(DataType::FP32, {2, 3, 4}, 3, 8, DataType::UINT32);
+
+    EXPECT_THROW((void)Reshape::Builder().network(network).featureInput(input).newDimensions({4, 5}).build(),
+                 std::invalid_argument);
+}

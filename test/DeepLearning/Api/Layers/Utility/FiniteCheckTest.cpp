@@ -98,3 +98,42 @@ TEST(UtilityApiLayers, FiniteCheckArchitecturePersistsDiagnosticPolicy) {
     EXPECT_TRUE(architecture.at("fail_on_non_finite").get<bool>());
     EXPECT_EQ(architecture.at("max_reported_indices").get<uint32_t>(), 7U);
 }
+
+TEST(UtilityApiLayers, RaggedFiniteCheckPreservesExactPartitionAndSerializes) {
+    Network network("raggedFiniteCheckBuilds");
+    Tensor values(DataType::FP32, {8, 2});
+    Tensor offsets(DataType::UINT64, {4});
+    RaggedTensor input(values, offsets, 5);
+
+    FiniteCheck finiteCheck = FiniteCheck::Builder()
+                                  .network(network)
+                                  .featureInput(input)
+                                  .tensorLabel("ragged_history")
+                                  .enabled(false)
+                                  .build();
+
+    ASSERT_TRUE(finiteCheck.getUseRagged());
+    ASSERT_TRUE(finiteCheck.getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(finiteCheck.getRaggedFeatureOutput().has_value());
+    const RaggedTensor output = finiteCheck.getRaggedFeatureOutput().value();
+    EXPECT_EQ(output.getOffsets(), input.getOffsets());
+    EXPECT_EQ(output.getBatchSize(), input.getBatchSize());
+    EXPECT_EQ(output.getMaxTotalValues(), input.getMaxTotalValues());
+    ASSERT_TRUE(output.hasMaxValuesPerRow());
+    EXPECT_EQ(output.getMaxValuesPerRow(), 5u);
+    EXPECT_EQ(output.getValues().getDimensions(), values.getDimensions());
+    EXPECT_NE(output.getValues(), values);
+
+    const json architecture = finiteCheck.architectureJson();
+    EXPECT_EQ(architecture.at("version").get<string>(), "1.1.0");
+    EXPECT_TRUE(architecture.at("use_ragged").get<bool>());
+    EXPECT_EQ(architecture.at("ragged_feature_input").at("offsets").at("id").get<uint64_t>(), offsets.getId());
+    EXPECT_EQ(architecture.at("ragged_feature_output").at("offsets").at("id").get<uint64_t>(), offsets.getId());
+
+    auto cloned = dynamic_pointer_cast<FiniteCheck>(finiteCheck.clone());
+    ASSERT_NE(cloned, nullptr);
+    ASSERT_TRUE(cloned->getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(cloned->getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(cloned->getRaggedFeatureInput()->getOffsets(), input.getOffsets());
+    EXPECT_EQ(cloned->getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
+}

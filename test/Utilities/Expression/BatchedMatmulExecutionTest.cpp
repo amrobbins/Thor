@@ -1,3 +1,4 @@
+#include "Utilities/Expression/CudaKernelExpression.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
 
@@ -82,6 +83,38 @@ FusedEquation compileMatmulPlusOne() {
     const Expression rhs = Expression::input("rhs", DataType::FP32, DataType::FP32);
     const Expression y = Expression::matmul(lhs, rhs, false, false, DataType::FP32, DataType::FP32);
     const Expression z = y + Expression::constantScalar(1.0);
+    return FusedEquation::compile(Expression::outputs({{"z", z}}).physicalOutputs(), 0);
+}
+
+FusedEquation compileGroupedMatmulCudaKernelPlusOne() {
+    const Expression lhs = Expression::input("lhs", DataType::FP32, DataType::FP32);
+    const Expression rhs = Expression::input("rhs", DataType::FP32, DataType::FP32);
+    const Expression matmul = Expression::matmul(lhs, rhs, false, false, DataType::FP32, DataType::FP32);
+
+    auto identity = CudaKernelExpression::builder("grouped_matmul_cuda_identity")
+                        .source(R"cuda(
+extern "C" __global__
+void grouped_matmul_cuda_identity_kernel(const float* x, float* y, int64_t n) {
+    int64_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        y[i] = x[i];
+    }
+}
+)cuda")
+                        .entry("grouped_matmul_cuda_identity_kernel")
+                        .input("x", DataType::FP32)
+                        .outputLike("y", DataType::FP32, "x")
+                        .scalar("n", DataType::INT64, CudaKernelExpression::DimExpr::numel("y"))
+                        .launchGrid1D(CudaKernelExpression::DimExpr::numel("y"), 128)
+                        .build();
+
+    Outputs cuda_outputs = identity.apply({{"x", matmul}});
+    if (cuda_outputs.namedOutputs().size() != 1) {
+        throw std::runtime_error("Expected one CudaKernel output.");
+    }
+    const Expression cuda_y =
+        Expression::fromPhysicalNode(cuda_outputs.expression(), cuda_outputs.namedOutputs().front().node_idx);
+    const Expression z = cuda_y + Expression::constantScalar(1.0);
     return FusedEquation::compile(Expression::outputs({{"z", z}}).physicalOutputs(), 0);
 }
 
@@ -241,6 +274,37 @@ TEST(ExpressionBatchedMatmulExecution, GroupedMatmulDependencyBarrierFeedsDownst
     StampedExecutionPlan plan = equation.stamp({{"lhs", lhs}, {"rhs", rhs}}, stream);
     EXPECT_EQ(plan.stageKindNames(),
               (std::vector<std::string>{"Matmul", "Matmul", "DependencyBarrier", "FusedKernel"}));
+
+    plan.run();
+    expectValues(copyToCpu(plan.output("z"), stream),
+                 {23, 29, 50, 65,
+                  59, 65, 140, 155,
+                  95, 101, 230, 245,
+                  77, 101, 104, 137,
+                  221, 245, 302, 335,
+                  365, 389, 500, 533});
+}
+
+TEST(ExpressionBatchedMatmulExecution, CudaKernelProducerUsesPhysicalStageIndexAfterGroupedMatmulExpansion) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor lhs =
+        makeGpuTensor({2, 1, 2, 3}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, stream);
+    Tensor rhs = makeGpuTensor({1, 3, 3, 2},
+                               {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18},
+                               stream);
+
+    FusedEquation equation = compileGroupedMatmulCudaKernelPlusOne();
+    StampedExecutionPlan plan = equation.stamp({{"lhs", lhs}, {"rhs", rhs}}, stream);
+    EXPECT_EQ(plan.stageKindNames(),
+              (std::vector<std::string>{"Matmul", "Matmul", "DependencyBarrier", "CudaKernel", "FusedKernel"}));
+
+    const std::vector<std::vector<uint32_t>> dependencies = plan.stageDependencyIndices();
+    ASSERT_EQ(dependencies.size(), 5u);
+    EXPECT_EQ(dependencies[2], (std::vector<uint32_t>{0, 1}));
+    EXPECT_EQ(dependencies[3], (std::vector<uint32_t>{2}));
+    EXPECT_EQ(dependencies[4], (std::vector<uint32_t>{3}));
 
     plan.run();
     expectValues(copyToCpu(plan.output("z"), stream),

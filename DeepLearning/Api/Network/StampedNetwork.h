@@ -129,7 +129,10 @@ class StampedNetwork {
     struct RaggedInputBinding {
         std::string valuesInputName;
         std::string offsetsInputName;
+        std::optional<std::string> partitionInputName;
         ThorImplementation::RaggedTensorDescriptor descriptor;
+
+        [[nodiscard]] bool ownsPartition() const { return !partitionInputName.has_value(); }
     };
 
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> getInputs() { return inputsShared; }

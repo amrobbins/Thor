@@ -87,3 +87,86 @@ def test_stop_gradient_rejects_wrong_types_and_arity():
 
     with pytest.raises(TypeError):
         thor.layers.StopGradient(n, "not a tensor")
+
+
+def _physical_ragged(values: np.ndarray, offsets: np.ndarray, dtype: thor.DataType = thor.DataType.fp32):
+    return thor.physical.PhysicalRaggedTensor(
+        _cpu_tensor(values, dtype),
+        _cpu_tensor(offsets, thor.DataType.uint32),
+    )
+
+
+def test_stop_gradient_accepts_ragged_tensor_and_preserves_partition():
+    n = thor.Network("test_ragged_stop_gradient_build")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=12,
+        max_values_per_row=8,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    stop = thor.layers.StopGradient(n, x)
+    y = stop.get_feature_output()
+
+    assert stop.get_use_ragged() is True
+    assert isinstance(y, thor.RaggedTensor)
+    assert y.offsets == x.offsets
+    assert y.max_values_per_row == 8
+
+    arch = _only_layer_architecture(n, "stop_gradient")
+    assert arch["use_ragged"] is True
+    assert arch["ragged_feature_input"]["offsets"]["id"] == arch["ragged_feature_output"]["offsets"]["id"]
+
+
+@pytest.mark.cuda
+def test_ragged_stop_gradient_forward_is_identity():
+    n = thor.Network("test_ragged_stop_gradient_forward")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=12,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    stop = thor.layers.StopGradient(n, x)
+    thor.layers.RaggedNetworkOutput(n, "output", stop.get_feature_output())
+
+    values = np.arange(12 * 4, dtype=np.float32).reshape(12, 4) / 7.0
+    offsets = np.array([0, 2, 2, 7], dtype=np.uint32)
+    placed = n.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    result = placed.infer({"tokens": _physical_ragged(values, offsets)})["output"]
+
+    assert np.array_equal(result.offsets.numpy(), offsets)
+    np.testing.assert_array_equal(np.array(result.values.numpy(), copy=True)[: offsets[-1]], values[: offsets[-1]])
+
+
+def test_ragged_stop_gradient_save_load_preserves_partition_metadata(tmp_path):
+    name = "test_ragged_stop_gradient_round_trip"
+    n = thor.Network(name)
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=12,
+        max_values_per_row=8,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    stop = thor.layers.StopGradient(n, x)
+    thor.layers.RaggedNetworkOutput(n, "output", stop.get_feature_output())
+
+    save_dir = tmp_path / "ragged_stop_gradient_model"
+    n.save(str(save_dir), overwrite=False)
+
+    loaded = thor.Network(name)
+    loaded.load(str(save_dir))
+    arch = _only_layer_architecture(loaded, "stop_gradient")
+    assert arch["use_ragged"] is True
+    assert arch["ragged_feature_input"]["offsets"]["id"] == arch["ragged_feature_output"]["offsets"]["id"]
+    assert arch["ragged_feature_input"]["max_values_per_row"] == 8

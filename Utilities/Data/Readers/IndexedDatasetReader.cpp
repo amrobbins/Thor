@@ -677,13 +677,19 @@ class IndexedDatasetReader::Session::Impl {
 
     struct IoContext {
         std::string filename;
-        UringDirect io;
         std::vector<std::vector<iovec>> iovecSlots;
         std::vector<std::vector<uint8_t>> windowedReferenceBuffers;
         std::vector<PendingReadRequest> pendingRequests;
         std::deque<uint64_t> freeIovecSlots;
         std::deque<uint64_t> submittedIovecSlotsInOrder;
         uint64_t submittedNotCompleted = 0;
+
+        // Fallback UringDirect requests retain pointers into iovecSlots and
+        // windowedReferenceBuffers until their worker completes. Members are
+        // destroyed in reverse declaration order, so keep io last: even when
+        // an I/O error unwinds a Session before drain(), UringDirect joins its
+        // workers before any request backing storage can be released.
+        UringDirect io;
 
         IoContext(uint64_t queueDepth, uint64_t recordSpanCount, uint64_t windowedReferenceBytes)
             : io(checkedQueueDepthForUring(queueDepth), UringDirect::ioBackendFromEnv("THOR_DATASET_IO_BACKEND")) {
@@ -701,8 +707,8 @@ class IndexedDatasetReader::Session::Impl {
 
         IoContext(const IoContext &) = delete;
         IoContext &operator=(const IoContext &) = delete;
-        IoContext(IoContext &&) noexcept = default;
-        IoContext &operator=(IoContext &&) noexcept = default;
+        IoContext(IoContext &&) = delete;
+        IoContext &operator=(IoContext &&) = delete;
     };
 
     struct SourceFileContext {
@@ -757,13 +763,19 @@ class IndexedDatasetReader::Session::Impl {
 
         stats.shardContextCacheMisses += 1;
         const uint64_t recordSpanCount = static_cast<uint64_t>(owner->impl->recordReadSpans.size());
-        IoContext context(queueDepth, recordSpanCount, owner->impl->totalWindowedReferenceBytes);
+        auto [insertIt, inserted] = ioContextsByShardIndex.try_emplace(
+            shardIndex, queueDepth, recordSpanCount, owner->impl->totalWindowedReferenceBytes);
+        THOR_THROW_IF_FALSE(inserted);
+        IoContext &context = insertIt->second;
         context.filename = shardInfo.path.string();
-        context.io.registerCachedLoadFile(context.filename);
+        try {
+            context.io.registerCachedLoadFile(context.filename);
+        } catch (...) {
+            ioContextsByShardIndex.erase(insertIt);
+            throw;
+        }
         resolvedIoBackends.insert(std::string(context.io.activeBackendName()) + "_readv");
 
-        auto [insertIt, inserted] = ioContextsByShardIndex.emplace(shardIndex, std::move(context));
-        THOR_THROW_IF_FALSE(inserted);
         stats.shardContextOpenCount += 1;
         stats.maxOpenShardContexts = std::max<uint64_t>(stats.maxOpenShardContexts,
                                                         static_cast<uint64_t>(ioContextsByShardIndex.size()));

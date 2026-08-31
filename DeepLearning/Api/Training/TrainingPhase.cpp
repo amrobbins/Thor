@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
 #include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -37,24 +38,46 @@ std::shared_ptr<Network> deserializePhaseNetwork(const json& networkJson, std::s
         if (!raggedInputs.is_array()) {
             throw std::runtime_error("TrainingPhase network 'ragged_network_inputs' is not a JSON array.");
         }
-        for (const json& raggedInputJson : raggedInputs) {
+        auto loadRaggedInput = [&network](const json& raggedInputJson, bool sharedPartition) {
             const std::string raggedInputVersion = raggedInputJson.at("version").get<std::string>();
-            if (raggedInputVersion != "1.0.0" && raggedInputVersion != "1.1.0") {
+            if (raggedInputVersion != "1.0.0" && raggedInputVersion != "1.1.0" && raggedInputVersion != "1.2.0") {
                 throw std::runtime_error("Unsupported TrainingPhase network ragged_network_inputs version: " +
                                          raggedInputVersion);
             }
+            const bool hasPartitionSource = raggedInputJson.contains("partition_input_name");
+            if (hasPartitionSource != sharedPartition) return;
             const std::string name = raggedInputJson.at("name").get<std::string>();
             const std::string valuesInputName = raggedInputJson.at("values_input_name").get<std::string>();
-            const std::string offsetsInputName = raggedInputJson.at("offsets_input_name").get<std::string>();
             const uint64_t valuesTensorId = raggedInputJson.at("values_tensor_id").get<uint64_t>();
-            const uint64_t offsetsTensorId = raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
             Tensor values = network->getApiTensorByOriginalId(valuesTensorId);
-            Tensor offsets = network->getApiTensorByOriginalId(offsetsTensorId);
-            RaggedTensor raggedTensor = raggedInputJson.contains("max_values_per_row")
-                ? RaggedTensor(values, offsets, raggedInputJson.at("max_values_per_row").get<uint64_t>())
-                : RaggedTensor(values, offsets);
-            network->registerRaggedNetworkInput(name, raggedTensor, valuesInputName, offsetsInputName);
-        }
+            if (hasPartitionSource) {
+                const std::string partitionInputName = raggedInputJson.at("partition_input_name").get<std::string>();
+                std::optional<RaggedNetworkInputReference> source;
+                for (const RaggedNetworkInputReference& candidate : network->getExternalRaggedNetworkInputs()) {
+                    if (candidate.name == partitionInputName) {
+                        source = candidate;
+                        break;
+                    }
+                }
+                if (!source.has_value()) {
+                    throw std::runtime_error("TrainingPhase shared ragged input '" + name +
+                                             "' references missing partition input '" + partitionInputName + "'.");
+                }
+                RaggedTensor raggedTensor = source->raggedTensor.withValues(values);
+                network->registerRaggedNetworkInput(
+                    name, raggedTensor, valuesInputName, source->offsetsInputName, partitionInputName);
+            } else {
+                const std::string offsetsInputName = raggedInputJson.at("offsets_input_name").get<std::string>();
+                const uint64_t offsetsTensorId = raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
+                Tensor offsets = network->getApiTensorByOriginalId(offsetsTensorId);
+                RaggedTensor raggedTensor = raggedInputJson.contains("max_values_per_row")
+                    ? RaggedTensor(values, offsets, raggedInputJson.at("max_values_per_row").get<uint64_t>())
+                    : RaggedTensor(values, offsets);
+                network->registerRaggedNetworkInput(name, raggedTensor, valuesInputName, offsetsInputName);
+            }
+        };
+        for (const json& raggedInputJson : raggedInputs) loadRaggedInput(raggedInputJson, /*sharedPartition=*/false);
+        for (const json& raggedInputJson : raggedInputs) loadRaggedInput(raggedInputJson, /*sharedPartition=*/true);
     }
 
     if (networkJson.contains("ragged_network_outputs")) {

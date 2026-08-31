@@ -78,7 +78,7 @@ TEST(StreamSharedOwnership, IndependentlyCreatedStreamsHaveDistinctIdentities) {
     second.synchronize();
 }
 
-TEST(StreamSharedOwnership, LazyLibraryHandlesAreSharedAcrossCopies) {
+TEST(StreamSharedOwnership, CudnnHandlesArePerHostThreadWhileOtherLazyHandlesRemainShared) {
     if (!gpuAvailable())
         GTEST_SKIP() << "Stream shared-ownership test requires a GPU";
 
@@ -87,25 +87,55 @@ TEST(StreamSharedOwnership, LazyLibraryHandlesAreSharedAcrossCopies) {
     Stream root(0);
     std::vector<Stream> stableSources(NUM_THREADS, root);
     std::vector<cudnnHandle_t> cudnnHandles(NUM_THREADS, nullptr);
+    std::vector<cudnnHandle_t> repeatedCudnnHandles(NUM_THREADS, nullptr);
     std::vector<cublasHandle_t> cublasHandles(NUM_THREADS, nullptr);
     std::vector<cublasLtHandle_t> cublasLtHandles(NUM_THREADS, nullptr);
     std::vector<std::thread> workers;
     workers.reserve(NUM_THREADS);
 
+    std::atomic<uint32_t> readyThreads = 0;
+    std::atomic<uint32_t> acquiredHandles = 0;
+    std::atomic<bool> start = false;
+    std::atomic<bool> release = false;
+
     for (uint32_t threadIndex = 0; threadIndex < NUM_THREADS; ++threadIndex) {
         workers.emplace_back([&, threadIndex]() {
             Stream source = stableSources[threadIndex];
+            readyThreads.fetch_add(1, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire))
+                std::this_thread::yield();
+
             cudnnHandles[threadIndex] = source.getCudnnHandle();
+            repeatedCudnnHandles[threadIndex] = source.getCudnnHandle();
             cublasHandles[threadIndex] = source.getCublasHandle();
             cublasLtHandles[threadIndex] = source.getCublasLtHandle();
+            acquiredHandles.fetch_add(1, std::memory_order_release);
+
+            // Keep every requesting thread alive until all handles have been
+            // acquired so a finished thread id cannot be reused by another
+            // worker during this test.
+            while (!release.load(std::memory_order_acquire))
+                std::this_thread::yield();
         });
     }
+
+    while (readyThreads.load(std::memory_order_acquire) != NUM_THREADS)
+        std::this_thread::yield();
+    start.store(true, std::memory_order_release);
+    while (acquiredHandles.load(std::memory_order_acquire) != NUM_THREADS)
+        std::this_thread::yield();
+    release.store(true, std::memory_order_release);
 
     for (std::thread &worker : workers)
         worker.join();
 
+    for (uint32_t threadIndex = 0; threadIndex < NUM_THREADS; ++threadIndex) {
+        EXPECT_EQ(repeatedCudnnHandles[threadIndex], cudnnHandles[threadIndex]);
+        for (uint32_t otherThreadIndex = threadIndex + 1; otherThreadIndex < NUM_THREADS; ++otherThreadIndex)
+            EXPECT_NE(cudnnHandles[threadIndex], cudnnHandles[otherThreadIndex]);
+    }
+
     for (uint32_t threadIndex = 1; threadIndex < NUM_THREADS; ++threadIndex) {
-        EXPECT_EQ(cudnnHandles[threadIndex], cudnnHandles[0]);
         EXPECT_EQ(cublasHandles[threadIndex], cublasHandles[0]);
         EXPECT_EQ(cublasLtHandles[threadIndex], cublasLtHandles[0]);
     }

@@ -191,7 +191,9 @@ TEST(ReusableEventFinalAudit, E5DynamicAndNormalizationHotPathsDoNotCreateTempor
            })();
 
     const string fusedEquation = readTextFile(root / "Utilities" / "Expression" / "FusedEquation.cpp");
-    EXPECT_NE(fusedEquation.find("ReusableEventLeases helperCompletionEvents"), string::npos);
+    EXPECT_NE(fusedEquation.find("ReusableEventLeases synchronizationEvents"), string::npos);
+    EXPECT_NE(fusedEquation.find("stream.putEvent(callerStreamReady.value())"), string::npos);
+    EXPECT_NE(fusedEquation.find("helper_stream.waitEvent(callerStreamReady.value())"), string::npos);
     EXPECT_NE(fusedEquation.find("helper_stream.putEvent(helperDoneEvent)"), string::npos);
 
     for (const string layer : {"LayerNorm", "RMSNorm", "InstanceNorm", "BatchNormalization"}) {

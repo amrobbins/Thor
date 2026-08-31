@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/AdaptiveLayerNorm.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
@@ -41,13 +42,27 @@ class AdaptiveLayerNorm : public MultiConnectionLayer {
     Tensor getDataInput() const { return featureInputs.at(DATA); }
     Tensor getScaleInput() const { return featureInputs.at(SCALE); }
     Tensor getBiasInput() const { return featureInputs.at(BIAS); }
+    [[nodiscard]] bool getUseRagged() const { return raggedFeatureInput.has_value(); }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedDataInput() const { return raggedFeatureInput; }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureOutput() const { return raggedFeatureOutput; }
 
     const std::vector<uint64_t>& getNormalizedShape() const { return normalizedShape; }
     double getEpsilon() const { return epsilon; }
     DataType getScaleBiasDataType() const { return scaleBiasDataType; }
 
     int getConnectionType(Tensor connectingTensor) const override;
+    std::vector<Tensor> getFeatureInputs() const override;
     bool mustConnectAllInputsToDriveOutput() const override { return true; }
+    [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
+        THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
+        THOR_THROW_IF_FALSE(outputTensor == featureOutputs.front());
+        return raggedFeatureInput.has_value();
+    }
+    uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
+        if (!raggedFeatureInput.has_value()) return MultiConnectionLayer::getOutputTensorBytes(batchSize);
+        THOR_THROW_IF_FALSE(featureOutputs.size() == 1);
+        return featureOutputs.front().getTotalSizeInBytes();
+    }
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
@@ -72,6 +87,8 @@ class AdaptiveLayerNorm : public MultiConnectionLayer {
     void resetInputConnectionTracking();
 
     std::vector<uint64_t> normalizedShape;
+    std::optional<RaggedTensor> raggedFeatureInput;
+    std::optional<RaggedTensor> raggedFeatureOutput;
     double epsilon = 1.0e-5;
     DataType scaleBiasDataType = DataType::FP32;
     std::set<uint64_t> connectedInputOriginalIds;
@@ -94,7 +111,17 @@ class AdaptiveLayerNorm::Builder {
 
     virtual AdaptiveLayerNorm::Builder& featureInput(Tensor featureInput) {
         THOR_THROW_IF_FALSE(featureInput.isInitialized());
+        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
         this->_featureInput = featureInput;
+        return *this;
+    }
+
+    virtual AdaptiveLayerNorm::Builder& featureInput(RaggedTensor featureInput) {
+        THOR_THROW_IF_FALSE(featureInput.isInitialized());
+        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
+        this->_raggedFeatureInput = featureInput;
+        this->_featureInput = featureInput.getValues();
         return *this;
     }
 
@@ -136,6 +163,7 @@ class AdaptiveLayerNorm::Builder {
 
     std::optional<Network*> _network;
     std::optional<Tensor> _featureInput;
+    std::optional<RaggedTensor> _raggedFeatureInput;
     std::optional<Tensor> _scaleInput;
     std::optional<Tensor> _biasInput;
     std::vector<uint64_t> _normalizedShape;

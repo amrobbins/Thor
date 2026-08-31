@@ -206,19 +206,24 @@ class AdaptiveLayerNorm(MultiConnectionLayer):
     Adaptive layer normalization over a contiguous trailing normalized shape.
 
     AdaptiveLayerNorm differs from LayerNorm by taking scale and bias as input tensors rather
-    than trainable parameters. The scale and bias tensors must match feature_input dimensions and
-    are interpreted as per-sample scale/bias values by cuDNN Frontend AdaLayerNorm.
+    than trainable parameters. For a dense feature_input, scale and bias are per-sample affine
+    values as before. For a rank-1 RaggedTensor feature_input, scale and bias are dense per-logical-
+    row values and Thor broadcasts each row's affine parameters only to that row's active tokens.
+    The exact ragged row partition is preserved.
 
     Parameters
     ----------
     network : thor.Network
         Network the layer should be added to.
-    feature_input : thor.Tensor
-        Input feature tensor to normalize.
+    feature_input : thor.Tensor or thor.RaggedTensor
+        Input feature tensor to normalize. Ragged input currently requires exactly one trailing
+        channel dimension.
     scale_input : thor.Tensor
-        Per-sample scale tensor. Must have the same dimensions as feature_input and fp32 dtype.
+        Per-sample/per-logical-row scale tensor. API dimensions must match normalized_shape and
+        dtype must be fp32.
     bias_input : thor.Tensor
-        Per-sample bias tensor. Must have the same dimensions as feature_input and fp32 dtype.
+        Per-sample/per-logical-row bias tensor. API dimensions must match normalized_shape and
+        dtype must be fp32.
     normalized_shape : Sequence[int] or None, default None
         Trailing feature dimensions to normalize over. None normalizes the final feature dimension.
     epsilon : float, default 1e-5
@@ -227,12 +232,14 @@ class AdaptiveLayerNorm(MultiConnectionLayer):
         Data type for scale and bias tensors. Thor currently requires fp32 for cuDNN Frontend AdaLayerNorm.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, scale_input: thor.Tensor, bias_input: thor.Tensor, normalized_shape: object | None = None, epsilon: float = 1e-05, scale_bias_data_type: thor.DataType = thor.DataType.fp32) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: object, scale_input: thor.Tensor, bias_input: thor.Tensor, normalized_shape: object | None = None, epsilon: float = 1e-05, scale_bias_data_type: thor.DataType = thor.DataType.fp32) -> None: ...
 
-    def get_feature_output(self) -> thor.Tensor:
-        """Return the output tensor produced by this layer."""
+    def get_feature_output(self) -> object:
+        """
+        Return the output tensor produced by this layer. Ragged inputs return a thor.RaggedTensor.
+        """
 
-    def get_data_input(self) -> thor.Tensor: ...
+    def get_data_input(self) -> object: ...
 
     def get_scale_input(self) -> thor.Tensor: ...
 
@@ -243,6 +250,8 @@ class AdaptiveLayerNorm(MultiConnectionLayer):
     def get_epsilon(self) -> float: ...
 
     def get_scale_bias_data_type(self) -> thor.DataType: ...
+
+    def get_use_ragged(self) -> bool: ...
 
 class Attention(CustomLayer):
     def __init__(self, network: thor.Network, query_input: object, key_input: object, value_input: object, num_heads: int, num_key_value_heads: int | None = None, head_dim: int | None = None, value_dim: int | None = None, output_features: int | None = None, has_bias: bool | None = False, mask_kind: str = 'none', diagonal_left_bound: int = 0, diagonal_right_bound: int = 0, use_alibi_mask: bool = False, attention_scale: float | None = None, use_rope: bool | None = False, rope_rotary_dim: int = 0, rope_base: float = 10000.0, rope_position_offset: int = 0, rope_interleaved: bool = False, rope_scaling_kind: str = 'none', rope_scaling_factor: float = 1.0, rope_original_max_position_embeddings: int = 0, rope_attention_factor: float | None = None, rope_yarn_beta_fast: float | None = 32.0, rope_yarn_beta_slow: float = 1.0, rope_llama3_low_freq_factor: float = 1.0, rope_llama3_high_freq_factor: float = 4.0, rope_long_rope_short_factors: Sequence[float] = [], rope_long_rope_long_factors: Sequence[float] = [], weights_data_type: thor.DataType | None = None, compute_data_type: thor.DataType | None = thor.DataType.fp32, output_data_type: thor.DataType | None = None, weights_initializer: thor.initializers.Initializer | None = None, bias_initializer: thor.initializers.Initializer | None = None, optimizer: thor.optimizers.Optimizer | None = None, rope_in_place: bool = False, sdpa_dropout_probability: float = 0.0, sdpa_dropout_seed: int = 0, sdpa_dropout_offset: int = 0, query_sequence_lengths: thor.Tensor | None = None, key_value_sequence_lengths: thor.Tensor | None = None, score_bias_input: thor.Tensor | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, rope_query_position_offset: int | None = None, rope_key_position_offset: int | None = None, rope_query_position_offsets: thor.Tensor | None = None, rope_key_position_offsets: thor.Tensor | None = None, output_dropout_probability: float | None = 0.0, output_dropout_seed: int | None = None, residual_input: object | None = None, dropout_probability: float | None = None, dropout_seed: int | None = None, dropout_offset: int | None = None) -> None:
@@ -686,28 +695,19 @@ class Convolution3d(TrainableLayer):
     def get_compute_data_type(self) -> thor.DataType: ...
 
 class Flatten(Layer):
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_dimensions: int) -> None:
+    def __init__(self, network: thor.Network, feature_input: object, num_output_dimensions: int) -> None:
         """
         Create and attach a Flatten layer to a Network.
 
-        Parameters
-        ----------
-        network : thor.Network
-            Network the layer should be added to.
-        feature_input : thor.Tensor
-            Input feature tensor for this layer.
-        num_output_dimensions : float
-            The number of leading dimesions that are kept from the input tensor by the output tensor.
-
-            For example if the input Tensor has dimensions [10, 20, 30, 40] and num_output_dimensions == 2,
-            then the ouput Tensor will have dimensions [10, 20, 1200].
+        For ragged inputs, num_output_dimensions applies only to the trailing
+        per-token value shape. The packed row axis and offsets are preserved.
         """
 
-    def get_feature_output(self) -> thor.Tensor:
+    def get_feature_output(self) -> object:
         """Return the output tensor produced by this layer."""
 
 class FiniteCheck(Layer):
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, tensor_label: str = '', check_forward: bool = True, check_backward: bool = True, fail_on_non_finite: bool = True, max_reported_indices: int = 8, enabled: bool = True) -> None:
+    def __init__(self, network: thor.Network, feature_input: object, tensor_label: str = '', check_forward: bool = True, check_backward: bool = True, fail_on_non_finite: bool = True, max_reported_indices: int = 8, enabled: bool = True) -> None:
         """
         Create and attach a zero-copy finite-value diagnostic layer.
 
@@ -717,12 +717,16 @@ class FiniteCheck(Layer):
 
         The forward activation and, when a backward path exists, the incoming gradient
         are checked for NaN and infinity values. The layer aliases its input storage in
-        both directions and allocates no feature or gradient tensor of its own.
+        both directions and allocates no feature or gradient tensor of its own. For a
+        ``RaggedTensor``, only the authoritative active packed prefix ending at
+        ``offsets[B]`` is checked; undefined inactive capacity is deliberately ignored
+        and the exact row partition is preserved on the output.
 
         On a failure, the report includes the user label, direction, tensor role, API
-        and physical tensor ids, dtype, shape, counts of NaN/+Inf/-Inf, and sample flat
-        and multidimensional indices. ``fail_on_non_finite=True`` raises immediately;
-        ``False`` writes the report to stderr and continues.
+        and physical tensor ids, dtype, shape, checked element count, counts of
+        NaN/+Inf/-Inf, and sample flat and multidimensional indices.
+        ``fail_on_non_finite=True`` raises immediately; ``False`` writes the report to
+        stderr and continues.
 
         FiniteCheck is intentionally a debugging barrier. GPU checks synchronize the
         layer stream so that a host-visible report or exception is deterministic, and
@@ -730,8 +734,12 @@ class FiniteCheck(Layer):
         when an enabled FiniteCheck is first stamped.
         """
 
-    def get_feature_output(self) -> thor.Tensor:
-        """Return the logical output tensor produced by this layer."""
+    def get_feature_output(self) -> object:
+        """
+        Return the logical output produced by this layer. Ragged inputs return a thor.RaggedTensor.
+        """
+
+    def get_use_ragged(self) -> bool: ...
 
     def get_tensor_label(self) -> str: ...
 
@@ -749,18 +757,19 @@ class Embedding(TrainableLayer):
     """
     Sparse-gradient embedding lookup layer.
 
-    Embedding maps an integer tensor of token ids to a floating output tensor whose
+    Embedding maps an integer Tensor or RaggedTensor of token ids to a floating output whose
     final dimension is ``embedding_dim``. Its output shape is the input index shape
-    with ``embedding_dim`` appended.
+    with ``embedding_dim`` appended. Ragged inputs preserve the exact input row partition;
+    inactive packed index capacity is outside the logical operation and is never read.
 
     This layer intentionally does not implement dense table gradients. Training uses
     sparse row updates; the first backend slice supports plain SGD for fp32 embedding
     tables, with fp16/bf16/fp32 forward lookup support.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, vocabulary_size: int, embedding_dim: int, weights_data_type: object | None = None, padding_index: object | None = None, sparse_gradients: bool = True, weights_initializer: thor.initializers.Initializer | None = None, weights_optimizer: thor.optimizers.Optimizer | None = None) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: object, vocabulary_size: int, embedding_dim: int, weights_data_type: object | None = None, padding_index: object | None = None, sparse_gradients: bool = True, weights_initializer: thor.initializers.Initializer | None = None, weights_optimizer: thor.optimizers.Optimizer | None = None) -> None: ...
 
-    def get_feature_output(self) -> thor.Tensor:
+    def get_feature_output(self) -> object:
         """Return the output tensor produced by this layer."""
 
     @property
@@ -777,6 +786,9 @@ class Embedding(TrainableLayer):
 
     @property
     def sparse_gradients(self) -> bool: ...
+
+    @property
+    def use_ragged(self) -> bool: ...
 
 class Einsum(MultiConnectionLayer):
     def __init__(self, network: thor.Network, equation: str, feature_inputs: object) -> None:
@@ -837,8 +849,8 @@ class FullyConnected(TrainableLayer):
         dimensions are preserved in the output. Ragged inputs require prefix preservation.
     activation : thor.Activation or None, default thor.activations.Gelu()
         Activation to apply after the linear transform. Pass ``None`` to keep the layer purely
-        linear. Ragged FullyConnected currently requires ``activation=None``; ragged activation
-        composition is provided by the separate ragged tokenwise-operation work.
+        linear. Ragged FullyConnected uses the same activation contract as dense FullyConnected;
+        the activation must support standalone ragged execution.
     weights_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
         Initializer for the weight matrix.
     biases_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
@@ -861,6 +873,10 @@ class FullyConnected(TrainableLayer):
     epilogue : thor.physical.Expression or None, default None
         Optional expression applied after the affine transform and activation.
         Build it from ``FullyConnected.epilogue_input()``.
+    epilogue_inputs : dict[str, thor.Tensor or thor.RaggedTensor] or None, default None
+        Named auxiliary tensors referenced by ``FullyConnected.epilogue_aux_input()``.
+        Ragged FullyConnected requires every auxiliary to be a RaggedTensor sharing the exact
+        row partition of ``feature_input``.
     """
 
     def __init__(self, network: thor.Network, feature_input: object, num_output_features: int, has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, weights_optimizer: thor.optimizers.Optimizer | None = None, biases_optimizer: thor.optimizers.Optimizer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, preserve_prefix_dimensions: bool | None = None, weights_constraints: object | None = None, biases_constraints: object | None = None, weights_data_type: object | None = None, compute_data_type: object | None = None, output_data_type: object | None = None, output_dropout_probability: float = 0.0, output_dropout_seed: int | None = None, residual_input: object | None = None) -> None: ...
@@ -876,6 +892,8 @@ class FullyConnected(TrainableLayer):
         """
         Return a named auxiliary tensor input expression for a FullyConnected epilogue.
         Bind the same name to a tensor with the ``epilogue_inputs`` constructor argument.
+        Ragged FullyConnected requires each auxiliary binding to be a ``thor.RaggedTensor``
+        with the exact same row partition as ``feature_input``.
         """
 
     def get_weights_data_type(self) -> thor.DataType: ...
@@ -944,8 +962,8 @@ class LayerNorm(TrainableLayer):
     ----------
     network : thor.Network
         Network the layer should be added to.
-    feature_input : thor.Tensor
-        Input feature tensor for this layer.
+    feature_input : thor.Tensor or thor.RaggedTensor
+        Input feature tensor for this layer. Ragged inputs are normalized token-wise over their single trailing channel dimension.
     normalized_shape : Sequence[int] or None, default None
         Trailing feature dimensions to normalize over.  None normalizes the final feature dimension.
     epsilon : float, default 1e-5
@@ -954,10 +972,14 @@ class LayerNorm(TrainableLayer):
         Data type for scale and bias.  Thor currently requires fp32 for cuDNN Frontend LayerNorm.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, normalized_shape: object | None = None, epsilon: float = 1e-05, parameter_data_type: thor.DataType = thor.DataType.fp32, weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, weights_optimizer: thor.optimizers.Optimizer | None = None, biases_optimizer: thor.optimizers.Optimizer | None = None) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: object, normalized_shape: object | None = None, epsilon: float = 1e-05, parameter_data_type: thor.DataType = thor.DataType.fp32, weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, weights_optimizer: thor.optimizers.Optimizer | None = None, biases_optimizer: thor.optimizers.Optimizer | None = None) -> None: ...
 
-    def get_feature_output(self) -> thor.Tensor:
-        """Return the output tensor produced by this layer."""
+    def get_feature_output(self) -> object:
+        """
+        Return the logical output produced by this layer. Ragged inputs preserve their row partition.
+        """
+
+    def get_use_ragged(self) -> bool: ...
 
     def get_normalized_shape(self) -> list[int]: ...
 
@@ -985,6 +1007,9 @@ class RMSNorm(TrainableLayer):
         Optional expression applied after RMSNorm. Build it from ``RMSNorm.epilogue_input()``.
         A Swish/SiLU epilogue can use the cuDNN Frontend RMSNorm + SiLU inference fusion when the
         feature input, output, and scale weights are bf16.
+    epilogue_inputs : dict[str, thor.Tensor | thor.RaggedTensor] or None, default None
+        Named auxiliary tensors referenced by ``RMSNorm.epilogue_aux_input()``. With a ragged
+        feature input, every auxiliary must be a RaggedTensor sharing its exact row partition.
     """
 
     def __init__(self, network: thor.Network, feature_input: object, normalized_shape: object | None = None, epsilon: float = 1e-05, parameter_data_type: object | None = None, weights_initializer: thor.initializers.Initializer | None = None, weights_optimizer: thor.optimizers.Optimizer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None) -> None: ...
@@ -1000,6 +1025,7 @@ class RMSNorm(TrainableLayer):
         """
         Return a named auxiliary tensor input expression for an RMSNorm epilogue.
         Bind the same name to a tensor with the ``epilogue_inputs`` constructor argument.
+        With a ragged feature input, the binding must be a ``thor.RaggedTensor`` sharing the exact row partition.
         """
 
     def get_feature_output(self) -> object:
@@ -1043,10 +1069,12 @@ class ScaledDotProductAttention(CustomLayer):
       bias shape.  Ragged + additive-bias backward is rejected.
     * Dense/padded attention may use ``sequence_lengths`` or the explicit
       ``query_sequence_lengths``/``key_value_sequence_lengths`` pair.
-    * Ragged attention is represented only by ``thor.RaggedTensor`` Q/K/V inputs.
-      Their canonical UINT32/UINT64 row partitions define sequence boundaries; cuDNN
-      INT32 sequence lengths and element offsets are private backend metadata.
-      Supplying dense sequence-length metadata together with RaggedTensor inputs is rejected.
+    * Query and key/value domains may be dense or ragged independently. Key and value
+      must use the same domain; a ragged key/value pair must share one canonical row
+      partition. When either domain is ragged, BSHD/token-major layout is required and
+      Thor synthesizes a uniform private row partition for the dense side before calling
+      cuDNN. The output is ragged exactly when the query is ragged. Supplying dense
+      sequence-length metadata together with any RaggedTensor input is rejected.
     * ``dropout_probability``/``dropout_seed``/``dropout_offset`` expose cuDNN Philox
       attention dropout.  Thor advances the runtime dropout offset by
       ``B * Hq * Sq * Skv``.
@@ -1104,6 +1132,10 @@ class ScaledDotProductAttention(CustomLayer):
 
     def get_use_ragged_input(self) -> bool: ...
 
+    def get_query_is_ragged(self) -> bool: ...
+
+    def get_key_value_is_ragged(self) -> bool: ...
+
     def get_use_bias(self) -> bool: ...
 
     def get_bias_input(self) -> thor.Tensor | None: ...
@@ -1141,11 +1173,11 @@ class ScaledDotProductAttention(CustomLayer):
     def get_output_data_type(self) -> thor.DataType: ...
 
 class ScaleGradient(Layer):
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, scale: float) -> None:
+    def __init__(self, network: thor.Network, feature_input: object, scale: float) -> None:
         """
         Create and attach a ScaleGradient layer to a Network.
 
-        Forward is an identity alias of ``feature_input``. During backward propagation,
+        Forward is an identity alias of ``feature_input``. Ragged inputs preserve their exact row partition. During backward propagation,
         the gradient passed upstream is multiplied by ``scale``. The downstream branch
         and any trainable layers after ScaleGradient receive their ordinary gradients.
 
@@ -1153,11 +1185,46 @@ class ScaleGradient(Layer):
         path. Negative scales are allowed and can be used for gradient reversal.
         """
 
-    def get_feature_output(self) -> thor.Tensor:
-        """Return the output tensor produced by this layer."""
+    def get_feature_output(self) -> object:
+        """
+        Return the logical output produced by this layer. Ragged inputs return a thor.RaggedTensor.
+        """
+
+    def get_use_ragged(self) -> bool: ...
 
     def get_scale(self) -> float:
         """Return the backward gradient scale."""
+
+class SegmentedBroadcast(MultiConnectionLayer):
+    """
+    Broadcast one dense value per batch row to every active token in a ragged row.
+
+    ``feature_input`` is a normal dense per-example tensor. ``partition_input``
+    provides only the canonical row offsets/capacity; its packed values are not read.
+    The output is a ``thor.RaggedTensor`` with the exact same offsets object and with
+    trailing value dimensions equal to ``feature_input``. Values must be FP16, BF16,
+    or FP32. FP64 is intentionally unsupported.
+    """
+
+    def __init__(self, network: thor.Network, feature_input: thor.Tensor, partition_input: thor.RaggedTensor) -> None: ...
+
+    def get_feature_output(self) -> thor.RaggedTensor: ...
+
+    def get_partition_input(self) -> thor.RaggedTensor: ...
+
+class SegmentedLogSoftmax(MultiConnectionLayer):
+    """
+    Log-softmax across the active tokens of each ragged row.
+
+    Each trailing component is normalized independently over its row's variable-length
+    token axis. The exact canonical offsets object is preserved and inactive packed
+    capacity is excluded. Values must be FP16, BF16, or FP32; FP64 is intentionally
+    unsupported.
+    """
+
+    def __init__(self, network: thor.Network, feature_input: thor.RaggedTensor) -> None: ...
+
+    def get_feature_output(self) -> thor.RaggedTensor: ...
 
 class SegmentedReduction(MultiConnectionLayer):
     """
@@ -1185,6 +1252,21 @@ class SegmentedReduction(MultiConnectionLayer):
 
     @property
     def reduction_type(self) -> SegmentedReduction.Type: ...
+
+class SegmentedSoftmax(MultiConnectionLayer):
+    """
+    Softmax across the active tokens of each ragged row.
+
+    Each trailing component is normalized independently over its row's variable-length
+    token axis. The exact canonical offsets object is preserved and inactive packed
+    capacity is excluded. Values must be FP16, BF16, or FP32; FP64 is intentionally
+    unsupported. This is distinct from ordinary ``Softmax``, which is not a segmented
+    sequence-axis operation.
+    """
+
+    def __init__(self, network: thor.Network, feature_input: thor.RaggedTensor) -> None: ...
+
+    def get_feature_output(self) -> thor.RaggedTensor: ...
 
 class Slice(Layer):
     """
@@ -1215,17 +1297,21 @@ class Slice(Layer):
     def length(self) -> int: ...
 
 class StopGradient(Layer):
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor) -> None:
+    def __init__(self, network: thor.Network, feature_input: object) -> None:
         """
         Create and attach a StopGradient layer to a Network.
 
         Forward is an identity alias of ``feature_input``. Backward does not propagate
         an error tensor through this layer, making the gradient barrier explicit in the
-        network graph.
+        network graph. Ragged inputs preserve their exact row partition.
         """
 
-    def get_feature_output(self) -> thor.Tensor:
-        """Return the output tensor produced by this layer."""
+    def get_feature_output(self) -> object:
+        """
+        Return the logical output produced by this layer. Ragged inputs return a thor.RaggedTensor.
+        """
+
+    def get_use_ragged(self) -> bool: ...
 
 class NetworkInput(Layer):
     """
@@ -1274,6 +1360,46 @@ class NetworkInput(Layer):
 
     def version(self) -> str: ...
 
+class RaggedFilter(MultiConnectionLayer):
+    def __init__(self, network: thor.Network, feature_input: thor.RaggedTensor, mask_input: thor.RaggedTensor) -> None:
+        """
+        Stable-filter every row of a rank-1 RaggedTensor with one BOOLEAN predicate per token.
+
+        ``mask_input`` must be a scalar BOOLEAN RaggedTensor sharing the exact same
+        canonical offsets tensor and row-partition descriptor as ``feature_input``.
+        Selected active tokens preserve their row-local order and are compacted into a
+        new packed values tensor with a newly produced canonical offsets tensor. Neither
+        forward nor backward reads inactive packed capacity. Backward writes zero to
+        active filtered-out feature positions and scatters gradients only to retained
+        positions; the BOOLEAN mask is non-differentiable.
+        """
+
+    def get_feature_output(self) -> thor.RaggedTensor: ...
+
+    def get_feature_input(self) -> thor.RaggedTensor: ...
+
+    def get_mask_input(self) -> thor.RaggedTensor: ...
+
+class RaggedGather(MultiConnectionLayer):
+    def __init__(self, network: thor.Network, source_input: thor.RaggedTensor, indices_input: thor.RaggedTensor) -> None:
+        """
+        Gather tokens independently within every row of a rank-1 RaggedTensor.
+
+        ``indices_input`` must contain scalar UINT32 or UINT64 row-local indices. Its
+        row partition Q defines the output partition exactly, while ``source_input``
+        provides source partition P and the output value dtype/trailing shape. Thus
+        source and indices may have different row lengths. Duplicate indices are valid
+        and preserve their occurrence order; backward sums their gradient contributions
+        into the selected source token. Inactive packed source/index capacity is never
+        read.
+        """
+
+    def get_feature_output(self) -> thor.RaggedTensor: ...
+
+    def get_source_input(self) -> thor.RaggedTensor: ...
+
+    def get_indices_input(self) -> thor.RaggedTensor: ...
+
 class RaggedRowLengths(Layer):
     """
     Materialize canonical ragged row lengths as dense INT32 logical ``[1]`` values.
@@ -1285,6 +1411,62 @@ class RaggedRowLengths(Layer):
     def __init__(self, network: thor.Network, feature_input: thor.RaggedTensor) -> None: ...
 
     def get_feature_output(self) -> thor.Tensor: ...
+
+class RaggedToPaddedDense(MultiConnectionLayer):
+    def __init__(self, network: thor.Network, feature_input: thor.RaggedTensor, padding_value: float = 0.0) -> None:
+        """
+        Convert a rank-1 RaggedTensor to a normal padded dense tensor.
+
+        ``feature_input`` must declare ``max_values_per_row``. The logical output shape
+        is ``[max_values_per_row, *trailing]`` and the physical stamped shape is
+        ``[B, max_values_per_row, *trailing]``. Active tokens are copied row-by-row and
+        all remaining padded positions are filled with ``padding_value``. Backward
+        ignores gradients in padded positions and returns only active packed gradients.
+        """
+
+    def get_feature_output(self) -> thor.Tensor: ...
+
+    def get_feature_input(self) -> thor.RaggedTensor: ...
+
+    @property
+    def padding_value(self) -> float: ...
+
+class RaggedSequenceConcatenate(MultiConnectionLayer):
+    def __init__(self, network: thor.Network, feature_inputs: object) -> None:
+        """
+        Concatenate rank-1 ragged inputs along their variable-length sequence axis.
+
+        Every input must have the same logical batch size, values dtype, offsets dtype,
+        and trailing value shape. Row partitions may differ. For each logical row, the
+        output contains row 0 from every input in argument order, then row 1 from every
+        input, and so on. The layer explicitly produces a new canonical offsets tensor;
+        it does not reuse any input partition. Inactive packed capacity is never read.
+        """
+
+    def get_feature_output(self) -> thor.RaggedTensor: ...
+
+class RaggedSequenceSlice(MultiConnectionLayer):
+    def __init__(self, network: thor.Network, feature_input: thor.RaggedTensor, start: int, length: int) -> None:
+        """
+        Slice every logical row of a rank-1 RaggedTensor along the variable-length sequence axis.
+
+        ``start`` is a non-negative row-local token offset and ``length`` must be
+        positive. Each row contributes at most ``length`` tokens beginning at ``start``;
+        short rows are clipped independently and rows no longer than ``start`` become
+        empty. Selected values are compacted and the layer explicitly produces a new
+        canonical offsets tensor rather than preserving the input partition. Inactive
+        packed capacity is never read, and backward writes exact zero to active input
+        positions outside the selected window while leaving inactive gradient capacity
+        undefined.
+        """
+
+    def get_feature_output(self) -> thor.RaggedTensor: ...
+
+    @property
+    def start(self) -> int: ...
+
+    @property
+    def length(self) -> int: ...
 
 class NetworkOutput(Layer):
     """
@@ -1405,32 +1587,54 @@ class Pooling(Layer):
 
     def get_horizontal_padding(self) -> int: ...
 
+class PaddedDenseToRagged(MultiConnectionLayer):
+    def __init__(self, network: thor.Network, feature_input: thor.Tensor, partition_input: thor.RaggedTensor) -> None:
+        """
+        Pack a normal padded dense tensor into canonical ragged storage.
+
+        ``partition_input`` is the sole source of row membership; only its offsets are
+        consumed and the output reuses that exact partition. The dense input logical
+        shape is ``[padded_width, *trailing]`` with ``padded_width`` at least
+        ``partition_input.max_values_per_row``. Padding cells are ignored. Backward
+        materializes dense gradients with exact zeros in padded positions.
+        """
+
+    def get_feature_output(self) -> thor.RaggedTensor: ...
+
+    def get_feature_input(self) -> thor.Tensor: ...
+
+    def get_partition_input(self) -> thor.RaggedTensor: ...
+
 class Reshape(Layer):
     """
     Create and attach a Reshape layer to a Network.
-    The number of elements in the reshaped tensor must exactly equal the
-    number of elements of the input tensor.
+
+    Dense inputs reshape the complete feature tensor. Ragged inputs reshape
+    only the trailing dimensions of each packed value; the packed row axis
+    and canonical offsets are preserved exactly.
 
     Parameters
     ----------
     network : thor.Network
         Network the layer should be added to.
-    feature_input : thor.Tensor
+    feature_input : thor.Tensor or thor.RaggedTensor
         Input feature tensor for this layer.
     new_dimensions : list[int]
-        The new shape of the tensor.
+        Dense output feature shape, or for ragged input the new per-token
+        trailing shape. Element count must be preserved.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, new_dimensions: Sequence[int]) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: object, new_dimensions: Sequence[int]) -> None: ...
 
-    def get_feature_output(self) -> thor.Tensor:
+    def get_feature_output(self) -> object:
         """
         Return the output tensor produced by this layer.
 
         Returns
         -------
-        thor.Tensor
-            The feature output tensor handle.
+        thor.Tensor or thor.RaggedTensor
+            Ragged inputs preserve their exact row partition and reshape only
+            the trailing per-token value dimensions.
         """
 
 class Stub(Layer):
@@ -1467,8 +1671,10 @@ class Transpose(Layer):
     ----------
     network : thor.Network
         Network the layer should be added to.
-    feature_input : thor.Tensor
-        Input feature tensor for this layer. Must have rank >= 2.
+    feature_input : thor.Tensor or thor.RaggedTensor
+        Dense inputs must have rank >= 2. Ragged inputs must have at least
+        two trailing value dimensions; only those final two dimensions are
+        transposed and the row partition is preserved.
     output_dtype : thor.DataType | None, default None
         Optional dtype for the transposed layer output. Defaults to the
         input feature dtype.
@@ -1476,7 +1682,7 @@ class Transpose(Layer):
         Optional expression applied after the transpose/output dtype cast.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, output_dtype: object | None = None, epilogue: object | None = None) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: object, output_dtype: object | None = None, epilogue: object | None = None) -> None: ...
 
     @staticmethod
     def epilogue_input(output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression:
@@ -1484,13 +1690,13 @@ class Transpose(Layer):
         Return the single tensor input expression expected by a Transpose epilogue.
         """
 
-    def get_feature_output(self) -> thor.Tensor:
+    def get_feature_output(self) -> object:
         """
         Return the output tensor produced by this layer.
 
         Returns
         -------
-        thor.Tensor
+        thor.Tensor or thor.RaggedTensor
             The feature output tensor handle.
         """
 

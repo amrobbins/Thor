@@ -306,3 +306,184 @@ TEST(AttentionApi, SdpaRejectsInvalidVariableLengthMetadata) {
                      .build(),
                  std::invalid_argument);
 }
+
+TEST(AttentionApi, SdpaDenseQueryRaggedKvMixedModeRoundTripsArchitecture) {
+    Api::Network network("attention_api_sdpa_dense_query_ragged_kv_round_trip");
+    Api::NetworkInput query = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("query")
+                                  .dimensions({5, 4, 16})
+                                  .dataType(DataType::FP16)
+                                  .build();
+    Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("context")
+                                    .valuesDataType(DataType::FP16)
+                                    .offsetsDataType(DataType::UINT64)
+                                    .trailingDimensions({2, 16})
+                                    .maxTotalValues(11)
+                                    .batchSize(3)
+                                    .build();
+
+    Api::ScaledDotProductAttention attention = Api::ScaledDotProductAttention::Builder()
+                                                   .network(network)
+                                                   .queryInput(query.getFeatureOutput().value())
+                                                   .keyInput(context)
+                                                   .valueInput(context)
+                                                   .build();
+
+    EXPECT_TRUE(attention.getUseRaggedInput());
+    EXPECT_FALSE(attention.getQueryIsRagged());
+    EXPECT_TRUE(attention.getKeyValueIsRagged());
+    EXPECT_EQ(attention.getTensorLayout(), Impl::AttentionTensorLayout::BSHD);
+    EXPECT_FALSE(attention.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(attention.getOutput("output").getDimensions(), (std::vector<uint64_t>{5, 4, 16}));
+    EXPECT_EQ(attention.getInputNames(),
+              (std::vector<std::string>{"query", "key", "value", "key_value_ragged_offsets"}));
+
+    const nlohmann::json arch = attention.architectureJson();
+    EXPECT_EQ(arch.at("version").get<std::string>(), "2.1.0");
+    EXPECT_TRUE(arch.at("use_ragged_input").get<bool>());
+    EXPECT_FALSE(arch.at("query_ragged").get<bool>());
+    EXPECT_TRUE(arch.at("key_value_ragged").get<bool>());
+    EXPECT_FALSE(arch.contains("query_ragged_input"));
+    EXPECT_TRUE(arch.contains("key_ragged_input"));
+    EXPECT_TRUE(arch.contains("value_ragged_input"));
+
+    auto cloned = std::dynamic_pointer_cast<Api::ScaledDotProductAttention>(attention.clone());
+    ASSERT_NE(cloned, nullptr);
+    EXPECT_FALSE(cloned->getQueryIsRagged());
+    EXPECT_TRUE(cloned->getKeyValueIsRagged());
+    EXPECT_FALSE(cloned->getRaggedFeatureOutput().has_value());
+
+    const uint32_t beforeRestoreCount = network.getNumTrainableLayers();
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    Api::ScaledDotProductAttention::deserialize(archiveReader, arch, &network);
+    auto restored = std::dynamic_pointer_cast<Api::ScaledDotProductAttention>(network.getTrainableLayer(beforeRestoreCount));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_FALSE(restored->getQueryIsRagged());
+    EXPECT_TRUE(restored->getKeyValueIsRagged());
+    EXPECT_FALSE(restored->getRaggedFeatureOutput().has_value());
+    ASSERT_TRUE(restored->getKeyRaggedInput().has_value());
+    EXPECT_EQ(restored->getKeyRaggedInput()->getOffsetsDataType(), DataType::UINT64);
+}
+
+TEST(AttentionApi, SdpaRaggedQueryDenseKvMixedModeRoundTripsArchitecture) {
+    Api::Network network("attention_api_sdpa_ragged_query_dense_kv_round_trip");
+    Api::RaggedTensor query = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("query")
+                                  .valuesDataType(DataType::BF16)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({4, 16})
+                                  .maxTotalValues(9)
+                                  .batchSize(3)
+                                  .build();
+    Api::NetworkInput context = Api::NetworkInput::Builder()
+                                    .network(network)
+                                    .name("context")
+                                    .dimensions({7, 2, 16})
+                                    .dataType(DataType::BF16)
+                                    .build();
+
+    Api::ScaledDotProductAttention attention = Api::ScaledDotProductAttention::Builder()
+                                                   .network(network)
+                                                   .queryInput(query)
+                                                   .keyInput(context.getFeatureOutput().value())
+                                                   .valueInput(context.getFeatureOutput().value())
+                                                   .build();
+
+    EXPECT_TRUE(attention.getUseRaggedInput());
+    EXPECT_TRUE(attention.getQueryIsRagged());
+    EXPECT_FALSE(attention.getKeyValueIsRagged());
+    EXPECT_EQ(attention.getTensorLayout(), Impl::AttentionTensorLayout::BSHD);
+    ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), query.getOffsets());
+    EXPECT_EQ(attention.getOutput("output").getDimensions(), (std::vector<uint64_t>{9, 4, 16}));
+    EXPECT_EQ(attention.getInputNames(),
+              (std::vector<std::string>{"query", "key", "value", "query_ragged_offsets"}));
+
+    const nlohmann::json arch = attention.architectureJson();
+    EXPECT_TRUE(arch.at("use_ragged_input").get<bool>());
+    EXPECT_TRUE(arch.at("query_ragged").get<bool>());
+    EXPECT_FALSE(arch.at("key_value_ragged").get<bool>());
+    EXPECT_TRUE(arch.contains("query_ragged_input"));
+    EXPECT_FALSE(arch.contains("key_ragged_input"));
+    EXPECT_FALSE(arch.contains("value_ragged_input"));
+
+    const uint32_t beforeRestoreCount = network.getNumTrainableLayers();
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    Api::ScaledDotProductAttention::deserialize(archiveReader, arch, &network);
+    auto restored = std::dynamic_pointer_cast<Api::ScaledDotProductAttention>(network.getTrainableLayer(beforeRestoreCount));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_TRUE(restored->getQueryIsRagged());
+    EXPECT_FALSE(restored->getKeyValueIsRagged());
+    ASSERT_TRUE(restored->getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(restored->getRaggedFeatureOutput()->getOffsetsDataType(), DataType::UINT32);
+}
+
+TEST(AttentionApi, SdpaMixedModeRejectsMismatchedKeyValueDomains) {
+    Api::Network network("attention_api_sdpa_mixed_mode_rejects_mismatched_key_value_domains");
+    Api::NetworkInput query = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("query")
+                                  .dimensions({5, 4, 16})
+                                  .dataType(DataType::FP16)
+                                  .build();
+    Api::NetworkInput denseContext = Api::NetworkInput::Builder()
+                                         .network(network)
+                                         .name("dense_context")
+                                         .dimensions({7, 2, 16})
+                                         .dataType(DataType::FP16)
+                                         .build();
+    Api::RaggedTensor raggedContext = Api::RaggedNetworkInput::Builder()
+                                          .network(network)
+                                          .name("ragged_context")
+                                          .valuesDataType(DataType::FP16)
+                                          .trailingDimensions({2, 16})
+                                          .maxTotalValues(8)
+                                          .batchSize(3)
+                                          .build();
+
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .queryInput(query.getFeatureOutput().value())
+                     .keyInput(raggedContext)
+                     .valueInput(denseContext.getFeatureOutput().value())
+                     .build(),
+                 std::invalid_argument);
+    EXPECT_THROW(Api::ScaledDotProductAttention::Builder()
+                     .network(network)
+                     .queryInput(query.getFeatureOutput().value())
+                     .keyInput(denseContext.getFeatureOutput().value())
+                     .valueInput(raggedContext)
+                     .build(),
+                 std::invalid_argument);
+}
+
+TEST(AttentionApi, SdpaLegacyV2AllRaggedArchitectureStillDeserializes) {
+    Api::Network network("attention_api_sdpa_legacy_v2_all_ragged_deserializes");
+    Api::RaggedTensor q = Api::RaggedNetworkInput::Builder()
+                              .network(network)
+                              .name("q")
+                              .valuesDataType(DataType::FP16)
+                              .trailingDimensions({2, 16})
+                              .maxTotalValues(6)
+                              .batchSize(2)
+                              .build();
+    Api::ScaledDotProductAttention attention = Api::ScaledDotProductAttention::Builder().network(network).selfInput(q).build();
+
+    nlohmann::json legacy = attention.architectureJson();
+    legacy["version"] = "2.0.0";
+    legacy.erase("query_ragged");
+    legacy.erase("key_value_ragged");
+
+    const uint32_t beforeRestoreCount = network.getNumTrainableLayers();
+    std::shared_ptr<thor_file::TarReader> archiveReader;
+    Api::ScaledDotProductAttention::deserialize(archiveReader, legacy, &network);
+    auto restored = std::dynamic_pointer_cast<Api::ScaledDotProductAttention>(network.getTrainableLayer(beforeRestoreCount));
+    ASSERT_NE(restored, nullptr);
+    EXPECT_TRUE(restored->getQueryIsRagged());
+    EXPECT_TRUE(restored->getKeyValueIsRagged());
+    ASSERT_TRUE(restored->getRaggedFeatureOutput().has_value());
+}

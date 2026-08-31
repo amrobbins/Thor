@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/FiniteCheck.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
 #include <cstdint>
@@ -24,7 +25,7 @@ void bind_finite_check(nb::module_ &m) {
         "__init__",
         [](FiniteCheck *self,
            Network &network,
-           const Tensor &feature_input,
+           nb::object feature_input,
            string tensor_label,
            bool check_forward,
            bool check_backward,
@@ -37,9 +38,15 @@ void bind_finite_check(nb::module_ &m) {
                 throw nb::value_error("FiniteCheck max_reported_indices exceeds the supported maximum of 32.");
 
             FiniteCheck::Builder builder;
-            FiniteCheck built = builder.network(network)
-                                    .featureInput(feature_input)
-                                    .tensorLabel(std::move(tensor_label))
+            builder.network(network);
+            if (nb::isinstance<RaggedTensor>(feature_input)) {
+                builder.featureInput(nb::cast<RaggedTensor>(feature_input));
+            } else if (nb::isinstance<Tensor>(feature_input)) {
+                builder.featureInput(nb::cast<Tensor>(feature_input));
+            } else {
+                throw nb::type_error("FiniteCheck feature_input must be thor.Tensor or thor.RaggedTensor.");
+            }
+            FiniteCheck built = builder.tensorLabel(std::move(tensor_label))
                                     .enabled(enabled)
                                     .checkForward(check_forward)
                                     .checkBackward(check_backward)
@@ -65,12 +72,16 @@ does not synchronize execution.
 
 The forward activation and, when a backward path exists, the incoming gradient
 are checked for NaN and infinity values. The layer aliases its input storage in
-both directions and allocates no feature or gradient tensor of its own.
+both directions and allocates no feature or gradient tensor of its own. For a
+``RaggedTensor``, only the authoritative active packed prefix ending at
+``offsets[B]`` is checked; undefined inactive capacity is deliberately ignored
+and the exact row partition is preserved on the output.
 
 On a failure, the report includes the user label, direction, tensor role, API
-and physical tensor ids, dtype, shape, counts of NaN/+Inf/-Inf, and sample flat
-and multidimensional indices. ``fail_on_non_finite=True`` raises immediately;
-``False`` writes the report to stderr and continues.
+and physical tensor ids, dtype, shape, checked element count, counts of
+NaN/+Inf/-Inf, and sample flat and multidimensional indices.
+``fail_on_non_finite=True`` raises immediately; ``False`` writes the report to
+stderr and continues.
 
 FiniteCheck is intentionally a debugging barrier. GPU checks synchronize the
 layer stream so that a host-visible report or exception is deterministic, and
@@ -80,8 +91,13 @@ when an enabled FiniteCheck is first stamped.
 
     finite_check.def(
         "get_feature_output",
-        [](FiniteCheck &self) -> Tensor { return self.getFeatureOutput().value(); },
-        R"nbdoc(Return the logical output tensor produced by this layer.)nbdoc");
+        [](FiniteCheck &self) -> nb::object {
+            if (std::optional<RaggedTensor> raggedOutput = self.getRaggedFeatureOutput(); raggedOutput.has_value())
+                return nb::cast(raggedOutput.value());
+            return nb::cast(self.getFeatureOutput().value());
+        },
+        R"nbdoc(Return the logical output produced by this layer. Ragged inputs return a thor.RaggedTensor.)nbdoc");
+    finite_check.def("get_use_ragged", &FiniteCheck::getUseRagged);
     finite_check.def("get_tensor_label", &FiniteCheck::getTensorLabel);
     finite_check.def("get_enabled", &FiniteCheck::getEnabled);
     finite_check.def("get_check_forward", &FiniteCheck::getCheckForward);

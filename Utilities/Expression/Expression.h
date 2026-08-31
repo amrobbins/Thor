@@ -348,7 +348,8 @@ struct ExprNode {
     uint64_t layer_norm_normalized_feature_count = 0;
     double layer_norm_epsilon = 1.0e-5;
     // Non-zero only for packed ragged values. Like RMSNorm, LayerNorm views
-    // each logical value as one normalization sample across its channel tail.
+    // each logical value as one normalization sample across its channel tail and
+    // runtime execution selects a finite row-capacity bucket from this domain.
     uint64_t layer_norm_packed_row_capacity = 0;
 
     bool embedding_has_padding_index = false;

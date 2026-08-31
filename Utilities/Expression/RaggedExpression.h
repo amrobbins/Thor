@@ -59,6 +59,10 @@ class RaggedExpression {
     [[nodiscard]] RaggedExpression mapValues(const std::function<Expression(const Expression&)>& mapper) const;
     [[nodiscard]] RaggedExpression sliceTrailingDimension(uint64_t trailing_axis, uint64_t start, uint64_t length) const;
     [[nodiscard]] RaggedExpression sliceLastDimension(uint64_t start, uint64_t length) const;
+    // Swap the final two trailing value dimensions while preserving the packed row axis.
+    // This is represented as an internal strided view under RAGGED_VALUEWISE_EXTENT so
+    // materialization, when required by a consumer/output, is limited to active rows.
+    [[nodiscard]] RaggedExpression transposeTrailingDimensions() const;
     [[nodiscard]] RaggedExpression cast(DataType output_dtype) const;
     // Normalize channels independently at each logical timestep while preserving
     // the row partition. Normalization is currently an explicit representation
@@ -120,6 +124,8 @@ class RaggedExpression {
     [[nodiscard]] Expression segment_mean() const;
     [[nodiscard]] RaggedExpression segment_softmax() const;
     [[nodiscard]] RaggedExpression segment_log_softmax() const;
+    [[nodiscard]] RaggedExpression segment_broadcast(const Expression& per_segment_values,
+                                                      const RaggedTensorDescriptor& output_descriptor) const;
 
    private:
     // `values` is the unwrapped value graph used to compose ragged operations.
@@ -140,7 +146,9 @@ class RaggedExpression {
     [[nodiscard]] RaggedExpression unaryValuewise(ExprOp op, const char* op_name) const;
     [[nodiscard]] RaggedExpression binaryValuewise(const RaggedExpression& other, ExprOp op, const char* op_name) const;
     [[nodiscard]] Expression segmentTotalBroadcast(ScanOp op, const char* op_name) const;
-    [[nodiscard]] Expression segmentDenseBroadcast(const Expression& per_segment_values, bool normalize_by_segment_length) const;
+    [[nodiscard]] Expression segmentDenseBroadcast(const Expression& per_segment_values,
+                                                     bool normalize_by_segment_length,
+                                                     std::optional<uint64_t> elements_per_value_override = std::nullopt) const;
 
     void validateInitialized(const char* caller) const;
     static void validateDescriptor(const RaggedTensorDescriptor& descriptor);

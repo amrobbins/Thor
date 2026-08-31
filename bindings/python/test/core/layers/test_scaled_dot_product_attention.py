@@ -386,3 +386,169 @@ def test_scaled_dot_product_attention_rejects_unsupported_experimental_fp8_forwa
             fp8_amax_s=scales["amax_s"],
             fp8_amax_o=scales["amax_o"],
         )
+
+
+def test_scaled_dot_product_attention_dense_query_ragged_kv_public_surface():
+    n = _net("test_sdpa_dense_query_ragged_kv_public_surface")
+    q = _input_tensor(n, "q", [3, 2, 16], thor.DataType.fp16)
+    kv = thor.layers.RaggedNetworkInput(
+        n,
+        "kv",
+        thor.DataType.fp16,
+        [2, 16],
+        max_total_values=5,
+        batch_size=2,
+        offsets_data_type=thor.DataType.uint64,
+    )
+
+    attention = thor.layers.ScaledDotProductAttention(n, q, key_input=kv, value_input=kv)
+
+    assert attention.get_use_ragged_input()
+    assert not attention.get_query_is_ragged()
+    assert attention.get_key_value_is_ragged()
+    assert attention.get_tensor_layout() == "bshd"
+    assert attention.get_input_names() == ["query", "key", "value", "key_value_ragged_offsets"]
+    output = attention.get_feature_output()
+    assert isinstance(output, thor.Tensor)
+    assert output.get_dimensions() == [3, 2, 16]
+
+    arch = _only_layer_architecture(n, "scaled_dot_product_attention")
+    assert arch["version"] == "2.1.0"
+    assert arch["use_ragged_input"] is True
+    assert arch["query_ragged"] is False
+    assert arch["key_value_ragged"] is True
+    assert "query_ragged_input" not in arch
+    assert "key_ragged_input" in arch
+    assert "value_ragged_input" in arch
+
+
+def test_scaled_dot_product_attention_ragged_query_dense_kv_public_surface():
+    n = _net("test_sdpa_ragged_query_dense_kv_public_surface")
+    q = thor.layers.RaggedNetworkInput(
+        n,
+        "q",
+        thor.DataType.bf16,
+        [2, 16],
+        max_total_values=5,
+        batch_size=2,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    kv = _input_tensor(n, "kv", [4, 2, 16], thor.DataType.bf16)
+
+    attention = thor.layers.ScaledDotProductAttention(n, q, key_input=kv, value_input=kv)
+
+    assert attention.get_use_ragged_input()
+    assert attention.get_query_is_ragged()
+    assert not attention.get_key_value_is_ragged()
+    assert attention.get_tensor_layout() == "bshd"
+    assert attention.get_input_names() == ["query", "key", "value", "query_ragged_offsets"]
+    output = attention.get_feature_output()
+    assert isinstance(output, thor.RaggedTensor)
+    assert output.values.get_dimensions() == [5, 2, 16]
+    assert output.offsets == q.offsets
+
+    arch = _only_layer_architecture(n, "scaled_dot_product_attention")
+    assert arch["query_ragged"] is True
+    assert arch["key_value_ragged"] is False
+    assert "query_ragged_input" in arch
+    assert "key_ragged_input" not in arch
+    assert "value_ragged_input" not in arch
+
+
+def test_scaled_dot_product_attention_mixed_mode_rejects_mismatched_key_value_domains():
+    n = _net("test_sdpa_mixed_mode_rejects_mismatched_key_value_domains")
+    q = _input_tensor(n, "q", [3, 2, 16], thor.DataType.fp16)
+    dense_kv = _input_tensor(n, "dense_kv", [4, 2, 16], thor.DataType.fp16)
+    ragged_kv = thor.layers.RaggedNetworkInput(
+        n,
+        "ragged_kv",
+        thor.DataType.fp16,
+        [2, 16],
+        max_total_values=5,
+        batch_size=2,
+    )
+
+    with pytest.raises(TypeError, match="key_input and value_input must both be dense or both be ragged"):
+        thor.layers.ScaledDotProductAttention(n, q, key_input=ragged_kv, value_input=dense_kv)
+    with pytest.raises(TypeError, match="key_input and value_input must both be dense or both be ragged"):
+        thor.layers.ScaledDotProductAttention(n, q, key_input=dense_kv, value_input=ragged_kv)
+
+
+@pytest.mark.cuda
+def test_scaled_dot_product_attention_dense_query_ragged_kv_executes_mixed_runtime():
+    batch_size = 2
+    n = _net("test_sdpa_dense_query_ragged_kv_executes_mixed_runtime")
+    q = thor.layers.NetworkInput(n, "q", [3, 2, 16], thor.DataType.fp16)
+    kv = thor.layers.RaggedNetworkInput(
+        n,
+        "kv",
+        thor.DataType.fp16,
+        [2, 16],
+        max_total_values=5,
+        batch_size=batch_size,
+        offsets_data_type=thor.DataType.uint64,
+    )
+    attention = thor.layers.ScaledDotProductAttention(
+        n, q.get_feature_output(), key_input=kv, value_input=kv
+    )
+    thor.layers.NetworkOutput(n, "output", attention.get_feature_output(), thor.DataType.fp16)
+
+    placed = n.place(batch_size, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    q_np = np.linspace(-0.4, 0.4, batch_size * 3 * 2 * 16, dtype=np.float16).reshape(batch_size, 3, 2, 16)
+    kv_np = np.linspace(-0.5, 0.5, 5 * 2 * 16, dtype=np.float16).reshape(5, 2, 16)
+    offsets_np = np.array([0, 2, 5], dtype=np.uint64)
+
+    result = placed.infer(
+        {
+            "q": _cpu_tensor(q_np, thor.DataType.fp16),
+            "kv": thor.physical.PhysicalRaggedTensor(
+                _cpu_tensor(kv_np, thor.DataType.fp16),
+                _cpu_tensor(offsets_np, thor.DataType.uint64),
+            ),
+        }
+    )["output"]
+
+    output = np.asarray(result.numpy())
+    assert output.shape == (batch_size, 3, 2, 16)
+    assert np.all(np.isfinite(output))
+
+
+@pytest.mark.cuda
+def test_scaled_dot_product_attention_ragged_query_dense_kv_executes_mixed_runtime():
+    batch_size = 2
+    n = _net("test_sdpa_ragged_query_dense_kv_executes_mixed_runtime")
+    q = thor.layers.RaggedNetworkInput(
+        n,
+        "q",
+        thor.DataType.fp16,
+        [2, 16],
+        max_total_values=5,
+        batch_size=batch_size,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    kv = thor.layers.NetworkInput(n, "kv", [4, 2, 16], thor.DataType.fp16)
+    attention = thor.layers.ScaledDotProductAttention(
+        n, q, key_input=kv.get_feature_output(), value_input=kv.get_feature_output()
+    )
+    thor.layers.RaggedNetworkOutput(n, "output", attention.get_feature_output())
+
+    placed = n.place(batch_size, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    q_np = np.linspace(-0.5, 0.5, 5 * 2 * 16, dtype=np.float16).reshape(5, 2, 16)
+    offsets_np = np.array([0, 1, 5], dtype=np.uint32)
+    kv_np = np.linspace(-0.4, 0.4, batch_size * 4 * 2 * 16, dtype=np.float16).reshape(batch_size, 4, 2, 16)
+
+    result = placed.infer(
+        {
+            "q": thor.physical.PhysicalRaggedTensor(
+                _cpu_tensor(q_np, thor.DataType.fp16),
+                _cpu_tensor(offsets_np, thor.DataType.uint32),
+            ),
+            "kv": _cpu_tensor(kv_np, thor.DataType.fp16),
+        }
+    )["output"]
+
+    assert isinstance(result, thor.physical.PhysicalRaggedTensor)
+    assert np.array_equal(result.offsets.numpy(), offsets_np)
+    output_values = np.asarray(result.values.numpy())
+    assert output_values.shape == (5, 2, 16)
+    assert np.all(np.isfinite(output_values))

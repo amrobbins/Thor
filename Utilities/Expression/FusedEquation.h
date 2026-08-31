@@ -824,7 +824,8 @@ class FusedEquation {
                                                                Tensor& scale,
                                                                const std::optional<Tensor>& preallocatedOutput,
                                                                const Stream& stream,
-                                                               const std::optional<Tensor>& rowPartitionOffsets = std::nullopt) const;
+                                                               const std::optional<Tensor>& rowPartitionOffsets = std::nullopt,
+                                                               bool packedTailPreparedExternally = false) const;
 
     [[nodiscard]] std::shared_ptr<StampedLayerNorm> stampLayerNorm(
         const std::shared_ptr<CompiledLayerNorm>& compiledStage,
@@ -843,7 +844,8 @@ class FusedEquation {
         const std::vector<std::optional<Tensor>>& preallocatedOutputs,
         const Stream& stream,
         const std::optional<Tensor>& rowPartitionOffsets = std::nullopt,
-        std::shared_ptr<RmsNormForwardState> saved_forward_state = nullptr) const;
+        std::shared_ptr<RmsNormForwardState> saved_forward_state = nullptr,
+        bool packedTailsPreparedExternally = false) const;
 
     [[nodiscard]] std::shared_ptr<StampedMatmul> stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
                                                              Tensor& lhs,
@@ -856,7 +858,8 @@ class FusedEquation {
                                                              const std::optional<std::string>& beta_runtime_name = std::nullopt,
                                                              const std::optional<Tensor>& epilogue_aux = std::nullopt,
                                                              const std::optional<Tensor>& preallocatedBgradOutput = std::nullopt,
-                                                             const std::optional<Tensor>& rowPartitionOffsets = std::nullopt) const;
+                                                             const std::optional<Tensor>& rowPartitionOffsets = std::nullopt,
+                                                             bool packedTailsPreparedExternally = false) const;
 
     [[nodiscard]] std::shared_ptr<StampedAttention> stampAttention(const std::shared_ptr<CompiledAttention>& compiledStage,
                                                                    const Tensor& q,
@@ -925,7 +928,8 @@ class FusedEquation {
                                                              const std::optional<std::string>& beta_runtime_name = std::nullopt,
                                                              const std::optional<Tensor>& epilogue_aux = std::nullopt,
                                                              const std::optional<Tensor>& preallocatedBgradOutput = std::nullopt,
-                                                             const std::optional<Tensor>& rowPartitionOffsets = std::nullopt) const;
+                                                             const std::optional<Tensor>& rowPartitionOffsets = std::nullopt,
+                                                             bool packedTailsPreparedExternally = false) const;
 
     [[nodiscard]] std::shared_ptr<StampedReduceMinMaxBackward> stampReduceMinMaxBackward(
         const std::shared_ptr<CompiledReduceMinMaxBackward>& compiledStage,

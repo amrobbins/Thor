@@ -96,9 +96,9 @@ TEST(RaggedCapacityPerformance, RepresentativeExpressionChainsContainOnlyLogical
         expectOnlyStages(compiled, {CompiledExecutionStage::Kind::Matmul, CompiledExecutionStage::Kind::FusedKernel});
     }
 
-    // FC -> SwiGLU -> RMSNorm. The GLU work stays active-aware (or may be fused);
-    // there is no physical helper/tail-clear stage between the bucketed MATMUL
-    // and RMSNorm consumers.
+    // FC -> SwiGLU -> RMSNorm. The GLU work stays active-aware (or may be fused).
+    // Tail sanitation is a stamped physical preparation stage, so it intentionally
+    // does not appear in this compiler-stage inventory.
     {
         Tensor x(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, 4}));
         Tensor w(gpuPlacement, TensorDescriptor(DataType::FP32, {4, 8}));
@@ -490,6 +490,66 @@ TEST(RaggedCapacityPerformance, PackedConsumerSanitationAccountingTracksSelected
                   /*selected_rows=*/64,
                   /*expected_sanitized_bytes_per_consumer=*/0,
                   /*expected_full_tail_bytes_per_consumer=*/36 * bytes_per_row);
+}
+
+TEST(RaggedCapacityPerformance, PackedTailSanitizationIsExplicitAndSharedAcrossIndependentConsumers) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t capacity = 100;
+    constexpr uint64_t width = 4;
+
+    Tensor x(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, width}));
+    Tensor w(gpuPlacement, TensorDescriptor(DataType::FP32, {width, width}));
+    Tensor scale(gpuPlacement, TensorDescriptor(DataType::FP32, {width}));
+    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
+
+    RowPartitionRuntime row_partition(
+        offsets, RowPartitionDescriptor(/*batchSize=*/2, capacity, DataType::UINT32));
+    row_partition.setHostActiveValueCount(9);
+
+    const Expression x_expr = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression w_expr = Expression::input("w", DataType::FP32, DataType::FP32);
+    const Expression scale_expr = Expression::input("scale", DataType::FP32, DataType::FP32);
+    const Expression offsets_expr = Expression::input("offsets", DataType::UINT32, DataType::UINT32);
+    const Expression packed_x = packedExtent(x_expr, offsets_expr, capacity, width);
+    const Expression projected = Expression::matmul(packed_x,
+                                                     w_expr,
+                                                     false,
+                                                     false,
+                                                     DataType::FP32,
+                                                     DataType::FP32,
+                                                     capacity);
+    const Expression normalized = Expression::rmsNorm(packed_x,
+                                                       scale_expr,
+                                                       width,
+                                                       1.0e-5,
+                                                       DataType::FP32,
+                                                       DataType::FP32,
+                                                       capacity);
+
+    FusedEquation equation =
+        FusedEquation::compile(Expression::outputs({{"projected", projected}, {"normalized", normalized}}).physicalOutputs(), 0);
+    Stream stream(0);
+    StampedExecutionPlan plan = equation.stamp({{"x", x}, {"w", w}, {"scale", scale}, {"offsets", offsets}}, stream);
+
+    const std::vector<std::string> kinds = plan.stageKindNames();
+    const std::vector<std::vector<uint32_t>> dependencies = plan.stageDependencyIndices();
+    ASSERT_EQ(kinds.size(), dependencies.size());
+    ASSERT_EQ(std::count(kinds.begin(), kinds.end(), "SanitizePackedTail"), 1);
+
+    const auto sanitize_it = std::find(kinds.begin(), kinds.end(), "SanitizePackedTail");
+    const auto matmul_it = std::find(kinds.begin(), kinds.end(), "Matmul");
+    const auto rms_norm_it = std::find(kinds.begin(), kinds.end(), "RmsNorm");
+    ASSERT_NE(sanitize_it, kinds.end());
+    ASSERT_NE(matmul_it, kinds.end());
+    ASSERT_NE(rms_norm_it, kinds.end());
+
+    const uint32_t sanitize_idx = static_cast<uint32_t>(std::distance(kinds.begin(), sanitize_it));
+    const uint32_t matmul_idx = static_cast<uint32_t>(std::distance(kinds.begin(), matmul_it));
+    const uint32_t rms_norm_idx = static_cast<uint32_t>(std::distance(kinds.begin(), rms_norm_it));
+    EXPECT_NE(std::find(dependencies[matmul_idx].begin(), dependencies[matmul_idx].end(), sanitize_idx),
+              dependencies[matmul_idx].end());
+    EXPECT_NE(std::find(dependencies[rms_norm_idx].begin(), dependencies[rms_norm_idx].end(), sanitize_idx),
+              dependencies[rms_norm_idx].end());
 }
 
 TEST(RaggedCapacityPerformance, CausalConv1dT10RetainedTrainingDoesNotMateriallyRegressAgainstPackedBoundary) {

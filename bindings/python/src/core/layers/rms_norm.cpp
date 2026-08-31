@@ -66,14 +66,20 @@ void applyPythonEpilogueInputs(RMSNorm::Builder& builder, const nb::object& epil
         return;
     }
     nb::dict inputsDict = pybind::castOrTypeError<nb::dict>(
-        epilogueInputs, "RMSNorm() argument 'epilogue_inputs'", "dict[str, thor.Tensor] or None", false);
+        epilogueInputs, "RMSNorm() argument 'epilogue_inputs'", "dict[str, thor.Tensor | thor.RaggedTensor] or None", false);
     size_t index = 0;
     for (auto item : inputsDict) {
         const std::string keyContext = "RMSNorm() argument 'epilogue_inputs' key[" + std::to_string(index) + "]";
         std::string name = pybind::castOrTypeError<std::string>(item.first, keyContext, "str", false);
         const std::string valueContext = "RMSNorm() argument 'epilogue_inputs'[" + name + "]";
-        Tensor tensor = pybind::castOrTypeError<Tensor>(item.second, valueContext, "thor.Tensor", false);
-        builder.epilogueInput(name, tensor);
+        if (nb::isinstance<RaggedTensor>(item.second)) {
+            builder.epilogueInput(name, nb::cast<RaggedTensor>(item.second));
+        } else if (nb::isinstance<Tensor>(item.second)) {
+            builder.epilogueInput(name, nb::cast<Tensor>(item.second));
+        } else {
+            throw nb::type_error((valueContext + ": expected thor.Tensor or thor.RaggedTensor, got " +
+                                  pybind::pythonTypeName(item.second)).c_str());
+        }
         ++index;
     }
 }
@@ -164,6 +170,7 @@ void bind_rms_norm(nb::module_& m) {
         R"nbdoc(
             Return a named auxiliary tensor input expression for an RMSNorm epilogue.
             Bind the same name to a tensor with the ``epilogue_inputs`` constructor argument.
+            With a ragged feature input, the binding must be a ``thor.RaggedTensor`` sharing the exact row partition.
             )nbdoc");
 
     rms_norm.def(
@@ -200,5 +207,8 @@ void bind_rms_norm(nb::module_& m) {
             Optional expression applied after RMSNorm. Build it from ``RMSNorm.epilogue_input()``.
             A Swish/SiLU epilogue can use the cuDNN Frontend RMSNorm + SiLU inference fusion when the
             feature input, output, and scale weights are bf16.
+        epilogue_inputs : dict[str, thor.Tensor | thor.RaggedTensor] or None, default None
+            Named auxiliary tensors referenced by ``RMSNorm.epilogue_aux_input()``. With a ragged
+            feature input, every auxiliary must be a RaggedTensor sharing its exact row partition.
         )nbdoc";
 }

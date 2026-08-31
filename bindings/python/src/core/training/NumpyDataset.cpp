@@ -934,9 +934,10 @@ underlying allocations through other aliases.
 
 Host-backed batching supports dense/ragged mixtures, arbitrary dataset splits,
 randomized training order, exact partial batches, and wrapped tails. Device-
-resident ragged NumpyDataset storage is intentionally deferred; BEST_EFFORT
-device storage falls back to the host-backed session and STRICT reports the
-unsupported resident-ragged backend.
+resident storage uses Thor's canonical materialized-snapshot path for dense and
+ragged fields alike; ragged values and row-partition metadata therefore support
+BEST_EFFORT and STRICT device storage with the same batching and requested
+capacity/per-row-bound contract.
         )nbdoc");
     numpyDataset.def(
         "__init__",

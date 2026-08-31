@@ -1,16 +1,18 @@
 #pragma once
 #include "DeepLearning/Implementation/ThorError.h"
 
-#include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 
 #include <algorithm>
+#include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -28,6 +30,9 @@ class Transpose : public Layer {
 
     std::string getLayerType() const override { return "Transpose"; }
     DataType getOutputDataType() const { return outputDataType; }
+    [[nodiscard]] bool getUseRagged() const { return raggedFeatureInput.has_value(); }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureInput() const { return raggedFeatureInput; }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureOutput() const { return raggedFeatureOutput; }
 
     static const char *epilogueInputName() { return "__transpose_epilogue_input"; }
     static const char *epilogueOutputName() { return "__transpose_epilogue_output"; }
@@ -61,6 +66,19 @@ class Transpose : public Layer {
         return LayerEpilogue::apply(input, epilogue, epilogueInputName());
     }
 
+    [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        THOR_THROW_IF_FALSE(outputTensor == featureOutput.value());
+        return raggedFeatureInput.has_value();
+    }
+
+    bool mustConnectAllInputsToDriveOutput() const override { return raggedFeatureInput.has_value(); }
+    std::vector<Tensor> getAllInputTensors() const override;
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
+    void informThatInputConnectionMade(Tensor inputTensor) override;
+    void resetGraphTraversalState() override;
+    int getConnectionType(Tensor connectingTensor) const override;
+
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
@@ -69,33 +87,7 @@ class Transpose : public Layer {
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
-                                                     const bool inferenceOnly) const override {
-        (void)drivingLayer;
-        (void)drivingApiLayer;
-        THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value());
-
-        using ThorImplementation::DynamicExpression;
-        using ThorImplementation::Expression;
-        using ThorImplementation::ExpressionDefinition;
-
-        Expression featureInput = Expression::input("feature_input");
-        Expression featureOutput = featureInput.transpose().withOutputDType(outputDataType);
-        if (epilogue.has_value()) {
-            featureOutput = Transpose::applyEpilogue(featureOutput, epilogue.value()).withOutputDType(outputDataType);
-        }
-        ExpressionDefinition definition = ExpressionDefinition::fromOutputs(Expression::outputs({{"feature_output", featureOutput}}));
-
-        std::shared_ptr<ThorImplementation::CustomLayer> physicalTranspose = std::make_shared<ThorImplementation::CustomLayer>(
-            DynamicExpression::fromExpressionDefinition(definition),
-            std::vector<std::string>{"feature_input"},
-            std::vector<std::string>{"feature_output"},
-            placement,
-            std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>>{},
-            inferenceOnly);
-        physicalTranspose->setLayerName("Transpose");
-        return physicalTranspose;
-    }
+                                                     const bool inferenceOnly) const override;
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         (void)batchSize;
@@ -108,31 +100,17 @@ class Transpose : public Layer {
     DataType outputDataType = DataType::FP32;
     std::optional<ThorImplementation::Expression> epilogue;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
+    std::optional<RaggedTensor> raggedFeatureInput;
+    std::optional<RaggedTensor> raggedFeatureOutput;
+    std::set<uint32_t> connectedInputPortIndices;
+    bool emittedFeatureOutputAfterAllInputsConnected = false;
 
     friend class Builder;
 };
 
 class Transpose::Builder {
    public:
-    virtual Transpose build() {
-        THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_featureInput.has_value());
-        if (_epilogue.has_value()) {
-            Transpose::validateEpilogueExpression(_epilogue.value());
-        }
-
-        std::vector<uint64_t> outputDimensions = _featureInput.value().getDimensions();
-        THOR_THROW_IF_FALSE(outputDimensions.size() >= 2);
-        std::swap(outputDimensions[outputDimensions.size() - 2], outputDimensions[outputDimensions.size() - 1]);
-
-        Transpose transpose(_epilogue);
-        transpose.outputDataType = _outputDataType.value_or(_featureInput.value().getDataType());
-        transpose.featureInput = _featureInput.value();
-        transpose.featureOutput = Tensor(transpose.outputDataType, outputDimensions);
-        transpose.initialized = true;
-        transpose.addToNetwork(_network.value());
-        return transpose;
-    }
+    virtual Transpose build();
 
     virtual Transpose::Builder &network(Network &_network) {
         THOR_THROW_IF_FALSE(!this->_network.has_value());
@@ -142,7 +120,18 @@ class Transpose::Builder {
 
     virtual Transpose::Builder &featureInput(Tensor _featureInput) {
         THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
+        THOR_THROW_IF_FALSE(_featureInput.isInitialized());
         this->_featureInput = _featureInput;
+        return *this;
+    }
+
+    virtual Transpose::Builder &featureInput(RaggedTensor _featureInput) {
+        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
+        THOR_THROW_IF_FALSE(_featureInput.isInitialized());
+        this->_raggedFeatureInput = _featureInput;
+        this->_featureInput = _featureInput.getValues();
         return *this;
     }
 
@@ -162,18 +151,10 @@ class Transpose::Builder {
         return *this;
     }
 
-    virtual Transpose::Builder &epilogue(const Activation &activation) { return epilogue(activation.toExpression(Transpose::epilogueInput())); }
-
-    virtual Transpose::Builder &epilogue(const std::shared_ptr<Activation> &activation) {
-        if (activation == nullptr) {
-            throw std::invalid_argument("Transpose epilogue activation must be non-null.");
-        }
-        return epilogue(*activation);
-    }
-
    private:
     std::optional<Network *> _network;
     std::optional<Tensor> _featureInput;
+    std::optional<RaggedTensor> _raggedFeatureInput;
     std::optional<DataType> _outputDataType;
     std::optional<ThorImplementation::Expression> _epilogue;
 };

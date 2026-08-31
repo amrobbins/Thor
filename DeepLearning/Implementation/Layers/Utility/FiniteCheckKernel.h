@@ -17,6 +17,7 @@ enum class FiniteCheckSampleKind : uint32_t {
 };
 
 struct FiniteCheckResult {
+    uint64_t checkedElements = 0;
     uint64_t totalNonFinite = 0;
     uint64_t nanCount = 0;
     uint64_t positiveInfinityCount = 0;
@@ -31,5 +32,16 @@ void launchFiniteCheck(const void *data,
                        uint32_t maxReportedIndices,
                        FiniteCheckResult *result,
                        Stream stream);
+
+void launchRaggedFiniteCheck(const void *data,
+                             DataType dataType,
+                             const void *offsets,
+                             DataType offsetsDataType,
+                             uint64_t batchSize,
+                             uint64_t maxTotalValues,
+                             uint64_t elementsPerValue,
+                             uint32_t maxReportedIndices,
+                             FiniteCheckResult *result,
+                             Stream stream);
 
 }  // namespace ThorImplementation

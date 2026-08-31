@@ -8084,7 +8084,8 @@ std::shared_ptr<StampedRmsNorm> FusedEquation::stampRmsNorm(const std::shared_pt
                                                                Tensor& scale,
                                                                const std::optional<Tensor>& preallocatedOutput,
                                                                const Stream& stream,
-                                                               const std::optional<Tensor>& rowPartitionOffsets) const {
+                                                               const std::optional<Tensor>& rowPartitionOffsets,
+                                                               bool packedTailPreparedExternally) const {
     if (!compiledStage) {
         throw std::runtime_error("stampRmsNorm requires non-null compiled stage.");
     }
@@ -8125,7 +8126,8 @@ std::shared_ptr<StampedRmsNorm> FusedEquation::stampRmsNorm(const std::shared_pt
         output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
     }
 
-    return std::make_shared<StampedRmsNorm>(compiledStage, adaptedInput, adaptedScale, output, stream, rowPartitionOffsets);
+    return std::make_shared<StampedRmsNorm>(
+        compiledStage, adaptedInput, adaptedScale, output, stream, rowPartitionOffsets, nullptr, packedTailPreparedExternally);
 }
 
 std::shared_ptr<StampedLayerNorm> FusedEquation::stampLayerNorm(
@@ -8169,7 +8171,8 @@ std::shared_ptr<StampedRmsNormBackward> FusedEquation::stampRmsNormBackward(
     const std::vector<std::optional<Tensor>>& preallocatedOutputs,
     const Stream& stream,
     const std::optional<Tensor>& rowPartitionOffsets,
-    std::shared_ptr<RmsNormForwardState> saved_forward_state) const {
+    std::shared_ptr<RmsNormForwardState> saved_forward_state,
+    bool packedTailsPreparedExternally) const {
     if (!compiledStage) {
         throw std::runtime_error("stampRmsNormBackward requires non-null compiled stage.");
     }
@@ -8214,7 +8217,16 @@ std::shared_ptr<StampedRmsNormBackward> FusedEquation::stampRmsNormBackward(
         CudnnRmsNorm::instance().warmBackward(warm_descriptor, stream.getGpuNum());
     }
     return std::make_shared<StampedRmsNormBackward>(
-        compiledStage, input, scale, dY, dX, dScale, stream, rowPartitionOffsets, std::move(saved_forward_state));
+        compiledStage,
+        input,
+        scale,
+        dY,
+        dX,
+        dScale,
+        stream,
+        rowPartitionOffsets,
+        std::move(saved_forward_state),
+        packedTailsPreparedExternally);
 }
 
 std::shared_ptr<StampedConvolution> FusedEquation::stampConvolution(const std::shared_ptr<CompiledConvolution>& compiledStage,
@@ -8327,7 +8339,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                           const std::optional<std::string>& beta_runtime_name,
                                                           const std::optional<Tensor>& epilogue_aux,
                                                           const std::optional<Tensor>& preallocatedBgradOutput,
-                                                          const std::optional<Tensor>& rowPartitionOffsets) const {
+                                                          const std::optional<Tensor>& rowPartitionOffsets,
+                                                          bool packedTailsPreparedExternally) const {
     if (!compiledStage) {
         throw std::runtime_error("stampMatmul requires non-null compiled stage.");
     }
@@ -8450,7 +8463,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       std::nullopt,
                                       epilogue_aux,
                                       bgrad_output,
-                                      rowPartitionOffsets);
+                                      rowPartitionOffsets,
+                                      packedTailsPreparedExternally);
 }
 
 std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<CompiledMatmul>& compiledStage,
@@ -8465,7 +8479,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                           const std::optional<std::string>& beta_runtime_name,
                                                           const std::optional<Tensor>& epilogue_aux,
                                                           const std::optional<Tensor>& preallocatedBgradOutput,
-                                                          const std::optional<Tensor>& rowPartitionOffsets) const {
+                                                          const std::optional<Tensor>& rowPartitionOffsets,
+                                                          bool packedTailsPreparedExternally) const {
     if (!compiledStage) {
         throw std::runtime_error("stampMatmul requires non-null compiled stage.");
     }
@@ -8615,7 +8630,8 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       beta_host_scratch,
                                       epilogue_aux,
                                       bgrad_output,
-                                      rowPartitionOffsets);
+                                      rowPartitionOffsets,
+                                      packedTailsPreparedExternally);
 }
 
 static CudnnRaggedAttentionScratch makeRaggedAttentionScratch(const TensorPlacement& placement, uint64_t batchSize) {
@@ -9878,6 +9894,94 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
     applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
 
+    struct PackedTailSanitizationBinding {
+        uint64_t tensor_id = 0;
+        uint64_t storage_element_offset = 0;
+        uint64_t total_num_elements = 0;
+        uint64_t offsets_tensor_id = 0;
+        uint64_t offsets_storage_element_offset = 0;
+        uint64_t offsets_total_num_elements = 0;
+        uint64_t producer_generation = 0;
+        uint64_t ragged_batch_size = 0;
+        uint64_t packed_row_capacity = 0;
+        uint32_t stage_index = 0;
+    };
+    std::vector<PackedTailSanitizationBinding> packed_tail_sanitizations;
+
+    auto ensurePackedTailSanitized = [&](uint32_t value_id,
+                                         uint32_t offsets_value_id,
+                                         const Tensor& tensor,
+                                         const Tensor& offsets,
+                                         uint64_t ragged_batch_size,
+                                         uint64_t packed_row_capacity,
+                                         std::vector<uint32_t>& consumer_dependencies) -> uint32_t {
+        if (ragged_batch_size == 0 || packed_row_capacity == 0) {
+            throw std::runtime_error("SANITIZE_PACKED_TAIL requires compiled packed-row metadata.");
+        }
+
+        auto producer_it = producer_stage_by_value_id.find(value_id);
+        const uint64_t producer_generation =
+            producer_it == producer_stage_by_value_id.end() ? 0 : static_cast<uint64_t>(producer_it->second) + 1;
+
+        for (const PackedTailSanitizationBinding& binding : packed_tail_sanitizations) {
+            const bool same_physical_generation =
+                binding.tensor_id == tensor.getTensorId() &&
+                binding.storage_element_offset == tensor.getStorageElementOffset() &&
+                binding.total_num_elements == tensor.getTotalNumElements() &&
+                binding.producer_generation == producer_generation;
+            if (!same_physical_generation) {
+                continue;
+            }
+            if (binding.offsets_tensor_id != offsets.getTensorId() ||
+                binding.offsets_storage_element_offset != offsets.getStorageElementOffset() ||
+                binding.offsets_total_num_elements != offsets.getTotalNumElements() ||
+                binding.ragged_batch_size != ragged_batch_size ||
+                binding.packed_row_capacity != packed_row_capacity) {
+                throw std::runtime_error(
+                    "One packed physical value cannot be sanitized against conflicting row-partition metadata.");
+            }
+            if (std::find(consumer_dependencies.begin(), consumer_dependencies.end(), binding.stage_index) ==
+                consumer_dependencies.end()) {
+                consumer_dependencies.push_back(binding.stage_index);
+            }
+            return binding.stage_index;
+        }
+
+        std::vector<uint32_t> sanitize_dependencies;
+        if (producer_it != producer_stage_by_value_id.end()) {
+            sanitize_dependencies.push_back(producer_it->second);
+        }
+        auto offsets_producer_it = producer_stage_by_value_id.find(offsets_value_id);
+        if (offsets_producer_it != producer_stage_by_value_id.end() &&
+            std::find(sanitize_dependencies.begin(), sanitize_dependencies.end(), offsets_producer_it->second) ==
+                sanitize_dependencies.end()) {
+            sanitize_dependencies.push_back(offsets_producer_it->second);
+        }
+        std::sort(sanitize_dependencies.begin(), sanitize_dependencies.end());
+
+        const uint32_t sanitize_stage_idx = static_cast<uint32_t>(stampedStages.size());
+        std::shared_ptr<StampedSanitizePackedTail> sanitize = std::make_shared<StampedSanitizePackedTail>(
+            tensor, offsets, ragged_batch_size, packed_row_capacity, stream);
+        stampedStages.emplace_back(sanitize, std::move(sanitize_dependencies));
+        packed_tail_sanitizations.push_back(PackedTailSanitizationBinding{
+            .tensor_id = tensor.getTensorId(),
+            .storage_element_offset = tensor.getStorageElementOffset(),
+            .total_num_elements = tensor.getTotalNumElements(),
+            .offsets_tensor_id = offsets.getTensorId(),
+            .offsets_storage_element_offset = offsets.getStorageElementOffset(),
+            .offsets_total_num_elements = offsets.getTotalNumElements(),
+            .producer_generation = producer_generation,
+            .ragged_batch_size = ragged_batch_size,
+            .packed_row_capacity = packed_row_capacity,
+            .stage_index = sanitize_stage_idx,
+        });
+        if (std::find(consumer_dependencies.begin(), consumer_dependencies.end(), sanitize_stage_idx) ==
+            consumer_dependencies.end()) {
+            consumer_dependencies.push_back(sanitize_stage_idx);
+        }
+        return sanitize_stage_idx;
+    };
+
     for (size_t stage_idx = 0; stage_idx < compiled_outputs->stages.size(); ++stage_idx) {
         const CompiledExecutionStage& stage = compiled_outputs->stages.at(stage_idx);
         applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
@@ -10526,6 +10630,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     resolved_outputs,
                     bound_tensor_scalar_inputs);
 
+                const uint32_t cuda_kernel_stage_idx = static_cast<uint32_t>(stampedStages.size());
                 for (const CompiledStageOutput& stage_output : stage.outputs) {
                     const ExprNode& output_node = stage.expr.nodes.at(stage_output.local_node_idx);
                     const std::string& output_name = stage.cuda_kernel_expression->outputs()[output_node.cuda_kernel_output_index].name;
@@ -10534,7 +10639,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                         throw std::runtime_error("CudaKernel stage did not resolve requested output '" + output_name + "'.");
                     }
                     values[stage_output.value_id] = output_it->second;
-                    producer_stage_by_value_id[stage_output.value_id] = static_cast<uint32_t>(stage_idx);
+                    producer_stage_by_value_id[stage_output.value_id] = cuda_kernel_stage_idx;
                 }
 
                 stampedStages.emplace_back(stampedCudaKernel, std::move(dependency_stage_indices), stage_flops);
@@ -11212,12 +11317,32 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     }
                     rowPartitionOffsets = runtimeInputTensor(stageInputs[stage.rms_norm->ragged_offsets_input_slot]);
                 }
+                bool packedTailPreparedExternally = false;
+                if (rowPartitionOffsets.has_value()) {
+                    const uint32_t offsets_value_id =
+                        stage.input_value_ids.at(stage.rms_norm->ragged_offsets_input_slot);
+                    ensurePackedTailSanitized(stage.input_value_ids.at(0),
+                                              offsets_value_id,
+                                              inputTensor,
+                                              rowPartitionOffsets.value(),
+                                              stage.rms_norm->ragged_batch_size,
+                                              stage.rms_norm->packed_row_capacity,
+                                              dependency_stage_indices);
+                    packedTailPreparedExternally = true;
+                    std::sort(dependency_stage_indices.begin(), dependency_stage_indices.end());
+                }
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 const std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
                 std::optional<Tensor> preallocated = preallocatedForStageOutput(stageOutput, output_dims);
 
                 std::shared_ptr<StampedRmsNorm> stampedRmsNorm =
-                    stampRmsNorm(stage.rms_norm, inputTensor, scaleTensor, preallocated, stream, rowPartitionOffsets);
+                    stampRmsNorm(stage.rms_norm,
+                                 inputTensor,
+                                 scaleTensor,
+                                 preallocated,
+                                 stream,
+                                 rowPartitionOffsets,
+                                 packedTailPreparedExternally);
                 Tensor outputTensor = stampedRmsNorm->getOutputTensor();
 
                 values[stageOutput.value_id] = outputTensor;
@@ -11273,6 +11398,27 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     rowPartitionOffsets = runtimeInputTensor(stageInputs[3]);
                 }
 
+                bool packedTailsPreparedExternally = false;
+                if (packedRmsNormBackward) {
+                    const uint32_t offsets_value_id = stage.input_value_ids.at(3);
+                    ensurePackedTailSanitized(stage.input_value_ids.at(0),
+                                              offsets_value_id,
+                                              inputTensor,
+                                              rowPartitionOffsets.value(),
+                                              stage.rms_norm_backward->ragged_batch_size,
+                                              stage.rms_norm_backward->packed_row_capacity,
+                                              dependency_stage_indices);
+                    ensurePackedTailSanitized(stage.input_value_ids.at(2),
+                                              offsets_value_id,
+                                              dYTensor,
+                                              rowPartitionOffsets.value(),
+                                              stage.rms_norm_backward->ragged_batch_size,
+                                              stage.rms_norm_backward->packed_row_capacity,
+                                              dependency_stage_indices);
+                    packedTailsPreparedExternally = true;
+                    std::sort(dependency_stage_indices.begin(), dependency_stage_indices.end());
+                }
+
                 std::vector<std::optional<Tensor>> semanticPreallocated(2, std::nullopt);
                 for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
                     const CompiledStageOutput& stageOutput = stage.outputs[output_idx];
@@ -11291,7 +11437,15 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
 
                 std::shared_ptr<StampedRmsNormBackward> stampedRmsNormBackward = stampRmsNormBackward(
-                    stage.rms_norm_backward, inputTensor, scaleTensor, dYTensor, semanticPreallocated, stream, rowPartitionOffsets);
+                    stage.rms_norm_backward,
+                    inputTensor,
+                    scaleTensor,
+                    dYTensor,
+                    semanticPreallocated,
+                    stream,
+                    rowPartitionOffsets,
+                    nullptr,
+                    packedTailsPreparedExternally);
                 const std::vector<Tensor>& semanticOutputs = stampedRmsNormBackward->getOutputTensors();
                 const uint32_t producer_stage_idx = static_cast<uint32_t>(stampedStages.size());
                 for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
@@ -11375,12 +11529,45 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 std::optional<std::string> beta_runtime_name = std::nullopt;
                 std::optional<Tensor> epilogue_aux = std::nullopt;
                 std::optional<Tensor> rowPartitionOffsets = std::nullopt;
+                bool packedTailsPreparedExternally = false;
                 if (stage.matmul->ragged_offsets_input_slot != UINT32_MAX) {
                     if (stage.matmul->ragged_offsets_input_slot >= stageInputs.size()) {
                         throw std::runtime_error("Matmul row-partition runtime input slot is out of range.");
                     }
                     rowPartitionOffsets = runtimeInputTensor(stageInputs[stage.matmul->ragged_offsets_input_slot]);
                 }
+
+                auto preparePackedMatmulTails = [&](const Tensor& lhsTensor, const Tensor& rhsTensor) {
+                    if (!rowPartitionOffsets.has_value() || stage.matmul->packed_row_binding == MatmulPackedRowBinding::None) {
+                        return;
+                    }
+                    const uint32_t offsets_value_id =
+                        stage.input_value_ids.at(stage.matmul->ragged_offsets_input_slot);
+                    const bool binds_lhs = stage.matmul->packed_row_binding == MatmulPackedRowBinding::RowsA ||
+                                           stage.matmul->packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB;
+                    const bool binds_rhs = stage.matmul->packed_row_binding == MatmulPackedRowBinding::RowsB ||
+                                           stage.matmul->packed_row_binding == MatmulPackedRowBinding::RowsAAndRowsB;
+                    if (binds_lhs) {
+                        ensurePackedTailSanitized(stage.input_value_ids.at(0),
+                                                  offsets_value_id,
+                                                  lhsTensor,
+                                                  rowPartitionOffsets.value(),
+                                                  stage.matmul->ragged_batch_size,
+                                                  stage.matmul->packed_row_capacity,
+                                                  dependency_stage_indices);
+                    }
+                    if (binds_rhs) {
+                        ensurePackedTailSanitized(stage.input_value_ids.at(1),
+                                                  offsets_value_id,
+                                                  rhsTensor,
+                                                  rowPartitionOffsets.value(),
+                                                  stage.matmul->ragged_batch_size,
+                                                  stage.matmul->packed_row_capacity,
+                                                  dependency_stage_indices);
+                    }
+                    packedTailsPreparedExternally = true;
+                    std::sort(dependency_stage_indices.begin(), dependency_stage_indices.end());
+                };
 
                 auto runtimeScalarNameForStageLocalSlot = [&](uint32_t local_slot) -> std::optional<std::string> {
                     if (local_slot == UINT32_MAX) {
@@ -11432,6 +11619,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     }
                     Tensor lhsTensor = runtimeInputTensor(stageInputs[0]);
                     Tensor rhsTensor = runtimeInputTensor(stageInputs[1]);
+                    preparePackedMatmulTails(lhsTensor, rhsTensor);
 
                     const bool plain_groupable_matmul =
                         stage.matmul->epilogue == MatmulEpilogue::Default &&
@@ -11511,7 +11699,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                 beta_runtime_name,
                                                 epilogue_aux,
                                                 std::nullopt,
-                                                rowPartitionOffsets);
+                                                rowPartitionOffsets,
+                                                packedTailsPreparedExternally);
                                 if (groupMatmul->getOutputTensor().getDimensions() != outputGroup.getDimensions()) {
                                     throw std::runtime_error(
                                         "Grouped MATMUL stamped output dimensions do not match the planned output view.");
@@ -11543,7 +11732,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                 beta_runtime_name,
                                                 epilogue_aux,
                                                 preallocated_bgrad,
-                                                rowPartitionOffsets);
+                                                rowPartitionOffsets,
+                                                packedTailsPreparedExternally);
                 } else {
                     if (stageInputs.size() < 3) {
                         throw std::runtime_error("GEMM stage expects at least three inputs.");
@@ -11551,6 +11741,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     Tensor lhsTensor = runtimeInputTensor(stageInputs[0]);
                     Tensor rhsTensor = runtimeInputTensor(stageInputs[1]);
                     Tensor addendTensor = runtimeInputTensor(stageInputs[2]);
+                    preparePackedMatmulTails(lhsTensor, rhsTensor);
                     stampedMatmul = stampMatmul(stage.matmul,
                                                 lhsTensor,
                                                 rhsTensor,
@@ -11563,7 +11754,8 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                 beta_runtime_name,
                                                 epilogue_aux,
                                                 preallocated_bgrad,
-                                                rowPartitionOffsets);
+                                                rowPartitionOffsets,
+                                                packedTailsPreparedExternally);
                 }
                 Tensor outputTensor = stampedMatmul->getOutputTensor();
                 if (outputTensor.getDimensions() != output_dims) {
@@ -12468,10 +12660,20 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
     std::vector<Stream> helper_streams_used;
     helper_streams_used.reserve(compiled_outputs->stages.size());
 
-    auto rememberHelperStream = [&](Stream& helper_stream) {
-        if (std::find(helper_streams_used.begin(), helper_streams_used.end(), helper_stream) == helper_streams_used.end()) {
-            helper_streams_used.push_back(helper_stream);
+    ReusableEventLeases synchronizationEvents(compiled_outputs->stages.size());
+    std::optional<Event> callerStreamReady;
+    if (compiled_outputs->stages.size() > 1) {
+        callerStreamReady = synchronizationEvents.acquire(gpu_num);
+        stream.putEvent(callerStreamReady.value());
+    }
+
+    auto prepareHelperStream = [&](Stream& helper_stream) {
+        if (std::find(helper_streams_used.begin(), helper_streams_used.end(), helper_stream) != helper_streams_used.end()) {
+            return;
         }
+        THOR_THROW_IF_FALSE(callerStreamReady.has_value());
+        helper_stream.waitEvent(callerStreamReady.value());
+        helper_streams_used.push_back(helper_stream);
     };
 
     for (uint32_t stage_num = 0; stage_num < compiled_outputs->stages.size(); ++stage_num) {
@@ -12505,16 +12707,15 @@ void FusedEquation::run(const std::unordered_map<std::string, Tensor>& inputs,
 
         if (use_helper_streams) {
             Stream& helper_stream = Expression::getNextHelperStream(gpu_num);
+            prepareHelperStream(helper_stream);
             runStageOnStream(stage, prepared_stage, orderedInputs, orderedOutputs, helper_stream);
-            rememberHelperStream(helper_stream);
         } else {
             runStageOnStream(stage, prepared_stage, orderedInputs, orderedOutputs, stream);
         }
     }
 
-    ReusableEventLeases helperCompletionEvents(helper_streams_used.size());
     for (Stream& helper_stream : helper_streams_used) {
-        Event helperDoneEvent = helperCompletionEvents.acquire(helper_stream.getGpuNum());
+        Event helperDoneEvent = synchronizationEvents.acquire(helper_stream.getGpuNum());
         helper_stream.putEvent(helperDoneEvent);
         stream.waitEvent(helperDoneEvent);
     }

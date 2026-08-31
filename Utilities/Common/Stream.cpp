@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -85,7 +86,7 @@ struct Stream::State {
 
     ~State() noexcept {
         if (processLifetime ||
-            (cudaStream == nullptr && !cudnnHandle.has_value() && !cublasHandle.has_value() && !cublasLtHandle.has_value()))
+            (cudaStream == nullptr && cudnnHandles.empty() && !cublasHandle.has_value() && !cublasLtHandle.has_value()))
             return;
 
         ThorImplementation::SharedOwnership::cleanupNoThrow("Stream", "release CUDA stream state", [&]() {
@@ -105,11 +106,12 @@ struct Stream::State {
                 }
             }
 
-            if (cudnnHandle.has_value()) {
+            for (auto& [threadId, cudnnHandle] : cudnnHandles) {
+                (void)threadId;
                 numCudnnHandles.fetch_sub(1, memory_order_relaxed);
-                reportCudnnCleanupFailure("cudnnDestroy", cudnnDestroy(cudnnHandle.value()));
-                cudnnHandle.reset();
+                reportCudnnCleanupFailure("cudnnDestroy", cudnnDestroy(cudnnHandle));
             }
+            cudnnHandles.clear();
 
             if (cublasHandle.has_value()) {
                 numCublasHandles.fetch_sub(1, memory_order_relaxed);
@@ -135,7 +137,7 @@ struct Stream::State {
 
     int gpuNum;
     cudaStream_t cudaStream = nullptr;
-    optional<cudnnHandle_t> cudnnHandle;
+    unordered_map<thread::id, cudnnHandle_t> cudnnHandles;
     optional<cublasHandle_t> cublasHandle;
     optional<cublasLtHandle_t> cublasLtHandle;
 
@@ -365,33 +367,42 @@ void Stream::enqueueHostFunction(cudaHostFn_t function, std::unique_ptr<HostFunc
 
 cudnnHandle_t Stream::getCudnnHandle() const {
     THOR_THROW_IF_FALSE(!uninitialized());
+    const thread::id requestingThread = this_thread::get_id();
     lock_guard<mutex> lock(state->libraryHandleMutex);
 
-    if (!state->cudnnHandle.has_value()) {
-        ScopedGpu scopedGpu(state->gpuNum);
-        cudnnHandle_t handle = nullptr;
-        const cudnnStatus_t createStatus = cudnnCreate(&handle);
-        if (createStatus != CUDNN_STATUS_SUCCESS) {
-            printf("cudnnStatus %d : %s   gpu:%d   numCudnnHandles %d\n",
-                   createStatus,
-                   cudnnGetErrorString(createStatus),
-                   state->gpuNum,
-                   numCudnnHandles.load(memory_order_relaxed));
-            fflush(stdout);
-        }
-        THOR_THROW_IF_FALSE(createStatus == CUDNN_STATUS_SUCCESS);
-
-        const cudnnStatus_t setStreamStatus = cudnnSetStream(handle, state->cudaStream);
-        if (setStreamStatus != CUDNN_STATUS_SUCCESS) {
-            reportCudnnCleanupFailure("cudnnDestroy after cudnnSetStream failure", cudnnDestroy(handle));
-            THOR_THROW_IF_FALSE(setStreamStatus == CUDNN_STATUS_SUCCESS);
-        }
-
-        state->cudnnHandle = handle;
-        numCudnnHandles.fetch_add(1, memory_order_relaxed);
+    auto existingHandle = state->cudnnHandles.find(requestingThread);
+    if (existingHandle != state->cudnnHandles.end()) {
+        return existingHandle->second;
     }
 
-    return state->cudnnHandle.value();
+    ScopedGpu scopedGpu(state->gpuNum);
+    cudnnHandle_t handle = nullptr;
+    const cudnnStatus_t createStatus = cudnnCreate(&handle);
+    if (createStatus != CUDNN_STATUS_SUCCESS) {
+        printf("cudnnStatus %d : %s   gpu:%d   numCudnnHandles %d\n",
+               createStatus,
+               cudnnGetErrorString(createStatus),
+               state->gpuNum,
+               numCudnnHandles.load(memory_order_relaxed));
+        fflush(stdout);
+    }
+    THOR_THROW_IF_FALSE(createStatus == CUDNN_STATUS_SUCCESS);
+
+    const cudnnStatus_t setStreamStatus = cudnnSetStream(handle, state->cudaStream);
+    if (setStreamStatus != CUDNN_STATUS_SUCCESS) {
+        reportCudnnCleanupFailure("cudnnDestroy after cudnnSetStream failure", cudnnDestroy(handle));
+        THOR_THROW_IF_FALSE(setStreamStatus == CUDNN_STATUS_SUCCESS);
+    }
+
+    try {
+        const auto [insertedHandle, inserted] = state->cudnnHandles.emplace(requestingThread, handle);
+        THOR_THROW_IF_FALSE(inserted);
+        numCudnnHandles.fetch_add(1, memory_order_relaxed);
+        return insertedHandle->second;
+    } catch (...) {
+        reportCudnnCleanupFailure("cudnnDestroy after handle-cache insertion failure", cudnnDestroy(handle));
+        throw;
+    }
 }
 
 cudaStream_t Stream::getStream() const {

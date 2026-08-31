@@ -133,6 +133,9 @@ struct RaggedNetworkInputReference {
     std::string name;
     std::string valuesInputName;
     std::string offsetsInputName;
+    // Null for a partition-owning boundary. Shared-partition inputs name the
+    // logical RaggedNetworkInput that owns offsetsInputName.
+    std::optional<std::string> partitionInputName;
     RaggedTensor raggedTensor;
 
     bool operator==(const RaggedNetworkInputReference&) const = default;
@@ -280,7 +283,8 @@ class Network {
     void registerRaggedNetworkInput(const std::string& name,
                                     const RaggedTensor& raggedTensor,
                                     const std::string& valuesInputName,
-                                    const std::string& offsetsInputName);
+                                    const std::string& offsetsInputName,
+                                    std::optional<std::string> partitionInputName = std::nullopt);
     [[nodiscard]] bool hasRaggedNetworkInput(const std::string& name) const;
     [[nodiscard]] std::vector<RaggedNetworkInputReference> getExternalRaggedNetworkInputs() const;
     void registerRaggedNetworkOutput(const std::string& name,
@@ -331,6 +335,7 @@ class Network {
         std::string name;
         std::string valuesInputName;
         std::string offsetsInputName;
+        std::optional<std::string> partitionInputName;
         RaggedTensor raggedTensor;
     };
     std::map<std::string, RaggedNetworkInputRecord> raggedNetworkInputs;

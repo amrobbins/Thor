@@ -5,8 +5,10 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradient.h"
 #include "Utilities/TensorOperations/Embedding/ReduceStageController.h"
+#include "Utilities/TensorOperations/Ragged/RuntimeExtent.h"
 
 #include "cuda_bf16.h"
 #include "cuda_fp16.h"
@@ -363,6 +365,15 @@ struct EmbeddingNetworkFixture {
     std::shared_ptr<Optimizer> optimizer;
 };
 
+struct RaggedEmbeddingNetworkFixture {
+    std::shared_ptr<NetworkInput> valuesInput;
+    std::shared_ptr<NetworkInput> offsetsInput;
+    std::shared_ptr<Embedding> embedding;
+    std::shared_ptr<EmbeddingErrorSink> sink;
+    std::shared_ptr<PhysicalParameter> weightsParameter;
+    std::shared_ptr<Optimizer> optimizer;
+};
+
 class SparseRowGradientOnlyOptimizer final : public Optimizer {
    public:
     explicit SparseRowGradientOnlyOptimizer(uint64_t id) : Optimizer(id) {}
@@ -480,7 +491,331 @@ void runEmbeddingTrainingPass(EmbeddingNetworkFixture& f,
     f.embedding->getGradientUpdateStream().value().synchronize();
 }
 
+RaggedEmbeddingNetworkFixture makeRaggedEmbeddingNetwork(uint64_t vocabularySize,
+                                                         uint64_t embeddingDim,
+                                                         uint64_t maxTotalValues,
+                                                         uint32_t batchSize,
+                                                         DataType offsetsDataType,
+                                                         std::optional<uint64_t> paddingIndex,
+                                                         float learningRate) {
+    RaggedEmbeddingNetworkFixture f;
+    f.valuesInput = std::make_shared<NetworkInput>(gpuPlacement, DataType::UINT32, std::vector<uint64_t>{maxTotalValues});
+    f.offsetsInput =
+        std::make_shared<NetworkInput>(gpuPlacement, offsetsDataType, std::vector<uint64_t>{static_cast<uint64_t>(batchSize) + 1});
+    f.weightsParameter =
+        std::make_shared<PhysicalParameter>("weights", true, std::vector<uint64_t>{vocabularySize, embeddingDim}, DataType::FP32);
+    f.optimizer = std::make_shared<Sgd>(1002, learningRate, /*decay=*/0.0f, /*momentum=*/0.0f, /*useNesterovMomentum=*/false);
+    f.weightsParameter->setOptimizer(f.optimizer);
+    f.embedding = std::make_shared<Embedding>(gpuPlacement,
+                                              std::vector<std::shared_ptr<PhysicalParameter>>{f.weightsParameter},
+                                              vocabularySize,
+                                              embeddingDim,
+                                              DataType::FP32,
+                                              paddingIndex,
+                                              /*sparseGradients=*/true,
+                                              /*inferenceOnly=*/false,
+                                              /*stampedId=*/-1,
+                                              RaggedEmbeddingConfig{.batchSize = batchSize,
+                                                                    .maxTotalValues = maxTotalValues,
+                                                                    .elementsPerValue = 1,
+                                                                    .offsetsDataType = offsetsDataType});
+    f.sink = std::make_shared<EmbeddingErrorSink>();
+
+    // One logical ragged application is represented physically as values port 0
+    // and offsets port 1.  Only the values output participates in backprop.
+    f.valuesInput->connectToNextLayer(f.embedding.get(), /*driverConnectionType=*/0, /*loaderConnectionType=*/0);
+    f.offsetsInput->connectToNextLayer(f.embedding.get(), /*driverConnectionType=*/0, /*loaderConnectionType=*/1);
+    f.embedding->connectToNextLayer(f.sink.get(), /*driverConnectionType=*/0);
+
+    f.valuesInput->compile();
+    f.offsetsInput->compile();
+    f.embedding->compile();
+    f.sink->compile();
+
+    f.valuesInput->initialize();
+    f.offsetsInput->initialize();
+    f.embedding->initialize();
+    f.sink->initialize();
+    return f;
+}
+
+void runRaggedEmbeddingTrainingPass(RaggedEmbeddingNetworkFixture& f,
+                                    Tensor& cpuIndices,
+                                    Tensor& cpuOffsets,
+                                    const std::vector<float>& upstreamGradient,
+                                    uint32_t batchSize) {
+    f.valuesInput->forward(cpuIndices, /*validationPass=*/false, batchSize);
+    f.offsetsInput->forward(cpuOffsets, /*validationPass=*/false, batchSize);
+
+    std::vector<Stream> dataStreams = f.embedding->getStreams();
+    ASSERT_EQ(dataStreams.size(), 2u);
+    Stream valuesStream = dataStreams[0];
+
+    std::optional<Tensor> errorTensorOpt = f.sink->getErrorOutput();
+    ASSERT_TRUE(errorTensorOpt.has_value());
+    Tensor errorTensor = errorTensorOpt.value();
+    Tensor cpuError = makeCpuFloatTensor(errorTensor.getDataType(), errorTensor.getDimensions(), upstreamGradient);
+    copyCpuToExistingGpu(errorTensor, cpuError, valuesStream);
+
+    f.embedding->backward(errorTensor, batchSize);
+    ASSERT_TRUE(f.embedding->getGradientUpdateStream().has_value());
+    f.embedding->getGradientUpdateStream().value().synchronize();
+}
+
 }  // namespace
+
+TEST(EmbeddingRaggedRuntimeTest, ForwardUsesActiveExtentAndNeverTouchesInactiveIndexCapacity) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 4;
+    constexpr uint64_t embeddingDim = 2;
+    constexpr uint64_t maxTotalValues = 6;
+    Tensor cpuWeights = makeCpuFloatTensor(DataType::FP32,
+                                           {vocabularySize, embeddingDim},
+                                           {0.0f, 1.0f, 10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f});
+    Tensor gpuWeights = copyCpuToGpu(cpuWeights, stream);
+
+    for (DataType offsetsDtype : {DataType::UINT32, DataType::UINT64}) {
+        Tensor cpuIndices = makeCpuUint32Tensor(
+            {maxTotalValues}, {1U, 2U, 3U, std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max(),
+                               std::numeric_limits<uint32_t>::max()});
+        Tensor gpuIndices = copyCpuToGpu(cpuIndices, stream);
+
+        Tensor cpuOffsets = offsetsDtype == DataType::UINT32
+            ? makeCpuUint32Tensor({4}, {0U, 1U, 1U, 3U})
+            : makeCpuUint64Tensor({4}, {0ULL, 1ULL, 1ULL, 3ULL});
+        Tensor gpuOffsets = copyCpuToGpu(cpuOffsets, stream);
+        RaggedRuntimeExtent extent = raggedRuntimeExtentFromOffsets(gpuOffsets, 3, maxTotalValues, 1);
+
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        Tensor cpuOutput = makeCpuFloatTensor(
+            DataType::FP32, {maxTotalValues, embeddingDim}, std::vector<float>(maxTotalValues * embeddingDim, nan));
+        Tensor gpuOutput = copyCpuToGpu(cpuOutput, stream);
+        auto prepared = prepareEmbeddingForwardRagged(gpuIndices, gpuWeights, gpuOutput, std::nullopt, extent);
+        launchPreparedEmbeddingForward(*prepared, gpuIndices, gpuWeights, gpuOutput, stream);
+        stream.synchronize();
+
+        const std::vector<float> output = copyGpuFloatTensorToValues(gpuOutput, stream);
+        expectAllClose(std::vector<float>(output.begin(), output.begin() + 6), {10.0f, 11.0f, 20.0f, 21.0f, 30.0f, 31.0f});
+        for (size_t i = 6; i < output.size(); ++i) EXPECT_TRUE(std::isnan(output[i]));
+
+        // Reuse the same prepared executable with an all-empty partition and
+        // completely poisoned index capacity. No index may be read.
+        Tensor cpuPoisonedIndices = makeCpuUint32Tensor(
+            {maxTotalValues}, std::vector<uint32_t>(maxTotalValues, std::numeric_limits<uint32_t>::max()));
+        copyCpuToExistingGpu(gpuIndices, cpuPoisonedIndices, stream);
+        Tensor cpuEmptyOffsets = offsetsDtype == DataType::UINT32
+            ? makeCpuUint32Tensor({4}, {0U, 0U, 0U, 0U})
+            : makeCpuUint64Tensor({4}, {0ULL, 0ULL, 0ULL, 0ULL});
+        copyCpuToExistingGpu(gpuOffsets, cpuEmptyOffsets, stream);
+        copyCpuToExistingGpu(gpuOutput, cpuOutput, stream);
+        launchPreparedEmbeddingForward(*prepared, gpuIndices, gpuWeights, gpuOutput, stream);
+        stream.synchronize();
+        const std::vector<float> emptyOutput = copyGpuFloatTensorToValues(gpuOutput, stream);
+        for (float value : emptyOutput) EXPECT_TRUE(std::isnan(value));
+    }
+}
+
+TEST(EmbeddingRaggedRuntimeTest, TrailingIndexDimensionsScaleActiveExtentByElementsPerValue) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 5;
+    constexpr uint64_t maxTotalValues = 3;
+    constexpr uint64_t elementsPerValue = 2;
+    Tensor cpuIndices = makeCpuUint32Tensor(
+        {maxTotalValues, elementsPerValue}, {1U, 2U, 3U, 1U, std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max()});
+    Tensor gpuIndices = copyCpuToGpu(cpuIndices, stream);
+    Tensor cpuOffsets = makeCpuUint32Tensor({3}, {0U, 1U, 2U});
+    Tensor gpuOffsets = copyCpuToGpu(cpuOffsets, stream);
+    RaggedRuntimeExtent extent = raggedRuntimeExtentFromOffsets(gpuOffsets, 2, maxTotalValues, elementsPerValue);
+
+    Tensor cpuWeights = makeCpuFloatTensor(DataType::FP32, {vocabularySize, 1}, {0.0f, 10.0f, 20.0f, 30.0f, 40.0f});
+    Tensor gpuWeights = copyCpuToGpu(cpuWeights, stream);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    Tensor cpuOutput = makeCpuFloatTensor(DataType::FP32, {maxTotalValues, elementsPerValue, 1},
+                                          std::vector<float>(maxTotalValues * elementsPerValue, nan));
+    Tensor gpuOutput = copyCpuToGpu(cpuOutput, stream);
+    auto forward = prepareEmbeddingForwardRagged(gpuIndices, gpuWeights, gpuOutput, std::nullopt, extent);
+    launchPreparedEmbeddingForward(*forward, gpuIndices, gpuWeights, gpuOutput, stream);
+    stream.synchronize();
+    const std::vector<float> output = copyGpuFloatTensorToValues(gpuOutput, stream);
+    expectAllClose(std::vector<float>(output.begin(), output.begin() + 4), {10.0f, 20.0f, 30.0f, 10.0f});
+    EXPECT_TRUE(std::isnan(output[4]));
+    EXPECT_TRUE(std::isnan(output[5]));
+
+    Tensor cpuUpstream = makeCpuFloatTensor(DataType::FP32,
+                                            {maxTotalValues, elementsPerValue, 1},
+                                            {1.0f, 2.0f, 3.0f, 4.0f, nan, nan});
+    Tensor gpuUpstream = copyCpuToGpu(cpuUpstream, stream);
+    SparseRowGradient gradient = SparseRowGradient::allocate(gpuPlacement,
+                                                             std::min<uint64_t>(maxTotalValues * elementsPerValue, vocabularySize),
+                                                             vocabularySize,
+                                                             1,
+                                                             DataType::FP32,
+                                                             SparseRowGradient::chooseRowDataType(vocabularySize));
+    auto backward = prepareEmbeddingSparseGradientRagged(gpuIndices, gpuUpstream, gradient, std::nullopt, extent);
+    launchPreparedEmbeddingSparseGradient(*backward, gpuIndices, gpuUpstream, gradient, stream);
+    stream.synchronize();
+
+    const std::vector<uint64_t> numRows = copyGpuRowTensorToUint64Values(gradient.numRows, stream);
+    ASSERT_EQ(numRows, (std::vector<uint64_t>{3}));
+    std::vector<uint64_t> rows = copyGpuRowTensorToUint64Values(gradient.rows, stream);
+    rows.resize(3);
+    EXPECT_EQ(rows, (std::vector<uint64_t>{1, 2, 3}));
+    std::vector<float> values = copyGpuFloatTensorToValues(gradient.values, stream);
+    values.resize(3);
+    expectAllClose(values, {5.0f, 2.0f, 3.0f});
+}
+
+TEST(EmbeddingRaggedRuntimeTest, SparseGradientMapsInactiveCapacityToSentinelWithoutReadingPoison) {
+    Stream stream(gpuPlacement);
+
+    constexpr uint64_t vocabularySize = 5;
+    constexpr uint64_t embeddingDim = 2;
+    constexpr uint64_t maxTotalValues = 6;
+    Tensor cpuIndices = makeCpuUint32Tensor(
+        {maxTotalValues}, {1U, 2U, 1U, std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max(),
+                           std::numeric_limits<uint32_t>::max()});
+    Tensor gpuIndices = copyCpuToGpu(cpuIndices, stream);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    Tensor cpuUpstream = makeCpuFloatTensor(
+        DataType::FP32, {maxTotalValues, embeddingDim}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, nan, nan, nan, nan, nan, nan});
+    Tensor gpuUpstream = copyCpuToGpu(cpuUpstream, stream);
+
+    for (DataType offsetsDtype : {DataType::UINT32, DataType::UINT64}) {
+        Tensor cpuOffsets = offsetsDtype == DataType::UINT32
+            ? makeCpuUint32Tensor({4}, {0U, 1U, 1U, 3U})
+            : makeCpuUint64Tensor({4}, {0ULL, 1ULL, 1ULL, 3ULL});
+        Tensor gpuOffsets = copyCpuToGpu(cpuOffsets, stream);
+        RaggedRuntimeExtent extent = raggedRuntimeExtentFromOffsets(gpuOffsets, 3, maxTotalValues, 1);
+
+        SparseRowGradient gradient = SparseRowGradient::allocate(gpuPlacement,
+                                                                 std::min<uint64_t>(maxTotalValues, vocabularySize),
+                                                                 vocabularySize,
+                                                                 embeddingDim,
+                                                                 DataType::FP32,
+                                                                 SparseRowGradient::chooseRowDataType(vocabularySize));
+        auto prepared = prepareEmbeddingSparseGradientRagged(gpuIndices, gpuUpstream, gradient, std::nullopt, extent);
+        launchPreparedEmbeddingSparseGradient(*prepared, gpuIndices, gpuUpstream, gradient, stream);
+        stream.synchronize();
+
+        const std::vector<uint64_t> numRows = copyGpuRowTensorToUint64Values(gradient.numRows, stream);
+        ASSERT_EQ(numRows, (std::vector<uint64_t>{2}));
+        std::vector<uint64_t> rows = copyGpuRowTensorToUint64Values(gradient.rows, stream);
+        rows.resize(2);
+        EXPECT_EQ(rows, (std::vector<uint64_t>{1, 2}));
+        std::vector<float> values = copyGpuFloatTensorToValues(gradient.values, stream);
+        values.resize(4);
+        expectAllClose(values, {6.0f, 8.0f, 3.0f, 4.0f});
+    }
+}
+
+TEST(EmbeddingRaggedRuntimeTest, EndToEndSparseTrainingReusesCapturedGraphAcrossChangingActiveExtent) {
+    constexpr uint64_t vocabularySize = 6;
+    constexpr uint64_t embeddingDim = 2;
+    constexpr uint64_t maxTotalValues = 6;
+    constexpr uint32_t batchSize = 3;
+    constexpr float learningRate = 0.3f;
+
+    RaggedEmbeddingNetworkFixture f = makeRaggedEmbeddingNetwork(vocabularySize,
+                                                                 embeddingDim,
+                                                                 maxTotalValues,
+                                                                 batchSize,
+                                                                 DataType::UINT32,
+                                                                 /*paddingIndex=*/0,
+                                                                 learningRate);
+
+    const std::vector<float> initialWeights{
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+        5.0f, 6.0f,
+        7.0f, 8.0f,
+        9.0f, 10.0f,
+        11.0f, 12.0f,
+    };
+    ASSERT_TRUE(f.weightsParameter->getStorage().has_value());
+    Tensor weights = f.weightsParameter->getStorage().value();
+    Stream valuesStream = f.embedding->getStreams().at(0);
+    Tensor cpuWeights = makeCpuFloatTensor(DataType::FP32, {vocabularySize, embeddingDim}, initialWeights);
+    copyCpuToExistingGpu(weights, cpuWeights, valuesStream);
+
+    SgdReferenceState expected;
+    expected.weights = initialWeights;
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+
+    // Pass 1: only the first three packed tokens are active. The inactive
+    // capacity intentionally contains valid vocabulary rows and NaN gradients;
+    // reading either would poison otherwise untouched weights.
+    std::vector<uint32_t> pass1Indices{1U, 2U, 1U, 3U, 4U, 5U};
+    std::vector<float> pass1Upstream{
+        1.0f, 2.0f,
+        3.0f, 4.0f,
+        5.0f, 6.0f,
+        nan, nan,
+        nan, nan,
+        nan, nan,
+    };
+    Tensor pass1CpuIndices = makeCpuUint32Tensor({maxTotalValues}, pass1Indices);
+    Tensor pass1CpuOffsets = makeCpuUint32Tensor({batchSize + 1}, {0U, 1U, 1U, 3U});
+    // The dense reference helper sees the physical tail, so replace inactive
+    // indices with out-of-range sentinels before computing the expected update.
+    std::vector<uint32_t> pass1ReferenceIndices = pass1Indices;
+    for (uint64_t i = 3; i < pass1ReferenceIndices.size(); ++i) pass1ReferenceIndices[i] = static_cast<uint32_t>(vocabularySize);
+    applyEmbeddingSgdReferencePass(expected,
+                                   toUint64(pass1ReferenceIndices),
+                                   pass1Upstream,
+                                   vocabularySize,
+                                   embeddingDim,
+                                   /*paddingIndex=*/0,
+                                   batchSize,
+                                   learningRate,
+                                   /*momentum=*/0.0f,
+                                   /*useNesterovMomentum=*/false);
+    runRaggedEmbeddingTrainingPass(f, pass1CpuIndices, pass1CpuOffsets, pass1Upstream, batchSize);
+    Stream gradientStream = f.embedding->getGradientUpdateStream().value();
+    expectAllClose(copyGpuFloatTensorToValues(weights, gradientStream), expected.weights, 2e-5f, 2e-5f, "ragged embedding pass 1");
+
+    // Pass 2 reuses the captured sparse-update graph but shrinks the active
+    // extent to one token. Valid, very large tail gradients must remain ignored.
+    std::vector<uint32_t> pass2Indices{4U, 1U, 2U, 3U, 1U, 2U};
+    std::vector<float> pass2Upstream{
+        2.0f, -1.0f,
+        1000.0f, 1000.0f,
+        1000.0f, 1000.0f,
+        1000.0f, 1000.0f,
+        1000.0f, 1000.0f,
+        1000.0f, 1000.0f,
+    };
+    Tensor pass2CpuIndices = makeCpuUint32Tensor({maxTotalValues}, pass2Indices);
+    Tensor pass2CpuOffsets = makeCpuUint32Tensor({batchSize + 1}, {0U, 0U, 1U, 1U});
+    std::vector<uint32_t> pass2ReferenceIndices = pass2Indices;
+    for (uint64_t i = 1; i < pass2ReferenceIndices.size(); ++i) pass2ReferenceIndices[i] = static_cast<uint32_t>(vocabularySize);
+    applyEmbeddingSgdReferencePass(expected,
+                                   toUint64(pass2ReferenceIndices),
+                                   pass2Upstream,
+                                   vocabularySize,
+                                   embeddingDim,
+                                   /*paddingIndex=*/0,
+                                   batchSize,
+                                   learningRate,
+                                   /*momentum=*/0.0f,
+                                   /*useNesterovMomentum=*/false);
+    runRaggedEmbeddingTrainingPass(f, pass2CpuIndices, pass2CpuOffsets, pass2Upstream, batchSize);
+    expectAllClose(copyGpuFloatTensorToValues(weights, gradientStream), expected.weights, 2e-5f, 2e-5f, "ragged embedding pass 2");
+
+    // Pass 3 is all-empty. It exercises active_count==0 through the same
+    // captured graph and must not update any row.
+    std::vector<uint32_t> pass3Indices{1U, 2U, 3U, 4U, 5U, 1U};
+    std::vector<float> pass3Upstream(maxTotalValues * embeddingDim, 5000.0f);
+    Tensor pass3CpuIndices = makeCpuUint32Tensor({maxTotalValues}, pass3Indices);
+    Tensor pass3CpuOffsets = makeCpuUint32Tensor({batchSize + 1}, {0U, 0U, 0U, 0U});
+    runRaggedEmbeddingTrainingPass(f, pass3CpuIndices, pass3CpuOffsets, pass3Upstream, batchSize);
+    expectAllClose(copyGpuFloatTensorToValues(weights, gradientStream), expected.weights, 2e-5f, 2e-5f, "ragged embedding all-empty pass");
+
+    EXPECT_FALSE(f.optimizer->getWeightsGradient().has_value());
+    ASSERT_TRUE(f.optimizer->getSparseRowGradient().has_value());
+    EXPECT_EQ(copyGpuRowTensorToUint64Values(f.optimizer->getSparseRowGradient()->numRows, gradientStream)[0], 0u);
+}
 
 TEST(EmbeddingSparseBackwardTest, SparseGradientProducerReducesDuplicatesAndSkipsPaddingAndOutOfRangeRows) {
     Stream stream(gpuPlacement);

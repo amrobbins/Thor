@@ -2734,6 +2734,7 @@ TEST(NamedDatasetMaterializerTest, MaterializesEveryCanonicalRowExactlyOnceInDat
         snapshot.tensor("daily_weight"),
         {100.0f, 120.0f, 140.0f, 160.0f, 180.0f});
 
+    loader.cancel();
     std::filesystem::remove_all(datasetPath);
 }
 
@@ -2773,6 +2774,7 @@ TEST(NamedDatasetMaterializerTest, MaterializationDoesNotAdvanceLiveSessionBatch
         {80.0f, 81.0f, 40.0f, 41.0f});
     sourceBatchLease.reset();
 
+    loader.cancel();
     std::filesystem::remove_all(datasetPath);
 }
 
@@ -2884,6 +2886,9 @@ TEST(NamedDatasetMaterializerTest, MaterializesWindowedFieldsInCanonicalRowOrder
         snapshot.tensor("history_mask"),
         {1, 1, 1, 0, 0, 1, 1, 1, 0});
 
+    // The indexed session owns background prefetch workers and opens window
+    // source files lazily. Stop it before removing its backing dataset.
+    loader.cancel();
     std::filesystem::remove_all(datasetPath);
 }
 
@@ -2927,6 +2932,7 @@ TEST(NamedDatasetMaterializerTest, MultipleShiftedFieldsShareOnePhysicalWindowSo
     EXPECT_EQ(persisted.windowedTensor("labels").sourceName, "tokens");
     EXPECT_EQ(persisted.windowedTensorSource("tokens").sourceSequences.size(), 1);
 
+    session.cancel();
     std::filesystem::remove_all(datasetPath);
 }
 
@@ -2964,6 +2970,7 @@ TEST(NamedDatasetMaterializerTest, MaterializesAffineWindowedFieldsInCanonicalRo
         {11, 12, 13, 14,
          13, 14, 15, 16});
 
+    session.cancel();
     std::filesystem::remove_all(datasetPath);
 }
 

@@ -32,12 +32,14 @@ class FullyConnected : public TrainableLayer, public TrainingDropoutControllable
 
     explicit FullyConnected(const std::optional<ThorImplementation::Expression> epilogue,
                            std::vector<std::pair<std::string, Tensor>> epilogueInputBindings = {},
+                           std::vector<std::pair<std::string, RaggedTensor>> raggedEpilogueInputBindings = {},
                            float outputDropoutProbability = 0.0f,
                            int64_t outputDropoutSeed = 0,
                            std::optional<Tensor> residualInput = std::nullopt,
                            std::optional<RaggedTensor> raggedResidualInput = std::nullopt)
         : epilogue(epilogue),
           epilogueInputBindings(std::move(epilogueInputBindings)),
+          raggedEpilogueInputBindings(std::move(raggedEpilogueInputBindings)),
           outputDropoutProbability(outputDropoutProbability),
           outputDropoutSeed(outputDropoutSeed),
           residualInput(std::move(residualInput)),
@@ -158,6 +160,7 @@ class FullyConnected : public TrainableLayer, public TrainingDropoutControllable
 
     const std::optional<ThorImplementation::Expression> epilogue;
     std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
+    std::vector<std::pair<std::string, RaggedTensor>> raggedEpilogueInputBindings;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
     float outputDropoutProbability = 0.0f;
     int64_t outputDropoutSeed = 0;
@@ -335,6 +338,23 @@ class FullyConnected::Builder {
         return *this;
     }
 
+    virtual FullyConnected::Builder &epilogueInput(const std::string &inputName, RaggedTensor tensor) {
+        FullyConnected::validateEpilogueAuxInputName(inputName);
+        THOR_THROW_IF_FALSE(tensor.isInitialized());
+        for (const auto &[existingName, existingTensor] : _epilogueInputBindings) {
+            (void)existingTensor;
+            if (existingName == inputName) {
+                throw std::invalid_argument("FullyConnected epilogue input name is duplicated: " + inputName + ".");
+            }
+        }
+        _raggedEpilogueInputBindings.emplace_back(inputName, tensor);
+        _epilogueInputBindings.emplace_back(inputName, tensor.getValues());
+        if (_epilogue.has_value()) {
+            FullyConnected::validateEpilogueExpression(_epilogue.value(), epilogueAuxInputNames());
+        }
+        return *this;
+    }
+
     // Dropout on the final FullyConnected output branch (after bias and activation).
     // With residualInput(), the exact semantic contract is residual + dropout(fc_output).
     virtual FullyConnected::Builder &outputDropoutProbability(float value) {
@@ -438,6 +458,7 @@ class FullyConnected::Builder {
     //        For now epilogue gives access to post layer fusion, if that optimization goes in, it can remain as a convenience feature.
     std::optional<ThorImplementation::Expression> _epilogue;
     std::vector<std::pair<std::string, Tensor>> _epilogueInputBindings;
+    std::vector<std::pair<std::string, RaggedTensor>> _raggedEpilogueInputBindings;
 
     std::vector<std::string> epilogueAuxInputNames() const {
         std::vector<std::string> names;

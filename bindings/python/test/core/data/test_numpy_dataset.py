@@ -236,6 +236,7 @@ def test_numpy_dataset_ragged_batches_train_through_canonical_ctc_with_exact_par
         thor.DataType.int32,
         [],
         max_total_values=5,
+        max_values_per_row=2,
         batch_size=batch_size,
         offsets_data_type=thor.DataType.uint32,
     )

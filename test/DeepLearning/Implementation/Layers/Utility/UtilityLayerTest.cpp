@@ -2030,3 +2030,76 @@ TEST(Split, PropagatesPartialBatchCardinalityToEveryOutput) {
 
     LayerTestHelper::tearDownNetwork(layers);
 }
+
+TEST(FiniteCheck, RaggedForwardAndBackwardIgnoreUndefinedInactiveCapacity) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor values(cpuPlacement, TensorDescriptor(DataType::FP32, {6, 2}));
+    Tensor offsets(cpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
+    Tensor gradient(cpuPlacement, TensorDescriptor(DataType::FP32, {6, 2}));
+    Stream valuesStream(cpuPlacement);
+    Stream offsetsStream(cpuPlacement);
+    NoOpLayer valuesProducer;
+    NoOpLayer offsetsProducer;
+
+    auto finiteCheck = make_shared<FiniteCheck>(
+        "ragged_check",
+        12001,
+        11001,
+        true,
+        true,
+        true,
+        4,
+        true,
+        FiniteCheck::RaggedConfiguration{
+            .batchSize = 3,
+            .maxTotalValues = 6,
+            .elementsPerValue = 2,
+            .offsetsDataType = DataType::UINT32,
+        });
+    finiteCheck->connectToPreviousLayer(&valuesProducer, values, valuesStream, false, 0);
+    finiteCheck->connectToPreviousLayer(&offsetsProducer, offsets, offsetsStream, false, 1);
+
+    // This test constructs the implementation-layer chain manually rather than
+    // through LayerTestHelper. FiniteCheck still follows the ordinary backward
+    // path after checking the incoming gradient, propagating a null error to
+    // valuesProducer because backPropagateError is false. The upstream layer
+    // therefore must participate in the normal compile/initialize lifecycle.
+    valuesProducer.compile();
+    valuesProducer.initialize();
+    finiteCheck->compile();
+    finiteCheck->initialize();
+
+    auto* offsetValues = offsets.getMemPtr<uint32_t>();
+    offsetValues[0] = 0;
+    offsetValues[1] = 1;
+    offsetValues[2] = 1;
+    offsetValues[3] = 3;
+
+    auto* packedValues = values.getMemPtr<float>();
+    auto* packedGradient = gradient.getMemPtr<float>();
+    for (uint64_t i = 0; i < 12; ++i) {
+        packedValues[i] = static_cast<float>(i + 1);
+        packedGradient[i] = static_cast<float>(i + 1);
+    }
+    // offsets[B] == 3 packed values, so flat elements [6, 12) are undefined tail.
+    packedValues[6] = std::numeric_limits<float>::quiet_NaN();
+    packedValues[9] = std::numeric_limits<float>::infinity();
+    packedGradient[7] = std::numeric_limits<float>::quiet_NaN();
+    packedGradient[10] = -std::numeric_limits<float>::infinity();
+
+    EXPECT_NO_THROW(finiteCheck->forward(offsets, false, 3));
+    EXPECT_NO_THROW(finiteCheck->forward(values, false, 3));
+    EXPECT_NO_THROW(finiteCheck->backward(gradient, 3));
+
+    // Move one NaN into the authoritative active prefix and verify both directions report it.
+    packedValues[5] = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_NO_THROW(finiteCheck->forward(values, false, 3));
+    EXPECT_THROW(finiteCheck->forward(offsets, false, 3), std::runtime_error);
+    packedValues[5] = 6.0f;
+
+    packedGradient[4] = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_THROW(finiteCheck->backward(gradient, 3), std::runtime_error);
+
+    finiteCheck->cleanup();
+    valuesProducer.cleanup();
+}

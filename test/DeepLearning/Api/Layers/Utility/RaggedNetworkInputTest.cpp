@@ -15,6 +15,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <map>
@@ -293,4 +294,131 @@ TEST(RaggedNetworkInputApi, NetworkInputDiscoveryReportsOnlyLogicalRaggedBoundar
               (std::vector<std::string>{"labels"}));
     EXPECT_EQ(network.getRequiredNetworkInputNamesForOutputs({"label_values", "label_offsets"}, /*inferenceOnly=*/true),
               (std::vector<std::string>{"labels"}));
+}
+
+TEST(RaggedNetworkInputApi, SharedPartitionDeclaresOnlyValuesBoundaryAndReusesCanonicalOffsets) {
+    Network network("ragged_network_input_shared_partition");
+    RaggedTensor feature = RaggedNetworkInput::Builder()
+                               .network(network)
+                               .name("feature")
+                               .valuesDataType(DataType::FP32)
+                               .offsetsDataType(DataType::UINT64)
+                               .trailingDimensions({3})
+                               .batchSize(5)
+                               .maxTotalValues(17)
+                               .maxValuesPerRow(6)
+                               .build();
+    RaggedTensor mask = RaggedNetworkInput::Builder()
+                            .network(network)
+                            .name("mask")
+                            .valuesDataType(DataType::BOOLEAN)
+                            .trailingDimensions({})
+                            .partition(feature)
+                            .build();
+
+    EXPECT_EQ(mask.getOffsets(), feature.getOffsets());
+    EXPECT_EQ(mask.getBatchSize(), 5u);
+    EXPECT_EQ(mask.getMaxTotalValues(), 17u);
+    ASSERT_TRUE(mask.hasMaxValuesPerRow());
+    EXPECT_EQ(mask.getMaxValuesPerRow(), 6u);
+
+    const json architecture = network.architectureJson();
+    ASSERT_EQ(architecture.at("layers").size(), 3u);
+    std::set<std::string> names;
+    for (const json& layer : architecture.at("layers")) names.insert(layer.at("name").get<std::string>());
+    EXPECT_EQ(names, (std::set<std::string>{"feature.values", "feature.offsets", "mask.values"}));
+    EXPECT_EQ(network.getExternalNetworkInputNames(), (std::vector<std::string>{"feature", "mask"}));
+
+    const auto inputs = network.getExternalRaggedNetworkInputs();
+    ASSERT_EQ(inputs.size(), 2u);
+    auto maskIt = std::find_if(inputs.begin(), inputs.end(), [](const RaggedNetworkInputReference& input) {
+        return input.name == "mask";
+    });
+    ASSERT_NE(maskIt, inputs.end());
+    ASSERT_TRUE(maskIt->partitionInputName.has_value());
+    EXPECT_EQ(maskIt->partitionInputName.value(), "feature");
+    EXPECT_EQ(maskIt->offsetsInputName, "feature.offsets");
+}
+
+TEST(RaggedNetworkInputApi, SharedPartitionSaveLoadResolvesOwnerIndependentlyOfSerializedNameOrder) {
+    const std::string networkName = "ragged_network_input_shared_partition_round_trip";
+    Network network(networkName);
+    RaggedTensor owner = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("z_feature")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT64)
+                             .trailingDimensions({2})
+                             .batchSize(3)
+                             .maxTotalValues(9)
+                             .maxValuesPerRow(4)
+                             .build();
+    RaggedTensor shared = RaggedNetworkInput::Builder()
+                              .network(network)
+                              .name("a_mask")
+                              .valuesDataType(DataType::BOOLEAN)
+                              .trailingDimensions({})
+                              .partition(owner)
+                              .build();
+    ASSERT_EQ(shared.getOffsets(), owner.getOffsets());
+
+    const json architecture = network.architectureJson();
+    ASSERT_EQ(architecture.at("ragged_network_inputs").size(), 2u);
+    // std::map order deliberately puts the shared input before its owner. The
+    // shared schema therefore cannot depend on one-pass JSON reconstruction.
+    EXPECT_EQ(architecture.at("ragged_network_inputs").at(0).at("name").get<std::string>(), "a_mask");
+    EXPECT_EQ(architecture.at("ragged_network_inputs").at(0).at("partition_input_name").get<std::string>(),
+              "z_feature");
+    EXPECT_FALSE(architecture.at("ragged_network_inputs").at(0).contains("offsets_input_name"));
+    EXPECT_FALSE(architecture.at("ragged_network_inputs").at(0).contains("offsets_tensor_id"));
+    EXPECT_FALSE(architecture.at("ragged_network_inputs").at(0).contains("max_values_per_row"));
+
+    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path archiveDir =
+        std::filesystem::temp_directory_path() /
+        (std::string("thor_ragged_network_input_shared_partition_round_trip_") + std::to_string(now));
+    std::filesystem::remove_all(archiveDir);
+    network.save(archiveDir.string(), /*overwrite=*/true);
+
+    Network loaded(networkName);
+    ASSERT_NO_THROW(loaded.load(archiveDir.string()));
+    const std::vector<RaggedNetworkInputReference> loadedInputs = loaded.getExternalRaggedNetworkInputs();
+    ASSERT_EQ(loadedInputs.size(), 2u);
+    auto ownerIt = std::find_if(loadedInputs.begin(), loadedInputs.end(), [](const RaggedNetworkInputReference& input) {
+        return input.name == "z_feature";
+    });
+    auto sharedIt = std::find_if(loadedInputs.begin(), loadedInputs.end(), [](const RaggedNetworkInputReference& input) {
+        return input.name == "a_mask";
+    });
+    ASSERT_NE(ownerIt, loadedInputs.end());
+    ASSERT_NE(sharedIt, loadedInputs.end());
+    ASSERT_TRUE(sharedIt->partitionInputName.has_value());
+    EXPECT_EQ(sharedIt->partitionInputName.value(), "z_feature");
+    EXPECT_EQ(sharedIt->offsetsInputName, ownerIt->offsetsInputName);
+    EXPECT_EQ(sharedIt->raggedTensor.getOffsets(), ownerIt->raggedTensor.getOffsets());
+    EXPECT_EQ(sharedIt->raggedTensor.getMaxValuesPerRow(), ownerIt->raggedTensor.getMaxValuesPerRow());
+
+    std::filesystem::remove_all(archiveDir);
+}
+
+TEST(RaggedNetworkInputApi, SharedPartitionRejectsRedundantStructuralBuilderArguments) {
+    Network network("ragged_network_input_shared_partition_redundant");
+    RaggedTensor feature = RaggedNetworkInput::Builder()
+                               .network(network)
+                               .name("feature")
+                               .valuesDataType(DataType::FP32)
+                               .batchSize(2)
+                               .maxTotalValues(6)
+                               .maxValuesPerRow(3)
+                               .build();
+
+    EXPECT_THROW((void)(RaggedNetworkInput::Builder()
+                            .network(network)
+                            .name("mask")
+                            .valuesDataType(DataType::BOOLEAN)
+                            .trailingDimensions({})
+                            .partition(feature)
+                            .maxTotalValues(6)
+                            .build()),
+                 std::logic_error);
 }

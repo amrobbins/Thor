@@ -9,6 +9,7 @@
 #include "DeepLearning/Api/Layers/Learning/Embedding.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "bindings/python/src/core/cast.h"
 
@@ -42,7 +43,7 @@ void bind_embedding(nb::module_& m) {
         "__init__",
         [](Embedding* self,
            Network& network,
-           Tensor featureInput,
+           nb::object featureInput,
            uint64_t vocabularySize,
            uint64_t embeddingDim,
            nb::object weightsDataTypeObj,
@@ -51,9 +52,15 @@ void bind_embedding(nb::module_& m) {
            shared_ptr<Initializer> weightsInitializer,
            shared_ptr<Optimizer> weightsOptimizer) {
             Embedding::Builder builder;
-            builder.network(network)
-                .featureInput(featureInput)
-                .vocabularySize(vocabularySize)
+            builder.network(network);
+            if (nb::isinstance<RaggedTensor>(featureInput)) {
+                builder.featureInput(nb::cast<RaggedTensor>(featureInput));
+            } else if (nb::isinstance<Tensor>(featureInput)) {
+                builder.featureInput(nb::cast<Tensor>(featureInput));
+            } else {
+                throw nb::type_error("Embedding feature_input must be thor.Tensor or thor.RaggedTensor.");
+            }
+            builder.vocabularySize(vocabularySize)
                 .embeddingDim(embeddingDim)
                 .sparseGradients(sparseGradients);
 
@@ -85,9 +92,13 @@ void bind_embedding(nb::module_& m) {
 
     embedding.def(
         "get_feature_output",
-        [](Embedding& self) -> Tensor {
+        [](Embedding& self) -> nb::object {
+            if (self.getUseRagged()) {
+                std::optional<RaggedTensor> output = self.getRaggedFeatureOutput();
+                return nb::cast(output.value());
+            }
             std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-            return maybeFeatureOutput.value();
+            return nb::cast(maybeFeatureOutput.value());
         },
         R"nbdoc(
             Return the output tensor produced by this layer.
@@ -98,13 +109,15 @@ void bind_embedding(nb::module_& m) {
     embedding.def_prop_ro("weights_data_type", &Embedding::getWeightsDataType);
     embedding.def_prop_ro("padding_index", &Embedding::getPaddingIndex);
     embedding.def_prop_ro("sparse_gradients", &Embedding::usesSparseGradients);
+    embedding.def_prop_ro("use_ragged", &Embedding::getUseRagged);
 
     embedding.attr("__doc__") = R"nbdoc(
         Sparse-gradient embedding lookup layer.
 
-        Embedding maps an integer tensor of token ids to a floating output tensor whose
+        Embedding maps an integer Tensor or RaggedTensor of token ids to a floating output whose
         final dimension is ``embedding_dim``. Its output shape is the input index shape
-        with ``embedding_dim`` appended.
+        with ``embedding_dim`` appended. Ragged inputs preserve the exact input row partition;
+        inactive packed index capacity is outside the logical operation and is never read.
 
         This layer intentionally does not implement dense table gradients. Training uses
         sparse row updates; the first backend slice supports plain SGD for fp32 embedding

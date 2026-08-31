@@ -1,5 +1,9 @@
 #include "DeepLearning/Api/Layers/Utility/LayerNorm.h"
 
+#include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
+#include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/Expression/RaggedExpression.h"
+
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -8,6 +12,117 @@ using namespace std;
 using json = nlohmann::json;
 
 namespace Thor {
+
+std::vector<Tensor> LayerNorm::getFeatureInputs() const {
+    if (raggedFeatureInputs.empty()) {
+        return featureInputs;
+    }
+
+    std::vector<Tensor> inputs;
+    inputs.reserve(raggedFeatureInputs.size() * 2);
+    for (const RaggedTensor& ragged : raggedFeatureInputs) {
+        inputs.push_back(ragged.getValues());
+        inputs.push_back(ragged.getOffsets());
+    }
+    return inputs;
+}
+
+std::vector<uint32_t> LayerNorm::inputPortIndicesForTensor(Tensor tensor) const {
+    std::vector<uint32_t> ports;
+    if (!raggedFeatureInputs.empty()) {
+        for (uint32_t i = 0; i < raggedFeatureInputs.size(); ++i) {
+            if (tensor.getOriginalId() == raggedFeatureInputs[i].getValues().getOriginalId()) {
+                ports.push_back(i * 2);
+            }
+            if (tensor.getOriginalId() == raggedFeatureInputs[i].getOffsets().getOriginalId()) {
+                ports.push_back(i * 2 + 1);
+            }
+        }
+        return ports;
+    }
+
+    for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+        if (tensor == featureInputs[i]) {
+            ports.push_back(i);
+        }
+    }
+    return ports;
+}
+
+Tensor LayerNorm::getFeatureOutput(Tensor inputTensor) const {
+    auto it = outputTensorFromInputTensor.find(inputTensor);
+    if (it == outputTensorFromInputTensor.end()) {
+        throw std::runtime_error("Tensor is not connected to this LayerNorm layer.");
+    }
+    return it->second;
+}
+
+std::vector<Tensor> LayerNorm::getOutputsFromInput(Tensor inputTensor) {
+    if (raggedFeatureInputs.empty()) {
+        return {getFeatureOutput(inputTensor)};
+    }
+    if (inputPortIndicesForTensor(inputTensor).empty()) {
+        throw std::runtime_error("LayerNorm received an unknown ragged input tensor.");
+    }
+
+    std::vector<Tensor> readyOutputs;
+    for (uint32_t applicationIndex = 0; applicationIndex < raggedFeatureInputs.size(); ++applicationIndex) {
+        const uint32_t valuesPort = applicationIndex * 2;
+        const uint32_t offsetsPort = valuesPort + 1;
+        if (!connectedInputPortIndices.contains(valuesPort) || !connectedInputPortIndices.contains(offsetsPort) ||
+            emittedRaggedOutputApplications.contains(applicationIndex)) {
+            continue;
+        }
+        THOR_THROW_IF_FALSE(applicationIndex < featureOutputs.size());
+        emittedRaggedOutputApplications.insert(applicationIndex);
+        readyOutputs.push_back(featureOutputs[applicationIndex]);
+    }
+    return readyOutputs;
+}
+
+void LayerNorm::informThatInputConnectionMade(Tensor inputTensor) {
+    if (raggedFeatureInputs.empty()) {
+        return;
+    }
+    std::vector<uint32_t> ports = inputPortIndicesForTensor(inputTensor);
+    if (ports.empty()) {
+        throw std::runtime_error("LayerNorm informed of connection for unknown ragged input tensor.");
+    }
+    uint32_t& cursor = nextTraversalInputCursorByTensorOriginalId[inputTensor.getOriginalId()];
+    connectedInputPortIndices.insert(ports[cursor % ports.size()]);
+    ++cursor;
+}
+
+void LayerNorm::resetGraphTraversalState() {
+    connectedInputPortIndices.clear();
+    emittedRaggedOutputApplications.clear();
+    nextInputConnectionCursorByTensorOriginalId.clear();
+    nextTraversalInputCursorByTensorOriginalId.clear();
+}
+
+int LayerNorm::getConnectionType(Tensor connectingTensor) const {
+    if (!raggedFeatureInputs.empty()) {
+        std::vector<uint32_t> ports = inputPortIndicesForTensor(connectingTensor);
+        if (!ports.empty()) {
+            uint32_t& cursor = nextInputConnectionCursorByTensorOriginalId[connectingTensor.getOriginalId()];
+            const uint32_t port = ports[cursor % ports.size()];
+            ++cursor;
+            return static_cast<int>(port);
+        }
+    } else {
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            if (connectingTensor == featureInputs[i]) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
+        if (connectingTensor == featureOutputs[i]) {
+            return static_cast<int>(i);
+        }
+    }
+    throw std::runtime_error("Tensor is not connected to this LayerNorm layer.");
+}
 
 bool LayerNorm::isLayerNormInputDataType(DataType dataType) {
     switch (dataType) {
@@ -73,6 +188,7 @@ LayerNorm LayerNorm::Builder::build() {
 
     LayerNorm layer;
     layer.featureInputs = _featureInputs;
+    layer.raggedFeatureInputs = _raggedFeatureInputs;
     layer.normalizedShape = _normalizedShape;
     layer.epsilon = _epsilon.value();
     layer.parameterDataType = _parameterDataType.value();
@@ -98,6 +214,9 @@ LayerNorm LayerNorm::Builder::build() {
         layer.featureOutputs.push_back(out);
         layer.outputTensorFromInputTensor[layer.featureInputs[i]] = out;
         layer.inputTensorFromOutputTensor[out] = layer.featureInputs[i];
+        if (!layer.raggedFeatureInputs.empty()) {
+            layer.raggedFeatureOutputs.push_back(layer.raggedFeatureInputs[i].withValues(out));
+        }
     }
 
     layer.addToNetwork(_network.value());
@@ -135,6 +254,26 @@ void LayerNorm::Builder::verifyConfig() const {
             throw invalid_argument("LayerNorm all feature inputs must have the same dimensions.");
         }
     }
+    if (!_raggedFeatureInputs.empty()) {
+        if (_raggedFeatureInputs.size() != _featureInputs.size()) {
+            throw invalid_argument("LayerNorm cannot mix dense and ragged feature inputs.");
+        }
+        for (uint32_t i = 0; i < _raggedFeatureInputs.size(); ++i) {
+            const RaggedTensor& ragged = _raggedFeatureInputs[i];
+            if (ragged.getValues() != _featureInputs[i]) {
+                throw invalid_argument("LayerNorm ragged feature input values do not match the packed feature tensor.");
+            }
+            const vector<uint64_t> trailingDims = ragged.getTrailingDimensions();
+            if (trailingDims.size() != 1 || trailingDims.front() == 0) {
+                throw invalid_argument(
+                    "LayerNorm(RaggedTensor) currently requires exactly one non-zero trailing channel dimension.");
+            }
+            if (_normalizedShape != trailingDims) {
+                throw invalid_argument(
+                    "LayerNorm(RaggedTensor) normalizedShape must be exactly the single trailing channel dimension and may not include the packed ragged row dimension.");
+            }
+        }
+    }
 }
 
 shared_ptr<ThorImplementation::Layer> LayerNorm::stamp(ThorImplementation::TensorPlacement placement,
@@ -145,7 +284,11 @@ shared_ptr<ThorImplementation::Layer> LayerNorm::stamp(ThorImplementation::Tenso
     (void)drivingLayer;
     (void)drivingApiLayer;
     THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+    if (!raggedFeatureInputs.empty()) {
+        THOR_THROW_IF_FALSE(!inputPortIndicesForTensor(connectingApiTensor).empty());
+    } else {
+        THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+    }
 
     vector<shared_ptr<ThorImplementation::PhysicalParameter>> physicalParameters;
     for (const auto& parameter : getParameters()) {
@@ -153,8 +296,42 @@ shared_ptr<ThorImplementation::Layer> LayerNorm::stamp(ThorImplementation::Tenso
         physicalParameters.push_back(parameter->stamp());
     }
 
-    return make_shared<ThorImplementation::LayerNorm>(
-        placement, inferenceOnly, normalizedShape, epsilon, parameterDataType, physicalParameters, getId());
+    if (raggedFeatureInputs.empty()) {
+        return make_shared<ThorImplementation::LayerNorm>(
+            placement, inferenceOnly, normalizedShape, epsilon, parameterDataType, physicalParameters, getId());
+    }
+
+    const RaggedTensor& ragged = raggedFeatureInputs.front();
+    const vector<uint64_t> trailingDims = ragged.getTrailingDimensions();
+    THOR_THROW_IF_FALSE(trailingDims.size() == 1);
+    const uint64_t elementsPerValue = trailingDims.front();
+
+    ThorImplementation::RaggedExpression input =
+        ThorImplementation::RaggedExpression::input("feature_input", "feature_offsets", ragged.getDescriptor());
+    ThorImplementation::Expression weights =
+        ThorImplementation::Expression::input("weights", std::nullopt, parameterDataType);
+    ThorImplementation::Expression biases =
+        ThorImplementation::Expression::input("biases", std::nullopt, parameterDataType);
+    ThorImplementation::RaggedExpression output =
+        input.layerNorm(weights, biases, epsilon, DataType::FP32, ragged.getValuesDataType());
+
+    ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
+        ThorImplementation::Expression::outputs({{"feature_output", output.getValues()}}));
+    auto physicalLayer = make_shared<ThorImplementation::RaggedCustomLayer>(
+        ThorImplementation::DynamicExpression::fromExpressionDefinition(definition),
+        vector<string>{"feature_input", "feature_offsets"},
+        vector<string>{"feature_output"},
+        placement,
+        physicalParameters,
+        inferenceOnly,
+        ragged.getMaxTotalValues(),
+        vector<uint64_t>{elementsPerValue},
+        vector<uint64_t>{elementsPerValue},
+        vector<uint32_t>{0},
+        1,
+        getId());
+    physicalLayer->setLayerName(getLayerType());
+    return physicalLayer;
 }
 
 json LayerNorm::architectureJson() const {
@@ -166,6 +343,15 @@ json LayerNorm::architectureJson() const {
     j["normalized_shape"] = normalizedShape;
     j["epsilon"] = epsilon;
     j["parameter_data_type"] = parameterDataType;
+    j["use_ragged"] = !raggedFeatureInputs.empty();
+    if (!raggedFeatureInputs.empty()) {
+        json raggedInputsJson = json::array();
+        json raggedOutputsJson = json::array();
+        for (const RaggedTensor& input : raggedFeatureInputs) raggedInputsJson.push_back(input.architectureJson());
+        for (const RaggedTensor& output : raggedFeatureOutputs) raggedOutputsJson.push_back(output.architectureJson());
+        j["ragged_inputs"] = std::move(raggedInputsJson);
+        j["ragged_outputs"] = std::move(raggedOutputsJson);
+    }
 
     json inputs = json::array();
     for (uint32_t i = 0; i < featureInputs.size(); ++i)
@@ -210,6 +396,43 @@ void LayerNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, con
     }
     if (layer.featureInputs.size() != layer.featureOutputs.size()) {
         throw runtime_error("LayerNorm deserialize expected equal numbers of inputs and outputs.");
+    }
+    const bool useRagged = j.value("use_ragged", false);
+    if (useRagged) {
+        if (!j.contains("ragged_inputs") || !j.contains("ragged_outputs") ||
+            j.at("ragged_inputs").size() != layer.featureInputs.size() ||
+            j.at("ragged_outputs").size() != layer.featureOutputs.size()) {
+            throw runtime_error("LayerNorm serialized ragged metadata does not match its input/output arity.");
+        }
+        for (uint32_t i = 0; i < layer.featureInputs.size(); ++i) {
+            const json& raggedInputJson = j.at("ragged_inputs").at(i);
+            if (raggedInputJson.at("values").at("id").get<uint64_t>() !=
+                j.at("inputs").at(i).at("id").get<uint64_t>()) {
+                throw runtime_error("LayerNorm serialized ragged input values must match the corresponding feature input.");
+            }
+            const uint64_t inputOffsetsId = raggedInputJson.at("offsets").at("id").get<uint64_t>();
+            Tensor inputOffsets = network->getApiTensorByOriginalId(inputOffsetsId);
+            RaggedTensor raggedInput = raggedInputJson.contains("max_values_per_row")
+                ? RaggedTensor(layer.featureInputs[i], inputOffsets, raggedInputJson.at("max_values_per_row").get<uint64_t>())
+                : RaggedTensor(layer.featureInputs[i], inputOffsets);
+            if (raggedInput.getBatchSize() != raggedInputJson.at("batch_size").get<uint64_t>() ||
+                raggedInput.getMaxTotalValues() != raggedInputJson.at("max_total_values").get<uint64_t>()) {
+                throw runtime_error("LayerNorm serialized ragged input metadata does not match reconstructed tensors.");
+            }
+            layer.raggedFeatureInputs.push_back(raggedInput);
+            layer.raggedFeatureOutputs.push_back(raggedInput.withValues(layer.featureOutputs[i]));
+            const json& raggedOutputJson = j.at("ragged_outputs").at(i);
+            if (raggedOutputJson.at("values").at("id").get<uint64_t>() !=
+                    j.at("outputs").at(i).at("id").get<uint64_t>() ||
+                raggedOutputJson.at("offsets").at("id").get<uint64_t>() != inputOffsetsId ||
+                raggedOutputJson.at("batch_size").get<uint64_t>() != raggedInput.getBatchSize() ||
+                raggedOutputJson.at("max_total_values").get<uint64_t>() != raggedInput.getMaxTotalValues() ||
+                (raggedOutputJson.contains("max_values_per_row") &&
+                 (!raggedInput.hasMaxValuesPerRow() ||
+                  raggedOutputJson.at("max_values_per_row").get<uint64_t>() != raggedInput.getMaxValuesPerRow()))) {
+                throw runtime_error("LayerNorm serialized ragged output must preserve the input row partition and capacity metadata.");
+            }
+        }
     }
     for (uint32_t i = 0; i < layer.featureInputs.size(); ++i) {
         layer.outputTensorFromInputTensor[layer.featureInputs[i]] = layer.featureOutputs[i];

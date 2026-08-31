@@ -6,6 +6,8 @@
 #include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradient.h"
 
 #include <algorithm>
+#include <limits>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -47,13 +49,15 @@ Embedding::Embedding(TensorPlacement placement,
                      std::optional<uint64_t> paddingIndex,
                      bool sparseGradients,
                      bool inferenceOnly,
-                     int64_t stampedId)
+                     int64_t stampedId,
+                     std::optional<RaggedEmbeddingConfig> raggedConfig)
     : TrainableLayer(placement, inferenceOnly, stampedId),
       vocabularySize(vocabularySize),
       embeddingDim(embeddingDim),
       weightsDataType(weightsDataType),
       paddingIndex(paddingIndex),
-      sparseGradients(sparseGradients) {
+      sparseGradients(sparseGradients),
+      raggedConfig(std::move(raggedConfig)) {
     if (vocabularySize == 0) {
         throw std::invalid_argument("Embedding vocabulary_size must be non-zero.");
     }
@@ -69,12 +73,64 @@ Embedding::Embedding(TensorPlacement placement,
     if (!sparseGradients) {
         throw std::invalid_argument("Embedding only supports sparse_gradients=true; dense gradients are intentionally not implemented.");
     }
+    if (this->raggedConfig.has_value()) {
+        const RaggedEmbeddingConfig& config = this->raggedConfig.value();
+        if (config.batchSize == 0 || config.maxTotalValues == 0 || config.elementsPerValue == 0) {
+            throw std::invalid_argument("Ragged Embedding requires non-zero batch/capacity/elements-per-value metadata.");
+        }
+        if (config.offsetsDataType != DataType::UINT32 && config.offsetsDataType != DataType::UINT64) {
+            throw std::invalid_argument("Ragged Embedding offsets dtype must be uint32 or uint64.");
+        }
+    }
     if (parameters.size() != 1 || parameters[0] == nullptr || parameters[0]->getName() != "weights") {
         throw std::invalid_argument("Embedding implementation requires exactly one parameter named 'weights'.");
     }
     this->parameters = std::move(parameters);
     parameterIndexByName.clear();
     parameterIndexByName["weights"] = 0;
+}
+
+uint32_t Embedding::raggedApplicationCount() const {
+    if (!isRagged())
+        return 0;
+    return static_cast<uint32_t>(std::max(featureOutputs.size(), featureInputs.size() / 2));
+}
+
+void Embedding::ensureRaggedApplicationStorage(uint32_t applicationIndex) {
+    const size_t requiredInputs = static_cast<size_t>(applicationIndex + 1) * 2;
+    const size_t requiredOutputs = static_cast<size_t>(applicationIndex + 1);
+    if (featureInputs.size() < requiredInputs) featureInputs.resize(requiredInputs, std::nullopt);
+    if (errorOutputs.size() < requiredInputs) errorOutputs.resize(requiredInputs, std::nullopt);
+    if (previousLayers.size() < requiredInputs) previousLayers.resize(requiredInputs, std::nullopt);
+    if (streams.size() < requiredInputs) streams.resize(requiredInputs);
+    if (featureOutputs.size() < requiredOutputs) featureOutputs.resize(requiredOutputs, std::nullopt);
+    if (errorInputs.size() < requiredOutputs) errorInputs.resize(requiredOutputs, std::nullopt);
+    if (nextLayers.size() < requiredOutputs) nextLayers.resize(requiredOutputs, std::nullopt);
+    if (raggedRuntimeExtents.size() < requiredOutputs) raggedRuntimeExtents.resize(requiredOutputs);
+    if (preparedRaggedForwards.size() < requiredOutputs) preparedRaggedForwards.resize(requiredOutputs);
+    if (raggedAllForwardInputTensorIds.size() < requiredOutputs) raggedAllForwardInputTensorIds.resize(requiredOutputs);
+    if (raggedWaitingForwardInputTensorIds.size() < requiredOutputs) raggedWaitingForwardInputTensorIds.resize(requiredOutputs);
+    if (raggedCurrentValidExampleCounts.size() < requiredOutputs) raggedCurrentValidExampleCounts.resize(requiredOutputs, 0);
+    if (raggedBatchCardinalitySet.size() < requiredOutputs) raggedBatchCardinalitySet.resize(requiredOutputs, false);
+    if (raggedOffsetsReadyEvents.size() < requiredOutputs) raggedOffsetsReadyEvents.resize(requiredOutputs);
+}
+
+void Embedding::resetRaggedForwardArrivalBookkeeping() {
+    if (!isRagged())
+        return;
+    for (uint32_t app = 0; app < raggedApplicationCount(); ++app) {
+        ensureRaggedApplicationStorage(app);
+        raggedAllForwardInputTensorIds[app].clear();
+        const uint32_t valuesSlot = raggedValuesSlot(app);
+        const uint32_t offsetsSlot = raggedOffsetsSlot(app);
+        if (valuesSlot < featureInputs.size() && featureInputs[valuesSlot].has_value())
+            raggedAllForwardInputTensorIds[app].insert(featureInputs[valuesSlot]->getTensorId());
+        if (offsetsSlot < featureInputs.size() && featureInputs[offsetsSlot].has_value())
+            raggedAllForwardInputTensorIds[app].insert(featureInputs[offsetsSlot]->getTensorId());
+        raggedWaitingForwardInputTensorIds[app] = raggedAllForwardInputTensorIds[app];
+        raggedCurrentValidExampleCounts[app] = 0;
+        raggedBatchCardinalitySet[app] = false;
+    }
 }
 
 void Embedding::compileImpl() {
@@ -113,6 +169,45 @@ void Embedding::compileImpl() {
 
     initializeEmbeddingKernelsSharedAttributes();
 
+    if (isRagged()) {
+        const RaggedEmbeddingConfig& config = raggedConfig.value();
+        const uint32_t applications = raggedApplicationCount();
+        if (applications == 0) {
+            throw std::invalid_argument("Ragged Embedding requires at least one connected application.");
+        }
+        Tensor weightsTensor = weights();
+        for (uint32_t app = 0; app < applications; ++app) {
+            ensureRaggedApplicationStorage(app);
+            const uint32_t valuesSlot = raggedValuesSlot(app);
+            const uint32_t offsetsSlot = raggedOffsetsSlot(app);
+            if (!featureInputs[valuesSlot].has_value() || !featureInputs[offsetsSlot].has_value() ||
+                !featureOutputs[app].has_value()) {
+                throw std::invalid_argument("Ragged Embedding requires values, offsets, and output for every application.");
+            }
+            const Tensor& indices = featureInputs[valuesSlot].value();
+            const Tensor& offsets = featureInputs[offsetsSlot].value();
+            if (indices.getDimensions().empty() || indices.getDimensions()[0] != config.maxTotalValues) {
+                throw std::invalid_argument("Ragged Embedding indices packed capacity does not match max_total_values.");
+            }
+            if (offsets.getDimensions() != std::vector<uint64_t>{config.batchSize + 1} ||
+                offsets.getDataType() != config.offsetsDataType) {
+                throw std::invalid_argument("Ragged Embedding offsets descriptor does not match its row-partition metadata.");
+            }
+            if (config.maxTotalValues > std::numeric_limits<uint64_t>::max() / config.elementsPerValue ||
+                indices.getTotalNumElements() != config.maxTotalValues * config.elementsPerValue) {
+                throw std::invalid_argument("Ragged Embedding indices trailing geometry does not match elements_per_value.");
+            }
+            raggedRuntimeExtents[app] =
+                raggedRuntimeExtentFromOffsets(offsets, config.batchSize, config.maxTotalValues, config.elementsPerValue);
+            preparedRaggedForwards[app] = prepareEmbeddingForwardRagged(indices,
+                                                                        weightsTensor,
+                                                                        featureOutputs[app].value(),
+                                                                        paddingIndex,
+                                                                        raggedRuntimeExtents[app]);
+        }
+        resetRaggedForwardArrivalBookkeeping();
+    }
+
     // Do not call PhysicalParameter::compileOptimizer here. The default optimizer path materializes a dense
     // weightsGradient tensor, which is exactly what Embedding must avoid for large vocabularies. Embedding instead
     // asks the optimizer for an optimizer-owned reduced sparse-gradient sink and sparse-row update plan.
@@ -141,6 +236,16 @@ void Embedding::compileImpl() {
                     throw std::invalid_argument("Trainable Embedding requires an error input so it can produce sparse row gradients.");
                 }
 
+                uint32_t trainingApplication = 0;
+                if (isRagged()) {
+                    for (; trainingApplication < errorInputs.size(); ++trainingApplication) {
+                        if (errorInputs[trainingApplication].has_value()) break;
+                    }
+                    THOR_THROW_IF_FALSE(trainingApplication < errorInputs.size());
+                    aFeatureInput = featureInputs[raggedValuesSlot(trainingApplication)];
+                    THOR_THROW_IF_FALSE(aFeatureInput.has_value());
+                }
+
                 const Tensor storage = parameter->getStorage().value();
                 const uint64_t maxSparseRows = std::min<uint64_t>(aFeatureInput.value().getTotalNumElements(), vocabularySize);
                 if (!optimizer->supportsSparseRowUpdateFusion()) {
@@ -160,13 +265,25 @@ void Embedding::compileImpl() {
 
                 SparseRowOptimizerExpression updateExpression =
                     optimizer->toSparseRowUpdateExpression(storage, weightsSparseGradient.value());
-                weightsSparseGradientProducer = prepareEmbeddingSparseGradientWithSparseRowUpdate(aFeatureInput.value(),
-                                                                                                  aErrorInput.value(),
-                                                                                                  weightsSparseGradient.value(),
-                                                                                                  updateExpression.outputs,
-                                                                                                  updateExpression.inputs,
-                                                                                                  updateExpression.indexedOutputs,
-                                                                                                  paddingIndex);
+                if (isRagged()) {
+                    weightsSparseGradientProducer = prepareEmbeddingSparseGradientWithSparseRowUpdateRagged(
+                        aFeatureInput.value(),
+                        aErrorInput.value(),
+                        weightsSparseGradient.value(),
+                        updateExpression.outputs,
+                        updateExpression.inputs,
+                        updateExpression.indexedOutputs,
+                        paddingIndex,
+                        raggedRuntimeExtents[trainingApplication]);
+                } else {
+                    weightsSparseGradientProducer = prepareEmbeddingSparseGradientWithSparseRowUpdate(aFeatureInput.value(),
+                                                                                                      aErrorInput.value(),
+                                                                                                      weightsSparseGradient.value(),
+                                                                                                      updateExpression.outputs,
+                                                                                                      updateExpression.inputs,
+                                                                                                      updateExpression.indexedOutputs,
+                                                                                                      paddingIndex);
+                }
 
                 weightsSparseGradientCapturedGraph.emplace(placement.getDeviceNum());
                 CudaGraphCaptureBuilder builder(gradientUpdateStream.value());
@@ -183,6 +300,163 @@ void Embedding::compileImpl() {
                 weightsSparseGradientCapturedGraph->uploadTargetNodes(gradientUpdateStream.value());
             }
         }
+    }
+}
+
+void Embedding::initialize() {
+    TrainableLayer::initialize();
+    if (isRagged()) resetRaggedForwardArrivalBookkeeping();
+}
+
+void Embedding::cleanup() {
+    preparedRaggedForwards.clear();
+    raggedRuntimeExtents.clear();
+    raggedAllForwardInputTensorIds.clear();
+    raggedWaitingForwardInputTensorIds.clear();
+    raggedCurrentValidExampleCounts.clear();
+    raggedBatchCardinalitySet.clear();
+    raggedOffsetsReadyEvents.clear();
+    weightsSparseGradientProducer.reset();
+    weightsSparseGradient.reset();
+    weightsSparseGradientCapturedGraph.reset();
+    weightsSparseGradientGraphExecutable.reset();
+    TrainableLayer::cleanup();
+}
+
+std::optional<Tensor> Embedding::connectToPreviousLayer(
+    Layer* previousLayer, std::optional<Tensor> featureInput, Stream stream, bool backPropagateError, int connectionType) {
+    if (!isRagged()) {
+        return TrainableLayer::connectToPreviousLayer(previousLayer, featureInput, stream, backPropagateError, connectionType);
+    }
+
+    THOR_THROW_IF_FALSE(!compiled);
+    THOR_THROW_IF_FALSE(previousLayer != nullptr && featureInput.has_value());
+    if (connectionType < 0) throw std::invalid_argument("Ragged Embedding input connection type must be non-negative.");
+    const uint32_t encoded = static_cast<uint32_t>(connectionType);
+    const uint32_t applicationIndex = encoded / 2;
+    const uint32_t portIndex = encoded % 2;
+    ensureRaggedApplicationStorage(applicationIndex);
+    const uint32_t flat = portIndex == 0 ? raggedValuesSlot(applicationIndex) : raggedOffsetsSlot(applicationIndex);
+    if (featureInputs[flat].has_value() || previousLayers[flat].has_value()) {
+        throw std::invalid_argument("Ragged Embedding input port was connected more than once.");
+    }
+
+    const RaggedEmbeddingConfig& config = raggedConfig.value();
+    if (portIndex == 0) {
+        if (!isSupportedIndexType(featureInput->getDataType())) {
+            throw std::invalid_argument("Ragged Embedding indices dtype must be uint8, uint16, uint32, or uint64.");
+        }
+        const std::vector<uint64_t>& dims = featureInput->getDimensions();
+        if (dims.empty() || dims[0] != config.maxTotalValues) {
+            throw std::invalid_argument("Ragged Embedding values input must use the configured packed capacity.");
+        }
+    } else {
+        if (featureInput->getDimensions() != std::vector<uint64_t>{config.batchSize + 1} ||
+            featureInput->getDataType() != config.offsetsDataType) {
+            throw std::invalid_argument("Ragged Embedding offsets input does not match the configured row partition.");
+        }
+    }
+
+    previousLayers[flat] = previousLayer;
+    featureInputs[flat] = featureInput;
+    streams[flat] = stream;
+    errorOutputs[flat] = std::nullopt;  // integer indices and structural offsets have no gradient
+    ensureNoDeviceCrossing(placement);
+    (void)backPropagateError;
+    return std::nullopt;
+}
+
+void Embedding::connectToNextLayer(Layer* nextLayer, int driverConnectionType, int loaderConnectionType) {
+    if (!isRagged()) {
+        TrainableLayer::connectToNextLayer(nextLayer, driverConnectionType, loaderConnectionType);
+        return;
+    }
+
+    THOR_THROW_IF_FALSE(!compiled);
+    THOR_THROW_IF_FALSE(nextLayer != nullptr);
+    if (driverConnectionType < 0) throw std::invalid_argument("Ragged Embedding output connection type must be non-negative.");
+    const uint32_t applicationIndex = static_cast<uint32_t>(driverConnectionType);
+    ensureRaggedApplicationStorage(applicationIndex);
+    const uint32_t valuesSlot = raggedValuesSlot(applicationIndex);
+    const uint32_t offsetsSlot = raggedOffsetsSlot(applicationIndex);
+    if (!featureInputs[valuesSlot].has_value() || !featureInputs[offsetsSlot].has_value()) {
+        throw std::invalid_argument("Ragged Embedding output cannot be connected until both values and offsets inputs are connected.");
+    }
+
+    if (!featureOutputs[applicationIndex].has_value()) {
+        std::vector<uint64_t> outputDims = featureInputs[valuesSlot]->getDimensions();
+        outputDims.push_back(embeddingDim);
+        featureOutputs[applicationIndex] =
+            Tensor(featureInputs[valuesSlot]->getPlacement(), TensorDescriptor(weightsDataType, outputDims));
+    }
+    nextLayers[applicationIndex] = nextLayer;
+    errorInputs[applicationIndex] = nextLayer->connectToPreviousLayer(this,
+                                                                      featureOutputs[applicationIndex],
+                                                                      streams[valuesSlot],
+                                                                      shouldConnectToBackPropErrorIn(),
+                                                                      loaderConnectionType);
+    ensureNoDeviceCrossing(placement);
+}
+
+void Embedding::forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t runtimeBatchSize) {
+    if (!isRagged()) {
+        TrainableLayer::forward(featureInput, validationPass, runtimeBatchSize);
+        return;
+    }
+
+    THOR_THROW_IF_FALSE(running && featureInput.has_value());
+    const RaggedEmbeddingConfig& config = raggedConfig.value();
+    THOR_THROW_IF_FALSE(config.batchSize <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
+    const uint32_t physicalBatchCapacity = static_cast<uint32_t>(config.batchSize);
+    const uint32_t resolvedValidExampleCount = runtimeBatchSize == 0 ? physicalBatchCapacity : runtimeBatchSize;
+    THOR_THROW_IF_FALSE(resolvedValidExampleCount >= 1 && resolvedValidExampleCount <= physicalBatchCapacity);
+
+    if (isStartOfForward) {
+        if (weightsAreUpToDateEventValid) {
+            for (const Stream& dataStream : uniqueDataStreams) dataStream.waitEvent(weightsAreUpToDateEvent);
+        }
+        weightsAreUpToDateEventValid = false;
+        isStartOfForward = false;
+        isStartOfBackward = true;
+        resetRaggedForwardArrivalBookkeeping();
+    }
+
+    std::set<uint32_t> candidateApplications;
+    for (uint32_t app = 0; app < raggedApplicationCount(); ++app) {
+        const uint32_t valuesSlot = raggedValuesSlot(app);
+        const uint32_t offsetsSlot = raggedOffsetsSlot(app);
+        if ((featureInputs[valuesSlot].has_value() && featureInputs[valuesSlot].value() == featureInput.value()) ||
+            (featureInputs[offsetsSlot].has_value() && featureInputs[offsetsSlot].value() == featureInput.value())) {
+            candidateApplications.insert(app);
+        }
+    }
+    THOR_THROW_IF_FALSE(!candidateApplications.empty());
+
+    for (uint32_t app : candidateApplications) {
+        if (raggedBatchCardinalitySet[app]) {
+            THOR_THROW_IF_FALSE(raggedCurrentValidExampleCounts[app] == resolvedValidExampleCount);
+        } else {
+            raggedCurrentValidExampleCounts[app] = resolvedValidExampleCount;
+            raggedBatchCardinalitySet[app] = true;
+        }
+
+        const uint64_t tensorId = featureInput->getTensorId();
+        auto waitingIt = raggedWaitingForwardInputTensorIds[app].find(tensorId);
+        if (waitingIt == raggedWaitingForwardInputTensorIds[app].end()) continue;
+        raggedWaitingForwardInputTensorIds[app].erase(waitingIt);
+        if (!raggedWaitingForwardInputTensorIds[app].empty()) continue;
+
+        const uint32_t valuesSlot = raggedValuesSlot(app);
+        const uint32_t offsetsSlot = raggedOffsetsSlot(app);
+        streams[valuesSlot].waitFor(streams[offsetsSlot], raggedOffsetsReadyEvents[app]);
+        computeFeatureOut(app);
+        if (nextLayers[app].has_value()) {
+            nextLayers[app].value()->forward(featureOutputs[app], validationPass, raggedCurrentValidExampleCounts[app]);
+        }
+
+        raggedWaitingForwardInputTensorIds[app] = raggedAllForwardInputTensorIds[app];
+        raggedCurrentValidExampleCounts[app] = 0;
+        raggedBatchCardinalitySet[app] = false;
     }
 }
 
@@ -210,6 +484,22 @@ Tensor Embedding::weights() const {
 }
 
 void Embedding::computeFeatureOut(uint32_t connectionNumber) {
+    if (isRagged()) {
+        const uint32_t applicationIndex = connectionNumber;
+        const uint32_t valuesSlot = raggedValuesSlot(applicationIndex);
+        THOR_THROW_IF_FALSE(applicationIndex < preparedRaggedForwards.size());
+        THOR_THROW_IF_FALSE(preparedRaggedForwards[applicationIndex] != nullptr);
+        THOR_THROW_IF_FALSE(valuesSlot < featureInputs.size() && featureInputs[valuesSlot].has_value());
+        THOR_THROW_IF_FALSE(applicationIndex < featureOutputs.size() && featureOutputs[applicationIndex].has_value());
+        Tensor weightsTensor = weights();
+        launchPreparedEmbeddingForward(*preparedRaggedForwards[applicationIndex],
+                                       featureInputs[valuesSlot].value(),
+                                       weightsTensor,
+                                       featureOutputs[applicationIndex].value(),
+                                       streams[valuesSlot]);
+        return;
+    }
+
     THOR_THROW_IF_FALSE(connectionNumber < featureInputs.size());
     THOR_THROW_IF_FALSE(featureInputs[connectionNumber].has_value());
     THOR_THROW_IF_FALSE(featureOutputs[connectionNumber].has_value());
@@ -234,16 +524,17 @@ void Embedding::backward(std::optional<Tensor> errorInput, uint32_t batchSize) {
             break;
     }
     THOR_THROW_IF_FALSE(connectionNumber != errorInputs.size());
-    THOR_THROW_IF_FALSE(featureInputs[connectionNumber].has_value());
+    const uint32_t valuesSlot = isRagged() ? raggedValuesSlot(connectionNumber) : connectionNumber;
+    THOR_THROW_IF_FALSE(valuesSlot < featureInputs.size() && featureInputs[valuesSlot].has_value());
 
     if (isStartOfBackward) {
         isStartOfBackward = false;
     }
 
     if (!isInferenceOnly() && gradientUpdateStream.has_value() && parameters[0]->isTrainingEnabled()) {
-        THOR_THROW_IF_FALSE(connectionNumber < errorInputReadyEvents.size());
-        streams[connectionNumber].putEvent(errorInputReadyEvents[connectionNumber]);
-        gradientUpdateStream.value().waitEvent(errorInputReadyEvents[connectionNumber]);
+        THOR_THROW_IF_FALSE(valuesSlot < errorInputReadyEvents.size());
+        streams[valuesSlot].putEvent(errorInputReadyEvents[valuesSlot]);
+        gradientUpdateStream.value().waitEvent(errorInputReadyEvents[valuesSlot]);
         THOR_THROW_IF_FALSE(weightsSparseGradient.has_value());
         THOR_THROW_IF_FALSE(weightsSparseGradientProducer != nullptr);
         THOR_THROW_IF_FALSE(weightsSparseGradientGraphExecutable.has_value());

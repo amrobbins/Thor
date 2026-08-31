@@ -1,8 +1,10 @@
 import json
 
+import numpy as np
 import pytest
 
 import thor
+from thor.physical import numpy_dtypes
 
 
 def _net():
@@ -18,6 +20,29 @@ def _only_layer_architecture(n: thor.Network, layer_type: str):
     layers = [layer for layer in json.loads(n.get_architecture_json())["layers"] if layer["layer_type"] == layer_type]
     assert len(layers) == 1
     return layers[0]
+
+
+def _cpu_tensor(values: np.ndarray, dtype: thor.DataType) -> thor.physical.PhysicalTensor:
+    values = np.asarray(values, dtype=numpy_dtypes.from_thor(dtype), order="C")
+    placement = thor.physical.Placement(thor.physical.DeviceType.cpu, 0)
+    descriptor = thor.physical.PhysicalTensor.Descriptor(dtype, list(values.shape))
+    tensor = thor.physical.PhysicalTensor(placement, descriptor)
+    tensor.numpy()[...] = values
+    return tensor
+
+
+def _physical_ragged(
+    values: np.ndarray,
+    offsets: np.ndarray,
+    *,
+    offsets_dtype: thor.DataType,
+    max_values_per_row: int,
+):
+    return thor.physical.PhysicalRaggedTensor(
+        _cpu_tensor(values, thor.DataType.fp32),
+        _cpu_tensor(offsets, offsets_dtype),
+        max_values_per_row=max_values_per_row,
+    )
 
 
 def test_fully_connected_constructs_defaults_and_output_shape_dtype():
@@ -353,3 +378,147 @@ def test_fully_connected_ragged_rejects_disabling_prefix_preservation():
             activation=None,
             preserve_prefix_dimensions=False,
         )
+
+
+def test_fully_connected_ragged_epilogue_auxiliary_requires_exact_partition():
+    n = thor.Network("test_net_fully_connected_ragged_epilogue_partition_guard")
+    x = thor.layers.RaggedNetworkInput(
+        n, "tokens", thor.DataType.fp32, [4], max_total_values=8, batch_size=3, max_values_per_row=5
+    )
+    other = thor.layers.RaggedNetworkInput(
+        n, "other", thor.DataType.fp32, [4], max_total_values=8, batch_size=3, max_values_per_row=5
+    )
+    projected = thor.layers.FullyConnected.epilogue_input(
+        output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32
+    )
+    auxiliary = thor.layers.FullyConnected.epilogue_aux_input(
+        "aux", output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32
+    )
+
+    with pytest.raises(ValueError, match="row partition|RaggedTensor|ragged"):
+        thor.layers.FullyConnected(
+            n,
+            x,
+            4,
+            False,
+            activation=None,
+            epilogue=projected + auxiliary,
+            epilogue_inputs={"aux": other},
+        )
+
+    with pytest.raises(ValueError, match="RaggedTensor|ragged"):
+        thor.layers.FullyConnected(
+            n,
+            x,
+            4,
+            False,
+            activation=None,
+            epilogue=projected + auxiliary,
+            epilogue_inputs={"aux": other.values},
+        )
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "offsets_dtype,np_offsets_dtype",
+    [
+        (thor.DataType.uint32, np.uint32),
+        (thor.DataType.uint64, np.uint64),
+    ],
+)
+def test_fully_connected_ragged_epilogue_auxiliary_is_active_prefix_aware_and_round_trips(
+    tmp_path, offsets_dtype, np_offsets_dtype
+):
+    batch_size = 3
+    capacity = 8
+    max_values_per_row = 5
+    features = 4
+    n = thor.Network(f"test_net_fully_connected_ragged_epilogue_auxiliary_{np_offsets_dtype.__name__}")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [features],
+        max_total_values=capacity,
+        batch_size=batch_size,
+        max_values_per_row=max_values_per_row,
+        offsets_data_type=offsets_dtype,
+    )
+    aux = thor.activations.Relu().add_to_network(n, x)
+    projected = thor.layers.FullyConnected.epilogue_input(
+        output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32
+    )
+    auxiliary = thor.layers.FullyConnected.epilogue_aux_input(
+        "aux", output_dtype=thor.DataType.fp32, compute_dtype=thor.DataType.fp32
+    )
+    fc = thor.layers.FullyConnected(
+        n,
+        x,
+        features,
+        False,
+        activation=None,
+        epilogue=projected * 0.0 + auxiliary,
+        epilogue_inputs={"aux": aux},
+    )
+    y = fc.get_feature_output()
+    assert isinstance(y, thor.RaggedTensor)
+    assert y.offsets == x.offsets
+    thor.layers.RaggedNetworkOutput(n, "output", y)
+
+    arch = _only_layer_architecture(n, "fully_connected")
+    assert arch["version"] == "1.2.0"
+    assert arch["epilogue_inputs"][0]["name"] == "aux"
+    assert arch["epilogue_inputs"][0]["ragged_tensor"]["offsets"]["id"] == arch["ragged_inputs"][0]["offsets"]["id"]
+
+    def run(placed, offsets_values, active_values):
+        values = np.full((capacity, features), np.nan, dtype=np.float32)
+        values[: len(active_values)] = np.asarray(active_values, dtype=np.float32)
+        result = placed.infer(
+            {
+                "tokens": _physical_ragged(
+                    values,
+                    np.asarray(offsets_values, dtype=np_offsets_dtype),
+                    offsets_dtype=offsets_dtype,
+                    max_values_per_row=max_values_per_row,
+                )
+            }
+        )["output"]
+        return result, np.array(result.values.numpy(), copy=True)
+
+    placed = n.place(batch_size, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    short_offsets = [0, 2, 2, 5]
+    short_values = np.asarray(
+        [[-2.0, 1.0, -0.5, 3.0], [4.0, -1.0, 2.0, -3.0], [-4.0, 5.0, 6.0, -7.0],
+         [8.0, -9.0, 10.0, -11.0], [12.0, 13.0, -14.0, 15.0]],
+        dtype=np.float32,
+    )
+    short_result, short_output = run(placed, short_offsets, short_values)
+    np.testing.assert_array_equal(short_result.offsets.numpy(), np.asarray(short_offsets, dtype=np_offsets_dtype))
+    np.testing.assert_allclose(short_output[:5], np.maximum(short_values, 0.0), rtol=0.0, atol=0.0)
+
+    long_offsets = [0, 1, 5, 8]
+    long_values = (np.arange(capacity * features, dtype=np.float32).reshape(capacity, features) - 9.0) / 3.0
+    long_result, long_output = run(placed, long_offsets, long_values)
+    np.testing.assert_array_equal(long_result.offsets.numpy(), np.asarray(long_offsets, dtype=np_offsets_dtype))
+    np.testing.assert_allclose(long_output[:capacity], np.maximum(long_values, 0.0), rtol=0.0, atol=0.0)
+
+    empty_offsets = [0, 0, 0, 0]
+    empty_result, _ = run(placed, empty_offsets, np.empty((0, features), dtype=np.float32))
+    np.testing.assert_array_equal(empty_result.offsets.numpy(), np.asarray(empty_offsets, dtype=np_offsets_dtype))
+
+    short_result_2, short_output_2 = run(placed, short_offsets, short_values)
+    np.testing.assert_array_equal(short_result_2.offsets.numpy(), np.asarray(short_offsets, dtype=np_offsets_dtype))
+    np.testing.assert_allclose(short_output_2[:5], np.maximum(short_values, 0.0), rtol=0.0, atol=0.0)
+
+    save_dir = tmp_path / f"ragged_fc_epilogue_aux_{np_offsets_dtype.__name__}"
+    n.save(str(save_dir), overwrite=False)
+    loaded = thor.Network(f"test_net_fully_connected_ragged_epilogue_auxiliary_{np_offsets_dtype.__name__}")
+    loaded.load(str(save_dir))
+    loaded_arch = _only_layer_architecture(loaded, "fully_connected")
+    assert loaded_arch["epilogue_inputs"][0]["ragged_tensor"]["offsets"]["id"] == loaded_arch["ragged_inputs"][0]["offsets"]["id"]
+    loaded_placed = loaded.place(batch_size, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    loaded_offsets = [0, 3, 3, 7]
+    loaded_values = (np.arange(7 * features, dtype=np.float32).reshape(7, features) - 12.0) / 5.0
+    loaded_result, loaded_output = run(loaded_placed, loaded_offsets, loaded_values)
+    np.testing.assert_array_equal(loaded_result.offsets.numpy(), np.asarray(loaded_offsets, dtype=np_offsets_dtype))
+    np.testing.assert_allclose(loaded_output[:7], np.maximum(loaded_values, 0.0), rtol=0.0, atol=0.0)

@@ -209,6 +209,51 @@ RaggedExpression RaggedExpression::sliceLastDimension(uint64_t start, uint64_t l
     return sliceTrailingDimension(trailing_dimensions.size() - 1, start, length);
 }
 
+RaggedExpression RaggedExpression::transposeTrailingDimensions() const {
+    validateInitialized("transposeTrailingDimensions");
+    std::vector<uint64_t> source_dimensions = descriptor.getValuesDimensions();
+    if (source_dimensions.size() < 3) {
+        throw std::invalid_argument(
+            "RaggedExpression::transposeTrailingDimensions requires at least two trailing value dimensions.");
+    }
+
+    std::vector<uint64_t> source_strides(source_dimensions.size(), 1);
+    Expression view_source = values;
+    uint64_t base_element_offset = 0;
+
+    // Compose with an immediately preceding view instead of interpreting its logical
+    // tensor as contiguous storage. This is required for Slice -> Transpose: both
+    // operations are aliases of the same original packed values allocation, and the
+    // transpose must retain the slice's accumulated storage offset and row stride.
+    if (values.expr && values.nodeIndex < values.expr->nodes.size() &&
+        values.expr->nodes.at(values.nodeIndex).op == ExprOp::STRIDED_VIEW) {
+        const ExprNode& prior_view = values.expr->nodes.at(values.nodeIndex);
+        if (prior_view.view_dims != source_dimensions || prior_view.view_strides.size() != source_dimensions.size() ||
+            prior_view.lhs == UINT32_MAX || prior_view.lhs >= values.expr->nodes.size()) {
+            throw std::runtime_error("RaggedExpression::transposeTrailingDimensions encountered an invalid preceding strided view.");
+        }
+        source_strides = prior_view.view_strides;
+        base_element_offset = prior_view.view_element_offset;
+        view_source = Expression::fromPhysicalNode(values.expr, prior_view.lhs);
+    } else {
+        uint64_t stride = 1;
+        for (size_t axis = source_dimensions.size(); axis-- > 0;) {
+            source_strides[axis] = stride;
+            stride = checkedMul(stride, source_dimensions[axis], "ragged trailing transpose source stride");
+        }
+    }
+
+    std::vector<uint64_t> output_dimensions = source_dimensions;
+    std::vector<uint64_t> output_strides = source_strides;
+    std::swap(output_dimensions[output_dimensions.size() - 2], output_dimensions[output_dimensions.size() - 1]);
+    std::swap(output_strides[output_strides.size() - 2], output_strides[output_strides.size() - 1]);
+
+    Expression transposed_values = view_source.stridedView(output_dimensions, output_strides, base_element_offset);
+    RaggedTensorDescriptor transposed_descriptor(
+        TensorDescriptor(descriptor.getValuesDataType(), output_dimensions), descriptor.getRowPartition(), descriptor.getRaggedRank());
+    return withValues(transposed_values, transposed_descriptor);
+}
+
 RaggedExpression RaggedExpression::cast(DataType output_dtype) const {
     validateInitialized("cast");
     return withValues(values.cast(output_dtype), descriptorWithValuesDataType(descriptor, output_dtype));
@@ -450,6 +495,17 @@ RaggedExpression RaggedExpression::segment_log_softmax() const {
     return withValues(shifted - segmentDenseBroadcast(row_sum, false).ln(), descriptor);
 }
 
+RaggedExpression RaggedExpression::segment_broadcast(const Expression& per_segment_values,
+                                                      const RaggedTensorDescriptor& output_descriptor) const {
+    validateInitialized("segment_broadcast");
+    validateDescriptor(output_descriptor);
+    // withValues() enforces exact RowPartitionDescriptor equality. The explicit
+    // width override is necessary because the broadcast value shape is owned by
+    // per_segment_values, not by the structural partition carrier's values.
+    return withValues(
+        segmentDenseBroadcast(per_segment_values, false, elementsPerValue(output_descriptor)), output_descriptor);
+}
+
 RaggedExpression RaggedExpression::unaryValuewise(ExprOp op, const char* op_name) const {
     validateInitialized(op_name);
 
@@ -528,13 +584,18 @@ Expression RaggedExpression::segmentTotalBroadcast(ScanOp op, const char* op_nam
     }
 }
 
-Expression RaggedExpression::segmentDenseBroadcast(const Expression& per_segment_values, bool normalize_by_segment_length) const {
+Expression RaggedExpression::segmentDenseBroadcast(const Expression& per_segment_values,
+                                                    bool normalize_by_segment_length,
+                                                   std::optional<uint64_t> elements_per_value_override) const {
     validateInitialized("segmentDenseBroadcast");
     Expression out = Expression::binaryOp(per_segment_values, offsets, ExprOp::SEGMENTED_BROADCAST);
     ExprNode& node = out.expr->nodes.at(out.nodeIndex);
     node.ragged_runtime_batch_size = descriptor.getBatchSize();
     node.ragged_runtime_max_active_values = descriptor.getMaxTotalValues();
-    node.ragged_runtime_elements_per_value = elementsPerValue(descriptor);
+    node.ragged_runtime_elements_per_value = elements_per_value_override.value_or(elementsPerValue(descriptor));
+    if (node.ragged_runtime_elements_per_value == 0) {
+        throw std::invalid_argument("RaggedExpression::segmentDenseBroadcast elements-per-value metadata must be non-zero.");
+    }
     node.segmented_broadcast_normalize_by_length = normalize_by_segment_length;
     return out;
 }

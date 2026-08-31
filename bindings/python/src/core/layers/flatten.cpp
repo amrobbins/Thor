@@ -5,12 +5,12 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/Flatten.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
 using namespace std;
-
 using namespace Thor;
 
 void bind_flatten(nb::module_ &m) {
@@ -19,63 +19,47 @@ void bind_flatten(nb::module_ &m) {
 
     flatten.def(
         "__init__",
-        [](Flatten *self, Network &network, const Tensor &feature_input, uint32_t num_output_dimensions) {
-            const auto &dims = feature_input.getDimensions();
-            const size_t rank = dims.size();
-
-            if (rank == 0) {
-                string msg = "Flatten instance: feature_input must have at least 1 dimension but tensor format is " +
-                             feature_input.getDescriptorString();
-                throw nb::value_error(msg.c_str());
-            }
-
-            if (num_output_dimensions == 0) {
-                string msg =
-                    "Flatten instance: num_output_dimensions must be >= 1. You passed 0. "
-                    "feature_input is " +
-                    feature_input.getDescriptorString();
-                throw nb::value_error(msg.c_str());
-            }
-
-            if (num_output_dimensions >= rank) {
-                string msg =
-                    "Flatten instance: num_output_dimensions must be < rank of feature_input. "
-                    "You passed num_output_dimensions " +
-                    to_string(num_output_dimensions) + " for rank " + to_string(rank) + ". feature_input is " +
-                    feature_input.getDescriptorString();
-                throw nb::value_error(msg.c_str());
-            }
-
+        [](Flatten *self, Network &network, nb::object feature_input, uint32_t num_output_dimensions) {
+            vector<uint64_t> dims;
             Flatten::Builder builder;
-            Flatten built = builder.network(network).featureInput(feature_input).numOutputDimensions(num_output_dimensions).build();
+            builder.network(network);
+            if (nb::isinstance<RaggedTensor>(feature_input)) {
+                RaggedTensor ragged = nb::cast<RaggedTensor>(feature_input);
+                dims = ragged.getTrailingDimensions();
+                builder.featureInput(ragged);
+            } else if (nb::isinstance<Tensor>(feature_input)) {
+                Tensor tensor = nb::cast<Tensor>(feature_input);
+                dims = tensor.getDimensions();
+                builder.featureInput(tensor);
+            } else {
+                throw nb::type_error("Flatten feature_input must be thor.Tensor or thor.RaggedTensor.");
+            }
 
-            // Move the flatten layer into the pre-allocated but uninitialized memory at self
+            if (dims.empty()) throw nb::value_error("Flatten instance: feature_input must have at least 1 dimension.");
+            if (num_output_dimensions == 0) {
+                throw nb::value_error("Flatten instance: num_output_dimensions must be >= 1.");
+            }
+            if (num_output_dimensions >= dims.size()) {
+                throw nb::value_error("Flatten instance: num_output_dimensions must be < rank of feature_input.");
+            }
+
+            Flatten built = builder.numOutputDimensions(num_output_dimensions).build();
             new (self) Flatten(std::move(built));
         },
         "network"_a,
         "feature_input"_a,
         "num_output_dimensions"_a,
-
         R"nbdoc(
             Create and attach a Flatten layer to a Network.
 
-            Parameters
-            ----------
-            network : thor.Network
-                Network the layer should be added to.
-            feature_input : thor.Tensor
-                Input feature tensor for this layer.
-            num_output_dimensions : float
-                The number of leading dimesions that are kept from the input tensor by the output tensor.
-
-                For example if the input Tensor has dimensions [10, 20, 30, 40] and num_output_dimensions == 2,
-                then the ouput Tensor will have dimensions [10, 20, 1200].
+            For ragged inputs, num_output_dimensions applies only to the trailing
+            per-token value shape. The packed row axis and offsets are preserved.
             )nbdoc")
         .def(
             "get_feature_output",
-            [](Flatten &self) -> Tensor {
-                std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-                return maybeFeatureOutput.value();
+            [](Flatten &self) -> nb::object {
+                if (auto ragged = self.getRaggedFeatureOutput(); ragged.has_value()) return nb::cast(ragged.value());
+                return nb::cast(self.getFeatureOutput().value());
             },
             R"nbdoc(
             Return the output tensor produced by this layer.

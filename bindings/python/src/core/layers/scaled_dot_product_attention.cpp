@@ -145,25 +145,33 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
             if (hasKey != hasValue)
                 throw nb::value_error("ScaledDotProductAttention key_input and value_input must be provided together.");
 
-            if (queryIsRagged) {
-                RaggedTensor q = nb::cast<RaggedTensor>(query_input);
-                if (!hasKey) {
-                    builder.selfInput(q);
+            if (!hasKey) {
+                if (queryIsRagged) {
+                    builder.selfInput(nb::cast<RaggedTensor>(query_input));
                 } else {
-                    if (!nb::isinstance<RaggedTensor>(key_input) || !nb::isinstance<RaggedTensor>(value_input))
-                        throw nb::type_error("ScaledDotProductAttention cannot mix dense and ragged Q/K/V inputs.");
-                    builder.queryInput(q)
-                        .keyInput(nb::cast<RaggedTensor>(key_input))
-                        .valueInput(nb::cast<RaggedTensor>(value_input));
+                    builder.selfInput(nb::cast<Tensor>(query_input));
                 }
             } else {
-                Tensor q = nb::cast<Tensor>(query_input);
-                if (!hasKey) {
-                    builder.selfInput(q);
+                const bool keyIsRagged = nb::isinstance<RaggedTensor>(key_input);
+                const bool keyIsDense = nb::isinstance<Tensor>(key_input);
+                const bool valueIsRagged = nb::isinstance<RaggedTensor>(value_input);
+                const bool valueIsDense = nb::isinstance<Tensor>(value_input);
+                if ((!keyIsRagged && !keyIsDense) || (!valueIsRagged && !valueIsDense)) {
+                    throw nb::type_error("ScaledDotProductAttention key_input/value_input must be thor.Tensor or thor.RaggedTensor.");
+                }
+                if (keyIsRagged != valueIsRagged) {
+                    throw nb::type_error("ScaledDotProductAttention key_input and value_input must both be dense or both be ragged.");
+                }
+
+                if (queryIsRagged) {
+                    builder.queryInput(nb::cast<RaggedTensor>(query_input));
                 } else {
-                    if (!nb::isinstance<Tensor>(key_input) || !nb::isinstance<Tensor>(value_input))
-                        throw nb::type_error("ScaledDotProductAttention cannot mix dense and ragged Q/K/V inputs.");
-                    builder.queryInput(q).keyInput(nb::cast<Tensor>(key_input)).valueInput(nb::cast<Tensor>(value_input));
+                    builder.queryInput(nb::cast<Tensor>(query_input));
+                }
+                if (keyIsRagged) {
+                    builder.keyInput(nb::cast<RaggedTensor>(key_input)).valueInput(nb::cast<RaggedTensor>(value_input));
+                } else {
+                    builder.keyInput(nb::cast<Tensor>(key_input)).valueInput(nb::cast<Tensor>(value_input));
                 }
             }
             if (bias_input.has_value()) {
@@ -270,6 +278,8 @@ void bind_scaled_dot_product_attention(nb::module_& layers) {
     sdpa.def("get_dropout_offset", &ScaledDotProductAttention::getDropoutOffset);
     sdpa.def("get_use_sequence_lengths", &ScaledDotProductAttention::getUseSequenceLengths);
     sdpa.def("get_use_ragged_input", &ScaledDotProductAttention::getUseRaggedInput);
+    sdpa.def("get_query_is_ragged", &ScaledDotProductAttention::getQueryIsRagged);
+    sdpa.def("get_key_value_is_ragged", &ScaledDotProductAttention::getKeyValueIsRagged);
     sdpa.def("get_use_bias", &ScaledDotProductAttention::getUseBias);
     sdpa.def("get_bias_input", &ScaledDotProductAttention::getBiasInput);
     sdpa.def("get_query_sequence_lengths_input", &ScaledDotProductAttention::getQuerySequenceLengthsInput);
@@ -316,10 +326,12 @@ FP16/BF16 production support:
   bias shape.  Ragged + additive-bias backward is rejected.
 * Dense/padded attention may use ``sequence_lengths`` or the explicit
   ``query_sequence_lengths``/``key_value_sequence_lengths`` pair.
-* Ragged attention is represented only by ``thor.RaggedTensor`` Q/K/V inputs.
-  Their canonical UINT32/UINT64 row partitions define sequence boundaries; cuDNN
-  INT32 sequence lengths and element offsets are private backend metadata.
-  Supplying dense sequence-length metadata together with RaggedTensor inputs is rejected.
+* Query and key/value domains may be dense or ragged independently. Key and value
+  must use the same domain; a ragged key/value pair must share one canonical row
+  partition. When either domain is ragged, BSHD/token-major layout is required and
+  Thor synthesizes a uniform private row partition for the dense side before calling
+  cuDNN. The output is ragged exactly when the query is ragged. Supplying dense
+  sequence-length metadata together with any RaggedTensor input is rejected.
 * ``dropout_probability``/``dropout_seed``/``dropout_offset`` expose cuDNN Philox
   attention dropout.  Thor advances the runtime dropout offset by
   ``B * Hq * Sq * Skv``.

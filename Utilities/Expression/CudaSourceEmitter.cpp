@@ -2233,6 +2233,27 @@ static std::vector<uint64_t> packedStrides(const std::vector<uint64_t>& dims) {
     return strides;
 }
 
+static std::vector<size_t> stridedViewBackwardStorageAxisOrder(const ExprNode& node) {
+    if (node.view_dims.empty() || node.view_dims.size() != node.view_strides.size()) {
+        throw std::runtime_error("strided_view_backward requires view dimensions and strides with the same non-zero rank.");
+    }
+    std::vector<size_t> axes(node.view_dims.size());
+    std::iota(axes.begin(), axes.end(), 0);
+    std::sort(axes.begin(), axes.end(), [&](size_t lhs, size_t rhs) {
+        if (node.view_strides[lhs] != node.view_strides[rhs]) {
+            return node.view_strides[lhs] > node.view_strides[rhs];
+        }
+        // A size-one axis consumes no storage span. When two axes have the same
+        // stride, decode the expanding axis first so the size-one coordinate is
+        // evaluated only after the residual has fallen below that stride.
+        const bool lhs_expands = node.view_dims[lhs] > 1;
+        const bool rhs_expands = node.view_dims[rhs] > 1;
+        if (lhs_expands != rhs_expands) return lhs_expands;
+        return lhs < rhs;
+    });
+    return axes;
+}
+
 static std::string nextIndexMappedSuffix(uint32_t node_idx, const std::string& emission_scope, uint32_t& counter) {
     return emission_scope + "_im" + std::to_string(node_idx) + "_" + std::to_string(counter++);
 }
@@ -2527,28 +2548,38 @@ static std::string emitIndexMappedScalarValue(std::ostringstream& ss,
                << ") { " << in_view << " = false; } else { " << residual << " -= "
                << emitUnsignedLiteral(n.view_element_offset, use_uint32_index_math) << "; }\n";
         }
-        ss << indent << emittedIndexType(use_uint32_index_math) << " " << view_linear << " = 0;\n";
+        const std::vector<size_t> storage_axis_order = stridedViewBackwardStorageAxisOrder(n);
+        std::vector<std::string> coords(n.view_dims.size());
         for (size_t axis = 0; axis < n.view_dims.size(); ++axis) {
             const uint64_t dim = n.view_dims[axis];
             const uint64_t stride = n.view_strides[axis];
             if (dim == 0 || stride == 0) {
                 throw runtime_error("Index-mapped strided_view_backward dimensions and strides must be non-zero.");
             }
-            const std::string coord = "svbw_coord" + suffix + "_" + std::to_string(axis);
+            coords[axis] = "svbw_coord" + suffix + "_" + std::to_string(axis);
+            ss << indent << emittedIndexType(use_uint32_index_math) << " " << coords[axis] << " = 0;\n";
+        }
+        for (size_t axis : storage_axis_order) {
+            const uint64_t dim = n.view_dims[axis];
+            const uint64_t stride = n.view_strides[axis];
+            const std::string& coord = coords[axis];
             ss << indent << "if (" << in_view << ") {\n";
-            ss << indent << "  const " << emittedIndexType(use_uint32_index_math) << " " << coord << " = " << residual
-               << " / " << emitUnsignedLiteral(stride, use_uint32_index_math) << ";\n";
+            ss << indent << "  " << coord << " = " << residual << " / "
+               << emitUnsignedLiteral(stride, use_uint32_index_math) << ";\n";
             ss << indent << "  if (" << coord << " >= " << emitUnsignedLiteral(dim, use_uint32_index_math) << ") {\n";
             ss << indent << "    " << in_view << " = false;\n";
             ss << indent << "  } else {\n";
             ss << indent << "    " << residual << " -= " << coord << " * " << emitUnsignedLiteral(stride, use_uint32_index_math)
                << ";\n";
-            ss << indent << "    " << view_linear << " = " << view_linear << " * "
-               << emitUnsignedLiteral(dim, use_uint32_index_math) << " + " << coord << ";\n";
             ss << indent << "  }\n";
             ss << indent << "}\n";
         }
         ss << indent << "if (" << residual << " != 0) " << in_view << " = false;\n";
+        ss << indent << emittedIndexType(use_uint32_index_math) << " " << view_linear << " = 0;\n";
+        for (size_t axis = 0; axis < n.view_dims.size(); ++axis) {
+            ss << indent << view_linear << " = " << view_linear << " * "
+               << emitUnsignedLiteral(n.view_dims[axis], use_uint32_index_math) << " + " << coords[axis] << ";\n";
+        }
 
         const std::string grad_value = emitIndexMappedScalarValue(ss,
                                                                    expr,
@@ -3261,25 +3292,35 @@ static std::string emitScalarValueAtIndex(std::ostringstream& ss,
             ss << indent << "if (" << residual << " < " << n.view_element_offset << "ULL) { " << in_view
                << " = false; } else { " << residual << " -= " << n.view_element_offset << "ULL; }\n";
         }
-        ss << indent << "unsigned long long " << view_linear << " = 0ULL;\n";
+        const std::vector<size_t> storage_axis_order = stridedViewBackwardStorageAxisOrder(n);
+        std::vector<std::string> coords(n.view_dims.size());
         for (size_t axis = 0; axis < n.view_dims.size(); ++axis) {
             const uint64_t dim = n.view_dims[axis];
             const uint64_t stride = n.view_strides[axis];
             if (dim == 0 || stride == 0) {
                 throw runtime_error("Nested strided_view_backward dimensions and strides must be non-zero.");
             }
-            const std::string coord = "nested_svbw_coord_" + std::to_string(node_idx) + "_" + std::to_string(axis) + suffix;
+            coords[axis] = "nested_svbw_coord_" + std::to_string(node_idx) + "_" + std::to_string(axis) + suffix;
+            ss << indent << "unsigned long long " << coords[axis] << " = 0ULL;\n";
+        }
+        for (size_t axis : storage_axis_order) {
+            const uint64_t dim = n.view_dims[axis];
+            const uint64_t stride = n.view_strides[axis];
+            const std::string& coord = coords[axis];
             ss << indent << "if (" << in_view << ") {\n";
-            ss << indent << "  const unsigned long long " << coord << " = " << residual << " / " << stride << "ULL;\n";
+            ss << indent << "  " << coord << " = " << residual << " / " << stride << "ULL;\n";
             ss << indent << "  if (" << coord << " >= " << dim << "ULL) {\n";
             ss << indent << "    " << in_view << " = false;\n";
             ss << indent << "  } else {\n";
             ss << indent << "    " << residual << " -= " << coord << " * " << stride << "ULL;\n";
-            ss << indent << "    " << view_linear << " = " << view_linear << " * " << dim << "ULL + " << coord << ";\n";
             ss << indent << "  }\n";
             ss << indent << "}\n";
         }
         ss << indent << "if (" << residual << " != 0ULL) " << in_view << " = false;\n";
+        ss << indent << "unsigned long long " << view_linear << " = 0ULL;\n";
+        for (size_t axis = 0; axis < n.view_dims.size(); ++axis) {
+            ss << indent << view_linear << " = " << view_linear << " * " << n.view_dims[axis] << "ULL + " << coords[axis] << ";\n";
+        }
         const std::string nested_suffix = suffix + "_svbw" + std::to_string(node_idx);
         const std::string grad_value = emitScalarValueAtIndex(
             ss, expr, n.lhs, view_linear, nested_suffix, indent, emitted, group);
@@ -3416,26 +3457,36 @@ static void emitScalarStridedViewBackwardNode(std::ostringstream& ss,
         ss << indent << "  view_bw_residual_" << node_idx << " -= " << n.view_element_offset << "ULL;\n";
         ss << indent << "}\n";
     }
-    ss << indent << "unsigned long long view_bw_linear_" << node_idx << " = 0ULL;\n";
+    const std::vector<size_t> storage_axis_order = stridedViewBackwardStorageAxisOrder(n);
+    std::vector<std::string> coords(n.view_dims.size());
     for (size_t axis = 0; axis < n.view_dims.size(); ++axis) {
         const uint64_t dim = n.view_dims.at(axis);
         const uint64_t stride = n.view_strides.at(axis);
         if (dim == 0 || stride == 0) {
             throw runtime_error("strided_view_backward dimensions and strides must be non-zero.");
         }
+        coords[axis] = "coord_" + std::to_string(node_idx) + "_" + std::to_string(axis);
+        ss << indent << "unsigned long long " << coords[axis] << " = 0ULL;\n";
+    }
+    for (size_t axis : storage_axis_order) {
+        const uint64_t dim = n.view_dims.at(axis);
+        const uint64_t stride = n.view_strides.at(axis);
+        const std::string& coord = coords[axis];
         ss << indent << "if (view_bw_in_view_" << node_idx << ") {\n";
-        ss << indent << "  const unsigned long long coord_" << node_idx << "_" << axis << " = view_bw_residual_" << node_idx << " / "
-           << stride << "ULL;\n";
-        ss << indent << "  if (coord_" << node_idx << "_" << axis << " >= " << dim << "ULL) {\n";
+        ss << indent << "  " << coord << " = view_bw_residual_" << node_idx << " / " << stride << "ULL;\n";
+        ss << indent << "  if (" << coord << " >= " << dim << "ULL) {\n";
         ss << indent << "    view_bw_in_view_" << node_idx << " = false;\n";
         ss << indent << "  } else {\n";
-        ss << indent << "    view_bw_residual_" << node_idx << " -= coord_" << node_idx << "_" << axis << " * " << stride << "ULL;\n";
-        ss << indent << "    view_bw_linear_" << node_idx << " = view_bw_linear_" << node_idx << " * " << dim << "ULL + coord_" << node_idx
-           << "_" << axis << ";\n";
+        ss << indent << "    view_bw_residual_" << node_idx << " -= " << coord << " * " << stride << "ULL;\n";
         ss << indent << "  }\n";
         ss << indent << "}\n";
     }
     ss << indent << "if (view_bw_residual_" << node_idx << " != 0ULL) view_bw_in_view_" << node_idx << " = false;\n";
+    ss << indent << "unsigned long long view_bw_linear_" << node_idx << " = 0ULL;\n";
+    for (size_t axis = 0; axis < n.view_dims.size(); ++axis) {
+        ss << indent << "view_bw_linear_" << node_idx << " = view_bw_linear_" << node_idx << " * " << n.view_dims[axis] << "ULL + "
+           << coords[axis] << ";\n";
+    }
     std::string grad_value;
     if (group != nullptr) {
         if (group->node_dims.size() != expr.nodes.size()) {

@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Utility/StopGradient.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 #include <optional>
 #include <utility>
@@ -20,9 +21,17 @@ void bind_stop_gradient(nb::module_ &m) {
 
     stop_gradient.def(
         "__init__",
-        [](StopGradient *self, Network &network, const Tensor &feature_input) {
+        [](StopGradient *self, Network &network, nb::object feature_input) {
             StopGradient::Builder builder;
-            StopGradient built = builder.network(network).featureInput(feature_input).build();
+            builder.network(network);
+            if (nb::isinstance<RaggedTensor>(feature_input)) {
+                builder.featureInput(nb::cast<RaggedTensor>(feature_input));
+            } else if (nb::isinstance<Tensor>(feature_input)) {
+                builder.featureInput(nb::cast<Tensor>(feature_input));
+            } else {
+                throw nb::type_error("StopGradient feature_input must be thor.Tensor or thor.RaggedTensor.");
+            }
+            StopGradient built = builder.build();
             new (self) StopGradient(std::move(built));
         },
         "network"_a,
@@ -32,16 +41,20 @@ Create and attach a StopGradient layer to a Network.
 
 Forward is an identity alias of ``feature_input``. Backward does not propagate
 an error tensor through this layer, making the gradient barrier explicit in the
-network graph.
+network graph. Ragged inputs preserve their exact row partition.
 )nbdoc");
 
     stop_gradient.def(
         "get_feature_output",
-        [](StopGradient &self) -> Tensor {
-            std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-            return maybeFeatureOutput.value();
+        [](StopGradient &self) -> nb::object {
+            if (std::optional<RaggedTensor> raggedOutput = self.getRaggedFeatureOutput(); raggedOutput.has_value()) {
+                return nb::cast(raggedOutput.value());
+            }
+            return nb::cast(self.getFeatureOutput().value());
         },
         R"nbdoc(
-Return the output tensor produced by this layer.
+Return the logical output produced by this layer. Ragged inputs return a thor.RaggedTensor.
 )nbdoc");
+
+    stop_gradient.def("get_use_ragged", &StopGradient::getUseRagged);
 }

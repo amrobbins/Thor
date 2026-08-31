@@ -1,5 +1,6 @@
 #include "DeepLearning/Api/Layers/Utility/LayerNorm.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 
 #include "gtest/gtest.h"
 
@@ -64,4 +65,66 @@ TEST(UtilityApiLayers, LayerNormArchitectureJsonContainsParameters) {
     EXPECT_EQ(arch.at("normalized_shape").get<vector<uint64_t>>(), vector<uint64_t>({32}));
     EXPECT_TRUE(arch.at("parameters").contains("weights"));
     EXPECT_TRUE(arch.at("parameters").contains("biases"));
+}
+
+
+TEST(UtilityApiLayers, RaggedLayerNormBuildsAndPreservesCanonicalPartition) {
+    Network network("ragged_layer_norm_build");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .trailingDimensions({4})
+                             .batchSize(3)
+                             .maxTotalValues(11)
+                             .maxValuesPerRow(7)
+                             .offsetsDataType(DataType::UINT64)
+                             .build();
+
+    LayerNorm layer = LayerNorm::Builder().network(network).featureInput(input).epsilon(2.5e-4).build();
+
+    EXPECT_TRUE(layer.getUseRagged());
+    ASSERT_TRUE(layer.getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(layer.getRaggedFeatureOutput().has_value());
+    const RaggedTensor output = layer.getRaggedFeatureOutput().value();
+    EXPECT_EQ(output.getValues().getDimensions(), (vector<uint64_t>{11, 4}));
+    EXPECT_EQ(output.getOffsets(), input.getOffsets());
+    EXPECT_EQ(output.getBatchSize(), input.getBatchSize());
+    EXPECT_EQ(output.getMaxTotalValues(), input.getMaxTotalValues());
+    ASSERT_TRUE(output.hasMaxValuesPerRow());
+    EXPECT_EQ(output.getMaxValuesPerRow(), input.getMaxValuesPerRow());
+    EXPECT_EQ(layer.getNormalizedShape(), (vector<uint64_t>{4}));
+
+    const json arch = layer.architectureJson();
+    EXPECT_TRUE(arch.at("use_ragged").get<bool>());
+    ASSERT_EQ(arch.at("ragged_inputs").size(), 1U);
+    ASSERT_EQ(arch.at("ragged_outputs").size(), 1U);
+    EXPECT_EQ(arch.at("ragged_inputs").at(0).at("offsets").at("id").get<uint64_t>(),
+              arch.at("ragged_outputs").at(0).at("offsets").at("id").get<uint64_t>());
+}
+
+TEST(UtilityApiLayers, RaggedLayerNormRejectsGeometryOutsideExpressionContract) {
+    Network network("ragged_layer_norm_bad_geometry");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .trailingDimensions({4})
+                             .batchSize(2)
+                             .maxTotalValues(9)
+                             .build();
+
+    EXPECT_THROW(LayerNorm::Builder().network(network).featureInput(input).normalizedShape({9, 4}).build(),
+                 std::invalid_argument);
+
+    RaggedTensor rankTwoTrailing = RaggedNetworkInput::Builder()
+                                       .network(network)
+                                       .name("matrix_tokens")
+                                       .valuesDataType(DataType::FP32)
+                                       .trailingDimensions({2, 2})
+                                       .batchSize(2)
+                                       .maxTotalValues(9)
+                                       .build();
+    EXPECT_THROW(LayerNorm::Builder().network(network).featureInput(rankTwoTrailing).normalizedShape({2}).build(),
+                 std::invalid_argument);
 }

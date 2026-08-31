@@ -26,6 +26,12 @@ json ScaleGradient::architectureJson() const {
     j["feature_input"] = featureInput.value().architectureJson();
     j["feature_output"] = featureOutput.value().architectureJson();
     j["scale"] = scale.value();
+    j["use_ragged"] = raggedFeatureInput.has_value();
+    if (raggedFeatureInput.has_value()) {
+        THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
+        j["ragged_feature_input"] = raggedFeatureInput->architectureJson();
+        j["ragged_feature_output"] = raggedFeatureOutput->architectureJson();
+    }
     return j;
 }
 
@@ -48,6 +54,30 @@ void ScaleGradient::deserialize(const json &j, Network *network) {
     scaleGradient.featureInput = featureInput;
     scaleGradient.featureOutput = featureOutput;
     scaleGradient.scale = scale;
+    if (j.value("use_ragged", false)) {
+        const json& raggedInputJson = j.at("ragged_feature_input");
+        const uint64_t offsetsId = raggedInputJson.at("offsets").at("id").get<uint64_t>();
+        Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
+        RaggedTensor raggedInput = raggedInputJson.contains("max_values_per_row")
+            ? RaggedTensor(featureInput, offsets, raggedInputJson.at("max_values_per_row").get<uint64_t>())
+            : RaggedTensor(featureInput, offsets);
+        if (raggedInput.getBatchSize() != raggedInputJson.at("batch_size").get<uint64_t>() ||
+            raggedInput.getMaxTotalValues() != raggedInputJson.at("max_total_values").get<uint64_t>()) {
+            throw runtime_error("ScaleGradient serialized ragged input metadata does not match reconstructed tensors.");
+        }
+        const json& raggedOutputJson = j.at("ragged_feature_output");
+        if (raggedOutputJson.at("values").at("id").get<uint64_t>() != j.at("feature_output").at("id").get<uint64_t>() ||
+            raggedOutputJson.at("offsets").at("id").get<uint64_t>() != offsetsId ||
+            raggedOutputJson.at("batch_size").get<uint64_t>() != raggedInput.getBatchSize() ||
+            raggedOutputJson.at("max_total_values").get<uint64_t>() != raggedInput.getMaxTotalValues() ||
+            (raggedOutputJson.contains("max_values_per_row") &&
+             (!raggedInput.hasMaxValuesPerRow() ||
+              raggedOutputJson.at("max_values_per_row").get<uint64_t>() != raggedInput.getMaxValuesPerRow()))) {
+            throw runtime_error("ScaleGradient serialized ragged output must preserve the input row partition and capacity metadata.");
+        }
+        scaleGradient.raggedFeatureInput = raggedInput;
+        scaleGradient.raggedFeatureOutput = raggedInput.withValues(featureOutput);
+    }
     scaleGradient.initialized = true;
     scaleGradient.addToNetwork(network);
 }

@@ -39,6 +39,46 @@ uint64_t checkedProductForRmsNorm(const std::vector<uint64_t>& dims, const std::
     return product;
 }
 
+struct ExpressionInputDataTypes {
+    std::optional<DataType> computeDataType;
+    std::optional<DataType> outputDataType;
+};
+
+ExpressionInputDataTypes expressionInputDataTypes(const ThorImplementation::Expression& expression,
+                                                   const std::string& inputName) {
+    const ThorImplementation::PhysicalExpression physicalExpression = expression.expression();
+    std::optional<ExpressionInputDataTypes> resolved;
+
+    for (const ThorImplementation::ExprNode& node : physicalExpression.nodes) {
+        if (node.op != ThorImplementation::ExprOp::INPUT) {
+            continue;
+        }
+        if (node.input_slot >= physicalExpression.inputs.size()) {
+            throw std::runtime_error("RMSNorm epilogue input node has an invalid input slot.");
+        }
+        if (physicalExpression.inputs[node.input_slot].name != inputName) {
+            continue;
+        }
+
+        const ExpressionInputDataTypes candidate{node.compute_dtype, node.output_dtype};
+        if (resolved.has_value() &&
+            (resolved->computeDataType != candidate.computeDataType ||
+             resolved->outputDataType != candidate.outputDataType)) {
+            throw std::runtime_error("RMSNorm epilogue input '" + inputName +
+                                     "' is used with inconsistent dtype annotations.");
+        }
+        resolved = candidate;
+    }
+
+    if (!resolved.has_value()) {
+        throw std::runtime_error("RMSNorm epilogue expression does not contain expected input '" + inputName + "'.");
+    }
+    return resolved.value();
+}
+
+// Backend optimization probe only: the public RMSNorm epilogue contract is an
+// Expression.  Recognizing this canonical form must not create a second
+// Activation-valued epilogue API.
 bool isSwishEpilogueExpression(const ThorImplementation::Expression& epilogue) {
     Swish swish;
     ThorImplementation::Expression reference = swish.toExpression(RMSNorm::epilogueInput());
@@ -288,13 +328,61 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                     return rmsNorm;
                 }
 
-                ThorImplementation::Expression effectiveEpilogue = epilogue.value();
-                if (needsFlattenedExpressionView) {
-                    for (const std::string& auxInputName : epilogueAuxInputNames) {
-                        ThorImplementation::Expression auxInput =
-                            Expression::input(auxInputName, inputDataType, inputDataType).reshape(flattenedInputDims);
-                        effectiveEpilogue = effectiveEpilogue.substituteInput(auxInputName, auxInput);
+                if (rowPartitionTensor.has_value()) {
+                    if (!packedRowCapacity.has_value() || originalInputDims.empty() ||
+                        originalInputDims[0] != packedRowCapacity.value()) {
+                        throw std::runtime_error(
+                            "Ragged RMSNorm epilogue primary geometry does not match its packed row capacity.");
                     }
+                    const TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
+                    const uint64_t raggedBatchSize = offsetsDescriptor.getDimensions()[0] - 1;
+                    if (outer % packedRowCapacity.value() != 0) {
+                        throw std::runtime_error(
+                            "Ragged RMSNorm epilogue primary flattened outer dimension is not divisible by packed capacity.");
+                    }
+                    const uint64_t elementsPerPackedValue = (outer / packedRowCapacity.value()) * hidden;
+                    Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
+                                                           offsetsDescriptor.getDataType(),
+                                                           offsetsDescriptor.getDataType());
+                    // RMSNorm consumes its input's runtime extent at the cuDNN stage boundary.
+                    // Re-wrap the normalized result before the custom epilogue so both the
+                    // primary branch and every same-partition auxiliary remain active-prefix-aware.
+                    rmsNorm = rmsNorm.withRaggedRuntimeExtent(offsets,
+                                                              raggedBatchSize,
+                                                              packedRowCapacity.value(),
+                                                              elementsPerPackedValue);
+                }
+
+                ThorImplementation::Expression effectiveEpilogue = epilogue.value();
+                for (const std::string& auxInputName : epilogueAuxInputNames) {
+                    const ExpressionInputDataTypes inputDataTypes = expressionInputDataTypes(effectiveEpilogue, auxInputName);
+                    ThorImplementation::Expression auxInput =
+                        Expression::input(auxInputName, inputDataTypes.computeDataType, inputDataTypes.outputDataType);
+                    if (needsFlattenedExpressionView) {
+                        auxInput = auxInput.reshape(flattenedInputDims);
+                    }
+                    if (rowPartitionTensor.has_value()) {
+                        if (!packedRowCapacity.has_value() || originalInputDims.empty() ||
+                            originalInputDims[0] != packedRowCapacity.value()) {
+                            throw std::runtime_error(
+                                "Ragged RMSNorm epilogue auxiliary geometry does not match its packed row capacity.");
+                        }
+                        const TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
+                        const uint64_t raggedBatchSize = offsetsDescriptor.getDimensions()[0] - 1;
+                        if (outer % packedRowCapacity.value() != 0) {
+                            throw std::runtime_error(
+                                "Ragged RMSNorm epilogue auxiliary flattened outer dimension is not divisible by packed capacity.");
+                        }
+                        const uint64_t elementsPerPackedValue = (outer / packedRowCapacity.value()) * hidden;
+                        Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
+                                                               offsetsDescriptor.getDataType(),
+                                                               offsetsDescriptor.getDataType());
+                        auxInput = auxInput.withRaggedRuntimeExtent(offsets,
+                                                                   raggedBatchSize,
+                                                                   packedRowCapacity.value(),
+                                                                   elementsPerPackedValue);
+                    }
+                    effectiveEpilogue = effectiveEpilogue.substituteInput(auxInputName, auxInput);
                 }
                 return RMSNorm::applyEpilogue(rmsNorm, effectiveEpilogue);
             }();
@@ -357,6 +445,7 @@ void RMSNorm::validateEpilogueAuxInputName(const std::string& inputName) {
         "feature_input",
         "feature_output",
         "weights",
+        ThorImplementation::RaggedRMSNorm::ROW_PARTITION_INPUT_NAME,
         epilogueInputName(),
         epilogueOutputName(),
     };
@@ -378,10 +467,14 @@ std::vector<std::string> RMSNorm::epilogueAuxInputNames() const {
 std::vector<Tensor> RMSNorm::getFeatureInputs() const {
     if (!raggedFeatureInputs.empty()) {
         std::vector<Tensor> inputs;
-        inputs.reserve(raggedFeatureInputs.size() * 2);
+        inputs.reserve(raggedFeatureInputs.size() * 2 + epilogueInputBindings.size());
         for (const RaggedTensor& ragged : raggedFeatureInputs) {
             inputs.push_back(ragged.getValues());
             inputs.push_back(ragged.getOffsets());
+        }
+        for (const auto& [name, tensor] : epilogueInputBindings) {
+            (void)name;
+            inputs.push_back(tensor);
         }
         return inputs;
     }
@@ -404,6 +497,12 @@ std::vector<uint32_t> RMSNorm::inputPortIndicesForTensor(Tensor tensor) const {
             }
             if (tensor.getOriginalId() == raggedFeatureInputs[i].getOffsets().getOriginalId()) {
                 ports.push_back(i * 2 + 1);
+            }
+        }
+        const uint32_t firstAuxPort = static_cast<uint32_t>(raggedFeatureInputs.size() * 2);
+        for (uint32_t i = 0; i < epilogueInputBindings.size(); ++i) {
+            if (tensor.getOriginalId() == epilogueInputBindings[i].second.getOriginalId()) {
+                ports.push_back(firstAuxPort + i);
             }
         }
         return ports;
@@ -433,6 +532,15 @@ std::vector<Tensor> RMSNorm::getOutputsFromInput(Tensor inputTensor) {
         if (inputPortIndicesForTensor(inputTensor).empty()) {
             throw std::runtime_error("RMSNorm received an unknown ragged input tensor.");
         }
+        if (!epilogueInputBindings.empty()) {
+            if (emittedFeatureOutputAfterAllInputsConnected) return {};
+            const uint32_t requiredInputPorts =
+                static_cast<uint32_t>(raggedFeatureInputs.size() * 2 + epilogueInputBindings.size());
+            if (connectedInputPortIndices.size() != requiredInputPorts) return {};
+            emittedFeatureOutputAfterAllInputsConnected = true;
+            return {featureOutputs[0]};
+        }
+
         std::vector<Tensor> readyOutputs;
         for (uint32_t applicationIndex = 0; applicationIndex < raggedFeatureInputs.size(); ++applicationIndex) {
             const uint32_t valuesPort = applicationIndex * 2;
@@ -574,7 +682,7 @@ RMSNorm RMSNorm::Builder::build() {
         throw invalid_argument("RMSNorm epilogue auxiliary inputs currently require exactly one feature input.");
     }
 
-    RMSNorm layer(_epilogue, _epilogueInputBindings);
+    RMSNorm layer(_epilogue, _epilogueInputBindings, _raggedEpilogueInputBindings);
     layer.featureInputs = _featureInputs;
     layer.raggedFeatureInputs = _raggedFeatureInputs;
     layer.normalizedShape = _normalizedShape;
@@ -661,8 +769,9 @@ void RMSNorm::Builder::verifyConfig() const {
         if (_raggedFeatureInputs.size() != _featureInputs.size()) {
             throw invalid_argument("RMSNorm cannot mix dense and ragged feature inputs.");
         }
-        if (!_epilogueInputBindings.empty()) {
-            throw invalid_argument("RMSNorm(RaggedTensor) does not yet support epilogue auxiliary inputs.");
+        if (_epilogueInputBindings.size() != _raggedEpilogueInputBindings.size()) {
+            throw invalid_argument(
+                "RMSNorm(RaggedTensor) epilogue auxiliary inputs must be RaggedTensor values with the exact feature row partition.");
         }
         for (uint32_t i = 0; i < _raggedFeatureInputs.size(); ++i) {
             const RaggedTensor& ragged = _raggedFeatureInputs[i];
@@ -678,6 +787,26 @@ void RMSNorm::Builder::verifyConfig() const {
             }
             RMSNorm::validateNormalizedShapeForInput(trailingDims, _normalizedShape);
         }
+        if (!_raggedEpilogueInputBindings.empty()) {
+            if (_raggedFeatureInputs.size() != 1) {
+                throw invalid_argument("RMSNorm ragged epilogue auxiliary inputs require exactly one feature input.");
+            }
+            const RaggedTensor& feature = _raggedFeatureInputs.front();
+            for (const auto& [name, auxiliary] : _raggedEpilogueInputBindings) {
+                const bool sameMaxValuesPerRow =
+                    auxiliary.hasMaxValuesPerRow() == feature.hasMaxValuesPerRow() &&
+                    (!feature.hasMaxValuesPerRow() || auxiliary.getMaxValuesPerRow() == feature.getMaxValuesPerRow());
+                if (auxiliary.getOffsets() != feature.getOffsets() ||
+                    auxiliary.getBatchSize() != feature.getBatchSize() ||
+                    auxiliary.getMaxTotalValues() != feature.getMaxTotalValues() ||
+                    !sameMaxValuesPerRow) {
+                    throw invalid_argument("RMSNorm ragged epilogue input '" + name +
+                                           "' must preserve the exact feature-input row partition.");
+                }
+            }
+        }
+    } else if (!_raggedEpilogueInputBindings.empty()) {
+        throw invalid_argument("RMSNorm dense feature input cannot use ragged epilogue auxiliary inputs.");
     }
 
     for (const auto& [name, tensor] : _epilogueInputBindings) {
@@ -717,7 +846,6 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
     const uint64_t hidden = RMSNorm::checkedFeatureCount(normalizedShape, "normalizedShape");
     std::vector<std::string> inputNames = {"feature_input"};
     std::vector<std::string> auxNames = epilogueAuxInputNames();
-    inputNames.insert(inputNames.end(), auxNames.begin(), auxNames.end());
 
     // A ragged RMSNorm API layer has one physical implementation shared by all of
     // its values/offsets edges. Stamping may begin from either edge, so do not infer
@@ -734,6 +862,7 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
     if (rowPartitionInputName.has_value()) {
         inputNames.push_back(rowPartitionInputName.value());
     }
+    inputNames.insert(inputNames.end(), auxNames.begin(), auxNames.end());
 
     ThorImplementation::DynamicExpression expression = buildRmsNormExpression(
         placement,
@@ -756,7 +885,8 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
             placement,
             physicalParameters,
             inferenceOnly,
-            getId());
+            getId(),
+            static_cast<uint32_t>(auxNames.size()));
     } else {
         physicalRmsNorm = make_shared<ThorImplementation::CustomLayer>(
             std::move(expression),
@@ -774,7 +904,7 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
 json RMSNorm::architectureJson() const {
     json j;
     j["factory"] = Layer::Factory::Learning.value();
-    j["version"] = getLayerVersion();
+    j["version"] = (!raggedFeatureInputs.empty() && !raggedEpilogueInputBindings.empty()) ? "1.1.0" : getLayerVersion();
     j["layer_type"] = "rms_norm";
     j["layer_name"] = string("layer") + to_string(getId());
     j["normalized_shape"] = normalizedShape;
@@ -803,8 +933,15 @@ json RMSNorm::architectureJson() const {
     j["inputs"] = inputs;
 
     json epilogueInputs = json::array();
-    for (const auto& [name, tensor] : epilogueInputBindings) {
-        epilogueInputs.push_back(json{{"name", name}, {"tensor", tensor.architectureJson()}});
+    for (uint32_t i = 0; i < epilogueInputBindings.size(); ++i) {
+        const auto& [name, tensor] = epilogueInputBindings[i];
+        json binding{{"name", name}, {"tensor", tensor.architectureJson()}};
+        if (!raggedEpilogueInputBindings.empty()) {
+            THOR_THROW_IF_FALSE(i < raggedEpilogueInputBindings.size());
+            THOR_THROW_IF_FALSE(raggedEpilogueInputBindings[i].first == name);
+            binding["ragged_tensor"] = raggedEpilogueInputBindings[i].second.architectureJson();
+        }
+        epilogueInputs.push_back(std::move(binding));
     }
     j["epilogue_inputs"] = epilogueInputs;
 
@@ -827,18 +964,37 @@ json RMSNorm::serialize(thor_file::TarWriter& archiveWriter,
 }
 
 void RMSNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
-    if (j.at("version").get<string>() != "1.0.0")
-        throw runtime_error("Unsupported version in RMSNorm::deserialize: " + j.at("version").get<string>());
+    const string serializedVersion = j.at("version").get<string>();
+    if (serializedVersion != "1.0.0" && serializedVersion != "1.1.0")
+        throw runtime_error("Unsupported version in RMSNorm::deserialize: " + serializedVersion);
     if (j.at("layer_type").get<string>() != "rms_norm")
         throw runtime_error("Layer type mismatch in RMSNorm::deserialize: " + j.at("layer_type").get<string>());
 
     std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
+    std::vector<std::pair<std::string, RaggedTensor>> raggedEpilogueInputBindings;
     if (j.contains("epilogue_inputs")) {
         for (const json& epilogueInputJson : j.at("epilogue_inputs")) {
             std::string inputName = epilogueInputJson.at("name").get<std::string>();
             validateEpilogueAuxInputName(inputName);
             uint64_t originalTensorId = epilogueInputJson.at("tensor").at("id").get<uint64_t>();
-            epilogueInputBindings.emplace_back(inputName, network->getApiTensorByOriginalId(originalTensorId));
+            Tensor values = network->getApiTensorByOriginalId(originalTensorId);
+            epilogueInputBindings.emplace_back(inputName, values);
+            if (epilogueInputJson.contains("ragged_tensor")) {
+                const json& raggedJson = epilogueInputJson.at("ragged_tensor");
+                if (raggedJson.at("values").at("id").get<uint64_t>() != originalTensorId) {
+                    throw runtime_error("RMSNorm serialized ragged epilogue input values metadata is inconsistent.");
+                }
+                const uint64_t offsetsId = raggedJson.at("offsets").at("id").get<uint64_t>();
+                Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
+                RaggedTensor ragged = raggedJson.contains("max_values_per_row")
+                    ? RaggedTensor(values, offsets, raggedJson.at("max_values_per_row").get<uint64_t>())
+                    : RaggedTensor(values, offsets);
+                if (ragged.getBatchSize() != raggedJson.at("batch_size").get<uint64_t>() ||
+                    ragged.getMaxTotalValues() != raggedJson.at("max_total_values").get<uint64_t>()) {
+                    throw runtime_error("RMSNorm serialized ragged epilogue input metadata does not match reconstructed tensors.");
+                }
+                raggedEpilogueInputBindings.emplace_back(inputName, ragged);
+            }
         }
     }
     std::vector<std::string> auxInputNames;
@@ -855,6 +1011,8 @@ void RMSNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const
         epilogue = epilogueExpressionFromDefinition(epilogueDefinition, auxInputNames);
     } else if (!epilogueInputBindings.empty()) {
         throw runtime_error("RMSNorm serialized epilogue_inputs require a non-null epilogue expression.");
+    // Backward compatibility for archives from the old fused-activation API:
+    // translate the legacy field into the canonical expression representation.
     } else if (j.contains("fused_activation") &&
                ThorImplementation::cudnnRmsNormFusedActivationFromString(j.at("fused_activation").get<string>()) ==
                    ThorImplementation::CudnnRmsNormFusedActivation::SWISH) {
@@ -862,7 +1020,11 @@ void RMSNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const
         epilogue = swish.toExpression(RMSNorm::epilogueInput());
     }
 
-    RMSNorm layer(epilogue, epilogueInputBindings);
+    if (!raggedEpilogueInputBindings.empty() && serializedVersion != "1.1.0") {
+        throw runtime_error("RMSNorm serialized ragged epilogue inputs require archive version 1.1.0.");
+    }
+
+    RMSNorm layer(epilogue, epilogueInputBindings, raggedEpilogueInputBindings);
     layer.normalizedShape = j.at("normalized_shape").get<vector<uint64_t>>();
     layer.epsilon = j.at("epsilon").get<double>();
     layer.parameterDataType = j.at("parameter_data_type").get<DataType>();
@@ -907,6 +1069,34 @@ void RMSNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const
                 throw runtime_error("RMSNorm serialized ragged output must preserve the input row partition and capacity metadata.");
             }
         }
+    }
+    if (useRagged) {
+        if (layer.epilogueInputBindings.size() != layer.raggedEpilogueInputBindings.size()) {
+            throw runtime_error("RMSNorm serialized ragged epilogue auxiliary inputs must carry ragged metadata.");
+        }
+        if (!layer.raggedEpilogueInputBindings.empty()) {
+            if (serializedVersion != "1.1.0") {
+                throw runtime_error("RMSNorm serialized ragged epilogue inputs require archive version 1.1.0.");
+            }
+            if (layer.raggedFeatureInputs.size() != 1) {
+                throw runtime_error("RMSNorm serialized ragged epilogue inputs require exactly one feature input.");
+            }
+            const RaggedTensor& feature = layer.raggedFeatureInputs.front();
+            for (const auto& [name, auxiliary] : layer.raggedEpilogueInputBindings) {
+                const bool sameMaxValuesPerRow =
+                    auxiliary.hasMaxValuesPerRow() == feature.hasMaxValuesPerRow() &&
+                    (!feature.hasMaxValuesPerRow() || auxiliary.getMaxValuesPerRow() == feature.getMaxValuesPerRow());
+                if (auxiliary.getOffsets() != feature.getOffsets() ||
+                    auxiliary.getBatchSize() != feature.getBatchSize() ||
+                    auxiliary.getMaxTotalValues() != feature.getMaxTotalValues() ||
+                    !sameMaxValuesPerRow) {
+                    throw runtime_error("RMSNorm serialized ragged epilogue input '" + name +
+                                        "' does not preserve the feature row partition.");
+                }
+            }
+        }
+    } else if (!layer.raggedEpilogueInputBindings.empty()) {
+        throw runtime_error("RMSNorm dense serialized epilogue inputs cannot contain ragged metadata.");
     }
     for (uint32_t i = 0; i < layer.featureInputs.size(); ++i) {
         layer.outputTensorFromInputTensor[layer.featureInputs[i]] = layer.featureOutputs[i];

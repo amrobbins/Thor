@@ -4,6 +4,7 @@
 #include "DeepLearning/Api/Layers/Utility/ScaleGradient.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 #include <optional>
 #include <utility>
@@ -20,9 +21,17 @@ void bind_scale_gradient(nb::module_ &m) {
 
     scale_gradient.def(
         "__init__",
-        [](ScaleGradient *self, Network &network, const Tensor &feature_input, float scale) {
+        [](ScaleGradient *self, Network &network, nb::object feature_input, float scale) {
             ScaleGradient::Builder builder;
-            ScaleGradient built = builder.network(network).featureInput(feature_input).scale(scale).build();
+            builder.network(network);
+            if (nb::isinstance<RaggedTensor>(feature_input)) {
+                builder.featureInput(nb::cast<RaggedTensor>(feature_input));
+            } else if (nb::isinstance<Tensor>(feature_input)) {
+                builder.featureInput(nb::cast<Tensor>(feature_input));
+            } else {
+                throw nb::type_error("ScaleGradient feature_input must be thor.Tensor or thor.RaggedTensor.");
+            }
+            ScaleGradient built = builder.scale(scale).build();
             new (self) ScaleGradient(std::move(built));
         },
         "network"_a,
@@ -31,7 +40,7 @@ void bind_scale_gradient(nb::module_ &m) {
         R"nbdoc(
 Create and attach a ScaleGradient layer to a Network.
 
-Forward is an identity alias of ``feature_input``. During backward propagation,
+Forward is an identity alias of ``feature_input``. Ragged inputs preserve their exact row partition. During backward propagation,
 the gradient passed upstream is multiplied by ``scale``. The downstream branch
 and any trainable layers after ScaleGradient receive their ordinary gradients.
 
@@ -41,13 +50,16 @@ path. Negative scales are allowed and can be used for gradient reversal.
 
     scale_gradient.def(
         "get_feature_output",
-        [](ScaleGradient &self) -> Tensor {
-            std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-            return maybeFeatureOutput.value();
+        [](ScaleGradient &self) -> nb::object {
+            if (std::optional<RaggedTensor> raggedOutput = self.getRaggedFeatureOutput(); raggedOutput.has_value()) {
+                return nb::cast(raggedOutput.value());
+            }
+            return nb::cast(self.getFeatureOutput().value());
         },
         R"nbdoc(
-Return the output tensor produced by this layer.
+Return the logical output produced by this layer. Ragged inputs return a thor.RaggedTensor.
 )nbdoc");
 
+    scale_gradient.def("get_use_ragged", &ScaleGradient::getUseRagged);
     scale_gradient.def("get_scale", &ScaleGradient::getScale, R"nbdoc(Return the backward gradient scale.)nbdoc");
 }

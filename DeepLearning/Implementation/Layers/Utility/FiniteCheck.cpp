@@ -1,6 +1,8 @@
 #include "DeepLearning/Implementation/Layers/Utility/FiniteCheck.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
@@ -14,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -38,6 +41,7 @@ double finiteCheckCpuToDouble(T value) {
 template <typename T>
 FiniteCheckResult checkCpuTyped(const T *data, uint64_t numElements, uint32_t maxReportedIndices) {
     FiniteCheckResult result{};
+    result.checkedElements = numElements;
     for (uint64_t index = 0; index < numElements; ++index) {
         const double value = finiteCheckCpuToDouble(data[index]);
         FiniteCheckSampleKind kind = FiniteCheckSampleKind::NONE;
@@ -102,7 +106,8 @@ FiniteCheck::FiniteCheck(std::string tensorLabel,
                          bool checkBackward,
                          bool failOnNonFinite,
                          uint32_t maxReportedIndices,
-                         bool enabled)
+                         bool enabled,
+                         std::optional<RaggedConfiguration> raggedConfiguration)
     : tensorLabel(std::move(tensorLabel)),
       apiTensorId(apiTensorId),
       originalApiTensorId(originalApiTensorId),
@@ -110,12 +115,23 @@ FiniteCheck::FiniteCheck(std::string tensorLabel,
       enabled(enabled),
       checkBackward(checkBackward),
       failOnNonFinite(failOnNonFinite),
-      maxReportedIndices(maxReportedIndices) {
+      maxReportedIndices(maxReportedIndices),
+      raggedConfiguration(raggedConfiguration) {
     if (!checkForward && !checkBackward)
         throw std::invalid_argument("FiniteCheck must check forward, backward, or both.");
     if (maxReportedIndices > FINITE_CHECK_MAX_REPORTED_INDICES) {
         throw std::invalid_argument("FiniteCheck maxReportedIndices exceeds the supported maximum of " +
                                     std::to_string(FINITE_CHECK_MAX_REPORTED_INDICES) + ".");
+    }
+    if (this->raggedConfiguration.has_value()) {
+        const RaggedConfiguration& config = this->raggedConfiguration.value();
+        if (config.batchSize == 0 || config.maxTotalValues == 0 || config.elementsPerValue == 0 ||
+            !RowPartitionDescriptor::isValidOffsetsDataType(config.offsetsDataType)) {
+            throw std::invalid_argument("Ragged FiniteCheck configuration is invalid.");
+        }
+        if (config.maxTotalValues > std::numeric_limits<uint64_t>::max() / config.elementsPerValue) {
+            throw std::overflow_error("Ragged FiniteCheck packed element capacity overflows uint64_t.");
+        }
     }
 }
 
@@ -133,9 +149,82 @@ std::optional<Tensor> FiniteCheck::createFeatureOutputTensor() {
     return featureInput.value();
 }
 
+std::optional<Tensor> FiniteCheck::connectToPreviousLayer(
+    Layer *previousLayer,
+    std::optional<Tensor> connectedInput,
+    Stream connectedStream,
+    bool backPropagateError,
+    int connectionType) {
+    if (!raggedConfiguration.has_value()) {
+        THOR_THROW_IF_FALSE(connectionType == 0);
+        return Layer::connectToPreviousLayer(previousLayer, connectedInput, connectedStream, backPropagateError, connectionType);
+    }
+
+    if (connectionType == 0) {
+        std::optional<Tensor> result =
+            Layer::connectToPreviousLayer(previousLayer, connectedInput, connectedStream, backPropagateError, connectionType);
+        if (rowPartitionInput.has_value()) validateRaggedInputs();
+        return result;
+    }
+    if (connectionType != 1)
+        throw std::runtime_error("Ragged FiniteCheck received an unknown physical input port.");
+
+    THOR_THROW_IF_FALSE(!compiled);
+    THOR_THROW_IF_FALSE(previousLayer != nullptr);
+    THOR_THROW_IF_FALSE(connectedInput.has_value());
+    THOR_THROW_IF_FALSE(!rowPartitionInput.has_value());
+    rowPartitionInput = connectedInput.value();
+    rowPartitionStream = connectedStream;
+    if (featureInput.has_value()) validateRaggedInputs();
+    // Canonical offsets are a structural forward dependency. They never receive gradients.
+    return std::nullopt;
+}
+
 void FiniteCheck::connectToNextLayer(Layer *nextLayer, int driverConnectionType, int loaderConnectionType) {
     Layer::connectToNextLayer(nextLayer, driverConnectionType, loaderConnectionType);
     fuseBackwardAlias();
+}
+
+void FiniteCheck::forward(std::optional<Tensor> arrivingInput, bool validationPass, uint32_t batchSize) {
+    if (!raggedConfiguration.has_value()) {
+        Layer::forward(arrivingInput, validationPass, batchSize);
+        return;
+    }
+
+    THOR_THROW_IF_FALSE(arrivingInput.has_value());
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    THOR_THROW_IF_FALSE(rowPartitionInput.has_value());
+    const bool valuesArrival = arrivingInput.value() == featureInput.value();
+    const bool partitionArrival = arrivingInput.value() == rowPartitionInput.value();
+    THOR_THROW_IF_FALSE(valuesArrival || partitionArrival);
+
+    // Disabled diagnostics are a zero-cost values identity. The structural edge
+    // remains present in the graph but does not need to delay values execution.
+    if (!enabled) {
+        if (partitionArrival) return;
+        Layer::forward(featureInput, validationPass, batchSize);
+        return;
+    }
+
+    if (!pendingRaggedValidationPass.has_value()) {
+        pendingRaggedValidationPass = validationPass;
+        pendingRaggedBatchSize = batchSize;
+    } else {
+        THOR_THROW_IF_FALSE(pendingRaggedValidationPass.value() == validationPass);
+        THOR_THROW_IF_FALSE(pendingRaggedBatchSize.value() == batchSize);
+    }
+    if (valuesArrival) raggedValuesArrived = true;
+    if (partitionArrival) raggedPartitionArrived = true;
+    if (!raggedValuesArrived || !raggedPartitionArrived) return;
+
+    const bool resolvedValidationPass = pendingRaggedValidationPass.value();
+    const uint32_t resolvedBatchSize = pendingRaggedBatchSize.value();
+    resetRaggedForwardArrivalState();
+
+    // Values are executed on Layer::stream. Join the structural producer before
+    // the diagnostic kernel dereferences offsets[B].
+    stream.waitFor(rowPartitionStream, rowPartitionReadyEvent);
+    Layer::forward(featureInput, resolvedValidationPass, resolvedBatchSize);
 }
 
 void FiniteCheck::fuseBackwardAlias() {
@@ -148,9 +237,29 @@ void FiniteCheck::fuseBackwardAlias() {
     errorOutput = errorInput;
 }
 
+void FiniteCheck::validateRaggedInputs() const {
+    THOR_THROW_IF_FALSE(raggedConfiguration.has_value());
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    THOR_THROW_IF_FALSE(rowPartitionInput.has_value());
+    const RaggedConfiguration& config = raggedConfiguration.value();
+    if (featureInput->getTotalNumElements() != config.maxTotalValues * config.elementsPerValue) {
+        throw std::runtime_error("Ragged FiniteCheck values input does not match its configured packed capacity.");
+    }
+    const TensorDescriptor offsetsDescriptor = rowPartitionInput->getDescriptor();
+    if (offsetsDescriptor.getDimensions() != std::vector<uint64_t>{config.batchSize + 1} ||
+        offsetsDescriptor.getDataType() != config.offsetsDataType ||
+        !rowPartitionInput->isDenseContiguous() || rowPartitionInput->getStorageElementOffset() != 0) {
+        throw std::runtime_error("Ragged FiniteCheck offsets input does not match its canonical row partition descriptor.");
+    }
+    if (featureInput->getPlacement() != rowPartitionInput->getPlacement()) {
+        throw std::runtime_error("Ragged FiniteCheck values and offsets must have the same placement.");
+    }
+}
+
 void FiniteCheck::compileImpl() {
     Layer::compileImpl();
     THOR_THROW_IF_FALSE(featureInput.has_value());
+    if (raggedConfiguration.has_value()) validateRaggedInputs();
 
     if (!enabled)
         return;
@@ -173,6 +282,8 @@ void FiniteCheck::cleanup() {
         CUDA_CHECK(cudaFree(gpuResult));
         gpuResult = nullptr;
     }
+    resetRaggedForwardArrivalState();
+    rowPartitionReadyEvent = Event();
     Layer::cleanup();
 }
 
@@ -180,8 +291,12 @@ void FiniteCheck::infer(std::optional<Tensor> inputTensor, std::optional<Tensor>
     (void)outputTensor;
     if (!enabled)
         return;
-    if (checkForward && inputTensor.has_value())
-        checkTensor(inputTensor.value(), "forward", "activation", stream);
+    if (checkForward && inputTensor.has_value()) {
+        if (raggedConfiguration.has_value())
+            checkRaggedTensor(inputTensor.value(), "forward", "activation", stream);
+        else
+            checkTensor(inputTensor.value(), "forward", "activation", stream);
+    }
 }
 
 void FiniteCheck::backProp(std::optional<Tensor> dataIn,
@@ -192,8 +307,12 @@ void FiniteCheck::backProp(std::optional<Tensor> dataIn,
     (void)errorOut;
     if (!enabled)
         return;
-    if (checkBackward && errorIn.has_value())
-        checkTensor(errorIn.value(), "backward", "incoming_gradient", stream);
+    if (checkBackward && errorIn.has_value()) {
+        if (raggedConfiguration.has_value())
+            checkRaggedTensor(errorIn.value(), "backward", "incoming_gradient", stream);
+        else
+            checkTensor(errorIn.value(), "backward", "incoming_gradient", stream);
+    }
 }
 
 void FiniteCheck::checkTensor(const Tensor &tensor, const char *direction, const char *tensorRole, Stream stream) {
@@ -214,7 +333,7 @@ void FiniteCheck::checkTensor(const Tensor &tensor, const char *direction, const
         // CPU layer kernels may be queued as CUDA host functions on this stream.
         // Wait before directly reading the aliased host tensor.
         stream.synchronize();
-        result = checkCpuTensor(tensor);
+        result = checkCpuTensor(tensor, tensor.getTotalNumElements());
     } else {
         cudaStreamCaptureStatus captureStatus = cudaStreamCaptureStatusNone;
         CUDA_CHECK(cudaStreamIsCapturing(stream.getStream(), &captureStatus));
@@ -245,20 +364,85 @@ void FiniteCheck::checkTensor(const Tensor &tensor, const char *direction, const
     std::cerr << message << std::endl;
 }
 
-FiniteCheckResult FiniteCheck::checkCpuTensor(const Tensor &tensor) const {
+void FiniteCheck::checkRaggedTensor(const Tensor &tensor, const char *direction, const char *tensorRole, Stream stream) {
+    THOR_THROW_IF_FALSE(raggedConfiguration.has_value());
+    THOR_THROW_IF_FALSE(rowPartitionInput.has_value());
+    if (TensorDescriptor::isIntegralType(tensor.getDataType()) || tensor.getTotalNumElements() == 0)
+        return;
+
+    std::lock_guard<std::mutex> checkLock(checkMutex);
+    if (!tensor.isDenseContiguous()) {
+        throw std::runtime_error("Ragged FiniteCheck requires dense contiguous packed values. label=\"" +
+                                 (tensorLabel.empty() ? std::string("<unnamed>") : tensorLabel) + "\" direction=" + direction +
+                                 " dtype=" + TensorDescriptor::getElementTypeName(tensor.getDataType()));
+    }
+    validateRaggedInputs();
+    const RaggedConfiguration& config = raggedConfiguration.value();
+    const uint64_t expectedElements = config.maxTotalValues * config.elementsPerValue;
+    if (tensor.getTotalNumElements() != expectedElements ||
+        tensor.getPlacement() != rowPartitionInput->getPlacement()) {
+        throw std::runtime_error("Ragged FiniteCheck checked tensor does not match the configured packed values capacity/placement.");
+    }
+
+    FiniteCheckResult result{};
+    if (tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+        stream.synchronize();
+        RowPartitionRuntime rowPartition(
+            rowPartitionInput.value(),
+            RowPartitionDescriptor(config.batchSize, config.maxTotalValues, config.offsetsDataType));
+        const uint64_t activeValues = rowPartition.requireHostActiveValueCount();
+        const uint64_t activeElements = activeValues * config.elementsPerValue;
+        result = checkCpuTensor(tensor, activeElements);
+    } else {
+        cudaStreamCaptureStatus captureStatus = cudaStreamCaptureStatusNone;
+        CUDA_CHECK(cudaStreamIsCapturing(stream.getStream(), &captureStatus));
+        if (captureStatus != cudaStreamCaptureStatusNone) {
+            throw std::runtime_error("FiniteCheck cannot execute during CUDA graph capture. Disable graph capture while using diagnostic "
+                                     "FiniteCheck layers.");
+        }
+        THOR_THROW_IF_FALSE(gpuResult != nullptr);
+        ScopedGpu scopedGpu(tensor.getPlacement().getDeviceNum());
+        CUDA_CHECK(cudaMemsetAsync(gpuResult, 0, sizeof(FiniteCheckResult), stream.getStream()));
+        launchRaggedFiniteCheck(tensor.getMemPtr(),
+                                tensor.getDataType(),
+                                rowPartitionInput->getMemPtr(),
+                                config.offsetsDataType,
+                                config.batchSize,
+                                config.maxTotalValues,
+                                config.elementsPerValue,
+                                maxReportedIndices,
+                                gpuResult,
+                                stream);
+        CUDA_CHECK(cudaMemcpyAsync(&result, gpuResult, sizeof(FiniteCheckResult), cudaMemcpyDeviceToHost, stream.getStream()));
+        stream.synchronize();
+    }
+
+    if (result.totalNonFinite == 0)
+        return;
+
+    const std::string message = formatFailure(tensor, direction, tensorRole, result);
+    if (failOnNonFinite)
+        throw std::runtime_error(message);
+
+    std::lock_guard<std::mutex> lock(finiteCheckReportMutex);
+    std::cerr << message << std::endl;
+}
+
+FiniteCheckResult FiniteCheck::checkCpuTensor(const Tensor &tensor, uint64_t numElements) const {
+    THOR_THROW_IF_FALSE(numElements <= tensor.getTotalNumElements());
     switch (tensor.getDataType()) {
         case DataType::FP8_E4M3:
-            return checkCpuTyped(static_cast<const __nv_fp8_e4m3 *>(tensor.getMemPtr()), tensor.getTotalNumElements(), maxReportedIndices);
+            return checkCpuTyped(static_cast<const __nv_fp8_e4m3 *>(tensor.getMemPtr()), numElements, maxReportedIndices);
         case DataType::FP8_E5M2:
-            return checkCpuTyped(static_cast<const __nv_fp8_e5m2 *>(tensor.getMemPtr()), tensor.getTotalNumElements(), maxReportedIndices);
+            return checkCpuTyped(static_cast<const __nv_fp8_e5m2 *>(tensor.getMemPtr()), numElements, maxReportedIndices);
         case DataType::FP16:
-            return checkCpuTyped(static_cast<const half *>(tensor.getMemPtr()), tensor.getTotalNumElements(), maxReportedIndices);
+            return checkCpuTyped(static_cast<const half *>(tensor.getMemPtr()), numElements, maxReportedIndices);
         case DataType::BF16:
-            return checkCpuTyped(static_cast<const __nv_bfloat16 *>(tensor.getMemPtr()), tensor.getTotalNumElements(), maxReportedIndices);
+            return checkCpuTyped(static_cast<const __nv_bfloat16 *>(tensor.getMemPtr()), numElements, maxReportedIndices);
         case DataType::FP32:
-            return checkCpuTyped(static_cast<const float *>(tensor.getMemPtr()), tensor.getTotalNumElements(), maxReportedIndices);
+            return checkCpuTyped(static_cast<const float *>(tensor.getMemPtr()), numElements, maxReportedIndices);
         case DataType::FP64:
-            return checkCpuTyped(static_cast<const double *>(tensor.getMemPtr()), tensor.getTotalNumElements(), maxReportedIndices);
+            return checkCpuTyped(static_cast<const double *>(tensor.getMemPtr()), numElements, maxReportedIndices);
         default:
             throw std::invalid_argument("FiniteCheck CPU scan only accepts floating-point tensor storage types.");
     }
@@ -276,6 +460,7 @@ std::string FiniteCheck::formatFailure(const Tensor &tensor,
         << " api_tensor_id=" << apiTensorId << " original_api_tensor_id=" << originalApiTensorId
         << " physical_tensor_id=" << tensor.getTensorId() << " dtype=" << TensorDescriptor::getElementTypeName(tensor.getDataType())
         << " shape=" << dimensionsString(tensor.getDimensions()) << " elements=" << tensor.getTotalNumElements()
+        << " checked_elements=" << result.checkedElements
         << " non_finite=" << result.totalNonFinite << " nan=" << result.nanCount
         << " positive_infinity=" << result.positiveInfinityCount << " negative_infinity=" << result.negativeInfinityCount;
 
@@ -295,6 +480,13 @@ std::string FiniteCheck::formatFailure(const Tensor &tensor,
     if (!failOnNonFinite)
         out << " action=report_only";
     return out.str();
+}
+
+void FiniteCheck::resetRaggedForwardArrivalState() {
+    raggedValuesArrived = false;
+    raggedPartitionArrived = false;
+    pendingRaggedValidationPass.reset();
+    pendingRaggedBatchSize.reset();
 }
 
 }  // namespace ThorImplementation

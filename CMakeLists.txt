@@ -1554,6 +1554,74 @@ add_custom_target(check-retained-ragged-training-production-gate
         VERBATIM
 )
 
+# R1 rank-1 ragged support qualification. This gathers the canonical boundary,
+# public API, partition-preservation, poisoned-tail, changing-runtime-extent,
+# save/load/clone, mixed-attention and representative backward regressions into
+# one executable contract gate. The disabled preflight prevents a GPU-less
+# machine from passing because constituent CUDA tests skipped. The heavier T10
+# retained-Conv1D performance qualification remains its own dedicated gate.
+set(THOR_RAGGED_SUPPORT_CONTRACT_GTEST_FILTER
+        "RaggedSupportContract.*:
+RaggedTensorApi.*:
+RaggedNetworkInputApi.*:
+RaggedNetworkOutputApi.*:
+RaggedTransformerCompleteness.*:
+Activations.ShapePreservingBuildersInferRaggedFromInputAndPreserveOffsets:
+GatedLinearUnits.Ragged*:
+FullyConnectedApi.Ragged*:
+EmbeddingApi.Ragged*:
+EmbeddingRaggedRuntimeTest.*:
+UtilityApiLayers.RaggedRMSNorm*:
+UtilityApiLayers.RaggedLayerNorm*:
+UtilityApiLayers.RaggedAdaptiveLayerNorm*:
+UtilityApiLayers.RaggedStopGradient*:
+UtilityApiLayers.RaggedScaleGradient*:
+UtilityApiLayers.RaggedReshape*:
+UtilityApiLayers.RaggedFlatten*:
+UtilityApiLayers.RaggedTranspose*:
+UtilityApiLayers.RaggedFiniteCheck*:
+FiniteCheck.Ragged*:
+UtilityApiLayers.RaggedDropOut*:
+DropOut.Ragged*:
+UtilityApiLayers.RaggedConcatenate*:
+UtilityApiLayers.RaggedSequenceConcatenate*:
+RaggedSequenceConcatenate.*:
+UtilityApiLayers.RaggedSequenceSlice*:
+RaggedSequenceSlice.*:
+UtilityApiLayers.RaggedFilter*:
+RaggedFilter.*:
+UtilityApiLayers.RaggedGather*:
+RaggedGather.*:
+UtilityApiLayers.RaggedDenseAdapters*:
+RaggedDenseAdapters.*:
+UtilityApiLayers.TypeConverterRagged*:
+SegmentedReductionApi.*:
+SegmentedPrimitiveApi.*:
+RaggedCustomLayer.*:
+AttentionApi.*Ragged*:
+CudnnMixedRaggedAttention.*:
+CtcRaggedArchitecture.*:
+RaggedCtcEndToEnd.*:
+TrainingRunsResult.Save*Ragged*:
+RaggedConvolution1dPublicIntegration.*:
+RaggedExpression.SegmentSumAndMeanAutodiffLowerThroughSegmentedBroadcast:
+RaggedExpression.TrailingTranspose*:
+RaggedExpression.*Segment*Softmax*")
+string(REPLACE "\n" "" THOR_RAGGED_SUPPORT_CONTRACT_GTEST_FILTER "${THOR_RAGGED_SUPPORT_CONTRACT_GTEST_FILTER}")
+
+add_custom_target(check-ragged-support-contract
+        COMMAND ${CMAKE_COMMAND} -E env
+        "THOR_R1_RAGGED_SUPPORT_GATE=1"
+        $<TARGET_FILE:thor_tests>
+        --gtest_color=yes
+        --gtest_also_run_disabled_tests
+        "--gtest_filter=${THOR_RAGGED_SUPPORT_CONTRACT_GTEST_FILTER}"
+        DEPENDS thor_tests
+        USES_TERMINAL
+        COMMENT "Thor: running R1 rank-1 ragged support qualification"
+        VERBATIM
+)
+
 # Per-configuration flags
 target_compile_definitions(thor_tests PRIVATE
         THOR_GTEST

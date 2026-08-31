@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/TensorOperations/Ragged/RuntimeExtent.h"
 
 #include <cstdint>
 #include <memory>
@@ -29,6 +30,17 @@ std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForward(const Tensor& 
                                                                  std::optional<uint64_t> paddingIndex,
                                                                  const EmbeddingForwardEpilogue& epilogue = {});
 
+// Ragged Embedding uses the row partition's authoritative active-value scalar
+// to bound lookup work.  The physical indices/output allocations still have
+// their placement-time packed capacity; values beyond activeValueCount are
+// undefined and must never be read or written by the logical operation.
+std::shared_ptr<PreparedEmbeddingForward> prepareEmbeddingForwardRagged(const Tensor& indices,
+                                                                       const Tensor& weights,
+                                                                       const Tensor& output,
+                                                                       std::optional<uint64_t> paddingIndex,
+                                                                       const RaggedRuntimeExtent& runtimeExtent,
+                                                                       const EmbeddingForwardEpilogue& epilogue = {});
+
 void launchPreparedEmbeddingForward(const PreparedEmbeddingForward& prepared,
                                     const Tensor& indices,
                                     const Tensor& weights,
@@ -41,6 +53,13 @@ void launchEmbeddingForward(const Tensor& indices,
                             Tensor& output,
                             std::optional<uint64_t> paddingIndex,
                             Stream stream);
+
+void launchEmbeddingForwardRagged(const Tensor& indices,
+                                  const Tensor& weights,
+                                  Tensor& output,
+                                  std::optional<uint64_t> paddingIndex,
+                                  const RaggedRuntimeExtent& runtimeExtent,
+                                  Stream stream);
 
 
 }  // namespace ThorImplementation

@@ -2085,16 +2085,57 @@ class BackwardGraphBuilder {
         if (view_dims.empty() || view_dims.size() != view_strides.size()) {
             throw std::runtime_error("AutoDiff strided-view backward requires view dimensions and strides with the same non-zero rank.");
         }
-        // The generated scatter kernel inverts a canonical, non-overlapping row-major-like strided view.
-        // Packed-QKV slices satisfy this: [B,S,H,D] strides [S*total,total,D,1].
-        uint64_t dense_tail = 1;
-        for (int64_t axis = static_cast<int64_t>(view_dims.size()) - 1; axis >= 0; --axis) {
-            if (view_dims[axis] == 0 || view_strides[axis] < dense_tail) {
-                throw std::runtime_error(
-                    "AutoDiff strided-view backward requires canonical non-overlapping row-major-like strides.");
+
+        // Match Expression::stridedViewBackward(): the scatter is valid for any
+        // positive-stride, non-overlapping view contained by the source storage.
+        // In particular, trailing transpose produces permutation strides such as
+        // [24, 12, 1, 4], which are not monotonic in logical-axis order.
+        std::vector<size_t> axes_by_stride(view_dims.size());
+        for (size_t axis = 0; axis < axes_by_stride.size(); ++axis) axes_by_stride[axis] = axis;
+        std::sort(axes_by_stride.begin(), axes_by_stride.end(), [&](size_t lhs, size_t rhs) {
+            if (view_strides[lhs] != view_strides[rhs]) {
+                return view_strides[lhs] < view_strides[rhs];
             }
-            dense_tail *= view_dims[axis];
+            const bool lhs_is_unit = view_dims[lhs] == 1;
+            const bool rhs_is_unit = view_dims[rhs] == 1;
+            if (lhs_is_unit != rhs_is_unit) return lhs_is_unit;
+            return lhs < rhs;
+        });
+
+        uint64_t source_numel = 1;
+        for (uint64_t dim : source_dims) {
+            if (dim == 0 || dim == std::numeric_limits<uint64_t>::max()) {
+                throw std::runtime_error(
+                    "AutoDiff strided-view backward requires concrete non-zero source dimensions.");
+            }
+            if (source_numel > std::numeric_limits<uint64_t>::max() / dim) {
+                throw std::runtime_error("AutoDiff strided-view backward source element count overflows uint64_t.");
+            }
+            source_numel *= dim;
         }
+
+        uint64_t occupied_span = 1;
+        for (size_t axis : axes_by_stride) {
+            const uint64_t dim = view_dims[axis];
+            const uint64_t stride = view_strides[axis];
+            if (dim == 0 || dim == std::numeric_limits<uint64_t>::max() || stride == 0 ||
+                (dim > 1 && stride < occupied_span)) {
+                throw std::runtime_error(
+                    "AutoDiff strided-view backward requires a non-overlapping positive-stride view.");
+            }
+            if (dim > 1 && stride > std::numeric_limits<uint64_t>::max() / (dim - 1)) {
+                throw std::runtime_error("AutoDiff strided-view backward view storage span overflows uint64_t.");
+            }
+            const uint64_t axis_span = stride * (dim - 1);
+            if (axis_span > std::numeric_limits<uint64_t>::max() - occupied_span) {
+                throw std::runtime_error("AutoDiff strided-view backward view storage span overflows uint64_t.");
+            }
+            occupied_span += axis_span;
+        }
+        if (view_element_offset >= source_numel || occupied_span > source_numel - view_element_offset) {
+            throw std::runtime_error("AutoDiff strided-view backward view exceeds its source storage.");
+        }
+
         ExprNode node{};
         node.op = ExprOp::STRIDED_VIEW_BACKWARD;
         node.lhs = grad_view;
@@ -3588,6 +3629,51 @@ static std::optional<std::vector<uint64_t>> inferPackedDenseSourceDimsForStrided
     for (uint64_t stride : strides) {
         if (stride == 0) {
             return std::nullopt;
+        }
+    }
+
+    // A full strided permutation of a packed dense source is unambiguous even
+    // without separately supplied forward dimensions. Reconstruct the source
+    // logical dimensions by walking axes in packed-storage order. This is the
+    // shape-free case used by trailing transpose, e.g.
+    //   view dims    [9, 2, 4, 3]
+    //   view strides [24, 12, 1, 4]
+    // which uniquely reconstructs source dims [9, 2, 3, 4].
+    // Require offset zero and exactly packed storage strides so slices/gapped
+    // aliases continue through the more specialized inference paths below.
+    if (node.view_element_offset == 0 && dims.size() >= 2) {
+        std::vector<size_t> axes_by_stride(dims.size());
+        for (size_t axis = 0; axis < axes_by_stride.size(); ++axis) axes_by_stride[axis] = axis;
+        std::sort(axes_by_stride.begin(), axes_by_stride.end(), [&](size_t lhs, size_t rhs) {
+            if (strides[lhs] != strides[rhs]) {
+                return strides[lhs] < strides[rhs];
+            }
+            const bool lhs_is_unit = dims[lhs] == 1;
+            const bool rhs_is_unit = dims[rhs] == 1;
+            if (lhs_is_unit != rhs_is_unit) return lhs_is_unit;
+            return lhs < rhs;
+        });
+
+        uint64_t expected_stride = 1;
+        bool packed_permutation = true;
+        for (size_t axis : axes_by_stride) {
+            if (strides[axis] != expected_stride) {
+                packed_permutation = false;
+                break;
+            }
+            if (expected_stride > std::numeric_limits<uint64_t>::max() / dims[axis]) {
+                packed_permutation = false;
+                break;
+            }
+            expected_stride *= dims[axis];
+        }
+        if (packed_permutation) {
+            std::vector<uint64_t> source_dims;
+            source_dims.reserve(dims.size());
+            for (auto it = axes_by_stride.rbegin(); it != axes_by_stride.rend(); ++it) {
+                source_dims.push_back(dims[*it]);
+            }
+            return source_dims;
         }
     }
 

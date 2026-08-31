@@ -178,7 +178,9 @@ TEST(AcceleratorBackendCachePolicy, DISABLED_GlobalBackendExecutionStateCachesAr
     // or process-style containers as an alternate ownership mechanism.
     const regex rawBackendHandleContainer(
         R"((?:std::)?(?:unordered_map|map|vector|deque|list)\s*<[^;{}]{0,2048}\b(?:cudnnHandle_t|cublasHandle_t|cublasLtHandle_t)\b[^;{}]{0,2048}>\s+[A-Za-z_][A-Za-z0-9_]*)");
-    expectNoProductionSourceMatches(root, rawBackendHandleContainer, "raw backend-handle containers");
+    EXPECT_EQ(filesMatching(root, rawBackendHandleContainer),
+              (set<string>{"Utilities/Common/Stream.cpp"}))
+        << "Only Stream may own a raw backend-handle container; its cuDNN handles are keyed by requesting host thread.";
 
     const regex staticRawBackendHandle(
         R"(\bstatic\s+(?:(?:std::)?optional\s*<\s*)?(?:cudnnHandle_t|cublasHandle_t|cublasLtHandle_t)\s*>?\s+[A-Za-z_][A-Za-z0-9_]*)");
@@ -201,7 +203,10 @@ TEST(AcceleratorBackendCachePolicy, BackendHandlesRemainStreamOwned) {
     EXPECT_EQ(helperHeader.find("cudnnHandle_t"), string::npos);
     EXPECT_FALSE(filesystem::exists(root / "Utilities/Common/CudnnHelper.cpp"));
 
-    EXPECT_NE(streamSource.find("optional<cudnnHandle_t> cudnnHandle"), string::npos);
+    EXPECT_NE(streamSource.find("unordered_map<thread::id, cudnnHandle_t> cudnnHandles"), string::npos);
+    EXPECT_NE(streamSource.find("const thread::id requestingThread = this_thread::get_id()"), string::npos);
+    EXPECT_NE(streamSource.find("state->cudnnHandles.find(requestingThread)"), string::npos);
+    EXPECT_NE(streamSource.find("state->cudnnHandles.emplace(requestingThread, handle)"), string::npos);
     EXPECT_NE(streamSource.find("optional<cublasHandle_t> cublasHandle"), string::npos);
     EXPECT_NE(streamSource.find("optional<cublasLtHandle_t> cublasLtHandle"), string::npos);
     EXPECT_NE(streamSource.find("cudnnSetStream(handle, state->cudaStream)"), string::npos);

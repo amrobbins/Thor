@@ -43,27 +43,7 @@ class UringDirect {
         initializeBackend(queueDepth);
     }
 
-    ~UringDirect() {
-        shutdownFallbackWorkersNoexcept();
-
-        // Unregister in reverse order (best-effort).
-        if (usesIoUring() && fileRegistered_) {
-            (void)io_uring_unregister_files(&ring_);
-            fileRegistered_ = false;
-        }
-        if (usesIoUring() && buffersRegistered_) {
-            (void)io_uring_unregister_buffers(&ring_);
-            buffersRegistered_ = false;
-        }
-        if (fd_ >= 0) {
-            ::close(fd_);
-            fd_ = -1;
-        }
-        if (ringInited_) {
-            io_uring_queue_exit(&ring_);
-            ringInited_ = false;
-        }
-    }
+    ~UringDirect() { releaseResourcesNoexcept(); }
 
     UringDirect(const UringDirect&) = delete;
     UringDirect& operator=(const UringDirect&) = delete;
@@ -71,7 +51,7 @@ class UringDirect {
     UringDirect(UringDirect&& other) noexcept { moveFrom(std::move(other)); }
     UringDirect& operator=(UringDirect&& other) noexcept {
         if (this != &other) {
-            this->~UringDirect();
+            releaseResourcesNoexcept();
             moveFrom(std::move(other));
         }
         return *this;
@@ -1743,6 +1723,30 @@ class UringDirect {
         testFallbackWorkerBlockCv().wait(lock, [] { return !testFallbackWorkerBlockEnabled(); });
     }
 #endif
+
+    void releaseResourcesNoexcept() noexcept {
+        shutdownFallbackWorkersNoexcept();
+
+        // Unregister in reverse order (best-effort).
+        if (usesIoUring() && fileRegistered_) {
+            (void)io_uring_unregister_files(&ring_);
+        }
+        fileRegistered_ = false;
+
+        if (usesIoUring() && buffersRegistered_) {
+            (void)io_uring_unregister_buffers(&ring_);
+        }
+        buffersRegistered_ = false;
+
+        if (fd_ >= 0) {
+            ::close(fd_);
+            fd_ = -1;
+        }
+        if (ringInited_) {
+            io_uring_queue_exit(&ring_);
+            ringInited_ = false;
+        }
+    }
 
     void moveFrom(UringDirect&& other) noexcept {
         other.shutdownFallbackWorkersNoexcept();

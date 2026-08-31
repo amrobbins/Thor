@@ -619,6 +619,14 @@ TEST(TrainingRunsStatsReporter, RunningSummaryWeightsPreviousEpochByRemainingFra
     for (uint64_t stepInEpoch : {1U, 5U, 9U, 10U}) {
         reporter.onStatsEvent(TrainingStatsEvent::fromTrainingEvent(
             TrainingEvent::statsUpdated(makeTrainStats(2, stepInEpoch, 10, 100.0)), "fold_0"));
+
+        // TrainingRunsStatsReporter is asynchronous and deliberately drains a
+        // burst of queued events before emitting a summary. Without an explicit
+        // observation boundary, whether an intermediate batch appears in the
+        // log depends on worker-thread scheduling. This test asserts each
+        // intermediate progress-weighted value, so force that snapshot to be
+        // emitted before enqueueing the next one.
+        reporter.flush();
     }
     reporter.close();
 

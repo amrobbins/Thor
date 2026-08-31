@@ -2573,6 +2573,105 @@ TEST(RaggedExpression, PackedRmsNormC6OwnsFiniteExecutableFamiliesAndNeverPrepar
     }
 }
 
+TEST(RaggedExpression, PackedLayerNormUsesFiniteRmsNormCapacityFamilyWithoutTailSanitation) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t capacity = 16;
+    constexpr uint64_t hidden = 4;
+    constexpr uint64_t batch_size = 2;
+    constexpr float inactive_sentinel = 32123.0F;
+    const std::vector<uint64_t> buckets = makeRaggedRmsNormCapacityBuckets(capacity);
+    ASSERT_EQ(buckets, (std::vector<uint64_t>{8, 16}));
+
+    Stream stream_a(0);
+    Stream stream_b(0);
+    Tensor x_a(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, hidden}));
+    Tensor x_b(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, hidden}));
+    Tensor scale_a(gpuPlacement, TensorDescriptor(DataType::FP32, {hidden}));
+    Tensor scale_b(gpuPlacement, TensorDescriptor(DataType::FP32, {hidden}));
+    Tensor bias_a(gpuPlacement, TensorDescriptor(DataType::FP32, {hidden}));
+    Tensor bias_b(gpuPlacement, TensorDescriptor(DataType::FP32, {hidden}));
+    Tensor y_a(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, hidden}));
+    Tensor y_b(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, hidden}));
+    Tensor offsets_a = makeGpuTensor<uint32_t>({batch_size + 1}, {0, 4, 7}, stream_a);
+    Tensor offsets_b = makeGpuTensor<uint32_t>({batch_size + 1}, {0, 4, 7}, stream_b);
+    x_a.fill(0.5, stream_a);
+    x_b.fill(0.75, stream_b);
+    scale_a.fill(1.0, stream_a);
+    scale_b.fill(1.0, stream_b);
+    bias_a.fill(0.0, stream_a);
+    bias_b.fill(0.0, stream_b);
+    y_a.fill(inactive_sentinel, stream_a);
+    y_b.fill(inactive_sentinel, stream_b);
+
+    auto compiled = std::make_shared<CompiledLayerNorm>();
+    compiled->normalized_feature_count = hidden;
+    compiled->packed_row_capacity = capacity;
+    compiled->ragged_batch_size = batch_size;
+    compiled->epsilon = 1.0e-5;
+    compiled->input_dtype = DataType::FP32;
+    compiled->scale_dtype = DataType::FP32;
+    compiled->bias_dtype = DataType::FP32;
+    compiled->output_dtype = DataType::FP32;
+    compiled->compute_dtype = DataType::FP32;
+    compiled->debug_name = "packed_layernorm_finite_capacity_family";
+
+    CudnnLayerNorm& layer_norm = CudnnLayerNorm::instance();
+    layer_norm.clearSelectionCache();
+    auto stamp_a = std::make_shared<StampedLayerNorm>(compiled, x_a, scale_a, bias_a, y_a, stream_a, offsets_a);
+    auto stamp_b = std::make_shared<StampedLayerNorm>(compiled, x_b, scale_b, bias_b, y_b, stream_b, offsets_b);
+
+    ASSERT_EQ(stamp_a->executablePlanCount(), buckets.size());
+    ASSERT_EQ(stamp_b->executablePlanCount(), buckets.size());
+    EXPECT_EQ(stamp_a->planSelections(), stamp_b->planSelections());
+    const std::vector<uintptr_t> ids_a = stamp_a->executablePlanIds();
+    const std::vector<uintptr_t> ids_b = stamp_b->executablePlanIds();
+    ASSERT_EQ(ids_a.size(), ids_b.size());
+    for (size_t i = 0; i < ids_a.size(); ++i) EXPECT_NE(ids_a[i], ids_b[i]);
+    EXPECT_EQ(layer_norm.cachedSelectionCount(), buckets.size());
+
+    layer_norm.clearSelectionCache();
+    ASSERT_EQ(layer_norm.cachedSelectionCount(), 0U);
+    const uint64_t preparations_after_stamping = cudnnFrontendExecutablePreparationCountForTests();
+
+    RowPartitionRuntime(offsets_a, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
+        .setHostActiveValueCount(7);
+    RowPartitionRuntime(offsets_b, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
+        .setHostActiveValueCount(7);
+    stamp_a->runOn(stream_a);
+    stamp_b->runOn(stream_b);
+    stream_a.synchronize();
+    stream_b.synchronize();
+
+    EXPECT_EQ(layer_norm.cachedSelectionCount(), 0U);
+    EXPECT_EQ(cudnnFrontendExecutablePreparationCountForTests(), preparations_after_stamping)
+        << "LayerNorm bucket selection must use only stamp-local prebuilt executables at runtime.";
+
+    // Seven active rows select the 8-row bucket. LayerNorm is row-local, so it
+    // deliberately does not sanitize the inactive row inside that bucket; rows
+    // outside the selected bucket must not be touched at all.
+    const std::vector<float> actual = copyToCpuValues(y_a, stream_a);
+    for (uint64_t row = 8; row < capacity; ++row) {
+        for (uint64_t channel = 0; channel < hidden; ++channel) {
+            EXPECT_EQ(actual[row * hidden + channel], inactive_sentinel)
+                << "row outside selected LayerNorm bucket was unexpectedly written";
+        }
+    }
+
+    // Crossing into the 16-row bucket must select another executable that was
+    // already prepared when the stamp was built.
+    RowPartitionRuntime(offsets_a, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
+        .setHostActiveValueCount(9);
+    RowPartitionRuntime(offsets_b, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
+        .setHostActiveValueCount(9);
+    stamp_a->runOn(stream_a);
+    stamp_b->runOn(stream_b);
+    stream_a.synchronize();
+    stream_b.synchronize();
+    EXPECT_EQ(cudnnFrontendExecutablePreparationCountForTests(), preparations_after_stamping)
+        << "LayerNorm bucket transitions must not prepare executables at runtime.";
+}
+
 TEST(RaggedExpression, PackedRmsNormAutodiffUsesBucketedCudnnBackwardWithStructuralOffsets) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
     const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
@@ -6932,6 +7031,7 @@ TEST(RaggedExpression, CausalConv1dT8CRmsNormIsExplicitPaddedRepresentationBound
               (std::vector<std::string>{"PaddedRaggedPack",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack",
+                                        "SanitizePackedTail",
                                         "RmsNorm",
                                         "PaddedRaggedPack",
                                         "RaggedConv1dCausal",
@@ -7246,6 +7346,7 @@ TEST(RaggedExpression, CausalConv1dT8CMixedPointwiseRegionStopsAtNormalizationBo
                                         "FusedKernel",
                                         "LayerNorm",
                                         "FusedKernel",
+                                        "SanitizePackedTail",
                                         "RmsNorm",
                                         "PaddedRaggedPack",
                                         "RaggedConv1dCausal",
@@ -7313,4 +7414,122 @@ TEST(RaggedExpression, CausalConv1dT8CMixedPointwiseRegionStopsAtNormalizationBo
     for (uint64_t index = offsets.back() * channels; index < actual.size(); ++index) {
         EXPECT_EQ(actual[index], inactive_sentinel) << "packed spare output index " << index;
     }
+}
+
+TEST(RaggedExpression, TrailingTransposePreservesPartitionAndUsesPermutationStrides) {
+    const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {2, 3, 4}, 3, 9));
+
+    const RaggedExpression result = ragged.transposeTrailingDimensions();
+
+    EXPECT_EQ(result.getValuesDimensions(), std::vector<uint64_t>({9, 2, 4, 3}));
+    EXPECT_EQ(result.getTrailingDimensions(), std::vector<uint64_t>({2, 4, 3}));
+    EXPECT_TRUE(result.getOffsets().isSameLogicalNode(ragged.getOffsets()));
+    EXPECT_TRUE(result.getRuntimeExtent().activeValueCount.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCount));
+    EXPECT_EQ(result.getRuntimeExtent().elementsPerValue, 24ULL);
+
+    const MarkedValueNodes marked = markedValueNodes(result.getValues());
+    EXPECT_EQ(marked.values.op, ExprOp::STRIDED_VIEW);
+    EXPECT_EQ(marked.values.view_dims, std::vector<uint64_t>({9, 2, 4, 3}));
+    EXPECT_EQ(marked.values.view_strides, std::vector<uint64_t>({24, 12, 1, 4}));
+    EXPECT_EQ(marked.values.view_element_offset, 0ULL);
+    EXPECT_EQ(marked.marker.ragged_runtime_elements_per_value, 24ULL);
+}
+
+TEST(RaggedExpression, TrailingTransposeRequiresAtLeastTwoTrailingDimensions) {
+    const RaggedExpression vector = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {8}, 3, 9));
+    EXPECT_THROW((void)vector.transposeTrailingDimensions(), std::invalid_argument);
+}
+
+TEST(RaggedExpression, TrailingTransposeAutodiffScattersPermutationWithinActiveRows) {
+    const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {2, 3, 4}, 3, 9));
+    const RaggedExpression transposed = ragged.transposeTrailingDimensions();
+
+    const PhysicalOutputs forward = Expression::outputs({{"y", transposed.getValues()}}).physicalOutputs();
+    PhysicalOutputs backward = buildBackwardOutputs(forward, {"x.values"});
+    resolveRaggedBackwardTestDTypes(backward, DataType::UINT32);
+
+    bool found_scatter = false;
+    for (const ExprNode& node : backward.expr->nodes) {
+        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT || node.ragged_runtime_elements_per_value != 24ULL) continue;
+        ASSERT_LT(node.lhs, backward.expr->nodes.size());
+        const ExprNode& scatter = backward.expr->nodes.at(node.lhs);
+        if (scatter.op != ExprOp::STRIDED_VIEW_BACKWARD) continue;
+
+        found_scatter = true;
+        EXPECT_EQ(scatter.fill_dims, std::vector<uint64_t>({9, 2, 3, 4}));
+        EXPECT_EQ(scatter.view_dims, std::vector<uint64_t>({9, 2, 4, 3}));
+        EXPECT_EQ(scatter.view_strides, std::vector<uint64_t>({24, 12, 1, 4}));
+        EXPECT_EQ(scatter.view_element_offset, 0ULL);
+        EXPECT_EQ(node.ragged_runtime_batch_size, 3ULL);
+        EXPECT_EQ(node.ragged_runtime_max_active_values, 9ULL);
+    }
+    EXPECT_TRUE(found_scatter);
+
+    const std::vector<PhysicalExecutionStage> stages = EquationCompiler::splitAtReductionBoundaries(backward);
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_trailing_transpose_backward");
+    EXPECT_NE(source.find("runtime_numel_u64 = active_values * 24ULL"), std::string::npos);
+}
+
+TEST(RaggedExpression, TrailingTransposeComposesWithPrecedingTrailingSlice) {
+    const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {2, 4, 6}, 3, 9));
+    const RaggedExpression sliced = ragged.sliceLastDimension(/*start=*/1, /*length=*/3);
+    const RaggedExpression transposed = sliced.transposeTrailingDimensions();
+
+    EXPECT_EQ(transposed.getValuesDimensions(), std::vector<uint64_t>({9, 2, 3, 4}));
+    EXPECT_TRUE(transposed.getOffsets().isSameLogicalNode(ragged.getOffsets()));
+
+    const MarkedValueNodes marked = markedValueNodes(transposed.getValues());
+    ASSERT_EQ(marked.values.op, ExprOp::STRIDED_VIEW);
+    EXPECT_EQ(marked.values.view_dims, std::vector<uint64_t>({9, 2, 3, 4}));
+    EXPECT_EQ(marked.values.view_strides, std::vector<uint64_t>({48, 24, 1, 6}));
+    EXPECT_EQ(marked.values.view_element_offset, 1ULL);
+}
+
+TEST(RaggedExpression, TrailingTransposeBackwardRunsOnlyAcrossActivePackedRows) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t max_total_values = 5;
+    constexpr uint64_t first = 2;
+    constexpr uint64_t second = 3;
+    constexpr uint64_t elements_per_value = first * second;
+
+    const RaggedExpression ragged = RaggedExpression::input(
+        "x", makeDescriptor(DataType::FP32, {first, second}, batch_size, max_total_values, DataType::UINT32));
+    const RaggedExpression transposed = ragged.transposeTrailingDimensions();
+
+    std::vector<float> values(max_total_values * elements_per_value, std::numeric_limits<float>::quiet_NaN());
+    for (uint64_t i = 0; i < 3 * elements_per_value; ++i) values[i] = static_cast<float>(i + 1);
+    Tensor gpu_values = makeGpuTensor<float>({max_total_values, first, second}, values, stream);
+    Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 1U, 1U, 3U}, stream);
+
+    std::vector<float> upstream_values(max_total_values * elements_per_value, std::numeric_limits<float>::quiet_NaN());
+    for (uint64_t i = 0; i < 3 * elements_per_value; ++i) upstream_values[i] = static_cast<float>(100 + i);
+    Tensor upstream = makeGpuTensor<float>({max_total_values, second, first}, upstream_values, stream);
+
+    Tensor gradient(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, first, second}));
+    constexpr float inactive_sentinel = 777.0F;
+    gradient.fill(inactive_sentinel, stream);
+
+    const Tensor result = runBackwardOutput(transposed.getValues(),
+                                            {{"x.values", gpu_values}, {"x.offsets", offsets}, {"dy", upstream}},
+                                            "x.values",
+                                            "dy",
+                                            stream,
+                                            gradient);
+    const std::vector<float> actual = copyToCpuValues(result, stream);
+
+    std::vector<float> expected(max_total_values * elements_per_value, inactive_sentinel);
+    for (uint64_t value = 0; value < 3; ++value) {
+        const uint64_t base = value * elements_per_value;
+        for (uint64_t i = 0; i < first; ++i) {
+            for (uint64_t j = 0; j < second; ++j) {
+                expected[base + i * second + j] = upstream_values[base + j * first + i];
+            }
+        }
+    }
+    expectNear(actual, expected);
 }

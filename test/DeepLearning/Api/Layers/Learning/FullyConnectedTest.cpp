@@ -2975,6 +2975,124 @@ TEST(FullyConnectedApi, RaggedFirstClassResidualRequiresExactRowPartition) {
         std::invalid_argument);
 }
 
+
+TEST(FullyConnectedApi, RaggedEpilogueAuxiliaryPreservesPartitionAndPlaces) {
+    constexpr uint32_t batchSize = 3;
+    Api::Network network("raggedFcEpilogueAuxiliary");
+    Api::RaggedTensor feature = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("feature")
+                                    .valuesDataType(DataType::FP32)
+                                    .offsetsDataType(DataType::UINT32)
+                                    .trailingDimensions({4})
+                                    .maxTotalValues(8)
+                                    .maxValuesPerRow(5)
+                                    .batchSize(batchSize)
+                                    .build();
+    shared_ptr<Api::Activation> relu = Api::Relu::Builder().network(network).featureInput(feature).build();
+    ASSERT_TRUE(relu->getRaggedFeatureOutput().has_value());
+    Api::RaggedTensor auxiliary = relu->getRaggedFeatureOutput().value();
+
+    Impl::Expression projected = Api::FullyConnected::epilogueInput(DataType::FP32, DataType::FP32);
+    Impl::Expression auxiliaryInput = Api::FullyConnected::epilogueAuxInput("aux", DataType::FP32, DataType::FP32);
+    shared_ptr<Api::Sgd> weightsSgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(feature)
+                                 .numOutputFeatures(4)
+                                 .hasBias(false)
+                                 .weightsDataType(DataType::FP32)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(DataType::FP32)
+                                 .weightsOptimizer(weightsSgd)
+                                 .noActivation()
+                                 .epilogueInput("aux", auxiliary)
+                                 .epilogue(projected * 0.0f + auxiliaryInput)
+                                 .build();
+    ASSERT_TRUE(fc.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(fc.getRaggedFeatureOutput()->getOffsets(), feature.getOffsets());
+    (void)Api::RaggedNetworkOutput::Builder()
+        .network(network)
+        .name("output")
+        .inputTensor(fc.getRaggedFeatureOutput().value())
+        .build();
+
+    const nlohmann::json architecture = fc.architectureJson();
+    ASSERT_EQ(architecture.at("version").get<string>(), "1.2.0");
+    ASSERT_EQ(architecture.at("epilogue_inputs").size(), 1u);
+    EXPECT_EQ(architecture.at("epilogue_inputs").at(0).at("ragged_tensor").at("offsets").at("id").get<uint64_t>(),
+              feature.getOffsets().getOriginalId());
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false));
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    auto physicalFc = dynamic_pointer_cast<Impl::RaggedFullyConnected>(
+        placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(fc.getId()));
+    ASSERT_NE(physicalFc, nullptr);
+    EXPECT_EQ(physicalFc->getFeatureInputs().size(), 3u);
+}
+
+TEST(FullyConnectedApi, RaggedEpilogueAuxiliaryRequiresExactRowPartition) {
+    constexpr uint32_t batchSize = 3;
+    Api::Network network("raggedFcEpilogueAuxiliaryPartitionGuard");
+    Api::RaggedTensor feature = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("feature")
+                                    .valuesDataType(DataType::FP32)
+                                    .offsetsDataType(DataType::UINT32)
+                                    .trailingDimensions({4})
+                                    .maxTotalValues(8)
+                                    .maxValuesPerRow(5)
+                                    .batchSize(batchSize)
+                                    .build();
+    Api::RaggedTensor differentPartition = Api::RaggedNetworkInput::Builder()
+                                               .network(network)
+                                               .name("different")
+                                               .valuesDataType(DataType::FP32)
+                                               .offsetsDataType(DataType::UINT32)
+                                               .trailingDimensions({4})
+                                               .maxTotalValues(8)
+                                               .maxValuesPerRow(5)
+                                               .batchSize(batchSize)
+                                               .build();
+    Impl::Expression projected = Api::FullyConnected::epilogueInput(DataType::FP32, DataType::FP32);
+    Impl::Expression auxiliaryInput = Api::FullyConnected::epilogueAuxInput("aux", DataType::FP32, DataType::FP32);
+
+    EXPECT_THROW(
+        (void)Api::FullyConnected::Builder()
+            .network(network)
+            .featureInput(feature)
+            .numOutputFeatures(4)
+            .hasBias(false)
+            .weightsDataType(DataType::FP32)
+            .computeDataType(DataType::FP32)
+            .outputDataType(DataType::FP32)
+            .noActivation()
+            .epilogueInput("aux", differentPartition)
+            .epilogue(projected + auxiliaryInput)
+            .build(),
+        std::invalid_argument);
+
+    Api::RaggedTensor conflictingBound(feature.getValues(), feature.getOffsets(), 4);
+    EXPECT_THROW(
+        (void)Api::FullyConnected::Builder()
+            .network(network)
+            .featureInput(feature)
+            .numOutputFeatures(4)
+            .hasBias(false)
+            .weightsDataType(DataType::FP32)
+            .computeDataType(DataType::FP32)
+            .outputDataType(DataType::FP32)
+            .noActivation()
+            .epilogueInput("aux", conflictingBound)
+            .epilogue(projected + auxiliaryInput)
+            .build(),
+        std::invalid_argument);
+}
+
 TEST(FullyConnectedApi, FirstClassResidualOutputDropoutRejectsCustomEpilogue) {
     Api::Network network("fcResidualCustomEpilogueGuard");
     Api::NetworkInput input =

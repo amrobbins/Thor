@@ -31,8 +31,9 @@ struct StampedMatmulStageDiagnostic {
 
 // Read-only runtime-extent diagnostics for physical consumers that deliberately
 // execute beyond a ragged tensor's logical active prefix. These diagnostics do
-// not synchronize or launch work; they describe the exact pre-read sanitation
-// implied by the current host-published row-partition extent and stamped bucket policy.
+// not synchronize or launch work; they describe the tail-preparation requirement
+// implied by the current host-published row-partition extent and stamped bucket
+// policy. Multiple consumers may share one explicit SANITIZE_PACKED_TAIL stage.
 enum class PackedRowConsumerKind : uint8_t {
     Matmul = 0,
     RmsNorm = 1,
@@ -46,7 +47,10 @@ struct PackedRowConsumerDiagnostic {
     uint64_t full_capacity_rows = 0;
     uint64_t sanitized_rows = 0;
     uint32_t sanitized_operand_count = 0;
-    // Bytes the physical consumer will actually sanitize before its next read.
+    // Bytes of tail preparation this consumer requires before its next read.
+    // Expression may satisfy identical requirements for multiple consumers with
+    // one shared SANITIZE_PACKED_TAIL stage, so summing this field across consumers
+    // is not a measurement of bytes actually written by the execution plan.
     uint64_t sanitized_bytes = 0;
     // Comparison baseline: bytes that would be written if the same row-bound
     // operands were canonicalized through full packed capacity instead.

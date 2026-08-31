@@ -5,6 +5,7 @@
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <functional>
@@ -4131,22 +4132,54 @@ Expression Expression::stridedViewBackward(const std::vector<uint64_t>& source_d
             "Expression::stridedViewBackward requires view dimensions and strides with the same non-zero rank.");
     }
 
-    uint64_t dense_tail = 1;
-    for (int64_t axis = static_cast<int64_t>(view_dims.size()) - 1; axis >= 0; --axis) {
-        if (view_dims[axis] == 0 || view_dims[axis] == std::numeric_limits<uint64_t>::max() ||
-            view_strides_elements[axis] < dense_tail) {
-            throw std::invalid_argument(
-                "Expression::stridedViewBackward requires canonical non-overlapping row-major-like strides.");
+    // The backward scatter is valid for any non-overlapping positive-stride view,
+    // including axis permutations such as a trailing transpose. Validate overlap by
+    // visiting axes from the smallest storage stride outward. Size-one axes consume
+    // no storage span, so at equal strides they must be considered before an axis
+    // whose dimension expands.
+    std::vector<size_t> axes_by_stride(view_dims.size());
+    for (size_t axis = 0; axis < axes_by_stride.size(); ++axis) axes_by_stride[axis] = axis;
+    std::sort(axes_by_stride.begin(), axes_by_stride.end(), [&](size_t lhs, size_t rhs) {
+        if (view_strides_elements[lhs] != view_strides_elements[rhs]) {
+            return view_strides_elements[lhs] < view_strides_elements[rhs];
         }
-        if (dense_tail > std::numeric_limits<uint64_t>::max() / view_dims[axis]) {
-            throw std::overflow_error("Expression::stridedViewBackward view element count overflows uint64_t.");
-        }
-        dense_tail *= view_dims[axis];
-    }
+        const bool lhs_is_unit = view_dims[lhs] == 1;
+        const bool rhs_is_unit = view_dims[rhs] == 1;
+        if (lhs_is_unit != rhs_is_unit) return lhs_is_unit;
+        return lhs < rhs;
+    });
+
+    uint64_t source_numel = 1;
     for (uint64_t d : source_dims) {
         if (d == 0 || d == std::numeric_limits<uint64_t>::max()) {
             throw std::invalid_argument("Expression::stridedViewBackward requires concrete non-zero source dimensions.");
         }
+        if (source_numel > std::numeric_limits<uint64_t>::max() / d) {
+            throw std::overflow_error("Expression::stridedViewBackward source element count overflows uint64_t.");
+        }
+        source_numel *= d;
+    }
+
+    uint64_t occupied_span = 1;
+    for (size_t axis : axes_by_stride) {
+        const uint64_t dim = view_dims[axis];
+        const uint64_t stride = view_strides_elements[axis];
+        if (dim == 0 || dim == std::numeric_limits<uint64_t>::max() || stride == 0 ||
+            (dim > 1 && stride < occupied_span)) {
+            throw std::invalid_argument(
+                "Expression::stridedViewBackward requires a non-overlapping positive-stride view.");
+        }
+        if (dim > 1 && stride > std::numeric_limits<uint64_t>::max() / (dim - 1)) {
+            throw std::overflow_error("Expression::stridedViewBackward view storage span overflows uint64_t.");
+        }
+        const uint64_t axis_span = stride * (dim - 1);
+        if (axis_span > std::numeric_limits<uint64_t>::max() - occupied_span) {
+            throw std::overflow_error("Expression::stridedViewBackward view storage span overflows uint64_t.");
+        }
+        occupied_span += axis_span;
+    }
+    if (view_element_offset >= source_numel || occupied_span > source_numel - view_element_offset) {
+        throw std::invalid_argument("Expression::stridedViewBackward view exceeds its source storage.");
     }
 
     Expression out = unaryOp(*this, ExprOp::STRIDED_VIEW_BACKWARD);

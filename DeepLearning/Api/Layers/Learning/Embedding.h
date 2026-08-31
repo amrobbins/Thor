@@ -3,14 +3,17 @@
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Optimizers/Optimizer.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace Thor {
@@ -24,6 +27,8 @@ class Embedding : public TrainableLayer {
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Embedding>(*this); }
 
+    std::string getLayerVersion() const override { return "1.1.0"; }
+
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
                              Stream stream,
                              bool saveOptimizerState,
@@ -36,17 +41,38 @@ class Embedding : public TrainableLayer {
     DataType getWeightsDataType() const { return weightsDataType; }
     std::optional<uint64_t> getPaddingIndex() const { return paddingIndex; }
     bool usesSparseGradients() const { return sparseGradients; }
+    bool getUseRagged() const { return !raggedFeatureInputs.empty(); }
+    std::optional<RaggedTensor> getRaggedFeatureInput(uint32_t index = 0) const {
+        if (index >= raggedFeatureInputs.size()) return std::nullopt;
+        return raggedFeatureInputs[index];
+    }
+    std::optional<RaggedTensor> getRaggedFeatureOutput(uint32_t index = 0) const {
+        if (index >= raggedFeatureOutputs.size()) return std::nullopt;
+        return raggedFeatureOutputs[index];
+    }
 
-    int getConnectionType(Tensor connectingTensor) const override {
-        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
-            if (connectingTensor == featureInputs[i])
-                return static_cast<int>(i);
-        }
-        for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
-            if (connectingTensor == featureOutputs[i])
-                return static_cast<int>(i);
-        }
-        throw std::runtime_error("Tensor is not connected to this Embedding layer.");
+    std::vector<Tensor> getFeatureInputs() const override;
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
+    void informThatInputConnectionMade(Tensor inputTensor) override;
+    void resetGraphTraversalState() override;
+    bool mustConnectAllInputsToDriveOutput() const override { return !raggedFeatureInputs.empty(); }
+
+    int getConnectionType(Tensor connectingTensor) const override;
+
+    uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
+        if (raggedFeatureOutputs.empty()) return MultiConnectionLayer::getOutputTensorBytes(batchSize);
+        (void)batchSize;
+        THOR_THROW_IF_FALSE(!featureOutputs.empty());
+        return featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
+    }
+    uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+                                                      ThorImplementation::TensorPlacement tensorPlacement) const override {
+        if (raggedFeatureOutputs.empty())
+            return TrainableLayer::getNonFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+        (void)batchSize;
+        (void)tensorPlacement;
+        THOR_THROW_IF_FALSE(!featureOutputs.empty());
+        return featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
     }
 
    protected:
@@ -69,6 +95,13 @@ class Embedding : public TrainableLayer {
     DataType weightsDataType = DataType::FP32;
     std::optional<uint64_t> paddingIndex = std::nullopt;
     bool sparseGradients = true;
+    std::vector<RaggedTensor> raggedFeatureInputs;
+    std::vector<RaggedTensor> raggedFeatureOutputs;
+    std::vector<uint32_t> inputPortIndicesForTensor(Tensor tensor) const;
+    std::set<uint32_t> connectedInputPortIndices;
+    std::set<uint32_t> emittedRaggedOutputApplications;
+    mutable std::unordered_map<uint64_t, uint32_t> nextInputConnectionCursorByTensorOriginalId;
+    std::unordered_map<uint64_t, uint32_t> nextTraversalInputCursorByTensorOriginalId;
 
     friend class Network;
     friend class Builder;
@@ -88,11 +121,28 @@ class Embedding::Builder {
 
     virtual Embedding::Builder& featureInput(Tensor featureInput) {
         THOR_THROW_IF_FALSE(featureInput.isInitialized());
+        THOR_THROW_IF_FALSE(_raggedFeatureInputs.empty());
         validateIndexTensor(featureInput, "featureInput");
         this->_featureInputs.push_back(featureInput);
         if (_featureInputs.size() > 1) {
             THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
             THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+        }
+        return *this;
+    }
+
+    virtual Embedding::Builder& featureInput(RaggedTensor featureInput) {
+        THOR_THROW_IF_FALSE(featureInput.isInitialized());
+        THOR_THROW_IF_FALSE(_featureInputs.empty() || !_raggedFeatureInputs.empty());
+        Tensor values = featureInput.getValues();
+        validateIndexTensor(values, "ragged featureInput values");
+        this->_raggedFeatureInputs.push_back(featureInput);
+        this->_featureInputs.push_back(values);
+        if (_featureInputs.size() > 1) {
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getBatchSize() == _raggedFeatureInputs.front().getBatchSize());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getOffsetsDataType() == _raggedFeatureInputs.front().getOffsetsDataType());
         }
         return *this;
     }
@@ -145,6 +195,7 @@ class Embedding::Builder {
 
     std::optional<Network*> _network = std::nullopt;
     std::vector<Tensor> _featureInputs;
+    std::vector<RaggedTensor> _raggedFeatureInputs;
     std::optional<uint64_t> _vocabularySize = std::nullopt;
     std::optional<uint64_t> _embeddingDim = std::nullopt;
     std::optional<DataType> _weightsDataType = std::nullopt;

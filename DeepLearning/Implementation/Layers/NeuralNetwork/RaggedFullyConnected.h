@@ -4,6 +4,7 @@
 #include "DeepLearning/Implementation/Layers/TrainingDropoutControllable.h"
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace ThorImplementation {
@@ -11,11 +12,12 @@ namespace ThorImplementation {
 // Expression-backed token-wise FullyConnected over packed ragged values.
 //
 // The mathematical graph is the same DynamicExpression used by the regular
-// FullyConnected implementation (matmul -> bias -> activation). The row
-// partition is carried as an explicit structural input. Packed MATMUL stages
-// consume that runtime extent directly and sanitize only the selected bucket
-// slack they are about to read. This wrapper therefore owns no inactive-tail
-// canonicalization or host active-row cache.
+// FullyConnected implementation (matmul -> bias -> activation -> optional
+// epilogue). The row partition is carried as an explicit structural input.
+// Same-partition ragged epilogue auxiliaries contribute packed value inputs but
+// reuse that one canonical partition input. Packed consumers receive the runtime
+// extent explicitly, so this wrapper owns no inactive-tail canonicalization or
+// host active-row cache.
 class RaggedFullyConnected final : public CustomLayer, public TrainingDropoutControllable {
    public:
     static constexpr const char* ROW_PARTITION_INPUT_NAME = "row_partition";
@@ -26,6 +28,7 @@ class RaggedFullyConnected final : public CustomLayer, public TrainingDropoutCon
                          bool inferenceOnly,
                          int64_t stampedId = -1,
                          bool useResidual = false,
+                         std::vector<std::string> epilogueAuxInputNames = {},
                          std::optional<DynamicExpressionVariantId> deterministicTrainingVariantId = std::nullopt,
                          bool trainingDropoutEnabled = true);
 

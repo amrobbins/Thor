@@ -11,12 +11,16 @@ RaggedFullyConnected::RaggedFullyConnected(DynamicExpression expression,
                                            bool inferenceOnly,
                                            int64_t stampedId,
                                            bool useResidual,
+                                           std::vector<std::string> epilogueAuxInputNames,
                                            std::optional<DynamicExpressionVariantId> deterministicTrainingVariantId,
                                            bool trainingDropoutEnabled)
     : CustomLayer(std::move(expression),
-                  useResidual
-                      ? std::vector<std::string>{"feature_input", ROW_PARTITION_INPUT_NAME, "residual_input"}
-                      : std::vector<std::string>{"feature_input", ROW_PARTITION_INPUT_NAME},
+                  [&]() {
+                      std::vector<std::string> names{"feature_input", ROW_PARTITION_INPUT_NAME};
+                      if (useResidual) names.push_back("residual_input");
+                      names.insert(names.end(), epilogueAuxInputNames.begin(), epilogueAuxInputNames.end());
+                      return names;
+                  }(),
                   std::vector<std::string>{"feature_output"},
                   placement,
                   physicalParameters,
@@ -25,7 +29,12 @@ RaggedFullyConnected::RaggedFullyConnected(DynamicExpression expression,
                   {},
                   false,
                   false,
-                  useResidual ? std::vector<bool>{false, true, false} : std::vector<bool>{false, true},
+                  [&]() {
+                      std::vector<bool> dimensionsIncludeBatch{false, true};
+                      if (useResidual) dimensionsIncludeBatch.push_back(false);
+                      dimensionsIncludeBatch.insert(dimensionsIncludeBatch.end(), epilogueAuxInputNames.size(), false);
+                      return dimensionsIncludeBatch;
+                  }(),
                   std::nullopt),
       deterministicTrainingVariantId(deterministicTrainingVariantId) {
     setTrainingDropoutEnabled(trainingDropoutEnabled);

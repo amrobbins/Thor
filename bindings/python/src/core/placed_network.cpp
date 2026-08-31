@@ -75,6 +75,9 @@ Parameters
 ----------
 batch_inputs : dict[str, thor.physical.PhysicalTensor | thor.physical.PhysicalRaggedTensor]
     Logical dense or ragged input fields keyed by NetworkInput/RaggedNetworkInput name.
+    A RaggedNetworkInput declared with ``partition=...`` may be supplied as just
+    its packed PhysicalTensor values; the referenced partition-owning input
+    supplies offsets for that batch.
 stamp_index : int, default 0
     Stamped network instance to execute.
 

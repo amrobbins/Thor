@@ -7,6 +7,7 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/AdaptiveLayerNorm.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "bindings/python/src/core/cast.h"
 
@@ -20,13 +21,12 @@ using DataType = ThorImplementation::DataType;
 
 namespace {
 
-vector<uint64_t> normalizedShapeFromPython(const nb::object& obj, const Tensor& featureInput) {
+vector<uint64_t> normalizedShapeFromPython(const nb::object& obj, const vector<uint64_t>& featureDimensions) {
     if (obj.is_none()) {
-        const vector<uint64_t> dims = featureInput.getDimensions();
-        if (dims.empty()) {
+        if (featureDimensions.empty()) {
             throw nb::value_error("AdaptiveLayerNorm instance: feature_input must have at least one feature dimension.");
         }
-        return {dims.back()};
+        return {featureDimensions.back()};
     }
     return pybind::castArgument<vector<uint64_t>>(obj, "AdaptiveLayerNorm", "normalized_shape", "Sequence[int] or None", false);
 }
@@ -41,7 +41,7 @@ void bind_adaptive_layer_norm(nb::module_& m) {
         "__init__",
         [](AdaptiveLayerNorm* self,
            Network& network,
-           Tensor feature_input,
+           nb::object feature_input,
            Tensor scale_input,
            Tensor bias_input,
            nb::object normalized_shape,
@@ -51,11 +51,23 @@ void bind_adaptive_layer_norm(nb::module_& m) {
                 throw nb::value_error("AdaptiveLayerNorm instance: epsilon must be > 0.");
             }
 
-            vector<uint64_t> shape = normalizedShapeFromPython(normalized_shape, feature_input);
             AdaptiveLayerNorm::Builder builder;
-            builder.network(network)
-                .featureInput(feature_input)
-                .scaleInput(scale_input)
+            builder.network(network);
+            vector<uint64_t> featureDimensions;
+            if (nb::isinstance<RaggedTensor>(feature_input)) {
+                RaggedTensor ragged = nb::cast<RaggedTensor>(feature_input);
+                featureDimensions = ragged.getTrailingDimensions();
+                builder.featureInput(ragged);
+            } else if (nb::isinstance<Tensor>(feature_input)) {
+                Tensor dense = nb::cast<Tensor>(feature_input);
+                featureDimensions = dense.getDimensions();
+                builder.featureInput(dense);
+            } else {
+                throw nb::type_error("AdaptiveLayerNorm feature_input must be thor.Tensor or thor.RaggedTensor.");
+            }
+
+            vector<uint64_t> shape = normalizedShapeFromPython(normalized_shape, featureDimensions);
+            builder.scaleInput(scale_input)
                 .biasInput(bias_input)
                 .normalizedShape(shape)
                 .epsilon(epsilon)
@@ -73,36 +85,50 @@ void bind_adaptive_layer_norm(nb::module_& m) {
 
     adaptive_layer_norm.def(
         "get_feature_output",
-        [](AdaptiveLayerNorm& self) -> Tensor {
+        [](AdaptiveLayerNorm& self) -> nb::object {
+            if (optional<RaggedTensor> ragged = self.getRaggedFeatureOutput(); ragged.has_value()) {
+                return nb::cast(ragged.value());
+            }
             optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-            return maybeFeatureOutput.value();
+            return nb::cast(maybeFeatureOutput.value());
         },
-        R"nbdoc(Return the output tensor produced by this layer.)nbdoc");
+        R"nbdoc(Return the output tensor produced by this layer. Ragged inputs return a thor.RaggedTensor.)nbdoc");
 
-    adaptive_layer_norm.def("get_data_input", [](AdaptiveLayerNorm& self) { return self.getDataInput(); });
+    adaptive_layer_norm.def("get_data_input", [](AdaptiveLayerNorm& self) -> nb::object {
+        if (optional<RaggedTensor> ragged = self.getRaggedDataInput(); ragged.has_value()) {
+            return nb::cast(ragged.value());
+        }
+        return nb::cast(self.getDataInput());
+    });
     adaptive_layer_norm.def("get_scale_input", [](AdaptiveLayerNorm& self) { return self.getScaleInput(); });
     adaptive_layer_norm.def("get_bias_input", [](AdaptiveLayerNorm& self) { return self.getBiasInput(); });
     adaptive_layer_norm.def("get_normalized_shape", [](AdaptiveLayerNorm& self) { return self.getNormalizedShape(); });
     adaptive_layer_norm.def("get_epsilon", [](AdaptiveLayerNorm& self) { return self.getEpsilon(); });
     adaptive_layer_norm.def("get_scale_bias_data_type", [](AdaptiveLayerNorm& self) { return self.getScaleBiasDataType(); });
+    adaptive_layer_norm.def("get_use_ragged", &AdaptiveLayerNorm::getUseRagged);
 
     adaptive_layer_norm.attr("__doc__") = R"nbdoc(
         Adaptive layer normalization over a contiguous trailing normalized shape.
 
         AdaptiveLayerNorm differs from LayerNorm by taking scale and bias as input tensors rather
-        than trainable parameters. The scale and bias tensors must match feature_input dimensions and
-        are interpreted as per-sample scale/bias values by cuDNN Frontend AdaLayerNorm.
+        than trainable parameters. For a dense feature_input, scale and bias are per-sample affine
+        values as before. For a rank-1 RaggedTensor feature_input, scale and bias are dense per-logical-
+        row values and Thor broadcasts each row's affine parameters only to that row's active tokens.
+        The exact ragged row partition is preserved.
 
         Parameters
         ----------
         network : thor.Network
             Network the layer should be added to.
-        feature_input : thor.Tensor
-            Input feature tensor to normalize.
+        feature_input : thor.Tensor or thor.RaggedTensor
+            Input feature tensor to normalize. Ragged input currently requires exactly one trailing
+            channel dimension.
         scale_input : thor.Tensor
-            Per-sample scale tensor. Must have the same dimensions as feature_input and fp32 dtype.
+            Per-sample/per-logical-row scale tensor. API dimensions must match normalized_shape and
+            dtype must be fp32.
         bias_input : thor.Tensor
-            Per-sample bias tensor. Must have the same dimensions as feature_input and fp32 dtype.
+            Per-sample/per-logical-row bias tensor. API dimensions must match normalized_shape and
+            dtype must be fp32.
         normalized_shape : Sequence[int] or None, default None
             Trailing feature dimensions to normalize over. None normalizes the final feature dimension.
         epsilon : float, default 1e-5

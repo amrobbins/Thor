@@ -11,6 +11,10 @@
 
 namespace Thor {
 
+// Layer epilogues are expression graphs, not Activation objects.  A backend may
+// recognize a canonical expression (for example RMSNorm followed by Swish) and
+// fuse it as an optimization, but that recognition must not leak into the public
+// layer API as an activation-specific epilogue overload.
 class LayerEpilogue {
    public:
     [[nodiscard]] static ThorImplementation::Expression input(

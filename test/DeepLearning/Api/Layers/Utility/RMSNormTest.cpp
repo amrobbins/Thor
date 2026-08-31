@@ -1,3 +1,4 @@
+#include "DeepLearning/Api/Layers/Activations/Relu.h"
 #include "DeepLearning/Api/Layers/Activations/Swish.h"
 #include "DeepLearning/Api/Layers/Utility/RMSNorm.h"
 #include "DeepLearning/Api/Layers/Utility/NetworkInput.h"
@@ -334,7 +335,7 @@ TEST(UtilityApiLayers, RMSNormAcceptsBf16WeightsOnlyForSwishEpilogueFusionCandid
                         .featureInput(input)
                         .normalizedShape({32})
                         .parameterDataType(DataType::BF16)
-                        .epilogue(swish)
+                        .epilogue(swish.toExpression(RMSNorm::epilogueInput()))
                         .build();
 
     EXPECT_EQ(layer.getParameterDataType(), DataType::BF16);
@@ -349,7 +350,7 @@ TEST(UtilityApiLayers, RMSNormAcceptsBf16WeightsOnlyForSwishEpilogueFusionCandid
                      .network(badInputNetwork)
                      .featureInput(fp16Input)
                      .parameterDataType(DataType::BF16)
-                     .epilogue(swish)
+                     .epilogue(swish.toExpression(RMSNorm::epilogueInput()))
                      .build(),
                  std::invalid_argument);
 }
@@ -634,6 +635,120 @@ TEST(UtilityApiLayers, RMSNormDenseFp16AndBf16BackwardMatchReferenceAndUpdateFp3
     }
 }
 
+
+
+TEST(UtilityApiLayers, RaggedRMSNormEpilogueAuxiliaryPreservesPartitionAndPlaces) {
+    constexpr uint32_t batchSize = 3;
+    Api::Network network("raggedRmsNormEpilogueAuxiliary");
+    Api::RaggedTensor feature = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("feature")
+                                    .valuesDataType(DataType::FP32)
+                                    .offsetsDataType(DataType::UINT32)
+                                    .trailingDimensions({4})
+                                    .maxTotalValues(8)
+                                    .maxValuesPerRow(5)
+                                    .batchSize(batchSize)
+                                    .build();
+    shared_ptr<Api::Activation> relu = Api::Relu::Builder().network(network).featureInput(feature).build();
+    ASSERT_TRUE(relu->getRaggedFeatureOutput().has_value());
+    Api::RaggedTensor auxiliary = relu->getRaggedFeatureOutput().value();
+
+    Impl::Expression normalized = Api::RMSNorm::epilogueInput(DataType::FP32, DataType::FP32);
+    Impl::Expression auxiliaryInput = Api::RMSNorm::epilogueAuxInput("aux", DataType::FP32, DataType::FP32);
+    shared_ptr<Api::Sgd> weightsSgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+    Api::RMSNorm rmsNorm = Api::RMSNorm::Builder()
+                               .network(network)
+                               .featureInput(feature)
+                               .normalizedShape({4})
+                               .parameterDataType(DataType::FP32)
+                               .weightsOptimizer(weightsSgd)
+                               .epilogueInput("aux", auxiliary)
+                               .epilogue(normalized * 0.0f + auxiliaryInput)
+                               .build();
+    ASSERT_TRUE(rmsNorm.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(rmsNorm.getRaggedFeatureOutput()->getOffsets(), feature.getOffsets());
+    (void)Api::RaggedNetworkOutput::Builder()
+        .network(network)
+        .name("output")
+        .inputTensor(rmsNorm.getRaggedFeatureOutput().value())
+        .build();
+
+    const nlohmann::json architecture = rmsNorm.architectureJson();
+    ASSERT_EQ(architecture.at("version").get<string>(), "1.1.0");
+    ASSERT_EQ(architecture.at("epilogue_inputs").size(), 1u);
+    EXPECT_EQ(architecture.at("epilogue_inputs").at(0).at("ragged_tensor").at("offsets").at("id").get<uint64_t>(),
+              feature.getOffsets().getOriginalId());
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false));
+    rmsSynchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    auto physicalRmsNorm = dynamic_pointer_cast<Impl::RaggedRMSNorm>(
+        placed->getStampedNetwork(0).getPhysicalLayerFromApiLayer(rmsNorm.getId()));
+    ASSERT_NE(physicalRmsNorm, nullptr);
+    EXPECT_EQ(physicalRmsNorm->getFeatureInputs().size(), 3u);
+}
+
+TEST(UtilityApiLayers, RaggedRMSNormEpilogueAuxiliaryRequiresExactRowPartition) {
+    constexpr uint32_t batchSize = 3;
+    Api::Network network("raggedRmsNormEpilogueAuxiliaryPartitionGuard");
+    Api::RaggedTensor feature = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("feature")
+                                    .valuesDataType(DataType::FP32)
+                                    .offsetsDataType(DataType::UINT32)
+                                    .trailingDimensions({4})
+                                    .maxTotalValues(8)
+                                    .maxValuesPerRow(5)
+                                    .batchSize(batchSize)
+                                    .build();
+    Api::RaggedTensor differentPartition = Api::RaggedNetworkInput::Builder()
+                                               .network(network)
+                                               .name("different")
+                                               .valuesDataType(DataType::FP32)
+                                               .offsetsDataType(DataType::UINT32)
+                                               .trailingDimensions({4})
+                                               .maxTotalValues(8)
+                                               .maxValuesPerRow(5)
+                                               .batchSize(batchSize)
+                                               .build();
+    Impl::Expression normalized = Api::RMSNorm::epilogueInput(DataType::FP32, DataType::FP32);
+    Impl::Expression auxiliaryInput = Api::RMSNorm::epilogueAuxInput("aux", DataType::FP32, DataType::FP32);
+
+    EXPECT_THROW(
+        (void)Api::RMSNorm::Builder()
+            .network(network)
+            .featureInput(feature)
+            .normalizedShape({4})
+            .epilogueInput("aux", differentPartition)
+            .epilogue(normalized + auxiliaryInput)
+            .build(),
+        std::invalid_argument);
+
+    Api::RaggedTensor conflictingBound(feature.getValues(), feature.getOffsets(), 4);
+    EXPECT_THROW(
+        (void)Api::RMSNorm::Builder()
+            .network(network)
+            .featureInput(feature)
+            .normalizedShape({4})
+            .epilogueInput("aux", conflictingBound)
+            .epilogue(normalized + auxiliaryInput)
+            .build(),
+        std::invalid_argument);
+
+    EXPECT_THROW(
+        (void)Api::RMSNorm::Builder()
+            .network(network)
+            .featureInput(feature)
+            .normalizedShape({4})
+            .epilogueInput("aux", feature.getValues())
+            .epilogue(normalized + auxiliaryInput)
+            .build(),
+        std::invalid_argument);
+}
 
 TEST(UtilityApiLayers, RMSNormAcceptsRaggedTensorPreservesPartitionAndUsesPackedCapacityMemoryAccounting) {
     constexpr uint64_t fullRows = 66;

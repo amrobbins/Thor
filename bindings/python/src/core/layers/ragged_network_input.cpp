@@ -20,45 +20,68 @@ void bind_ragged_network_input(nb::module_ &m) {
            const std::string &name,
            DataType valuesDataType,
            const std::vector<uint64_t> &trailingDimensions,
-           uint64_t maxTotalValues,
-           uint64_t batchSize,
-           DataType offsetsDataType,
-           std::optional<uint64_t> maxValuesPerRow) {
+           std::optional<uint64_t> maxTotalValues,
+           std::optional<uint64_t> batchSize,
+           std::optional<DataType> offsetsDataType,
+           std::optional<uint64_t> maxValuesPerRow,
+           std::optional<RaggedTensor> partition) {
             if (name.empty()) {
                 throw nb::value_error("RaggedNetworkInput name must not be empty.");
-            }
-            if (maxTotalValues == 0) {
-                throw nb::value_error("RaggedNetworkInput max_total_values must be >= 1.");
             }
             for (uint64_t dim : trailingDimensions) {
                 if (dim == 0) {
                     throw nb::value_error("RaggedNetworkInput trailing_dimensions must contain only positive dimensions.");
                 }
             }
+
             RaggedNetworkInput::Builder builder = RaggedNetworkInput::Builder()
                 .network(network)
                 .name(name)
                 .valuesDataType(valuesDataType)
-                .offsetsDataType(offsetsDataType)
-                .trailingDimensions(trailingDimensions)
-                .maxTotalValues(maxTotalValues)
-                .batchSize(batchSize);
-            if (maxValuesPerRow.has_value()) builder.maxValuesPerRow(maxValuesPerRow.value());
+                .trailingDimensions(trailingDimensions);
+
+            if (partition.has_value()) {
+                if (maxTotalValues.has_value() || batchSize.has_value() || offsetsDataType.has_value() ||
+                    maxValuesPerRow.has_value()) {
+                    throw nb::value_error(
+                        "RaggedNetworkInput partition=... is the sole structural source of truth; "
+                        "do not also specify max_total_values, batch_size, offsets_data_type, or max_values_per_row.");
+                }
+                builder.partition(partition.value());
+            } else {
+                if (!maxTotalValues.has_value() || maxTotalValues.value() == 0) {
+                    throw nb::value_error("RaggedNetworkInput max_total_values must be >= 1 when partition is not provided.");
+                }
+                if (!batchSize.has_value()) {
+                    throw nb::value_error("RaggedNetworkInput batch_size is required when partition is not provided.");
+                }
+                builder.maxTotalValues(maxTotalValues.value()).batchSize(batchSize.value());
+                if (offsetsDataType.has_value()) builder.offsetsDataType(offsetsDataType.value());
+                if (maxValuesPerRow.has_value()) builder.maxValuesPerRow(maxValuesPerRow.value());
+            }
             return builder.build();
         },
         "network"_a,
         "name"_a,
         "values_data_type"_a,
         "trailing_dimensions"_a,
-        "max_total_values"_a,
-        "batch_size"_a,
-        "offsets_data_type"_a = DataType::UINT32,
+        "max_total_values"_a = nb::none(),
+        "batch_size"_a = nb::none(),
+        "offsets_data_type"_a = nb::none(),
         "max_values_per_row"_a = nb::none(),
+        "partition"_a = nb::none(),
         R"nbdoc(
 Create one logical external ragged network input and return its ``thor.RaggedTensor`` handle.
 
-Thor creates the physical ``<name>.values`` and ``<name>.offsets`` NetworkInput
-layers internally. Callers bind datasets and layers to the logical ``name``;
-the physical pair is an implementation detail.
+Without ``partition``, Thor creates the physical ``<name>.values`` and
+``<name>.offsets`` NetworkInput layers internally. ``max_total_values`` and
+``batch_size`` are required and ``offsets_data_type`` defaults to uint32.
+
+With ``partition=<existing_ragged_tensor>``, Thor creates only
+``<name>.values`` and reuses the exact canonical row partition of the referenced
+logical RaggedNetworkInput. Structural arguments must not be repeated in this
+form. At direct inference time, a shared-partition logical input may be supplied
+as just a packed ``thor.physical.PhysicalTensor`` under ``name``; its partition
+comes from the referenced logical ragged input for that batch.
         )nbdoc");
 }

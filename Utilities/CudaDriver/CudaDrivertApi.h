@@ -3,6 +3,7 @@
 #include <cuda.h>
 #include <dlfcn.h>
 
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 
@@ -35,6 +36,13 @@ class CudaDriverApi {
     }
 
     CUresult cuModuleUnload(CUmodule module) { return p_cuModuleUnload(module); }
+
+    CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int* numBlocks,
+                                                         CUfunction function,
+                                                         int blockSize,
+                                                         std::size_t dynamicSmemSize) {
+        return p_cuOccupancyMaxActiveBlocksPerMultiprocessor(numBlocks, function, blockSize, dynamicSmemSize);
+    }
 
     CUresult cuLaunchKernel(CUfunction function,
                             unsigned int gridDimX,
@@ -79,6 +87,7 @@ class CudaDriverApi {
     using cuModuleLoadData_t = CUresult (*)(CUmodule*, const void*);
     using cuModuleGetFunction_t = CUresult (*)(CUfunction*, CUmodule, const char*);
     using cuModuleUnload_t = CUresult (*)(CUmodule);
+    using cuOccupancyMaxActiveBlocksPerMultiprocessor_t = CUresult (*)(int*, CUfunction, int, std::size_t);
     using cuLaunchKernel_t = CUresult (*)(CUfunction,
                                           unsigned int,
                                           unsigned int,
@@ -105,6 +114,7 @@ class CudaDriverApi {
     cuModuleLoadData_t p_cuModuleLoadData = nullptr;
     cuModuleGetFunction_t p_cuModuleGetFunction = nullptr;
     cuModuleUnload_t p_cuModuleUnload = nullptr;
+    cuOccupancyMaxActiveBlocksPerMultiprocessor_t p_cuOccupancyMaxActiveBlocksPerMultiprocessor = nullptr;
     cuLaunchKernel_t p_cuLaunchKernel = nullptr;
     cuLaunchKernelEx_t p_cuLaunchKernelEx = nullptr;
     cuGraphKernelNodeGetParams_v2_t p_cuGraphKernelNodeGetParams_v2 = nullptr;
@@ -128,6 +138,8 @@ class CudaDriverApi {
         p_cuModuleLoadData = load<cuModuleLoadData_t>("cuModuleLoadData");
         p_cuModuleGetFunction = load<cuModuleGetFunction_t>("cuModuleGetFunction");
         p_cuModuleUnload = load<cuModuleUnload_t>("cuModuleUnload");
+        p_cuOccupancyMaxActiveBlocksPerMultiprocessor =
+            load<cuOccupancyMaxActiveBlocksPerMultiprocessor_t>("cuOccupancyMaxActiveBlocksPerMultiprocessor");
         p_cuLaunchKernel = load<cuLaunchKernel_t>("cuLaunchKernel");
         p_cuLaunchKernelEx = load<cuLaunchKernelEx_t>("cuLaunchKernelEx");
         p_cuGraphKernelNodeGetParams_v2 = load<cuGraphKernelNodeGetParams_v2_t>("cuGraphKernelNodeGetParams_v2");

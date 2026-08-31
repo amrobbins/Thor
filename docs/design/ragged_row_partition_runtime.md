@@ -1,5 +1,9 @@
 # Ragged row-partition runtime model
 
+The repository-level public support matrix and qualification checklist live in
+[`ragged_support_contract.md`](ragged_support_contract.md). This document focuses
+on physical row-partition ownership and runtime extent semantics.
+
 Thor's native ragged representation separates packed values from row-partition state:
 
 ```text
@@ -73,11 +77,15 @@ An operation that changes row membership or segmentation must explicitly produce
 (values B, partition Q)
 ```
 
+`RaggedSequenceConcatenate`, `RaggedSequenceSlice`, `RaggedFilter`, and `RaggedGather` are public examples of this family. Concatenate, slice, and filter produce `Q` explicitly; gather instead adopts the canonical `Q` already owned by its ragged indices input. Concatenate and slice publish host partition metadata only when it can be derived from already available structural input metadata without a device synchronization. Filter is data-dependent on BOOLEAN mask values, so it leaves the newly produced device offsets as the sole source of truth rather than introducing an implicit device-to-host synchronization. Gather is different: its output partition Q is already supplied by the ragged indices input, so it reuses that exact canonical offsets tensor rather than copying or regenerating Q.
+
 There is no implicit propagation convention on values tensors that can create `Q` accidentally.
 
 ## Network boundaries and inactive capacity
 
-A logical `RaggedNetworkInput` materializes values and offsets through separate physical input ports. The submitted host-known active count is boundary execution metadata used to publish the offsets-owned runtime cache after the new offsets payload is materialized. It does not extend the logical tensor into inactive packed capacity.
+A partition-owning logical `RaggedNetworkInput` materializes values and offsets through separate physical input ports. A shared-partition `RaggedNetworkInput(..., partition=source)` materializes only a new values port and reuses the exact offsets tensor owned by `source`; batch size, packed capacity, offsets dtype, and `max_values_per_row` are inherited rather than repeated. The submitted host-known active count is boundary execution metadata used to publish the offsets-owned runtime cache after the new offsets payload is materialized. It does not extend the logical tensor into inactive packed capacity.
+
+At direct submission time, a shared-partition logical input may be supplied as packed values only. The referenced partition-owning input supplies the row partition for the batch. Supplying a full ragged value for a shared input remains accepted for dataset/materialization compatibility; its offsets are not wired as a second graph boundary, and host-known offsets are checked for agreement when available.
 
 The consumer-responsibility contract continues unchanged across both network boundaries:
 
@@ -87,7 +95,7 @@ The consumer-responsibility contract continues unchanged across both network bou
 
 Current implementations may temporarily perform broader sanitation while the consumer-responsibility cleanup is staged. That behavior is incidental and is deliberately not part of the public or internal semantic contract. Tests therefore compare logical prefixes and poison inactive capacity rather than asserting tail bytes.
 
-The legacy flattened `map<string, Tensor>` submission surface cannot represent the logical ragged boundary contract and is rejected for stamped networks with `RaggedNetworkInput`s. Submit a `Batch` containing `RaggedTensor` entries instead.
+The legacy flattened `map<string, Tensor>` submission surface cannot represent a partition-owning logical ragged boundary and is rejected for stamped networks with such `RaggedNetworkInput`s. Submit a `Batch` containing `RaggedTensor` entries for partition owners. Shared-partition logical inputs may contribute packed `Tensor` values in that same `Batch` because their row partition is supplied by the referenced owner.
 
 ## Expression execution
 
@@ -114,7 +122,8 @@ The cutover is covered at several levels rather than by one metadata-propagation
 | Attention and mixed dense/ragged quadrants | `AttentionApi.*Ragged*`, Python `test_attention.py`, transformer tests |
 | Ragged CustomLayer / residual Add | `RaggedCustomLayer.*`, Python `test_custom_layer_ragged.py` and transformer tests |
 | TypeConverter and activations | Python `test_type_converter.py` and `test_ragged_activations.py` |
-| Segmented reductions / ragged Slice | Python `test_segmented_reduction.py` |
+| Segmented reductions / trailing-dimension ragged Slice | Python `test_segmented_reduction.py` |
+| Partition-changing sequence concatenate/slice/filter/gather | `RaggedSequenceConcatenate.*`, `RaggedSequenceSlice.*`, `RaggedFilter.*`, `RaggedGather.*`, Python sequence concatenate/slice/filter/gather tests |
 | Architecture/model save-load | `RaggedTensorApi.*` and ragged transformer completeness test |
 | TrainingPhase and Python training | ragged transformer TrainingPhase round trip and training integration test |
 

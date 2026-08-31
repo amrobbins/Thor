@@ -266,6 +266,8 @@ struct CompiledRmsNorm {
 
 struct CompiledLayerNorm {
     uint64_t normalized_feature_count = 0;
+    // Non-zero for packed ragged values. Runtime execution selects the same
+    // finite row-capacity bucket family used by packed RMSNorm.
     uint64_t packed_row_capacity = 0;
     uint32_t ragged_offsets_input_slot = UINT32_MAX;
     uint64_t ragged_batch_size = 0;
@@ -939,15 +941,11 @@ class StampedLayerNorm {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
     Tensor getOutputTensor() const { return output; }
     [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
-    uintptr_t executablePlanId() const {
-        return executable_plan.has_value() ? executable_plan->executableId() : 0;
-    }
-    CudnnFrontendPlanSelection planSelection() const {
-        if (!executable_plan.has_value()) {
-            throw std::runtime_error("StampedLayerNorm has no prepared executable plan.");
-        }
-        return executable_plan->selection();
-    }
+    [[nodiscard]] uintptr_t executablePlanId() const;
+    [[nodiscard]] CudnnFrontendPlanSelection planSelection() const;
+    [[nodiscard]] size_t executablePlanCount() const noexcept { return forward_executable_plans.size(); }
+    [[nodiscard]] std::vector<uintptr_t> executablePlanIds() const;
+    [[nodiscard]] std::vector<CudnnFrontendPlanSelection> planSelections() const;
 
     StampedLayerNorm(std::shared_ptr<CompiledLayerNorm> compiled,
                      Tensor input,
@@ -958,6 +956,9 @@ class StampedLayerNorm {
                      std::optional<Tensor> row_partition_offsets = std::nullopt);
 
    private:
+    void prepareForwardExecutableFamily();
+    [[nodiscard]] const CudnnLayerNormExecutablePlan& forwardExecutableForOuter(uint64_t outer) const;
+
     const std::shared_ptr<CompiledLayerNorm> compiled_layer_norm;
     const Tensor input;
     const Tensor scale;
@@ -965,8 +966,39 @@ class StampedLayerNorm {
     const std::optional<Tensor> row_partition_offsets;
     Tensor output;
     Stream stream;
-    std::optional<CudnnLayerNormExecutablePlan> executable_plan;
+    uint64_t packed_outer_per_row = 0;
+    std::vector<uint64_t> packed_capacity_buckets;
+    std::unordered_map<uint64_t, CudnnLayerNormExecutablePlan> forward_executable_plans;
     mutable std::optional<Tensor> workspace;
+};
+
+// Physical preparation stage for packed-row consumers that execute a larger
+// capacity bucket than the current logical active-row count. This stage mutates
+// only the inactive bucket slack of an existing packed tensor; it does not
+// produce a new logical value. Expression inserts and shares one such stage per
+// physical packed value so read-only consumers never hide in-place writes in
+// their own run methods.
+class StampedSanitizePackedTail {
+   public:
+    StampedSanitizePackedTail(const Tensor& tensor,
+                              const Tensor& row_partition_offsets,
+                              uint64_t ragged_batch_size,
+                              uint64_t packed_row_capacity,
+                              const Stream& stream);
+
+    void run() { runOn(stream); }
+    void runOn(Stream& run_stream) const;
+
+    uint32_t gpuNum() const { return tensor.getPlacement().getDeviceNum(); }
+
+   private:
+    const Tensor tensor;
+    const Tensor row_partition_offsets;
+    const uint64_t ragged_batch_size;
+    const uint64_t packed_row_capacity;
+    const uint64_t elements_per_packed_row;
+    const std::vector<uint64_t> capacity_buckets;
+    Stream stream;
 };
 
 class StampedRmsNorm {
@@ -1002,7 +1034,8 @@ class StampedRmsNorm {
                    const Tensor& output,
                    const Stream& stream,
                    std::optional<Tensor> row_partition_offsets = std::nullopt,
-                   std::shared_ptr<RmsNormForwardState> forward_state = nullptr);
+                   std::shared_ptr<RmsNormForwardState> forward_state = nullptr,
+                   bool packed_tail_prepared_externally = false);
 
    private:
     const std::shared_ptr<CompiledRmsNorm> compiled_rms_norm;
@@ -1012,6 +1045,7 @@ class StampedRmsNorm {
     Tensor output;
     Stream stream;
     std::shared_ptr<RmsNormForwardState> forward_state;
+    const bool packed_tail_prepared_externally;
     // Dense RMSNorm has one entry. Packed RMSNorm owns the entire finite
     // outer-size family selected by runtime row capacity. Global state contains
     // only immutable selections; every executable here belongs to this stamp.
@@ -1055,7 +1089,8 @@ class StampedRmsNormBackward {
                            const Tensor& dScale,
                            const Stream& stream,
                            std::optional<Tensor> row_partition_offsets = std::nullopt,
-                           std::shared_ptr<RmsNormForwardState> saved_forward_state = nullptr);
+                           std::shared_ptr<RmsNormForwardState> saved_forward_state = nullptr,
+                           bool packed_tails_prepared_externally = false);
 
    private:
     const std::shared_ptr<CompiledRmsNormBackward> compiled_rms_norm_backward;
@@ -1068,6 +1103,7 @@ class StampedRmsNormBackward {
     Stream stream;
     std::vector<Tensor> outputs;
     std::shared_ptr<RmsNormForwardState> saved_forward_state;
+    const bool packed_tails_prepared_externally;
     mutable std::shared_ptr<RmsNormForwardState> fallback_forward_state;
     mutable Tensor fallback_output;
     // Dense backward has one plan in each applicable family. Packed backward
@@ -1142,7 +1178,8 @@ class StampedMatmul {
                   std::optional<Tensor> beta_host_scratch,
                   std::optional<Tensor> epilogue_aux = std::nullopt,
                   std::optional<Tensor> bgrad_output = std::nullopt,
-                  std::optional<Tensor> row_partition_offsets = std::nullopt);
+                  std::optional<Tensor> row_partition_offsets = std::nullopt,
+                  bool packed_tails_prepared_externally = false);
 
     [[nodiscard]] std::optional<std::string> alphaRuntimeName() const { return alpha_runtime_name; }
     [[nodiscard]] std::optional<std::string> betaRuntimeName() const { return beta_runtime_name; }
@@ -1168,6 +1205,7 @@ class StampedMatmul {
     const std::optional<Tensor> epilogue_aux;
     const std::optional<Tensor> bgrad_output;
     const std::optional<Tensor> row_partition_offsets;
+    const bool packed_tails_prepared_externally;
     Stream stream;
     const std::optional<Tensor> workspace;
     const std::optional<RuntimeInputValue> alpha_input;
@@ -1589,6 +1627,7 @@ struct StampedExecutionStage {
         PaddedRaggedUnpack,
         Scan,
         Softmax,
+        SanitizePackedTail,
         RmsNorm,
         LayerNorm,
         RmsNormBackward,
@@ -1635,6 +1674,8 @@ struct StampedExecutionStage {
                 return "Scan";
             case Kind::Softmax:
                 return "Softmax";
+            case Kind::SanitizePackedTail:
+                return "SanitizePackedTail";
             case Kind::RmsNorm:
                 return "RmsNorm";
             case Kind::LayerNorm:
@@ -1688,6 +1729,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedPaddedRaggedUnpack> padded_ragged_unpack = nullptr;
     const std::shared_ptr<StampedScan> scan = nullptr;
     const std::shared_ptr<StampedSoftmax> softmax = nullptr;
+    const std::shared_ptr<StampedSanitizePackedTail> sanitize_packed_tail = nullptr;
     const std::shared_ptr<StampedRmsNorm> rms_norm = nullptr;
     const std::shared_ptr<StampedLayerNorm> layer_norm = nullptr;
     const std::shared_ptr<StampedRmsNormBackward> rms_norm_backward = nullptr;
@@ -1833,6 +1875,13 @@ struct StampedExecutionStage {
           gpu_num(softmax->gpuNum()),
           flop_count(flop_count),
           softmax(softmax) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedSanitizePackedTail>& sanitize_packed_tail,
+                                   std::vector<uint32_t> dependency_stage_indices = {})
+        : kind(Kind::SanitizePackedTail),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(sanitize_packed_tail->gpuNum()),
+          sanitize_packed_tail(sanitize_packed_tail) {}
 
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedRmsNorm>& rms_norm,
@@ -2111,6 +2160,9 @@ struct StampedExecutionStage {
         } else if (kind == Kind::Softmax) {
             THOR_THROW_IF_FALSE(softmax != nullptr);
             softmax->runOn(run_stream);
+        } else if (kind == Kind::SanitizePackedTail) {
+            THOR_THROW_IF_FALSE(sanitize_packed_tail != nullptr);
+            sanitize_packed_tail->runOn(run_stream);
         } else if (kind == Kind::RmsNorm) {
             THOR_THROW_IF_FALSE(rms_norm != nullptr);
             rms_norm->runOn(run_stream);

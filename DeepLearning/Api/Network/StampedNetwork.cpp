@@ -322,6 +322,7 @@ void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOthe
         THOR_THROW_IF_FALSE(raggedInputNamed.count(it->first) == 1);
         THOR_THROW_IF_FALSE(raggedInputNamed[it->first].valuesInputName == it->second.valuesInputName);
         THOR_THROW_IF_FALSE(raggedInputNamed[it->first].offsetsInputName == it->second.offsetsInputName);
+        THOR_THROW_IF_FALSE(raggedInputNamed[it->first].partitionInputName == it->second.partitionInputName);
         THOR_THROW_IF_FALSE(raggedInputNamed[it->first].descriptor == it->second.descriptor);
     }
     for (auto it = outputNamedShared.begin(); it != outputNamedShared.end(); ++it) {
@@ -488,18 +489,40 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
         }
     };
 
+    std::map<std::string, std::vector<uint64_t>> submittedHostOffsetsByPartition;
     for (const auto& [name, value] : batchInputs.values()) {
         const std::optional<Thor::BatchSourceReference> sourceReference =
             batchInputs.getSourceReference(name);
         if (std::holds_alternative<Tensor>(value)) {
             Tensor inputTensor = std::get<Tensor>(value);
-            const std::vector<uint64_t> dimensions = inputTensor.getDescriptor().getDimensions();
-            THOR_THROW_IF_FALSE(!dimensions.empty());
-            requireConsistentBatchCapacity(dimensions[0]);
-            THOR_THROW_IF_FALSE(
-                physicalBatchInputs.emplace(
-                    name,
-                    PhysicalBatchInput{inputTensor, sourceReference}).second);
+            auto raggedIt = raggedInputNamed.find(name);
+            if (raggedIt != raggedInputNamed.end()) {
+                const RaggedInputBinding& binding = raggedIt->second;
+                if (binding.ownsPartition()) {
+                    throw std::runtime_error(
+                        "StampedNetwork::sendBatch partition-owning ragged input '" + name +
+                        "' requires a PhysicalRaggedTensor; only shared-partition ragged inputs may be supplied as packed PhysicalTensor values.");
+                }
+                if (inputTensor.getDescriptor() != binding.descriptor.getValuesDescriptor()) {
+                    throw std::runtime_error(
+                        "StampedNetwork::sendBatch shared-partition ragged input '" + name +
+                        "' values descriptor mismatch: received=" + inputTensor.getDescriptor().toString() +
+                        " expected=" + binding.descriptor.getValuesDescriptor().toString() + ".");
+                }
+                requireConsistentBatchCapacity(binding.descriptor.getBatchSize());
+                THOR_THROW_IF_FALSE(
+                    physicalBatchInputs.emplace(
+                        binding.valuesInputName,
+                        PhysicalBatchInput{inputTensor, sourceReference}).second);
+            } else {
+                const std::vector<uint64_t> dimensions = inputTensor.getDescriptor().getDimensions();
+                THOR_THROW_IF_FALSE(!dimensions.empty());
+                requireConsistentBatchCapacity(dimensions[0]);
+                THOR_THROW_IF_FALSE(
+                    physicalBatchInputs.emplace(
+                        name,
+                        PhysicalBatchInput{inputTensor, sourceReference}).second);
+            }
         } else if (std::holds_alternative<RaggedTensor>(value)) {
             auto raggedIt = raggedInputNamed.find(name);
             THOR_THROW_IF_FALSE(raggedIt != raggedInputNamed.end());
@@ -518,26 +541,57 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
                 raggedTensor.getHostMaxActiveRowLengthIfAvailable();
             const std::optional<std::vector<uint64_t>> hostOffsets =
                 raggedTensor.getHostOffsetsIfAvailable();
+            if (hostOffsets.has_value()) {
+                auto [it, inserted] = submittedHostOffsetsByPartition.emplace(binding.offsetsInputName, hostOffsets.value());
+                if (!inserted && it->second != hostOffsets.value()) {
+                    throw std::runtime_error(
+                        "StampedNetwork::sendBatch ragged inputs sharing partition '" + binding.offsetsInputName +
+                        "' were submitted with different host offsets.");
+                }
+            }
             THOR_THROW_IF_FALSE(
                 physicalBatchInputs.emplace(
                     binding.valuesInputName,
                     PhysicalBatchInput{raggedTensor.getValues(), sourceReference}).second);
-            THOR_THROW_IF_FALSE(
-                physicalBatchInputs.emplace(
-                    binding.offsetsInputName,
-                    PhysicalBatchInput{raggedTensor.getOffsets(),
-                                       sourceReference,
-                                       raggedTensor.getRowPartitionRuntime().getDescriptor(),
-                                       activeValueCount,
-                                       maxActiveRowLength,
-                                       hostOffsets}).second);
+            if (binding.ownsPartition()) {
+                THOR_THROW_IF_FALSE(
+                    physicalBatchInputs.emplace(
+                        binding.offsetsInputName,
+                        PhysicalBatchInput{raggedTensor.getOffsets(),
+                                           sourceReference,
+                                           raggedTensor.getRowPartitionRuntime().getDescriptor(),
+                                           activeValueCount,
+                                           maxActiveRowLength,
+                                           hostOffsets}).second);
+            }
         } else if (std::holds_alternative<Thor::DeviceBatchReference>(value)) {
             Thor::DeviceBatchReference reference = std::get<Thor::DeviceBatchReference>(value);
-            requireConsistentBatchCapacity(reference.getBatchCapacity());
-            THOR_THROW_IF_FALSE(
-                physicalBatchInputs.emplace(
-                    name,
-                    PhysicalBatchInput{std::move(reference), sourceReference}).second);
+            auto raggedIt = raggedInputNamed.find(name);
+            if (raggedIt != raggedInputNamed.end()) {
+                const RaggedInputBinding& binding = raggedIt->second;
+                if (binding.ownsPartition()) {
+                    throw std::runtime_error(
+                        "StampedNetwork::sendBatch partition-owning ragged input '" + name +
+                        "' requires a PhysicalRaggedTensor; only shared-partition ragged inputs may be supplied as packed DeviceBatchReference values.");
+                }
+                if (reference.getOutputDescriptor() != binding.descriptor.getValuesDescriptor()) {
+                    throw std::runtime_error(
+                        "StampedNetwork::sendBatch shared-partition ragged input '" + name +
+                        "' device-reference descriptor mismatch: received=" + reference.getOutputDescriptor().toString() +
+                        " expected=" + binding.descriptor.getValuesDescriptor().toString() + ".");
+                }
+                requireConsistentBatchCapacity(binding.descriptor.getBatchSize());
+                THOR_THROW_IF_FALSE(
+                    physicalBatchInputs.emplace(
+                        binding.valuesInputName,
+                        PhysicalBatchInput{std::move(reference), sourceReference}).second);
+            } else {
+                requireConsistentBatchCapacity(reference.getBatchCapacity());
+                THOR_THROW_IF_FALSE(
+                    physicalBatchInputs.emplace(
+                        name,
+                        PhysicalBatchInput{std::move(reference), sourceReference}).second);
+            }
         } else {
             THOR_UNREACHABLE();
         }
@@ -619,11 +673,12 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
 
     const auto inputForwardStart = timingNow(submitTiming);
 
-    // A logical RaggedNetworkInput materializes values and offsets through two
-    // physical NetworkInput ports. Values use the ordinary tensor-copy path: packed
-    // storage beyond offsets[B] is undefined and the input boundary does not inspect
-    // or canonicalize it. The offsets port alone publishes the row-partition runtime
-    // metadata required by host-dispatched ragged consumers.
+    // A partition-owning logical RaggedNetworkInput materializes values and
+    // offsets through two physical NetworkInput ports. Shared-partition inputs
+    // materialize only their values port and reuse the owner's offsets port.
+    // Values use the ordinary tensor-copy path: packed storage beyond offsets[B]
+    // is undefined and the input boundary does not inspect or canonicalize it.
+    // The canonical offsets port alone publishes row-partition runtime metadata.
 
     for (uint32_t i = 0; i < inputs.size(); ++i) {
         auto it = batchInputs.find(inputs[i]->getName());

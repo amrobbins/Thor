@@ -54,6 +54,82 @@ void Embedding::validateIndexTensor(const Tensor& tensor, const std::string& wha
     }
 }
 
+std::vector<Tensor> Embedding::getFeatureInputs() const {
+    if (raggedFeatureInputs.empty()) return featureInputs;
+    std::vector<Tensor> inputs;
+    inputs.reserve(raggedFeatureInputs.size() * 2);
+    for (const RaggedTensor& input : raggedFeatureInputs) {
+        inputs.push_back(input.getValues());
+        inputs.push_back(input.getOffsets());
+    }
+    return inputs;
+}
+
+std::vector<uint32_t> Embedding::inputPortIndicesForTensor(Tensor tensor) const {
+    std::vector<uint32_t> ports;
+    if (raggedFeatureInputs.empty()) return ports;
+    for (uint32_t i = 0; i < raggedFeatureInputs.size(); ++i) {
+        if (tensor.getOriginalId() == raggedFeatureInputs[i].getValues().getOriginalId()) ports.push_back(i * 2);
+        if (tensor.getOriginalId() == raggedFeatureInputs[i].getOffsets().getOriginalId()) ports.push_back(i * 2 + 1);
+    }
+    return ports;
+}
+
+std::vector<Tensor> Embedding::getOutputsFromInput(Tensor inputTensor) {
+    if (raggedFeatureInputs.empty()) return {getFeatureOutput(inputTensor)};
+    if (inputPortIndicesForTensor(inputTensor).empty()) {
+        throw std::runtime_error("Embedding received an unknown ragged input tensor.");
+    }
+    std::vector<Tensor> readyOutputs;
+    for (uint32_t app = 0; app < raggedFeatureInputs.size(); ++app) {
+        const uint32_t valuesPort = app * 2;
+        const uint32_t offsetsPort = valuesPort + 1;
+        if (!connectedInputPortIndices.contains(valuesPort) || !connectedInputPortIndices.contains(offsetsPort) ||
+            emittedRaggedOutputApplications.contains(app)) {
+            continue;
+        }
+        emittedRaggedOutputApplications.insert(app);
+        readyOutputs.push_back(featureOutputs.at(app));
+    }
+    return readyOutputs;
+}
+
+void Embedding::informThatInputConnectionMade(Tensor inputTensor) {
+    if (raggedFeatureInputs.empty()) return;
+    const std::vector<uint32_t> ports = inputPortIndicesForTensor(inputTensor);
+    if (ports.empty()) throw std::runtime_error("Embedding informed of a connection for an unknown ragged input tensor.");
+    uint32_t& cursor = nextTraversalInputCursorByTensorOriginalId[inputTensor.getOriginalId()];
+    connectedInputPortIndices.insert(ports[cursor % ports.size()]);
+    ++cursor;
+}
+
+void Embedding::resetGraphTraversalState() {
+    connectedInputPortIndices.clear();
+    emittedRaggedOutputApplications.clear();
+    nextInputConnectionCursorByTensorOriginalId.clear();
+    nextTraversalInputCursorByTensorOriginalId.clear();
+}
+
+int Embedding::getConnectionType(Tensor connectingTensor) const {
+    if (!raggedFeatureInputs.empty()) {
+        const std::vector<uint32_t> inputPorts = inputPortIndicesForTensor(connectingTensor);
+        if (!inputPorts.empty()) {
+            uint32_t& cursor = nextInputConnectionCursorByTensorOriginalId[connectingTensor.getOriginalId()];
+            const uint32_t port = inputPorts[cursor % inputPorts.size()];
+            ++cursor;
+            return static_cast<int>(port);
+        }
+    } else {
+        for (uint32_t i = 0; i < featureInputs.size(); ++i) {
+            if (connectingTensor == featureInputs[i]) return static_cast<int>(i);
+        }
+    }
+    for (uint32_t i = 0; i < featureOutputs.size(); ++i) {
+        if (connectingTensor == featureOutputs[i]) return static_cast<int>(i);
+    }
+    throw std::runtime_error("Tensor is not connected to this Embedding layer.");
+}
+
 Embedding Embedding::Builder::build() {
     if (!_sparseGradients.has_value())
         _sparseGradients = true;
@@ -66,6 +142,7 @@ Embedding Embedding::Builder::build() {
 
     Embedding embedding;
     embedding.featureInputs = _featureInputs;
+    embedding.raggedFeatureInputs = _raggedFeatureInputs;
     embedding.vocabularySize = _vocabularySize.value();
     embedding.embeddingDim = _embeddingDim.value();
     embedding.weightsDataType = _weightsDataType.value();
@@ -89,6 +166,9 @@ Embedding Embedding::Builder::build() {
         outDims.push_back(embedding.embeddingDim);
         Tensor out(embedding.weightsDataType, outDims);
         embedding.featureOutputs.push_back(out);
+        if (!embedding.raggedFeatureInputs.empty()) {
+            embedding.raggedFeatureOutputs.push_back(embedding.raggedFeatureInputs[i].withValues(out));
+        }
         embedding.outputTensorFromInputTensor[embedding.featureInputs[i]] = out;
         embedding.inputTensorFromOutputTensor[out] = embedding.featureInputs[i];
     }
@@ -143,7 +223,11 @@ std::shared_ptr<ThorImplementation::Layer> Embedding::stamp(ThorImplementation::
     (void)drivingApiLayer;
 
     THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+    if (!raggedFeatureInputs.empty()) {
+        THOR_THROW_IF_FALSE(!inputPortIndicesForTensor(connectingApiTensor).empty());
+    } else {
+        THOR_THROW_IF_FALSE(outputTensorFromInputTensor.find(connectingApiTensor) != outputTensorFromInputTensor.end());
+    }
 
     std::vector<std::shared_ptr<ThorImplementation::PhysicalParameter>> physicalParameters;
     for (const auto& parameter : getParameters()) {
@@ -151,8 +235,31 @@ std::shared_ptr<ThorImplementation::Layer> Embedding::stamp(ThorImplementation::
         physicalParameters.push_back(parameter->stamp());
     }
 
-    std::shared_ptr<ThorImplementation::Embedding> physicalEmbedding = std::make_shared<ThorImplementation::Embedding>(
-        placement, physicalParameters, vocabularySize, embeddingDim, weightsDataType, paddingIndex, sparseGradients, inferenceOnly, getId());
+    std::optional<ThorImplementation::RaggedEmbeddingConfig> raggedConfig = std::nullopt;
+    if (!raggedFeatureInputs.empty()) {
+        const RaggedTensor& input = raggedFeatureInputs.front();
+        const Tensor values = input.getValues();
+        const uint64_t maxTotalValues = input.getMaxTotalValues();
+        THOR_THROW_IF_FALSE(maxTotalValues != 0);
+        THOR_THROW_IF_FALSE(values.getTotalNumElements() % maxTotalValues == 0);
+        raggedConfig = ThorImplementation::RaggedEmbeddingConfig{
+            .batchSize = input.getBatchSize(),
+            .maxTotalValues = maxTotalValues,
+            .elementsPerValue = values.getTotalNumElements() / maxTotalValues,
+            .offsetsDataType = input.getOffsetsDataType(),
+        };
+    }
+
+    std::shared_ptr<ThorImplementation::Embedding> physicalEmbedding = std::make_shared<ThorImplementation::Embedding>(placement,
+                                                                                                                        physicalParameters,
+                                                                                                                        vocabularySize,
+                                                                                                                        embeddingDim,
+                                                                                                                        weightsDataType,
+                                                                                                                        paddingIndex,
+                                                                                                                        sparseGradients,
+                                                                                                                        inferenceOnly,
+                                                                                                                        getId(),
+                                                                                                                        raggedConfig);
     physicalEmbedding->setName(getLayerType());
     return physicalEmbedding;
 }
@@ -167,6 +274,7 @@ json Embedding::architectureJson() const {
     j["embedding_dim"] = embeddingDim;
     j["weights_data_type"] = weightsDataType;
     j["sparse_gradients"] = sparseGradients;
+    j["use_ragged"] = !raggedFeatureInputs.empty();
     if (paddingIndex.has_value()) {
         j["padding_index"] = paddingIndex.value();
     } else {
@@ -183,6 +291,15 @@ json Embedding::architectureJson() const {
         outputs.push_back(output.architectureJson());
     j["outputs"] = outputs;
 
+    if (!raggedFeatureInputs.empty()) {
+        json raggedInputs = json::array();
+        json raggedOutputs = json::array();
+        for (const RaggedTensor& input : raggedFeatureInputs) raggedInputs.push_back(input.architectureJson());
+        for (const RaggedTensor& output : raggedFeatureOutputs) raggedOutputs.push_back(output.architectureJson());
+        j["ragged_inputs"] = std::move(raggedInputs);
+        j["ragged_outputs"] = std::move(raggedOutputs);
+    }
+
     j["parameters"] = getParametersArchitectureJson()["parameters"];
     return j;
 }
@@ -198,8 +315,9 @@ json Embedding::serialize(thor_file::TarWriter& archiveWriter,
 }
 
 void Embedding::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader, const json& j, Network* network) {
-    if (j.at("version").get<std::string>() != "1.0.0")
-        throw std::runtime_error("Unsupported version in Embedding::deserialize: " + j.at("version").get<std::string>());
+    const std::string serializedVersion = j.at("version").get<std::string>();
+    if (serializedVersion != "1.0.0" && serializedVersion != "1.1.0")
+        throw std::runtime_error("Unsupported version in Embedding::deserialize: " + serializedVersion);
     if (j.at("layer_type").get<std::string>() != "embedding")
         throw std::runtime_error("Layer type mismatch in Embedding::deserialize: " + j.at("layer_type").get<std::string>());
 
@@ -221,6 +339,42 @@ void Embedding::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
     }
     if (embedding.featureInputs.size() != embedding.featureOutputs.size()) {
         throw std::runtime_error("Embedding deserialize expected equal numbers of inputs and outputs.");
+    }
+    const bool useRagged = j.value("use_ragged", false);
+    if (useRagged) {
+        if (serializedVersion == "1.0.0") {
+            throw std::runtime_error("Embedding 1.0.0 archives cannot contain ragged metadata.");
+        }
+        if (!j.contains("ragged_inputs") || !j.contains("ragged_outputs") ||
+            j.at("ragged_inputs").size() != embedding.featureInputs.size() ||
+            j.at("ragged_outputs").size() != embedding.featureOutputs.size()) {
+            throw std::runtime_error("Embedding serialized ragged metadata does not match its input/output arity.");
+        }
+        for (uint32_t i = 0; i < embedding.featureInputs.size(); ++i) {
+            const json& raggedInputJson = j.at("ragged_inputs").at(i);
+            const uint64_t offsetsId = raggedInputJson.at("offsets").at("id").get<uint64_t>();
+            Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
+            RaggedTensor raggedInput = raggedInputJson.contains("max_values_per_row")
+                ? RaggedTensor(embedding.featureInputs[i], offsets, raggedInputJson.at("max_values_per_row").get<uint64_t>())
+                : RaggedTensor(embedding.featureInputs[i], offsets);
+            if (raggedInput.getBatchSize() != raggedInputJson.at("batch_size").get<uint64_t>() ||
+                raggedInput.getMaxTotalValues() != raggedInputJson.at("max_total_values").get<uint64_t>()) {
+                throw std::runtime_error("Embedding serialized ragged input metadata does not match reconstructed tensors.");
+            }
+            const json& raggedOutputJson = j.at("ragged_outputs").at(i);
+            const bool outputMaxValuesPerRowMatches =
+                raggedOutputJson.contains("max_values_per_row") == raggedInput.hasMaxValuesPerRow() &&
+                (!raggedInput.hasMaxValuesPerRow() ||
+                 raggedOutputJson.at("max_values_per_row").get<uint64_t>() == raggedInput.getMaxValuesPerRow());
+            if (raggedOutputJson.at("offsets").at("id").get<uint64_t>() != offsetsId ||
+                raggedOutputJson.at("batch_size").get<uint64_t>() != raggedInput.getBatchSize() ||
+                raggedOutputJson.at("max_total_values").get<uint64_t>() != raggedInput.getMaxTotalValues() ||
+                !outputMaxValuesPerRowMatches) {
+                throw std::runtime_error("Embedding serialized ragged output must preserve the input row partition and capacity.");
+            }
+            embedding.raggedFeatureInputs.push_back(raggedInput);
+            embedding.raggedFeatureOutputs.push_back(raggedInput.withValues(embedding.featureOutputs[i]));
+        }
     }
     for (uint32_t i = 0; i < embedding.featureInputs.size(); ++i) {
         embedding.outputTensorFromInputTensor[embedding.featureInputs[i]] = embedding.featureOutputs[i];

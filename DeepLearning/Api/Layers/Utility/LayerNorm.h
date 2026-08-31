@@ -4,13 +4,16 @@
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Parameter/ParameterSpecification.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/LayerNorm.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -30,6 +33,39 @@ class LayerNorm : public TrainableLayer {
     const std::vector<uint64_t>& getNormalizedShape() const { return normalizedShape; }
     double getEpsilon() const { return epsilon; }
     DataType getParameterDataType() const { return parameterDataType; }
+    [[nodiscard]] bool getUseRagged() const { return !raggedFeatureInputs.empty(); }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureInput(uint32_t index = 0) const {
+        if (index >= raggedFeatureInputs.size()) return std::nullopt;
+        return raggedFeatureInputs[index];
+    }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureOutput(uint32_t index = 0) const {
+        if (index >= raggedFeatureOutputs.size()) return std::nullopt;
+        return raggedFeatureOutputs[index];
+    }
+
+    using MultiConnectionLayer::getFeatureOutput;
+    int getConnectionType(Tensor connectingTensor) const override;
+    std::vector<Tensor> getFeatureInputs() const override;
+    Tensor getFeatureOutput(Tensor inputTensor) const override;
+    std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
+    void informThatInputConnectionMade(Tensor inputTensor) override;
+    void resetGraphTraversalState() override;
+    bool mustConnectAllInputsToDriveOutput() const override { return !raggedFeatureInputs.empty(); }
+
+    uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
+        if (raggedFeatureOutputs.empty()) return MultiConnectionLayer::getOutputTensorBytes(batchSize);
+        THOR_THROW_IF_FALSE(!featureOutputs.empty());
+        return featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
+    }
+    uint64_t getNonFirstInstanceMemRequirementInBytes(uint32_t batchSize,
+                                                      ThorImplementation::TensorPlacement tensorPlacement) const override {
+        if (raggedFeatureOutputs.empty())
+            return TrainableLayer::getNonFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
+        (void)batchSize;
+        (void)tensorPlacement;
+        THOR_THROW_IF_FALSE(!featureOutputs.empty());
+        return featureOutputs.size() * featureOutputs[0].getTotalSizeInBytes();
+    }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
                              Stream stream,
@@ -51,6 +87,13 @@ class LayerNorm : public TrainableLayer {
     static void validateNormalizedShapeForInput(const std::vector<uint64_t>& inputDims, const std::vector<uint64_t>& normalizedShape);
 
     std::vector<uint64_t> normalizedShape;
+    std::vector<RaggedTensor> raggedFeatureInputs;
+    std::vector<RaggedTensor> raggedFeatureOutputs;
+    std::vector<uint32_t> inputPortIndicesForTensor(Tensor tensor) const;
+    std::set<uint32_t> connectedInputPortIndices;
+    std::set<uint32_t> emittedRaggedOutputApplications;
+    mutable std::unordered_map<uint64_t, uint32_t> nextInputConnectionCursorByTensorOriginalId;
+    std::unordered_map<uint64_t, uint32_t> nextTraversalInputCursorByTensorOriginalId;
     double epsilon = 1.0e-5;
     DataType parameterDataType = DataType::FP32;
 
@@ -72,10 +115,27 @@ class LayerNorm::Builder {
 
     virtual LayerNorm::Builder& featureInput(Tensor featureInput) {
         THOR_THROW_IF_FALSE(featureInput.isInitialized());
+        THOR_THROW_IF_FALSE(this->_raggedFeatureInputs.empty());
         this->_featureInputs.push_back(featureInput);
         if (_featureInputs.size() > 1) {
             THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
             THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+        }
+        return *this;
+    }
+
+    virtual LayerNorm::Builder& featureInput(RaggedTensor featureInput) {
+        THOR_THROW_IF_FALSE(featureInput.isInitialized());
+        THOR_THROW_IF_FALSE(this->_featureInputs.empty() || !this->_raggedFeatureInputs.empty());
+        Tensor values = featureInput.getValues();
+        this->_raggedFeatureInputs.push_back(featureInput);
+        this->_featureInputs.push_back(values);
+        if (_featureInputs.size() > 1) {
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getBatchSize() == _raggedFeatureInputs.front().getBatchSize());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getMaxTotalValues() == _raggedFeatureInputs.front().getMaxTotalValues());
+            THOR_THROW_IF_FALSE(_raggedFeatureInputs.back().getOffsetsDataType() == _raggedFeatureInputs.front().getOffsetsDataType());
         }
         return *this;
     }
@@ -130,6 +190,7 @@ class LayerNorm::Builder {
 
     std::optional<Network*> _network;
     std::vector<Tensor> _featureInputs;
+    std::vector<RaggedTensor> _raggedFeatureInputs;
     std::vector<uint64_t> _normalizedShape;
     std::optional<double> _epsilon;
     std::optional<DataType> _parameterDataType;

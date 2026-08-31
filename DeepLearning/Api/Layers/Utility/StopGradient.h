@@ -3,6 +3,7 @@
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Layers/Utility/StopGradient.h"
 
 #include <optional>
@@ -18,6 +19,16 @@ class StopGradient : public Layer {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<StopGradient>(*this); }
 
     std::string getLayerType() const override { return "StopGradient"; }
+
+    [[nodiscard]] bool getUseRagged() const { return raggedFeatureInput.has_value(); }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureInput() const { return raggedFeatureInput; }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureOutput() const { return raggedFeatureOutput; }
+
+    [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        THOR_THROW_IF_FALSE(outputTensor == featureOutput.value());
+        return raggedFeatureInput.has_value();
+    }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
@@ -43,6 +54,12 @@ class StopGradient : public Layer {
         (void)tensorPlacement;
         return 0;
     }
+
+   private:
+    std::optional<RaggedTensor> raggedFeatureInput;
+    std::optional<RaggedTensor> raggedFeatureOutput;
+
+    friend class Builder;
 };
 
 class StopGradient::Builder {
@@ -54,6 +71,10 @@ class StopGradient::Builder {
         StopGradient stopGradient;
         stopGradient.featureInput = _featureInput;
         stopGradient.featureOutput = _featureInput.value().clone();
+        if (_raggedFeatureInput.has_value()) {
+            stopGradient.raggedFeatureInput = _raggedFeatureInput;
+            stopGradient.raggedFeatureOutput = _raggedFeatureInput->withValues(stopGradient.featureOutput.value());
+        }
         stopGradient.initialized = true;
         stopGradient.addToNetwork(_network.value());
         return stopGradient;
@@ -67,14 +88,25 @@ class StopGradient::Builder {
 
     virtual StopGradient::Builder &featureInput(Tensor _featureInput) {
         THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
         THOR_THROW_IF_FALSE(_featureInput.isInitialized());
         this->_featureInput = _featureInput;
+        return *this;
+    }
+
+    virtual StopGradient::Builder &featureInput(RaggedTensor _featureInput) {
+        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
+        THOR_THROW_IF_FALSE(_featureInput.isInitialized());
+        this->_raggedFeatureInput = _featureInput;
+        this->_featureInput = _featureInput.getValues();
         return *this;
     }
 
    private:
     std::optional<Network *> _network;
     std::optional<Tensor> _featureInput;
+    std::optional<RaggedTensor> _raggedFeatureInput;
 };
 
 }  // namespace Thor

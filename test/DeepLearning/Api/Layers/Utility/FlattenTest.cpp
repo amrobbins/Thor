@@ -209,3 +209,35 @@ TEST(UtilityApiLayers, FlattenSerializeDeserialize) {
     ASSERT_EQ(stampedFlatten->getFeatureInput().value().getDataType(), dataType);
     ASSERT_EQ(stampedFlatten->getFeatureOutput().value().getDataType(), dataType);
 }
+
+TEST(UtilityApiLayers, RaggedFlattenPreservesPartitionAndFlattensOnlyTrailingValues) {
+    Network network("raggedFlatten");
+    RaggedTensor input(DataType::FP16, {2, 3, 4}, 3, 8, DataType::UINT64);
+
+    Flatten flatten = Flatten::Builder().network(network).featureInput(input).numOutputDimensions(2).build();
+
+    ASSERT_TRUE(flatten.getUseRagged());
+    ASSERT_TRUE(flatten.getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(flatten.getRaggedFeatureOutput().has_value());
+    const RaggedTensor output = flatten.getRaggedFeatureOutput().value();
+    EXPECT_EQ(output.getValuesDimensions(), std::vector<uint64_t>({8, 2, 12}));
+    EXPECT_EQ(output.getTrailingDimensions(), std::vector<uint64_t>({2, 12}));
+    EXPECT_EQ(output.getOffsets(), input.getOffsets());
+    EXPECT_EQ(output.getBatchSize(), input.getBatchSize());
+    EXPECT_EQ(output.getMaxTotalValues(), input.getMaxTotalValues());
+    EXPECT_EQ(output.getOffsetsDataType(), DataType::UINT64);
+    ASSERT_TRUE(flatten.getFeatureOutput().has_value());
+    EXPECT_TRUE(flatten.outputTensorDimensionsIncludeBatch(flatten.getFeatureOutput().value()));
+
+    const json architecture = flatten.architectureJson();
+    EXPECT_TRUE(architecture.at("use_ragged").get<bool>());
+    EXPECT_EQ(architecture.at("ragged_feature_output").at("offsets").at("id").get<uint64_t>(), input.getOffsets().getId());
+}
+
+TEST(UtilityApiLayers, RaggedFlattenRejectsOutputRankNotSmallerThanTrailingRank) {
+    Network network("raggedFlattenRejectsRank");
+    RaggedTensor input(DataType::FP32, {2, 3}, 3, 8, DataType::UINT32);
+
+    EXPECT_THROW((void)Flatten::Builder().network(network).featureInput(input).numOutputDimensions(2).build(),
+                 std::invalid_argument);
+}

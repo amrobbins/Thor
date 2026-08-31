@@ -56,7 +56,13 @@ Public API metadata source: **generated .pyi**.
 
 ::: thor.layers.ScaleGradient
 
+::: thor.layers.SegmentedBroadcast
+
+::: thor.layers.SegmentedLogSoftmax
+
 ::: thor.layers.SegmentedReduction
+
+::: thor.layers.SegmentedSoftmax
 
 ::: thor.layers.Slice
 
@@ -64,13 +70,25 @@ Public API metadata source: **generated .pyi**.
 
 ::: thor.layers.NetworkInput
 
+::: thor.layers.RaggedFilter
+
+::: thor.layers.RaggedGather
+
 ::: thor.layers.RaggedRowLengths
+
+::: thor.layers.RaggedToPaddedDense
+
+::: thor.layers.RaggedSequenceConcatenate
+
+::: thor.layers.RaggedSequenceSlice
 
 ::: thor.layers.NetworkOutput
 
 ::: thor.layers.RaggedNetworkOutput
 
 ::: thor.layers.Pooling
+
+::: thor.layers.PaddedDenseToRagged
 
 ::: thor.layers.Reshape
 

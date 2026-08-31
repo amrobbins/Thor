@@ -986,6 +986,58 @@ TEST(UringDirect, RegisterReusableBuffersRejectsReplacementWithInFlightIo) {
     UringDirect::testResetFallbackWorkerBlock();
 }
 
+TEST(UringDirect, MoveAssignmentReleasesDestinationResourcesAndTransfersSource) {
+    std::string destinationFilename = makeTmpPrefix("move_assignment_destination");
+    std::string sourceFilename = makeTmpPrefix("move_assignment_source");
+    ScopedUnlink destinationCleanup(destinationFilename);
+    ScopedUnlink sourceCleanup(sourceFilename);
+
+    const std::array<uint8_t, 4> destinationBytes = {1, 2, 3, 4};
+    const std::array<uint8_t, 4> sourceBytes = {9, 8, 7, 6};
+    {
+        std::ofstream out(destinationFilename, std::ios::binary);
+        ASSERT_TRUE(out.good());
+        out.write(reinterpret_cast<const char*>(destinationBytes.data()),
+                  static_cast<std::streamsize>(destinationBytes.size()));
+        ASSERT_TRUE(out.good());
+    }
+    {
+        std::ofstream out(sourceFilename, std::ios::binary);
+        ASSERT_TRUE(out.good());
+        out.write(reinterpret_cast<const char*>(sourceBytes.data()), static_cast<std::streamsize>(sourceBytes.size()));
+        ASSERT_TRUE(out.good());
+    }
+
+    // Exercise resources owned by the destination before overwriting it, including
+    // a live fallback worker pool that move assignment must shut down cleanly.
+    UringDirect destination(/*queueDepth=*/2, UringDirect::IoBackend::PreadBuffered);
+    destination.registerCachedLoadFile(destinationFilename);
+    uint8_t destinationRead = 0;
+    ASSERT_TRUE(destination.submitReadCached(&destinationRead, /*fileOffsetBytes=*/0, /*lenBytes=*/1));
+    EXPECT_EQ(destination.submit(), 1);
+    auto destinationCompletions = destination.waitCompletionsInOrder(1);
+    ASSERT_EQ(destinationCompletions.size(), 1u);
+    EXPECT_EQ(destinationRead, destinationBytes[0]);
+
+    UringDirect source(/*queueDepth=*/2, UringDirect::IoBackend::PreadBuffered);
+    source.registerCachedLoadFile(sourceFilename);
+
+    destination = std::move(source);
+
+    EXPECT_EQ(destination.requestedBackend(), UringDirect::IoBackend::PreadBuffered);
+    EXPECT_EQ(destination.activeBackend(), UringDirect::IoBackend::PreadBuffered);
+
+    std::array<uint8_t, 4> sourceRead = {0, 0, 0, 0};
+    ASSERT_TRUE(destination.submitReadCached(sourceRead.data(),
+                                             /*fileOffsetBytes=*/0,
+                                             static_cast<std::uint32_t>(sourceRead.size())));
+    EXPECT_EQ(destination.submit(), 1);
+    auto sourceCompletions = destination.waitCompletionsInOrder(1);
+    ASSERT_EQ(sourceCompletions.size(), 1u);
+    EXPECT_EQ(sourceCompletions[0].responseCode, static_cast<int>(sourceRead.size()));
+    EXPECT_EQ(sourceRead, sourceBytes);
+}
+
 TEST(UringDirect, RejectsTransferLengthOutsideCompletionResponseRange) {
     std::string filename = makeTmpPrefix("reject_huge_cached_read_len");
     {

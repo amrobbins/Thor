@@ -88,14 +88,20 @@ void applyPythonEpilogueInputs(FullyConnected::Builder &builder, const nb::objec
         return;
     }
     nb::dict inputsDict = pybind::castOrTypeError<nb::dict>(
-        epilogueInputs, "FullyConnected() argument 'epilogue_inputs'", "dict[str, thor.Tensor] or None", false);
+        epilogueInputs, "FullyConnected() argument 'epilogue_inputs'", "dict[str, thor.Tensor | thor.RaggedTensor] or None", false);
     size_t index = 0;
     for (auto item : inputsDict) {
         const std::string keyContext = "FullyConnected() argument 'epilogue_inputs' key[" + std::to_string(index) + "]";
         std::string name = pybind::castOrTypeError<std::string>(item.first, keyContext, "str", false);
         const std::string valueContext = "FullyConnected() argument 'epilogue_inputs'[" + name + "]";
-        Tensor tensor = pybind::castOrTypeError<Tensor>(item.second, valueContext, "thor.Tensor", false);
-        builder.epilogueInput(name, tensor);
+        if (nb::isinstance<RaggedTensor>(item.second)) {
+            builder.epilogueInput(name, nb::cast<RaggedTensor>(item.second));
+        } else if (nb::isinstance<Tensor>(item.second)) {
+            builder.epilogueInput(name, nb::cast<Tensor>(item.second));
+        } else {
+            throw nb::type_error((valueContext + ": expected thor.Tensor or thor.RaggedTensor, got " +
+                                  pybind::pythonTypeName(item.second)).c_str());
+        }
         ++index;
     }
 }
@@ -277,6 +283,8 @@ void bind_fully_connected(nb::module_ &m) {
         R"nbdoc(
             Return a named auxiliary tensor input expression for a FullyConnected epilogue.
             Bind the same name to a tensor with the ``epilogue_inputs`` constructor argument.
+            Ragged FullyConnected requires each auxiliary binding to be a ``thor.RaggedTensor``
+            with the exact same row partition as ``feature_input``.
             )nbdoc");
 
     fully_connected.def("get_weights_data_type", &FullyConnected::getWeightsDataType);
@@ -350,8 +358,8 @@ void bind_fully_connected(nb::module_ &m) {
             dimensions are preserved in the output. Ragged inputs require prefix preservation.
         activation : thor.Activation or None, default thor.activations.Gelu()
             Activation to apply after the linear transform. Pass ``None`` to keep the layer purely
-            linear. Ragged FullyConnected currently requires ``activation=None``; ragged activation
-            composition is provided by the separate ragged tokenwise-operation work.
+            linear. Ragged FullyConnected uses the same activation contract as dense FullyConnected;
+            the activation must support standalone ragged execution.
         weights_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
             Initializer for the weight matrix.
         biases_initializer : thor.initializers.Initializer, default thor.initializers.Glorot()
@@ -374,5 +382,9 @@ void bind_fully_connected(nb::module_ &m) {
         epilogue : thor.physical.Expression or None, default None
             Optional expression applied after the affine transform and activation.
             Build it from ``FullyConnected.epilogue_input()``.
+        epilogue_inputs : dict[str, thor.Tensor or thor.RaggedTensor] or None, default None
+            Named auxiliary tensors referenced by ``FullyConnected.epilogue_aux_input()``.
+            Ragged FullyConnected requires every auxiliary to be a RaggedTensor sharing the exact
+            row partition of ``feature_input``.
         )nbdoc";
 }

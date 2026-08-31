@@ -2982,29 +2982,62 @@ RaggedNetworkInputReference requiredApiRaggedNetworkInputByName(
     return inputIt->second;
 }
 
-RaggedTensor buildMatchingRaggedNetworkInput(Network& destination,
-                                             const RaggedNetworkInputReference& source,
-                                             const std::string& inputName) {
+RaggedTensor buildMatchingRaggedNetworkInput(
+    Network& destination,
+    const RaggedNetworkInputReference& source,
+    const std::string& inputName,
+    const std::map<std::string, RaggedNetworkInputReference>& sourceInputsByName) {
+    for (const RaggedNetworkInputReference& existing : destination.getExternalRaggedNetworkInputs()) {
+        if (existing.name == inputName) {
+            if (existing.raggedTensor.getDescriptor() != source.raggedTensor.getDescriptor() ||
+                existing.partitionInputName != source.partitionInputName) {
+                throw std::runtime_error("TrainingRuns found incompatible existing ragged input '" + inputName + "'.");
+            }
+            return existing.raggedTensor;
+        }
+    }
+
     const ThorImplementation::RaggedTensorDescriptor descriptor = source.raggedTensor.getDescriptor();
     RaggedNetworkInput::Builder builder = RaggedNetworkInput::Builder()
                                               .network(destination)
                                               .name(inputName)
                                               .valuesDataType(descriptor.getValuesDataType())
-                                              .offsetsDataType(descriptor.getOffsetsDataType())
-                                              .trailingDimensions(descriptor.getTrailingDimensions())
-                                              .maxTotalValues(descriptor.getMaxTotalValues())
-                                              .batchSize(descriptor.getBatchSize());
-    if (descriptor.hasMaxValuesPerRow()) {
-        builder.maxValuesPerRow(descriptor.getMaxValuesPerRow());
-    }
-    RaggedTensor result = builder.build();
+                                              .trailingDimensions(descriptor.getTrailingDimensions());
 
-    // A logical ragged boundary always owns both physical components even when a
-    // particular bounded subgraph uses only values or only offsets. Stub both
-    // components so component-level graph validation remains valid without
-    // changing the logical external-input contract.
+    if (source.partitionInputName.has_value()) {
+        RaggedTensor destinationPartition;
+        bool foundPartition = false;
+        for (const RaggedNetworkInputReference& existing : destination.getExternalRaggedNetworkInputs()) {
+            if (existing.name == source.partitionInputName.value()) {
+                destinationPartition = existing.raggedTensor;
+                foundPartition = true;
+                break;
+            }
+        }
+        if (!foundPartition) {
+            auto sourcePartitionIt = sourceInputsByName.find(source.partitionInputName.value());
+            if (sourcePartitionIt == sourceInputsByName.end()) {
+                throw std::runtime_error("TrainingRuns cannot reconstruct shared ragged partition source '" +
+                                         source.partitionInputName.value() + "'.");
+            }
+            destinationPartition = buildMatchingRaggedNetworkInput(
+                destination, sourcePartitionIt->second, sourcePartitionIt->first, sourceInputsByName);
+        }
+        builder.partition(destinationPartition);
+    } else {
+        builder.offsetsDataType(descriptor.getOffsetsDataType())
+            .maxTotalValues(descriptor.getMaxTotalValues())
+            .batchSize(descriptor.getBatchSize());
+        if (descriptor.hasMaxValuesPerRow()) {
+            builder.maxValuesPerRow(descriptor.getMaxValuesPerRow());
+        }
+    }
+
+    RaggedTensor result = builder.build();
     Stub::Builder().network(destination).inputTensor(result.getValues()).build();
-    Stub::Builder().network(destination).inputTensor(result.getOffsets()).build();
+    if (!source.partitionInputName.has_value()) {
+        Stub::Builder().network(destination).inputTensor(result.getOffsets()).build();
+    }
     return result;
 }
 
@@ -3013,9 +3046,10 @@ void validateComposedEvaluatorMemberRaggedInputsCompatible(
     const RaggedNetworkInputReference& memberInput,
     size_t memberIndex,
     const std::string& inputName) {
-    if (referenceInput.raggedTensor.getDescriptor() != memberInput.raggedTensor.getDescriptor()) {
+    if (referenceInput.raggedTensor.getDescriptor() != memberInput.raggedTensor.getDescriptor() ||
+        referenceInput.partitionInputName != memberInput.partitionInputName) {
         throw std::runtime_error("TrainingRuns composed ensemble evaluator member " + std::to_string(memberIndex) +
-                                 " has incompatible ragged descriptor for input '" + inputName + "'.");
+                                 " has incompatible ragged descriptor/partition topology for input '" + inputName + "'.");
     }
 }
 
@@ -3134,7 +3168,7 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         auto referenceRaggedIt = referenceRaggedInputsByName.find(inputName);
         if (referenceRaggedIt != referenceRaggedInputsByName.end()) {
             RaggedTensor evaluatorInput =
-                buildMatchingRaggedNetworkInput(*evaluator.network, referenceRaggedIt->second, inputName);
+                buildMatchingRaggedNetworkInput(*evaluator.network, referenceRaggedIt->second, inputName, referenceRaggedInputsByName);
             evaluator.sharedRaggedInputTensorsByName[inputName] = evaluatorInput;
         } else {
             std::shared_ptr<NetworkInput> referenceInput =
@@ -3206,6 +3240,7 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         }
 
         ApiTensorRemap remap;
+        std::map<uint64_t, Tensor> memberOffsetsPassThroughBySourceOriginalId;
         for (const std::string& inputName : memberCloneInputNames) {
             auto referenceRaggedIt = referenceRaggedInputsByName.find(inputName);
             if (referenceRaggedIt != referenceRaggedInputsByName.end()) {
@@ -3229,16 +3264,25 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
                                                                    memberIndex, memberRaggedInput.valuesInputName))
                                                                .passThroughSource(sharedRaggedIt->second.getValues())
                                                                .build();
-                NetworkInput memberOffsetsPassThrough = NetworkInput::Builder()
-                                                                .network(*evaluator.network)
-                                                                .name(trainingRunsMemberScopedName(
-                                                                    memberIndex, memberRaggedInput.offsetsInputName))
-                                                                .passThroughSource(sharedRaggedIt->second.getOffsets())
-                                                                .build();
+                Tensor memberOffsetsPassThroughTensor;
+                const uint64_t sourceOffsetsOriginalId = memberRaggedInput.raggedTensor.getOffsets().getOriginalId();
+                auto existingOffsetsIt = memberOffsetsPassThroughBySourceOriginalId.find(sourceOffsetsOriginalId);
+                if (existingOffsetsIt != memberOffsetsPassThroughBySourceOriginalId.end()) {
+                    memberOffsetsPassThroughTensor = existingOffsetsIt->second;
+                } else {
+                    NetworkInput memberOffsetsPassThrough = NetworkInput::Builder()
+                                                                    .network(*evaluator.network)
+                                                                    .name(trainingRunsMemberScopedName(
+                                                                        memberIndex, memberRaggedInput.offsetsInputName))
+                                                                    .passThroughSource(sharedRaggedIt->second.getOffsets())
+                                                                    .build();
+                    memberOffsetsPassThroughTensor = memberOffsetsPassThrough.getFeatureOutput().value();
+                    memberOffsetsPassThroughBySourceOriginalId.emplace(
+                        sourceOffsetsOriginalId, memberOffsetsPassThroughTensor);
+                }
                 remap.map(memberRaggedInput.raggedTensor.getValues(),
                           memberValuesPassThrough.getFeatureOutput().value());
-                remap.map(memberRaggedInput.raggedTensor.getOffsets(),
-                          memberOffsetsPassThrough.getFeatureOutput().value());
+                remap.map(memberRaggedInput.raggedTensor.getOffsets(), memberOffsetsPassThroughTensor);
                 continue;
             }
 
@@ -3362,7 +3406,7 @@ std::shared_ptr<Network> buildSingleMemberEnsembleNetworkArtifact(Network& membe
         auto memberRaggedIt = memberRaggedInputsByName.find(inputName);
         if (memberRaggedIt != memberRaggedInputsByName.end()) {
             RaggedTensor ensembleInput =
-                buildMatchingRaggedNetworkInput(*ensembleNetwork, memberRaggedIt->second, inputName);
+                buildMatchingRaggedNetworkInput(*ensembleNetwork, memberRaggedIt->second, inputName, memberRaggedInputsByName);
             remap.map(memberRaggedIt->second.raggedTensor.getValues(), ensembleInput.getValues());
             remap.map(memberRaggedIt->second.raggedTensor.getOffsets(), ensembleInput.getOffsets());
             continue;

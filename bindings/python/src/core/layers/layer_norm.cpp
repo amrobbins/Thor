@@ -11,6 +11,7 @@
 #include "DeepLearning/Api/Layers/Utility/LayerNorm.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "bindings/python/src/core/cast.h"
 
 namespace nb = nanobind;
@@ -44,7 +45,7 @@ void bind_layer_norm(nb::module_& m) {
         "__init__",
         [](LayerNorm* self,
            Network& network,
-           Tensor feature_input,
+           nb::object feature_input,
            nb::object normalized_shape,
            double epsilon,
            DataType parameter_data_type,
@@ -56,9 +57,22 @@ void bind_layer_norm(nb::module_& m) {
                 throw nb::value_error("LayerNorm instance: epsilon must be > 0.");
             }
 
-            vector<uint64_t> shape = normalizedShapeFromPython(normalized_shape, feature_input);
+            Tensor valuesInput;
             LayerNorm::Builder builder;
-            builder.network(network).featureInput(feature_input).normalizedShape(shape).epsilon(epsilon).parameterDataType(parameter_data_type);
+            builder.network(network);
+            if (nb::isinstance<RaggedTensor>(feature_input)) {
+                RaggedTensor raggedInput = nb::cast<RaggedTensor>(feature_input);
+                valuesInput = raggedInput.getValues();
+                builder.featureInput(raggedInput);
+            } else if (nb::isinstance<Tensor>(feature_input)) {
+                valuesInput = nb::cast<Tensor>(feature_input);
+                builder.featureInput(valuesInput);
+            } else {
+                throw nb::type_error("LayerNorm feature_input must be thor.Tensor or thor.RaggedTensor.");
+            }
+
+            vector<uint64_t> shape = normalizedShapeFromPython(normalized_shape, valuesInput);
+            builder.normalizedShape(shape).epsilon(epsilon).parameterDataType(parameter_data_type);
             if (weights_initializer != nullptr)
                 builder.weightsInitializer(weights_initializer);
             if (biases_initializer != nullptr)
@@ -80,12 +94,15 @@ void bind_layer_norm(nb::module_& m) {
 
     layer_norm.def(
         "get_feature_output",
-        [](LayerNorm& self) -> Tensor {
-            optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-            return maybeFeatureOutput.value();
+        [](LayerNorm& self) -> nb::object {
+            if (optional<RaggedTensor> raggedOutput = self.getRaggedFeatureOutput(); raggedOutput.has_value()) {
+                return nb::cast(raggedOutput.value());
+            }
+            return nb::cast(self.getFeatureOutput().value());
         },
-        R"nbdoc(Return the output tensor produced by this layer.)nbdoc");
+        R"nbdoc(Return the logical output produced by this layer. Ragged inputs preserve their row partition.)nbdoc");
 
+    layer_norm.def("get_use_ragged", &LayerNorm::getUseRagged);
     layer_norm.def("get_normalized_shape", [](LayerNorm& self) { return self.getNormalizedShape(); });
     layer_norm.def("get_epsilon", [](LayerNorm& self) { return self.getEpsilon(); });
     layer_norm.def("get_parameter_data_type", [](LayerNorm& self) { return self.getParameterDataType(); });
@@ -97,8 +114,8 @@ void bind_layer_norm(nb::module_& m) {
         ----------
         network : thor.Network
             Network the layer should be added to.
-        feature_input : thor.Tensor
-            Input feature tensor for this layer.
+        feature_input : thor.Tensor or thor.RaggedTensor
+            Input feature tensor for this layer. Ragged inputs are normalized token-wise over their single trailing channel dimension.
         normalized_shape : Sequence[int] or None, default None
             Trailing feature dimensions to normalize over.  None normalizes the final feature dimension.
         epsilon : float, default 1e-5

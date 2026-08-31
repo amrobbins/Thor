@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Layers/Utility/Transpose.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
 #include "Utilities/Expression/Expression.h"
 #include "bindings/python/src/core/cast.h"
@@ -52,14 +53,24 @@ void bind_transpose(nb::module_ &m) {
 
     transpose.def(
         "__init__",
-        [](Transpose *self, Network &network, const Tensor &feature_input, nb::object output_dtype, nb::object epilogue) {
-            const auto &dims = feature_input.getDimensions();
-            if (dims.size() < 2) {
-                throw nb::value_error("Transpose instance: feature_input must have rank >= 2.");
-            }
-
+        [](Transpose *self, Network &network, nb::object feature_input, nb::object output_dtype, nb::object epilogue) {
             Transpose::Builder builder;
-            builder.network(network).featureInput(feature_input);
+            builder.network(network);
+            if (nb::isinstance<RaggedTensor>(feature_input)) {
+                RaggedTensor ragged = nb::cast<RaggedTensor>(feature_input);
+                if (ragged.getTrailingDimensions().size() < 2) {
+                    throw nb::value_error("Ragged Transpose instance: feature_input must have at least two trailing value dimensions.");
+                }
+                builder.featureInput(ragged);
+            } else if (nb::isinstance<Tensor>(feature_input)) {
+                Tensor tensor = nb::cast<Tensor>(feature_input);
+                if (tensor.getDimensions().size() < 2) {
+                    throw nb::value_error("Transpose instance: feature_input must have rank >= 2.");
+                }
+                builder.featureInput(tensor);
+            } else {
+                throw nb::type_error("Transpose feature_input must be thor.Tensor or thor.RaggedTensor.");
+            }
             if (!output_dtype.is_none()) {
                 builder.outputDataType(pybind::castArgument<DataType>(
                     output_dtype, "Transpose", "output_dtype", "thor.DataType or None", false));
@@ -85,16 +96,18 @@ void bind_transpose(nb::module_ &m) {
 
     transpose.def(
         "get_feature_output",
-        [](Transpose &self) -> Tensor {
-            std::optional<Tensor> maybeFeatureOutput = self.getFeatureOutput();
-            return maybeFeatureOutput.value();
+        [](Transpose &self) -> nb::object {
+            if (std::optional<RaggedTensor> raggedOutput = self.getRaggedFeatureOutput(); raggedOutput.has_value()) {
+                return nb::cast(raggedOutput.value());
+            }
+            return nb::cast(self.getFeatureOutput().value());
         },
         R"nbdoc(
             Return the output tensor produced by this layer.
 
             Returns
             -------
-            thor.Tensor
+            thor.Tensor or thor.RaggedTensor
                 The feature output tensor handle.
             )nbdoc");
 
@@ -114,8 +127,10 @@ void bind_transpose(nb::module_ &m) {
             ----------
             network : thor.Network
                 Network the layer should be added to.
-            feature_input : thor.Tensor
-                Input feature tensor for this layer. Must have rank >= 2.
+            feature_input : thor.Tensor or thor.RaggedTensor
+                Dense inputs must have rank >= 2. Ragged inputs must have at least
+                two trailing value dimensions; only those final two dimensions are
+                transposed and the row partition is preserved.
             output_dtype : thor.DataType | None, default None
                 Optional dtype for the transposed layer output. Defaults to the
                 input feature dtype.

@@ -818,7 +818,7 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
         for (const auto& [name, record] : raggedNetworkInputs) {
             THOR_THROW_IF_FALSE(record.raggedTensor.getBatchSize() == batchSize);
             ThorImplementation::StampedNetwork::RaggedInputBinding binding{
-                record.valuesInputName, record.offsetsInputName, record.raggedTensor.getDescriptor()};
+                record.valuesInputName, record.offsetsInputName, record.partitionInputName, record.raggedTensor.getDescriptor()};
             stampedNetwork.raggedInputNamedShared[name] = binding;
             stampedNetwork.raggedInputNamed[name] = binding;
         }
@@ -1143,7 +1143,8 @@ void Network::save(vector<ThorImplementation::StampedNetwork> &stampedNetworks,
 void Network::registerRaggedNetworkInput(const std::string& name,
                                          const RaggedTensor& raggedTensor,
                                          const std::string& valuesInputName,
-                                         const std::string& offsetsInputName) {
+                                         const std::string& offsetsInputName,
+                                         std::optional<std::string> partitionInputName) {
     THOR_THROW_IF_FALSE(!name.empty());
     THOR_THROW_IF_FALSE(raggedTensor.isInitialized());
     THOR_THROW_IF_FALSE(!valuesInputName.empty());
@@ -1151,10 +1152,38 @@ void Network::registerRaggedNetworkInput(const std::string& name,
     THOR_THROW_IF_FALSE(valuesInputName != offsetsInputName);
     THOR_THROW_IF_FALSE(raggedNetworkInputs.count(name) == 0);
 
+    if (partitionInputName.has_value()) {
+        THOR_THROW_IF_FALSE(!partitionInputName->empty());
+        THOR_THROW_IF_FALSE(partitionInputName.value() != name);
+        auto sourceIt = raggedNetworkInputs.find(partitionInputName.value());
+        THOR_THROW_IF_FALSE(sourceIt != raggedNetworkInputs.end());
+        // Partition references are canonicalized to the owning boundary.
+        THOR_THROW_IF_FALSE(!sourceIt->second.partitionInputName.has_value());
+        THOR_THROW_IF_FALSE(sourceIt->second.offsetsInputName == offsetsInputName);
+        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getOffsets() == raggedTensor.getOffsets());
+        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getBatchSize() == raggedTensor.getBatchSize());
+        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getMaxTotalValues() == raggedTensor.getMaxTotalValues());
+        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getOffsetsDataType() == raggedTensor.getOffsetsDataType());
+        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.hasMaxValuesPerRow() == raggedTensor.hasMaxValuesPerRow());
+        if (raggedTensor.hasMaxValuesPerRow()) {
+            THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getMaxValuesPerRow() == raggedTensor.getMaxValuesPerRow());
+        }
+    } else {
+        for (const auto& [existingName, existing] : raggedNetworkInputs) {
+            (void)existingName;
+            THOR_THROW_IF_FALSE(existing.offsetsInputName != offsetsInputName);
+        }
+    }
+    for (const auto& [existingName, existing] : raggedNetworkInputs) {
+        (void)existingName;
+        THOR_THROW_IF_FALSE(existing.valuesInputName != valuesInputName);
+    }
+
     RaggedNetworkInputRecord record;
     record.name = name;
     record.valuesInputName = valuesInputName;
     record.offsetsInputName = offsetsInputName;
+    record.partitionInputName = std::move(partitionInputName);
     record.raggedTensor = raggedTensor;
     raggedNetworkInputs[name] = record;
 }
@@ -1163,7 +1192,8 @@ bool Network::hasRaggedNetworkInput(const std::string& name) const { return ragg
 
 std::string Network::logicalExternalInputName(const std::string& physicalInputName) const {
     for (const auto& [logicalName, record] : raggedNetworkInputs) {
-        if (physicalInputName == record.valuesInputName || physicalInputName == record.offsetsInputName) {
+        if (physicalInputName == record.valuesInputName ||
+            (!record.partitionInputName.has_value() && physicalInputName == record.offsetsInputName)) {
             return logicalName;
         }
     }
@@ -1179,6 +1209,7 @@ std::vector<RaggedNetworkInputReference> Network::getExternalRaggedNetworkInputs
             .name = record.name,
             .valuesInputName = record.valuesInputName,
             .offsetsInputName = record.offsetsInputName,
+            .partitionInputName = record.partitionInputName,
             .raggedTensor = record.raggedTensor});
     }
     return inputs;
@@ -1235,14 +1266,21 @@ void Network::appendRaggedNetworkBoundaryJson(json& modelJson) const {
         modelJson["ragged_network_inputs"] = json::array();
         for (const auto& [name, record] : raggedNetworkInputs) {
             (void)name;
-            json entry{{"version", "1.1.0"},
+            json entry{{"version", record.partitionInputName.has_value() ? "1.2.0" : "1.1.0"},
                        {"name", record.name},
                        {"values_input_name", record.valuesInputName},
-                       {"offsets_input_name", record.offsetsInputName},
-                       {"values_tensor_id", record.raggedTensor.getValues().getId()},
-                       {"offsets_tensor_id", record.raggedTensor.getOffsets().getId()}};
-            if (record.raggedTensor.hasMaxValuesPerRow())
-                entry["max_values_per_row"] = record.raggedTensor.getMaxValuesPerRow();
+                       {"values_tensor_id", record.raggedTensor.getValues().getId()}};
+            if (record.partitionInputName.has_value()) {
+                // Version 1.2 shared inputs intentionally serialize no duplicate
+                // offsets descriptor/id/bounds. The partition owner is the sole
+                // structural source of truth.
+                entry["partition_input_name"] = record.partitionInputName.value();
+            } else {
+                entry["offsets_input_name"] = record.offsetsInputName;
+                entry["offsets_tensor_id"] = record.raggedTensor.getOffsets().getId();
+                if (record.raggedTensor.hasMaxValuesPerRow())
+                    entry["max_values_per_row"] = record.raggedTensor.getMaxValuesPerRow();
+            }
             modelJson["ragged_network_inputs"].push_back(std::move(entry));
         }
     }
@@ -1392,23 +1430,39 @@ void Network::load(const string &directory,
         if (!raggedInputs.is_array()) {
             throw runtime_error("\"ragged_network_inputs\" is not a JSON array");
         }
-        for (const json& raggedInputJson : raggedInputs) {
+        auto loadRaggedInput = [this](const json& raggedInputJson, bool sharedPartition) {
             const string raggedInputVersion = raggedInputJson.at("version").get<string>();
-            if (raggedInputVersion != "1.0.0" && raggedInputVersion != "1.1.0") {
+            if (raggedInputVersion != "1.0.0" && raggedInputVersion != "1.1.0" && raggedInputVersion != "1.2.0") {
                 throw runtime_error("Unsupported ragged_network_inputs version: " + raggedInputVersion);
             }
+            const bool hasPartitionSource = raggedInputJson.contains("partition_input_name");
+            if (hasPartitionSource != sharedPartition) return;
             const string name = raggedInputJson.at("name").get<string>();
             const string valuesInputName = raggedInputJson.at("values_input_name").get<string>();
-            const string offsetsInputName = raggedInputJson.at("offsets_input_name").get<string>();
             const uint64_t valuesTensorId = raggedInputJson.at("values_tensor_id").get<uint64_t>();
-            const uint64_t offsetsTensorId = raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
             Tensor values = getApiTensorByOriginalId(valuesTensorId);
-            Tensor offsets = getApiTensorByOriginalId(offsetsTensorId);
-            RaggedTensor raggedTensor = raggedInputJson.contains("max_values_per_row")
-                ? RaggedTensor(values, offsets, raggedInputJson.at("max_values_per_row").get<uint64_t>())
-                : RaggedTensor(values, offsets);
-            registerRaggedNetworkInput(name, raggedTensor, valuesInputName, offsetsInputName);
-        }
+            if (hasPartitionSource) {
+                const string partitionInputName = raggedInputJson.at("partition_input_name").get<string>();
+                auto sourceIt = raggedNetworkInputs.find(partitionInputName);
+                if (sourceIt == raggedNetworkInputs.end()) {
+                    throw runtime_error("Shared ragged input '" + name + "' references missing partition input '" +
+                                        partitionInputName + "'.");
+                }
+                RaggedTensor raggedTensor = sourceIt->second.raggedTensor.withValues(values);
+                registerRaggedNetworkInput(
+                    name, raggedTensor, valuesInputName, sourceIt->second.offsetsInputName, partitionInputName);
+            } else {
+                const string offsetsInputName = raggedInputJson.at("offsets_input_name").get<string>();
+                const uint64_t offsetsTensorId = raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
+                Tensor offsets = getApiTensorByOriginalId(offsetsTensorId);
+                RaggedTensor raggedTensor = raggedInputJson.contains("max_values_per_row")
+                    ? RaggedTensor(values, offsets, raggedInputJson.at("max_values_per_row").get<uint64_t>())
+                    : RaggedTensor(values, offsets);
+                registerRaggedNetworkInput(name, raggedTensor, valuesInputName, offsetsInputName);
+            }
+        };
+        for (const json& raggedInputJson : raggedInputs) loadRaggedInput(raggedInputJson, /*sharedPartition=*/false);
+        for (const json& raggedInputJson : raggedInputs) loadRaggedInput(raggedInputJson, /*sharedPartition=*/true);
     }
 
     raggedNetworkOutputs.clear();

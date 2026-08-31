@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Api/Layers/Layer.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Implementation/Layers/Utility/ScaleGradient.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
@@ -22,6 +23,16 @@ class ScaleGradient : public Layer {
     float getScale() const {
         THOR_THROW_IF_FALSE(scale.has_value());
         return scale.value();
+    }
+
+    [[nodiscard]] bool getUseRagged() const { return raggedFeatureInput.has_value(); }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureInput() const { return raggedFeatureInput; }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedFeatureOutput() const { return raggedFeatureOutput; }
+
+    [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        THOR_THROW_IF_FALSE(outputTensor == featureOutput.value());
+        return raggedFeatureInput.has_value();
     }
 
     nlohmann::json architectureJson() const override;
@@ -54,6 +65,10 @@ class ScaleGradient : public Layer {
 
    private:
     std::optional<float> scale;
+    std::optional<RaggedTensor> raggedFeatureInput;
+    std::optional<RaggedTensor> raggedFeatureOutput;
+
+    friend class Builder;
 };
 
 class ScaleGradient::Builder {
@@ -67,6 +82,10 @@ class ScaleGradient::Builder {
         ScaleGradient scaleGradient;
         scaleGradient.featureInput = _featureInput;
         scaleGradient.featureOutput = _featureInput.value().clone();
+        if (_raggedFeatureInput.has_value()) {
+            scaleGradient.raggedFeatureInput = _raggedFeatureInput;
+            scaleGradient.raggedFeatureOutput = _raggedFeatureInput->withValues(scaleGradient.featureOutput.value());
+        }
         scaleGradient.scale = _scale;
         scaleGradient.initialized = true;
         scaleGradient.addToNetwork(_network.value());
@@ -81,6 +100,7 @@ class ScaleGradient::Builder {
 
     virtual ScaleGradient::Builder &featureInput(Tensor _featureInput) {
         THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
         THOR_THROW_IF_FALSE(_featureInput.isInitialized());
         switch (_featureInput.getDataType()) {
             case DataType::FP8_E4M3:
@@ -97,6 +117,26 @@ class ScaleGradient::Builder {
         return *this;
     }
 
+    virtual ScaleGradient::Builder &featureInput(RaggedTensor _featureInput) {
+        THOR_THROW_IF_FALSE(!this->_featureInput.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedFeatureInput.has_value());
+        THOR_THROW_IF_FALSE(_featureInput.isInitialized());
+        switch (_featureInput.getValuesDataType()) {
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+            case DataType::FP16:
+            case DataType::BF16:
+            case DataType::FP32:
+            case DataType::FP64:
+                break;
+            default:
+                THOR_THROW_LOGIC_ERROR("ScaleGradient requires a floating-point ragged values storage type.");
+        }
+        this->_raggedFeatureInput = _featureInput;
+        this->_featureInput = _featureInput.getValues();
+        return *this;
+    }
+
     virtual ScaleGradient::Builder &scale(float _scale) {
         THOR_THROW_IF_FALSE(!this->_scale.has_value());
         THOR_THROW_IF_FALSE(std::isfinite(_scale));
@@ -107,6 +147,7 @@ class ScaleGradient::Builder {
    private:
     std::optional<Network *> _network;
     std::optional<Tensor> _featureInput;
+    std::optional<RaggedTensor> _raggedFeatureInput;
     std::optional<float> _scale;
 };
 

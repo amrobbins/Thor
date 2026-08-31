@@ -91,7 +91,8 @@ void validateProducerConsumerDescriptors(const string& tensorName,
 
 optional<RaggedNetworkInputReference> raggedInputForPhysicalName(const Network& network, const string& physicalInputName) {
     for (const RaggedNetworkInputReference& ragged : network.getExternalRaggedNetworkInputs()) {
-        if (physicalInputName == ragged.valuesInputName || physicalInputName == ragged.offsetsInputName) {
+        if (physicalInputName == ragged.valuesInputName ||
+            (!ragged.partitionInputName.has_value() && physicalInputName == ragged.offsetsInputName)) {
             return ragged;
         }
     }
@@ -110,9 +111,10 @@ Tensor ensureExternalInput(ComposedPhaseGraph& graph, const Network& sourceNetwo
             if (existing.name != sourceRagged->name) {
                 continue;
             }
-            if (existing.raggedTensor.getDescriptor() != sourceRagged->raggedTensor.getDescriptor()) {
+            if (existing.raggedTensor.getDescriptor() != sourceRagged->raggedTensor.getDescriptor() ||
+                existing.partitionInputName != sourceRagged->partitionInputName) {
                 throw runtime_error("Phase graph logical ragged external input '" + sourceRagged->name +
-                                    "' has incompatible descriptors across active phases.");
+                                    "' has incompatible descriptor/partition topology across active phases.");
             }
             destinationRagged = existing.raggedTensor;
             foundExisting = true;
@@ -126,11 +128,56 @@ Tensor ensureExternalInput(ComposedPhaseGraph& graph, const Network& sourceNetwo
                                                      .network(*graph.network)
                                                      .name(sourceRagged->name)
                                                      .valuesDataType(descriptor.getValuesDataType())
-                                                     .offsetsDataType(descriptor.getOffsetsDataType())
-                                                     .trailingDimensions(descriptor.getTrailingDimensions())
-                                                     .maxTotalValues(descriptor.getMaxTotalValues())
-                                                     .batchSize(descriptor.getBatchSize());
-            if (descriptor.hasMaxValuesPerRow()) builder.maxValuesPerRow(descriptor.getMaxValuesPerRow());
+                                                     .trailingDimensions(descriptor.getTrailingDimensions());
+            if (sourceRagged->partitionInputName.has_value()) {
+                bool foundPartition = false;
+                for (const RaggedNetworkInputReference& existing : graph.network->getExternalRaggedNetworkInputs()) {
+                    if (existing.name == sourceRagged->partitionInputName.value()) {
+                        builder.partition(existing.raggedTensor);
+                        foundPartition = true;
+                        break;
+                    }
+                }
+                if (!foundPartition) {
+                    optional<RaggedNetworkInputReference> sourcePartition;
+                    for (const RaggedNetworkInputReference& candidate : sourceNetwork.getExternalRaggedNetworkInputs()) {
+                        if (candidate.name == sourceRagged->partitionInputName.value()) {
+                            sourcePartition = candidate;
+                            break;
+                        }
+                    }
+                    if (!sourcePartition.has_value()) {
+                        throw runtime_error("Phase graph shared ragged input '" + sourceRagged->name +
+                                            "' references missing partition source '" +
+                                            sourceRagged->partitionInputName.value() + "'.");
+                    }
+                    shared_ptr<NetworkInput> sourcePartitionInput;
+                    for (const shared_ptr<NetworkInput>& candidate : sourceNetwork.getExternalNetworkInputs()) {
+                        if (candidate->getName() == sourcePartition->offsetsInputName) {
+                            sourcePartitionInput = candidate;
+                            break;
+                        }
+                    }
+                    if (sourcePartitionInput == nullptr) {
+                        throw runtime_error("Phase graph cannot locate physical offsets boundary for shared ragged partition source '" +
+                                            sourcePartition->name + "'.");
+                    }
+                    (void)ensureExternalInput(graph, sourceNetwork, *sourcePartitionInput);
+                    for (const RaggedNetworkInputReference& existing : graph.network->getExternalRaggedNetworkInputs()) {
+                        if (existing.name == sourceRagged->partitionInputName.value()) {
+                            builder.partition(existing.raggedTensor);
+                            foundPartition = true;
+                            break;
+                        }
+                    }
+                    THOR_THROW_IF_FALSE(foundPartition);
+                }
+            } else {
+                builder.offsetsDataType(descriptor.getOffsetsDataType())
+                    .maxTotalValues(descriptor.getMaxTotalValues())
+                    .batchSize(descriptor.getBatchSize());
+                if (descriptor.hasMaxValuesPerRow()) builder.maxValuesPerRow(descriptor.getMaxValuesPerRow());
+            }
             destinationRagged = builder.build();
         }
 

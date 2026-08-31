@@ -1,3 +1,4 @@
+import json
 import pytest
 import thor
 
@@ -127,4 +128,52 @@ def test_ragged_network_input_rejects_invalid_shape_contract():
             max_total_values=64,
             batch_size=8,
             max_values_per_row=65,
+        )
+
+
+def test_ragged_network_input_can_share_existing_partition_without_repeating_structure():
+    n = _net()
+    feature = thor.layers.RaggedNetworkInput(
+        n,
+        "feature",
+        thor.DataType.fp32,
+        [3],
+        max_total_values=17,
+        batch_size=5,
+        offsets_data_type=thor.DataType.uint64,
+        max_values_per_row=6,
+    )
+    mask = thor.layers.RaggedNetworkInput(
+        n,
+        "mask",
+        thor.DataType.bool,
+        [],
+        partition=feature,
+    )
+
+    assert mask.values.get_dimensions() == [17]
+    assert mask.offsets == feature.offsets
+    assert mask.batch_size == feature.batch_size
+    assert mask.max_total_values == feature.max_total_values
+    assert mask.max_values_per_row == feature.max_values_per_row
+    assert mask.offsets_data_type == feature.offsets_data_type
+
+    architecture = json.loads(n.get_architecture_json())
+    physical_inputs = [layer["name"] for layer in architecture["layers"] if layer["layer_type"] == "network_input"]
+    assert sorted(physical_inputs) == ["feature.offsets", "feature.values", "mask.values"]
+    mask_boundary = next(item for item in architecture["ragged_network_inputs"] if item["name"] == "mask")
+    assert mask_boundary["partition_input_name"] == "feature"
+    assert "offsets_input_name" not in mask_boundary
+    assert "offsets_tensor_id" not in mask_boundary
+    assert "max_values_per_row" not in mask_boundary
+
+
+def test_ragged_network_input_shared_partition_rejects_redundant_structure():
+    n = _net()
+    feature = thor.layers.RaggedNetworkInput(
+        n, "feature", thor.DataType.fp32, [2], max_total_values=8, batch_size=3, max_values_per_row=4
+    )
+    with pytest.raises(ValueError, match="sole structural source of truth"):
+        thor.layers.RaggedNetworkInput(
+            n, "mask", thor.DataType.bool, [], partition=feature, max_total_values=8
         )

@@ -2,7 +2,6 @@
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Initializers/UniformRandom.h"
-#include "DeepLearning/Api/Layers/Activations/Activation.h"
 #include "DeepLearning/Api/Layers/Learning/LayerEpilogue.h"
 #include "DeepLearning/Api/Layers/Learning/TrainableLayer.h"
 #include "DeepLearning/Api/Network/Network.h"
@@ -29,8 +28,11 @@ class RMSNorm : public TrainableLayer {
 
     RMSNorm() = default;
     explicit RMSNorm(std::optional<ThorImplementation::Expression> epilogue,
-                     std::vector<std::pair<std::string, Tensor>> epilogueInputBindings = {})
-        : epilogue(std::move(epilogue)), epilogueInputBindings(std::move(epilogueInputBindings)) {}
+                     std::vector<std::pair<std::string, Tensor>> epilogueInputBindings = {},
+                     std::vector<std::pair<std::string, RaggedTensor>> raggedEpilogueInputBindings = {})
+        : epilogue(std::move(epilogue)),
+          epilogueInputBindings(std::move(epilogueInputBindings)),
+          raggedEpilogueInputBindings(std::move(raggedEpilogueInputBindings)) {}
     ~RMSNorm() override = default;
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<RMSNorm>(*this); }
@@ -149,6 +151,7 @@ class RMSNorm : public TrainableLayer {
     DataType parameterDataType = DataType::FP32;
     std::optional<ThorImplementation::Expression> epilogue;
     std::vector<std::pair<std::string, Tensor>> epilogueInputBindings;
+    std::vector<std::pair<std::string, RaggedTensor>> raggedEpilogueInputBindings;
     mutable std::optional<ThorImplementation::ExpressionDefinition> serializableEpilogue;
 
     std::vector<std::string> epilogueAuxInputNames() const;
@@ -259,13 +262,21 @@ class RMSNorm::Builder {
         return *this;
     }
 
-    virtual RMSNorm::Builder& epilogue(const Activation& activation) { return epilogue(activation.toExpression(RMSNorm::epilogueInput())); }
-
-    virtual RMSNorm::Builder& epilogue(const std::shared_ptr<Activation>& activation) {
-        if (activation == nullptr) {
-            throw std::invalid_argument("RMSNorm epilogue activation must be non-null.");
+    virtual RMSNorm::Builder& epilogueInput(const std::string& inputName, RaggedTensor tensor) {
+        RMSNorm::validateEpilogueAuxInputName(inputName);
+        THOR_THROW_IF_FALSE(tensor.isInitialized());
+        for (const auto& [existingName, existingTensor] : _epilogueInputBindings) {
+            (void)existingTensor;
+            if (existingName == inputName) {
+                throw std::invalid_argument("RMSNorm epilogue input name is duplicated: " + inputName + ".");
+            }
         }
-        return epilogue(*activation);
+        _raggedEpilogueInputBindings.emplace_back(inputName, tensor);
+        _epilogueInputBindings.emplace_back(inputName, tensor.getValues());
+        if (_epilogue.has_value()) {
+            RMSNorm::validateEpilogueExpression(_epilogue.value(), epilogueAuxInputNames());
+        }
+        return *this;
     }
 
    private:
@@ -281,6 +292,7 @@ class RMSNorm::Builder {
     std::shared_ptr<Optimizer> _weightsOptimizer = nullptr;
     std::optional<ThorImplementation::Expression> _epilogue;
     std::vector<std::pair<std::string, Tensor>> _epilogueInputBindings;
+    std::vector<std::pair<std::string, RaggedTensor>> _raggedEpilogueInputBindings;
 
     std::vector<std::string> epilogueAuxInputNames() const {
         std::vector<std::string> names;

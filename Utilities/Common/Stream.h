@@ -79,6 +79,9 @@ class Stream {
     // Any exception thrown by the callback is captured and rethrown by synchronize().
     void enqueueHostFunction(cudaHostFn_t function, std::unique_ptr<HostFunctionArgsBase> &&args);
 
+    // cuDNN handles are scoped by requesting host thread within the shared
+    // stream state. This keeps each handle permanently bound to this CUDA
+    // stream without allowing simultaneous host-thread use of one handle.
     cudnnHandle_t getCudnnHandle() const;
 
     cudaStream_t getStream() const;

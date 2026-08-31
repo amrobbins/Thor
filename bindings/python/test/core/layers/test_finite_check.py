@@ -159,3 +159,107 @@ def test_enabled_finite_check_warns_when_stamped(capfd):
     assert 'label="warning_check"' in warning
     assert "intended for diagnostic runs" in warning
     assert "will hurt performance" in warning
+
+
+def _physical_ragged(values: np.ndarray, offsets: np.ndarray, offsets_dtype: thor.DataType):
+    values_tensor = _cpu_tensor(values, thor.DataType.fp32)
+    offsets_tensor = _cpu_tensor(offsets, offsets_dtype)
+    return thor.physical.PhysicalRaggedTensor(values_tensor, offsets_tensor)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize(
+    "offsets_dtype,np_offsets_dtype",
+    [
+        (thor.DataType.uint32, np.uint32),
+        (thor.DataType.uint64, np.uint64),
+    ],
+)
+def test_ragged_finite_check_ignores_poisoned_inactive_capacity_and_reuses_partition(offsets_dtype, np_offsets_dtype):
+    network = thor.Network("ragged_finite_check_active_prefix")
+    source = thor.layers.RaggedNetworkInput(
+        network,
+        "input",
+        thor.DataType.fp32,
+        [2],
+        max_total_values=6,
+        batch_size=3,
+        offsets_data_type=offsets_dtype,
+    )
+    check = thor.layers.FiniteCheck(network, source, tensor_label="ragged_history")
+    assert check.get_use_ragged()
+    output = check.get_feature_output()
+    assert isinstance(output, thor.RaggedTensor)
+    assert output.get_offsets() == source.get_offsets()
+    thor.layers.RaggedNetworkOutput(network, "output", output)
+
+    placed = network.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+
+    def infer(values, offsets):
+        return placed.infer(
+            {
+                "input": _physical_ragged(
+                    np.ascontiguousarray(values, dtype=np.float32),
+                    np.ascontiguousarray(offsets, dtype=np_offsets_dtype),
+                    offsets_dtype,
+                )
+            }
+        )["output"]
+
+    poisoned = np.asarray(
+        [
+            [1.0, 2.0],
+            [3.0, 4.0],
+            [5.0, 6.0],
+            [np.nan, np.inf],
+            [-np.inf, np.nan],
+            [np.inf, -np.inf],
+        ],
+        dtype=np.float32,
+    )
+    short = infer(poisoned, [0, 1, 1, 3])
+    assert isinstance(short, thor.physical.PhysicalRaggedTensor)
+    np.testing.assert_array_equal(np.array(short.offsets.numpy(), copy=True), np.asarray([0, 1, 1, 3], dtype=np_offsets_dtype))
+
+    # Reuse the same placed executable with a longer active prefix; a non-finite
+    # value that moves into the authoritative prefix must now be reported.
+    with pytest.raises(RuntimeError, match=r"checked_elements=8"):
+        infer(poisoned, [0, 2, 2, 4])
+
+    finite = poisoned.copy()
+    finite[3] = [7.0, 8.0]
+    longer = infer(finite, [0, 2, 2, 4])
+    np.testing.assert_array_equal(np.array(longer.offsets.numpy(), copy=True), np.asarray([0, 2, 2, 4], dtype=np_offsets_dtype))
+
+    empty = infer(poisoned, [0, 0, 0, 0])
+    np.testing.assert_array_equal(np.array(empty.offsets.numpy(), copy=True), np.zeros((4,), dtype=np_offsets_dtype))
+
+
+@pytest.mark.cuda
+def test_ragged_finite_check_save_load_accepts_different_runtime_partition(tmp_path):
+    name = "ragged_finite_check_save_load"
+    network = thor.Network(name)
+    source = thor.layers.RaggedNetworkInput(
+        network,
+        "input",
+        thor.DataType.fp32,
+        [2],
+        max_total_values=6,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint64,
+    )
+    check = thor.layers.FiniteCheck(network, source, tensor_label="saved_ragged")
+    thor.layers.RaggedNetworkOutput(network, "output", check.get_feature_output())
+    save_dir = tmp_path / "model"
+    network.save(str(save_dir), overwrite=False)
+
+    loaded = thor.Network(name)
+    loaded.load(str(save_dir))
+    placed = loaded.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    values = np.asarray(
+        [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [np.nan, np.inf], [np.nan, -np.inf]],
+        dtype=np.float32,
+    )
+    offsets = np.asarray([0, 2, 2, 4], dtype=np.uint64)
+    result = placed.infer({"input": _physical_ragged(values, offsets, thor.DataType.uint64)})["output"]
+    np.testing.assert_array_equal(np.array(result.offsets.numpy(), copy=True), offsets)

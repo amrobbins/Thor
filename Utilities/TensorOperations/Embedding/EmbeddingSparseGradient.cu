@@ -415,6 +415,42 @@ __global__ void materializeEmbeddingSparseGradientSortPairsKernel(const IndexT* 
     tokenIds[token] = static_cast<uint32_t>(token);
 }
 
+template <typename IndexT, typename RowT, typename ActiveCountT>
+__global__ void materializeEmbeddingSparseGradientSortPairsRaggedKernel(const IndexT* __restrict__ indices,
+                                                                        RowT* __restrict__ rowKeys,
+                                                                        uint32_t* __restrict__ tokenIds,
+                                                                        const ActiveCountT* __restrict__ activeValueCount,
+                                                                        uint64_t numTokens,
+                                                                        uint64_t elementsPerValue,
+                                                                        uint64_t vocabularySize,
+                                                                        uint64_t paddingIndex,
+                                                                        bool hasPaddingIndex) {
+    static_assert(!std::is_signed_v<IndexT>, "Embedding sparse-gradient indices are unsigned-only.");
+    static_assert(!std::is_signed_v<RowT>, "Embedding sparse-gradient row keys are unsigned-only.");
+    static_assert(!std::is_signed_v<ActiveCountT>, "Ragged active-value counts are unsigned-only.");
+
+    const uint64_t token = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (token >= numTokens) {
+        return;
+    }
+
+    const uint64_t activeValues = static_cast<uint64_t>(*activeValueCount);
+    const uint64_t activeTokens =
+        activeValues <= numTokens / elementsPerValue ? activeValues * elementsPerValue : numTokens;
+    if (token >= activeTokens) {
+        // Inactive packed capacity is logically nonexistent.  Emit the same
+        // sentinel used for invalid/padding rows without touching indices.
+        rowKeys[token] = static_cast<RowT>(vocabularySize);
+        tokenIds[token] = static_cast<uint32_t>(token);
+        return;
+    }
+
+    const uint64_t row = static_cast<uint64_t>(indices[token]);
+    const bool valid = row < vocabularySize && (!hasPaddingIndex || row != paddingIndex);
+    rowKeys[token] = static_cast<RowT>(valid ? row : vocabularySize);
+    tokenIds[token] = static_cast<uint32_t>(token);
+}
+
 template <uint32_t EmbeddingDim>
 struct IsFixedEmbeddingReducerDim {
     static constexpr bool value =
@@ -1477,6 +1513,7 @@ struct PreparedEmbeddingSparseGradient {
     DataType gradientDataType = DataType::FP32;
     DataType rowDataType = DataType::UINT64;
     EmbeddingSparseGradientRunBucketConfig runBucketConfig;
+    std::optional<RaggedRuntimeExtent> raggedRuntimeExtent;
 
     Tensor rowKeys;
     Tensor tokenIds;
@@ -1817,20 +1854,68 @@ void launchMaterializeSortPairsTyped(const Tensor& indices, PreparedEmbeddingSpa
     CUDA_CHECK(cudaPeekAtLastError());
 }
 
+template <typename IndexT, typename RowT, typename ActiveCountT>
+void launchMaterializeSortPairsRaggedTyped(const Tensor& indices, PreparedEmbeddingSparseGradient& prepared, Stream stream) {
+    THOR_THROW_IF_FALSE(prepared.raggedRuntimeExtent.has_value());
+    const RaggedRuntimeExtent& extent = prepared.raggedRuntimeExtent.value();
+    const uint32_t block = THREADS_PER_BLOCK;
+    const uint32_t grid = static_cast<uint32_t>((prepared.numTokens + block - 1) / block);
+    materializeEmbeddingSparseGradientSortPairsRaggedKernel<IndexT, RowT, ActiveCountT>
+        <<<grid, block, 0, stream.getStream()>>>(indices.getMemPtr<IndexT>(),
+                                                 prepared.rowKeys.getMemPtr<RowT>(),
+                                                 prepared.tokenIds.getMemPtr<uint32_t>(),
+                                                 extent.activeValueCount.getMemPtr<ActiveCountT>(),
+                                                 prepared.numTokens,
+                                                 extent.elementsPerValue,
+                                                 prepared.vocabularySize,
+                                                 prepared.paddingIndex,
+                                                 prepared.hasPaddingIndex);
+    CUDA_CHECK(cudaPeekAtLastError());
+}
+
+template <typename IndexT, typename RowT>
+void launchMaterializeSortPairsRaggedForActiveCountType(const Tensor& indices,
+                                                        PreparedEmbeddingSparseGradient& prepared,
+                                                        Stream stream) {
+    THOR_THROW_IF_FALSE(prepared.raggedRuntimeExtent.has_value());
+    switch (prepared.raggedRuntimeExtent->activeValueCount.getDataType()) {
+        case DataType::UINT32:
+            launchMaterializeSortPairsRaggedTyped<IndexT, RowT, uint32_t>(indices, prepared, stream);
+            return;
+        case DataType::UINT64:
+            launchMaterializeSortPairsRaggedTyped<IndexT, RowT, uint64_t>(indices, prepared, stream);
+            return;
+        default:
+            THOR_UNREACHABLE();
+    }
+}
+
 template <typename RowT>
 void launchMaterializeSortPairsForRowType(const Tensor& indices, PreparedEmbeddingSparseGradient& prepared, Stream stream) {
     switch (prepared.indexDataType) {
         case DataType::UINT8:
-            launchMaterializeSortPairsTyped<uint8_t, RowT>(indices, prepared, stream);
+            if (prepared.raggedRuntimeExtent.has_value())
+                launchMaterializeSortPairsRaggedForActiveCountType<uint8_t, RowT>(indices, prepared, stream);
+            else
+                launchMaterializeSortPairsTyped<uint8_t, RowT>(indices, prepared, stream);
             break;
         case DataType::UINT16:
-            launchMaterializeSortPairsTyped<uint16_t, RowT>(indices, prepared, stream);
+            if (prepared.raggedRuntimeExtent.has_value())
+                launchMaterializeSortPairsRaggedForActiveCountType<uint16_t, RowT>(indices, prepared, stream);
+            else
+                launchMaterializeSortPairsTyped<uint16_t, RowT>(indices, prepared, stream);
             break;
         case DataType::UINT32:
-            launchMaterializeSortPairsTyped<uint32_t, RowT>(indices, prepared, stream);
+            if (prepared.raggedRuntimeExtent.has_value())
+                launchMaterializeSortPairsRaggedForActiveCountType<uint32_t, RowT>(indices, prepared, stream);
+            else
+                launchMaterializeSortPairsTyped<uint32_t, RowT>(indices, prepared, stream);
             break;
         case DataType::UINT64:
-            launchMaterializeSortPairsTyped<uint64_t, RowT>(indices, prepared, stream);
+            if (prepared.raggedRuntimeExtent.has_value())
+                launchMaterializeSortPairsRaggedForActiveCountType<uint64_t, RowT>(indices, prepared, stream);
+            else
+                launchMaterializeSortPairsTyped<uint64_t, RowT>(indices, prepared, stream);
             break;
         default:
             throw std::runtime_error("Prepared Embedding sparse-gradient producer has unsupported index dtype.");
@@ -2164,6 +2249,7 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientI
     const Tensor& upstreamGradient,
     SparseRowGradient& outputGradient,
     std::optional<uint64_t> paddingIndex,
+    const std::optional<RaggedRuntimeExtent>& runtimeExtent,
     std::optional<SparseRowUpdateFusionSource> sparseRowUpdate) {
     if (!indices.isInitialized() || !upstreamGradient.isInitialized()) {
         throw std::invalid_argument("Embedding sparse-gradient indices and upstream gradient tensors must be initialized.");
@@ -2220,6 +2306,27 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientI
     if (paddingIndex.has_value() && paddingIndex.value() >= outputGradient.vocabularySize) {
         throw std::invalid_argument("Embedding sparse-gradient padding_index must be less than vocabulary_size.");
     }
+    if (runtimeExtent.has_value()) {
+        const RaggedRuntimeExtent& extent = runtimeExtent.value();
+        if (!extent.isInitialized()) {
+            throw std::invalid_argument("Ragged Embedding sparse-gradient runtime extent is not initialized.");
+        }
+        if (extent.activeValueCount.getPlacement() != placement) {
+            throw std::invalid_argument("Ragged Embedding sparse-gradient active-value count must use the indices placement.");
+        }
+        if (extent.activeValueCount.getDataType() != DataType::UINT32 &&
+            extent.activeValueCount.getDataType() != DataType::UINT64) {
+            throw std::invalid_argument("Ragged Embedding sparse-gradient active-value count must use uint32 or uint64 storage.");
+        }
+        if (extent.activeValueCount.getTotalNumElements() != 1 || extent.maxActiveValues == 0 || extent.elementsPerValue == 0) {
+            throw std::invalid_argument("Ragged Embedding sparse-gradient runtime extent has invalid capacity metadata.");
+        }
+        if (extent.maxActiveValues > std::numeric_limits<uint64_t>::max() / extent.elementsPerValue ||
+            extent.maxActiveValues * extent.elementsPerValue != numTokens) {
+            throw std::invalid_argument(
+                "Ragged Embedding sparse-gradient runtime extent capacity must match the physical indices tensor.");
+        }
+    }
 
     auto prepared = std::make_shared<PreparedEmbeddingSparseGradient>();
     prepared->numTokens = numTokens;
@@ -2232,6 +2339,7 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientI
     prepared->gradientDataType = upstreamGradient.getDataType();
     prepared->rowDataType = outputGradient.rowDataType;
     prepared->runBucketConfig = currentEmbeddingSparseGradientRunBucketConfig();
+    prepared->raggedRuntimeExtent = runtimeExtent;
     validateEmbeddingSparseGradientRunBucketConfig(prepared->runBucketConfig);
     prepared->sparseRowUpdate = std::move(sparseRowUpdate);
     allocateSparseRowUpdateRuntimeScalarTensors(*prepared, placement);
@@ -2259,7 +2367,16 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradient(
                                                                                 const Tensor& upstreamGradient,
                                                                                 SparseRowGradient& outputGradient,
                                                                                 std::optional<uint64_t> paddingIndex) {
-    return prepareEmbeddingSparseGradientImpl(indices, upstreamGradient, outputGradient, paddingIndex, std::nullopt);
+    return prepareEmbeddingSparseGradientImpl(indices, upstreamGradient, outputGradient, paddingIndex, std::nullopt, std::nullopt);
+}
+
+std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientRagged(
+    const Tensor& indices,
+    const Tensor& upstreamGradient,
+    SparseRowGradient& outputGradient,
+    std::optional<uint64_t> paddingIndex,
+    const RaggedRuntimeExtent& runtimeExtent) {
+    return prepareEmbeddingSparseGradientImpl(indices, upstreamGradient, outputGradient, paddingIndex, runtimeExtent, std::nullopt);
 }
 
 std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientWithSparseRowUpdate(
@@ -2272,7 +2389,21 @@ std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientW
     std::optional<uint64_t> paddingIndex) {
     SparseRowUpdateFusionSource source = SparseRowUpdatePlan::emitFusionSource(
         std::move(updateOutputs), outputGradient.rows, outputGradient.numRows, updateInputs, indexedUpdateOutputs, {{"gradient", "sum"}});
-    return prepareEmbeddingSparseGradientImpl(indices, upstreamGradient, outputGradient, paddingIndex, std::move(source));
+    return prepareEmbeddingSparseGradientImpl(indices, upstreamGradient, outputGradient, paddingIndex, std::nullopt, std::move(source));
+}
+
+std::shared_ptr<PreparedEmbeddingSparseGradient> prepareEmbeddingSparseGradientWithSparseRowUpdateRagged(
+    const Tensor& indices,
+    const Tensor& upstreamGradient,
+    SparseRowGradient& outputGradient,
+    PhysicalOutputs updateOutputs,
+    const std::unordered_map<std::string, SparseRowUpdateTensorBinding>& updateInputs,
+    const std::unordered_map<std::string, Tensor>& indexedUpdateOutputs,
+    std::optional<uint64_t> paddingIndex,
+    const RaggedRuntimeExtent& runtimeExtent) {
+    SparseRowUpdateFusionSource source = SparseRowUpdatePlan::emitFusionSource(
+        std::move(updateOutputs), outputGradient.rows, outputGradient.numRows, updateInputs, indexedUpdateOutputs, {{"gradient", "sum"}});
+    return prepareEmbeddingSparseGradientImpl(indices, upstreamGradient, outputGradient, paddingIndex, runtimeExtent, std::move(source));
 }
 
 bool preparedEmbeddingSparseGradientHasSparseRowUpdate(const PreparedEmbeddingSparseGradient& prepared) {

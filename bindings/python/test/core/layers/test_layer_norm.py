@@ -184,3 +184,122 @@ def test_layer_norm_forward_matches_numpy_explicit_trailing_shape():
     expected = _layer_norm_reference_for_dtype(values, [3, 4], epsilon, dtype)
 
     np.testing.assert_allclose(actual.astype(np.float32), expected.astype(np.float32), atol=1.5e-3, rtol=1.5e-3)
+
+
+def _physical_ragged(values: np.ndarray, offsets: np.ndarray, dtype: thor.DataType = thor.DataType.fp32):
+    return thor.physical.PhysicalRaggedTensor(
+        _cpu_tensor(values, dtype),
+        _cpu_tensor(offsets, thor.DataType.uint32),
+    )
+
+
+def test_layer_norm_accepts_ragged_tensor_and_preserves_partition():
+    n = thor.Network("test_ragged_layer_norm_build")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=16,
+        max_values_per_row=9,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint32,
+    )
+
+    ln = thor.layers.LayerNorm(n, x)
+    y = ln.get_feature_output()
+
+    assert ln.get_use_ragged() is True
+    assert isinstance(y, thor.RaggedTensor)
+    assert y.values.get_dimensions() == [16, 4]
+    assert y.offsets == x.offsets
+    assert y.max_values_per_row == 9
+    assert ln.get_normalized_shape() == [4]
+
+    arch = _only_layer_architecture(n, "layer_norm")
+    assert arch["use_ragged"] is True
+    assert arch["ragged_inputs"][0]["offsets"]["id"] == arch["ragged_outputs"][0]["offsets"]["id"]
+
+
+def test_layer_norm_rejects_ragged_geometry_outside_single_channel_contract():
+    n = thor.Network("test_ragged_layer_norm_bad_shape")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=16,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    with pytest.raises((RuntimeError, ValueError), match="packed ragged row dimension"):
+        thor.layers.LayerNorm(n, x, normalized_shape=[16, 4])
+
+    matrix = thor.layers.RaggedNetworkInput(
+        n,
+        "matrix_tokens",
+        thor.DataType.fp32,
+        [2, 2],
+        max_total_values=16,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    with pytest.raises((RuntimeError, ValueError), match="exactly one non-zero trailing channel dimension"):
+        thor.layers.LayerNorm(n, matrix, normalized_shape=[2])
+
+
+@pytest.mark.cuda
+def test_ragged_layer_norm_matches_active_prefix_and_ignores_poisoned_capacity():
+    epsilon = 1e-4
+    n = thor.Network("test_ragged_layer_norm_forward")
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=16,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    ln = thor.layers.LayerNorm(n, x, epsilon=epsilon)
+    thor.layers.RaggedNetworkOutput(n, "output", ln.get_feature_output())
+
+    active_rows = 11
+    values = np.full((16, 4), np.float32(np.nan), dtype=np.float32)
+    values[:active_rows] = (np.arange(active_rows * 4, dtype=np.float32).reshape(active_rows, 4) - 10.0) / 5.0
+    offsets = np.array([0, 3, 3, active_rows], dtype=np.uint32)
+
+    placed = n.place(3, inference_only=True, forced_devices=[0], forced_num_stamps_per_gpu=1)
+    result = placed.infer({"tokens": _physical_ragged(values, offsets)})["output"]
+    actual = np.array(result.values.numpy(), copy=True)
+    expected = _layer_norm_reference(values[:active_rows], [4], epsilon)
+
+    assert np.array_equal(result.offsets.numpy(), offsets)
+    np.testing.assert_allclose(actual[:active_rows], expected, rtol=2.5e-5, atol=2.5e-5)
+
+
+def test_ragged_layer_norm_save_load_preserves_partition_metadata(tmp_path):
+    name = "test_ragged_layer_norm_round_trip"
+    n = thor.Network(name)
+    x = thor.layers.RaggedNetworkInput(
+        n,
+        "tokens",
+        thor.DataType.fp32,
+        [4],
+        max_total_values=16,
+        max_values_per_row=9,
+        batch_size=3,
+        offsets_data_type=thor.DataType.uint32,
+    )
+    ln = thor.layers.LayerNorm(n, x, epsilon=1e-4)
+    thor.layers.RaggedNetworkOutput(n, "output", ln.get_feature_output())
+
+    save_dir = tmp_path / "ragged_layer_norm_model"
+    n.save(str(save_dir), overwrite=False)
+
+    loaded = thor.Network(name)
+    loaded.load(str(save_dir))
+    arch = _only_layer_architecture(loaded, "layer_norm")
+    assert arch["use_ragged"] is True
+    assert arch["ragged_inputs"][0]["offsets"]["id"] == arch["ragged_outputs"][0]["offsets"]["id"]
+    assert arch["ragged_inputs"][0]["max_values_per_row"] == 9

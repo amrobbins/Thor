@@ -58,10 +58,12 @@ LogicalNetworkInputs collectLogicalNetworkInputs(const Network &network) {
         if (!logical.raggedByTensorId.emplace(ragged.raggedTensor.getId(), ragged).second) {
             throw std::runtime_error("Network contains duplicate logical RaggedNetworkInput tensor identity.");
         }
-        if (!raggedPhysicalNames.insert(ragged.valuesInputName).second ||
-            !raggedPhysicalNames.insert(ragged.offsetsInputName).second) {
-            throw std::runtime_error("Network contains overlapping RaggedNetworkInput physical components.");
+        if (!raggedPhysicalNames.insert(ragged.valuesInputName).second) {
+            throw std::runtime_error("Network contains overlapping RaggedNetworkInput values components.");
         }
+        // Shared-partition logical inputs intentionally reference the same
+        // physical offsets boundary as their canonical partition owner.
+        raggedPhysicalNames.insert(ragged.offsetsInputName);
     }
 
     for (const std::shared_ptr<NetworkInput> &input : network.getExternalNetworkInputs()) {

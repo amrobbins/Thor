@@ -3417,10 +3417,9 @@ void StampedConvolutionBackward::runOn(Stream& run_stream) const {
     throw std::runtime_error("StampedConvolutionBackward received non-frontend convolution payload unexpectedly.");
 }
 
-// Consumer-side pre-read sanitation for bucketed cuDNN RMSNorm. cuDNN is
-// deliberately dispatched over selected_rows, so only [active_rows, selected_rows)
-// must be made safe. Storage in [selected_rows, full_capacity_rows) is outside this
-// consumer's physical read and remains undefined.
+// Standalone stamped-operation fallback sanitation for bucketed cuDNN RMSNorm.
+// Expression execution inserts an explicit StampedSanitizePackedTail dependency
+// instead, so its read-only RMSNorm stages never hide an in-place write.
 static void ensureRmsNormExecutionWorkspace(std::optional<Tensor>& workspace,
                                             const TensorPlacement& placement,
                                             uint64_t required_bytes,
@@ -3464,13 +3463,174 @@ static void sanitizePackedRmsNormOverreadRows(Tensor tensor,
     overread.memsetAsync(stream, 0);
 }
 
+StampedSanitizePackedTail::StampedSanitizePackedTail(const Tensor& tensor,
+                                                     const Tensor& row_partition_offsets,
+                                                     uint64_t ragged_batch_size,
+                                                     uint64_t packed_row_capacity,
+                                                     const Stream& stream)
+    : tensor(tensor),
+      row_partition_offsets(row_partition_offsets),
+      ragged_batch_size(ragged_batch_size),
+      packed_row_capacity(packed_row_capacity),
+      elements_per_packed_row(packed_row_capacity == 0 ? 0 : tensor.getTotalNumElements() / packed_row_capacity),
+      capacity_buckets(packed_row_capacity == 0 ? std::vector<uint64_t>{}
+                                                : makeRaggedMatmulCapacityBuckets(packed_row_capacity)),
+      stream(stream) {
+    if (packed_row_capacity == 0 || ragged_batch_size == 0) {
+        throw std::invalid_argument("SANITIZE_PACKED_TAIL requires non-zero packed-row capacity and ragged batch size.");
+    }
+    if (tensor.getTotalNumElements() == 0 || tensor.getTotalNumElements() % packed_row_capacity != 0 ||
+        elements_per_packed_row == 0 || !tensor.isDenseContiguous()) {
+        throw std::runtime_error(
+            "SANITIZE_PACKED_TAIL requires dense contiguous storage whose element count is divisible by packed-row capacity.");
+    }
+    if (tensor.getPlacement() != row_partition_offsets.getPlacement()) {
+        throw std::runtime_error("SANITIZE_PACKED_TAIL tensor and row-partition offsets must share placement.");
+    }
+    RowPartitionRuntime(row_partition_offsets,
+                        RowPartitionDescriptor(ragged_batch_size,
+                                               packed_row_capacity,
+                                               row_partition_offsets.getDataType()));
+}
+
+void StampedSanitizePackedTail::runOn(Stream& run_stream) const {
+    RowPartitionRuntime row_partition(row_partition_offsets,
+                                      RowPartitionDescriptor(ragged_batch_size,
+                                                             packed_row_capacity,
+                                                             row_partition_offsets.getDataType()));
+    const uint64_t active_rows = row_partition.requireHostActiveValueCount();
+    const uint64_t selected_rows =
+        active_rows == 0 ? capacity_buckets.front() : chooseRaggedMatmulCapacityBucket(active_rows, capacity_buckets);
+    if (selected_rows < active_rows || selected_rows > packed_row_capacity) {
+        throw std::runtime_error("SANITIZE_PACKED_TAIL selected an invalid physical row extent.");
+    }
+    if (active_rows == selected_rows) {
+        return;
+    }
+
+    const uint64_t active_elements = active_rows * elements_per_packed_row;
+    const uint64_t sanitize_elements = (selected_rows - active_rows) * elements_per_packed_row;
+    Tensor tail = tensor.aliasView({sanitize_elements}, {1}, active_elements);
+    tail.memsetAsync(run_stream, 0);
+}
+
+std::vector<uintptr_t> StampedLayerNorm::executablePlanIds() const {
+    std::vector<std::pair<uint64_t, uintptr_t>> keyed;
+    keyed.reserve(forward_executable_plans.size());
+    for (const auto& [outer, plan] : forward_executable_plans) {
+        keyed.emplace_back(outer, plan.executableId());
+    }
+    std::sort(keyed.begin(), keyed.end());
+    std::vector<uintptr_t> ids;
+    ids.reserve(keyed.size());
+    for (const auto& [_, id] : keyed) ids.push_back(id);
+    return ids;
+}
+
+std::vector<CudnnFrontendPlanSelection> StampedLayerNorm::planSelections() const {
+    std::vector<std::pair<uint64_t, CudnnFrontendPlanSelection>> keyed;
+    keyed.reserve(forward_executable_plans.size());
+    for (const auto& [outer, plan] : forward_executable_plans) {
+        keyed.emplace_back(outer, plan.selection());
+    }
+    std::sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<CudnnFrontendPlanSelection> selections;
+    selections.reserve(keyed.size());
+    for (auto& [_, selection] : keyed) selections.push_back(std::move(selection));
+    return selections;
+}
+
+uintptr_t StampedLayerNorm::executablePlanId() const {
+    if (forward_executable_plans.size() != 1) {
+        throw std::runtime_error("StampedLayerNorm executablePlanId requires exactly one prepared executable plan.");
+    }
+    return forward_executable_plans.begin()->second.executableId();
+}
+
+CudnnFrontendPlanSelection StampedLayerNorm::planSelection() const {
+    if (forward_executable_plans.size() != 1) {
+        throw std::runtime_error("StampedLayerNorm planSelection requires exactly one prepared executable plan.");
+    }
+    return forward_executable_plans.begin()->second.selection();
+}
+
+const CudnnLayerNormExecutablePlan& StampedLayerNorm::forwardExecutableForOuter(uint64_t outer) const {
+    const auto iter = forward_executable_plans.find(outer);
+    if (iter == forward_executable_plans.end()) {
+        throw std::runtime_error("Stamped LayerNorm has no prepared local forward executable for outer extent " +
+                                 std::to_string(outer) + ".");
+    }
+    return iter->second;
+}
+
+void StampedLayerNorm::prepareForwardExecutableFamily() {
+    std::unordered_map<uint64_t, CudnnLayerNormExecutablePlan> prepared;
+    uint64_t max_workspace_bytes = 0;
+    auto prepare_descriptor = [&](CudnnLayerNormDescriptor descriptor) {
+        CudnnLayerNormExecutablePlan plan = CudnnLayerNorm::instance().prepareForward(descriptor, stream);
+        max_workspace_bytes = std::max(max_workspace_bytes, plan.workspaceBytes());
+        const uint64_t outer = plan.descriptor().outerSize;
+        const auto [_, inserted] = prepared.emplace(outer, std::move(plan));
+        if (!inserted) {
+            throw std::runtime_error("Stamped LayerNorm finite family produced a duplicate outer extent.");
+        }
+    };
+
+    if (compiled_layer_norm->packed_row_capacity == 0) {
+        prepare_descriptor(compiled_layer_norm->descriptorFor(input, scale, bias, output));
+    } else {
+        if (!row_partition_offsets.has_value() || compiled_layer_norm->ragged_batch_size == 0) {
+            throw std::runtime_error("Packed-row LayerNorm requires an explicit row-partition runtime binding.");
+        }
+        const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
+        RowPartitionRuntime(row_partition_offsets.value(),
+                            RowPartitionDescriptor(compiled_layer_norm->ragged_batch_size,
+                                                   compiled_layer_norm->packed_row_capacity,
+                                                   offsets_descriptor.getDataType()));
+        const std::vector<uint64_t> input_dims = input.getDimensions();
+        if (input_dims.size() != 2 || input_dims[0] % compiled_layer_norm->packed_row_capacity != 0) {
+            throw std::runtime_error(
+                "Packed-row LayerNorm requires logical [outer, hidden] input whose outer dimension is divisible by packed_row_capacity.");
+        }
+        packed_outer_per_row = input_dims[0] / compiled_layer_norm->packed_row_capacity;
+        if (packed_outer_per_row == 0) {
+            throw std::runtime_error("Packed-row LayerNorm outer samples per packed row must be non-zero.");
+        }
+
+        // LayerNorm uses the same finite packed-row capacity family as RMSNorm.
+        // It does not require tail sanitation: normalization is independent for
+        // each outer sample, so inactive bucket rows cannot affect active rows.
+        if (packed_capacity_buckets.empty()) {
+            throw std::runtime_error("Packed-row LayerNorm is missing its precomputed finite capacity family.");
+        }
+        for (const uint64_t capacity_rows : packed_capacity_buckets) {
+            const uint64_t bucket_outer = capacity_rows * packed_outer_per_row;
+            Tensor bucket_input = input.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            Tensor bucket_output = output.aliasView({bucket_outer, input_dims[1]}, {input_dims[1], 1}, 0);
+            prepare_descriptor(compiled_layer_norm->descriptorFor(bucket_input, scale, bias, bucket_output));
+        }
+    }
+
+    if (prepared.empty()) {
+        throw std::runtime_error("Stamped LayerNorm prepared an empty executable family.");
+    }
+    forward_executable_plans = std::move(prepared);
+    ensureRmsNormExecutionWorkspace(
+        workspace,
+        input.getPlacement(),
+        max_workspace_bytes,
+        "layernorm_forward",
+        "input=" + input.getDescriptor().toString() + " packed_capacity=" +
+            std::to_string(compiled_layer_norm->packed_row_capacity));
+}
+
 StampedLayerNorm::StampedLayerNorm(std::shared_ptr<CompiledLayerNorm> compiled,
-                                       Tensor input,
-                                       Tensor scale,
-                                       Tensor bias,
-                                       Tensor output,
-                                       const Stream& stream,
-                                       std::optional<Tensor> row_partition_offsets)
+                                   Tensor input,
+                                   Tensor scale,
+                                   Tensor bias,
+                                   Tensor output,
+                                   const Stream& stream,
+                                   std::optional<Tensor> row_partition_offsets)
     : compiled_layer_norm(std::move(compiled)),
       input(std::move(input)),
       scale(std::move(scale)),
@@ -3483,14 +3643,10 @@ StampedLayerNorm::StampedLayerNorm(std::shared_ptr<CompiledLayerNorm> compiled,
     if (packed != this->row_partition_offsets.has_value()) {
         throw std::runtime_error("LayerNorm row-partition binding does not match the compiled packed-row contract.");
     }
-    const CudnnLayerNormDescriptor descriptor =
-        compiled_layer_norm->descriptorFor(this->input, this->scale, this->bias, this->output);
-    executable_plan.emplace(CudnnLayerNorm::instance().prepareForward(descriptor, stream));
-    ensureRmsNormExecutionWorkspace(workspace,
-                                    this->input.getPlacement(),
-                                    executable_plan->workspaceBytes(),
-                                    "layernorm_forward",
-                                    "hidden=" + std::to_string(compiled_layer_norm->normalized_feature_count));
+    if (packed) {
+        packed_capacity_buckets = makeRaggedRmsNormCapacityBuckets(compiled_layer_norm->packed_row_capacity);
+    }
+    prepareForwardExecutableFamily();
 }
 
 std::optional<uint64_t> StampedLayerNorm::runtimeLogicalFlopCount() const {
@@ -3513,15 +3669,49 @@ std::optional<uint64_t> StampedLayerNorm::runtimeLogicalFlopCount() const {
 }
 
 void StampedLayerNorm::runOn(Stream& run_stream) const {
+    if (compiled_layer_norm->packed_row_capacity == 0) {
+        if (forward_executable_plans.size() != 1) {
+            throw std::runtime_error("Dense LayerNorm requires exactly one prepared executable plan.");
+        }
+        CudnnLayerNormForwardArgs args;
+        args.x = input;
+        args.scale = scale;
+        args.bias = bias;
+        args.y = output;
+        CudnnLayerNorm::instance().forward(forward_executable_plans.begin()->second, args, workspace, run_stream);
+        return;
+    }
+
+    if (!row_partition_offsets.has_value()) {
+        throw std::runtime_error("Packed-row LayerNorm is missing its row-partition runtime binding.");
+    }
+    const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
+    RowPartitionRuntime row_partition(row_partition_offsets.value(),
+                                      RowPartitionDescriptor(compiled_layer_norm->ragged_batch_size,
+                                                             compiled_layer_norm->packed_row_capacity,
+                                                             offsets_descriptor.getDataType()));
+    const uint64_t active_rows = row_partition.requireHostActiveValueCount();
+    if (active_rows == 0) {
+        // Every output row is inactive, so the packed output is entirely
+        // undefined and there is no useful LayerNorm work to launch.
+        return;
+    }
+
+    const uint64_t selected_rows = chooseRaggedMatmulCapacityBucket(active_rows, packed_capacity_buckets);
+    const uint64_t selected_outer = selected_rows * packed_outer_per_row;
+    const uint64_t hidden = compiled_layer_norm->normalized_feature_count;
+
+    // LayerNorm is row-local: inactive rows in the selected physical bucket do
+    // not contribute to any active row. Deliberately do not sanitize the tail.
+    Tensor bucket_input = input.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
+    Tensor bucket_output = output.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
     CudnnLayerNormForwardArgs args;
-    args.x = input;
+    args.x = bucket_input;
     args.scale = scale;
     args.bias = bias;
-    args.y = output;
-    if (!executable_plan.has_value()) {
-        throw std::runtime_error("StampedLayerNorm run requires a prepared executable plan.");
-    }
-    CudnnLayerNorm::instance().forward(executable_plan.value(), args, workspace, run_stream);
+    args.y = bucket_output;
+    const CudnnLayerNormExecutablePlan& plan = forwardExecutableForOuter(selected_outer);
+    CudnnLayerNorm::instance().forward(plan, args, workspace, run_stream);
 }
 
 std::vector<uintptr_t> StampedRmsNorm::executablePlanIds() const {
@@ -3626,14 +3816,16 @@ StampedRmsNorm::StampedRmsNorm(std::shared_ptr<CompiledRmsNorm> compiled,
                                const Tensor& output,
                                const Stream& stream,
                                std::optional<Tensor> row_partition_offsets,
-                               std::shared_ptr<RmsNormForwardState> forward_state)
+                               std::shared_ptr<RmsNormForwardState> forward_state,
+                               bool packed_tail_prepared_externally)
     : compiled_rms_norm(std::move(compiled)),
       input(input),
       scale(scale),
       row_partition_offsets(std::move(row_partition_offsets)),
       output(output),
       stream(stream),
-      forward_state(forward_state ? std::move(forward_state) : std::make_shared<RmsNormForwardState>()) {
+      forward_state(forward_state ? std::move(forward_state) : std::make_shared<RmsNormForwardState>()),
+      packed_tail_prepared_externally(packed_tail_prepared_externally) {
     if (!compiled_rms_norm) {
         throw std::runtime_error("StampedRmsNorm requires a compiled RMSNorm payload.");
     }
@@ -3717,15 +3909,18 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
         active_rows == 0 ? buckets.front() : chooseRaggedMatmulCapacityBucket(active_rows, buckets);
     const uint64_t selected_outer = selected_rows * outer_per_packed_row;
 
-    // cuDNN deliberately executes the selected physical bucket. Sanitize exactly
-    // the rows that this consumer will over-read and leave all later capacity undefined.
-    Tensor mutable_input = input;
-    sanitizePackedRmsNormOverreadRows(mutable_input,
-                                      active_rows,
-                                      selected_rows,
-                                      compiled_rms_norm->packed_row_capacity,
-                                      outer_per_packed_row,
-                                      run_stream);
+    // cuDNN deliberately executes the selected physical bucket. Expression plans
+    // satisfy this through an explicit SANITIZE_PACKED_TAIL dependency; direct
+    // StampedRmsNorm users retain the local fallback for API compatibility.
+    if (!packed_tail_prepared_externally) {
+        Tensor mutable_input = input;
+        sanitizePackedRmsNormOverreadRows(mutable_input,
+                                          active_rows,
+                                          selected_rows,
+                                          compiled_rms_norm->packed_row_capacity,
+                                          outer_per_packed_row,
+                                          run_stream);
+    }
 
     Tensor bucket_input = input.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
     Tensor bucket_output = output.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
@@ -4011,7 +4206,8 @@ StampedRmsNormBackward::StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBa
                                                const Tensor& dScale,
                                                const Stream& stream,
                                                std::optional<Tensor> row_partition_offsets,
-                                               std::shared_ptr<RmsNormForwardState> saved_forward_state)
+                                               std::shared_ptr<RmsNormForwardState> saved_forward_state,
+                                               bool packed_tails_prepared_externally)
     : compiled_rms_norm_backward(std::move(compiled)),
       input(input),
       scale(scale),
@@ -4021,7 +4217,8 @@ StampedRmsNormBackward::StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBa
       row_partition_offsets(std::move(row_partition_offsets)),
       stream(stream),
       outputs({dX, dScale}),
-      saved_forward_state(std::move(saved_forward_state)) {
+      saved_forward_state(std::move(saved_forward_state)),
+      packed_tails_prepared_externally(packed_tails_prepared_externally) {
     if (!compiled_rms_norm_backward) {
         throw std::runtime_error("StampedRmsNormBackward requires a compiled RMSNorm backward payload.");
     }
@@ -4114,13 +4311,15 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
     // dY is the backward consumer's newly supplied row-bound operand. Sanitize only
     // the bucket slack cuDNN will read. x was sanitized by the matching forward
     // consumer and remains the same retained forward input storage.
-    Tensor mutable_dy = dY;
-    sanitizePackedRmsNormOverreadRows(mutable_dy,
-                                      active_rows,
-                                      selected_rows,
-                                      compiled_rms_norm_backward->packed_row_capacity,
-                                      outer_per_packed_row,
-                                      run_stream);
+    if (!packed_tails_prepared_externally) {
+        Tensor mutable_dy = dY;
+        sanitizePackedRmsNormOverreadRows(mutable_dy,
+                                          active_rows,
+                                          selected_rows,
+                                          compiled_rms_norm_backward->packed_row_capacity,
+                                          outer_per_packed_row,
+                                          run_stream);
+    }
 
     Tensor bucket_input = input.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
     Tensor bucket_dy = dY.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
@@ -4137,13 +4336,15 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
         // Standalone differentiated packed equations have no separately stamped
         // forward stage. Execute the already-prepared fallback plan for the same
         // selected physical bucket while honoring consumer responsibility.
-        Tensor mutable_input = input;
-        sanitizePackedRmsNormOverreadRows(mutable_input,
-                                          active_rows,
-                                          selected_rows,
-                                          compiled_rms_norm_backward->packed_row_capacity,
-                                          outer_per_packed_row,
-                                          run_stream);
+        if (!packed_tails_prepared_externally) {
+            Tensor mutable_input = input;
+            sanitizePackedRmsNormOverreadRows(mutable_input,
+                                              active_rows,
+                                              selected_rows,
+                                              compiled_rms_norm_backward->packed_row_capacity,
+                                              outer_per_packed_row,
+                                              run_stream);
+        }
         if (fallback_forward_state == nullptr || !fallback_forward_state->inv_variance.isInitialized() ||
             !fallback_output.isInitialized()) {
             throw std::runtime_error("Standalone packed RMSNorm backward fallback state was not prepared before execution.");
@@ -4221,7 +4422,8 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
                              std::optional<Tensor> beta_host_scratch,
                              std::optional<Tensor> epilogue_aux,
                              std::optional<Tensor> bgrad_output,
-                             std::optional<Tensor> row_partition_offsets)
+                             std::optional<Tensor> row_partition_offsets,
+                             bool packed_tails_prepared_externally)
     : compiled_matmul(std::move(compiled)),
       built_matmul(std::move(built)),
       lhs(lhs),
@@ -4231,6 +4433,7 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
       epilogue_aux(epilogue_aux),
       bgrad_output(bgrad_output),
       row_partition_offsets(std::move(row_partition_offsets)),
+      packed_tails_prepared_externally(packed_tails_prepared_externally),
       stream(stream),
       workspace(workspace),
       alpha_input(alpha_input),
@@ -4682,10 +4885,9 @@ static bool packedMatmulBindsRowsRhs(MatmulPackedRowBinding binding) {
     return binding == MatmulPackedRowBinding::RowsB || binding == MatmulPackedRowBinding::RowsAAndRowsB;
 }
 
-// Consumer-side pre-read sanitation for bucketed cuBLASLt MATMUL. The selected
-// GEMM reads selected_rows from every row-bound operand, so sanitize exactly
-// [active_rows, selected_rows) immediately before that read. Never canonicalize
-// [selected_rows, full_capacity_rows) merely because the tensor is ragged.
+// Standalone stamped-operation fallback sanitation for bucketed cuBLASLt MATMUL.
+// Expression execution inserts explicit StampedSanitizePackedTail dependencies;
+// direct StampedMatmul users retain this local path for API compatibility.
 static void sanitizePackedMatmulOverreadRows(Tensor tensor,
                                              uint64_t active_rows,
                                              uint64_t selected_rows,
@@ -4752,18 +4954,20 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                                          offsets_descriptor.getDataType()));
                 const uint64_t active_rows = row_partition.requireHostActiveValueCount();
                 // cuBLASLt executes a pre-tuned row bucket rather than an arbitrary logical
-                // row count. The MATMUL is therefore the physical consumer responsible for
-                // sanitizing exactly the bucket slack it will read. Producer tails remain
-                // undefined, including when another active-aware ragged stage feeds us. An
-                // all-empty batch selects the smallest cached bucket rather than full capacity.
+                // row count. Expression plans prepare the bucket slack through an explicit
+                // SANITIZE_PACKED_TAIL dependency; direct StampedMatmul users fall back to
+                // local sanitation below. An all-empty batch selects the smallest cached
+                // bucket rather than full capacity.
                 const uint64_t selected_rows = built_matmul->bucketed_cublas_gemm->getSelectedCapacityRows(active_rows);
-                if (packedMatmulBindsRowsLhs(compiled_matmul->packed_row_binding)) {
-                    sanitizePackedMatmulOverreadRows(
-                        lhs, active_rows, selected_rows, compiled_matmul->packed_row_capacity, run_stream);
-                }
-                if (packedMatmulBindsRowsRhs(compiled_matmul->packed_row_binding)) {
-                    sanitizePackedMatmulOverreadRows(
-                        rhs, active_rows, selected_rows, compiled_matmul->packed_row_capacity, run_stream);
+                if (!packed_tails_prepared_externally) {
+                    if (packedMatmulBindsRowsLhs(compiled_matmul->packed_row_binding)) {
+                        sanitizePackedMatmulOverreadRows(
+                            lhs, active_rows, selected_rows, compiled_matmul->packed_row_capacity, run_stream);
+                    }
+                    if (packedMatmulBindsRowsRhs(compiled_matmul->packed_row_binding)) {
+                        sanitizePackedMatmulOverreadRows(
+                            rhs, active_rows, selected_rows, compiled_matmul->packed_row_capacity, run_stream);
+                    }
                 }
                 const float alphaOne = 1.0f;
                 const float betaZero = 0.0f;
@@ -4779,8 +4983,8 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                                                               CublasScalarPointerMode::Host));
                 // The selected bucket's output slack and all rows beyond it are outside
                 // the logical ragged tensor. Do not canonicalize either region after the
-                // consumer finishes; a later over-reading consumer must sanitize its own
-                // selected over-read immediately before use.
+                // consumer finishes; a later over-reading consumer must depend on tail
+                // preparation for its own selected over-read before use.
                 return;
             }
             if (!built_matmul->cublas_kernel.has_value()) {

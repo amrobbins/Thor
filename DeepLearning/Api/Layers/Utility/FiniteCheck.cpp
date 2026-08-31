@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -34,10 +35,82 @@ void warnIfEnabled(const FiniteCheck &finiteCheck) {
               << std::endl;
 }
 
+RaggedTensor reconstructRaggedInput(const json& inputJson, Network* network, const char* context) {
+    const uint64_t valuesId = inputJson.at("values").at("id").get<uint64_t>();
+    const uint64_t offsetsId = inputJson.at("offsets").at("id").get<uint64_t>();
+    Tensor values = network->getApiTensorByOriginalId(valuesId);
+    Tensor offsets = network->getApiTensorByOriginalId(offsetsId);
+    RaggedTensor ragged = inputJson.contains("max_values_per_row")
+        ? RaggedTensor(values, offsets, inputJson.at("max_values_per_row").get<uint64_t>())
+        : RaggedTensor(values, offsets);
+    if (ragged.getBatchSize() != inputJson.at("batch_size").get<uint64_t>() ||
+        ragged.getMaxTotalValues() != inputJson.at("max_total_values").get<uint64_t>()) {
+        throw runtime_error(string(context) + " serialized ragged input metadata does not match reconstructed tensors.");
+    }
+    return ragged;
+}
+
+void validateSerializedRaggedOutput(const json& outputJson,
+                                    const json& denseOutputJson,
+                                    const RaggedTensor& input,
+                                    const Tensor& outputValues,
+                                    const char* context) {
+    if (outputJson.at("values").at("id").get<uint64_t>() != denseOutputJson.at("id").get<uint64_t>() ||
+        outputJson.at("offsets").at("id").get<uint64_t>() != input.getOffsets().getOriginalId() ||
+        outputJson.at("batch_size").get<uint64_t>() != input.getBatchSize() ||
+        outputJson.at("max_total_values").get<uint64_t>() != input.getMaxTotalValues() ||
+        outputValues.getDimensions() != input.getValues().getDimensions() ||
+        outputValues.getDataType() != input.getValues().getDataType()) {
+        throw runtime_error(string(context) + " serialized ragged output must preserve the input values descriptor and row partition.");
+    }
+    if (outputJson.contains("max_values_per_row")) {
+        if (!input.hasMaxValuesPerRow() ||
+            outputJson.at("max_values_per_row").get<uint64_t>() != input.getMaxValuesPerRow()) {
+            throw runtime_error(string(context) + " serialized ragged output max_values_per_row does not match its input.");
+        }
+    }
+}
+
 }  // namespace
 
 FiniteCheck::FiniteCheck() = default;
 FiniteCheck::~FiniteCheck() = default;
+
+vector<Tensor> FiniteCheck::getAllInputTensors() const {
+    if (!raggedFeatureInput.has_value()) return Layer::getAllInputTensors();
+    return {raggedFeatureInput->getValues(), raggedFeatureInput->getOffsets()};
+}
+
+vector<Tensor> FiniteCheck::getOutputsFromInput(Tensor inputTensor) {
+    (void)getConnectionType(inputTensor);
+    if (!raggedFeatureInput.has_value()) {
+        THOR_THROW_IF_FALSE(featureOutput.has_value());
+        return {featureOutput.value()};
+    }
+    if (emittedFeatureOutputAfterAllInputsConnected || connectedInputPortIndices.size() != 2) return {};
+    emittedFeatureOutputAfterAllInputsConnected = true;
+    THOR_THROW_IF_FALSE(featureOutput.has_value());
+    return {featureOutput.value()};
+}
+
+void FiniteCheck::informThatInputConnectionMade(Tensor inputTensor) {
+    if (!raggedFeatureInput.has_value()) return;
+    connectedInputPortIndices.insert(static_cast<uint32_t>(getConnectionType(inputTensor)));
+}
+
+void FiniteCheck::resetGraphTraversalState() {
+    connectedInputPortIndices.clear();
+    emittedFeatureOutputAfterAllInputsConnected = false;
+}
+
+int FiniteCheck::getConnectionType(Tensor connectingTensor) const {
+    THOR_THROW_IF_FALSE(featureInput.has_value());
+    THOR_THROW_IF_FALSE(featureOutput.has_value());
+    if (connectingTensor == featureInput.value()) return 0;
+    if (raggedFeatureInput.has_value() && connectingTensor == raggedFeatureInput->getOffsets()) return 1;
+    if (connectingTensor == featureOutput.value()) return 0;
+    throw runtime_error("Tensor is not connected to this FiniteCheck layer.");
+}
 
 shared_ptr<ThorImplementation::Layer> FiniteCheck::stamp(ThorImplementation::TensorPlacement placement,
                                                          shared_ptr<ThorImplementation::Layer> drivingLayer,
@@ -50,9 +123,27 @@ shared_ptr<ThorImplementation::Layer> FiniteCheck::stamp(ThorImplementation::Ten
     (void)inferenceOnly;
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(featureInput.has_value());
-    THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
+    bool knownInput = connectingApiTensor == featureInput.value();
+    if (raggedFeatureInput.has_value() && connectingApiTensor == raggedFeatureInput->getOffsets()) knownInput = true;
+    THOR_THROW_IF_FALSE(knownInput);
 
     warnIfEnabled(*this);
+
+    optional<ThorImplementation::FiniteCheck::RaggedConfiguration> raggedConfiguration;
+    if (raggedFeatureInput.has_value()) {
+        uint64_t elementsPerValue = 1;
+        for (uint64_t dim : raggedFeatureInput->getTrailingDimensions()) {
+            if (dim == 0 || elementsPerValue > numeric_limits<uint64_t>::max() / dim)
+                throw overflow_error("Ragged FiniteCheck elements-per-value overflow.");
+            elementsPerValue *= dim;
+        }
+        raggedConfiguration = ThorImplementation::FiniteCheck::RaggedConfiguration{
+            .batchSize = raggedFeatureInput->getBatchSize(),
+            .maxTotalValues = raggedFeatureInput->getMaxTotalValues(),
+            .elementsPerValue = elementsPerValue,
+            .offsetsDataType = raggedFeatureInput->getOffsetsDataType(),
+        };
+    }
 
     return make_shared<ThorImplementation::FiniteCheck>(tensorLabel,
                                                          featureInput.value().getId(),
@@ -61,7 +152,8 @@ shared_ptr<ThorImplementation::Layer> FiniteCheck::stamp(ThorImplementation::Ten
                                                          checkBackward,
                                                          failOnNonFinite,
                                                          maxReportedIndices,
-                                                         enabled);
+                                                         enabled,
+                                                         raggedConfiguration);
 }
 
 uint64_t FiniteCheck::getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
@@ -87,6 +179,12 @@ json FiniteCheck::architectureJson() const {
     j["layer_type"] = to_snake_case(getLayerType());
     j["feature_input"] = featureInput.value().architectureJson();
     j["feature_output"] = featureOutput.value().architectureJson();
+    j["use_ragged"] = raggedFeatureInput.has_value();
+    if (raggedFeatureInput.has_value()) {
+        THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
+        j["ragged_feature_input"] = raggedFeatureInput->architectureJson();
+        j["ragged_feature_output"] = raggedFeatureOutput->architectureJson();
+    }
     j["tensor_label"] = tensorLabel;
     j["enabled"] = enabled;
     j["check_forward"] = checkForward;
@@ -97,19 +195,36 @@ json FiniteCheck::architectureJson() const {
 }
 
 void FiniteCheck::deserialize(const json &j, Network *network) {
-    if (j.at("version").get<string>() != "1.0.0")
-        throw runtime_error("Unsupported version in FiniteCheck::deserialize: " + j.at("version").get<string>());
+    const string version = j.at("version").get<string>();
+    if (version != "1.0.0" && version != "1.1.0")
+        throw runtime_error("Unsupported version in FiniteCheck::deserialize: " + version);
     if (j.at("layer_type").get<string>() != "finite_check")
         throw runtime_error("Layer type mismatch in FiniteCheck::deserialize: " + j.at("layer_type").get<string>());
 
-    const json input = j.at("feature_input").get<json>();
-    const uint64_t originalTensorId = input.at("id").get<uint64_t>();
-    Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
+    const bool useRagged = version == "1.1.0" && j.value("use_ragged", false);
+    Tensor featureInput;
+    optional<RaggedTensor> raggedInput;
+    if (useRagged) {
+        const json& inputJson = j.at("ragged_feature_input");
+        if (j.at("feature_input").at("id").get<uint64_t>() != inputJson.at("values").at("id").get<uint64_t>()) {
+            throw runtime_error("FiniteCheck serialized ragged feature_input must reference the ragged values tensor.");
+        }
+        raggedInput = reconstructRaggedInput(inputJson, network, "FiniteCheck");
+        featureInput = raggedInput->getValues();
+    } else {
+        const json input = j.at("feature_input").get<json>();
+        featureInput = network->getApiTensorByOriginalId(input.at("id").get<uint64_t>());
+    }
     Tensor featureOutput = Tensor::deserialize(j.at("feature_output").get<json>());
 
     FiniteCheck finiteCheck;
     finiteCheck.featureInput = featureInput;
     finiteCheck.featureOutput = featureOutput;
+    if (raggedInput.has_value()) {
+        validateSerializedRaggedOutput(j.at("ragged_feature_output"), j.at("feature_output"), raggedInput.value(), featureOutput, "FiniteCheck");
+        finiteCheck.raggedFeatureInput = raggedInput;
+        finiteCheck.raggedFeatureOutput = raggedInput->withValues(featureOutput);
+    }
     finiteCheck.tensorLabel = j.value("tensor_label", string{});
     finiteCheck.enabled = j.value("enabled", true);
     finiteCheck.checkForward = j.value("check_forward", true);
@@ -138,6 +253,10 @@ FiniteCheck FiniteCheck::Builder::build() {
     FiniteCheck finiteCheck;
     finiteCheck.featureInput = _featureInput.value();
     finiteCheck.featureOutput = _featureInput.value().clone();
+    if (_raggedFeatureInput.has_value()) {
+        finiteCheck.raggedFeatureInput = _raggedFeatureInput;
+        finiteCheck.raggedFeatureOutput = _raggedFeatureInput->withValues(finiteCheck.featureOutput.value());
+    }
     finiteCheck.tensorLabel = std::move(_tensorLabel);
     finiteCheck.enabled = _enabled;
     finiteCheck.checkForward = _checkForward;
@@ -157,8 +276,18 @@ FiniteCheck::Builder &FiniteCheck::Builder::network(Network &network) {
 
 FiniteCheck::Builder &FiniteCheck::Builder::featureInput(Tensor featureInput) {
     THOR_THROW_IF_FALSE(!_featureInput.has_value());
+    THOR_THROW_IF_FALSE(!_raggedFeatureInput.has_value());
     THOR_THROW_IF_FALSE(featureInput.isInitialized());
     _featureInput = featureInput;
+    return *this;
+}
+
+FiniteCheck::Builder &FiniteCheck::Builder::featureInput(RaggedTensor featureInput) {
+    THOR_THROW_IF_FALSE(!_featureInput.has_value());
+    THOR_THROW_IF_FALSE(!_raggedFeatureInput.has_value());
+    THOR_THROW_IF_FALSE(featureInput.isInitialized());
+    _raggedFeatureInput = featureInput;
+    _featureInput = featureInput.getValues();
     return *this;
 }
 
