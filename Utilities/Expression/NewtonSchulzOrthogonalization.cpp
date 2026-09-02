@@ -21,7 +21,7 @@ void validateOptions(uint64_t numRows, uint64_t numCols, const NewtonSchulzOrtho
 }
 
 Expression normalizeByFrobeniusNorm(const Expression& input, const NewtonSchulzOrthogonalizationOptions& options) {
-    auto frobeniusNorm = (input * input).reduce_sum(/*reduction_axes=*/{}, /*squeeze_axes=*/{UINT64_MAX}, options.computeDType).sqrt();
+    auto frobeniusNorm = input.reduce_norm2(/*reduction_axes=*/{}, /*squeeze_axes=*/{UINT64_MAX}, options.computeDType);
     return input / (frobeniusNorm + Expression::constantScalar(options.epsilon));
 }
 

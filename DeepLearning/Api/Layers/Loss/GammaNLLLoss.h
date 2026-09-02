@@ -4,10 +4,13 @@
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 #include <optional>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace Thor {
 
@@ -28,6 +31,13 @@ class GammaNLLLoss : public Loss {
     bool getLogMean() const { return logMean; }
     bool getLogDispersion() const { return logDispersion; }
     float getEps() const { return eps; }
+    [[nodiscard]] bool isRagged() const { return raggedPredictionsTensor.has_value(); }
+    [[nodiscard]] RaggedTensor getRaggedPredictions() const { if (!isRagged()) throw std::runtime_error("GammaNLLLoss mean is dense."); return raggedPredictionsTensor.value(); }
+    [[nodiscard]] RaggedTensor getRaggedLabels() const { if (!isRagged()) throw std::runtime_error("GammaNLLLoss labels are dense."); return raggedLabelsTensor.value(); }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedDispersion() const { return raggedDispersionTensor; }
+    [[nodiscard]] RaggedTensor getRaggedRawLoss() const { if (!raggedRawLossTensor.has_value()) throw std::runtime_error("GammaNLLLoss raw loss is dense."); return raggedRawLossTensor.value(); }
+    [[nodiscard]] RaggedTensor getRaggedLoss() const { if (!isRagged() || lossShape != LossShape::RAW || !raggedRawLossTensor.has_value()) throw std::runtime_error("GammaNLLLoss does not expose a ragged reported loss for this LossShape."); return raggedRawLossTensor.value(); }
+    [[nodiscard]] LossShape getLossShape() const { return lossShape; }
 
     std::vector<Tensor> getLossInputTensors() const override {
         std::vector<Tensor> inputs{predictionsTensor, labelsTensor};
@@ -54,6 +64,11 @@ class GammaNLLLoss : public Loss {
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
+    std::optional<RaggedTensor> raggedPredictionsTensor;
+    std::optional<RaggedTensor> raggedLabelsTensor;
+    std::optional<RaggedTensor> raggedDispersionTensor;
+    std::optional<RaggedTensor> raggedRawLossTensor;
+
     virtual bool isMultiLayer() const { return true; }
 
     virtual void buildSupportLayersAndAddToNetwork();
@@ -97,41 +112,68 @@ class GammaNLLLoss::Builder {
 
     virtual GammaNLLLoss build() {
         THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_predictions.has_value());
-        THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        if (_dispersion.has_value()) {
-            THOR_THROW_IF_FALSE(_dispersion.value() != _predictions.value());
-            THOR_THROW_IF_FALSE(_dispersion.value() != _labels.value());
-        }
-        if (_exampleWeights.has_value()) {
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _predictions.value());
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _labels.value());
-            if (_dispersion.has_value())
-                THOR_THROW_IF_FALSE(_exampleWeights.value() != _dispersion.value());
-        }
-        THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
-        if (_dispersion.has_value())
-            THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _dispersion.value().getDimensions());
-
-        if (!_lossShape.has_value())
-            _lossShape = LossShape::BATCH;
-        if (!_lossDataType.has_value())
-            _lossDataType = _predictions.value().getDataType();
-        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
-
-        float eps = _eps.value_or(1.0e-6f);
+        const bool hasDensePredictions = _predictions.has_value();
+        const bool hasDenseLabels = _labels.has_value();
+        const bool hasRaggedPredictions = _raggedPredictions.has_value();
+        const bool hasRaggedLabels = _raggedLabels.has_value();
+        THOR_THROW_IF_FALSE(hasDensePredictions == hasDenseLabels);
+        THOR_THROW_IF_FALSE(hasRaggedPredictions == hasRaggedLabels);
+        THOR_THROW_IF_FALSE(hasDensePredictions != hasRaggedPredictions);
+        THOR_THROW_IF_FALSE(!_dispersion.has_value() || hasDensePredictions);
+        THOR_THROW_IF_FALSE(!_raggedDispersion.has_value() || hasRaggedPredictions);
+        if (!_lossShape.has_value()) _lossShape = LossShape::BATCH;
+        const float eps = _eps.value_or(1.0e-6f);
         THOR_THROW_IF_FALSE(eps > 0.0f);
-        THOR_THROW_IF_FALSE(!_logDispersion.value_or(false) || _dispersion.has_value());
+        THOR_THROW_IF_FALSE(!_logDispersion.value_or(false) || _dispersion.has_value() || _raggedDispersion.has_value());
 
         GammaNLLLoss loss;
-        loss.predictionsTensor = _predictions.value();
-        loss.labelsTensor = _labels.value();
-        loss.dispersionTensor = _dispersion;
-        loss.exampleWeightsTensor = _exampleWeights;
+        if (hasDensePredictions) {
+            THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+            THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
+            THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+            if (_dispersion.has_value()) {
+                THOR_THROW_IF_FALSE(_dispersion.value() != _predictions.value() && _dispersion.value() != _labels.value());
+                THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _dispersion.value().getDimensions());
+            }
+            if (_exampleWeights.has_value()) {
+                THOR_THROW_IF_FALSE(_exampleWeights.value() != _predictions.value());
+                THOR_THROW_IF_FALSE(_exampleWeights.value() != _labels.value());
+                if (_dispersion.has_value())
+                    THOR_THROW_IF_FALSE(_exampleWeights.value() != _dispersion.value());
+            }
+            if (!_lossDataType.has_value()) _lossDataType = _predictions.value().getDataType();
+            loss.predictionsTensor = _predictions.value();
+            loss.labelsTensor = _labels.value();
+            loss.dispersionTensor = _dispersion;
+            loss.exampleWeightsTensor = _exampleWeights;
+        } else {
+            const RaggedTensor& mean = _raggedPredictions.value();
+            const RaggedTensor& labels = _raggedLabels.value();
+            THOR_THROW_IF_FALSE(mean.isInitialized() && labels.isInitialized());
+            THOR_THROW_IF_FALSE(mean.getValues() != labels.getValues());
+            if (mean.getOffsets() != labels.getOffsets()) throw std::invalid_argument("GammaNLLLoss ragged mean and labels must use the exact same row partition tensor.");
+            if (mean.getBatchSize() != labels.getBatchSize() || mean.getMaxTotalValues() != labels.getMaxTotalValues() || mean.getTrailingDimensions() != labels.getTrailingDimensions())
+                throw std::invalid_argument("GammaNLLLoss ragged mean and labels must have identical value geometry.");
+            if (_raggedDispersion.has_value()) {
+                const RaggedTensor& dispersion = _raggedDispersion.value();
+                if (dispersion.getOffsets() != mean.getOffsets()) throw std::invalid_argument("GammaNLLLoss ragged dispersion must use the exact same row partition tensor as mean.");
+                if (dispersion.getBatchSize() != mean.getBatchSize() || dispersion.getMaxTotalValues() != mean.getMaxTotalValues() || dispersion.getTrailingDimensions() != mean.getTrailingDimensions())
+                    throw std::invalid_argument("GammaNLLLoss ragged dispersion must have identical value geometry to mean.");
+                if (dispersion.getValues() == mean.getValues() || dispersion.getValues() == labels.getValues()) throw std::invalid_argument("GammaNLLLoss ragged dispersion values must be distinct from mean and labels values.");
+            }
+            if (_exampleWeights.has_value() && _exampleWeights->getDimensions() != std::vector<uint64_t>{1})
+                throw std::invalid_argument("GammaNLLLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");
+            if (_lossShape.value() == LossShape::PER_OUTPUT) throw std::invalid_argument("GammaNLLLoss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+            if (!_lossDataType.has_value()) _lossDataType = mean.getValuesDataType();
+            loss.predictionsTensor = mean.getValues();
+            loss.labelsTensor = labels.getValues();
+            loss.raggedPredictionsTensor = mean;
+            loss.raggedLabelsTensor = labels;
+            if (_raggedDispersion.has_value()) { loss.raggedDispersionTensor = _raggedDispersion.value(); loss.dispersionTensor = _raggedDispersion->getValues(); }
+            loss.exampleWeightsTensor = _exampleWeights;
+        }
+        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
         loss.lossDataType = _lossDataType.value();
-
         loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         loss.lossShape = _lossShape.value();
         loss.logMean = _logMean.value_or(false);
@@ -139,7 +181,6 @@ class GammaNLLLoss::Builder {
         loss.eps = eps;
         loss.network = _network.value();
         loss.initialized = true;
-
         loss.buildSupportLayersAndAddToNetwork();
         return loss;
     }
@@ -157,7 +198,9 @@ class GammaNLLLoss::Builder {
         return *this;
     }
 
+    virtual GammaNLLLoss::Builder &predictions(RaggedTensor predictions) { THOR_THROW_IF_FALSE(!this->_raggedPredictions.has_value()); THOR_THROW_IF_FALSE(predictions.isInitialized()); this->_raggedPredictions = std::move(predictions); return *this; }
     virtual GammaNLLLoss::Builder &mean(Tensor _mean) { return predictions(_mean); }
+    virtual GammaNLLLoss::Builder &mean(RaggedTensor mean) { return predictions(std::move(mean)); }
 
     virtual GammaNLLLoss::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
@@ -166,7 +209,9 @@ class GammaNLLLoss::Builder {
         return *this;
     }
 
+    virtual GammaNLLLoss::Builder &labels(RaggedTensor labels) { THOR_THROW_IF_FALSE(!this->_raggedLabels.has_value()); THOR_THROW_IF_FALSE(labels.isInitialized()); this->_raggedLabels = std::move(labels); return *this; }
     virtual GammaNLLLoss::Builder &target(Tensor _target) { return labels(_target); }
+    virtual GammaNLLLoss::Builder &target(RaggedTensor target) { return labels(std::move(target)); }
 
     virtual GammaNLLLoss::Builder &dispersion(Tensor _dispersion) {
         THOR_THROW_IF_FALSE(!this->_dispersion.has_value());
@@ -174,6 +219,8 @@ class GammaNLLLoss::Builder {
         this->_dispersion = _dispersion;
         return *this;
     }
+
+    virtual GammaNLLLoss::Builder &dispersion(RaggedTensor dispersion) { THOR_THROW_IF_FALSE(!this->_raggedDispersion.has_value()); THOR_THROW_IF_FALSE(dispersion.isInitialized()); this->_raggedDispersion = std::move(dispersion); return *this; }
 
     virtual GammaNLLLoss::Builder &logMean(bool _logMean) {
         THOR_THROW_IF_FALSE(!this->_logMean.has_value());
@@ -249,7 +296,10 @@ class GammaNLLLoss::Builder {
     std::optional<Network *> _network;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
+    std::optional<RaggedTensor> _raggedPredictions;
+    std::optional<RaggedTensor> _raggedLabels;
     std::optional<Tensor> _dispersion;
+    std::optional<RaggedTensor> _raggedDispersion;
     std::optional<Tensor> _exampleWeights;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;

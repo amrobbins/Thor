@@ -80,10 +80,6 @@ void validateForward(const Tensor& sourceValues,
     if (indicesValues.getDataType() != DataType::UINT32 && indicesValues.getDataType() != DataType::UINT64) {
         throw std::invalid_argument("RaggedGather indices values must use UINT32 or UINT64 dtype.");
     }
-    if (indicesValues.getDimensions().size() != 1 ||
-        indicesValues.getDimensions()[0] != outputValues.getDimensions()[0]) {
-        throw std::invalid_argument("RaggedGather indices must be scalar packed values with the same capacity as output values.");
-    }
     const std::vector<uint64_t> sourceDimensions = sourceValues.getDimensions();
     const std::vector<uint64_t> outputDimensions = outputValues.getDimensions();
     if (sourceValues.getDataType() != outputValues.getDataType() || sourceDimensions.size() != outputDimensions.size() ||
@@ -92,6 +88,9 @@ void validateForward(const Tensor& sourceValues,
     }
     if (!std::equal(sourceDimensions.begin() + 1, sourceDimensions.end(), outputDimensions.begin() + 1)) {
         throw std::invalid_argument("RaggedGather source/output values must share identical trailing dimensions.");
+    }
+    if (indicesValues.getNumDimensions() != 1 || indicesValues.getTotalNumElements() != outputDimensions[0]) {
+        throw std::invalid_argument("RaggedGather indices must be scalar packed values with the same capacity as output values.");
     }
 }
 
@@ -339,16 +338,15 @@ void launchRaggedGatherBackward(const Tensor& source_offsets,
     if (indices_values.getDataType() != DataType::UINT32 && indices_values.getDataType() != DataType::UINT64) {
         throw std::invalid_argument("RaggedGather backward indices values must use UINT32 or UINT64 dtype.");
     }
-    if (indices_values.getDimensions().size() != 1 ||
-        indices_values.getDimensions()[0] != output_gradient.getDimensions()[0]) {
-        throw std::invalid_argument("RaggedGather backward indices/output gradient packed capacities must match.");
-    }
     const std::vector<uint64_t> sourceDimensions = source_gradient.getDimensions();
     const std::vector<uint64_t> outputDimensions = output_gradient.getDimensions();
     if (source_gradient.getDataType() != output_gradient.getDataType() || sourceDimensions.size() != outputDimensions.size() ||
         sourceDimensions.empty() ||
         !std::equal(sourceDimensions.begin() + 1, sourceDimensions.end(), outputDimensions.begin() + 1)) {
         throw std::invalid_argument("RaggedGather backward gradients must share dtype and trailing dimensions.");
+    }
+    if (indices_values.getNumDimensions() != 1 || indices_values.getTotalNumElements() != outputDimensions[0]) {
+        throw std::invalid_argument("RaggedGather backward indices/output gradient packed capacities must match.");
     }
 
     ScopedGpu scopedGpu(stream.getGpuNum());

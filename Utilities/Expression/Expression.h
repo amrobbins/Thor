@@ -151,6 +151,7 @@ enum class ExprOp : uint16_t {
     SEGMENTED_REDUCE_MAX_BACKWARD,
     RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER,
     BROADCAST_TO,
+    REDUCE_SUM_SQUARES,
 };
 
 enum class RotaryScalingKind : uint8_t {
@@ -225,7 +226,8 @@ struct RotaryPositionEmbeddingOptions {
 
 inline bool isValueReductionOp(ExprOp op) {
     return op == ExprOp::REDUCE_SUM || op == ExprOp::REDUCE_PROD || op == ExprOp::REDUCE_MIN || op == ExprOp::REDUCE_MAX ||
-           op == ExprOp::REDUCE_AVG || op == ExprOp::REDUCE_NORM1 || op == ExprOp::REDUCE_NORM2;
+           op == ExprOp::REDUCE_AVG || op == ExprOp::REDUCE_NORM1 || op == ExprOp::REDUCE_NORM2 ||
+           op == ExprOp::REDUCE_SUM_SQUARES;
 }
 
 inline bool isReductionOp(ExprOp op) {
@@ -1056,6 +1058,9 @@ class Expression {
     [[nodiscard]] Expression reduce_norm2(const std::vector<uint64_t>& reduction_axes = {},
                                           const std::vector<uint64_t>& squeeze_axes = {},
                                           std::optional<DataType> compute_dtype = std::nullopt) const;
+    [[nodiscard]] Expression reduce_sum_squares(const std::vector<uint64_t>& reduction_axes = {},
+                                                const std::vector<uint64_t>& squeeze_axes = {},
+                                                std::optional<DataType> compute_dtype = std::nullopt) const;
 
     [[nodiscard]] Expression min(const Expression& other) const;
     [[nodiscard]] Expression max(const Expression& other) const;

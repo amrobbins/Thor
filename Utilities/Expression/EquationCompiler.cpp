@@ -1464,6 +1464,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "RNORM1";
         case ExprOp::REDUCE_NORM2:
             return "RNORM2";
+        case ExprOp::REDUCE_SUM_SQUARES:
+            return "RSUMSQ";
         case ExprOp::SCAN:
             return "SCAN";
         case ExprOp::SEGMENTED_SCAN:
@@ -2373,11 +2375,22 @@ shared_ptr<CompiledSegmentedReduction> EquationCompiler::compileSegmentedReducti
     }
 
     const DataType input_dtype = input_node.input_tensor_dtype.value();
-    if (input_dtype != node.output_dtype.value()) {
-        throw std::runtime_error("Expression segmented-reduction currently requires input/output dtypes to match.");
-    }
+    const DataType output_dtype = node.output_dtype.value();
     if (!CubSegmentedReduction::isInputDataTypeSupported(input_dtype)) {
         throw std::runtime_error("Expression segmented-reduction input dtype is not supported.");
+    }
+    // CubSegmentedReduction converts source storage to FP32 for accumulation and
+    // converts once to the configured output storage dtype.  Do not force an
+    // input materialization merely because a caller requests FP32 reduction
+    // statistics from FP8/FP16/BF16 ragged values.
+    try {
+        (void)CubSegmentedReduction(node.op == ExprOp::SEGMENTED_REDUCE_SUM ? CubReductionOp::Sum :
+                                   node.op == ExprOp::SEGMENTED_REDUCE_MIN ? CubReductionOp::Min :
+                                   node.op == ExprOp::SEGMENTED_REDUCE_MAX ? CubReductionOp::Max : CubReductionOp::Mean,
+                                   output_dtype)
+            .resolveOutputDataType(input_dtype);
+    } catch (const std::invalid_argument& e) {
+        throw std::runtime_error(std::string("Expression segmented-reduction output dtype is not supported: ") + e.what());
     }
     switch (node.op) {
         case ExprOp::SEGMENTED_REDUCE_SUM:

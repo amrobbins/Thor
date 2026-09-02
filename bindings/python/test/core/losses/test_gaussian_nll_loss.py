@@ -328,3 +328,72 @@ def test_gaussian_nll_loss_log_variance_and_weights_match_reference():
 
     expected = _gaussian_nll_reference(predictions, labels, variance, False, 1.0e-6) * weights
     np.testing.assert_allclose(np.array(outputs["loss"].numpy(), copy=True), expected, rtol=1e-5, atol=1e-6)
+
+
+def _r10j_gaussian_ragged_inputs(network, prefix="r10j_gaussian"):
+    predictions = thor.layers.RaggedNetworkInput(
+        network,
+        f"{prefix}_predictions",
+        thor.DataType.fp32,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    labels = thor.layers.RaggedNetworkInput(
+        network,
+        f"{prefix}_labels",
+        thor.DataType.fp32,
+        [2],
+        partition=predictions,
+    )
+    variance = thor.layers.RaggedNetworkInput(
+        network,
+        f"{prefix}_variance",
+        thor.DataType.fp32,
+        [2],
+        partition=predictions,
+    )
+    return predictions, labels, variance
+
+
+def test_gaussian_nll_loss_r10j_constructs_ragged_secondary_parameter_and_raw_loss():
+    n = thor.Network("r10j_gaussian_api")
+    predictions, labels, variance = _r10j_gaussian_ragged_inputs(n)
+    weights = thor.layers.NetworkInput(n, "weights", [1], thor.DataType.fp16).get_feature_output()
+    loss = thor.losses.distribution.GaussianNLLLoss(
+        n,
+        predictions,
+        labels,
+        variance,
+        log_variance=True,
+        example_weights=weights,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert loss.is_ragged
+    assert loss.get_predictions() == predictions
+    assert loss.get_labels() == labels
+    assert loss.variance == variance
+    assert isinstance(loss.get_loss(), thor.RaggedTensor)
+    assert loss.get_loss().offsets == predictions.offsets
+    assert loss.example_weights == weights
+
+
+def test_gaussian_nll_loss_r10j_rejects_per_output_and_mismatched_partition():
+    n = thor.Network("r10j_gaussian_reject")
+    predictions, labels, variance = _r10j_gaussian_ragged_inputs(n, "base")
+    with pytest.raises(ValueError, match=r"per_output.*undefined"):
+        thor.losses.distribution.GaussianNLLLoss(
+            n, predictions, labels, variance, reported_loss_shape=thor.losses.LossShape.per_output
+        )
+    different = thor.layers.RaggedNetworkInput(
+        n,
+        "different_variance",
+        thor.DataType.fp32,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    with pytest.raises(ValueError, match=r"exact same row partition"):
+        thor.losses.distribution.GaussianNLLLoss(n, predictions, labels, different)

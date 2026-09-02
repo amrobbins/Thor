@@ -1,12 +1,12 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
-
 #include <optional>
 #include <vector>
 
 #include "DeepLearning/Api/Layers/Loss/MeanSquaredError.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 #include "bindings/python/src/core/losses/regression_loss_dtype.h"
 
@@ -76,35 +76,68 @@ void bind_mean_squared_error(nb::module_ &losses) {
         "__init__",
         [](MSE *self,
            Network &network,
-           Tensor predictions,
-           Tensor labels,
+           nb::object predictionsObject,
+           nb::object labelsObject,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
            std::optional<float> loss_weight,
            std::optional<Tensor> example_weights) {
             const string loss_name = "MSE instance";
-            ThorPython::RegressionLossDType::validatePredictions(loss_name, predictions);
-            ThorPython::RegressionLossDType::validateLabels(loss_name, labels);
-            const DataType effectiveLossDataType =
-                ThorPython::RegressionLossDType::effectiveLossDType(loss_name, predictions.getDataType(), loss_data_type);
             validateReportedLossShape(reported_loss_shape, loss_name);
 
             MSE::Builder builder;
+            builder.network(network);
 
-            builder.network(network).predictions(predictions).labels(labels).lossDataType(effectiveLossDataType);
-            builder.lossWeight(loss_weight.value_or(1.0f));
-            maybeSetExampleWeights(builder, predictions, labels, example_weights);
+            if (nb::isinstance<Tensor>(predictionsObject) && nb::isinstance<Tensor>(labelsObject)) {
+                Tensor predictions = nb::cast<Tensor>(predictionsObject);
+                Tensor labels = nb::cast<Tensor>(labelsObject);
+                ThorPython::RegressionLossDType::validatePredictions(loss_name, predictions);
+                ThorPython::RegressionLossDType::validateLabels(loss_name, labels);
+                const DataType effectiveLossDataType =
+                    ThorPython::RegressionLossDType::effectiveLossDType(loss_name, predictions.getDataType(), loss_data_type);
+                builder.predictions(predictions).labels(labels).lossDataType(effectiveLossDataType);
+                maybeSetExampleWeights(builder, predictions, labels, example_weights);
 
-            if (predictions.getDimensions() != labels.getDimensions()) {
-                string error_message = "MSE instance: predictions and labels dimensions must match. predictions tensor is " +
-                                       predictions.getDescriptorString() + "; labels tensor is " + labels.getDescriptorString() + ".";
-                throw nb::value_error(error_message.c_str());
+                if (predictions.getDimensions() != labels.getDimensions()) {
+                    string error_message = "MSE instance: predictions and labels dimensions must match. predictions tensor is " +
+                                           predictions.getDescriptorString() + "; labels tensor is " + labels.getDescriptorString() + ".";
+                    throw nb::value_error(error_message.c_str());
+                }
+            } else if (nb::isinstance<RaggedTensor>(predictionsObject) && nb::isinstance<RaggedTensor>(labelsObject)) {
+                RaggedTensor predictions = nb::cast<RaggedTensor>(predictionsObject);
+                RaggedTensor labels = nb::cast<RaggedTensor>(labelsObject);
+                ThorPython::RegressionLossDType::validatePredictions(loss_name, predictions.getValues());
+                ThorPython::RegressionLossDType::validateLabels(loss_name, labels.getValues());
+                const DataType effectiveLossDataType = ThorPython::RegressionLossDType::effectiveLossDType(
+                    loss_name, predictions.getValuesDataType(), loss_data_type);
+                if (example_weights.has_value()) {
+                    if (example_weights.value() == predictions.getValues() || example_weights.value() == labels.getValues())
+                        throw nb::value_error("MSE instance: ragged example_weights must be distinct from predictions and labels values.");
+                    ThorPython::RegressionLossDType::validateExampleWeights("MSE instance", example_weights.value());
+                    if (example_weights->getDimensions() != std::vector<uint64_t>{1})
+                        throw nb::value_error("MSE instance: ragged example_weights dimensions must be [1] for one scalar weight per logical row.");
+                }
+                if (reported_loss_shape == LossShape::PER_OUTPUT) {
+                    throw nb::value_error("MSE instance: per_output reporting is undefined for ragged predictions.");
+                }
+                if (predictions.getOffsets() != labels.getOffsets()) {
+                    throw nb::value_error("MSE instance: ragged predictions and labels must use the exact same row partition tensor.");
+                }
+                if (predictions.getBatchSize() != labels.getBatchSize() ||
+                    predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
+                    predictions.getTrailingDimensions() != labels.getTrailingDimensions()) {
+                    throw nb::value_error("MSE instance: ragged predictions and labels must have identical value geometry.");
+                }
+                builder.predictions(predictions).labels(labels).lossDataType(effectiveLossDataType);
+                if (example_weights.has_value())
+                    builder.exampleWeights(example_weights.value());
+            } else {
+                throw nb::type_error("MSE predictions and labels must both be thor.Tensor or both be thor.RaggedTensor.");
             }
 
+            builder.lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
-
             MSE built = builder.build();
-
             new (self) MSE(std::move(built));
         },
         "network"_a,
@@ -115,25 +148,41 @@ void bind_mean_squared_error(nb::module_ &losses) {
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
         "example_weights"_a.none() = nb::none(),
-        R"nbdoc(Construct a MSE loss.)nbdoc");
+        R"nbdoc(Construct a dense or rank-1 ragged MSE loss.)nbdoc");
+
+    // Shadow the dense Loss accessors on MSE so Python receives the logical
+    // RaggedTensor for ragged predictions/labels and RAW reported loss.
+    mean_squared_error.def("get_predictions", [](const MSE& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.Loss::getPredictions());
+    });
+    mean_squared_error.def("get_labels", [](const MSE& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedLabels());
+        return nb::cast(self.Loss::getLabels());
+    });
+    mean_squared_error.def("get_raw_loss", [](const MSE& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedRawLoss());
+        return nb::cast(self.Loss::getRawLoss());
+    });
+    mean_squared_error.def("get_loss", [](const MSE& self) -> nb::object {
+        if (self.isRagged() && self.getLossShape() == LossShape::RAW) return nb::cast(self.getRaggedLoss());
+        return nb::cast(self.Loss::getLoss());
+    });
+    mean_squared_error.def_prop_ro("is_ragged", &MSE::isRagged);
 
     mean_squared_error.attr("__doc__") = R"nbdoc(
 MSE loss.
 
-Parameters
-----------
-network : thor.Network
-predictions : thor.Tensor
-labels : thor.Tensor
-loss_data_type : thor.DataType | None, default fp16 for fp16 predictions, otherwise fp32
-reported_loss_shape : thor.losses.LossShape, default thor.losses.LossShape.batch
-    Controls the reported loss tensor:
+``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or
+rank-1 ``thor.RaggedTensor`` objects. Ragged inputs must share the exact same
+row-partition tensor. Ragged loss reporting supports ``none``, ``raw``,
+``per_example``, and ``batch``; ``per_output`` is intentionally undefined.
 
-    * ``none`` does not expose a reportable loss tensor; the raw loss remains the training objective.
-    * ``batch`` averages over the batch after summing all non-batch values.
-    * ``per_example`` sums all non-batch values independently for each example.
-    * ``per_output`` averages over the batch and preserves every non-batch dimension.
-    * ``raw`` reports the unreduced pointwise loss.
-
+For ragged inputs, ``raw`` returns a ``thor.RaggedTensor`` with the same row
+partition. ``per_example`` returns one dense scalar per logical row and
+``batch`` averages those row sums over valid logical examples rather than over
+active tokens. For ragged inputs, ``example_weights`` must have dimensions
+``[1]`` and supplies one scalar weight per logical row; the weight is broadcast
+to that row's active tokens and scales both loss and prediction gradient.
 )nbdoc";
 }

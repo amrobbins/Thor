@@ -1,6 +1,12 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Api/Layers/Loss/StudentTNLLLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedCustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedLossShaper.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedBroadcast.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
@@ -49,6 +55,14 @@ void validateExampleWeights(Tensor location,
     }
 }
 
+vector<uint64_t> raggedPackedScalarWeightBroadcastDimensions(const vector<uint64_t>& locationValueDimensions) {
+    if (locationValueDimensions.empty())
+        throw invalid_argument("StudentTNLLLoss ragged location values must have a packed-capacity dimension.");
+    vector<uint64_t> dimensions(locationValueDimensions.size(), 1);
+    dimensions[0] = locationValueDimensions[0];
+    return dimensions;
+}
+
 ThorImplementation::Expression degreesOfFreedomExpression(optional<ThorImplementation::Expression> learnedLogDegreesOfFreedom,
                                                            float fixedDegreesOfFreedom,
                                                            float minimumDegreesOfFreedom) {
@@ -85,7 +99,8 @@ ThorImplementation::DynamicExpression makeStudentTNLLLossExpression(DataType los
                                                                     bool learnedDegreesOfFreedom,
                                                                     float fixedDegreesOfFreedom,
                                                                     float minimumDegreesOfFreedom,
-                                                                    bool weighted) {
+                                                                    bool weighted,
+                                                                    optional<vector<uint64_t>> raggedValueDimensions = nullopt) {
     validateFloatingDType("loss", lossDataType);
     ThorImplementation::Expression location = ThorImplementation::Expression::input(kLocationName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression logScale = ThorImplementation::Expression::input(kLogScaleName, DataType::FP32, DataType::FP32);
@@ -100,6 +115,8 @@ ThorImplementation::DynamicExpression makeStudentTNLLLossExpression(DataType los
     if (weighted) {
         ThorImplementation::Expression exampleWeights =
             ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+        if (raggedValueDimensions.has_value())
+            exampleWeights = exampleWeights.reshape(raggedPackedScalarWeightBroadcastDimensions(raggedValueDimensions.value()));
         loss = loss * exampleWeights;
     }
     loss = loss.withOutputDType(lossDataType);
@@ -114,7 +131,8 @@ ThorImplementation::DynamicExpression makeStudentTNLLGradientExpression(DataType
                                                                         optional<DataType> logDegreesOfFreedomDType,
                                                                         float fixedDegreesOfFreedom,
                                                                         float minimumDegreesOfFreedom,
-                                                                        bool weighted) {
+                                                                        bool weighted,
+                                                                        optional<vector<uint64_t>> raggedValueDimensions = nullopt) {
     validateFloatingDType("location", locationDType);
     validateFloatingDType("log_scale", logScaleDType);
     if (logDegreesOfFreedomDType.has_value())
@@ -167,6 +185,8 @@ ThorImplementation::DynamicExpression makeStudentTNLLGradientExpression(DataType
     if (weighted) {
         ThorImplementation::Expression exampleWeights =
             ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+        if (raggedValueDimensions.has_value())
+            exampleWeights = exampleWeights.reshape(raggedPackedScalarWeightBroadcastDimensions(raggedValueDimensions.value()));
         locationGradient = locationGradient * exampleWeights;
         logScaleGradient = logScaleGradient * exampleWeights;
         if (logDegreesOfFreedomGradient.has_value())
@@ -208,6 +228,90 @@ void StudentTNLLLoss::buildSupportLayersAndAddToNetwork() {
     THOR_THROW_IF_FALSE(std::isfinite(minimumDegreesOfFreedom) && minimumDegreesOfFreedom >= 0.0f);
     if (!logDegreesOfFreedomTensor.has_value())
         THOR_THROW_IF_FALSE(degreesOfFreedom > minimumDegreesOfFreedom);
+
+    if (isRagged()) {
+        if (!raggedLogScaleTensor.has_value() || !raggedLabelsTensor.has_value())
+            throw logic_error("StudentTNLLLoss ragged support tensors are incomplete.");
+        if (lossShape == LossShape::PER_OUTPUT)
+            throw invalid_argument("StudentTNLLLoss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+
+        optional<RaggedTensor> broadcastWeights;
+        if (exampleWeightsTensor.has_value()) {
+            if (exampleWeightsTensor->getDimensions() != vector<uint64_t>{1})
+                throw invalid_argument("StudentTNLLLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");
+            TypeConverter weightConverter = TypeConverter::Builder()
+                                                .network(*network)
+                                                .featureInput(exampleWeightsTensor.value())
+                                                .newDataType(DataType::FP32)
+                                                .build();
+            SegmentedBroadcast weightBroadcast = SegmentedBroadcast::Builder()
+                                                     .network(*network)
+                                                     .featureInput(weightConverter.getFeatureOutput().value())
+                                                     .partitionInput(raggedPredictionsTensor.value())
+                                                     .build();
+            broadcastWeights = weightBroadcast.getRaggedFeatureOutput();
+        }
+
+        const vector<uint64_t> dims = raggedPredictionsTensor->getValuesDimensions();
+        RaggedCustomLoss::Builder builder;
+        builder.network(*network)
+            .predictions(raggedPredictionsTensor.value())
+            .labels(raggedLabelsTensor.value())
+            .secondaryInput(raggedLogScaleTensor.value(), kLogScaleName, kLogScaleGradientName)
+            .lossExpression(makeStudentTNLLLossExpression(lossDataType,
+                                                          logDegreesOfFreedomTensor.has_value(),
+                                                          degreesOfFreedom,
+                                                          minimumDegreesOfFreedom,
+                                                          broadcastWeights.has_value(),
+                                                          broadcastWeights.has_value() ? optional<vector<uint64_t>>(dims) : nullopt))
+            .gradientExpression(makeStudentTNLLGradientExpression(
+                predictionsTensor.getDataType(),
+                logScaleTensor.getDataType(),
+                logDegreesOfFreedomTensor.has_value() ? optional<DataType>(logDegreesOfFreedomTensor.value().getDataType()) : nullopt,
+                degreesOfFreedom,
+                minimumDegreesOfFreedom,
+                broadcastWeights.has_value(),
+                broadcastWeights.has_value() ? optional<vector<uint64_t>>(dims) : nullopt))
+            .predictionsName(kLocationName)
+            .labelsName(kTargetName)
+            .lossName(kLossName)
+            .gradientName(kLocationGradientName)
+            .lossDataType(lossDataType)
+            .lossWeight(lossWeight.value_or(1.0f));
+        if (raggedLogDegreesOfFreedomTensor.has_value())
+            builder.secondaryInput(raggedLogDegreesOfFreedomTensor.value(),
+                                   kLogDegreesOfFreedomName,
+                                   kLogDegreesOfFreedomGradientName);
+        if (broadcastWeights.has_value())
+            builder.exampleWeights(broadcastWeights.value()).exampleWeightsName(kExampleWeightsName);
+
+        RaggedCustomLoss rawStudentTNLLLoss = builder.build();
+        raggedRawLossTensor = rawStudentTNLLLoss.getRaggedRawLoss();
+        lossShaperInput = raggedRawLossTensor->getValues();
+        if (lossShape == LossShape::NONE) {
+            lossTensor = lossShaperInput;
+            Stub::Builder().network(*network).inputTensor(lossShaperInput).build();
+        } else if (lossShape == LossShape::RAW) {
+            lossTensor = lossShaperInput;
+        } else if (lossShape == LossShape::PER_EXAMPLE) {
+            lossTensor = RaggedLossShaper::Builder()
+                             .network(*network)
+                             .lossInput(raggedRawLossTensor.value())
+                             .reportsPerExampleLoss()
+                             .build()
+                             .getLossOutput();
+        } else if (lossShape == LossShape::BATCH) {
+            lossTensor = RaggedLossShaper::Builder()
+                             .network(*network)
+                             .lossInput(raggedRawLossTensor.value())
+                             .reportsBatchLoss()
+                             .build()
+                             .getLossOutput();
+        } else {
+            THOR_UNREACHABLE();
+        }
+        return;
+    }
 
     MultiInputCustomLoss::Builder builder;
     builder.network(*network)
@@ -254,6 +358,14 @@ json StudentTNLLLoss::architectureJson() const {
         j["log_degrees_of_freedom_tensor"] = logDegreesOfFreedomTensor.value().architectureJson();
     else
         j["degrees_of_freedom"] = degreesOfFreedom;
+    if (isRagged()) {
+        j["ragged_predictions"] = raggedPredictionsTensor->architectureJson();
+        j["ragged_labels"] = raggedLabelsTensor->architectureJson();
+        j["ragged_log_scale"] = raggedLogScaleTensor->architectureJson();
+        if (raggedLogDegreesOfFreedomTensor.has_value())
+            j["ragged_log_degrees_of_freedom"] = raggedLogDegreesOfFreedomTensor->architectureJson();
+        if (raggedRawLossTensor.has_value()) j["ragged_raw_loss"] = raggedRawLossTensor->architectureJson();
+    }
     return j;
 }
 
@@ -262,6 +374,37 @@ void StudentTNLLLoss::deserialize(const json& j, Network* network) {
         throw runtime_error("Unsupported version in StudentTNLLLoss::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "student_t_nll_loss")
         throw runtime_error("Layer type mismatch in StudentTNLLLoss::deserialize: " + j.at("layer_type").get<std::string>());
+
+    if (j.contains("ragged_predictions")) {
+        RaggedTensor location = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_predictions"), network, "StudentTNLLLoss");
+        RaggedTensor target = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_labels"), network, "StudentTNLLLoss");
+        RaggedTensor logScale = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_log_scale"), network, "StudentTNLLLoss");
+        Builder builder;
+        builder.network(*network)
+            .location(location)
+            .target(target)
+            .logScale(logScale)
+            .minimumDegreesOfFreedom(j.value("minimum_degrees_of_freedom", 0.0f))
+            .lossDataType(j.at("loss_data_type").get<DataType>())
+            .lossWeight(ThorImplementation::lossWeightFromJson(j).value_or(1.0f));
+        if (j.contains("ragged_log_degrees_of_freedom")) {
+            builder.logDegreesOfFreedom(SegmentedPrimitiveDetail::reconstructInput(
+                j.at("ragged_log_degrees_of_freedom"), network, "StudentTNLLLoss"));
+        } else {
+            builder.degreesOfFreedom(j.value("degrees_of_freedom", 3.0f));
+        }
+        if (j.contains("example_weights_tensor"))
+            builder.exampleWeights(network->getApiTensorByOriginalId(j["example_weights_tensor"].at("id").get<uint64_t>()));
+        switch (j.at("loss_shape").get<LossShape>()) {
+            case LossShape::NONE: builder.reportsNoLoss(); break;
+            case LossShape::RAW: builder.reportsRawLoss(); break;
+            case LossShape::PER_EXAMPLE: builder.reportsPerExampleLoss(); break;
+            case LossShape::BATCH: builder.reportsBatchLoss(); break;
+            case LossShape::PER_OUTPUT: throw runtime_error("Serialized ragged StudentTNLLLoss cannot use PER_OUTPUT.");
+        }
+        (void)builder.build();
+        return;
+    }
 
     uint64_t originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     Tensor location = network->getApiTensorByOriginalId(originalTensorId);

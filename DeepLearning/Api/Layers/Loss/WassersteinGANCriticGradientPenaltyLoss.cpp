@@ -61,7 +61,8 @@ ThorImplementation::Expression gradientPenaltyTerm(const ThorImplementation::Exp
                                                    float eps,
                                                    const vector<uint64_t>& reductionAxes,
                                                    const vector<uint64_t>& squeezeAxes) {
-    ThorImplementation::Expression squaredNorm = (sampleGradients * sampleGradients).reduce_sum(reductionAxes, squeezeAxes, DataType::FP32);
+    ThorImplementation::Expression squaredNorm =
+        sampleGradients.reduce_sum_squares(reductionAxes, squeezeAxes, DataType::FP32);
     ThorImplementation::Expression safeSquaredNorm = squaredNorm.max(ThorImplementation::Expression(eps));
     ThorImplementation::Expression norm = safeSquaredNorm.sqrt();
     ThorImplementation::Expression normDiff = norm - ThorImplementation::Expression(targetGradientNorm);
@@ -111,7 +112,7 @@ ThorImplementation::DynamicExpression makeWassersteinGANCriticGradientPenaltyGra
     ThorImplementation::Expression realGradient = ((realScores * zero) - scale).withOutputDType(scoresDataType);
     ThorImplementation::Expression fakeGradient = ((fakeScores * zero) + scale).withOutputDType(scoresDataType);
 
-    ThorImplementation::Expression squaredNorm = (sampleGradients * sampleGradients).reduce_sum(reductionAxes, {}, DataType::FP32);
+    ThorImplementation::Expression squaredNorm = sampleGradients.reduce_sum_squares(reductionAxes, {}, DataType::FP32);
     ThorImplementation::Expression active = ThorImplementation::Expression::where(squaredNorm > epsExpr,
                                                                                    ThorImplementation::Expression(1.0),
                                                                                    ThorImplementation::Expression(0.0));

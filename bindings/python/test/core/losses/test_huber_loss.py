@@ -180,3 +180,27 @@ def test_huber_loss_numerical_forward_matches_reference(reported_loss_shape):
     actual = _run_huber_loss_network(predictions, labels, delta, reported_loss_shape)
 
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+def _ragged_pair_huber(network):
+    predictions = thor.layers.RaggedNetworkInput(
+        network, "ragged_predictions", thor.DataType.fp32, [2], batch_size=3, max_total_values=8, max_values_per_row=4
+    )
+    labels = thor.layers.RaggedNetworkInput(network, "ragged_labels", thor.DataType.uint32, [2], partition=predictions)
+    return predictions, labels
+
+
+def test_huber_loss_constructs_ragged_and_rejects_per_output():
+    n = _net()
+    predictions, labels = _ragged_pair_huber(n)
+    loss = thor.losses.HuberLoss(n, predictions, labels, 0.75, thor.DataType.fp32, thor.losses.LossShape.raw)
+    assert loss.is_ragged
+    assert loss.get_predictions() == predictions
+    assert loss.get_labels() == labels
+    assert isinstance(loss.get_loss(), thor.RaggedTensor)
+    assert loss.get_loss().offsets == predictions.offsets
+
+    n2 = _net()
+    predictions2, labels2 = _ragged_pair_huber(n2)
+    with pytest.raises(ValueError, match=r"per_output.*undefined"):
+        thor.losses.HuberLoss(n2, predictions2, labels2, reported_loss_shape=thor.losses.LossShape.per_output)

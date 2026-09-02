@@ -264,3 +264,90 @@ def test_quantile_loss_with_example_weights_numerical_forward_matches_reference(
     actual = _run_quantile_loss_network(predictions, labels, quantile, reported_loss_shape, example_weights)
 
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+
+def _r10g_ragged_pair(network, prediction_dtype=thor.DataType.fp32, label_dtype=None):
+    if label_dtype is None:
+        label_dtype = prediction_dtype
+    predictions = thor.layers.RaggedNetworkInput(
+        network,
+        "r10g_predictions",
+        prediction_dtype,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    labels = thor.layers.RaggedNetworkInput(
+        network,
+        "r10g_labels",
+        label_dtype,
+        [2],
+        partition=predictions,
+    )
+    return predictions, labels
+
+
+def test_quantileloss_r10g_constructs_ragged_raw_and_preserves_partition():
+    n = _net()
+    predictions, labels = _r10g_ragged_pair(n, thor.DataType.bf16, thor.DataType.int32)
+    loss = thor.losses.QuantileLoss(
+        n,
+        predictions,
+        labels,
+        quantile=0.8,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert loss.is_ragged
+    assert loss.get_predictions() == predictions
+    assert loss.get_labels() == labels
+    assert isinstance(loss.get_loss(), thor.RaggedTensor)
+    assert loss.get_loss().offsets == predictions.offsets
+    assert loss.get_raw_loss().values.get_data_type() == thor.DataType.fp32
+
+
+def test_quantileloss_r10g_rejects_per_output_and_different_partition():
+    n = _net()
+    predictions, labels = _r10g_ragged_pair(n)
+    with pytest.raises(ValueError, match=r"per_output.*undefined"):
+        thor.losses.QuantileLoss(n, predictions, labels, quantile=0.8, reported_loss_shape=thor.losses.LossShape.per_output)
+
+    different_labels = thor.layers.RaggedNetworkInput(
+        n,
+        "r10g_different_labels",
+        thor.DataType.fp32,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    with pytest.raises(ValueError, match=r"exact same row partition"):
+        thor.losses.QuantileLoss(n, predictions, different_labels, quantile=0.8)
+
+
+def test_quantileloss_r10g_accepts_dense_per_row_example_weights():
+    n = _net()
+    predictions, labels = _r10g_ragged_pair(n)
+    weights_input = thor.layers.NetworkInput(n, "r10g_weights", [1], thor.DataType.bf16)
+    weights = weights_input.get_feature_output()
+    loss = thor.losses.QuantileLoss(n, predictions, labels, quantile=0.8, example_weights=weights)
+    assert loss.example_weights == weights
+    assert loss.get_example_weights() == weights
+
+
+@pytest.mark.parametrize(
+    "dtype, expected_loss_dtype",
+    [
+        (thor.DataType.fp8_e4m3, thor.DataType.fp32),
+        (thor.DataType.fp8_e5m2, thor.DataType.fp32),
+        (thor.DataType.fp16, thor.DataType.fp16),
+        (thor.DataType.bf16, thor.DataType.fp32),
+        (thor.DataType.fp32, thor.DataType.fp32),
+    ],
+)
+def test_quantileloss_r10g_matches_dense_prediction_dtype_contract(dtype, expected_loss_dtype):
+    n = _net()
+    predictions, labels = _r10g_ragged_pair(n, dtype, thor.DataType.int32)
+    loss = thor.losses.QuantileLoss(n, predictions, labels, quantile=0.8, reported_loss_shape=thor.losses.LossShape.raw)
+    assert loss.get_raw_loss().values.get_data_type() == expected_loss_dtype

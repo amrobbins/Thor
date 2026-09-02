@@ -311,7 +311,8 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                     // make a valid RMSNorm+Swish API graph unplaceable.
                     Expression finFp32 = fin.cast(DataType::FP32);
                     Expression weightsFp32 = weights.cast(DataType::FP32);
-                    Expression meanSquare = (finFp32 * finFp32).reduce_mean({1}, {}, DataType::FP32);
+                    Expression meanSquare =
+                        fin.reduce_sum_squares({1}, {}, DataType::FP32) / Expression(static_cast<double>(hidden));
                     Expression invRms = Expression(1.0) / (meanSquare + Expression(epsilon)).sqrt();
                     Expression fallback = (finFp32 * invRms * weightsFp32).cast(inputDataType);
                     return RMSNorm::applyEpilogue(fallback, epilogue.value());

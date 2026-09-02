@@ -43,26 +43,6 @@ uint64_t elementCount(const std::vector<uint64_t>& dimensions) {
     return count;
 }
 
-std::optional<DataType> finalOutputDType(const std::shared_ptr<CompiledOutputs>& compiledOutputs,
-                                        const std::string& outputName) {
-    for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-        for (size_t outputIndex = 0; outputIndex < stage.outputs.size(); ++outputIndex) {
-            if (stage.outputs[outputIndex].name == outputName)
-                return stage.outputDType(outputIndex);
-        }
-    }
-    for (const CompiledStageOutput& finalOutput : compiledOutputs->final_outputs) {
-        if (finalOutput.name != outputName)
-            continue;
-        for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-            for (size_t outputIndex = 0; outputIndex < stage.outputs.size(); ++outputIndex) {
-                if (stage.outputs[outputIndex].value_id == finalOutput.value_id)
-                    return stage.outputDType(outputIndex);
-            }
-        }
-    }
-    return std::nullopt;
-}
 
 }  // namespace
 
@@ -173,18 +153,18 @@ std::unordered_map<std::string, CustomMetric::OutputDescriptor> CustomMetric::in
 
     const std::unordered_map<std::string, std::vector<uint64_t>> outputShapes =
         build.equation->getOutputShapes(build.stamp_inputs, build.tensor_scalar_inputs);
-    const std::shared_ptr<CompiledOutputs> compiledOutputs =
-        build.equation->compileForInputs(build.stamp_inputs, {}, build.tensor_scalar_inputs);
+    const std::unordered_map<std::string, DataType> outputDTypes =
+        build.equation->getOutputDataTypes(build.stamp_inputs, build.tensor_scalar_inputs);
 
     std::unordered_map<std::string, OutputDescriptor> descriptors;
     for (const std::string& outputName : expectedMetricOutputNames()) {
         auto shapeIt = outputShapes.find(outputName);
         if (shapeIt == outputShapes.end())
             throw std::runtime_error("CustomMetric expression did not infer output shape for '" + outputName + "'.");
-        const std::optional<DataType> outputDType = finalOutputDType(compiledOutputs, outputName);
-        if (!outputDType.has_value())
+        auto dtypeIt = outputDTypes.find(outputName);
+        if (dtypeIt == outputDTypes.end())
             throw std::runtime_error("CustomMetric expression did not infer output dtype for '" + outputName + "'.");
-        descriptors.emplace(outputName, OutputDescriptor{shapeIt->second, outputDType.value()});
+        descriptors.emplace(outputName, OutputDescriptor{shapeIt->second, dtypeIt->second});
     }
     return descriptors;
 }
@@ -299,8 +279,14 @@ void CustomMetric::computeMetric(
         throw std::logic_error("CustomMetric does not define exact partial-batch semantics.");
     }
 
+    runPreparedMetricExpression(this->stream);
+}
+
+void CustomMetric::runPreparedMetricExpression(Stream runStream) {
+    THOR_THROW_IF_FALSE(runStream == this->stream);
+    THOR_THROW_IF_FALSE(metricStamped != nullptr);
     if (metricPreRunHook)
-        metricPreRunHook(this->stream);
+        metricPreRunHook(runStream);
     metricStamped->run();
     if (isRatioMetric())
         captureRatioStatistics();

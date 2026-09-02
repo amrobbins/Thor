@@ -4,10 +4,12 @@
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 #include <optional>
 #include <stdexcept>
+#include <utility>
 
 namespace Thor {
 
@@ -26,6 +28,29 @@ class LaplaceNLLLoss : public Loss {
     Tensor getTarget() const { return labelsTensor; }
     Tensor getScale() const { return scaleTensor; }
     bool getLogScale() const { return logScale; }
+    [[nodiscard]] bool isRagged() const { return raggedPredictionsTensor.has_value(); }
+    [[nodiscard]] RaggedTensor getRaggedPredictions() const {
+        if (!isRagged()) throw std::runtime_error("LaplaceNLLLoss location is dense.");
+        return raggedPredictionsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLabels() const {
+        if (!isRagged()) throw std::runtime_error("LaplaceNLLLoss target is dense.");
+        return raggedLabelsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedScale() const {
+        if (!isRagged()) throw std::runtime_error("LaplaceNLLLoss scale is dense.");
+        return raggedScaleTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedRawLoss() const {
+        if (!raggedRawLossTensor.has_value()) throw std::runtime_error("LaplaceNLLLoss raw loss is dense.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLoss() const {
+        if (!isRagged() || lossShape != LossShape::RAW || !raggedRawLossTensor.has_value())
+            throw std::runtime_error("LaplaceNLLLoss does not expose a ragged reported loss for this LossShape.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] LossShape getLossShape() const { return lossShape; }
     float getEps() const { return eps; }
 
     std::vector<Tensor> getLossInputTensors() const override {
@@ -51,6 +76,11 @@ class LaplaceNLLLoss : public Loss {
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
+    std::optional<RaggedTensor> raggedPredictionsTensor;
+    std::optional<RaggedTensor> raggedLabelsTensor;
+    std::optional<RaggedTensor> raggedScaleTensor;
+    std::optional<RaggedTensor> raggedRawLossTensor;
+
     virtual bool isMultiLayer() const { return true; }
 
     virtual void buildSupportLayersAndAddToNetwork();
@@ -92,35 +122,66 @@ class LaplaceNLLLoss::Builder {
 
     virtual LaplaceNLLLoss build() {
         THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_location.has_value());
-        THOR_THROW_IF_FALSE(_scale.has_value());
-        THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_location.value() != _scale.value());
-        THOR_THROW_IF_FALSE(_location.value() != _labels.value());
-        THOR_THROW_IF_FALSE(_scale.value() != _labels.value());
-        if (_exampleWeights.has_value()) {
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _location.value());
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _scale.value());
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _labels.value());
-        }
-        THOR_THROW_IF_FALSE(!_location.value().getDimensions().empty());
-        THOR_THROW_IF_FALSE(_location.value().getDimensions() == _scale.value().getDimensions());
-        THOR_THROW_IF_FALSE(_location.value().getDimensions() == _labels.value().getDimensions());
+        const bool hasDenseLocation = _location.has_value();
+        const bool hasDenseScale = _scale.has_value();
+        const bool hasDenseLabels = _labels.has_value();
+        const bool hasRaggedLocation = _raggedLocation.has_value();
+        const bool hasRaggedScale = _raggedScale.has_value();
+        const bool hasRaggedLabels = _raggedLabels.has_value();
+        THOR_THROW_IF_FALSE(hasDenseLocation == hasDenseScale && hasDenseScale == hasDenseLabels);
+        THOR_THROW_IF_FALSE(hasRaggedLocation == hasRaggedScale && hasRaggedScale == hasRaggedLabels);
+        THOR_THROW_IF_FALSE(hasDenseLocation != hasRaggedLocation);
+        if (!_lossShape.has_value()) _lossShape = LossShape::BATCH;
 
-        if (!_lossShape.has_value())
-            _lossShape = LossShape::BATCH;
-        if (!_lossDataType.has_value())
-            _lossDataType = _location.value().getDataType();
-        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
-
-        float eps = _eps.value_or(1.0e-8f);
+        const float eps = _eps.value_or(1.0e-8f);
         THOR_THROW_IF_FALSE(eps > 0.0f);
 
         LaplaceNLLLoss loss;
-        loss.predictionsTensor = _location.value();
-        loss.scaleTensor = _scale.value();
-        loss.labelsTensor = _labels.value();
-        loss.exampleWeightsTensor = _exampleWeights;
+        if (hasDenseLocation) {
+            THOR_THROW_IF_FALSE(_location.value() != _scale.value());
+            THOR_THROW_IF_FALSE(_location.value() != _labels.value());
+            THOR_THROW_IF_FALSE(_scale.value() != _labels.value());
+            if (_exampleWeights.has_value()) {
+                THOR_THROW_IF_FALSE(_exampleWeights.value() != _location.value());
+                THOR_THROW_IF_FALSE(_exampleWeights.value() != _scale.value());
+                THOR_THROW_IF_FALSE(_exampleWeights.value() != _labels.value());
+            }
+            THOR_THROW_IF_FALSE(!_location.value().getDimensions().empty());
+            THOR_THROW_IF_FALSE(_location.value().getDimensions() == _scale.value().getDimensions());
+            THOR_THROW_IF_FALSE(_location.value().getDimensions() == _labels.value().getDimensions());
+            if (!_lossDataType.has_value()) _lossDataType = _location.value().getDataType();
+            loss.predictionsTensor = _location.value();
+            loss.scaleTensor = _scale.value();
+            loss.labelsTensor = _labels.value();
+            loss.exampleWeightsTensor = _exampleWeights;
+        } else {
+            const RaggedTensor& location = _raggedLocation.value();
+            const RaggedTensor& scale = _raggedScale.value();
+            const RaggedTensor& target = _raggedLabels.value();
+            THOR_THROW_IF_FALSE(location.isInitialized() && scale.isInitialized() && target.isInitialized());
+            THOR_THROW_IF_FALSE(location.getValues() != scale.getValues());
+            THOR_THROW_IF_FALSE(location.getValues() != target.getValues());
+            THOR_THROW_IF_FALSE(scale.getValues() != target.getValues());
+            if (location.getOffsets() != scale.getOffsets() || location.getOffsets() != target.getOffsets())
+                throw std::invalid_argument("LaplaceNLLLoss ragged location, scale, and target must use the exact same row partition tensor.");
+            if (location.getBatchSize() != scale.getBatchSize() || location.getBatchSize() != target.getBatchSize() ||
+                location.getMaxTotalValues() != scale.getMaxTotalValues() || location.getMaxTotalValues() != target.getMaxTotalValues() ||
+                location.getTrailingDimensions() != scale.getTrailingDimensions() || location.getTrailingDimensions() != target.getTrailingDimensions())
+                throw std::invalid_argument("LaplaceNLLLoss ragged location, scale, and target must have identical value geometry.");
+            if (_exampleWeights.has_value() && _exampleWeights->getDimensions() != std::vector<uint64_t>{1})
+                throw std::invalid_argument("LaplaceNLLLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");
+            if (_lossShape.value() == LossShape::PER_OUTPUT)
+                throw std::invalid_argument("LaplaceNLLLoss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+            if (!_lossDataType.has_value()) _lossDataType = location.getValuesDataType();
+            loss.predictionsTensor = location.getValues();
+            loss.scaleTensor = scale.getValues();
+            loss.labelsTensor = target.getValues();
+            loss.raggedPredictionsTensor = location;
+            loss.raggedScaleTensor = scale;
+            loss.raggedLabelsTensor = target;
+            loss.exampleWeightsTensor = _exampleWeights;
+        }
+        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
         loss.lossDataType = _lossDataType.value();
         loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         loss.lossShape = _lossShape.value();
@@ -144,13 +205,26 @@ class LaplaceNLLLoss::Builder {
         this->_location = _location;
         return *this;
     }
+    virtual LaplaceNLLLoss::Builder &location(RaggedTensor location) {
+        THOR_THROW_IF_FALSE(!this->_raggedLocation.has_value());
+        THOR_THROW_IF_FALSE(location.isInitialized());
+        this->_raggedLocation = std::move(location);
+        return *this;
+    }
 
     virtual LaplaceNLLLoss::Builder &predictions(Tensor _location) { return location(_location); }
+    virtual LaplaceNLLLoss::Builder &predictions(RaggedTensor location) { return this->location(std::move(location)); }
 
     virtual LaplaceNLLLoss::Builder &scale(Tensor _scale) {
         THOR_THROW_IF_FALSE(!this->_scale.has_value());
         THOR_THROW_IF_FALSE(!_scale.getDimensions().empty());
         this->_scale = _scale;
+        return *this;
+    }
+    virtual LaplaceNLLLoss::Builder &scale(RaggedTensor scale) {
+        THOR_THROW_IF_FALSE(!this->_raggedScale.has_value());
+        THOR_THROW_IF_FALSE(scale.isInitialized());
+        this->_raggedScale = std::move(scale);
         return *this;
     }
 
@@ -160,8 +234,15 @@ class LaplaceNLLLoss::Builder {
         this->_labels = _labels;
         return *this;
     }
+    virtual LaplaceNLLLoss::Builder &labels(RaggedTensor labels) {
+        THOR_THROW_IF_FALSE(!this->_raggedLabels.has_value());
+        THOR_THROW_IF_FALSE(labels.isInitialized());
+        this->_raggedLabels = std::move(labels);
+        return *this;
+    }
 
     virtual LaplaceNLLLoss::Builder &target(Tensor _target) { return labels(_target); }
+    virtual LaplaceNLLLoss::Builder &target(RaggedTensor target) { return labels(std::move(target)); }
 
     virtual LaplaceNLLLoss::Builder &logScale(bool _logScale) {
         THOR_THROW_IF_FALSE(!this->_logScale.has_value());
@@ -232,6 +313,9 @@ class LaplaceNLLLoss::Builder {
     std::optional<Tensor> _location;
     std::optional<Tensor> _scale;
     std::optional<Tensor> _labels;
+    std::optional<RaggedTensor> _raggedLocation;
+    std::optional<RaggedTensor> _raggedScale;
+    std::optional<RaggedTensor> _raggedLabels;
     std::optional<Tensor> _exampleWeights;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;

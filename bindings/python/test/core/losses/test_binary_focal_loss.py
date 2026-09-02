@@ -223,3 +223,58 @@ def test_binary_focal_loss_vector_numerical_forward_matches_reference(reported_l
     actual = _run_binary_focal_loss_network(predictions, labels, gamma, alpha, reported_loss_shape)
 
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+def _r10h_ragged_focal_pair(network, prediction_dtype=thor.DataType.fp32, label_dtype=thor.DataType.uint8):
+    predictions = thor.layers.RaggedNetworkInput(
+        network,
+        "r10h_focal_predictions",
+        prediction_dtype,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    labels = thor.layers.RaggedNetworkInput(
+        network,
+        "r10h_focal_labels",
+        label_dtype,
+        [2],
+        partition=predictions,
+    )
+    return predictions, labels
+
+
+def test_binary_focal_loss_r10h_constructs_ragged_raw_and_preserves_partition():
+    n = _net()
+    predictions, labels = _r10h_ragged_focal_pair(n)
+    loss = thor.losses.classification.BinaryFocalLoss(
+        n,
+        predictions,
+        labels,
+        gamma=1.5,
+        alpha=0.35,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert loss.is_ragged
+    assert loss.get_predictions() == predictions
+    assert loss.get_labels() == labels
+    assert isinstance(loss.get_loss(), thor.RaggedTensor)
+    assert loss.get_loss().offsets == predictions.offsets
+    assert loss.get_raw_loss().values.get_data_type() == thor.DataType.fp32
+
+
+def test_binary_focal_loss_r10h_rejects_different_partition():
+    n = _net()
+    predictions, labels = _r10h_ragged_focal_pair(n)
+    different_labels = thor.layers.RaggedNetworkInput(
+        n,
+        "r10h_focal_different_labels",
+        thor.DataType.uint8,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    with pytest.raises(ValueError, match=r"exact same row partition"):
+        thor.losses.classification.BinaryFocalLoss(n, predictions, different_labels)

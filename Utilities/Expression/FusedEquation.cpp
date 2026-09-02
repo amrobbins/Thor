@@ -1471,7 +1471,8 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
             case ExprOp::REDUCE_ARGMAX:
             case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
-            case ExprOp::REDUCE_NORM2: {
+            case ExprOp::REDUCE_NORM2:
+            case ExprOp::REDUCE_SUM_SQUARES: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
                 const std::vector<uint64_t> reduction_axes = resolveReductionAxesForInputRank(node.reduction_axes, lhs_dims.size());
                 node_dims[i] = StampedEquation::computeReductionOutputDims(lhs_dims, reduction_axes, node.squeeze_axes);
@@ -3927,6 +3928,7 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDims(const Physical
             case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
             case ExprOp::REDUCE_NORM2:
+            case ExprOp::REDUCE_SUM_SQUARES:
                 node_dims[i] = StampedEquation::computeReductionOutputDims(node_dims[node.lhs], node.reduction_axes, node.squeeze_axes);
                 break;
             default:
@@ -3998,6 +4000,11 @@ static uint64_t reductionSemanticFlops(ExprOp op, uint64_t output_numel, uint64_
 
         case ExprOp::REDUCE_NORM2: {
             const uint64_t per_output = checkedMulU64(2, reduce_extent, "reductionSemanticFlops");
+            return checkedMulU64(output_numel, per_output, "reductionSemanticFlops");
+        }
+
+        case ExprOp::REDUCE_SUM_SQUARES: {
+            const uint64_t per_output = checkedMulU64(2, reduce_extent, "reductionSemanticFlops") - 1;
             return checkedMulU64(output_numel, per_output, "reductionSemanticFlops");
         }
 
@@ -4313,7 +4320,8 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
             case ExprOp::REDUCE_ARGMAX:
             case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
-            case ExprOp::REDUCE_NORM2: {
+            case ExprOp::REDUCE_NORM2:
+            case ExprOp::REDUCE_SUM_SQUARES: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
                 const std::vector<uint64_t> reduction_axes = resolveReductionAxesForInputRank(node.reduction_axes, lhs_dims.size());
                 node_dims[i] = StampedEquation::computeReductionOutputDims(lhs_dims, reduction_axes, node.squeeze_axes);
@@ -4438,7 +4446,8 @@ static uint64_t computeFusedStageNodeFlops(const PhysicalExpression& expr,
         case ExprOp::REDUCE_ARGMAX:
         case ExprOp::REDUCE_AVG:
         case ExprOp::REDUCE_NORM1:
-        case ExprOp::REDUCE_NORM2: {
+        case ExprOp::REDUCE_NORM2:
+        case ExprOp::REDUCE_SUM_SQUARES: {
             const uint64_t out_numel = numelFromDims(node_dims[node_idx]);
             const uint64_t red_extent = reductionExtent(node_dims[node.lhs], node.reduction_axes);
             return reductionSemanticFlops(node.op, out_numel, red_extent);
@@ -5788,6 +5797,7 @@ static std::unordered_map<uint32_t, std::set<std::vector<uint64_t>>> collectEffe
         case ExprOp::REDUCE_AVG:
         case ExprOp::REDUCE_NORM1:
         case ExprOp::REDUCE_NORM2:
+        case ExprOp::REDUCE_SUM_SQUARES:
             return collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);
         case ExprOp::ROPE: {
             auto result = collectEffectiveInputDimsForNode(expr, node_dims, node.lhs);

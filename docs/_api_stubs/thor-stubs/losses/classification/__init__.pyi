@@ -16,10 +16,25 @@ class BinaryFocalLoss(thor.losses.Loss):
         alpha_t * (1 - p_t) ** gamma * BCEWithLogits(logit, target)
 
     where alpha_t is alpha for positive targets and 1 - alpha for negative targets.
+
+    Predictions and labels may both be dense tensors or rank-1 ragged tensors. Ragged
+    inputs must share the exact row partition; raw loss preserves that partition and
+    per-example/batch reporting uses active tokens only.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, gamma: float = 2.0, alpha: float = 0.25, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None) -> None:
-        """Construct a binary focal loss from logits."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, gamma: float = 2.0, alpha: float = 0.25, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None) -> None:
+        """Construct a dense or rank-1 ragged binary focal loss."""
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
     @property
     def gamma(self) -> float: ...

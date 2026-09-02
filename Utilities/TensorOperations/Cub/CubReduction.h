@@ -21,6 +21,7 @@ enum class CubReductionOp : uint8_t {
     Mean = 4,
     L1Norm = 5,
     L2Norm = 6,
+    SumSquares = 7,
 };
 
 enum class CubArgReductionOp : uint8_t {

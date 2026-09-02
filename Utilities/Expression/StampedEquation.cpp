@@ -6453,6 +6453,8 @@ static CubReductionOp toCubReductionOp(ExprOp op) {
             return CubReductionOp::L1Norm;
         case ExprOp::REDUCE_NORM2:
             return CubReductionOp::L2Norm;
+        case ExprOp::REDUCE_SUM_SQUARES:
+            return CubReductionOp::SumSquares;
         default:
             throw std::runtime_error("ExprOp is not a supported CUB value reduction op.");
     }

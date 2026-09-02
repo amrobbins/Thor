@@ -347,6 +347,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "reduce_norm1";
         case ExprOp::REDUCE_NORM2:
             return "reduce_norm2";
+        case ExprOp::REDUCE_SUM_SQUARES:
+            return "reduce_sum_squares";
         case ExprOp::SCAN:
             return "scan";
         case ExprOp::RMSNORM:
@@ -516,6 +518,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"reduce_avg", ExprOp::REDUCE_AVG},
         {"reduce_norm1", ExprOp::REDUCE_NORM1},
         {"reduce_norm2", ExprOp::REDUCE_NORM2},
+        {"reduce_sum_squares", ExprOp::REDUCE_SUM_SQUARES},
         {"scan", ExprOp::SCAN},
         {"rmsnorm", ExprOp::RMSNORM},
         {"layernorm", ExprOp::LAYERNORM},
@@ -1238,6 +1241,8 @@ std::string opName(ExprOp op) {
             return "RNORM1";
         case ExprOp::REDUCE_NORM2:
             return "RNORM2";
+        case ExprOp::REDUCE_SUM_SQUARES:
+            return "RSUMSQ";
         case ExprOp::SCAN:
             return "SCAN";
         case ExprOp::SEGMENTED_SCAN:
@@ -1491,7 +1496,8 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
         case ExprOp::REDUCE_ARGMAX:
         case ExprOp::REDUCE_AVG:
         case ExprOp::REDUCE_NORM1:
-        case ExprOp::REDUCE_NORM2: {
+        case ExprOp::REDUCE_NORM2:
+        case ExprOp::REDUCE_SUM_SQUARES: {
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
                   ";axes=" + formatUIntVectorCanonical(n.reduction_axes) + ";squeeze=" + formatUIntVectorCanonical(n.squeeze_axes) + ")";
             break;
@@ -2808,6 +2814,7 @@ bool Expression::isUnaryOp(const ExprOp op) {
         case ExprOp::REDUCE_AVG:
         case ExprOp::REDUCE_NORM1:
         case ExprOp::REDUCE_NORM2:
+        case ExprOp::REDUCE_SUM_SQUARES:
         case ExprOp::SCAN:
             return true;
         default:
@@ -5589,6 +5596,12 @@ Expression Expression::reduce_norm2(const std::vector<uint64_t>& reduction_axes,
                                     const std::vector<uint64_t>& squeeze_axes,
                                     std::optional<DataType> compute_dtype) const {
     return reduction(ExprOp::REDUCE_NORM2, reduction_axes, squeeze_axes, compute_dtype);
+}
+
+Expression Expression::reduce_sum_squares(const std::vector<uint64_t>& reduction_axes,
+                                          const std::vector<uint64_t>& squeeze_axes,
+                                          std::optional<DataType> compute_dtype) const {
+    return reduction(ExprOp::REDUCE_SUM_SQUARES, reduction_axes, squeeze_axes, compute_dtype);
 }
 
 Expression Expression::withDTypes(std::optional<DataType> compute_dtype, std::optional<DataType> output_dtype) const {

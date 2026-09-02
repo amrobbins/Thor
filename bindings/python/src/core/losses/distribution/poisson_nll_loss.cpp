@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Loss/PoissonNLLLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -104,6 +105,20 @@ void maybeSetPoissonExampleWeights(PoissonNLLLoss::Builder &builder,
     builder.exampleWeights(example_weights.value());
 }
 
+void maybeSetRaggedPoissonExampleWeights(PoissonNLLLoss::Builder& builder,
+                                         const RaggedTensor& predictions,
+                                         const RaggedTensor& labels,
+                                         optional<Tensor> example_weights) {
+    if (!example_weights.has_value()) return;
+    if (example_weights.value() == predictions.getValues() || example_weights.value() == labels.getValues())
+        throw nb::value_error("PoissonNLLLoss instance: ragged example_weights must be distinct from predictions and labels values.");
+    if (!isFloatingDType(example_weights->getDataType()))
+        throw nb::value_error("PoissonNLLLoss instance: example_weights must use fp16 or fp32 dtype.");
+    if (example_weights->getDimensions() != vector<uint64_t>{1})
+        throw nb::value_error("PoissonNLLLoss instance: ragged example_weights dimensions must be [1] for one scalar weight per logical row.");
+    builder.exampleWeights(example_weights.value());
+}
+
 }  // namespace
 
 void bind_poisson_nll_loss(nb::module_ &losses) {
@@ -114,46 +129,65 @@ void bind_poisson_nll_loss(nb::module_ &losses) {
         "__init__",
         [](PoissonNLLLoss *self,
            Network &network,
-           Tensor predictions,
-           Tensor labels,
+           nb::object predictionsObject,
+           nb::object labelsObject,
            bool log_input,
            bool full,
            float eps,
-           std::optional<DataType> loss_data_type,
+           optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
-           std::optional<float> loss_weight,
-           std::optional<Tensor> example_weights) {
+           optional<float> loss_weight,
+           optional<Tensor> example_weights) {
             const string loss_name = "PoissonNLLLoss instance";
-            validatePoissonNLLLossArguments(loss_name, predictions, labels, loss_data_type, reported_loss_shape, eps);
-
-            DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
+            if (eps <= 0.0f) throw nb::value_error("PoissonNLLLoss instance: eps must be greater than zero");
+            validateReportedLossShape(reported_loss_shape, loss_name);
             PoissonNLLLoss::Builder builder;
-            builder.network(network)
-                .predictions(predictions)
-                .labels(labels)
-                .logInput(log_input)
-                .full(full)
-                .eps(eps)
-                .lossDataType(effectiveLossDataType)
-                .lossWeight(loss_weight.value_or(1.0f));
-            maybeSetPoissonExampleWeights(builder, predictions, labels, example_weights);
+            builder.network(network).logInput(log_input).full(full).eps(eps).lossWeight(loss_weight.value_or(1.0f));
+            if (nb::isinstance<Tensor>(predictionsObject) && nb::isinstance<Tensor>(labelsObject)) {
+                Tensor predictions = nb::cast<Tensor>(predictionsObject);
+                Tensor labels = nb::cast<Tensor>(labelsObject);
+                validatePoissonNLLLossArguments(loss_name, predictions, labels, loss_data_type, reported_loss_shape, eps);
+                builder.predictions(predictions).labels(labels).lossDataType(loss_data_type.value_or(predictions.getDataType()));
+                maybeSetPoissonExampleWeights(builder, predictions, labels, example_weights);
+            } else if (nb::isinstance<RaggedTensor>(predictionsObject) && nb::isinstance<RaggedTensor>(labelsObject)) {
+                RaggedTensor predictions = nb::cast<RaggedTensor>(predictionsObject);
+                RaggedTensor labels = nb::cast<RaggedTensor>(labelsObject);
+                if (!isFloatingDType(predictions.getValuesDataType())) throw nb::value_error("PoissonNLLLoss instance: predictions must use fp16 or fp32 dtype");
+                if (!isPoissonTargetDType(labels.getValuesDataType())) throw nb::value_error("PoissonNLLLoss instance: labels must use boolean, unsigned integer, fp16, or fp32 dtype");
+                if (reported_loss_shape == LossShape::PER_OUTPUT) throw nb::value_error("PoissonNLLLoss instance: per_output reporting is undefined for ragged predictions.");
+                if (predictions.getOffsets() != labels.getOffsets()) throw nb::value_error("PoissonNLLLoss instance: ragged predictions and labels must use the exact same row partition tensor.");
+                if (predictions.getBatchSize() != labels.getBatchSize() || predictions.getMaxTotalValues() != labels.getMaxTotalValues() || predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                    throw nb::value_error("PoissonNLLLoss instance: ragged predictions and labels must have identical value geometry.");
+                DataType effective = loss_data_type.value_or(predictions.getValuesDataType());
+                if (!isFloatingDType(effective)) throw nb::value_error("PoissonNLLLoss instance: loss_data_type must be fp16 or fp32");
+                builder.predictions(predictions).labels(labels).lossDataType(effective);
+                maybeSetRaggedPoissonExampleWeights(builder, predictions, labels, example_weights);
+            } else {
+                throw nb::type_error("PoissonNLLLoss predictions and labels must both be thor.Tensor or both be thor.RaggedTensor.");
+            }
             setReportedLossShape(builder, reported_loss_shape);
             PoissonNLLLoss built = builder.build();
-
             new (self) PoissonNLLLoss(std::move(built));
         },
-        "network"_a,
-        "predictions"_a,
-        "labels"_a,
-        "log_input"_a = true,
-        "full"_a = false,
-        "eps"_a = 1.0e-8f,
-        "loss_data_type"_a.none() = nb::none(),
-        "reported_loss_shape"_a = LossShape::BATCH,
-        nb::kw_only(),
-        "loss_weight"_a.none() = nb::none(),
-        "example_weights"_a.none() = nb::none(),
-        R"nbdoc(Construct a Poisson negative log-likelihood loss.)nbdoc");
+        "network"_a, "predictions"_a, "labels"_a, "log_input"_a = true, "full"_a = false, "eps"_a = 1.0e-8f,
+        "loss_data_type"_a.none() = nb::none(), "reported_loss_shape"_a = LossShape::BATCH, nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(), "example_weights"_a.none() = nb::none(),
+        R"nbdoc(Construct a dense or rank-1 ragged Poisson negative log-likelihood loss.)nbdoc");
+
+    poisson_nll_loss.def("get_predictions", [](const PoissonNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.Loss::getPredictions());
+    });
+    poisson_nll_loss.def("get_labels", [](const PoissonNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedLabels());
+        return nb::cast(self.Loss::getLabels());
+    });
+    poisson_nll_loss.def("get_raw_loss", [](const PoissonNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedRawLoss());
+        return nb::cast(self.Loss::getRawLoss());
+    });
+    poisson_nll_loss.def("get_loss", [](const PoissonNLLLoss& self) -> nb::object { if (self.isRagged() && self.getLossShape() == LossShape::RAW) return nb::cast(self.getRaggedLoss()); return nb::cast(self.Loss::getLoss()); });
+    poisson_nll_loss.def_prop_ro("is_ragged", &PoissonNLLLoss::isRagged);
 
     poisson_nll_loss.def_prop_ro("log_input", &PoissonNLLLoss::getLogInput);
     poisson_nll_loss.def_prop_ro("full", &PoissonNLLLoss::getFull);

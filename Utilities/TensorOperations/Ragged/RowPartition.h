@@ -52,6 +52,26 @@ void rowPartitionLengthsToOffsets(const Tensor& temp_storage,
 
 void rowPartitionOffsetsToLengths(const Tensor& offsets, Tensor& lengths, uint64_t batch_size, Stream& stream);
 
+// Writes offsets[valid_row_count] * elements_per_value to one FP32 scalar.
+// This is a structural statistic: it reads only the row partition, never the
+// reserved packed values capacity.  It is used by ragged ratio metrics to
+// count active scalar contributions without materializing an FP32 tensor of
+// packed ones.
+void rowPartitionActiveScalarCount(const Tensor& offsets,
+                                   Tensor& active_scalar_count,
+                                   uint64_t valid_row_count,
+                                   uint64_t elements_per_value,
+                                   Stream& stream);
+
+// Copies a canonical [batch_size + 1] row partition while making rows at or
+// after valid_row_count empty.  Values after the valid-row boundary are never
+// made active by the resulting partition.
+void rowPartitionClampOffsetsToValidRows(const Tensor& offsets,
+                                         Tensor& clamped_offsets,
+                                         uint64_t batch_size,
+                                         uint64_t valid_row_count,
+                                         Stream& stream);
+
 // Converts canonical UINT32/UINT64 offsets to INT32 per-row lengths for
 // backends such as cuDNN CTC. Validation is entirely device-side: malformed
 // partitions, offsets beyond max_total_values, rows beyond max_allowed_length,

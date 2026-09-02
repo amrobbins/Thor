@@ -2,6 +2,10 @@
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Api/Layers/Loss/HuberLoss.h"
 
+#include "DeepLearning/Api/Layers/Loss/RaggedCustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedLossShaper.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 
@@ -84,7 +88,53 @@ ThorImplementation::DynamicExpression makeHuberGradientExpression(DataType predi
 void HuberLoss::buildSupportLayersAndAddToNetwork() {
     validatePredictionsDType(predictionsTensor.getDataType());
     validateLabelsDType(labelsTensor.getDataType());
+    THOR_THROW_IF_FALSE(lossDataType == DataType::FP16 || lossDataType == DataType::FP32);
     THOR_THROW_IF_FALSE(delta > 0.0f);
+
+    if (isRagged()) {
+        if (lossShape == LossShape::PER_OUTPUT)
+            throw invalid_argument("HuberLoss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+
+        RaggedCustomLoss rawHuberLoss = RaggedCustomLoss::Builder()
+                                            .network(*network)
+                                            .lossExpression(makeHuberLossExpression(lossDataType, delta))
+                                            .gradientExpression(makeHuberGradientExpression(predictionsTensor.getDataType(), delta))
+                                            .predictions(raggedPredictionsTensor.value())
+                                            .labels(raggedLabelsTensor.value())
+                                            .predictionsName(kPredictionsName)
+                                            .labelsName(kLabelsName)
+                                            .lossName(kLossName)
+                                            .gradientName(kGradientName)
+                                            .lossDataType(lossDataType)
+                                            .lossWeight(lossWeight.value_or(1.0f))
+                                            .build();
+        raggedRawLossTensor = rawHuberLoss.getRaggedRawLoss();
+        lossShaperInput = raggedRawLossTensor->getValues();
+
+        if (lossShape == LossShape::NONE) {
+            lossTensor = lossShaperInput;
+            Stub::Builder().network(*network).inputTensor(lossShaperInput).build();
+        } else if (lossShape == LossShape::RAW) {
+            lossTensor = lossShaperInput;
+        } else if (lossShape == LossShape::PER_EXAMPLE) {
+            RaggedLossShaper shaper = RaggedLossShaper::Builder()
+                                          .network(*network)
+                                          .lossInput(raggedRawLossTensor.value())
+                                          .reportsPerExampleLoss()
+                                          .build();
+            lossTensor = shaper.getLossOutput();
+        } else if (lossShape == LossShape::BATCH) {
+            RaggedLossShaper shaper = RaggedLossShaper::Builder()
+                                          .network(*network)
+                                          .lossInput(raggedRawLossTensor.value())
+                                          .reportsBatchLoss()
+                                          .build();
+            lossTensor = shaper.getLossOutput();
+        } else {
+            THOR_UNREACHABLE();
+        }
+        return;
+    }
 
     CustomLoss rawHuberLoss = CustomLoss::Builder()
                                   .network(*network)
@@ -97,12 +147,11 @@ void HuberLoss::buildSupportLayersAndAddToNetwork() {
                                   .lossName(kLossName)
                                   .gradientName(kGradientName)
                                   .lossDataType(lossDataType)
-                                       .lossWeight(lossWeight.value_or(1.0f))
+                                  .lossWeight(lossWeight.value_or(1.0f))
                                   .reportsRawLoss()
                                   .build();
 
     lossShaperInput = rawHuberLoss.getLoss();
-
     finalizeLossReporting();
 }
 
@@ -110,6 +159,11 @@ json HuberLoss::architectureJson() const {
     json j = Loss::architectureJson();
     j["loss_shape"] = lossShape;
     j["delta"] = delta;
+    if (isRagged()) {
+        j["ragged_predictions"] = raggedPredictionsTensor->architectureJson();
+        j["ragged_labels"] = raggedLabelsTensor->architectureJson();
+        if (raggedRawLossTensor.has_value()) j["ragged_raw_loss"] = raggedRawLossTensor->architectureJson();
+    }
     return j;
 }
 
@@ -119,6 +173,25 @@ void HuberLoss::deserialize(const json& j, Network* network) {
     if (j.at("layer_type").get<std::string>() != "huber_loss")
         throw runtime_error("Layer type mismatch in HuberLoss::deserialize: " + j.at("layer_type").get<std::string>());
 
+    if (j.contains("ragged_predictions")) {
+        RaggedTensor predictions = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_predictions"), network, "HuberLoss");
+        RaggedTensor labels = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_labels"), network, "HuberLoss");
+        HuberLoss::Builder builder;
+        builder.network(*network).predictions(predictions).labels(labels).delta(j.value("delta", 1.0f));
+        builder.lossDataType(j.at("loss_data_type").get<DataType>());
+        builder.lossWeight(ThorImplementation::lossWeightFromJson(j).value_or(1.0f));
+        switch (j.at("loss_shape").get<LossShape>()) {
+            case LossShape::NONE: builder.reportsNoLoss(); break;
+            case LossShape::BATCH: builder.reportsBatchLoss(); break;
+            case LossShape::PER_EXAMPLE: builder.reportsPerExampleLoss(); break;
+            case LossShape::RAW: builder.reportsRawLoss(); break;
+            case LossShape::PER_OUTPUT:
+                throw runtime_error("Serialized ragged HuberLoss cannot use LossShape::PER_OUTPUT.");
+        }
+        (void)builder.build();
+        return;
+    }
+
     uint64_t originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     Tensor predictions = network->getApiTensorByOriginalId(originalTensorId);
     originalTensorId = j["labels_tensor"].at("id").get<uint64_t>();
@@ -127,7 +200,6 @@ void HuberLoss::deserialize(const json& j, Network* network) {
     HuberLoss huberLoss;
     huberLoss.lossShape = j.at("loss_shape").get<LossShape>();
     huberLoss.lossDataType = j.at("loss_data_type").get<DataType>();
-
     huberLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     huberLoss.delta = j.value("delta", 1.0f);
     huberLoss.predictionsTensor = predictions;

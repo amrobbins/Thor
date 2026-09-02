@@ -14,6 +14,7 @@ TEST(CubReduction, DefinesExplicitFp32EmptyReductionValues) {
     EXPECT_FLOAT_EQ(CubReduction::getFp32EmptyReductionValue(CubReductionOp::Mean), 0.0f);
     EXPECT_FLOAT_EQ(CubReduction::getFp32EmptyReductionValue(CubReductionOp::L1Norm), 0.0f);
     EXPECT_FLOAT_EQ(CubReduction::getFp32EmptyReductionValue(CubReductionOp::L2Norm), 0.0f);
+    EXPECT_FLOAT_EQ(CubReduction::getFp32EmptyReductionValue(CubReductionOp::SumSquares), 0.0f);
     EXPECT_EQ(CubReduction::getFp32EmptyReductionValue(CubReductionOp::Min),
               std::numeric_limits<float>::infinity());
     EXPECT_EQ(CubReduction::getFp32EmptyReductionValue(CubReductionOp::Max),
@@ -33,7 +34,8 @@ TEST(CubReduction, WholeTensorPathSupportsEveryValueOperation) {
                       {CubReductionOp::Min, {-4.0f}, 0.0f},
                       {CubReductionOp::Max, {3.0f}, 0.0f},
                       {CubReductionOp::L1Norm, {9.0f}, 0.0f},
-                      {CubReductionOp::L2Norm, {std::sqrt(29.0f)}, 1.0e-5f}},
+                      {CubReductionOp::L2Norm, {std::sqrt(29.0f)}, 1.0e-5f},
+                      {CubReductionOp::SumSquares, {29.0f}, 0.0f}},
                      stream);
 }
 
@@ -50,7 +52,8 @@ TEST(CubReduction, ContiguousFixedSegmentPathSupportsEveryValueOperation) {
                       {CubReductionOp::Min, {-3.0f, -5.0f}, 0.0f},
                       {CubReductionOp::Max, {2.0f, 6.0f}, 0.0f},
                       {CubReductionOp::L1Norm, {6.0f, 15.0f}, 0.0f},
-                      {CubReductionOp::L2Norm, {std::sqrt(14.0f), std::sqrt(77.0f)}, 1.0e-5f}},
+                      {CubReductionOp::L2Norm, {std::sqrt(14.0f), std::sqrt(77.0f)}, 1.0e-5f},
+                      {CubReductionOp::SumSquares, {14.0f, 77.0f}, 0.0f}},
                      stream);
 }
 
@@ -72,7 +75,8 @@ TEST(CubReduction, TiledFixedSegmentPathSupportsEveryValueOperation) {
                       {CubReductionOp::L1Norm, {9.0f, 12.0f, 27.0f, 30.0f}, 0.0f},
                       {CubReductionOp::L2Norm,
                        {std::sqrt(35.0f), std::sqrt(56.0f), std::sqrt(251.0f), std::sqrt(308.0f)},
-                       1.0e-5f}},
+                       1.0e-5f},
+                      {CubReductionOp::SumSquares, {35.0f, 56.0f, 251.0f, 308.0f}, 0.0f}},
                      stream);
 }
 
@@ -95,7 +99,8 @@ TEST(CubReduction, PermutationAwareTiledPathSupportsEveryValueOperation) {
                       {CubReductionOp::L1Norm, {9.0f, 27.0f, 12.0f, 30.0f}, 0.0f},
                       {CubReductionOp::L2Norm,
                        {std::sqrt(35.0f), std::sqrt(251.0f), std::sqrt(56.0f), std::sqrt(308.0f)},
-                       1.0e-5f}},
+                       1.0e-5f},
+                      {CubReductionOp::SumSquares, {35.0f, 251.0f, 56.0f, 308.0f}, 0.0f}},
                      stream);
 }
 
@@ -425,6 +430,7 @@ TEST(CubReduction, NewOperationsDefaultOutputStorageToInputDtype) {
         {CubReductionOp::Mean, {2.0f, -2.0f}, 0.0f},
         {CubReductionOp::L1Norm, {6.0f, 6.0f}, 0.0f},
         {CubReductionOp::L2Norm, {std::sqrt(14.0f), std::sqrt(14.0f)}, 2.0e-2f},
+        {CubReductionOp::SumSquares, {14.0f, 14.0f}, 2.0e-2f},
     };
 
     for (const OperationExpectation& expectation : expectations) {
@@ -488,7 +494,8 @@ TEST(CubReduction, ArithmeticAndNormOperationsNaturallyPropagateNan) {
                               CubReductionOp::Product,
                               CubReductionOp::Mean,
                               CubReductionOp::L1Norm,
-                              CubReductionOp::L2Norm}) {
+                              CubReductionOp::L2Norm,
+                              CubReductionOp::SumSquares}) {
         SCOPED_TRACE(static_cast<int>(op));
         expectFloatVectorNear(executeFp32Output(input, op, 0, stream), {nan});
     }

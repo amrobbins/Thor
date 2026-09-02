@@ -50,6 +50,13 @@ class CustomMetric : public Metric {
 
     std::string getType() override { return "CustomMetric"; }
 
+   protected:
+    // Execute an already-validated/prepared metric expression and capture ratio
+    // sufficient statistics when applicable.  Ragged metric substrates use this
+    // after applying their own logical-row batch-cardinality semantics instead of
+    // CustomMetric's dense leading-dimension partial-batch rule.
+    void runPreparedMetricExpression(Stream runStream);
+
    private:
     using TensorMap = std::unordered_map<std::string, Tensor>;
 

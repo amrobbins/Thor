@@ -86,6 +86,22 @@ void launchL2NormReduction(const Tensor& temp_storage,
                         float output_scale,
                         Stream& stream);
 
+size_t querySumSquaresReductionBytes(DataType input_dtype,
+                                     const void* input,
+                                     uint64_t input_elements,
+                                     DataType output_dtype,
+                                     void* output,
+                                     const CubReductionGeometry& geometry,
+                                     float output_scale,
+                                     const Stream& stream);
+void launchSumSquaresReduction(const Tensor& temp_storage,
+                               size_t temp_storage_bytes,
+                               const Tensor& input,
+                               Tensor& output,
+                               const CubReductionGeometry& geometry,
+                               float output_scale,
+                               Stream& stream);
+
 size_t queryMinReductionBytes(DataType input_dtype,
                               const void* input,
                               uint64_t input_elements,

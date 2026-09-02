@@ -69,7 +69,11 @@ inline DynamicExpression makeExpression() {
                                  Expression correct = Expression::where(predictedClass == trueClass, Expression(1.0), Expression(0.0));
                                  Expression validity =
                                      Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
-                                 Expression correctCount = (correct * validity).reduce_sum({0, 1}, {0}, DataType::FP32);
+                                 // Correctness is exactly 0/1. Keep the reduction workspace FP16 and let CUB
+                                 // perform its normal FP32 conversion/accumulation internally.
+                                 Expression correctCount = (correct * validity)
+                                                               .withOutputDType(DataType::FP16)
+                                                               .reduce_sum({0, 1}, {0}, DataType::FP32);
                                  Expression validCount = validity.reduce_sum({0, 1}, {0}, DataType::FP32);
                                  Expression metric = correctCount / validCount;
 

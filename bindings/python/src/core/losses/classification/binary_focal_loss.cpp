@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Loss/BinaryFocalLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -97,28 +98,49 @@ void bind_binary_focal_loss(nb::module_ &losses) {
         "__init__",
         [](BinaryFocalLoss *self,
            Network &network,
-           Tensor predictions,
-           Tensor labels,
+           nb::object predictionsObject,
+           nb::object labelsObject,
            float gamma,
            float alpha,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
            std::optional<float> loss_weight) {
             const string loss_name = "BinaryFocalLoss instance";
-            validateBinaryFocalLossArguments(loss_name, predictions, labels, gamma, alpha, loss_data_type, reported_loss_shape);
+            if (gamma < 0.0f) throw nb::value_error((loss_name + ": gamma must be non-negative").c_str());
+            if (alpha < 0.0f || alpha > 1.0f) throw nb::value_error((loss_name + ": alpha must be in the range [0, 1]").c_str());
+            validateReportedLossShape(reported_loss_shape, loss_name);
 
-            DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
             BinaryFocalLoss::Builder builder;
-            builder.network(network)
-                .predictions(predictions)
-                .labels(labels)
-                .focusingParameter(gamma)
-                .alpha(alpha)
-                .lossDataType(effectiveLossDataType)
-                .lossWeight(loss_weight.value_or(1.0f));
+            builder.network(network).focusingParameter(gamma).alpha(alpha).lossWeight(loss_weight.value_or(1.0f));
+            if (nb::isinstance<Tensor>(predictionsObject) && nb::isinstance<Tensor>(labelsObject)) {
+                Tensor predictions = nb::cast<Tensor>(predictionsObject);
+                Tensor labels = nb::cast<Tensor>(labelsObject);
+                validateBinaryFocalLossArguments(loss_name, predictions, labels, gamma, alpha, loss_data_type, reported_loss_shape);
+                builder.predictions(predictions).labels(labels);
+                if (loss_data_type.has_value()) builder.lossDataType(loss_data_type.value());
+            } else if (nb::isinstance<RaggedTensor>(predictionsObject) && nb::isinstance<RaggedTensor>(labelsObject)) {
+                RaggedTensor predictions = nb::cast<RaggedTensor>(predictionsObject);
+                RaggedTensor labels = nb::cast<RaggedTensor>(labelsObject);
+                if (predictions.getValuesDataType() != DataType::FP16 && predictions.getValuesDataType() != DataType::FP32)
+                    throw nb::value_error((loss_name + ": predictions must use fp16 or fp32 dtype").c_str());
+                if (!isBinaryLabelDType(labels.getValuesDataType()))
+                    throw nb::value_error((loss_name + ": labels must use bool, uint8, uint16, uint32, fp16, or fp32 dtype").c_str());
+                if (predictions.getOffsets() != labels.getOffsets())
+                    throw nb::value_error((loss_name + ": ragged predictions and labels must use the exact same row partition tensor.").c_str());
+                if (predictions.getBatchSize() != labels.getBatchSize() ||
+                    predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
+                    predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                    throw nb::value_error((loss_name + ": ragged predictions and labels must have identical value geometry.").c_str());
+                DataType effectiveLossDataType = loss_data_type.value_or(predictions.getValuesDataType());
+                if (effectiveLossDataType != DataType::FP16 && effectiveLossDataType != DataType::FP32)
+                    throw nb::value_error((loss_name + ": loss_data_type must be fp16 or fp32").c_str());
+                builder.predictions(predictions).labels(labels).lossDataType(effectiveLossDataType);
+            } else {
+                throw nb::type_error("BinaryFocalLoss predictions and labels must both be thor.Tensor or both be thor.RaggedTensor.");
+            }
+
             setReportedLossShape(builder, reported_loss_shape);
             BinaryFocalLoss built = builder.build();
-
             new (self) BinaryFocalLoss(std::move(built));
         },
         "network"_a,
@@ -130,7 +152,25 @@ void bind_binary_focal_loss(nb::module_ &losses) {
         "reported_loss_shape"_a = LossShape::BATCH,
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
-        R"nbdoc(Construct a binary focal loss from logits.)nbdoc");
+        R"nbdoc(Construct a dense or rank-1 ragged binary focal loss.)nbdoc");
+
+    binary_focal_loss.def("get_predictions", [](const BinaryFocalLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.Loss::getPredictions());
+    });
+    binary_focal_loss.def("get_labels", [](const BinaryFocalLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedLabels());
+        return nb::cast(self.Loss::getLabels());
+    });
+    binary_focal_loss.def("get_raw_loss", [](const BinaryFocalLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedRawLoss());
+        return nb::cast(self.Loss::getRawLoss());
+    });
+    binary_focal_loss.def("get_loss", [](const BinaryFocalLoss& self) -> nb::object {
+        if (self.isRagged() && self.getLossShape() == LossShape::RAW) return nb::cast(self.getRaggedLoss());
+        return nb::cast(self.Loss::getLoss());
+    });
+    binary_focal_loss.def_prop_ro("is_ragged", &BinaryFocalLoss::isRagged);
 
     binary_focal_loss.def_prop_ro("gamma", &BinaryFocalLoss::getGamma);
     binary_focal_loss.def_prop_ro("alpha", &BinaryFocalLoss::getAlpha);
@@ -146,5 +186,9 @@ prediction objectives. The raw loss is applied pointwise:
     alpha_t * (1 - p_t) ** gamma * BCEWithLogits(logit, target)
 
 where alpha_t is alpha for positive targets and 1 - alpha for negative targets.
+
+Predictions and labels may both be dense tensors or rank-1 ragged tensors. Ragged
+inputs must share the exact row partition; raw loss preserves that partition and
+per-example/batch reporting uses active tokens only.
 )nbdoc";
 }

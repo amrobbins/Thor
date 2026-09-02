@@ -4,10 +4,13 @@
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 #include <optional>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace Thor {
 
@@ -25,11 +28,21 @@ class PoissonNLLLoss : public Loss {
     bool getLogInput() const { return logInput; }
     bool getFull() const { return full; }
     float getEps() const { return eps; }
+    [[nodiscard]] bool isRagged() const { return raggedPredictionsTensor.has_value(); }
+    [[nodiscard]] RaggedTensor getRaggedPredictions() const { if (!isRagged()) throw std::runtime_error("PoissonNLLLoss predictions are dense."); return raggedPredictionsTensor.value(); }
+    [[nodiscard]] RaggedTensor getRaggedLabels() const { if (!isRagged()) throw std::runtime_error("PoissonNLLLoss labels are dense."); return raggedLabelsTensor.value(); }
+    [[nodiscard]] RaggedTensor getRaggedRawLoss() const { if (!raggedRawLossTensor.has_value()) throw std::runtime_error("PoissonNLLLoss raw loss is dense."); return raggedRawLossTensor.value(); }
+    [[nodiscard]] RaggedTensor getRaggedLoss() const { if (!isRagged() || lossShape != LossShape::RAW || !raggedRawLossTensor.has_value()) throw std::runtime_error("PoissonNLLLoss does not expose a ragged reported loss for this LossShape."); return raggedRawLossTensor.value(); }
+    [[nodiscard]] LossShape getLossShape() const { return lossShape; }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
+    std::optional<RaggedTensor> raggedPredictionsTensor;
+    std::optional<RaggedTensor> raggedLabelsTensor;
+    std::optional<RaggedTensor> raggedRawLossTensor;
+
     virtual bool isMultiLayer() const { return true; }
 
     virtual void buildSupportLayersAndAddToNetwork();
@@ -71,27 +84,50 @@ class PoissonNLLLoss::Builder {
 
     virtual PoissonNLLLoss build() {
         THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_predictions.has_value());
-        THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+        const bool hasDensePredictions = _predictions.has_value();
+        const bool hasDenseLabels = _labels.has_value();
+        const bool hasRaggedPredictions = _raggedPredictions.has_value();
+        const bool hasRaggedLabels = _raggedLabels.has_value();
+        THOR_THROW_IF_FALSE(hasDensePredictions == hasDenseLabels);
+        THOR_THROW_IF_FALSE(hasRaggedPredictions == hasRaggedLabels);
+        THOR_THROW_IF_FALSE(hasDensePredictions != hasRaggedPredictions);
 
-        if (!_lossShape.has_value())
-            _lossShape = LossShape::BATCH;
-        if (!_lossDataType.has_value())
-            _lossDataType = _predictions.value().getDataType();
-        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
-
-        float eps = _eps.value_or(1.0e-8f);
+        if (!_lossShape.has_value()) _lossShape = LossShape::BATCH;
+        const float eps = _eps.value_or(1.0e-8f);
         THOR_THROW_IF_FALSE(eps > 0.0f);
 
         PoissonNLLLoss loss;
-        loss.predictionsTensor = _predictions.value();
-        loss.labelsTensor = _labels.value();
-        loss.exampleWeightsTensor = _exampleWeights;
+        if (hasDensePredictions) {
+            THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+            THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
+            THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+            if (!_lossDataType.has_value()) _lossDataType = _predictions.value().getDataType();
+            loss.predictionsTensor = _predictions.value();
+            loss.labelsTensor = _labels.value();
+            loss.exampleWeightsTensor = _exampleWeights;
+        } else {
+            const RaggedTensor& predictions = _raggedPredictions.value();
+            const RaggedTensor& labels = _raggedLabels.value();
+            THOR_THROW_IF_FALSE(predictions.isInitialized() && labels.isInitialized());
+            THOR_THROW_IF_FALSE(predictions.getValues() != labels.getValues());
+            if (predictions.getOffsets() != labels.getOffsets())
+                throw std::invalid_argument("PoissonNLLLoss ragged predictions and labels must use the exact same row partition tensor.");
+            if (predictions.getBatchSize() != labels.getBatchSize() || predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
+                predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                throw std::invalid_argument("PoissonNLLLoss ragged predictions and labels must have identical value geometry.");
+            if (_exampleWeights.has_value() && _exampleWeights->getDimensions() != std::vector<uint64_t>{1})
+                throw std::invalid_argument("PoissonNLLLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");
+            if (_lossShape.value() == LossShape::PER_OUTPUT)
+                throw std::invalid_argument("PoissonNLLLoss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+            if (!_lossDataType.has_value()) _lossDataType = predictions.getValuesDataType();
+            loss.predictionsTensor = predictions.getValues();
+            loss.labelsTensor = labels.getValues();
+            loss.raggedPredictionsTensor = predictions;
+            loss.raggedLabelsTensor = labels;
+            loss.exampleWeightsTensor = _exampleWeights;
+        }
+        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
         loss.lossDataType = _lossDataType.value();
-
         loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         loss.lossShape = _lossShape.value();
         loss.logInput = _logInput.value_or(true);
@@ -99,9 +135,7 @@ class PoissonNLLLoss::Builder {
         loss.eps = eps;
         loss.network = _network.value();
         loss.initialized = true;
-
         loss.buildSupportLayersAndAddToNetwork();
-
         return loss;
     }
 
@@ -118,10 +152,24 @@ class PoissonNLLLoss::Builder {
         return *this;
     }
 
+    virtual PoissonNLLLoss::Builder &predictions(RaggedTensor predictions) {
+        THOR_THROW_IF_FALSE(!this->_raggedPredictions.has_value());
+        THOR_THROW_IF_FALSE(predictions.isInitialized());
+        this->_raggedPredictions = std::move(predictions);
+        return *this;
+    }
+
     virtual PoissonNLLLoss::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
+        return *this;
+    }
+
+    virtual PoissonNLLLoss::Builder &labels(RaggedTensor labels) {
+        THOR_THROW_IF_FALSE(!this->_raggedLabels.has_value());
+        THOR_THROW_IF_FALSE(labels.isInitialized());
+        this->_raggedLabels = std::move(labels);
         return *this;
     }
 
@@ -199,6 +247,8 @@ class PoissonNLLLoss::Builder {
     std::optional<Network *> _network;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
+    std::optional<RaggedTensor> _raggedPredictions;
+    std::optional<RaggedTensor> _raggedLabels;
     std::optional<Tensor> _exampleWeights;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;

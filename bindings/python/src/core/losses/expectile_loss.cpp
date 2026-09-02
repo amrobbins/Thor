@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Loss/ExpectileLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 #include "bindings/python/src/core/losses/regression_loss_dtype.h"
 
@@ -62,6 +63,20 @@ void maybeSetExampleWeights(ExpectileLoss::Builder& builder,
     }
     builder.exampleWeights(example_weights.value());
 }
+
+void maybeSetRaggedExampleWeights(ExpectileLoss::Builder& builder,
+                                  RaggedTensor predictions,
+                                  RaggedTensor labels,
+                                  std::optional<Tensor> example_weights) {
+    if (!example_weights.has_value())
+        return;
+    if (example_weights.value() == predictions.getValues() || example_weights.value() == labels.getValues())
+        throw nb::value_error("ExpectileLoss instance: ragged example_weights must be distinct from predictions and labels values.");
+    ThorPython::RegressionLossDType::validateExampleWeights("ExpectileLoss instance", example_weights.value());
+    if (example_weights->getDimensions() != std::vector<uint64_t>{1})
+        throw nb::value_error("ExpectileLoss instance: ragged example_weights dimensions must be [1] for one scalar weight per logical row.");
+    builder.exampleWeights(example_weights.value());
+}
 }  // namespace
 
 void bind_expectile_loss(nb::module_& losses) {
@@ -72,45 +87,66 @@ void bind_expectile_loss(nb::module_& losses) {
         "__init__",
         [](ExpectileLoss* self,
            Network& network,
-           Tensor predictions,
-           Tensor labels,
+           nb::object predictionsObject,
+           nb::object labelsObject,
            float expectile,
            std::optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
            std::optional<float> loss_weight,
            std::optional<Tensor> example_weights) {
             const string loss_name = "ExpectileLoss instance";
-            ThorPython::RegressionLossDType::validatePredictions(loss_name, predictions);
-            ThorPython::RegressionLossDType::validateLabels(loss_name, labels);
-            if (predictions.getDimensions().empty()) {
-                string error_message = loss_name + ": predictions must have at least one per-example dimension but predictions is " +
-                                       predictions.getDescriptorString();
-                throw nb::value_error(error_message.c_str());
-            }
-            if (labels.getDimensions() != predictions.getDimensions()) {
-                string error_message = loss_name + ": labels dimensions " + labels.getDescriptorString() +
-                                       " must match predictions dimensions " + predictions.getDescriptorString();
-                throw nb::value_error(error_message.c_str());
-            }
             if (expectile <= 0.0f || expectile >= 1.0f) {
                 string error_message = loss_name + ": expectile must be greater than zero and less than one";
                 throw nb::value_error(error_message.c_str());
             }
-            const DataType effectiveLossDataType =
-                ThorPython::RegressionLossDType::effectiveLossDType(loss_name, predictions.getDataType(), loss_data_type);
             validateReportedLossShape(reported_loss_shape, loss_name);
 
             ExpectileLoss::Builder builder;
-            builder.network(network)
-                .predictions(predictions)
-                .labels(labels)
-                .expectile(expectile)
-                .lossDataType(effectiveLossDataType)
-                .lossWeight(loss_weight.value_or(1.0f));
-            maybeSetExampleWeights(builder, predictions, labels, example_weights);
+            builder.network(network).expectile(expectile);
+
+            if (nb::isinstance<Tensor>(predictionsObject) && nb::isinstance<Tensor>(labelsObject)) {
+                Tensor predictions = nb::cast<Tensor>(predictionsObject);
+                Tensor labels = nb::cast<Tensor>(labelsObject);
+                ThorPython::RegressionLossDType::validatePredictions(loss_name, predictions);
+                ThorPython::RegressionLossDType::validateLabels(loss_name, labels);
+                if (predictions.getDimensions().empty()) {
+                    string error_message = loss_name + ": predictions must have at least one per-example dimension but predictions is " +
+                                           predictions.getDescriptorString();
+                    throw nb::value_error(error_message.c_str());
+                }
+                if (labels.getDimensions() != predictions.getDimensions()) {
+                    string error_message = loss_name + ": labels dimensions " + labels.getDescriptorString() +
+                                           " must match predictions dimensions " + predictions.getDescriptorString();
+                    throw nb::value_error(error_message.c_str());
+                }
+                const DataType effectiveLossDataType =
+                    ThorPython::RegressionLossDType::effectiveLossDType(loss_name, predictions.getDataType(), loss_data_type);
+                builder.predictions(predictions).labels(labels).lossDataType(effectiveLossDataType);
+                maybeSetExampleWeights(builder, predictions, labels, example_weights);
+            } else if (nb::isinstance<RaggedTensor>(predictionsObject) && nb::isinstance<RaggedTensor>(labelsObject)) {
+                RaggedTensor predictions = nb::cast<RaggedTensor>(predictionsObject);
+                RaggedTensor labels = nb::cast<RaggedTensor>(labelsObject);
+                ThorPython::RegressionLossDType::validatePredictions(loss_name, predictions.getValues());
+                ThorPython::RegressionLossDType::validateLabels(loss_name, labels.getValues());
+                if (reported_loss_shape == LossShape::PER_OUTPUT)
+                    throw nb::value_error("ExpectileLoss instance: per_output reporting is undefined for ragged predictions.");
+                if (predictions.getOffsets() != labels.getOffsets())
+                    throw nb::value_error("ExpectileLoss instance: ragged predictions and labels must use the exact same row partition tensor.");
+                if (predictions.getBatchSize() != labels.getBatchSize() ||
+                    predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
+                    predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                    throw nb::value_error("ExpectileLoss instance: ragged predictions and labels must have identical value geometry.");
+                const DataType effectiveLossDataType = ThorPython::RegressionLossDType::effectiveLossDType(
+                    loss_name, predictions.getValuesDataType(), loss_data_type);
+                builder.predictions(predictions).labels(labels).lossDataType(effectiveLossDataType);
+                maybeSetRaggedExampleWeights(builder, predictions, labels, example_weights);
+            } else {
+                throw nb::type_error("ExpectileLoss predictions and labels must both be thor.Tensor or both be thor.RaggedTensor.");
+            }
+
+            builder.lossWeight(loss_weight.value_or(1.0f));
             setReportedLossShape(builder, reported_loss_shape);
             ExpectileLoss built = builder.build();
-
             new (self) ExpectileLoss(std::move(built));
         },
         "network"_a,
@@ -122,7 +158,25 @@ void bind_expectile_loss(nb::module_& losses) {
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
         "example_weights"_a.none() = nb::none(),
-        R"nbdoc(Construct an asymmetric squared-error expectile loss.)nbdoc");
+        R"nbdoc(Construct a dense or rank-1 ragged asymmetric squared-error expectile loss.)nbdoc");
+
+    expectile_loss.def("get_predictions", [](const ExpectileLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.Loss::getPredictions());
+    });
+    expectile_loss.def("get_labels", [](const ExpectileLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedLabels());
+        return nb::cast(self.Loss::getLabels());
+    });
+    expectile_loss.def("get_raw_loss", [](const ExpectileLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedRawLoss());
+        return nb::cast(self.Loss::getRawLoss());
+    });
+    expectile_loss.def("get_loss", [](const ExpectileLoss& self) -> nb::object {
+        if (self.isRagged() && self.getLossShape() == LossShape::RAW) return nb::cast(self.getRaggedLoss());
+        return nb::cast(self.Loss::getLoss());
+    });
+    expectile_loss.def_prop_ro("is_ragged", &ExpectileLoss::isRagged);
 
     expectile_loss.def_prop_ro("expectile", &ExpectileLoss::getExpectile);
 
@@ -138,5 +192,11 @@ The factor of two makes expectile=0.5 exactly equal to MSE, including its gradie
 Expectiles below 0.5 emphasize over-prediction errors and estimate lower conditional
 expectiles; expectiles above 0.5 emphasize under-prediction errors and estimate upper
 conditional expectiles.
+
+
+Predictions and labels may both be dense tensors or rank-1 ragged tensors. Ragged
+inputs must share the exact row partition. Ragged reporting supports none, raw,
+per-example, and batch; per-output is undefined. Dense [1] example weights are
+broadcast over each logical row's active tokens.
 )nbdoc";
 }

@@ -563,3 +563,86 @@ def test_gamma_nll_loss_learned_log_dispersion_matches_reference():
 
     expected = _gamma_mean_dispersion_reference(mean, labels, dispersion, eps) * weights
     np.testing.assert_allclose(np.array(outputs["loss"].numpy(), copy=True), expected, rtol=2e-5, atol=2e-5)
+
+
+def _r10i_ragged_pair(network, prefix="r10i", dtype=thor.DataType.fp32):
+    predictions = thor.layers.RaggedNetworkInput(
+        network,
+        f"{prefix}_predictions",
+        dtype,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    labels = thor.layers.RaggedNetworkInput(
+        network,
+        f"{prefix}_labels",
+        dtype,
+        [2],
+        partition=predictions,
+    )
+    return predictions, labels
+
+
+def test_tweedie_loss_r10i_constructs_ragged_raw_and_preserves_partition():
+    n = _net("r10i_tweedie")
+    predictions, labels = _r10i_ragged_pair(n, "tweedie")
+    loss = thor.losses.distribution.TweedieLoss(
+        n,
+        predictions,
+        labels,
+        power=1.5,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert loss.is_ragged
+    assert loss.get_predictions() == predictions
+    assert loss.get_labels() == labels
+    assert isinstance(loss.get_loss(), thor.RaggedTensor)
+    assert loss.get_loss().offsets == predictions.offsets
+
+
+def test_gamma_nll_loss_r10i_constructs_ragged_dispersion_and_preserves_partition():
+    n = _net("r10i_gamma")
+    mean, labels = _r10i_ragged_pair(n, "gamma")
+    dispersion = thor.layers.RaggedNetworkInput(
+        n,
+        "gamma_dispersion",
+        thor.DataType.fp32,
+        [2],
+        partition=mean,
+    )
+    weights = thor.layers.NetworkInput(n, "gamma_weights", [1], thor.DataType.fp16).get_feature_output()
+    loss = thor.losses.distribution.GammaNLLLoss(
+        n,
+        mean,
+        labels,
+        dispersion=dispersion,
+        example_weights=weights,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert loss.is_ragged
+    assert loss.dispersion == dispersion
+    assert isinstance(loss.get_loss(), thor.RaggedTensor)
+    assert loss.get_loss().offsets == mean.offsets
+    assert loss.example_weights == weights
+
+
+def test_gamma_tweedie_r10i_reject_per_output_and_mismatched_partition():
+    n = _net("r10i_distribution_reject")
+    predictions, labels = _r10i_ragged_pair(n, "base")
+    with pytest.raises(ValueError, match=r"per_output.*undefined"):
+        thor.losses.distribution.TweedieLoss(
+            n, predictions, labels, reported_loss_shape=thor.losses.LossShape.per_output
+        )
+    different = thor.layers.RaggedNetworkInput(
+        n,
+        "different_partition",
+        thor.DataType.fp32,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    with pytest.raises(ValueError, match=r"exact same row partition"):
+        thor.losses.distribution.GammaNLLLoss(n, predictions, labels, dispersion=different)

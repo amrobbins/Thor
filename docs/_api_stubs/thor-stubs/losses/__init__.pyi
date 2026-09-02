@@ -133,8 +133,8 @@ class BinaryCrossEntropy(Loss):
     Parameters
     ----------
     network : thor.Network
-    predictions : thor.Tensor
-    labels : thor.Tensor
+    predictions : thor.Tensor or thor.RaggedTensor
+    labels : thor.Tensor or thor.RaggedTensor
     loss_data_type : thor.DataType, default thor.DataType.fp32
     reported_loss_shape : thor.losses.LossShape, default thor.losses.LossShape.batch
         Controls the reported loss tensor:
@@ -142,15 +142,26 @@ class BinaryCrossEntropy(Loss):
         * ``none`` does not expose a reportable loss tensor; the raw loss remains the training objective.
         * ``batch`` averages over the batch after summing all non-batch values.
         * ``per_example`` sums all non-batch values independently for each example.
-        * ``per_output`` averages over the batch and preserves every non-batch dimension.
+        * ``per_output`` averages over the batch and preserves every non-batch dimension for dense inputs; it is undefined for ragged inputs.
         * ``raw`` reports the unreduced pointwise loss.
 
     If you want to inspect mutually exclusive binary categories, it may be more convenient
     to use SparseCategoricalCrossEntropy with two classes.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, loss_data_type: thor.DataType = thor.DataType.fp32, reported_loss_shape: LossShape = LossShape.batch, *, loss_weight: float | None = None) -> None:
-        """Construct a Binary Cross Entropy loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, loss_data_type: thor.DataType = thor.DataType.fp32, reported_loss_shape: LossShape = LossShape.batch, *, loss_weight: float | None = None) -> None:
+        """Construct a dense or rank-1 ragged Binary Cross Entropy loss."""
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
 class CategoricalCrossEntropy(Loss):
     r"""
@@ -220,146 +231,178 @@ class MAE(Loss):
     """
     MAE loss.
 
-    Parameters
-    ----------
-    network : thor.Network
-    predictions : thor.Tensor
-    labels : thor.Tensor
-    loss_data_type : thor.DataType | None, default fp16 for fp16 predictions, otherwise fp32
-    reported_loss_shape : thor.losses.LossShape, default thor.losses.LossShape.batch
-        Controls the reported loss tensor:
+    ``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or
+    rank-1 ``thor.RaggedTensor`` objects. Ragged inputs must share the exact same
+    row-partition tensor. Ragged loss reporting supports ``none``, ``raw``,
+    ``per_example``, and ``batch``; ``per_output`` is intentionally undefined.
 
-        * ``none`` does not expose a reportable loss tensor; the raw loss remains the training objective.
-        * ``batch`` averages over the batch after summing all non-batch values.
-        * ``per_example`` sums all non-batch values independently for each example.
-        * ``per_output`` averages over the batch and preserves every non-batch dimension.
-        * ``raw`` reports the unreduced pointwise loss.
+    For ragged inputs, ``raw`` returns a ``thor.RaggedTensor`` with the same row
+    partition. ``per_example`` returns one dense scalar per logical row and
+    ``batch`` averages those row sums over valid logical examples rather than over
+    active tokens. For ragged inputs, ``example_weights`` must have dimensions
+    ``[1]`` and supplies one scalar weight per logical row; the weight is broadcast
+    to that row's active tokens and scales both loss and prediction gradient.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
-        """Construct a MAE loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
+        """Construct a dense or rank-1 ragged MAE loss."""
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
 class MAPE(Loss):
     """
     MAPE loss.
 
-    Parameters
-    ----------
-    network : thor.Network
-    predictions : thor.Tensor
-    labels : thor.Tensor
-    loss_data_type : thor.DataType | None, default same data type as predictions
-    reported_loss_shape : thor.losses.LossShape, default thor.losses.LossShape.batch
-        Controls the reported loss tensor:
-
-        * ``none`` does not expose a reportable loss tensor; the raw loss remains the training objective.
-        * ``batch`` averages over the batch after summing all non-batch values.
-        * ``per_example`` sums all non-batch values independently for each example.
-        * ``per_output`` averages over the batch and preserves every non-batch dimension.
-        * ``raw`` reports the unreduced pointwise loss.
+    ``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or rank-1
+    ``thor.RaggedTensor`` objects. Ragged inputs must share the exact same row
+    partition. Ragged reporting supports ``none``, ``raw``, ``per_example``, and
+    ``batch``; ``per_output`` is intentionally undefined. ``batch`` averages
+    per-row active-token sums over valid logical examples rather than active tokens.
+    Ragged MAPE preserves the dense MAPE stability contract: epsilon=1e-4 and a maximum loss/gradient magnitude of 1000.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None) -> None:
-        """Construct a MAPE loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None) -> None:
+        """Construct a dense or rank-1 ragged MAPE loss."""
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
 class MSE(Loss):
     """
     MSE loss.
 
-    Parameters
-    ----------
-    network : thor.Network
-    predictions : thor.Tensor
-    labels : thor.Tensor
-    loss_data_type : thor.DataType | None, default fp16 for fp16 predictions, otherwise fp32
-    reported_loss_shape : thor.losses.LossShape, default thor.losses.LossShape.batch
-        Controls the reported loss tensor:
+    ``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or
+    rank-1 ``thor.RaggedTensor`` objects. Ragged inputs must share the exact same
+    row-partition tensor. Ragged loss reporting supports ``none``, ``raw``,
+    ``per_example``, and ``batch``; ``per_output`` is intentionally undefined.
 
-        * ``none`` does not expose a reportable loss tensor; the raw loss remains the training objective.
-        * ``batch`` averages over the batch after summing all non-batch values.
-        * ``per_example`` sums all non-batch values independently for each example.
-        * ``per_output`` averages over the batch and preserves every non-batch dimension.
-        * ``raw`` reports the unreduced pointwise loss.
+    For ragged inputs, ``raw`` returns a ``thor.RaggedTensor`` with the same row
+    partition. ``per_example`` returns one dense scalar per logical row and
+    ``batch`` averages those row sums over valid logical examples rather than over
+    active tokens. For ragged inputs, ``example_weights`` must have dimensions
+    ``[1]`` and supplies one scalar weight per logical row; the weight is broadcast
+    to that row's active tokens and scales both loss and prediction gradient.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
-        """Construct a MSE loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
+        """Construct a dense or rank-1 ragged MSE loss."""
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
 class MeanPowerError(Loss):
     """
     MeanPowerError loss.
 
-    MeanPowerError computes the mean absolute residual raised to a configurable
-    power:
+    ``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or
+    rank-1 ``thor.RaggedTensor`` objects. Ragged inputs must share the exact same
+    row-partition tensor. Ragged loss reporting supports ``none``, ``raw``,
+    ``per_example``, and ``batch``; ``per_output`` is intentionally undefined.
 
-        loss = mean(abs(prediction - label) ** exponent)
-
-    The exponent must be finite and greater than or equal to 1.0. The most useful
-    range for ordinary regression losses is usually 1.0 <= exponent <= 2.0:
-
-        MeanPowerError(exponent=1.0) is MeanAbsoluteError / MAE.
-        MeanPowerError(exponent=2.0) is MeanSquaredError / MSE.
-        1.0 < exponent < 2.0 gives behavior between MAE and MSE.
-
-    Values greater than 2.0 are allowed for cases that intentionally give very large
-    errors more leverage than MSE, but they are more outlier-sensitive.
-
-    Parameters
-    ----------
-    network : thor.Network
-    predictions : thor.Tensor
-    labels : thor.Tensor
-    exponent : float, default 1.5
-        Power applied to abs(prediction - label). Must be >= 1.0.
-    loss_data_type : thor.DataType | None, default fp16 for fp16 predictions, otherwise fp32
-    reported_loss_shape : thor.losses.LossShape, default thor.losses.LossShape.batch
-        Controls the reported loss tensor:
-
-        * ``none`` does not expose a reportable loss tensor; the raw loss remains the training objective.
-        * ``batch`` averages over the batch after summing all non-batch values.
-        * ``per_example`` sums all non-batch values independently for each example.
-        * ``per_output`` averages over the batch and preserves every non-batch dimension.
-        * ``raw`` reports the unreduced pointwise loss.
+    The exponent must be finite and greater than or equal to 1.0. For ragged
+    inputs, ``raw`` preserves the partition, ``per_example`` returns one dense
+    scalar per logical row, and ``batch`` averages those row sums over valid
+    logical examples rather than active tokens. Dense ``[1]`` example weights are
+    broadcast to active tokens in each row and scale both loss and prediction
+    gradient.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, exponent: float = 1.5, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
-        """Construct a MeanPowerError loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, exponent: float = 1.5, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
+        """Construct a dense or rank-1 ragged MeanPowerError loss."""
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
     @property
     def exponent(self) -> float: ...
 
 class SmoothL1Loss(Loss):
     """
-    Smooth L1 loss.
+    SmoothL1Loss loss.
 
-    SmoothL1Loss uses the PyTorch-style beta parameterization:
-
-        0.5 * (prediction - label)^2 / beta    if |prediction - label| < beta
-        |prediction - label| - 0.5 * beta      otherwise
-
-    HuberLoss(delta=beta) is beta times SmoothL1Loss(beta=beta).
+    ``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or rank-1
+    ``thor.RaggedTensor`` objects. Ragged inputs must share the exact same row
+    partition. Ragged reporting supports ``none``, ``raw``, ``per_example``, and
+    ``batch``; ``per_output`` is intentionally undefined. ``batch`` averages
+    per-row active-token sums over valid logical examples rather than active tokens.
+    SmoothL1Loss uses the PyTorch-style beta parameterization.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, beta: float = 1.0, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None) -> None:
-        """Construct a Smooth L1 loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, beta: float = 1.0, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None) -> None:
+        """Construct a dense or rank-1 ragged SmoothL1Loss loss."""
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
     @property
     def beta(self) -> float: ...
 
 class HuberLoss(Loss):
     """
-    Huber loss.
+    HuberLoss loss.
 
-    HuberLoss uses the standard delta parameterization:
-
-        0.5 * (prediction - label)^2                    if |prediction - label| <= delta
-        delta * (|prediction - label| - 0.5 * delta)    otherwise
-
-    HuberLoss(delta=beta) is beta times SmoothL1Loss(beta=beta).
+    ``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or rank-1
+    ``thor.RaggedTensor`` objects. Ragged inputs must share the exact same row
+    partition. Ragged reporting supports ``none``, ``raw``, ``per_example``, and
+    ``batch``; ``per_output`` is intentionally undefined. ``batch`` averages
+    per-row active-token sums over valid logical examples rather than active tokens.
+    HuberLoss uses the standard delta parameterization.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, delta: float = 1.0, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None) -> None:
-        """Construct a Huber loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, delta: float = 1.0, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None) -> None:
+        """Construct a dense or rank-1 ragged HuberLoss loss."""
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
     @property
     def delta(self) -> float: ...
@@ -405,10 +448,27 @@ class QuantileLoss(Loss):
         (q - 1) * error    otherwise
 
     The subgradient at zero error is defined as 0.
+
+
+    Predictions and labels may both be dense tensors or rank-1 ragged tensors. Ragged
+    inputs must share the exact row partition. Ragged reporting supports none, raw,
+    per-example, and batch; per-output is undefined. Dense [1] example weights are
+    broadcast over each logical row's active tokens.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, quantile: float = 0.5, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
-        """Construct a Quantile / pinball loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, quantile: float = 0.5, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
+        """Construct a dense or rank-1 ragged Quantile / pinball loss."""
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
     @property
     def quantile(self) -> float: ...
@@ -428,10 +488,29 @@ class ExpectileLoss(Loss):
     Expectiles below 0.5 emphasize over-prediction errors and estimate lower conditional
     expectiles; expectiles above 0.5 emphasize under-prediction errors and estimate upper
     conditional expectiles.
+
+
+    Predictions and labels may both be dense tensors or rank-1 ragged tensors. Ragged
+    inputs must share the exact row partition. Ragged reporting supports none, raw,
+    per-example, and batch; per-output is undefined. Dense [1] example weights are
+    broadcast over each logical row's active tokens.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, expectile: float = 0.5, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
-        """Construct an asymmetric squared-error expectile loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, expectile: float = 0.5, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
+        """
+        Construct a dense or rank-1 ragged asymmetric squared-error expectile loss.
+        """
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
     @property
     def expectile(self) -> float: ...
@@ -454,10 +533,29 @@ class AsymmetricPowerLoss(Loss):
     change the fitted optimum, and preserves exact equality with MeanPowerError at the
     central level. Exponents between 1 and 2 provide asymmetric bounds with robustness
     between quantile loss and expectile loss.
+
+
+    Predictions and labels may both be dense tensors or rank-1 ragged tensors. Ragged
+    inputs must share the exact row partition. Ragged reporting supports none, raw,
+    per-example, and batch; per-output is undefined. Dense [1] example weights are
+    broadcast over each logical row's active tokens.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, level: float = 0.5, exponent: float = 1.5, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
-        """Construct an asymmetric absolute-power regression loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, level: float = 0.5, exponent: float = 1.5, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
+        """
+        Construct a dense or rank-1 ragged asymmetric absolute-power regression loss.
+        """
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
     @property
     def level(self) -> float: ...

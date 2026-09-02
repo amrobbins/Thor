@@ -126,3 +126,59 @@ def test_binary_cross_entropy_rejects_wrong_arity():
 
     with pytest.raises(TypeError):
         thor.losses.BinaryCrossEntropy(n, preds, labels, thor.DataType.fp32, thor.losses.LossShape.batch, 123, 456)  # extra arg
+
+
+def _r10h_ragged_bce_pair(network, prediction_dtype=thor.DataType.fp32, label_dtype=thor.DataType.uint8):
+    predictions = thor.layers.RaggedNetworkInput(
+        network,
+        "r10h_bce_predictions",
+        prediction_dtype,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    labels = thor.layers.RaggedNetworkInput(
+        network,
+        "r10h_bce_labels",
+        label_dtype,
+        [2],
+        partition=predictions,
+    )
+    return predictions, labels
+
+
+def test_binary_cross_entropy_r10h_constructs_ragged_raw_and_preserves_partition():
+    n = _net()
+    predictions, labels = _r10h_ragged_bce_pair(n)
+    loss = thor.losses.BinaryCrossEntropy(
+        n,
+        predictions,
+        labels,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert loss.is_ragged
+    assert loss.get_predictions() == predictions
+    assert loss.get_labels() == labels
+    assert isinstance(loss.get_loss(), thor.RaggedTensor)
+    assert loss.get_loss().offsets == predictions.offsets
+    assert loss.get_raw_loss().values.get_data_type() == thor.DataType.fp32
+
+
+def test_binary_cross_entropy_r10h_rejects_per_output_and_different_partition():
+    n = _net()
+    predictions, labels = _r10h_ragged_bce_pair(n)
+    with pytest.raises(ValueError, match=r"per_output.*undefined"):
+        thor.losses.BinaryCrossEntropy(n, predictions, labels, reported_loss_shape=thor.losses.LossShape.per_output)
+
+    different_labels = thor.layers.RaggedNetworkInput(
+        n,
+        "r10h_bce_different_labels",
+        thor.DataType.uint8,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    with pytest.raises(ValueError, match=r"exact same row partition"):
+        thor.losses.BinaryCrossEntropy(n, predictions, different_labels)

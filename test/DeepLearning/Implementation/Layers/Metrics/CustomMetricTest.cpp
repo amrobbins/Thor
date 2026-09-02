@@ -43,7 +43,49 @@ DynamicExpression buildMeanSquaredErrorMetricExpression() {
                              });
 }
 
+
+DynamicExpression buildPassThroughRatioMetricExpression() {
+    Expression numerator = Expression::input("predictions", DataType::FP32, DataType::FP32);
+    Expression denominator = Expression::input("labels", DataType::FP32, DataType::FP32);
+    Expression metric = numerator / denominator;
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(Expression::outputs({
+        {"metric", metric},
+        {Thor::METRIC_AGGREGATION_NUMERATOR_NAME, numerator},
+        {Thor::METRIC_AGGREGATION_DENOMINATOR_NAME, denominator},
+    }));
+    return DynamicExpression::fromExpressionDefinition(definition);
+}
+
 }  // namespace
+
+TEST(CustomMetric, RatioAggregationInfersPassThroughStatisticDTypes) {
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    // Implementation metric tensors include the batch axis, so use a one-example,
+    // one-feature physical input while keeping each pass-through statistic scalar.
+    TensorDescriptor descriptor(DataType::FP32, {1, 1});
+
+    vector<shared_ptr<Layer>> layers;
+    auto numeratorInput = make_shared<NetworkInput>(Tensor(gpuPlacement, descriptor));
+    auto denominatorInput = make_shared<NetworkInput>(Tensor(gpuPlacement, descriptor));
+    auto metric = make_shared<CustomMetric>(buildPassThroughRatioMetricExpression(),
+                                            "predictions",
+                                            "labels",
+                                            "metric",
+                                            "Ratio",
+                                            Thor::MetricAggregation::RATIO);
+    auto output = make_shared<NetworkOutput>(gpuPlacement);
+    layers = {numeratorInput, denominatorInput, metric, output};
+    LayerTestHelper::connectTwoLayers(numeratorInput, metric, 0, static_cast<int>(Metric::ConnectionType::FORWARD));
+    LayerTestHelper::connectTwoLayers(denominatorInput, metric, 0, static_cast<int>(Metric::ConnectionType::LABELS));
+    LayerTestHelper::connectTwoLayers(metric, output, static_cast<int>(Metric::ConnectionType::METRIC));
+
+    EXPECT_NO_THROW(LayerTestHelper::initializeNetwork(layers));
+    ASSERT_TRUE(metric->getFeatureOutput().has_value());
+    EXPECT_EQ(metric->getFeatureOutput()->getDataType(), DataType::FP32);
+    EXPECT_EQ(metric->getFeatureOutput()->getDimensions(), vector<uint64_t>({1, 1}));
+
+    LayerTestHelper::tearDownNetwork(layers);
+}
 
 TEST(CustomMetric, ComputesExpressionBackedMeanSquaredError) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);

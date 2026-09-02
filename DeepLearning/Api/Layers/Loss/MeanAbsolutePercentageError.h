@@ -3,9 +3,11 @@
 
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/Loss/MeanAbsolutePercentageError.h"
 #include <optional>
+#include <utility>
 
 namespace Thor {
 
@@ -24,12 +26,32 @@ class MAPE : public Loss {
 
     static void deserialize(const nlohmann::json &j, Network *network);
 
-   protected:
-    virtual bool isMultiLayer() const {
-        if (lossShape == LossShape::RAW)
-            return false;
-        return true;
+    [[nodiscard]] bool isRagged() const { return raggedPredictionsTensor.has_value(); }
+    [[nodiscard]] RaggedTensor getRaggedPredictions() const {
+        if (!raggedPredictionsTensor.has_value()) throw std::runtime_error("MAPE predictions are dense.");
+        return raggedPredictionsTensor.value();
     }
+    [[nodiscard]] RaggedTensor getRaggedLabels() const {
+        if (!raggedLabelsTensor.has_value()) throw std::runtime_error("MAPE labels are dense.");
+        return raggedLabelsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedRawLoss() const {
+        if (!raggedRawLossTensor.has_value()) throw std::runtime_error("MAPE raw loss is dense.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLoss() const {
+        if (!isRagged() || lossShape != LossShape::RAW || !raggedRawLossTensor.has_value())
+            throw std::runtime_error("MAPE does not expose a ragged reported loss for this LossShape.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] LossShape getLossShape() const { return lossShape; }
+
+   protected:
+    std::optional<RaggedTensor> raggedPredictionsTensor;
+    std::optional<RaggedTensor> raggedLabelsTensor;
+    std::optional<RaggedTensor> raggedRawLossTensor;
+
+    virtual bool isMultiLayer() const { return isRagged() || lossShape != LossShape::RAW; }
 
     virtual void buildSupportLayersAndAddToNetwork();
 
@@ -38,20 +60,16 @@ class MAPE : public Loss {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        // FIXME: How to prune backward then.
+        THOR_THROW_IF_FALSE(!isRagged());
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
-        std::shared_ptr<ThorImplementation::MeanAbsolutePercentageError> meanAbsolutePercentageError =
-            std::make_shared<ThorImplementation::MeanAbsolutePercentageError>(lossDataType);
-
-        return meanAbsolutePercentageError;
+        return std::make_shared<ThorImplementation::MeanAbsolutePercentageError>(lossDataType);
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         uint64_t lossShaperBytes = 0;
-        // Loss will be reported either element-wise or batch-wise, the shaper is only required when loss is batch-wise.
-        if (isMultiLayer()) {
+        if (isMultiLayer() && !isRagged()) {
             lossShaperBytes = LossShaper::Builder()
                                   .lossInput(lossTensor)
                                   .reportsBatchLoss()
@@ -65,100 +83,117 @@ class MAPE : public Loss {
 
 class MAPE::Builder {
    public:
+    virtual ~Builder() = default;
+
     virtual MAPE build() {
         THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_predictions.has_value());
-        THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+        const bool hasDensePredictions = _predictions.has_value();
+        const bool hasDenseLabels = _labels.has_value();
+        const bool hasRaggedPredictions = _raggedPredictions.has_value();
+        const bool hasRaggedLabels = _raggedLabels.has_value();
+        THOR_THROW_IF_FALSE(hasDensePredictions == hasDenseLabels);
+        THOR_THROW_IF_FALSE(hasRaggedPredictions == hasRaggedLabels);
+        THOR_THROW_IF_FALSE(hasDensePredictions != hasRaggedPredictions);
 
-        if (!_lossShape.has_value())
-            _lossShape = LossShape::BATCH;
-        if (!_lossDataType.has_value())
-            _lossDataType = _predictions.value().getDataType();
-        MAPE meanAbsolutePercentageError;
-        meanAbsolutePercentageError.predictionsTensor = _predictions.value();
-        meanAbsolutePercentageError.labelsTensor = _labels.value();
-        meanAbsolutePercentageError.lossDataType = _lossDataType.value();
+        if (!_lossShape.has_value()) _lossShape = LossShape::BATCH;
 
-        meanAbsolutePercentageError.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
-        meanAbsolutePercentageError.lossShape = _lossShape.value();
-        meanAbsolutePercentageError.network = _network.value();
-        meanAbsolutePercentageError.initialized = true;
-
-        if (meanAbsolutePercentageError.isMultiLayer()) {
-            meanAbsolutePercentageError.buildSupportLayersAndAddToNetwork();
+        MAPE loss;
+        if (hasDensePredictions) {
+            THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+            THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
+            THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+            if (!_lossDataType.has_value()) _lossDataType = _predictions.value().getDataType();
+            loss.predictionsTensor = _predictions.value();
+            loss.labelsTensor = _labels.value();
         } else {
-            // lossTensor is the one that comes directly out of MAPE, that may be replaced by a loss shaper.
-            meanAbsolutePercentageError.lossTensor = Tensor(_lossDataType.value(), _predictions.value().getDimensions());
-            meanAbsolutePercentageError.lossShaperInput = meanAbsolutePercentageError.lossTensor;
-            meanAbsolutePercentageError.addToNetwork(_network.value());
+            const RaggedTensor& predictions = _raggedPredictions.value();
+            const RaggedTensor& labels = _raggedLabels.value();
+            THOR_THROW_IF_FALSE(predictions.isInitialized() && labels.isInitialized());
+            THOR_THROW_IF_FALSE(predictions.getValues() != labels.getValues());
+            if (predictions.getOffsets() != labels.getOffsets())
+                throw std::invalid_argument("MAPE ragged predictions and labels must use the exact same row partition tensor.");
+            if (predictions.getBatchSize() != labels.getBatchSize() ||
+                predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
+                predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                throw std::invalid_argument("MAPE ragged predictions and labels must have identical value geometry.");
+            if (_lossShape.value() == LossShape::PER_OUTPUT)
+                throw std::invalid_argument("MAPE LossShape::PER_OUTPUT is undefined for ragged sequences.");
+            if (!_lossDataType.has_value()) _lossDataType = predictions.getValuesDataType();
+            loss.predictionsTensor = predictions.getValues();
+            loss.labelsTensor = labels.getValues();
+            loss.raggedPredictionsTensor = predictions;
+            loss.raggedLabelsTensor = labels;
         }
 
-        return meanAbsolutePercentageError;
+        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
+        loss.lossDataType = _lossDataType.value();
+        loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
+        loss.lossShape = _lossShape.value();
+        loss.network = _network.value();
+        loss.initialized = true;
+
+        if (loss.isRagged() || loss.isMultiLayer()) {
+            loss.buildSupportLayersAndAddToNetwork();
+        } else {
+            loss.lossTensor = Tensor(_lossDataType.value(), _predictions.value().getDimensions());
+            loss.lossShaperInput = loss.lossTensor;
+            loss.addToNetwork(_network.value());
+        }
+
+        return loss;
     }
 
-    virtual MAPE::Builder &network(Network &_network) {
+    virtual Builder &network(Network &_network) {
         THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
-    virtual MAPE::Builder &predictions(Tensor _predictions) {
+    virtual Builder &predictions(Tensor predictions) {
         THOR_THROW_IF_FALSE(!this->_predictions.has_value());
-        THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
-        this->_predictions = _predictions;
+        THOR_THROW_IF_FALSE(!predictions.getDimensions().empty());
+        this->_predictions = std::move(predictions);
         return *this;
     }
 
-    virtual MAPE::Builder &labels(Tensor _labels) {
+    virtual Builder &predictions(RaggedTensor predictions) {
+        THOR_THROW_IF_FALSE(!this->_raggedPredictions.has_value());
+        THOR_THROW_IF_FALSE(predictions.isInitialized());
+        this->_raggedPredictions = std::move(predictions);
+        return *this;
+    }
+
+    virtual Builder &labels(Tensor labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
-        THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
-        this->_labels = _labels;
+        THOR_THROW_IF_FALSE(!labels.getDimensions().empty());
+        this->_labels = std::move(labels);
         return *this;
     }
 
-    virtual MAPE::Builder &reportsBatchLoss() {
-        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::BATCH;
+    virtual Builder &labels(RaggedTensor labels) {
+        THOR_THROW_IF_FALSE(!this->_raggedLabels.has_value());
+        THOR_THROW_IF_FALSE(labels.isInitialized());
+        this->_raggedLabels = std::move(labels);
         return *this;
     }
 
-    virtual MAPE::Builder &reportsPerExampleLoss() {
-        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::PER_EXAMPLE;
-        return *this;
-    }
+    virtual Builder &reportsBatchLoss() { THOR_THROW_IF_FALSE(!_lossShape.has_value()); _lossShape = LossShape::BATCH; return *this; }
+    virtual Builder &reportsPerExampleLoss() { THOR_THROW_IF_FALSE(!_lossShape.has_value()); _lossShape = LossShape::PER_EXAMPLE; return *this; }
+    virtual Builder &reportsPerOutputLoss() { THOR_THROW_IF_FALSE(!_lossShape.has_value()); _lossShape = LossShape::PER_OUTPUT; return *this; }
+    virtual Builder &reportsNoLoss() { THOR_THROW_IF_FALSE(!_lossShape.has_value()); _lossShape = LossShape::NONE; return *this; }
+    virtual Builder &reportsRawLoss() { THOR_THROW_IF_FALSE(!_lossShape.has_value()); _lossShape = LossShape::RAW; return *this; }
 
-    virtual MAPE::Builder &reportsPerOutputLoss() {
-        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::PER_OUTPUT;
-        return *this;
-    }
-
-    virtual MAPE::Builder &reportsNoLoss() {
-        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::NONE;
-        return *this;
-    }
-
-    virtual MAPE::Builder &reportsRawLoss() {
-        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::RAW;
-        return *this;
-    }
-
-    virtual MAPE::Builder & lossWeight(float lossWeight) {
-        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+    virtual Builder &lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!_lossWeight.has_value());
         ThorImplementation::validateLossWeight(lossWeight);
-        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        _lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
         return *this;
     }
 
-    virtual MAPE::Builder &lossDataType(DataType _lossDataType) {
-        THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
-        this->_lossDataType = _lossDataType;
+    virtual Builder &lossDataType(DataType lossDataType) {
+        THOR_THROW_IF_FALSE(!_lossDataType.has_value());
+        THOR_THROW_IF_FALSE(lossDataType == DataType::FP16 || lossDataType == DataType::FP32);
+        _lossDataType = lossDataType;
         return *this;
     }
 
@@ -166,10 +201,11 @@ class MAPE::Builder {
     std::optional<Network *> _network;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
+    std::optional<RaggedTensor> _raggedPredictions;
+    std::optional<RaggedTensor> _raggedLabels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
     std::optional<float> _lossWeight;
 };
-
 
 }  // namespace Thor

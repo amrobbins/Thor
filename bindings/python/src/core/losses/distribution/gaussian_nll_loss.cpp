@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Loss/GaussianNLLLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -99,6 +100,51 @@ void maybeSetExampleWeights(GaussianNLLLoss::Builder &builder,
     }
     builder.exampleWeights(example_weights.value());
 }
+
+void validateRaggedGaussianNLLLossArguments(const string& lossName,
+                                            const RaggedTensor& predictions,
+                                            const RaggedTensor& labels,
+                                            const RaggedTensor& variance,
+                                            optional<DataType> lossDataType,
+                                            LossShape reportedLossShape,
+                                            float eps) {
+    if (!isFloatingDType(predictions.getValuesDataType()))
+        throw nb::value_error("GaussianNLLLoss instance: predictions must use fp16 or fp32 dtype");
+    if (!isFloatingDType(labels.getValuesDataType()))
+        throw nb::value_error("GaussianNLLLoss instance: labels must use fp16 or fp32 dtype");
+    if (!isFloatingDType(variance.getValuesDataType()))
+        throw nb::value_error("GaussianNLLLoss instance: variance must use fp16 or fp32 dtype");
+    if (predictions.getOffsets() != labels.getOffsets() || predictions.getOffsets() != variance.getOffsets())
+        throw nb::value_error("GaussianNLLLoss instance: ragged predictions, labels, and variance must use the exact same row partition tensor.");
+    if (predictions.getBatchSize() != labels.getBatchSize() || predictions.getBatchSize() != variance.getBatchSize() ||
+        predictions.getMaxTotalValues() != labels.getMaxTotalValues() || predictions.getMaxTotalValues() != variance.getMaxTotalValues() ||
+        predictions.getTrailingDimensions() != labels.getTrailingDimensions() ||
+        predictions.getTrailingDimensions() != variance.getTrailingDimensions())
+        throw nb::value_error("GaussianNLLLoss instance: ragged predictions, labels, and variance must have identical value geometry.");
+    const DataType effectiveLossDataType = lossDataType.value_or(predictions.getValuesDataType());
+    if (!isFloatingDType(effectiveLossDataType))
+        throw nb::value_error("GaussianNLLLoss instance: loss_data_type must be fp16 or fp32");
+    if (eps <= 0.0f) throw nb::value_error("GaussianNLLLoss instance: eps must be greater than zero");
+    validateReportedLossShape(reportedLossShape, lossName);
+    if (reportedLossShape == LossShape::PER_OUTPUT)
+        throw nb::value_error("GaussianNLLLoss instance: reported_loss_shape per_output is undefined for ragged sequences.");
+}
+
+void maybeSetRaggedExampleWeights(GaussianNLLLoss::Builder& builder,
+                                  const RaggedTensor& predictions,
+                                  const RaggedTensor& labels,
+                                  const RaggedTensor& variance,
+                                  optional<Tensor> exampleWeights) {
+    if (!exampleWeights.has_value()) return;
+    if (exampleWeights.value() == predictions.getValues() || exampleWeights.value() == labels.getValues() ||
+        exampleWeights.value() == variance.getValues())
+        throw nb::value_error("GaussianNLLLoss instance: example_weights must be distinct from predictions, labels, and variance values.");
+    if (!isFloatingDType(exampleWeights->getDataType()))
+        throw nb::value_error("GaussianNLLLoss instance: example_weights must use fp16 or fp32 dtype.");
+    if (exampleWeights->getDimensions() != vector<uint64_t>{1})
+        throw nb::value_error("GaussianNLLLoss instance: ragged example_weights dimensions must be [1] for one scalar weight per logical row.");
+    builder.exampleWeights(exampleWeights.value());
+}
 }  // namespace
 
 void bind_gaussian_nll_loss(nb::module_ &losses) {
@@ -109,9 +155,9 @@ void bind_gaussian_nll_loss(nb::module_ &losses) {
         "__init__",
         [](GaussianNLLLoss *self,
            Network &network,
-           Tensor predictions,
-           Tensor labels,
-           Tensor variance,
+           nb::object predictionsObject,
+           nb::object labelsObject,
+           nb::object varianceObject,
            bool full,
            float eps,
            optional<DataType> loss_data_type,
@@ -120,23 +166,43 @@ void bind_gaussian_nll_loss(nb::module_ &losses) {
            bool log_variance,
            optional<Tensor> example_weights) {
             const string loss_name = "GaussianNLLLoss instance";
-            validateGaussianNLLLossArguments(loss_name, predictions, labels, variance, loss_data_type, reported_loss_shape, eps);
-
-            DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
+            if (eps <= 0.0f) throw nb::value_error("GaussianNLLLoss instance: eps must be greater than zero");
             GaussianNLLLoss::Builder builder;
             builder.network(network)
-                .predictions(predictions)
-                .labels(labels)
-                .variance(variance)
                 .logVariance(log_variance)
                 .full(full)
                 .eps(eps)
-                .lossDataType(effectiveLossDataType)
                 .lossWeight(loss_weight.value_or(1.0f));
-            maybeSetExampleWeights(builder, predictions, labels, variance, example_weights);
+
+            if (nb::isinstance<Tensor>(predictionsObject) && nb::isinstance<Tensor>(labelsObject) &&
+                nb::isinstance<Tensor>(varianceObject)) {
+                Tensor predictions = nb::cast<Tensor>(predictionsObject);
+                Tensor labels = nb::cast<Tensor>(labelsObject);
+                Tensor variance = nb::cast<Tensor>(varianceObject);
+                validateGaussianNLLLossArguments(loss_name, predictions, labels, variance, loss_data_type, reported_loss_shape, eps);
+                builder.predictions(predictions)
+                    .labels(labels)
+                    .variance(variance)
+                    .lossDataType(loss_data_type.value_or(predictions.getDataType()));
+                maybeSetExampleWeights(builder, predictions, labels, variance, example_weights);
+            } else if (nb::isinstance<RaggedTensor>(predictionsObject) && nb::isinstance<RaggedTensor>(labelsObject) &&
+                       nb::isinstance<RaggedTensor>(varianceObject)) {
+                RaggedTensor predictions = nb::cast<RaggedTensor>(predictionsObject);
+                RaggedTensor labels = nb::cast<RaggedTensor>(labelsObject);
+                RaggedTensor variance = nb::cast<RaggedTensor>(varianceObject);
+                validateRaggedGaussianNLLLossArguments(
+                    loss_name, predictions, labels, variance, loss_data_type, reported_loss_shape, eps);
+                builder.predictions(predictions)
+                    .labels(labels)
+                    .variance(variance)
+                    .lossDataType(loss_data_type.value_or(predictions.getValuesDataType()));
+                maybeSetRaggedExampleWeights(builder, predictions, labels, variance, example_weights);
+            } else {
+                throw nb::type_error(
+                    "GaussianNLLLoss predictions, labels, and variance must all be thor.Tensor or all be thor.RaggedTensor.");
+            }
             setReportedLossShape(builder, reported_loss_shape);
             GaussianNLLLoss built = builder.build();
-
             new (self) GaussianNLLLoss(std::move(built));
         },
         "network"_a,
@@ -151,9 +217,29 @@ void bind_gaussian_nll_loss(nb::module_ &losses) {
         "loss_weight"_a.none() = nb::none(),
         "log_variance"_a = false,
         "example_weights"_a.none() = nb::none(),
-        R"nbdoc(Construct a Gaussian negative log-likelihood loss.)nbdoc");
+        R"nbdoc(Construct a dense or rank-1 ragged Gaussian negative log-likelihood loss.)nbdoc");
 
-    gaussian_nll_loss.def_prop_ro("variance", &GaussianNLLLoss::getVariance);
+    gaussian_nll_loss.def("get_predictions", [](const GaussianNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.Loss::getPredictions());
+    });
+    gaussian_nll_loss.def("get_labels", [](const GaussianNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedLabels());
+        return nb::cast(self.Loss::getLabels());
+    });
+    gaussian_nll_loss.def("get_raw_loss", [](const GaussianNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedRawLoss());
+        return nb::cast(self.Loss::getRawLoss());
+    });
+    gaussian_nll_loss.def("get_loss", [](const GaussianNLLLoss& self) -> nb::object {
+        if (self.isRagged() && self.getLossShape() == LossShape::RAW) return nb::cast(self.getRaggedLoss());
+        return nb::cast(self.Loss::getLoss());
+    });
+    gaussian_nll_loss.def_prop_ro("is_ragged", &GaussianNLLLoss::isRagged);
+    gaussian_nll_loss.def_prop_ro("variance", [](const GaussianNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedVariance());
+        return nb::cast(self.getVariance());
+    });
     gaussian_nll_loss.def_prop_ro("log_variance", &GaussianNLLLoss::getLogVariance);
     gaussian_nll_loss.def_prop_ro("full", &GaussianNLLLoss::getFull);
     gaussian_nll_loss.def_prop_ro("eps", &GaussianNLLLoss::getEps);

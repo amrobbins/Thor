@@ -18,7 +18,10 @@ inline DynamicExpression makeExpression() {
     Expression predictedLabel = Expression::where(predictions >= Expression(0.5), Expression(1.0), Expression(0.0));
     Expression correct = Expression::where(predictedLabel == labels, Expression(1.0), Expression(0.0));
     Expression validity = Expression::input(Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
-    Expression correctCount = (correct * validity).reduce_sum({0, 1}, {0}, DataType::FP32);
+    // Correctness is exactly 0/1. Retain the historical FP16 workspace semantics and let
+    // CUB widen to FP32 internally instead of materializing a full FP32 correctness tensor.
+    Expression correctCount =
+        (correct * validity).withOutputDType(DataType::FP16).reduce_sum({0, 1}, {0}, DataType::FP32);
     Expression validCount = validity.reduce_sum({0, 1}, {0}, DataType::FP32);
     Expression metric = correctCount / validCount;
 

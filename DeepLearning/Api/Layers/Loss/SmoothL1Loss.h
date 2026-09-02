@@ -4,9 +4,11 @@
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 #include <optional>
+#include <utility>
 #include <stdexcept>
 
 namespace Thor {
@@ -27,7 +29,31 @@ class SmoothL1Loss : public Loss {
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
+    [[nodiscard]] bool isRagged() const { return raggedPredictionsTensor.has_value(); }
+    [[nodiscard]] RaggedTensor getRaggedPredictions() const {
+        if (!raggedPredictionsTensor.has_value()) throw std::runtime_error("SmoothL1Loss predictions are dense.");
+        return raggedPredictionsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLabels() const {
+        if (!raggedLabelsTensor.has_value()) throw std::runtime_error("SmoothL1Loss labels are dense.");
+        return raggedLabelsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedRawLoss() const {
+        if (!raggedRawLossTensor.has_value()) throw std::runtime_error("SmoothL1Loss raw loss is dense.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLoss() const {
+        if (!isRagged() || lossShape != LossShape::RAW || !raggedRawLossTensor.has_value())
+            throw std::runtime_error("SmoothL1Loss does not expose a ragged reported loss for this LossShape.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] LossShape getLossShape() const { return lossShape; }
+
    protected:
+    std::optional<RaggedTensor> raggedPredictionsTensor;
+    std::optional<RaggedTensor> raggedLabelsTensor;
+    std::optional<RaggedTensor> raggedRawLossTensor;
+
     virtual bool isMultiLayer() const { return true; }
 
     virtual void buildSupportLayersAndAddToNetwork();
@@ -47,7 +73,7 @@ class SmoothL1Loss : public Loss {
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         uint64_t lossShaperBytes = 0;
-        if (isMultiLayer()) {
+        if (isMultiLayer() && !isRagged()) {
             lossShaperBytes = LossShaper::Builder()
                                   .lossInput(lossTensor)
                                   .reportsBatchLoss()
@@ -67,105 +93,115 @@ class SmoothL1Loss::Builder {
 
     virtual SmoothL1Loss build() {
         THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_predictions.has_value());
-        THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+        const bool hasDensePredictions = _predictions.has_value();
+        const bool hasDenseLabels = _labels.has_value();
+        const bool hasRaggedPredictions = _raggedPredictions.has_value();
+        const bool hasRaggedLabels = _raggedLabels.has_value();
+        THOR_THROW_IF_FALSE(hasDensePredictions == hasDenseLabels);
+        THOR_THROW_IF_FALSE(hasRaggedPredictions == hasRaggedLabels);
+        THOR_THROW_IF_FALSE(hasDensePredictions != hasRaggedPredictions);
 
-        if (!_lossShape.has_value())
-            _lossShape = LossShape::BATCH;
-        if (!_lossDataType.has_value())
-            _lossDataType = _predictions.value().getDataType();
+        if (!_lossShape.has_value()) _lossShape = LossShape::BATCH;
+        const float parameter = _beta.value_or(1.0f);
+        THOR_THROW_IF_FALSE(parameter > 0.0f);
+
+        SmoothL1Loss loss;
+        if (hasDensePredictions) {
+            THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+            THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
+            THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+            if (!_lossDataType.has_value()) _lossDataType = _predictions.value().getDataType();
+            loss.predictionsTensor = _predictions.value();
+            loss.labelsTensor = _labels.value();
+        } else {
+            const RaggedTensor& predictions = _raggedPredictions.value();
+            const RaggedTensor& labels = _raggedLabels.value();
+            THOR_THROW_IF_FALSE(predictions.isInitialized() && labels.isInitialized());
+            THOR_THROW_IF_FALSE(predictions.getValues() != labels.getValues());
+            if (predictions.getOffsets() != labels.getOffsets())
+                throw std::invalid_argument("SmoothL1Loss ragged predictions and labels must use the exact same row partition tensor.");
+            if (predictions.getBatchSize() != labels.getBatchSize() ||
+                predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
+                predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                throw std::invalid_argument("SmoothL1Loss ragged predictions and labels must have identical value geometry.");
+            if (_lossShape.value() == LossShape::PER_OUTPUT)
+                throw std::invalid_argument("SmoothL1Loss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+            if (!_lossDataType.has_value()) _lossDataType = predictions.getValuesDataType();
+            loss.predictionsTensor = predictions.getValues();
+            loss.labelsTensor = labels.getValues();
+            loss.raggedPredictionsTensor = predictions;
+            loss.raggedLabelsTensor = labels;
+        }
+
         THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
-
-        float beta = _beta.value_or(1.0f);
-        THOR_THROW_IF_FALSE(beta > 0.0f);
-
-        SmoothL1Loss smoothL1Loss;
-        smoothL1Loss.predictionsTensor = _predictions.value();
-        smoothL1Loss.labelsTensor = _labels.value();
-        smoothL1Loss.lossDataType = _lossDataType.value();
-
-        smoothL1Loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
-        smoothL1Loss.lossShape = _lossShape.value();
-        smoothL1Loss.beta = beta;
-        smoothL1Loss.network = _network.value();
-        smoothL1Loss.initialized = true;
-
-        smoothL1Loss.buildSupportLayersAndAddToNetwork();
-
-        return smoothL1Loss;
+        loss.lossDataType = _lossDataType.value();
+        loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
+        loss.lossShape = _lossShape.value();
+        loss.beta = parameter;
+        loss.network = _network.value();
+        loss.initialized = true;
+        loss.buildSupportLayersAndAddToNetwork();
+        return loss;
     }
 
-    virtual SmoothL1Loss::Builder &network(Network &_network) {
+    virtual Builder &network(Network &_network) {
         THOR_THROW_IF_FALSE(!this->_network.has_value());
         this->_network = &_network;
         return *this;
     }
 
-    virtual SmoothL1Loss::Builder &predictions(Tensor _predictions) {
+    virtual Builder &predictions(Tensor predictions) {
         THOR_THROW_IF_FALSE(!this->_predictions.has_value());
-        THOR_THROW_IF_FALSE(!_predictions.getDimensions().empty());
-        this->_predictions = _predictions;
+        THOR_THROW_IF_FALSE(!predictions.getDimensions().empty());
+        this->_predictions = std::move(predictions);
         return *this;
     }
 
-    virtual SmoothL1Loss::Builder &labels(Tensor _labels) {
+    virtual Builder &predictions(RaggedTensor predictions) {
+        THOR_THROW_IF_FALSE(!this->_raggedPredictions.has_value());
+        THOR_THROW_IF_FALSE(predictions.isInitialized());
+        this->_raggedPredictions = std::move(predictions);
+        return *this;
+    }
+
+    virtual Builder &labels(Tensor labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
-        THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
-        this->_labels = _labels;
+        THOR_THROW_IF_FALSE(!labels.getDimensions().empty());
+        this->_labels = std::move(labels);
         return *this;
     }
 
-    virtual SmoothL1Loss::Builder &beta(float _beta) {
+    virtual Builder &labels(RaggedTensor labels) {
+        THOR_THROW_IF_FALSE(!this->_raggedLabels.has_value());
+        THOR_THROW_IF_FALSE(labels.isInitialized());
+        this->_raggedLabels = std::move(labels);
+        return *this;
+    }
+
+    virtual Builder &beta(float value) {
         THOR_THROW_IF_FALSE(!this->_beta.has_value());
-        THOR_THROW_IF_FALSE(_beta > 0.0f);
-        this->_beta = _beta;
+        THOR_THROW_IF_FALSE(value > 0.0f);
+        this->_beta = value;
         return *this;
     }
 
-    virtual SmoothL1Loss::Builder &reportsBatchLoss() {
-        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::BATCH;
-        return *this;
-    }
+    virtual Builder &reportsBatchLoss() { THOR_THROW_IF_FALSE(!_lossShape.has_value()); _lossShape = LossShape::BATCH; return *this; }
+    virtual Builder &reportsPerExampleLoss() { THOR_THROW_IF_FALSE(!_lossShape.has_value()); _lossShape = LossShape::PER_EXAMPLE; return *this; }
+    virtual Builder &reportsPerOutputLoss() { THOR_THROW_IF_FALSE(!_lossShape.has_value()); _lossShape = LossShape::PER_OUTPUT; return *this; }
+    virtual Builder &reportsNoLoss() { THOR_THROW_IF_FALSE(!_lossShape.has_value()); _lossShape = LossShape::NONE; return *this; }
+    virtual Builder &reportsRawLoss() { THOR_THROW_IF_FALSE(!_lossShape.has_value()); _lossShape = LossShape::RAW; return *this; }
 
-    virtual SmoothL1Loss::Builder &reportsPerExampleLoss() {
-        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::PER_EXAMPLE;
-        return *this;
-    }
-
-    virtual SmoothL1Loss::Builder &reportsPerOutputLoss() {
-        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::PER_OUTPUT;
-        return *this;
-    }
-
-    virtual SmoothL1Loss::Builder &reportsNoLoss() {
-        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::NONE;
-        return *this;
-    }
-
-    virtual SmoothL1Loss::Builder &reportsRawLoss() {
-        THOR_THROW_IF_FALSE(!this->_lossShape.has_value());
-        _lossShape = LossShape::RAW;
-        return *this;
-    }
-
-    virtual SmoothL1Loss::Builder & lossWeight(float lossWeight) {
-        THOR_THROW_IF_FALSE(!this->_lossWeight.has_value());
+    virtual Builder &lossWeight(float lossWeight) {
+        THOR_THROW_IF_FALSE(!_lossWeight.has_value());
         ThorImplementation::validateLossWeight(lossWeight);
-        this->_lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
+        _lossWeight = ThorImplementation::normalizeLossWeight(lossWeight);
         return *this;
     }
 
-    virtual SmoothL1Loss::Builder &lossDataType(DataType _lossDataType) {
-        THOR_THROW_IF_FALSE(!this->_lossDataType.has_value());
-        THOR_THROW_IF_FALSE(_lossDataType == DataType::FP16 || _lossDataType == DataType::FP32);
-        this->_lossDataType = _lossDataType;
+    virtual Builder &lossDataType(DataType lossDataType) {
+        THOR_THROW_IF_FALSE(!_lossDataType.has_value());
+        THOR_THROW_IF_FALSE(lossDataType == DataType::FP16 || lossDataType == DataType::FP32);
+        _lossDataType = lossDataType;
         return *this;
     }
 
@@ -173,6 +209,8 @@ class SmoothL1Loss::Builder {
     std::optional<Network *> _network;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
+    std::optional<RaggedTensor> _raggedPredictions;
+    std::optional<RaggedTensor> _raggedLabels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
     std::optional<float> _lossWeight;

@@ -2,6 +2,8 @@
 #include "DeepLearning/Api/Layers/Loss/BinaryCrossEntropy.h"
 
 #include "DeepLearning/Implementation/Layers/Loss.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 
@@ -46,6 +48,50 @@ ThorImplementation::DynamicExpression makeBinaryCrossEntropyGradientExpression(D
 
 void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
     THOR_THROW_IF_FALSE(!rawLossAddedToNetwork);
+    if (isRagged()) {
+        if (lossShape == LossShape::PER_OUTPUT)
+            throw invalid_argument("BinaryCrossEntropy LossShape::PER_OUTPUT is undefined for ragged sequences.");
+        THOR_THROW_IF_FALSE(predictionsTensor.getDataType() == DataType::FP16 || predictionsTensor.getDataType() == DataType::FP32);
+
+        RaggedCustomLoss rawBinaryCrossEntropy = RaggedCustomLoss::Builder()
+                                                     .network(*network)
+                                                     .lossExpression(makeBinaryCrossEntropyLossExpression(lossDataType))
+                                                     .gradientExpression(makeBinaryCrossEntropyGradientExpression(predictionsTensor.getDataType()))
+                                                     .predictions(raggedPredictionsTensor.value())
+                                                     .labels(raggedLabelsTensor.value())
+                                                     .predictionsName(kPredictionsName)
+                                                     .labelsName(kLabelsName)
+                                                     .lossName(kLossName)
+                                                     .gradientName(kGradientName)
+                                                     .lossDataType(lossDataType)
+                                                     .lossWeight(lossWeight.value_or(1.0f))
+                                                     .build();
+        raggedRawLossTensor = rawBinaryCrossEntropy.getRaggedRawLoss();
+        lossShaperInput = raggedRawLossTensor->getValues();
+        if (lossShape == LossShape::NONE) {
+            lossTensor = lossShaperInput;
+            Stub::Builder().network(*network).inputTensor(lossShaperInput).build();
+        } else if (lossShape == LossShape::RAW) {
+            lossTensor = lossShaperInput;
+        } else if (lossShape == LossShape::PER_EXAMPLE) {
+            lossTensor = RaggedLossShaper::Builder()
+                             .network(*network)
+                             .lossInput(raggedRawLossTensor.value())
+                             .reportsPerExampleLoss()
+                             .build()
+                             .getLossOutput();
+        } else if (lossShape == LossShape::BATCH) {
+            lossTensor = RaggedLossShaper::Builder()
+                             .network(*network)
+                             .lossInput(raggedRawLossTensor.value())
+                             .reportsBatchLoss()
+                             .build()
+                             .getLossOutput();
+        } else {
+            THOR_UNREACHABLE();
+        }
+        return;
+    }
 
     CustomLoss rawBinaryCrossEntropy = CustomLoss::Builder()
                                            .network(*network)
@@ -59,14 +105,23 @@ void BinaryCrossEntropy::buildSupportLayersAndAddToNetwork() {
                                            .gradientName(kGradientName)
                                            .reportsRawLoss()
                                            .lossDataType(lossDataType)
-                                       .lossWeight(lossWeight.value_or(1.0f))
+                                           .lossWeight(lossWeight.value_or(1.0f))
                                            .build();
     lossShaperInput = rawBinaryCrossEntropy.getLoss();
-
     finalizeLossReporting();
 }
 
 json BinaryCrossEntropy::architectureJson() const {
+    if (isRagged()) {
+        json j = Loss::architectureJson();
+        j["layer_type"] = "binary_cross_entropy";
+        j["loss_shape"] = lossShape;
+        j["ragged_predictions"] = raggedPredictionsTensor->architectureJson();
+        j["ragged_labels"] = raggedLabelsTensor->architectureJson();
+        if (raggedRawLossTensor.has_value()) j["ragged_raw_loss"] = raggedRawLossTensor->architectureJson();
+        return j;
+    }
+
     // The thing that is deserialized must be just the base layer, any helper layers
     // are themselves deserialized. So loss_shape is set to RAW.
 
@@ -92,6 +147,24 @@ void BinaryCrossEntropy::deserialize(const json &j, Network *network) {
         throw runtime_error("Unsupported version in BinaryCrossEntropy::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "binary_cross_entropy")
         throw runtime_error("Layer type mismatch in BinaryCrossEntropy::deserialize: " + j.at("layer_type").get<std::string>());
+
+    if (j.contains("ragged_predictions")) {
+        RaggedTensor predictions = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_predictions"), network, "BinaryCrossEntropy");
+        RaggedTensor labels = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_labels"), network, "BinaryCrossEntropy");
+        BinaryCrossEntropy::Builder builder;
+        builder.network(*network).predictions(predictions).labels(labels).lossDataType(j.at("loss_data_type").get<DataType>());
+        builder.lossWeight(ThorImplementation::lossWeightFromJson(j).value_or(1.0f));
+        switch (j.at("loss_shape").get<LossShape>()) {
+            case LossShape::NONE: builder.reportsNoLoss(); break;
+            case LossShape::BATCH: builder.reportsBatchLoss(); break;
+            case LossShape::PER_EXAMPLE: builder.reportsPerExampleLoss(); break;
+            case LossShape::RAW: builder.reportsRawLoss(); break;
+            case LossShape::PER_OUTPUT:
+                throw runtime_error("Serialized ragged BinaryCrossEntropy cannot use LossShape::PER_OUTPUT.");
+        }
+        (void)builder.build();
+        return;
+    }
 
     // Only connect the historical single raw-loss BCE layer and add it to the network.
     // New saves will contain a raw custom_loss support layer instead.

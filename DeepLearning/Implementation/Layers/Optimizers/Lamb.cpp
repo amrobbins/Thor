@@ -103,8 +103,8 @@ CustomOptimizer::UpdateExpressionBuilder makeUpdateExpressionBuilder(shared_ptr<
 
         Expression trustRatio = Expression::constantScalar(1.0f);
         if (weightDims.size() > 1) {
-            Expression weightNorm = (w * w).reduce_sum(/*reduction_axes=*/{}, /*squeeze_axes=*/{UINT64_MAX}, DataType::FP32).sqrt();
-            Expression updateNorm = (update * update).reduce_sum(/*reduction_axes=*/{}, /*squeeze_axes=*/{UINT64_MAX}, DataType::FP32).sqrt();
+            Expression weightNorm = w.reduce_norm2(/*reduction_axes=*/{}, /*squeeze_axes=*/{UINT64_MAX}, DataType::FP32);
+            Expression updateNorm = update.reduce_norm2(/*reduction_axes=*/{}, /*squeeze_axes=*/{UINT64_MAX}, DataType::FP32);
             trustRatio = weightNorm / (updateNorm + trustRatioEpsilonExpr);
         }
 

@@ -4,7 +4,10 @@
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Network/Network.h"
+
+#include <utility>
 
 #include <cmath>
 #include <optional>
@@ -33,6 +36,33 @@ class StudentTNLLLoss : public Loss {
     }
     std::optional<Tensor> getLearnedLogDegreesOfFreedom() const { return logDegreesOfFreedomTensor; }
     float getMinimumDegreesOfFreedom() const { return minimumDegreesOfFreedom; }
+    [[nodiscard]] bool isRagged() const { return raggedPredictionsTensor.has_value(); }
+    [[nodiscard]] RaggedTensor getRaggedPredictions() const {
+        if (!isRagged()) throw std::runtime_error("StudentTNLLLoss location is dense.");
+        return raggedPredictionsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLabels() const {
+        if (!isRagged()) throw std::runtime_error("StudentTNLLLoss target is dense.");
+        return raggedLabelsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLogScale() const {
+        if (!isRagged()) throw std::runtime_error("StudentTNLLLoss log_scale is dense.");
+        return raggedLogScaleTensor.value();
+    }
+    [[nodiscard]] std::optional<RaggedTensor> getRaggedLearnedLogDegreesOfFreedom() const {
+        if (!isRagged()) throw std::runtime_error("StudentTNLLLoss learned degrees of freedom are dense.");
+        return raggedLogDegreesOfFreedomTensor;
+    }
+    [[nodiscard]] RaggedTensor getRaggedRawLoss() const {
+        if (!raggedRawLossTensor.has_value()) throw std::runtime_error("StudentTNLLLoss raw loss is dense.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLoss() const {
+        if (!isRagged() || lossShape != LossShape::RAW || !raggedRawLossTensor.has_value())
+            throw std::runtime_error("StudentTNLLLoss does not expose a ragged reported loss for this LossShape.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] LossShape getLossShape() const { return lossShape; }
 
     std::vector<Tensor> getLossInputTensors() const override {
         std::vector<Tensor> inputs{predictionsTensor, labelsTensor, logScaleTensor};
@@ -63,6 +93,12 @@ class StudentTNLLLoss : public Loss {
     static void deserialize(const nlohmann::json& j, Network* network);
 
    protected:
+    std::optional<RaggedTensor> raggedPredictionsTensor;
+    std::optional<RaggedTensor> raggedLabelsTensor;
+    std::optional<RaggedTensor> raggedLogScaleTensor;
+    std::optional<RaggedTensor> raggedLogDegreesOfFreedomTensor;
+    std::optional<RaggedTensor> raggedRawLossTensor;
+
     virtual bool isMultiLayer() const { return true; }
 
     virtual void buildSupportLayersAndAddToNetwork();
@@ -108,51 +144,101 @@ class StudentTNLLLoss::Builder {
 
     virtual StudentTNLLLoss build() {
         THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_location.has_value());
-        THOR_THROW_IF_FALSE(_logScale.has_value());
-        THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_location.value() != _logScale.value());
-        THOR_THROW_IF_FALSE(_location.value() != _labels.value());
-        THOR_THROW_IF_FALSE(_logScale.value() != _labels.value());
-        THOR_THROW_IF_FALSE(!(_degreesOfFreedom.has_value() && _logDegreesOfFreedom.has_value()));
-        if (_logDegreesOfFreedom.has_value()) {
-            THOR_THROW_IF_FALSE(_logDegreesOfFreedom.value() != _location.value());
-            THOR_THROW_IF_FALSE(_logDegreesOfFreedom.value() != _logScale.value());
-            THOR_THROW_IF_FALSE(_logDegreesOfFreedom.value() != _labels.value());
-        }
-        if (_exampleWeights.has_value()) {
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _location.value());
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _logScale.value());
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _labels.value());
-            if (_logDegreesOfFreedom.has_value())
-                THOR_THROW_IF_FALSE(_exampleWeights.value() != _logDegreesOfFreedom.value());
-        }
-        THOR_THROW_IF_FALSE(!_location.value().getDimensions().empty());
-        THOR_THROW_IF_FALSE(_location.value().getDimensions() == _logScale.value().getDimensions());
-        THOR_THROW_IF_FALSE(_location.value().getDimensions() == _labels.value().getDimensions());
-        if (_logDegreesOfFreedom.has_value())
-            THOR_THROW_IF_FALSE(_location.value().getDimensions() == _logDegreesOfFreedom.value().getDimensions());
-
-        if (!_lossShape.has_value())
-            _lossShape = LossShape::BATCH;
-        if (!_lossDataType.has_value())
-            _lossDataType = _location.value().getDataType();
-        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
+        const bool hasDenseLocation = _location.has_value();
+        const bool hasDenseLogScale = _logScale.has_value();
+        const bool hasDenseLabels = _labels.has_value();
+        const bool hasRaggedLocation = _raggedLocation.has_value();
+        const bool hasRaggedLogScale = _raggedLogScale.has_value();
+        const bool hasRaggedLabels = _raggedLabels.has_value();
+        THOR_THROW_IF_FALSE(hasDenseLocation == hasDenseLogScale && hasDenseLogScale == hasDenseLabels);
+        THOR_THROW_IF_FALSE(hasRaggedLocation == hasRaggedLogScale && hasRaggedLogScale == hasRaggedLabels);
+        THOR_THROW_IF_FALSE(hasDenseLocation != hasRaggedLocation);
+        THOR_THROW_IF_FALSE(!(_degreesOfFreedom.has_value() && (_logDegreesOfFreedom.has_value() || _raggedLogDegreesOfFreedom.has_value())));
+        THOR_THROW_IF_FALSE(!(_logDegreesOfFreedom.has_value() && _raggedLogDegreesOfFreedom.has_value()));
+        if (!_lossShape.has_value()) _lossShape = LossShape::BATCH;
 
         float degreesOfFreedom = _degreesOfFreedom.value_or(3.0f);
         THOR_THROW_IF_FALSE(std::isfinite(degreesOfFreedom) && degreesOfFreedom > 0.0f);
         THOR_THROW_IF_FALSE(std::isfinite(_minimumDegreesOfFreedom) && _minimumDegreesOfFreedom >= 0.0f);
-        if (!_logDegreesOfFreedom.has_value())
-            THOR_THROW_IF_FALSE(degreesOfFreedom > _minimumDegreesOfFreedom);
 
         StudentTNLLLoss loss;
-        loss.predictionsTensor = _location.value();
-        loss.logScaleTensor = _logScale.value();
-        loss.labelsTensor = _labels.value();
-        loss.logDegreesOfFreedomTensor = _logDegreesOfFreedom;
+        if (hasDenseLocation) {
+            THOR_THROW_IF_FALSE(_location.value() != _logScale.value());
+            THOR_THROW_IF_FALSE(_location.value() != _labels.value());
+            THOR_THROW_IF_FALSE(_logScale.value() != _labels.value());
+            THOR_THROW_IF_FALSE(!_raggedLogDegreesOfFreedom.has_value());
+            if (_logDegreesOfFreedom.has_value()) {
+                THOR_THROW_IF_FALSE(_logDegreesOfFreedom.value() != _location.value());
+                THOR_THROW_IF_FALSE(_logDegreesOfFreedom.value() != _logScale.value());
+                THOR_THROW_IF_FALSE(_logDegreesOfFreedom.value() != _labels.value());
+            }
+            if (_exampleWeights.has_value()) {
+                THOR_THROW_IF_FALSE(_exampleWeights.value() != _location.value());
+                THOR_THROW_IF_FALSE(_exampleWeights.value() != _logScale.value());
+                THOR_THROW_IF_FALSE(_exampleWeights.value() != _labels.value());
+                if (_logDegreesOfFreedom.has_value())
+                    THOR_THROW_IF_FALSE(_exampleWeights.value() != _logDegreesOfFreedom.value());
+            }
+            THOR_THROW_IF_FALSE(!_location.value().getDimensions().empty());
+            THOR_THROW_IF_FALSE(_location.value().getDimensions() == _logScale.value().getDimensions());
+            THOR_THROW_IF_FALSE(_location.value().getDimensions() == _labels.value().getDimensions());
+            if (_logDegreesOfFreedom.has_value())
+                THOR_THROW_IF_FALSE(_location.value().getDimensions() == _logDegreesOfFreedom.value().getDimensions());
+            if (!_lossDataType.has_value()) _lossDataType = _location.value().getDataType();
+            loss.predictionsTensor = _location.value();
+            loss.logScaleTensor = _logScale.value();
+            loss.labelsTensor = _labels.value();
+            loss.logDegreesOfFreedomTensor = _logDegreesOfFreedom;
+            loss.exampleWeightsTensor = _exampleWeights;
+        } else {
+            THOR_THROW_IF_FALSE(!_logDegreesOfFreedom.has_value());
+            const RaggedTensor& location = _raggedLocation.value();
+            const RaggedTensor& logScale = _raggedLogScale.value();
+            const RaggedTensor& target = _raggedLabels.value();
+            THOR_THROW_IF_FALSE(location.isInitialized() && logScale.isInitialized() && target.isInitialized());
+            THOR_THROW_IF_FALSE(location.getValues() != logScale.getValues());
+            THOR_THROW_IF_FALSE(location.getValues() != target.getValues());
+            THOR_THROW_IF_FALSE(logScale.getValues() != target.getValues());
+            if (location.getOffsets() != logScale.getOffsets() || location.getOffsets() != target.getOffsets())
+                throw std::invalid_argument("StudentTNLLLoss ragged location, log_scale, and target must use the exact same row partition tensor.");
+            if (location.getBatchSize() != logScale.getBatchSize() || location.getBatchSize() != target.getBatchSize() ||
+                location.getMaxTotalValues() != logScale.getMaxTotalValues() || location.getMaxTotalValues() != target.getMaxTotalValues() ||
+                location.getTrailingDimensions() != logScale.getTrailingDimensions() || location.getTrailingDimensions() != target.getTrailingDimensions())
+                throw std::invalid_argument("StudentTNLLLoss ragged location, log_scale, and target must have identical value geometry.");
+            if (_raggedLogDegreesOfFreedom.has_value()) {
+                const RaggedTensor& logDof = _raggedLogDegreesOfFreedom.value();
+                if (location.getOffsets() != logDof.getOffsets())
+                    throw std::invalid_argument("StudentTNLLLoss ragged learned log degrees of freedom must use the exact same row partition tensor.");
+                if (location.getBatchSize() != logDof.getBatchSize() || location.getMaxTotalValues() != logDof.getMaxTotalValues() ||
+                    location.getTrailingDimensions() != logDof.getTrailingDimensions())
+                    throw std::invalid_argument("StudentTNLLLoss ragged learned log degrees of freedom must have identical value geometry.");
+                THOR_THROW_IF_FALSE(logDof.getValues() != location.getValues());
+                THOR_THROW_IF_FALSE(logDof.getValues() != logScale.getValues());
+                THOR_THROW_IF_FALSE(logDof.getValues() != target.getValues());
+            }
+            if (_exampleWeights.has_value() && _exampleWeights->getDimensions() != std::vector<uint64_t>{1})
+                throw std::invalid_argument("StudentTNLLLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");
+            if (_lossShape.value() == LossShape::PER_OUTPUT)
+                throw std::invalid_argument("StudentTNLLLoss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+            if (!_lossDataType.has_value()) _lossDataType = location.getValuesDataType();
+            loss.predictionsTensor = location.getValues();
+            loss.logScaleTensor = logScale.getValues();
+            loss.labelsTensor = target.getValues();
+            loss.raggedPredictionsTensor = location;
+            loss.raggedLogScaleTensor = logScale;
+            loss.raggedLabelsTensor = target;
+            if (_raggedLogDegreesOfFreedom.has_value()) {
+                loss.logDegreesOfFreedomTensor = _raggedLogDegreesOfFreedom->getValues();
+                loss.raggedLogDegreesOfFreedomTensor = _raggedLogDegreesOfFreedom;
+            }
+            loss.exampleWeightsTensor = _exampleWeights;
+        }
+
+        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
+        if (!loss.logDegreesOfFreedomTensor.has_value())
+            THOR_THROW_IF_FALSE(degreesOfFreedom > _minimumDegreesOfFreedom);
         loss.degreesOfFreedom = degreesOfFreedom;
         loss.minimumDegreesOfFreedom = _minimumDegreesOfFreedom;
-        loss.exampleWeightsTensor = _exampleWeights;
         loss.lossDataType = _lossDataType.value();
         loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         loss.lossShape = _lossShape.value();
@@ -175,12 +261,26 @@ class StudentTNLLLoss::Builder {
         return *this;
     }
 
+    virtual StudentTNLLLoss::Builder& location(RaggedTensor location) {
+        THOR_THROW_IF_FALSE(!this->_raggedLocation.has_value());
+        THOR_THROW_IF_FALSE(location.isInitialized());
+        this->_raggedLocation = std::move(location);
+        return *this;
+    }
+
     virtual StudentTNLLLoss::Builder& predictions(Tensor _location) { return location(_location); }
+    virtual StudentTNLLLoss::Builder& predictions(RaggedTensor location) { return this->location(std::move(location)); }
 
     virtual StudentTNLLLoss::Builder& logScale(Tensor _logScale) {
         THOR_THROW_IF_FALSE(!this->_logScale.has_value());
         THOR_THROW_IF_FALSE(!_logScale.getDimensions().empty());
         this->_logScale = _logScale;
+        return *this;
+    }
+    virtual StudentTNLLLoss::Builder& logScale(RaggedTensor logScale) {
+        THOR_THROW_IF_FALSE(!this->_raggedLogScale.has_value());
+        THOR_THROW_IF_FALSE(logScale.isInitialized());
+        this->_raggedLogScale = std::move(logScale);
         return *this;
     }
 
@@ -190,12 +290,20 @@ class StudentTNLLLoss::Builder {
         this->_labels = _labels;
         return *this;
     }
+    virtual StudentTNLLLoss::Builder& labels(RaggedTensor labels) {
+        THOR_THROW_IF_FALSE(!this->_raggedLabels.has_value());
+        THOR_THROW_IF_FALSE(labels.isInitialized());
+        this->_raggedLabels = std::move(labels);
+        return *this;
+    }
 
     virtual StudentTNLLLoss::Builder& target(Tensor _target) { return labels(_target); }
+    virtual StudentTNLLLoss::Builder& target(RaggedTensor target) { return labels(std::move(target)); }
 
     virtual StudentTNLLLoss::Builder& degreesOfFreedom(float _degreesOfFreedom) {
         THOR_THROW_IF_FALSE(!this->_degreesOfFreedom.has_value());
         THOR_THROW_IF_FALSE(!this->_logDegreesOfFreedom.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedLogDegreesOfFreedom.has_value());
         THOR_THROW_IF_FALSE(std::isfinite(_degreesOfFreedom) && _degreesOfFreedom > 0.0f);
         this->_degreesOfFreedom = _degreesOfFreedom;
         return *this;
@@ -203,9 +311,18 @@ class StudentTNLLLoss::Builder {
 
     virtual StudentTNLLLoss::Builder& logDegreesOfFreedom(Tensor _logDegreesOfFreedom) {
         THOR_THROW_IF_FALSE(!this->_logDegreesOfFreedom.has_value());
+        THOR_THROW_IF_FALSE(!this->_raggedLogDegreesOfFreedom.has_value());
         THOR_THROW_IF_FALSE(!this->_degreesOfFreedom.has_value());
         THOR_THROW_IF_FALSE(!_logDegreesOfFreedom.getDimensions().empty());
         this->_logDegreesOfFreedom = _logDegreesOfFreedom;
+        return *this;
+    }
+    virtual StudentTNLLLoss::Builder& logDegreesOfFreedom(RaggedTensor logDegreesOfFreedom) {
+        THOR_THROW_IF_FALSE(!this->_raggedLogDegreesOfFreedom.has_value());
+        THOR_THROW_IF_FALSE(!this->_logDegreesOfFreedom.has_value());
+        THOR_THROW_IF_FALSE(!this->_degreesOfFreedom.has_value());
+        THOR_THROW_IF_FALSE(logDegreesOfFreedom.isInitialized());
+        this->_raggedLogDegreesOfFreedom = std::move(logDegreesOfFreedom);
         return *this;
     }
 
@@ -271,8 +388,12 @@ class StudentTNLLLoss::Builder {
     std::optional<Tensor> _location;
     std::optional<Tensor> _logScale;
     std::optional<Tensor> _labels;
+    std::optional<RaggedTensor> _raggedLocation;
+    std::optional<RaggedTensor> _raggedLogScale;
+    std::optional<RaggedTensor> _raggedLabels;
     std::optional<float> _degreesOfFreedom;
     std::optional<Tensor> _logDegreesOfFreedom;
+    std::optional<RaggedTensor> _raggedLogDegreesOfFreedom;
     float _minimumDegreesOfFreedom = 0.0f;
     std::optional<Tensor> _exampleWeights;
     std::optional<LossShape> _lossShape;

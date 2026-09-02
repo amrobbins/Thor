@@ -770,10 +770,12 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
                                      TensorDescriptor::getElementTypeName(offsets_dtype));
         }
         const DataType input_dtype = resolved_output_dtypes[node.lhs];
-        if (node.output_dtype.has_value() && node.output_dtype.value() != input_dtype) {
-            throw std::runtime_error("Expression segmented reduction currently requires output dtype to match input dtype.");
-        }
-        return input_dtype;
+        (void)input_dtype;
+        // Offset-segmented CUB reductions may intentionally emit a different
+        // storage dtype than their source (for example FP16/BF16/FP8 -> FP32)
+        // while accumulating internally in FP32. Backend capability validation
+        // is performed when the segmented-reduction stage is compiled.
+        return node.output_dtype.value_or(resolved_output_dtypes[node.lhs]);
     }
 
     if (isSegmentedBroadcastOp(node.op)) {
@@ -1036,9 +1038,20 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
             propagate_to_parent(node.lhs);
             propagate_to_parent(node.rhs);
         } else if (isSegmentedReduceOp(node.op)) {
-            // Segment offsets are structural metadata; reduction compute dtype
-            // propagates only through values.
-            propagate_to_parent(node.lhs);
+            // Like ordinary CUB reductions, segmented reductions own their FP32
+            // accumulation policy. Do not propagate an FP32 result/accumulator
+            // requirement backward and materialize a low-precision producer as
+            // FP32 merely to feed the reduction. Offsets are structural metadata.
+            if (node.lhs >= expr.nodes.size()) {
+                throw std::runtime_error(
+                    "Segmented-reduction parent node index out of range in propagateMaterializedOutputComputeDTypes.");
+            }
+            const ExprNode& producer = expr.nodes[node.lhs];
+            if (producer.compute_dtype.has_value()) {
+                seedRequiredComputeDType(required_compute_dtype[node.lhs], producer.compute_dtype.value());
+            } else if (producer.output_dtype.has_value()) {
+                seedRequiredComputeDType(required_compute_dtype[node.lhs], producer.output_dtype.value());
+            }
         } else if (isSegmentedBroadcastOp(node.op)) {
             // Segment offsets are structural metadata. Numeric dtype requirements
             // flow only through the per-segment values.

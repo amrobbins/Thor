@@ -75,6 +75,19 @@ Impl::DynamicExpression makeSerializableRatioMetricExpression(
     return Impl::DynamicExpression::fromExpressionDefinition(definition);
 }
 
+
+Impl::DynamicExpression makePassThroughRatioMetricExpression() {
+    Impl::Expression numerator = Impl::Expression::input("predictions", DataType::FP32, DataType::FP32);
+    Impl::Expression denominator = Impl::Expression::input("labels", DataType::FP32, DataType::FP32);
+    Impl::Expression metric = numerator / denominator;
+    Impl::ExpressionDefinition definition = Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({
+        {"metric", metric},
+        {Thor::METRIC_AGGREGATION_NUMERATOR_NAME, numerator},
+        {Thor::METRIC_AGGREGATION_DENOMINATOR_NAME, denominator},
+    }));
+    return Impl::DynamicExpression::fromExpressionDefinition(definition);
+}
+
 Impl::DynamicExpression makeNonSerializableMseMetricExpression() {
     return Impl::DynamicExpression({"predictions", "labels"},
                                    {"metric"},
@@ -357,6 +370,23 @@ TEST(CustomMetricApi, RatioAggregationInfersOnlyPublicMetricOutputName) {
     EXPECT_EQ(metric.getMetricName(), "weighted_ratio");
     EXPECT_EQ(metric.getMetric().getDimensions(), std::vector<uint64_t>({1}));
     EXPECT_EQ(metric.getAggregation(), MetricAggregation::RATIO);
+}
+
+TEST(CustomMetricApi, RatioAggregationInfersPassThroughStatisticDTypes) {
+    Network network("custom_metric_ratio_passthrough_dtype");
+    Tensor numerator(DataType::FP32, {1});
+    Tensor denominator(DataType::FP32, {1});
+
+    CustomMetric metric = CustomMetric::Builder()
+                              .network(network)
+                              .expression(makePassThroughRatioMetricExpression())
+                              .predictions(numerator)
+                              .labels(denominator)
+                              .aggregation(MetricAggregation::RATIO)
+                              .build();
+
+    EXPECT_EQ(metric.getMetric().getDataType(), DataType::FP32);
+    EXPECT_EQ(metric.getMetric().getDimensions(), vector<uint64_t>({1, 1}));
 }
 
 TEST(CustomMetricApi, RatioStatisticsMustBeScalarFp32) {

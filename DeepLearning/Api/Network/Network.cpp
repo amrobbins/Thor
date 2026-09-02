@@ -2836,19 +2836,15 @@ void Network::rebuildApiGraphIndexes(bool inferenceOnly) {
 
         shared_ptr<Metric> metric = dynamic_pointer_cast<Metric>(layer);
         if (metric) {
-            Tensor inputTensor = metric->getFeatureInput().value();
+            const vector<Tensor> inputTensors = metric->getAllInputTensors();
             Tensor outputTensor = metric->getFeatureOutput().value();
-            allTensors.insert(inputTensor);
-            allTensors.insert(outputTensor);
-            apiTensorToApiLoadingLayers[inputTensor].push_back(metric);
-            apiLayerToApiInputTensors[metric].push_back(inputTensor);
-
-            if (metric->requiresLabels()) {
-                Tensor labelsTensor = metric->getLabels();
-                allTensors.insert(labelsTensor);
-                apiTensorToApiLoadingLayers[labelsTensor].push_back(metric);
-                apiLayerToApiInputTensors[metric].push_back(labelsTensor);
+            THOR_THROW_IF_FALSE(!inputTensors.empty());
+            for (const Tensor& inputTensor : inputTensors) {
+                allTensors.insert(inputTensor);
+                apiTensorToApiLoadingLayers[inputTensor].push_back(metric);
+                apiLayerToApiInputTensors[metric].push_back(inputTensor);
             }
+            allTensors.insert(outputTensor);
 
             THOR_THROW_IF_FALSE(apiTensorToApiDrivingLayer.count(outputTensor) == 0);
             apiTensorToApiDrivingLayer[outputTensor] = metric;
@@ -3513,13 +3509,9 @@ void Network::addLayerToNetwork(const Layer *layer) {
         }
         apiTensorByOriginalId[lossTensor.getOriginalId()] = lossTensor;
     } else if (metric) {
-        Tensor inputTensor = metric->getFeatureInput().value();
+        for (const Tensor& inputTensor : metric->getAllInputTensors())
+            apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
         Tensor outputTensor = metric->getFeatureOutput().value();
-        apiTensorByOriginalId[inputTensor.getOriginalId()] = inputTensor;
-        if (metric->requiresLabels()) {
-            Tensor labelsTensor = metric->getLabels();
-            apiTensorByOriginalId[labelsTensor.getOriginalId()] = labelsTensor;
-        }
         apiTensorByOriginalId[outputTensor.getOriginalId()] = outputTensor;
     } else if (customLayer) {
         vector<Tensor> inputTensors = customLayer->getFeatureInputs();
@@ -4161,10 +4153,14 @@ Tensor Network::getApiTensorByOriginalId(uint64_t originalId) {
         }
 
         std::shared_ptr<Metric> metric = std::dynamic_pointer_cast<Metric>(layer);
-        if (metric != nullptr && metric->requiresLabels()) {
-            if (std::optional<Tensor> found = rememberIfMatches(metric->getLabels())) {
-                return *found;
+        if (metric != nullptr) {
+            for (const Tensor& tensor : metric->getAllInputTensors()) {
+                if (std::optional<Tensor> found = rememberIfMatches(tensor))
+                    return *found;
             }
+            if (std::optional<Tensor> found = rememberIfMatches(metric->getMetric()))
+                return *found;
+            continue;
         }
 
         std::shared_ptr<CustomLayer> customLayer = std::dynamic_pointer_cast<CustomLayer>(layer);

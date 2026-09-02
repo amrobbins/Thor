@@ -202,3 +202,82 @@ def test_laplace_nll_loss_save_load_round_trip_serializes_support_layers(tmp_pat
     loaded_arch = json.loads(loaded.get_architecture_json())
     assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "multi_input_custom_loss") == 1
     assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "loss_shaper") == 1
+
+
+def test_laplace_nll_loss_rejects_non_positive_eps_as_value_error():
+    n = thor.Network("laplace_bad_eps")
+    location = _tensor_1d(1)
+    scale = _tensor_1d(1)
+    labels = _tensor_1d(1)
+
+    with pytest.raises(ValueError, match=r"eps must be greater than zero"):
+        thor.losses.distribution.LaplaceNLLLoss(n, location, scale, labels, eps=0.0)
+
+
+def _r10j_laplace_ragged_inputs(network, prefix="r10j_laplace"):
+    location = thor.layers.RaggedNetworkInput(
+        network,
+        f"{prefix}_location",
+        thor.DataType.fp32,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    scale = thor.layers.RaggedNetworkInput(
+        network,
+        f"{prefix}_scale",
+        thor.DataType.fp32,
+        [2],
+        partition=location,
+    )
+    labels = thor.layers.RaggedNetworkInput(
+        network,
+        f"{prefix}_labels",
+        thor.DataType.fp32,
+        [2],
+        partition=location,
+    )
+    return location, scale, labels
+
+
+def test_laplace_nll_loss_r10j_constructs_ragged_secondary_parameter_and_raw_loss():
+    n = thor.Network("r10j_laplace_api")
+    location, scale, labels = _r10j_laplace_ragged_inputs(n)
+    weights = thor.layers.NetworkInput(n, "weights", [1], thor.DataType.fp16).get_feature_output()
+    loss = thor.losses.distribution.LaplaceNLLLoss(
+        n,
+        location,
+        scale,
+        labels,
+        log_scale=False,
+        example_weights=weights,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert loss.is_ragged
+    assert loss.location == location
+    assert loss.scale == scale
+    assert loss.get_labels() == labels
+    assert isinstance(loss.get_loss(), thor.RaggedTensor)
+    assert loss.get_loss().offsets == location.offsets
+    assert loss.example_weights == weights
+
+
+def test_laplace_nll_loss_r10j_rejects_per_output_and_mismatched_partition():
+    n = thor.Network("r10j_laplace_reject")
+    location, scale, labels = _r10j_laplace_ragged_inputs(n, "base")
+    with pytest.raises(ValueError, match=r"per_output.*undefined"):
+        thor.losses.distribution.LaplaceNLLLoss(
+            n, location, scale, labels, reported_loss_shape=thor.losses.LossShape.per_output
+        )
+    different = thor.layers.RaggedNetworkInput(
+        n,
+        "different_scale",
+        thor.DataType.fp32,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    with pytest.raises(ValueError, match=r"exact same row partition"):
+        thor.losses.distribution.LaplaceNLLLoss(n, location, different, labels)

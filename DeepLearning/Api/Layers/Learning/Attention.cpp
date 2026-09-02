@@ -1561,6 +1561,7 @@ void Attention::validateEpilogueShapePreserving(const ThorImplementation::Expres
             case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
             case ExprOp::REDUCE_NORM2:
+            case ExprOp::REDUCE_SUM_SQUARES:
             case ExprOp::SCAN:
             case ExprOp::ATTENTION:
             case ExprOp::ATTENTION_BACKWARD_Q:

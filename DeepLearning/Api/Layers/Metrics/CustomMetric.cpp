@@ -17,9 +17,6 @@ namespace {
 
 using PhysicalTensor = ThorImplementation::Tensor;
 using PhysicalTensorMap = std::unordered_map<std::string, PhysicalTensor>;
-using CompiledOutputs = ThorImplementation::CompiledOutputs;
-using CompiledExecutionStage = ThorImplementation::CompiledExecutionStage;
-using CompiledStageOutput = ThorImplementation::CompiledStageOutput;
 
 std::string joinNames(const std::set<std::string>& names) {
     if (names.empty())
@@ -51,26 +48,6 @@ bool isScalarShape(const std::vector<uint64_t>& dimensions) {
     return std::all_of(dimensions.begin(), dimensions.end(), [](uint64_t dimension) { return dimension == 1; });
 }
 
-std::optional<DataType> finalOutputDType(const std::shared_ptr<CompiledOutputs>& compiledOutputs,
-                                        const std::string& outputName) {
-    for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-        for (size_t outputIndex = 0; outputIndex < stage.outputs.size(); ++outputIndex) {
-            if (stage.outputs[outputIndex].name == outputName)
-                return stage.outputDType(outputIndex);
-        }
-    }
-    for (const CompiledStageOutput& finalOutput : compiledOutputs->final_outputs) {
-        if (finalOutput.name != outputName)
-            continue;
-        for (const CompiledExecutionStage& stage : compiledOutputs->stages) {
-            for (size_t outputIdx = 0; outputIdx < stage.outputs.size(); ++outputIdx) {
-                if (stage.outputs[outputIdx].value_id == finalOutput.value_id)
-                    return stage.outputDType(outputIdx);
-            }
-        }
-    }
-    return std::nullopt;
-}
 
 }  // namespace
 
@@ -188,9 +165,8 @@ Tensor CustomMetric::inferMetricTensor() const {
 
     std::unordered_map<std::string, std::vector<uint64_t>> fakeOutputShapes =
         build.equation->getOutputShapes(build.stamp_inputs, build.tensor_scalar_inputs);
-    std::shared_ptr<CompiledOutputs> compiledOutputs = build.equation->compileForInputs(build.stamp_inputs, {}, build.tensor_scalar_inputs);
-
-    std::optional<DataType> metricDType = finalOutputDType(compiledOutputs, metricName);
+    const std::unordered_map<std::string, DataType> fakeOutputDTypes =
+        build.equation->getOutputDataTypes(build.stamp_inputs, build.tensor_scalar_inputs);
 
     if (aggregation == MetricAggregation::RATIO) {
         for (const char* statisticName : {Thor::METRIC_AGGREGATION_NUMERATOR_NAME,
@@ -200,10 +176,10 @@ Tensor CustomMetric::inferMetricTensor() const {
                 throw runtime_error("CustomMetric failed to infer output shape for '" + std::string(statisticName) + "'.");
             if (!isScalarShape(statisticShapeIt->second))
                 throw runtime_error("CustomMetric ratio statistic output '" + std::string(statisticName) + "' must be scalar.");
-            const std::optional<DataType> statisticDType = finalOutputDType(compiledOutputs, statisticName);
-            if (!statisticDType.has_value())
+            auto statisticDTypeIt = fakeOutputDTypes.find(statisticName);
+            if (statisticDTypeIt == fakeOutputDTypes.end())
                 throw runtime_error("CustomMetric failed to infer output dtype for '" + std::string(statisticName) + "'.");
-            if (statisticDType.value() != DataType::FP32)
+            if (statisticDTypeIt->second != DataType::FP32)
                 throw runtime_error("CustomMetric ratio statistic output '" + std::string(statisticName) + "' must be FP32.");
         }
     }
@@ -213,10 +189,11 @@ Tensor CustomMetric::inferMetricTensor() const {
         throw runtime_error("CustomMetric failed to infer output shape for '" + metricName + "'.");
     if (aggregation == MetricAggregation::RATIO && !isScalarShape(shapeIt->second))
         throw runtime_error("CustomMetric ratio metric output '" + metricName + "' must be scalar.");
-    if (!metricDType.has_value())
+    auto metricDTypeIt = fakeOutputDTypes.find(metricName);
+    if (metricDTypeIt == fakeOutputDTypes.end())
         throw runtime_error("CustomMetric failed to infer output dtype for '" + metricName + "'.");
 
-    return logicalMetricTensorFromFakeOutput(shapeIt->second, metricDType.value());
+    return logicalMetricTensorFromFakeOutput(shapeIt->second, metricDTypeIt->second);
 }
 
 std::shared_ptr<ThorImplementation::Layer> CustomMetric::stamp(ThorImplementation::TensorPlacement placement,

@@ -1,8 +1,10 @@
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 
 #include "DeepLearning/Api/Layers/Metrics/ReductionMetrics.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -13,7 +15,7 @@ using namespace Thor;
 namespace {
 
 template <typename MetricT>
-void bind_unary_reduction_metric(nb::module_& metrics, const char* name, const char* doc) {
+void bind_unary_reduction_metric(nb::module_& metrics, const char* name, const char* doc, bool supportsRagged = false) {
     auto metric = nb::class_<MetricT, Metric>(metrics, name);
     metric.attr("__module__") = "thor.metrics";
 
@@ -29,14 +31,29 @@ void bind_unary_reduction_metric(nb::module_& metrics, const char* name, const c
         "values"_a,
         doc);
 
+    if (supportsRagged) {
+        metric.def(
+            "__init__",
+            [](MetricT* self, Network& network, RaggedTensor values) {
+                typename MetricT::Builder builder;
+                builder.network(network).values(std::move(values));
+                MetricT built = builder.build();
+                new (self) MetricT(std::move(built));
+            },
+            "network"_a,
+            "values"_a,
+            doc);
+    }
+
     metric.def_prop_ro("values", &MetricT::getValues);
+    metric.def_prop_ro("ragged_values", &MetricT::getRaggedValues);
 }
 
 }  // namespace
 
 void bind_reduction_metrics(nb::module_& metrics) {
-    bind_unary_reduction_metric<Mean>(metrics, "Mean", R"nbdoc(Construct a Mean metric over a values tensor.)nbdoc");
-    bind_unary_reduction_metric<Sum>(metrics, "Sum", R"nbdoc(Construct a Sum metric over a values tensor.)nbdoc");
+    bind_unary_reduction_metric<Mean>(metrics, "Mean", R"nbdoc(Construct a Mean metric over dense or ragged values.)nbdoc", true);
+    bind_unary_reduction_metric<Sum>(metrics, "Sum", R"nbdoc(Construct a Sum metric over dense or ragged values.)nbdoc", true);
     bind_unary_reduction_metric<Min>(metrics, "Min", R"nbdoc(Construct a Min metric over a values tensor.)nbdoc");
     bind_unary_reduction_metric<Max>(metrics, "Max", R"nbdoc(Construct a Max metric over a values tensor.)nbdoc");
 

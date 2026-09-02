@@ -31,6 +31,7 @@ const std::vector<ReductionCase> valueReductionCases = {
     {ExprOp::REDUCE_MIN, CubReductionOp::Min},       {ExprOp::REDUCE_MAX, CubReductionOp::Max},
     {ExprOp::REDUCE_AVG, CubReductionOp::Mean},      {ExprOp::REDUCE_NORM1, CubReductionOp::L1Norm},
     {ExprOp::REDUCE_NORM2, CubReductionOp::L2Norm},
+    {ExprOp::REDUCE_SUM_SQUARES, CubReductionOp::SumSquares},
 };
 
 }  // namespace

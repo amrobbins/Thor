@@ -5,10 +5,13 @@
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Network/Network.h"
 
 #include <optional>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace Thor {
 
@@ -28,7 +31,31 @@ class QuantileLoss : public Loss {
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
+    [[nodiscard]] bool isRagged() const { return raggedPredictionsTensor.has_value(); }
+    [[nodiscard]] RaggedTensor getRaggedPredictions() const {
+        if (!raggedPredictionsTensor.has_value()) throw std::runtime_error("QuantileLoss predictions are dense.");
+        return raggedPredictionsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLabels() const {
+        if (!raggedLabelsTensor.has_value()) throw std::runtime_error("QuantileLoss labels are dense.");
+        return raggedLabelsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedRawLoss() const {
+        if (!raggedRawLossTensor.has_value()) throw std::runtime_error("QuantileLoss raw loss is dense.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLoss() const {
+        if (!isRagged() || lossShape != LossShape::RAW || !raggedRawLossTensor.has_value())
+            throw std::runtime_error("QuantileLoss does not expose a ragged reported loss for this LossShape.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] LossShape getLossShape() const { return lossShape; }
+
    protected:
+    std::optional<RaggedTensor> raggedPredictionsTensor;
+    std::optional<RaggedTensor> raggedLabelsTensor;
+    std::optional<RaggedTensor> raggedRawLossTensor;
+
     virtual bool isMultiLayer() const { return true; }
 
     virtual void buildSupportLayersAndAddToNetwork();
@@ -68,36 +95,68 @@ class QuantileLoss::Builder {
 
     virtual QuantileLoss build() {
         THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_predictions.has_value());
-        THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+        const bool hasDensePredictions = _predictions.has_value();
+        const bool hasDenseLabels = _labels.has_value();
+        const bool hasRaggedPredictions = _raggedPredictions.has_value();
+        const bool hasRaggedLabels = _raggedLabels.has_value();
+        THOR_THROW_IF_FALSE(hasDensePredictions == hasDenseLabels);
+        THOR_THROW_IF_FALSE(hasRaggedPredictions == hasRaggedLabels);
+        THOR_THROW_IF_FALSE(hasDensePredictions != hasRaggedPredictions);
 
-        if (!_lossShape.has_value())
-            _lossShape = LossShape::BATCH;
-        if (!_lossDataType.has_value())
-            _lossDataType = ThorImplementation::RegressionLossDType::defaultLossDType(_predictions.value().getDataType());
-        ThorImplementation::RegressionLossDType::validateLossDType("QuantileLoss", _lossDataType.value());
-
-        float quantile = _quantile.value_or(0.5f);
+        if (!_lossShape.has_value()) _lossShape = LossShape::BATCH;
+        const float quantile = _quantile.value_or(0.5f);
         THOR_THROW_IF_FALSE(quantile > 0.0f && quantile < 1.0f);
 
-        QuantileLoss quantileLoss;
-        quantileLoss.predictionsTensor = _predictions.value();
-        quantileLoss.labelsTensor = _labels.value();
-        quantileLoss.exampleWeightsTensor = _exampleWeights;
-        quantileLoss.lossDataType = _lossDataType.value();
+        QuantileLoss loss;
+        if (hasDensePredictions) {
+            THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+            THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
+            THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+            if (!_lossDataType.has_value())
+                _lossDataType = ThorImplementation::RegressionLossDType::defaultLossDType(_predictions.value().getDataType());
+            loss.predictionsTensor = _predictions.value();
+            loss.labelsTensor = _labels.value();
+            loss.exampleWeightsTensor = _exampleWeights;
+        } else {
+            const RaggedTensor& predictions = _raggedPredictions.value();
+            const RaggedTensor& labels = _raggedLabels.value();
+            THOR_THROW_IF_FALSE(predictions.isInitialized() && labels.isInitialized());
+            THOR_THROW_IF_FALSE(predictions.getValues() != labels.getValues());
+            ThorImplementation::RegressionLossDType::validatePredictionsDType("QuantileLoss", predictions.getValuesDataType());
+            ThorImplementation::RegressionLossDType::validateLabelsDType("QuantileLoss", labels.getValuesDataType());
+            if (predictions.getOffsets() != labels.getOffsets())
+                throw std::invalid_argument("QuantileLoss ragged predictions and labels must use the exact same row partition tensor.");
+            if (predictions.getBatchSize() != labels.getBatchSize() ||
+                predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
+                predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                throw std::invalid_argument("QuantileLoss ragged predictions and labels must have identical value geometry.");
+            if (_exampleWeights.has_value()) {
+                if (_exampleWeights.value() == predictions.getValues() || _exampleWeights.value() == labels.getValues())
+                    throw std::invalid_argument("QuantileLoss ragged example_weights must be distinct from predictions and labels values.");
+                ThorImplementation::RegressionLossDType::validateExampleWeightDType("QuantileLoss", _exampleWeights->getDataType());
+                if (_exampleWeights->getDimensions() != std::vector<uint64_t>{1})
+                    throw std::invalid_argument("QuantileLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");
+            }
+            if (_lossShape.value() == LossShape::PER_OUTPUT)
+                throw std::invalid_argument("QuantileLoss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+            if (!_lossDataType.has_value())
+                _lossDataType = ThorImplementation::RegressionLossDType::defaultLossDType(predictions.getValuesDataType());
+            loss.predictionsTensor = predictions.getValues();
+            loss.labelsTensor = labels.getValues();
+            loss.raggedPredictionsTensor = predictions;
+            loss.raggedLabelsTensor = labels;
+            loss.exampleWeightsTensor = _exampleWeights;
+        }
 
-        quantileLoss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
-        quantileLoss.lossShape = _lossShape.value();
-        quantileLoss.quantile = quantile;
-        quantileLoss.network = _network.value();
-        quantileLoss.initialized = true;
-
-        quantileLoss.buildSupportLayersAndAddToNetwork();
-
-        return quantileLoss;
+        ThorImplementation::RegressionLossDType::validateLossDType("QuantileLoss", _lossDataType.value());
+        loss.lossDataType = _lossDataType.value();
+        loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
+        loss.lossShape = _lossShape.value();
+        loss.quantile = quantile;
+        loss.network = _network.value();
+        loss.initialized = true;
+        loss.buildSupportLayersAndAddToNetwork();
+        return loss;
     }
 
     virtual QuantileLoss::Builder &network(Network &_network) {
@@ -113,10 +172,24 @@ class QuantileLoss::Builder {
         return *this;
     }
 
+    virtual QuantileLoss::Builder &predictions(RaggedTensor predictions) {
+        THOR_THROW_IF_FALSE(!this->_raggedPredictions.has_value());
+        THOR_THROW_IF_FALSE(predictions.isInitialized());
+        this->_raggedPredictions = std::move(predictions);
+        return *this;
+    }
+
     virtual QuantileLoss::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
+        return *this;
+    }
+
+    virtual QuantileLoss::Builder &labels(RaggedTensor labels) {
+        THOR_THROW_IF_FALSE(!this->_raggedLabels.has_value());
+        THOR_THROW_IF_FALSE(labels.isInitialized());
+        this->_raggedLabels = std::move(labels);
         return *this;
     }
 
@@ -182,6 +255,8 @@ class QuantileLoss::Builder {
     std::optional<Network *> _network;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
+    std::optional<RaggedTensor> _raggedPredictions;
+    std::optional<RaggedTensor> _raggedLabels;
     std::optional<Tensor> _exampleWeights;
     std::optional<float> _quantile;
     std::optional<LossShape> _lossShape;

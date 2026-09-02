@@ -7,6 +7,7 @@
 #include "DeepLearning/Api/Layers/Loss/StudentTNLLLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -119,6 +120,68 @@ void maybeSetExampleWeights(StudentTNLLLoss::Builder& builder,
     }
     builder.exampleWeights(exampleWeights.value());
 }
+
+void validateRaggedArguments(const RaggedTensor& location,
+                            const RaggedTensor& logScale,
+                            const RaggedTensor& labels,
+                            optional<float> degreesOfFreedom,
+                            optional<RaggedTensor> learnedLogDegreesOfFreedom,
+                            float minimumDegreesOfFreedom,
+                            optional<DataType> lossDataType,
+                            LossShape reportedLossShape) {
+    if (!isFloatingDType(location.getValuesDataType()) || !isFloatingDType(logScale.getValuesDataType()) ||
+        !isFloatingDType(labels.getValuesDataType()))
+        throw nb::value_error("StudentTNLLLoss instance: ragged location, log_scale, and labels must use fp16 or fp32 dtype.");
+    if (location.getOffsets() != logScale.getOffsets() || location.getOffsets() != labels.getOffsets())
+        throw nb::value_error("StudentTNLLLoss instance: ragged location, log_scale, and labels must use the exact same row partition tensor.");
+    if (location.getBatchSize() != logScale.getBatchSize() || location.getBatchSize() != labels.getBatchSize() ||
+        location.getMaxTotalValues() != logScale.getMaxTotalValues() || location.getMaxTotalValues() != labels.getMaxTotalValues() ||
+        location.getTrailingDimensions() != logScale.getTrailingDimensions() || location.getTrailingDimensions() != labels.getTrailingDimensions())
+        throw nb::value_error("StudentTNLLLoss instance: ragged location, log_scale, and labels must have identical value geometry.");
+    if (learnedLogDegreesOfFreedom.has_value()) {
+        const RaggedTensor& dof = learnedLogDegreesOfFreedom.value();
+        if (!isFloatingDType(dof.getValuesDataType()))
+            throw nb::value_error("StudentTNLLLoss instance: learned_log_degrees_of_freedom must use fp16 or fp32 dtype.");
+        if (dof.getOffsets() != location.getOffsets())
+            throw nb::value_error("StudentTNLLLoss instance: ragged learned_log_degrees_of_freedom must use the exact same row partition tensor.");
+        if (dof.getBatchSize() != location.getBatchSize() || dof.getMaxTotalValues() != location.getMaxTotalValues() ||
+            dof.getTrailingDimensions() != location.getTrailingDimensions())
+            throw nb::value_error("StudentTNLLLoss instance: ragged learned_log_degrees_of_freedom must have identical value geometry.");
+    }
+    if (degreesOfFreedom.has_value() && learnedLogDegreesOfFreedom.has_value())
+        throw nb::value_error("StudentTNLLLoss instance: specify either fixed degrees_of_freedom or learned_log_degrees_of_freedom, not both.");
+    if (degreesOfFreedom.has_value() && (!std::isfinite(degreesOfFreedom.value()) || degreesOfFreedom.value() <= 0.0f))
+        throw nb::value_error("StudentTNLLLoss instance: degrees_of_freedom must be greater than zero.");
+    if (!std::isfinite(minimumDegreesOfFreedom) || minimumDegreesOfFreedom < 0.0f)
+        throw nb::value_error("StudentTNLLLoss instance: minimum_degrees_of_freedom must be finite and non-negative.");
+    const float effectiveFixedDegreesOfFreedom = degreesOfFreedom.value_or(3.0f);
+    if (!learnedLogDegreesOfFreedom.has_value() && effectiveFixedDegreesOfFreedom <= minimumDegreesOfFreedom)
+        throw nb::value_error("StudentTNLLLoss instance: fixed degrees_of_freedom must be greater than minimum_degrees_of_freedom.");
+    DataType effectiveLossDataType = lossDataType.value_or(location.getValuesDataType());
+    if (!isFloatingDType(effectiveLossDataType))
+        throw nb::value_error("StudentTNLLLoss instance: loss_data_type must be fp16 or fp32.");
+    validateReportedLossShape(reportedLossShape, "StudentTNLLLoss instance");
+    if (reportedLossShape == LossShape::PER_OUTPUT)
+        throw nb::value_error("StudentTNLLLoss instance: reported_loss_shape per_output is undefined for ragged sequences.");
+}
+
+void maybeSetRaggedExampleWeights(StudentTNLLLoss::Builder& builder,
+                                  const RaggedTensor& location,
+                                  const RaggedTensor& logScale,
+                                  const RaggedTensor& labels,
+                                  optional<RaggedTensor> learnedLogDegreesOfFreedom,
+                                  optional<Tensor> exampleWeights) {
+    if (!exampleWeights.has_value()) return;
+    if (exampleWeights.value() == location.getValues() || exampleWeights.value() == logScale.getValues() ||
+        exampleWeights.value() == labels.getValues() ||
+        (learnedLogDegreesOfFreedom.has_value() && exampleWeights.value() == learnedLogDegreesOfFreedom->getValues()))
+        throw nb::value_error("StudentTNLLLoss instance: example_weights must be distinct from ragged differentiable/label values.");
+    if (!isFloatingDType(exampleWeights->getDataType()))
+        throw nb::value_error("StudentTNLLLoss instance: example_weights must use fp16 or fp32 dtype.");
+    if (exampleWeights->getDimensions() != vector<uint64_t>{1})
+        throw nb::value_error("StudentTNLLLoss instance: ragged example_weights dimensions must be [1] for one scalar weight per logical row.");
+    builder.exampleWeights(exampleWeights.value());
+}
 }  // namespace
 
 void bind_student_t_nll_loss(nb::module_& losses) {
@@ -129,38 +192,52 @@ void bind_student_t_nll_loss(nb::module_& losses) {
         "__init__",
         [](StudentTNLLLoss* self,
            Network& network,
-           Tensor location,
-           Tensor log_scale,
-           Tensor labels,
+           nb::object locationObject,
+           nb::object logScaleObject,
+           nb::object labelsObject,
            optional<float> degrees_of_freedom,
            optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
            float minimum_degrees_of_freedom,
-           optional<Tensor> learned_log_degrees_of_freedom,
+           nb::object learnedLogDegreesOfFreedomObject,
            optional<float> loss_weight,
            optional<Tensor> example_weights) {
-            validateArguments(location,
-                              log_scale,
-                              labels,
-                              degrees_of_freedom,
-                              learned_log_degrees_of_freedom,
-                              minimum_degrees_of_freedom,
-                              loss_data_type,
-                              reported_loss_shape);
-
             StudentTNLLLoss::Builder builder;
-            builder.network(network)
-                .location(location)
-                .logScale(log_scale)
-                .labels(labels)
-                .minimumDegreesOfFreedom(minimum_degrees_of_freedom)
-                .lossDataType(loss_data_type.value_or(location.getDataType()))
-                .lossWeight(loss_weight.value_or(1.0f));
-            if (degrees_of_freedom.has_value())
-                builder.degreesOfFreedom(degrees_of_freedom.value());
-            if (learned_log_degrees_of_freedom.has_value())
-                builder.logDegreesOfFreedom(learned_log_degrees_of_freedom.value());
-            maybeSetExampleWeights(builder, location, log_scale, labels, learned_log_degrees_of_freedom, example_weights);
+            builder.network(network).lossWeight(loss_weight.value_or(1.0f));
+
+            const bool noLearnedDof = learnedLogDegreesOfFreedomObject.is_none();
+            if (nb::isinstance<Tensor>(locationObject) && nb::isinstance<Tensor>(logScaleObject) && nb::isinstance<Tensor>(labelsObject) &&
+                (noLearnedDof || nb::isinstance<Tensor>(learnedLogDegreesOfFreedomObject))) {
+                Tensor location = nb::cast<Tensor>(locationObject);
+                Tensor logScale = nb::cast<Tensor>(logScaleObject);
+                Tensor labels = nb::cast<Tensor>(labelsObject);
+                optional<Tensor> learnedDof = noLearnedDof ? nullopt : optional<Tensor>(nb::cast<Tensor>(learnedLogDegreesOfFreedomObject));
+                validateArguments(location, logScale, labels, degrees_of_freedom, learnedDof, minimum_degrees_of_freedom,
+                                  loss_data_type, reported_loss_shape);
+                builder.location(location).logScale(logScale).labels(labels).lossDataType(loss_data_type.value_or(location.getDataType()));
+                if (learnedDof.has_value()) builder.logDegreesOfFreedom(learnedDof.value());
+                maybeSetExampleWeights(builder, location, logScale, labels, learnedDof, example_weights);
+            } else if (nb::isinstance<RaggedTensor>(locationObject) && nb::isinstance<RaggedTensor>(logScaleObject) &&
+                       nb::isinstance<RaggedTensor>(labelsObject) &&
+                       (noLearnedDof || nb::isinstance<RaggedTensor>(learnedLogDegreesOfFreedomObject))) {
+                RaggedTensor location = nb::cast<RaggedTensor>(locationObject);
+                RaggedTensor logScale = nb::cast<RaggedTensor>(logScaleObject);
+                RaggedTensor labels = nb::cast<RaggedTensor>(labelsObject);
+                optional<RaggedTensor> learnedDof = noLearnedDof ? nullopt : optional<RaggedTensor>(nb::cast<RaggedTensor>(learnedLogDegreesOfFreedomObject));
+                validateRaggedArguments(location, logScale, labels, degrees_of_freedom, learnedDof, minimum_degrees_of_freedom,
+                                        loss_data_type, reported_loss_shape);
+                builder.location(location).logScale(logScale).labels(labels).lossDataType(loss_data_type.value_or(location.getValuesDataType()));
+                if (learnedDof.has_value()) builder.logDegreesOfFreedom(learnedDof.value());
+                maybeSetRaggedExampleWeights(builder, location, logScale, labels, learnedDof, example_weights);
+            } else {
+                throw nb::type_error("StudentTNLLLoss location, log_scale, labels, and learned_log_degrees_of_freedom must all use the same dense/ragged tensor kind.");
+            }
+
+            // The public validation above deliberately runs before these builder setters.
+            // Builder checks are internal invariants and surface as RuntimeError through
+            // nanobind; invalid user parameters must instead raise Python ValueError.
+            builder.minimumDegreesOfFreedom(minimum_degrees_of_freedom);
+            if (degrees_of_freedom.has_value()) builder.degreesOfFreedom(degrees_of_freedom.value());
             setReportedLossShape(builder, reported_loss_shape);
             StudentTNLLLoss built = builder.build();
             new (self) StudentTNLLLoss(std::move(built));
@@ -174,15 +251,45 @@ void bind_student_t_nll_loss(nb::module_& losses) {
         "reported_loss_shape"_a = LossShape::BATCH,
         nb::kw_only(),
         "minimum_degrees_of_freedom"_a = 0.0f,
-        "learned_log_degrees_of_freedom"_a.none() = nb::none(),
+        "learned_log_degrees_of_freedom"_a = nb::none(),
         "loss_weight"_a.none() = nb::none(),
         "example_weights"_a.none() = nb::none(),
-        R"nbdoc(Construct a Student-t negative log-likelihood loss.)nbdoc");
+        R"nbdoc(Construct a dense or rank-1 ragged Student-t negative log-likelihood loss.)nbdoc");
 
-    lossClass.def_prop_ro("location", &StudentTNLLLoss::getLocation);
-    lossClass.def_prop_ro("log_scale", &StudentTNLLLoss::getLogScale);
+    lossClass.def("get_predictions", [](const StudentTNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.Loss::getPredictions());
+    });
+    lossClass.def("get_labels", [](const StudentTNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedLabels());
+        return nb::cast(self.Loss::getLabels());
+    });
+    lossClass.def("get_raw_loss", [](const StudentTNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedRawLoss());
+        return nb::cast(self.Loss::getRawLoss());
+    });
+    lossClass.def("get_loss", [](const StudentTNLLLoss& self) -> nb::object {
+        if (self.isRagged() && self.getLossShape() == LossShape::RAW) return nb::cast(self.getRaggedLoss());
+        return nb::cast(self.Loss::getLoss());
+    });
+    lossClass.def_prop_ro("is_ragged", &StudentTNLLLoss::isRagged);
+    lossClass.def_prop_ro("location", [](const StudentTNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.getLocation());
+    });
+    lossClass.def_prop_ro("log_scale", [](const StudentTNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedLogScale());
+        return nb::cast(self.getLogScale());
+    });
     lossClass.def_prop_ro("degrees_of_freedom", &StudentTNLLLoss::getDegreesOfFreedom);
-    lossClass.def_prop_ro("learned_log_degrees_of_freedom", &StudentTNLLLoss::getLearnedLogDegreesOfFreedom);
+    lossClass.def_prop_ro("learned_log_degrees_of_freedom", [](const StudentTNLLLoss& self) -> nb::object {
+        if (self.isRagged()) {
+            auto value = self.getRaggedLearnedLogDegreesOfFreedom();
+            return value.has_value() ? nb::cast(value.value()) : nb::none();
+        }
+        auto value = self.getLearnedLogDegreesOfFreedom();
+        return value.has_value() ? nb::cast(value.value()) : nb::none();
+    });
     lossClass.def_prop_ro("minimum_degrees_of_freedom", &StudentTNLLLoss::getMinimumDegreesOfFreedom);
 
     lossClass.attr("__doc__") = R"nbdoc(
@@ -205,8 +312,9 @@ of the degrees-of-freedom excess above the floor. If neither fixed nor learned
 degrees of freedom is supplied, fixed nu defaults to 3.0. Fixed nu must be
 greater than the configured minimum.
 
-example_weights may be [1] for per-example weighting or may match location for
-elementwise weighting. Weights scale the raw NLL and all learned-parameter
+For dense inputs, example_weights may be [1] for per-example weighting or may
+match location for elementwise weighting. Ragged inputs support dense [1]
+per-row example weights only. Weights scale the raw NLL and all learned-parameter
 gradients before loss-shape reduction.
 )nbdoc";
 }

@@ -59,6 +59,30 @@ TEST(MetricEpochAccumulator, CombinesUnevenTailBatchesByDeclaredContract) {
     EXPECT_NEAR(ratio.value().value(), 100.0 / 11.0, 1e-12);
 }
 
+
+TEST(MetricEpochAccumulator, R10LRaggedMeanAggregatesActiveScalarsAcrossUnequalAndEmptyBatches) {
+    MetricEpochAccumulator ratio(MetricAggregation::RATIO);
+
+    // Two active scalars with mean 5.0.
+    ratio.add(batchStat(MetricAggregation::RATIO, 5.0, 4, 10.0, 2.0));
+    // A logically valid all-empty ragged batch contributes zero active scalars.
+    ratio.add(batchStat(MetricAggregation::RATIO, 0.0, 4, 0.0, 0.0));
+    // Eighteen active scalars with mean 10.0. The exact epoch mean is
+    // (10 + 180) / (2 + 18) = 9.5, while averaging the two nonempty
+    // batch means would incorrectly produce 7.5.
+    ratio.add(batchStat(MetricAggregation::RATIO, 10.0, 2, 180.0, 18.0));
+
+    ASSERT_TRUE(ratio.value().has_value());
+    EXPECT_DOUBLE_EQ(ratio.value().value(), 9.5);
+    const std::optional<MetricBatchStat> combined = ratio.statistic();
+    ASSERT_TRUE(combined.has_value());
+    ASSERT_TRUE(combined->numerator.has_value());
+    ASSERT_TRUE(combined->denominator.has_value());
+    EXPECT_DOUBLE_EQ(combined->numerator.value(), 190.0);
+    EXPECT_DOUBLE_EQ(combined->denominator.value(), 20.0);
+    EXPECT_EQ(combined->validExamples, 10u);
+}
+
 TEST(MetricEpochAccumulator, RatioRetainsNumeratorFromZeroDenominatorBatch) {
     MetricEpochAccumulator ratio(MetricAggregation::RATIO);
     ratio.add(batchStat(MetricAggregation::RATIO, 0.0, 4, 10.0, 0.0));

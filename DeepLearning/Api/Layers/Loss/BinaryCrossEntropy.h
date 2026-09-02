@@ -4,10 +4,16 @@
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedCustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedLossShaper.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Loss/BinaryCrossEntropy.h"
 #include <optional>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace Thor {
 
@@ -25,7 +31,31 @@ class BinaryCrossEntropy : public Loss {
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);
 
+    [[nodiscard]] bool isRagged() const { return raggedPredictionsTensor.has_value(); }
+    [[nodiscard]] RaggedTensor getRaggedPredictions() const {
+        if (!raggedPredictionsTensor.has_value()) throw std::runtime_error("BinaryCrossEntropy predictions are dense.");
+        return raggedPredictionsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLabels() const {
+        if (!raggedLabelsTensor.has_value()) throw std::runtime_error("BinaryCrossEntropy labels are dense.");
+        return raggedLabelsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedRawLoss() const {
+        if (!raggedRawLossTensor.has_value()) throw std::runtime_error("BinaryCrossEntropy raw loss is dense.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLoss() const {
+        if (!isRagged() || lossShape != LossShape::RAW || !raggedRawLossTensor.has_value())
+            throw std::runtime_error("BinaryCrossEntropy does not expose a ragged reported loss for this LossShape.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] LossShape getLossShape() const { return lossShape; }
+
    protected:
+    std::optional<RaggedTensor> raggedPredictionsTensor;
+    std::optional<RaggedTensor> raggedLabelsTensor;
+    std::optional<RaggedTensor> raggedRawLossTensor;
+
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
                                                      std::shared_ptr<ThorImplementation::Layer> drivingLayer,
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
@@ -52,30 +82,50 @@ class BinaryCrossEntropy::Builder {
    public:
     virtual BinaryCrossEntropy build() {
         THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_predictions.has_value());
-        THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        if (!_lossShape.has_value())
-            _lossShape = LossShape::BATCH;
-
-        std::vector<uint64_t> predictionDimensions = _predictions.value().getDimensions();
-        std::vector<uint64_t> labelDimensions = _labels.value().getDimensions();
-        // API tensors omit the physical batch dimension. BCE is pointwise, so every
-        // nonempty per-example tensor shape is valid when labels match exactly.
-        THOR_THROW_IF_FALSE(!predictionDimensions.empty());
-        THOR_THROW_IF_FALSE(predictionDimensions == labelDimensions);
+        const bool hasDensePredictions = _predictions.has_value();
+        const bool hasDenseLabels = _labels.has_value();
+        const bool hasRaggedPredictions = _raggedPredictions.has_value();
+        const bool hasRaggedLabels = _raggedLabels.has_value();
+        THOR_THROW_IF_FALSE(hasDensePredictions == hasDenseLabels);
+        THOR_THROW_IF_FALSE(hasRaggedPredictions == hasRaggedLabels);
+        THOR_THROW_IF_FALSE(hasDensePredictions != hasRaggedPredictions);
+        if (!_lossShape.has_value()) _lossShape = LossShape::BATCH;
 
         BinaryCrossEntropy binaryCrossEntropy;
         binaryCrossEntropy.rawLossAddedToNetwork = _rawLossAddedToNetwork.value_or(false);
-        binaryCrossEntropy.predictionsTensor = _predictions.value();
-        binaryCrossEntropy.labelsTensor = _labels.value();
-        if (!_lossDataType.has_value())
-            _lossDataType = DataType::FP32;
+        if (hasDensePredictions) {
+            THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+            const std::vector<uint64_t> predictionDimensions = _predictions->getDimensions();
+            const std::vector<uint64_t> labelDimensions = _labels->getDimensions();
+            THOR_THROW_IF_FALSE(!predictionDimensions.empty());
+            THOR_THROW_IF_FALSE(predictionDimensions == labelDimensions);
+            binaryCrossEntropy.predictionsTensor = _predictions.value();
+            binaryCrossEntropy.labelsTensor = _labels.value();
+        } else {
+            const RaggedTensor& predictions = _raggedPredictions.value();
+            const RaggedTensor& labels = _raggedLabels.value();
+            THOR_THROW_IF_FALSE(predictions.isInitialized() && labels.isInitialized());
+            THOR_THROW_IF_FALSE(predictions.getValues() != labels.getValues());
+            THOR_THROW_IF_FALSE(predictions.getValuesDataType() == DataType::FP16 || predictions.getValuesDataType() == DataType::FP32);
+            if (predictions.getOffsets() != labels.getOffsets())
+                throw std::invalid_argument("BinaryCrossEntropy ragged predictions and labels must use the exact same row partition tensor.");
+            if (predictions.getBatchSize() != labels.getBatchSize() ||
+                predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
+                predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                throw std::invalid_argument("BinaryCrossEntropy ragged predictions and labels must have identical value geometry.");
+            if (_lossShape.value() == LossShape::PER_OUTPUT)
+                throw std::invalid_argument("BinaryCrossEntropy LossShape::PER_OUTPUT is undefined for ragged sequences.");
+            THOR_THROW_IF_FALSE(!binaryCrossEntropy.rawLossAddedToNetwork);
+            binaryCrossEntropy.predictionsTensor = predictions.getValues();
+            binaryCrossEntropy.labelsTensor = labels.getValues();
+            binaryCrossEntropy.raggedPredictionsTensor = predictions;
+            binaryCrossEntropy.raggedLabelsTensor = labels;
+        }
+
+        if (!_lossDataType.has_value()) _lossDataType = DataType::FP32;
         THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
         binaryCrossEntropy.lossDataType = _lossDataType.value();
-
         binaryCrossEntropy.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
-
         THOR_THROW_IF_FALSE(_lossShape.value() == LossShape::NONE || _lossShape.value() == LossShape::BATCH ||
                             _lossShape.value() == LossShape::PER_EXAMPLE || _lossShape.value() == LossShape::PER_OUTPUT ||
                             _lossShape.value() == LossShape::RAW);
@@ -84,16 +134,14 @@ class BinaryCrossEntropy::Builder {
         binaryCrossEntropy.network = _network.value();
 
         if (binaryCrossEntropy.rawLossAddedToNetwork) {
-            // Legacy/deserialization-only path: build the single raw BCE layer itself. New public BCE construction
-            // builds a raw CustomLoss support layer instead.
+            THOR_THROW_IF_FALSE(hasDensePredictions);
             THOR_THROW_IF_FALSE(binaryCrossEntropy.lossShape == LossShape::PER_EXAMPLE);
-            binaryCrossEntropy.lossTensor = Tensor(_lossDataType.value(), predictionDimensions);
+            binaryCrossEntropy.lossTensor = Tensor(_lossDataType.value(), _predictions->getDimensions());
             binaryCrossEntropy.lossShaperInput = binaryCrossEntropy.lossTensor;
             binaryCrossEntropy.addToNetwork(_network.value());
         } else {
             binaryCrossEntropy.buildSupportLayersAndAddToNetwork();
         }
-
         return binaryCrossEntropy;
     }
 
@@ -110,10 +158,24 @@ class BinaryCrossEntropy::Builder {
         return *this;
     }
 
+    virtual BinaryCrossEntropy::Builder &predictions(RaggedTensor predictions) {
+        THOR_THROW_IF_FALSE(!this->_raggedPredictions.has_value());
+        THOR_THROW_IF_FALSE(predictions.isInitialized());
+        this->_raggedPredictions = std::move(predictions);
+        return *this;
+    }
+
     virtual BinaryCrossEntropy::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
+        return *this;
+    }
+
+    virtual BinaryCrossEntropy::Builder &labels(RaggedTensor labels) {
+        THOR_THROW_IF_FALSE(!this->_raggedLabels.has_value());
+        THOR_THROW_IF_FALSE(labels.isInitialized());
+        this->_raggedLabels = std::move(labels);
         return *this;
     }
 
@@ -194,6 +256,8 @@ class BinaryCrossEntropy::Builder {
     std::optional<Network *> _network;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
+    std::optional<RaggedTensor> _raggedPredictions;
+    std::optional<RaggedTensor> _raggedLabels;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
     std::optional<float> _lossWeight;

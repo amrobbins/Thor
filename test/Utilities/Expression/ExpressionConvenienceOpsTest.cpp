@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -3520,6 +3521,33 @@ TEST(ExpressionConvenienceOps, PreallocatedOutputAliasingInputWaitsForSiblingRea
     expectNear(copyToCpuValues(input, stream), {2.0f, 3.0f, 4.0f});
 }
 
+TEST(ExpressionConvenienceOps, MaskedLowPrecisionValueReductionDoesNotMaterializeFp32CompatibilityTensor) {
+    for (DataType sourceDType : {DataType::FP8_E4M3, DataType::FP8_E5M2, DataType::FP16, DataType::BF16}) {
+        Expression values = Expression::input("values", DataType::FP32, sourceDType);
+        Expression validity = Expression::input("validity", DataType::FP32, DataType::FP32);
+        Expression masked = (values * validity).withOutputDType(sourceDType);
+        PhysicalOutputs outputs = Expression::outputs({{"sum", masked.reduce_sum({0, 1}, {0}, DataType::FP32)}}).physicalOutputs();
+
+        ASSERT_EQ(outputs.expr->inputs.size(), 2u);
+        std::vector<DataType> inputDTypes(outputs.expr->inputs.size(), DataType::FP32);
+        for (const NamedInput& input : outputs.expr->inputs) {
+            if (input.name == "values")
+                inputDTypes.at(input.slot) = sourceDType;
+        }
+        ASSERT_NO_THROW(resolveOutputsDTypesInPlace(outputs, inputDTypes));
+
+        const ExprNode& reduction = outputNode(outputs);
+        ASSERT_EQ(reduction.op, ExprOp::REDUCE_SUM);
+        ASSERT_NE(reduction.lhs, UINT32_MAX);
+        ASSERT_LT(reduction.lhs, outputs.expr->nodes.size());
+        const std::optional<DataType> parentStorage = materializedValueStorageDType(*outputs.expr, reduction.lhs);
+        ASSERT_TRUE(parentStorage.has_value());
+        EXPECT_EQ(parentStorage.value(), sourceDType);
+        ASSERT_TRUE(reduction.output_dtype.has_value());
+        EXPECT_EQ(reduction.output_dtype.value(), DataType::FP32);
+    }
+}
+
 TEST(ExpressionConvenienceOps, DenseValueReductionsExecuteThroughTheCentralReductionUtility) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
@@ -3534,6 +3562,7 @@ TEST(ExpressionConvenienceOps, DenseValueReductionsExecuteThroughTheCentralReduc
         {"mean", x.reduce_mean({1}, {1})},
         {"norm1", x.reduce_norm1({1}, {1})},
         {"norm2", x.reduce_norm2({1}, {1})},
+        {"sum_squares", x.reduce_sum_squares({1}, {1}, DataType::FP32)},
     });
 
     FusedEquation equation = FusedEquation::compile(expression_outputs.physicalOutputs(), 0);
@@ -3547,6 +3576,70 @@ TEST(ExpressionConvenienceOps, DenseValueReductionsExecuteThroughTheCentralReduc
     expectNear(copyToCpuValues(plan.output("mean"), stream), {2.0f / 3.0f, 5.0f / 3.0f});
     expectNear(copyToCpuValues(plan.output("norm1"), stream), {6.0f, 7.0f});
     expectNear(copyToCpuValues(plan.output("norm2"), stream), {std::sqrt(14.0f), std::sqrt(21.0f)});
+    expectNear(copyToCpuValues(plan.output("sum_squares"), stream), {14.0f, 21.0f});
+}
+
+TEST(ExpressionConvenienceOps, SumSquaresReductionRoundTripsExpressionDefinition) {
+    Expression x = Expression::input("x", DataType::FP32, DataType::FP16);
+    ExpressionDefinition definition = ExpressionDefinition::fromOutputs(
+        Expression::outputs({{"sum_squares", x.reduce_sum_squares({1}, {1}, DataType::FP32)}}));
+
+    const nlohmann::json payload = definition.architectureJson();
+    ExpressionDefinition loaded = ExpressionDefinition::deserialize(payload);
+    EXPECT_EQ(loaded.architectureJson(), payload);
+    EXPECT_EQ(loaded.canonical_hash, definition.canonical_hash);
+}
+
+TEST(ExpressionConvenienceOps, SumSquaresReductionBackwardProducesTwoXTimesUpstream) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    FusedEquation forward = FusedEquation::compile(
+        Expression::outputs({{"y", x.reduce_sum_squares({1}, {1}, DataType::FP32)}}).physicalOutputs(), 0);
+    FusedEquation backward = forward.compileBackward({"x"}, "dy");
+
+    Tensor xTensor = makeGpuTensor({2, 3}, {-2.0f, 1.0f, 3.0f, 4.0f, -1.0f, 2.0f}, stream);
+    Tensor dy = makeGpuTensor({2}, {0.5f, -2.0f}, stream);
+    StampedExecutionPlan plan = backward.stamp({{"x", xTensor}, {"dy", dy}}, stream);
+    plan.run();
+
+    expectNear(copyToCpuValues(plan.output("x_grad"), stream),
+               {-2.0f, 1.0f, 3.0f, -16.0f, 4.0f, -8.0f});
+}
+
+TEST(ExpressionConvenienceOps, SumSquaresReductionDoesNotMaterializePointwiseSquare) {
+    for (DataType sourceDType : {DataType::FP8_E4M3, DataType::FP8_E5M2, DataType::FP16, DataType::BF16}) {
+        Expression x = Expression::input("x", DataType::FP32, sourceDType);
+        PhysicalOutputs outputs = Expression::outputs(
+            {{"sum_squares", x.reduce_sum_squares({1}, {1}, DataType::FP32)}}).physicalOutputs();
+
+        ASSERT_NO_THROW(resolveOutputsDTypesInPlace(outputs, {sourceDType}));
+        const ExprNode& reduction = outputNode(outputs);
+        ASSERT_EQ(reduction.op, ExprOp::REDUCE_SUM_SQUARES);
+        ASSERT_NE(reduction.lhs, UINT32_MAX);
+        ASSERT_LT(reduction.lhs, outputs.expr->nodes.size());
+        EXPECT_EQ(outputs.expr->nodes[reduction.lhs].op, ExprOp::INPUT);
+        const std::optional<DataType> parentStorage = materializedValueStorageDType(*outputs.expr, reduction.lhs);
+        ASSERT_TRUE(parentStorage.has_value());
+        EXPECT_EQ(parentStorage.value(), sourceDType);
+        ASSERT_TRUE(reduction.output_dtype.has_value());
+        EXPECT_EQ(reduction.output_dtype.value(), DataType::FP32);
+    }
+}
+
+TEST(NewtonSchulzOrthogonalization, R1FrobeniusNormalizationUsesDirectNorm2Reduction) {
+    NewtonSchulzOrthogonalizationOptions options;
+    options.numIterations = 0;
+    Expression normalized = newtonSchulzOrthogonalize(Expression::input("x"), 3, 4, options);
+    PhysicalOutputs outputs = Expression::outputs({{"y", normalized}}).physicalOutputs();
+
+    bool foundNorm2 = false;
+    for (const ExprNode& node : outputs.expr->nodes) {
+        foundNorm2 = foundNorm2 || node.op == ExprOp::REDUCE_NORM2;
+        EXPECT_NE(node.op, ExprOp::REDUCE_SUM);
+    }
+    EXPECT_TRUE(foundNorm2);
 }
 
 TEST(NewtonSchulzOrthogonalization, RejectsInvalidOptions) {

@@ -291,3 +291,68 @@ def test_poisson_nll_loss_save_load_round_trip_serializes_support_layers(tmp_pat
     loaded_arch = json.loads(loaded.get_architecture_json())
     assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "custom_loss") == 1
     assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "loss_shaper") == 1
+
+
+def _r10i_poisson_ragged_pair(network, label_dtype=thor.DataType.uint16):
+    predictions = thor.layers.RaggedNetworkInput(
+        network,
+        "r10i_predictions",
+        thor.DataType.fp32,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    labels = thor.layers.RaggedNetworkInput(
+        network,
+        "r10i_labels",
+        label_dtype,
+        [2],
+        partition=predictions,
+    )
+    return predictions, labels
+
+
+def test_poisson_nll_loss_r10i_constructs_ragged_raw_and_preserves_partition():
+    n = _net()
+    predictions, labels = _r10i_poisson_ragged_pair(n)
+    loss = thor.losses.distribution.PoissonNLLLoss(
+        n,
+        predictions,
+        labels,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert loss.is_ragged
+    assert loss.get_predictions() == predictions
+    assert loss.get_labels() == labels
+    assert isinstance(loss.get_loss(), thor.RaggedTensor)
+    assert loss.get_loss().offsets == predictions.offsets
+
+
+def test_poisson_nll_loss_r10i_rejects_per_output_and_different_partition():
+    n = _net()
+    predictions, labels = _r10i_poisson_ragged_pair(n, thor.DataType.fp32)
+    with pytest.raises(ValueError, match=r"per_output.*undefined"):
+        thor.losses.distribution.PoissonNLLLoss(
+            n, predictions, labels, reported_loss_shape=thor.losses.LossShape.per_output
+        )
+
+    different_labels = thor.layers.RaggedNetworkInput(
+        n,
+        "r10i_different_labels",
+        thor.DataType.fp32,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    with pytest.raises(ValueError, match=r"exact same row partition"):
+        thor.losses.distribution.PoissonNLLLoss(n, predictions, different_labels)
+
+
+def test_poisson_nll_loss_r10i_accepts_dense_per_row_weights():
+    n = _net()
+    predictions, labels = _r10i_poisson_ragged_pair(n, thor.DataType.fp32)
+    weights = thor.layers.NetworkInput(n, "r10i_weights", [1], thor.DataType.fp16).get_feature_output()
+    loss = thor.losses.distribution.PoissonNLLLoss(n, predictions, labels, example_weights=weights)
+    assert loss.example_weights == weights

@@ -4,6 +4,12 @@
 #include "DeepLearning/Api/Layers/Loss/AsymmetricPowerLoss.h"
 
 #include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedCustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedLossShaper.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedBroadcast.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
@@ -79,6 +85,14 @@ ThorImplementation::Expression asymmetricPowerLossExpression(float level, float 
     return asymmetricWeight(error, level) * absolutePower(error, exponent);
 }
 
+vector<uint64_t> raggedPackedScalarWeightBroadcastDimensions(const vector<uint64_t>& predictionValueDimensions) {
+    if (predictionValueDimensions.empty())
+        throw invalid_argument("AsymmetricPowerLoss ragged prediction values must have a packed-capacity dimension.");
+    vector<uint64_t> dimensions(predictionValueDimensions.size(), 1);
+    dimensions.front() = predictionValueDimensions.front();
+    return dimensions;
+}
+
 ThorImplementation::DynamicExpression makeAsymmetricPowerLossExpression(DataType lossDataType, float level, float exponent) {
     validateLevel(level);
     validateExponent(exponent);
@@ -88,13 +102,16 @@ ThorImplementation::DynamicExpression makeAsymmetricPowerLossExpression(DataType
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
-ThorImplementation::DynamicExpression makeWeightedAsymmetricPowerLossExpression(DataType lossDataType,
-                                                                                 float level,
-                                                                                 float exponent) {
+ThorImplementation::DynamicExpression makeWeightedAsymmetricPowerLossExpression(
+    DataType lossDataType, float level, float exponent, optional<vector<uint64_t>> raggedPredictionValueDimensions = nullopt) {
     validateLevel(level);
     validateExponent(exponent);
     ThorImplementation::Expression exampleWeights =
         ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+    if (raggedPredictionValueDimensions.has_value()) {
+        exampleWeights = exampleWeights.reshape(
+            raggedPackedScalarWeightBroadcastDimensions(raggedPredictionValueDimensions.value()));
+    }
     ThorImplementation::Expression loss =
         (asymmetricPowerLossExpression(level, exponent) * exampleWeights).withOutputDType(lossDataType);
     ThorImplementation::ExpressionDefinition definition =
@@ -144,14 +161,17 @@ ThorImplementation::DynamicExpression makeAsymmetricPowerGradientExpression(Data
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
-ThorImplementation::DynamicExpression makeWeightedAsymmetricPowerGradientExpression(DataType predictionsDataType,
-                                                                                     float level,
-                                                                                     float exponent) {
+ThorImplementation::DynamicExpression makeWeightedAsymmetricPowerGradientExpression(
+    DataType predictionsDataType, float level, float exponent, optional<vector<uint64_t>> raggedPredictionValueDimensions = nullopt) {
     validatePredictionsDType(predictionsDataType);
     validateLevel(level);
     validateExponent(exponent);
     ThorImplementation::Expression exampleWeights =
         ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+    if (raggedPredictionValueDimensions.has_value()) {
+        exampleWeights = exampleWeights.reshape(
+            raggedPackedScalarWeightBroadcastDimensions(raggedPredictionValueDimensions.value()));
+    }
     ThorImplementation::Expression gradient =
         (asymmetricPowerGradientExpression(level, exponent) * exampleWeights).withOutputDType(predictionsDataType);
     ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
@@ -167,40 +187,105 @@ void AsymmetricPowerLoss::buildSupportLayersAndAddToNetwork() {
     validateExponent(exponent);
     validatePredictionsDType(predictionsTensor.getDataType());
     validateLabelsDType(labelsTensor.getDataType());
-    validateExampleWeights(predictionsTensor, labelsTensor, exampleWeightsTensor);
 
+    if (isRagged()) {
+        if (lossShape == LossShape::PER_OUTPUT)
+            throw invalid_argument("AsymmetricPowerLoss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+
+        RaggedCustomLoss::Builder rawBuilder;
+        rawBuilder.network(*network)
+            .predictions(raggedPredictionsTensor.value())
+            .labels(raggedLabelsTensor.value())
+            .predictionsName(kPredictionsName)
+            .labelsName(kLabelsName)
+            .lossName(kLossName)
+            .gradientName(kGradientName)
+            .lossDataType(lossDataType)
+            .lossWeight(lossWeight.value_or(1.0f));
+
+        if (exampleWeightsTensor.has_value()) {
+            validateExampleWeights(predictionsTensor, labelsTensor, exampleWeightsTensor);
+            if (exampleWeightsTensor->getDimensions() != vector<uint64_t>{1})
+                throw invalid_argument("AsymmetricPowerLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");
+            TypeConverter weightConverter = TypeConverter::Builder()
+                                                .network(*network)
+                                                .featureInput(exampleWeightsTensor.value())
+                                                .newDataType(DataType::FP32)
+                                                .build();
+            SegmentedBroadcast weightBroadcast = SegmentedBroadcast::Builder()
+                                                     .network(*network)
+                                                     .featureInput(weightConverter.getFeatureOutput().value())
+                                                     .partitionInput(raggedPredictionsTensor.value())
+                                                     .build();
+            const vector<uint64_t> predictionValueDimensions = raggedPredictionsTensor->getValuesDimensions();
+            rawBuilder.lossExpression(makeWeightedAsymmetricPowerLossExpression(lossDataType, level, exponent, predictionValueDimensions))
+                .gradientExpression(makeWeightedAsymmetricPowerGradientExpression(predictionsTensor.getDataType(), level, exponent, predictionValueDimensions))
+                .exampleWeights(weightBroadcast.getRaggedFeatureOutput())
+                .exampleWeightsName(kExampleWeightsName);
+        } else {
+            rawBuilder.lossExpression(makeAsymmetricPowerLossExpression(lossDataType, level, exponent))
+                .gradientExpression(makeAsymmetricPowerGradientExpression(predictionsTensor.getDataType(), level, exponent));
+        }
+
+        RaggedCustomLoss rawLoss = rawBuilder.build();
+        raggedRawLossTensor = rawLoss.getRaggedRawLoss();
+        lossShaperInput = raggedRawLossTensor->getValues();
+
+        if (lossShape == LossShape::NONE) {
+            lossTensor = lossShaperInput;
+            Stub::Builder().network(*network).inputTensor(lossShaperInput).build();
+        } else if (lossShape == LossShape::RAW) {
+            lossTensor = lossShaperInput;
+        } else if (lossShape == LossShape::PER_EXAMPLE) {
+            RaggedLossShaper shaper = RaggedLossShaper::Builder()
+                                          .network(*network)
+                                          .lossInput(raggedRawLossTensor.value())
+                                          .reportsPerExampleLoss()
+                                          .build();
+            lossTensor = shaper.getLossOutput();
+        } else if (lossShape == LossShape::BATCH) {
+            RaggedLossShaper shaper = RaggedLossShaper::Builder()
+                                          .network(*network)
+                                          .lossInput(raggedRawLossTensor.value())
+                                          .reportsBatchLoss()
+                                          .build();
+            lossTensor = shaper.getLossOutput();
+        } else {
+            THOR_UNREACHABLE();
+        }
+        return;
+    }
+
+    validateExampleWeights(predictionsTensor, labelsTensor, exampleWeightsTensor);
     if (exampleWeightsTensor.has_value()) {
-        MultiInputCustomLoss rawAsymmetricPowerLoss =
-            MultiInputCustomLoss::Builder()
-                .network(*network)
-                .lossExpression(makeWeightedAsymmetricPowerLossExpression(lossDataType, level, exponent))
-                .gradientExpression(
-                    makeWeightedAsymmetricPowerGradientExpression(predictionsTensor.getDataType(), level, exponent))
-                .input(kPredictionsName, predictionsTensor, std::string(kGradientName))
-                .auxiliaryInput(kLabelsName, labelsTensor)
-                .auxiliaryInput(kExampleWeightsName, exampleWeightsTensor.value())
-                .lossName(kLossName)
-                .lossDataType(lossDataType)
-                .lossWeight(lossWeight.value_or(1.0f))
-                .reportsRawLoss()
-                .build();
+        MultiInputCustomLoss rawAsymmetricPowerLoss = MultiInputCustomLoss::Builder()
+            .network(*network)
+            .lossExpression(makeWeightedAsymmetricPowerLossExpression(lossDataType, level, exponent))
+            .gradientExpression(makeWeightedAsymmetricPowerGradientExpression(predictionsTensor.getDataType(), level, exponent))
+            .input(kPredictionsName, predictionsTensor, std::string(kGradientName))
+            .auxiliaryInput(kLabelsName, labelsTensor)
+            .auxiliaryInput(kExampleWeightsName, exampleWeightsTensor.value())
+            .lossName(kLossName)
+            .lossDataType(lossDataType)
+            .lossWeight(lossWeight.value_or(1.0f))
+            .reportsRawLoss()
+            .build();
         lossShaperInput = rawAsymmetricPowerLoss.getLoss();
     } else {
-        CustomLoss rawAsymmetricPowerLoss =
-            CustomLoss::Builder()
-                .network(*network)
-                .lossExpression(makeAsymmetricPowerLossExpression(lossDataType, level, exponent))
-                .gradientExpression(makeAsymmetricPowerGradientExpression(predictionsTensor.getDataType(), level, exponent))
-                .predictions(predictionsTensor)
-                .labels(labelsTensor)
-                .predictionsName(kPredictionsName)
-                .labelsName(kLabelsName)
-                .lossName(kLossName)
-                .gradientName(kGradientName)
-                .lossDataType(lossDataType)
-                .lossWeight(lossWeight.value_or(1.0f))
-                .reportsRawLoss()
-                .build();
+        CustomLoss rawAsymmetricPowerLoss = CustomLoss::Builder()
+            .network(*network)
+            .lossExpression(makeAsymmetricPowerLossExpression(lossDataType, level, exponent))
+            .gradientExpression(makeAsymmetricPowerGradientExpression(predictionsTensor.getDataType(), level, exponent))
+            .predictions(predictionsTensor)
+            .labels(labelsTensor)
+            .predictionsName(kPredictionsName)
+            .labelsName(kLabelsName)
+            .lossName(kLossName)
+            .gradientName(kGradientName)
+            .lossDataType(lossDataType)
+            .lossWeight(lossWeight.value_or(1.0f))
+            .reportsRawLoss()
+            .build();
         lossShaperInput = rawAsymmetricPowerLoss.getLoss();
     }
 
@@ -209,9 +294,17 @@ void AsymmetricPowerLoss::buildSupportLayersAndAddToNetwork() {
 
 json AsymmetricPowerLoss::architectureJson() const {
     json j = Loss::architectureJson();
-    j["loss_shape"] = lossShape;
+    j["layer_type"] = "asymmetric_power_loss";
     j["level"] = level;
     j["exponent"] = exponent;
+    if (isRagged()) {
+        j["loss_shape"] = lossShape;
+        j["ragged_predictions"] = raggedPredictionsTensor->architectureJson();
+        j["ragged_labels"] = raggedLabelsTensor->architectureJson();
+        if (raggedRawLossTensor.has_value()) j["ragged_raw_loss"] = raggedRawLossTensor->architectureJson();
+    } else {
+        j["loss_shape"] = lossShape;
+    }
     return j;
 }
 
@@ -219,31 +312,53 @@ void AsymmetricPowerLoss::deserialize(const json& j, Network* network) {
     if (j.at("version").get<std::string>() != "1.0.0")
         throw runtime_error("Unsupported version in AsymmetricPowerLoss::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "asymmetric_power_loss")
-        throw runtime_error("Layer type mismatch in AsymmetricPowerLoss::deserialize: " +
-                            j.at("layer_type").get<std::string>());
+        throw runtime_error("Layer type mismatch in AsymmetricPowerLoss::deserialize: " + j.at("layer_type").get<std::string>());
+
+    if (j.contains("ragged_predictions")) {
+        RaggedTensor predictions = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_predictions"), network, "AsymmetricPowerLoss");
+        RaggedTensor labels = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_labels"), network, "AsymmetricPowerLoss");
+        AsymmetricPowerLoss::Builder builder;
+        builder.network(*network).predictions(predictions).labels(labels).level(j.value("level", 0.5f)).exponent(j.value("exponent", 1.5f));
+        if (j.contains("example_weights_tensor")) {
+            const uint64_t weightsId = j.at("example_weights_tensor").at("id").get<uint64_t>();
+            builder.exampleWeights(network->getApiTensorByOriginalId(weightsId));
+        }
+        builder.lossDataType(j.at("loss_data_type").get<DataType>());
+        builder.lossWeight(ThorImplementation::lossWeightFromJson(j).value_or(1.0f));
+        switch (j.at("loss_shape").get<LossShape>()) {
+            case LossShape::NONE: builder.reportsNoLoss(); break;
+            case LossShape::BATCH: builder.reportsBatchLoss(); break;
+            case LossShape::PER_EXAMPLE: builder.reportsPerExampleLoss(); break;
+            case LossShape::RAW: builder.reportsRawLoss(); break;
+            case LossShape::PER_OUTPUT:
+                throw runtime_error("Serialized ragged AsymmetricPowerLoss cannot use LossShape::PER_OUTPUT.");
+        }
+        (void)builder.build();
+        return;
+    }
 
     uint64_t originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     Tensor predictions = network->getApiTensorByOriginalId(originalTensorId);
     originalTensorId = j["labels_tensor"].at("id").get<uint64_t>();
     Tensor labels = network->getApiTensorByOriginalId(originalTensorId);
 
-    AsymmetricPowerLoss asymmetricPowerLoss;
-    asymmetricPowerLoss.lossShape = j.at("loss_shape").get<LossShape>();
-    asymmetricPowerLoss.lossDataType = j.at("loss_data_type").get<DataType>();
-    asymmetricPowerLoss.lossWeight = ThorImplementation::lossWeightFromJson(j);
-    asymmetricPowerLoss.level = j.value("level", 0.5f);
-    asymmetricPowerLoss.exponent = j.value("exponent", 1.5f);
-    validateLevel(asymmetricPowerLoss.level);
-    validateExponent(asymmetricPowerLoss.exponent);
-    asymmetricPowerLoss.predictionsTensor = predictions;
-    asymmetricPowerLoss.labelsTensor = labels;
+    AsymmetricPowerLoss loss;
+    loss.lossShape = j.at("loss_shape").get<LossShape>();
+    loss.lossDataType = j.at("loss_data_type").get<DataType>();
+    loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
+    loss.level = j.value("level", 0.5f);
+    loss.exponent = j.value("exponent", 1.5f);
+    validateLevel(loss.level);
+    validateExponent(loss.exponent);
+    loss.predictionsTensor = predictions;
+    loss.labelsTensor = labels;
     if (j.contains("example_weights_tensor")) {
         originalTensorId = j["example_weights_tensor"].at("id").get<uint64_t>();
-        asymmetricPowerLoss.exampleWeightsTensor = network->getApiTensorByOriginalId(originalTensorId);
+        loss.exampleWeightsTensor = network->getApiTensorByOriginalId(originalTensorId);
     }
-    asymmetricPowerLoss.network = network;
-    asymmetricPowerLoss.initialized = true;
-    asymmetricPowerLoss.buildSupportLayersAndAddToNetwork();
+    loss.network = network;
+    loss.initialized = true;
+    loss.buildSupportLayersAndAddToNetwork();
 }
 
 }  // namespace Thor

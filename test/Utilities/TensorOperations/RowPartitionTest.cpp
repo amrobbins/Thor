@@ -47,6 +47,11 @@ DataType dtypeFor<int32_t>() {
     return DataType::INT32;
 }
 
+template <>
+DataType dtypeFor<float>() {
+    return DataType::FP32;
+}
+
 template <typename T>
 Tensor makeGpuVector(const std::vector<T>& values, Stream& stream) {
     Tensor cpu(cpuPlacement, TensorDescriptor(dtypeFor<T>(), {static_cast<uint64_t>(values.size())}));
@@ -202,6 +207,33 @@ TEST(RowPartition, RuntimeExtentRejectsInvalidStaticCapacityAndElementsPerValue)
     EXPECT_THROW(static_cast<void>(raggedRuntimeExtentFromOffsets(offsets, 1, 0, 1)), std::invalid_argument);
     EXPECT_THROW(static_cast<void>(raggedRuntimeExtentFromOffsets(offsets, 1, 1, 0)), std::invalid_argument);
 }
+
+template <typename OffsetT>
+void expectR10LMetricStructuralHelpersDType() {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    // The final two rows deliberately contain values that belong to an invalid
+    // logical tail batch. Clamping must make those rows empty without touching
+    // packed values, and active-scalar counting must stop at offsets[2].
+    Tensor offsets = makeGpuVector<OffsetT>({OffsetT{0}, OffsetT{2}, OffsetT{5}, OffsetT{8}, OffsetT{9}}, stream);
+    Tensor clamped(gpuPlacement, TensorDescriptor(dtypeFor<OffsetT>(), {5}));
+    Tensor activeScalarCount(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
+
+    rowPartitionClampOffsetsToValidRows(offsets, clamped, 4, 2, stream);
+    rowPartitionActiveScalarCount(offsets, activeScalarCount, 2, 3, stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuVector<OffsetT>(clamped, stream),
+              (std::vector<OffsetT>{OffsetT{0}, OffsetT{2}, OffsetT{5}, OffsetT{5}, OffsetT{5}}));
+    const std::vector<float> count = copyGpuVector<float>(activeScalarCount, stream);
+    ASSERT_EQ(count.size(), 1U);
+    EXPECT_FLOAT_EQ(count.front(), 15.0F);
+}
+
+TEST(RowPartition, R10LMetricStructuralHelpersUint32) { expectR10LMetricStructuralHelpersDType<uint32_t>(); }
+
+TEST(RowPartition, R10LMetricStructuralHelpersUint64) { expectR10LMetricStructuralHelpersDType<uint64_t>(); }
 
 TEST(RowPartition, OffsetsToLengthsUint32) { expectOffsetsToLengthsDType<uint32_t>(); }
 

@@ -411,6 +411,7 @@ void requireSupportedSegmentedOperation(CubReductionOp op) {
         case CubReductionOp::Product:
         case CubReductionOp::L1Norm:
         case CubReductionOp::L2Norm:
+        case CubReductionOp::SumSquares:
             break;
     }
     throw std::invalid_argument("Offset-segmented CUB reduction supports sum, mean, min, and max.");
@@ -542,6 +543,7 @@ void requireSupportedOperation(CubReductionOp op) {
         case CubReductionOp::Mean:
         case CubReductionOp::L1Norm:
         case CubReductionOp::L2Norm:
+        case CubReductionOp::SumSquares:
             return;
     }
     throw std::invalid_argument("Unsupported CUB tensor reduction operation.");
@@ -571,6 +573,9 @@ size_t queryReductionBytes(CubReductionOp op,
                 input_dtype, input, input_elements, output_dtype, output, geometry, output_scale, stream);
         case CubReductionOp::L2Norm:
             return CubReductionInternal::queryL2NormReductionBytes(
+                input_dtype, input, input_elements, output_dtype, output, geometry, output_scale, stream);
+        case CubReductionOp::SumSquares:
+            return CubReductionInternal::querySumSquaresReductionBytes(
                 input_dtype, input, input_elements, output_dtype, output, geometry, output_scale, stream);
         case CubReductionOp::Min:
             return CubReductionInternal::queryMinReductionBytes(
@@ -609,6 +614,10 @@ void launchReduction(CubReductionOp op,
             return;
         case CubReductionOp::L2Norm:
             CubReductionInternal::launchL2NormReduction(
+                temp_storage, temp_storage_bytes, input, output, geometry, output_scale, stream);
+            return;
+        case CubReductionOp::SumSquares:
+            CubReductionInternal::launchSumSquaresReduction(
                 temp_storage, temp_storage_bytes, input, output, geometry, output_scale, stream);
             return;
         case CubReductionOp::Min:
@@ -722,6 +731,7 @@ float CubReduction::getFp32EmptyReductionValue(CubReductionOp op) {
         case CubReductionOp::Mean:
         case CubReductionOp::L1Norm:
         case CubReductionOp::L2Norm:
+        case CubReductionOp::SumSquares:
             return 0.0f;
         case CubReductionOp::Min:
             return std::numeric_limits<float>::infinity();

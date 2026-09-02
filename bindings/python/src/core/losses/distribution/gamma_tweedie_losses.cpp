@@ -8,6 +8,7 @@
 #include "DeepLearning/Api/Layers/Loss/TweedieLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -174,6 +175,32 @@ void maybeSetTweedieExampleWeights(TweedieLoss::Builder &builder,
     }
     builder.exampleWeights(example_weights.value());
 }
+void validateRaggedMeanTarget(const string& loss_name, const RaggedTensor& predictions, const RaggedTensor& labels,
+                              optional<DataType> loss_data_type, LossShape reported_loss_shape, float eps) {
+    if (!isFloatingDType(predictions.getValuesDataType())) throw nb::value_error((loss_name + ": predictions must use fp16 or fp32 dtype").c_str());
+    if (!isFloatingDType(labels.getValuesDataType())) throw nb::value_error((loss_name + ": labels must use fp16 or fp32 dtype").c_str());
+    if (predictions.getOffsets() != labels.getOffsets()) throw nb::value_error((loss_name + ": ragged predictions and labels must use the exact same row partition tensor.").c_str());
+    if (predictions.getBatchSize() != labels.getBatchSize() || predictions.getMaxTotalValues() != labels.getMaxTotalValues() || predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+        throw nb::value_error((loss_name + ": ragged predictions and labels must have identical value geometry.").c_str());
+    if (reported_loss_shape == LossShape::PER_OUTPUT) throw nb::value_error((loss_name + ": per_output reporting is undefined for ragged predictions.").c_str());
+    DataType effective = loss_data_type.value_or(predictions.getValuesDataType());
+    if (!isFloatingDType(effective)) throw nb::value_error((loss_name + ": loss_data_type must be fp16 or fp32").c_str());
+    if (eps <= 0.0f) throw nb::value_error((loss_name + ": eps must be greater than zero").c_str());
+    validateReportedLossShape(reported_loss_shape, loss_name);
+}
+
+void maybeSetRaggedDistributionWeights(const string& loss_name, optional<Tensor> example_weights,
+                                       const RaggedTensor& predictions, const RaggedTensor& labels,
+                                       const optional<RaggedTensor>& third, auto& builder) {
+    if (!example_weights.has_value()) return;
+    if (example_weights.value() == predictions.getValues() || example_weights.value() == labels.getValues() ||
+        (third.has_value() && example_weights.value() == third->getValues()))
+        throw nb::value_error((loss_name + ": example_weights must be distinct from ragged value inputs.").c_str());
+    if (!isFloatingDType(example_weights->getDataType())) throw nb::value_error((loss_name + ": example_weights must use fp16 or fp32 dtype.").c_str());
+    if (example_weights->getDimensions() != vector<uint64_t>{1}) throw nb::value_error((loss_name + ": ragged example_weights dimensions must be [1] for one scalar weight per logical row.").c_str());
+    builder.exampleWeights(example_weights.value());
+}
+
 }  // namespace
 
 void bind_gamma_tweedie_losses(nb::module_ &losses) {
@@ -184,50 +211,83 @@ void bind_gamma_tweedie_losses(nb::module_ &losses) {
         "__init__",
         [](GammaNLLLoss *self,
            Network &network,
-           Tensor predictions,
-           Tensor labels,
+           nb::object predictionsObject,
+           nb::object labelsObject,
            float eps,
            optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
            optional<float> loss_weight,
-           optional<Tensor> dispersion,
+           nb::object dispersionObject,
            bool log_mean,
            bool log_dispersion,
            optional<Tensor> example_weights) {
             const string loss_name = "GammaNLLLoss instance";
-            validateMeanTargetLossArguments(loss_name, predictions, labels, loss_data_type, reported_loss_shape, eps);
-
-            DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
+            if (eps <= 0.0f) throw nb::value_error("GammaNLLLoss instance: eps must be greater than zero");
             GammaNLLLoss::Builder builder;
-            builder.network(network)
-                .predictions(predictions)
-                .labels(labels)
-                .logMean(log_mean)
-                .eps(eps)
-                .lossDataType(effectiveLossDataType)
-                .lossWeight(loss_weight.value_or(1.0f));
-            maybeSetGammaDispersion(builder, predictions, labels, dispersion, log_dispersion);
-            maybeSetGammaExampleWeights(builder, predictions, labels, dispersion, example_weights);
+            builder.network(network).logMean(log_mean).eps(eps).lossWeight(loss_weight.value_or(1.0f));
+            if (nb::isinstance<Tensor>(predictionsObject) && nb::isinstance<Tensor>(labelsObject)) {
+                Tensor predictions = nb::cast<Tensor>(predictionsObject);
+                Tensor labels = nb::cast<Tensor>(labelsObject);
+                validateMeanTargetLossArguments(loss_name, predictions, labels, loss_data_type, reported_loss_shape, eps);
+                builder.predictions(predictions).labels(labels).lossDataType(loss_data_type.value_or(predictions.getDataType()));
+                optional<Tensor> dispersion;
+                if (!dispersionObject.is_none()) {
+                    if (!nb::isinstance<Tensor>(dispersionObject)) throw nb::type_error("GammaNLLLoss dense predictions require dense dispersion.");
+                    dispersion = nb::cast<Tensor>(dispersionObject);
+                }
+                maybeSetGammaDispersion(builder, predictions, labels, dispersion, log_dispersion);
+                maybeSetGammaExampleWeights(builder, predictions, labels, dispersion, example_weights);
+            } else if (nb::isinstance<RaggedTensor>(predictionsObject) && nb::isinstance<RaggedTensor>(labelsObject)) {
+                RaggedTensor predictions = nb::cast<RaggedTensor>(predictionsObject);
+                RaggedTensor labels = nb::cast<RaggedTensor>(labelsObject);
+                validateRaggedMeanTarget(loss_name, predictions, labels, loss_data_type, reported_loss_shape, eps);
+                builder.predictions(predictions).labels(labels).lossDataType(loss_data_type.value_or(predictions.getValuesDataType()));
+                optional<RaggedTensor> dispersion;
+                if (!dispersionObject.is_none()) {
+                    if (!nb::isinstance<RaggedTensor>(dispersionObject)) throw nb::type_error("GammaNLLLoss ragged predictions require ragged dispersion.");
+                    dispersion = nb::cast<RaggedTensor>(dispersionObject);
+                    if (!isFloatingDType(dispersion->getValuesDataType())) throw nb::value_error("GammaNLLLoss instance: dispersion must use fp16 or fp32 dtype.");
+                    if (dispersion->getOffsets() != predictions.getOffsets()) throw nb::value_error("GammaNLLLoss instance: ragged dispersion must use the exact same row partition tensor as predictions.");
+                    if (dispersion->getBatchSize() != predictions.getBatchSize() || dispersion->getMaxTotalValues() != predictions.getMaxTotalValues() || dispersion->getTrailingDimensions() != predictions.getTrailingDimensions())
+                        throw nb::value_error("GammaNLLLoss instance: ragged dispersion must have identical value geometry to predictions.");
+                    builder.dispersion(dispersion.value());
+                } else if (log_dispersion) {
+                    throw nb::value_error("GammaNLLLoss instance: log_dispersion=True requires dispersion.");
+                }
+                builder.logDispersion(log_dispersion);
+                maybeSetRaggedDistributionWeights(loss_name, example_weights, predictions, labels, dispersion, builder);
+            } else {
+                throw nb::type_error("GammaNLLLoss predictions and labels must both be thor.Tensor or both be thor.RaggedTensor.");
+            }
             setReportedLossShape(builder, reported_loss_shape);
             GammaNLLLoss built = builder.build();
-
             new (self) GammaNLLLoss(std::move(built));
         },
-        "network"_a,
-        "predictions"_a,
-        "labels"_a,
-        "eps"_a = 1.0e-6f,
-        "loss_data_type"_a.none() = nb::none(),
-        "reported_loss_shape"_a = LossShape::BATCH,
-        nb::kw_only(),
-        "loss_weight"_a.none() = nb::none(),
-        "dispersion"_a.none() = nb::none(),
-        "log_mean"_a = false,
-        "log_dispersion"_a = false,
-        "example_weights"_a.none() = nb::none(),
-        R"nbdoc(Construct a Gamma negative log-likelihood loss.)nbdoc");
+        "network"_a, "predictions"_a, "labels"_a, "eps"_a = 1.0e-6f,
+        "loss_data_type"_a.none() = nb::none(), "reported_loss_shape"_a = LossShape::BATCH, nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(), "dispersion"_a = nb::none(), "log_mean"_a = false,
+        "log_dispersion"_a = false, "example_weights"_a.none() = nb::none(),
+        R"nbdoc(Construct a dense or rank-1 ragged Gamma negative log-likelihood loss.)nbdoc");
 
-    gamma_nll_loss.def_prop_ro("dispersion", &GammaNLLLoss::getDispersion);
+    gamma_nll_loss.def("get_predictions", [](const GammaNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.Loss::getPredictions());
+    });
+    gamma_nll_loss.def("get_labels", [](const GammaNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedLabels());
+        return nb::cast(self.Loss::getLabels());
+    });
+    gamma_nll_loss.def("get_raw_loss", [](const GammaNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedRawLoss());
+        return nb::cast(self.Loss::getRawLoss());
+    });
+    gamma_nll_loss.def("get_loss", [](const GammaNLLLoss& self) -> nb::object { if (self.isRagged() && self.getLossShape() == LossShape::RAW) return nb::cast(self.getRaggedLoss()); return nb::cast(self.Loss::getLoss()); });
+    gamma_nll_loss.def_prop_ro("is_ragged", &GammaNLLLoss::isRagged);
+
+    gamma_nll_loss.def_prop_ro("dispersion", [](const GammaNLLLoss& self) -> nb::object {
+        if (self.isRagged()) { auto d = self.getRaggedDispersion(); return d.has_value() ? nb::cast(d.value()) : nb::none(); }
+        auto d = self.getDispersion(); return d.has_value() ? nb::cast(d.value()) : nb::none();
+    });
     gamma_nll_loss.def_prop_ro("log_mean", &GammaNLLLoss::getLogMean);
     gamma_nll_loss.def_prop_ro("log_dispersion", &GammaNLLLoss::getLogDispersion);
     gamma_nll_loss.def_prop_ro("eps", &GammaNLLLoss::getEps);
@@ -256,8 +316,8 @@ gradients before loss-shape reduction.
         "__init__",
         [](TweedieLoss *self,
            Network &network,
-           Tensor predictions,
-           Tensor labels,
+           nb::object predictionsObject,
+           nb::object labelsObject,
            float power,
            float eps,
            optional<DataType> loss_data_type,
@@ -265,34 +325,47 @@ gradients before loss-shape reduction.
            optional<float> loss_weight,
            optional<Tensor> example_weights) {
             const string loss_name = "TweedieLoss instance";
-            validateTweedieArguments(loss_name, predictions, labels, power, loss_data_type, reported_loss_shape, eps);
-
-            DataType effectiveLossDataType = loss_data_type.value_or(predictions.getDataType());
+            if (!std::isfinite(power)) throw nb::value_error("TweedieLoss instance: power must be finite");
+            if (eps <= 0.0f) throw nb::value_error("TweedieLoss instance: eps must be greater than zero");
             TweedieLoss::Builder builder;
-            builder.network(network)
-                .predictions(predictions)
-                .labels(labels)
-                .power(power)
-                .eps(eps)
-                .lossDataType(effectiveLossDataType)
-                .lossWeight(loss_weight.value_or(1.0f));
-            maybeSetTweedieExampleWeights(builder, predictions, labels, example_weights);
+            builder.network(network).power(power).eps(eps).lossWeight(loss_weight.value_or(1.0f));
+            if (nb::isinstance<Tensor>(predictionsObject) && nb::isinstance<Tensor>(labelsObject)) {
+                Tensor predictions = nb::cast<Tensor>(predictionsObject); Tensor labels = nb::cast<Tensor>(labelsObject);
+                validateTweedieArguments(loss_name, predictions, labels, power, loss_data_type, reported_loss_shape, eps);
+                builder.predictions(predictions).labels(labels).lossDataType(loss_data_type.value_or(predictions.getDataType()));
+                maybeSetTweedieExampleWeights(builder, predictions, labels, example_weights);
+            } else if (nb::isinstance<RaggedTensor>(predictionsObject) && nb::isinstance<RaggedTensor>(labelsObject)) {
+                RaggedTensor predictions = nb::cast<RaggedTensor>(predictionsObject); RaggedTensor labels = nb::cast<RaggedTensor>(labelsObject);
+                validateRaggedMeanTarget(loss_name, predictions, labels, loss_data_type, reported_loss_shape, eps);
+                builder.predictions(predictions).labels(labels).lossDataType(loss_data_type.value_or(predictions.getValuesDataType()));
+                optional<RaggedTensor> noThird;
+                maybeSetRaggedDistributionWeights(loss_name, example_weights, predictions, labels, noThird, builder);
+            } else {
+                throw nb::type_error("TweedieLoss predictions and labels must both be thor.Tensor or both be thor.RaggedTensor.");
+            }
             setReportedLossShape(builder, reported_loss_shape);
             TweedieLoss built = builder.build();
-
             new (self) TweedieLoss(std::move(built));
         },
-        "network"_a,
-        "predictions"_a,
-        "labels"_a,
-        "power"_a = 1.5f,
-        "eps"_a = 1.0e-6f,
-        "loss_data_type"_a.none() = nb::none(),
-        "reported_loss_shape"_a = LossShape::BATCH,
-        nb::kw_only(),
-        "loss_weight"_a.none() = nb::none(),
-        "example_weights"_a.none() = nb::none(),
-        R"nbdoc(Construct a Tweedie unit-deviance loss.)nbdoc");
+        "network"_a, "predictions"_a, "labels"_a, "power"_a = 1.5f, "eps"_a = 1.0e-6f,
+        "loss_data_type"_a.none() = nb::none(), "reported_loss_shape"_a = LossShape::BATCH, nb::kw_only(),
+        "loss_weight"_a.none() = nb::none(), "example_weights"_a.none() = nb::none(),
+        R"nbdoc(Construct a dense or rank-1 ragged Tweedie unit-deviance loss.)nbdoc");
+
+    tweedie_loss.def("get_predictions", [](const TweedieLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.Loss::getPredictions());
+    });
+    tweedie_loss.def("get_labels", [](const TweedieLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedLabels());
+        return nb::cast(self.Loss::getLabels());
+    });
+    tweedie_loss.def("get_raw_loss", [](const TweedieLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedRawLoss());
+        return nb::cast(self.Loss::getRawLoss());
+    });
+    tweedie_loss.def("get_loss", [](const TweedieLoss& self) -> nb::object { if (self.isRagged() && self.getLossShape() == LossShape::RAW) return nb::cast(self.getRaggedLoss()); return nb::cast(self.Loss::getLoss()); });
+    tweedie_loss.def_prop_ro("is_ragged", &TweedieLoss::isRagged);
 
     tweedie_loss.def_prop_ro("power", &TweedieLoss::getPower);
     tweedie_loss.def_prop_ro("eps", &TweedieLoss::getEps);

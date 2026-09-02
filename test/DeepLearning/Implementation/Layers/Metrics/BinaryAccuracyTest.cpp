@@ -5,6 +5,7 @@
 #include "DeepLearning/Implementation/Layers/Metrics/BinaryAccuracy.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
+#include "Utilities/Expression/ExpressionDTypeResolution.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -14,6 +15,7 @@
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
+#include <optional>
 #include <set>
 #include <unordered_set>
 #include <vector>
@@ -21,6 +23,37 @@
 using namespace std;
 
 using namespace ThorImplementation;
+
+TEST(BinaryAccuracy, R1CorrectnessReductionUsesFp16WorkspaceBeforeFp32CubAccumulation) {
+    const DynamicExpression expression = BinaryAccuracyDetail::makeExpression();
+    const std::shared_ptr<const ExpressionDefinition> definition = expression.getSerializedDefinition();
+    ASSERT_NE(definition, nullptr);
+
+    PhysicalOutputs outputs = definition->outputs;
+    std::vector<DataType> inputDTypes(outputs.expr->inputs.size(), DataType::FP32);
+    for (const NamedInput& input : outputs.expr->inputs) {
+        if (input.name == "predictions" || input.name == "labels")
+            inputDTypes.at(input.slot) = DataType::FP16;
+    }
+    ASSERT_NO_THROW(resolveOutputsDTypesInPlace(outputs, inputDTypes));
+
+    bool foundCorrectnessReduction = false;
+    for (const ExprNode& node : outputs.expr->nodes) {
+        if (node.op != ExprOp::REDUCE_SUM || node.lhs == UINT32_MAX || node.lhs >= outputs.expr->nodes.size())
+            continue;
+        const ExprNode& parent = outputs.expr->nodes.at(node.lhs);
+        if (parent.op != ExprOp::MUL)
+            continue;
+        const std::optional<DataType> parentStorage =
+            materializedValueStorageDType(*outputs.expr, node.lhs);
+        ASSERT_TRUE(parentStorage.has_value());
+        EXPECT_EQ(parentStorage.value(), DataType::FP16);
+        ASSERT_TRUE(node.output_dtype.has_value());
+        EXPECT_EQ(node.output_dtype.value(), DataType::FP32);
+        foundCorrectnessReduction = true;
+    }
+    EXPECT_TRUE(foundCorrectnessReduction);
+}
 
 TEST(BinaryAccuracy, ComputesCorrectElementWiseResult) {
     srand(time(NULL));

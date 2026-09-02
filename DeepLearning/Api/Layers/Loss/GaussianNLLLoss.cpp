@@ -1,6 +1,12 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Api/Layers/Loss/GaussianNLLLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedCustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedLossShaper.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedBroadcast.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
@@ -46,6 +52,13 @@ void validateExampleWeights(Tensor mean, Tensor target, Tensor variance, std::op
     }
 }
 
+vector<uint64_t> raggedPackedScalarWeightBroadcastDimensions(const vector<uint64_t>& meanValueDimensions) {
+    if (meanValueDimensions.empty()) throw invalid_argument("GaussianNLLLoss ragged mean values must have a packed-capacity dimension.");
+    vector<uint64_t> dimensions(meanValueDimensions.size(), 1);
+    dimensions[0] = meanValueDimensions[0];
+    return dimensions;
+}
+
 ThorImplementation::Expression clampedVariance(const ThorImplementation::Expression& variance, float eps) {
     return variance.max(ThorImplementation::Expression(eps));
 }
@@ -74,7 +87,8 @@ ThorImplementation::DynamicExpression makeGaussianNLLLossExpression(DataType los
                                                                     bool logVariance,
                                                                     bool full,
                                                                     float eps,
-                                                                    bool weighted) {
+                                                                    bool weighted,
+                                                                    optional<vector<uint64_t>> raggedMeanValueDimensions = nullopt) {
     validateFloatingDType("loss", lossDataType);
 
     ThorImplementation::Expression mean = ThorImplementation::Expression::input(kMeanName, DataType::FP32, DataType::FP32);
@@ -84,6 +98,8 @@ ThorImplementation::DynamicExpression makeGaussianNLLLossExpression(DataType los
     if (weighted) {
         ThorImplementation::Expression exampleWeights =
             ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+        if (raggedMeanValueDimensions.has_value())
+            exampleWeights = exampleWeights.reshape(raggedPackedScalarWeightBroadcastDimensions(raggedMeanValueDimensions.value()));
         loss = loss * exampleWeights;
     }
     loss = loss.withOutputDType(lossDataType);
@@ -97,7 +113,8 @@ ThorImplementation::DynamicExpression makeGaussianNLLGradientExpression(DataType
                                                                         DataType varianceDType,
                                                                         bool logVariance,
                                                                         float eps,
-                                                                        bool weighted) {
+                                                                        bool weighted,
+                                                                        optional<vector<uint64_t>> raggedMeanValueDimensions = nullopt) {
     validateFloatingDType("mean", meanDType);
     validateFloatingDType("variance", varianceDType);
 
@@ -127,6 +144,8 @@ ThorImplementation::DynamicExpression makeGaussianNLLGradientExpression(DataType
     if (weighted) {
         ThorImplementation::Expression exampleWeights =
             ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+        if (raggedMeanValueDimensions.has_value())
+            exampleWeights = exampleWeights.reshape(raggedPackedScalarWeightBroadcastDimensions(raggedMeanValueDimensions.value()));
         meanGradient = meanGradient * exampleWeights;
         varianceGradient = varianceGradient * exampleWeights;
     }
@@ -145,6 +164,86 @@ void GaussianNLLLoss::buildSupportLayersAndAddToNetwork() {
     validateGaussianDTypes(predictionsTensor.getDataType(), labelsTensor.getDataType(), varianceTensor.getDataType());
     validateExampleWeights(predictionsTensor, labelsTensor, varianceTensor, exampleWeightsTensor);
     THOR_THROW_IF_FALSE(eps > 0.0f);
+
+    if (isRagged()) {
+        if (lossShape == LossShape::PER_OUTPUT)
+            throw invalid_argument("GaussianNLLLoss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+
+        optional<RaggedTensor> broadcastWeights;
+        if (exampleWeightsTensor.has_value()) {
+            if (exampleWeightsTensor->getDimensions() != vector<uint64_t>{1})
+                throw invalid_argument("GaussianNLLLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");
+            TypeConverter weightConverter = TypeConverter::Builder()
+                                                .network(*network)
+                                                .featureInput(exampleWeightsTensor.value())
+                                                .newDataType(DataType::FP32)
+                                                .build();
+            SegmentedBroadcast weightBroadcast = SegmentedBroadcast::Builder()
+                                                     .network(*network)
+                                                     .featureInput(weightConverter.getFeatureOutput().value())
+                                                     .partitionInput(raggedPredictionsTensor.value())
+                                                     .build();
+            broadcastWeights = weightBroadcast.getRaggedFeatureOutput();
+        }
+
+        const vector<uint64_t> dims = raggedPredictionsTensor->getValuesDimensions();
+        RaggedCustomLoss::Builder builder;
+        builder.network(*network)
+            .predictions(raggedPredictionsTensor.value())
+            .labels(raggedLabelsTensor.value())
+            .secondaryInput(raggedVarianceTensor.value(), kVarianceName, kVarianceGradientName)
+            .lossExpression(makeGaussianNLLLossExpression(lossDataType,
+                                                          logVariance,
+                                                          full,
+                                                          eps,
+                                                          broadcastWeights.has_value(),
+                                                          broadcastWeights.has_value()
+                                                              ? optional<vector<uint64_t>>(dims)
+                                                              : nullopt))
+            .gradientExpression(makeGaussianNLLGradientExpression(predictionsTensor.getDataType(),
+                                                                  varianceTensor.getDataType(),
+                                                                  logVariance,
+                                                                  eps,
+                                                                  broadcastWeights.has_value(),
+                                                                  broadcastWeights.has_value()
+                                                                      ? optional<vector<uint64_t>>(dims)
+                                                                      : nullopt))
+            .predictionsName(kMeanName)
+            .labelsName(kTargetName)
+            .lossName(kLossName)
+            .gradientName(kMeanGradientName)
+            .lossDataType(lossDataType)
+            .lossWeight(lossWeight.value_or(1.0f));
+        if (broadcastWeights.has_value())
+            builder.exampleWeights(broadcastWeights.value()).exampleWeightsName(kExampleWeightsName);
+
+        RaggedCustomLoss rawGaussianNLLLoss = builder.build();
+        raggedRawLossTensor = rawGaussianNLLLoss.getRaggedRawLoss();
+        lossShaperInput = raggedRawLossTensor->getValues();
+        if (lossShape == LossShape::NONE) {
+            lossTensor = lossShaperInput;
+            Stub::Builder().network(*network).inputTensor(lossShaperInput).build();
+        } else if (lossShape == LossShape::RAW) {
+            lossTensor = lossShaperInput;
+        } else if (lossShape == LossShape::PER_EXAMPLE) {
+            lossTensor = RaggedLossShaper::Builder()
+                             .network(*network)
+                             .lossInput(raggedRawLossTensor.value())
+                             .reportsPerExampleLoss()
+                             .build()
+                             .getLossOutput();
+        } else if (lossShape == LossShape::BATCH) {
+            lossTensor = RaggedLossShaper::Builder()
+                             .network(*network)
+                             .lossInput(raggedRawLossTensor.value())
+                             .reportsBatchLoss()
+                             .build()
+                             .getLossOutput();
+        } else {
+            THOR_UNREACHABLE();
+        }
+        return;
+    }
 
     MultiInputCustomLoss::Builder builder;
     builder.network(*network)
@@ -177,6 +276,12 @@ json GaussianNLLLoss::architectureJson() const {
     j["log_variance"] = logVariance;
     j["full"] = full;
     j["eps"] = eps;
+    if (isRagged()) {
+        j["ragged_predictions"] = raggedPredictionsTensor->architectureJson();
+        j["ragged_labels"] = raggedLabelsTensor->architectureJson();
+        j["ragged_variance"] = raggedVarianceTensor->architectureJson();
+        if (raggedRawLossTensor.has_value()) j["ragged_raw_loss"] = raggedRawLossTensor->architectureJson();
+    }
     return j;
 }
 
@@ -185,6 +290,33 @@ void GaussianNLLLoss::deserialize(const json& j, Network* network) {
         throw runtime_error("Unsupported version in GaussianNLLLoss::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "gaussian_nll_loss")
         throw runtime_error("Layer type mismatch in GaussianNLLLoss::deserialize: " + j.at("layer_type").get<std::string>());
+
+    if (j.contains("ragged_predictions")) {
+        RaggedTensor mean = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_predictions"), network, "GaussianNLLLoss");
+        RaggedTensor target = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_labels"), network, "GaussianNLLLoss");
+        RaggedTensor variance = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_variance"), network, "GaussianNLLLoss");
+        Builder builder;
+        builder.network(*network)
+            .mean(mean)
+            .target(target)
+            .variance(variance)
+            .logVariance(j.value("log_variance", false))
+            .full(j.value("full", false))
+            .eps(j.value("eps", 1.0e-6f))
+            .lossDataType(j.at("loss_data_type").get<DataType>())
+            .lossWeight(ThorImplementation::lossWeightFromJson(j).value_or(1.0f));
+        if (j.contains("example_weights_tensor"))
+            builder.exampleWeights(network->getApiTensorByOriginalId(j["example_weights_tensor"].at("id").get<uint64_t>()));
+        switch (j.at("loss_shape").get<LossShape>()) {
+            case LossShape::NONE: builder.reportsNoLoss(); break;
+            case LossShape::RAW: builder.reportsRawLoss(); break;
+            case LossShape::PER_EXAMPLE: builder.reportsPerExampleLoss(); break;
+            case LossShape::BATCH: builder.reportsBatchLoss(); break;
+            case LossShape::PER_OUTPUT: throw runtime_error("Serialized ragged GaussianNLLLoss cannot use PER_OUTPUT.");
+        }
+        (void)builder.build();
+        return;
+    }
 
     uint64_t originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     Tensor predictions = network->getApiTensorByOriginalId(originalTensorId);
@@ -196,7 +328,6 @@ void GaussianNLLLoss::deserialize(const json& j, Network* network) {
     GaussianNLLLoss loss;
     loss.lossShape = j.at("loss_shape").get<LossShape>();
     loss.lossDataType = j.at("loss_data_type").get<DataType>();
-
     loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     loss.logVariance = j.value("log_variance", false);
     loss.full = j.value("full", false);

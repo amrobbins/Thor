@@ -59,8 +59,10 @@ CosineTerms cosineTerms(const ThorImplementation::Expression& input1,
                         const ThorImplementation::Expression& input2,
                         float eps) {
     ThorImplementation::Expression dot = (input1 * input2).reduce_sum({1}, {});
-    ThorImplementation::Expression input1Sq = (input1 * input1).reduce_sum({1}, {}) + ThorImplementation::Expression(eps);
-    ThorImplementation::Expression input2Sq = (input2 * input2).reduce_sum({1}, {}) + ThorImplementation::Expression(eps);
+    ThorImplementation::Expression input1Sq =
+        input1.reduce_sum_squares({1}, {}, DataType::FP32) + ThorImplementation::Expression(eps);
+    ThorImplementation::Expression input2Sq =
+        input2.reduce_sum_squares({1}, {}, DataType::FP32) + ThorImplementation::Expression(eps);
     ThorImplementation::Expression denom = (input1Sq * input2Sq).sqrt();
     ThorImplementation::Expression cosine = dot / denom;
     return CosineTerms{cosine, input1Sq, input2Sq, denom};

@@ -5,19 +5,14 @@
 #include "DeepLearning/Api/Layers/Loss/CustomLoss.h"
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Implementation/Layers/Loss/MeanPowerError.h"
-
 #include <cmath>
 #include <optional>
 
 namespace Thor {
 
-// MeanPowerError computes mean(abs(prediction - label) ^ exponent).
-// Useful ordinary-regression exponents are typically in [1, 2]:
-//   exponent = 1 is MAE.
-//   exponent = 2 is MSE.
-// Exponents greater than 2 are allowed but increasingly outlier-sensitive.
 class MeanPowerError : public Loss {
    public:
     class Builder;
@@ -35,7 +30,31 @@ class MeanPowerError : public Loss {
 
     static void deserialize(const nlohmann::json &j, Network *network);
 
+    [[nodiscard]] bool isRagged() const { return raggedPredictionsTensor.has_value(); }
+    [[nodiscard]] RaggedTensor getRaggedPredictions() const {
+        if (!raggedPredictionsTensor.has_value()) throw std::runtime_error("MeanPowerError predictions are dense.");
+        return raggedPredictionsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLabels() const {
+        if (!raggedLabelsTensor.has_value()) throw std::runtime_error("MeanPowerError labels are dense.");
+        return raggedLabelsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedRawLoss() const {
+        if (!raggedRawLossTensor.has_value()) throw std::runtime_error("MeanPowerError raw loss is dense.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLoss() const {
+        if (!isRagged() || lossShape != LossShape::RAW || !raggedRawLossTensor.has_value())
+            throw std::runtime_error("MeanPowerError does not expose a ragged reported loss for this LossShape.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] LossShape getLossShape() const { return lossShape; }
+
    protected:
+    std::optional<RaggedTensor> raggedPredictionsTensor;
+    std::optional<RaggedTensor> raggedLabelsTensor;
+    std::optional<RaggedTensor> raggedRawLossTensor;
+
     virtual bool isMultiLayer() const { return true; }
 
     virtual void buildSupportLayersAndAddToNetwork();
@@ -45,10 +64,7 @@ class MeanPowerError : public Loss {
                                                      std::shared_ptr<Thor::Layer> drivingApiLayer,
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override {
-        (void)placement;
-        (void)drivingLayer;
-        (void)drivingApiLayer;
-        (void)inferenceOnly;
+        // FIXME: How to prune backward then.
         THOR_THROW_IF_FALSE(initialized);
         THOR_THROW_IF_FALSE(connectingApiTensor == predictionsTensor || connectingApiTensor == labelsTensor);
 
@@ -60,6 +76,7 @@ class MeanPowerError : public Loss {
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
         uint64_t lossShaperBytes = 0;
+        // Loss will be reported either element-wise or batch-wise, the shaper is only required when loss is batch-wise.
         if (isMultiLayer()) {
             lossShaperBytes = LossShaper::Builder()
                                   .lossInput(lossTensor)
@@ -80,35 +97,68 @@ class MeanPowerError::Builder {
 
     virtual MeanPowerError build() {
         THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_predictions.has_value());
-        THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
-        THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
-        THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+        const bool hasDensePredictions = _predictions.has_value();
+        const bool hasDenseLabels = _labels.has_value();
+        const bool hasRaggedPredictions = _raggedPredictions.has_value();
+        const bool hasRaggedLabels = _raggedLabels.has_value();
+        THOR_THROW_IF_FALSE(hasDensePredictions == hasDenseLabels);
+        THOR_THROW_IF_FALSE(hasRaggedPredictions == hasRaggedLabels);
+        THOR_THROW_IF_FALSE(hasDensePredictions != hasRaggedPredictions);
 
-        if (!_lossShape.has_value())
-            _lossShape = LossShape::BATCH;
-        if (!_lossDataType.has_value())
-            _lossDataType = ThorImplementation::RegressionLossDType::defaultLossDType(_predictions.value().getDataType());
-        ThorImplementation::RegressionLossDType::validateLossDType("MeanPowerError", _lossDataType.value());
-
+        if (!_lossShape.has_value()) _lossShape = LossShape::BATCH;
         const float exponent = _exponent.value_or(1.5f);
         THOR_THROW_IF_FALSE(std::isfinite(exponent) && exponent >= 1.0f);
 
         MeanPowerError meanPowerError;
-        meanPowerError.predictionsTensor = _predictions.value();
-        meanPowerError.labelsTensor = _labels.value();
-        meanPowerError.exampleWeightsTensor = _exampleWeights;
-        meanPowerError.lossDataType = _lossDataType.value();
+        if (hasDensePredictions) {
+            THOR_THROW_IF_FALSE(_predictions.value() != _labels.value());
+            THOR_THROW_IF_FALSE(!_predictions.value().getDimensions().empty());
+            THOR_THROW_IF_FALSE(_predictions.value().getDimensions() == _labels.value().getDimensions());
+            if (!_lossDataType.has_value())
+                _lossDataType = ThorImplementation::RegressionLossDType::defaultLossDType(_predictions.value().getDataType());
+            meanPowerError.predictionsTensor = _predictions.value();
+            meanPowerError.labelsTensor = _labels.value();
+            meanPowerError.exampleWeightsTensor = _exampleWeights;
+        } else {
+            const RaggedTensor& predictions = _raggedPredictions.value();
+            const RaggedTensor& labels = _raggedLabels.value();
+            THOR_THROW_IF_FALSE(predictions.isInitialized() && labels.isInitialized());
+            THOR_THROW_IF_FALSE(predictions.getValues() != labels.getValues());
+            ThorImplementation::RegressionLossDType::validatePredictionsDType("MeanPowerError", predictions.getValuesDataType());
+            ThorImplementation::RegressionLossDType::validateLabelsDType("MeanPowerError", labels.getValuesDataType());
+            if (predictions.getOffsets() != labels.getOffsets())
+                throw std::invalid_argument("MeanPowerError ragged predictions and labels must use the exact same row partition tensor.");
+            if (predictions.getBatchSize() != labels.getBatchSize() ||
+                predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
+                predictions.getTrailingDimensions() != labels.getTrailingDimensions())
+                throw std::invalid_argument("MeanPowerError ragged predictions and labels must have identical value geometry.");
+            if (_exampleWeights.has_value()) {
+                if (_exampleWeights.value() == predictions.getValues() || _exampleWeights.value() == labels.getValues())
+                    throw std::invalid_argument("MeanPowerError ragged example_weights must be distinct from predictions and labels values.");
+                ThorImplementation::RegressionLossDType::validateExampleWeightDType(
+                    "MeanPowerError", _exampleWeights->getDataType());
+                if (_exampleWeights->getDimensions() != std::vector<uint64_t>{1})
+                    throw std::invalid_argument("MeanPowerError ragged example_weights must have dimensions [1] for one scalar weight per logical row.");
+            }
+            if (_lossShape.value() == LossShape::PER_OUTPUT)
+                throw std::invalid_argument("MeanPowerError LossShape::PER_OUTPUT is undefined for ragged sequences.");
+            if (!_lossDataType.has_value())
+                _lossDataType = ThorImplementation::RegressionLossDType::defaultLossDType(predictions.getValuesDataType());
+            meanPowerError.predictionsTensor = predictions.getValues();
+            meanPowerError.labelsTensor = labels.getValues();
+            meanPowerError.raggedPredictionsTensor = predictions;
+            meanPowerError.raggedLabelsTensor = labels;
+            meanPowerError.exampleWeightsTensor = _exampleWeights;
+        }
 
+        ThorImplementation::RegressionLossDType::validateLossDType("MeanPowerError", _lossDataType.value());
+        meanPowerError.lossDataType = _lossDataType.value();
         meanPowerError.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         meanPowerError.lossShape = _lossShape.value();
         meanPowerError.exponent = exponent;
         meanPowerError.network = _network.value();
         meanPowerError.initialized = true;
-
         meanPowerError.buildSupportLayersAndAddToNetwork();
-
         return meanPowerError;
     }
 
@@ -125,10 +175,24 @@ class MeanPowerError::Builder {
         return *this;
     }
 
+    virtual MeanPowerError::Builder &predictions(RaggedTensor predictions) {
+        THOR_THROW_IF_FALSE(!this->_raggedPredictions.has_value());
+        THOR_THROW_IF_FALSE(predictions.isInitialized());
+        this->_raggedPredictions = std::move(predictions);
+        return *this;
+    }
+
     virtual MeanPowerError::Builder &labels(Tensor _labels) {
         THOR_THROW_IF_FALSE(!this->_labels.has_value());
         THOR_THROW_IF_FALSE(!_labels.getDimensions().empty());
         this->_labels = _labels;
+        return *this;
+    }
+
+    virtual MeanPowerError::Builder &labels(RaggedTensor labels) {
+        THOR_THROW_IF_FALSE(!this->_raggedLabels.has_value());
+        THOR_THROW_IF_FALSE(labels.isInitialized());
+        this->_raggedLabels = std::move(labels);
         return *this;
     }
 
@@ -194,11 +258,14 @@ class MeanPowerError::Builder {
     std::optional<Network *> _network;
     std::optional<Tensor> _predictions;
     std::optional<Tensor> _labels;
+    std::optional<RaggedTensor> _raggedPredictions;
+    std::optional<RaggedTensor> _raggedLabels;
     std::optional<Tensor> _exampleWeights;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;
     std::optional<float> _lossWeight;
     std::optional<float> _exponent;
 };
+
 
 }  // namespace Thor

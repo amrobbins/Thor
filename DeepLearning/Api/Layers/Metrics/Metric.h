@@ -7,7 +7,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
+#include <limits>
 #include <utility>
 #include <optional>
 
@@ -40,6 +42,14 @@ class Metric : public Layer {
     virtual MetricAggregation getAggregation() const = 0;
     virtual bool requiresLabels() const { return true; }
     virtual Tensor getPredictions() const { return getFeatureInput().value(); }
+    std::vector<Tensor> getAllInputTensors() const override {
+        std::vector<Tensor> inputs;
+        if (getFeatureInput().has_value())
+            inputs.push_back(getFeatureInput().value());
+        if (requiresLabels())
+            inputs.push_back(labelsTensor);
+        return inputs;
+    }
     virtual Tensor getLabels() const {
         THOR_THROW_IF_FALSE(requiresLabels());
         return labelsTensor;
@@ -66,7 +76,8 @@ class Metric : public Layer {
     }
 
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override {
-        THOR_THROW_IF_FALSE(inputTensor == getFeatureInput().value() || (requiresLabels() && inputTensor == labelsTensor));
+        const std::vector<Tensor> inputs = getAllInputTensors();
+        THOR_THROW_IF_FALSE(std::find(inputs.begin(), inputs.end(), inputTensor) != inputs.end());
         if (numInputConnectionsMade == requiredInputConnectionCount())
             return {metricTensor};
         else
@@ -85,7 +96,11 @@ class Metric : public Layer {
     }
 
    private:
-    uint32_t requiredInputConnectionCount() const { return requiresLabels() ? 2 : 1; }
+    uint32_t requiredInputConnectionCount() const {
+        const size_t count = getAllInputTensors().size();
+        THOR_THROW_IF_FALSE(count >= 1 && count <= std::numeric_limits<uint32_t>::max());
+        return static_cast<uint32_t>(count);
+    }
 
     uint32_t numInputConnectionsMade = 0;
 };

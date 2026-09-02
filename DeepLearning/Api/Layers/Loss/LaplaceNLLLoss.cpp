@@ -1,6 +1,12 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Api/Layers/Loss/LaplaceNLLLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedCustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedLossShaper.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedBroadcast.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
@@ -39,6 +45,13 @@ void validateExampleWeights(Tensor location, Tensor scale, Tensor target, std::o
     }
 }
 
+vector<uint64_t> raggedPackedScalarWeightBroadcastDimensions(const vector<uint64_t>& locationValueDimensions) {
+    if (locationValueDimensions.empty()) throw invalid_argument("LaplaceNLLLoss ragged location values must have a packed-capacity dimension.");
+    vector<uint64_t> dimensions(locationValueDimensions.size(), 1);
+    dimensions[0] = locationValueDimensions[0];
+    return dimensions;
+}
+
 ThorImplementation::Expression safeScale(const ThorImplementation::Expression& scale, float eps) {
     return scale.max(ThorImplementation::Expression(eps));
 }
@@ -68,7 +81,8 @@ ThorImplementation::Expression laplaceLoss(const ThorImplementation::Expression&
 ThorImplementation::DynamicExpression makeLaplaceNLLLossExpression(DataType lossDataType,
                                                                    bool logScale,
                                                                    float eps,
-                                                                   bool weighted) {
+                                                                   bool weighted,
+                                                                   optional<vector<uint64_t>> raggedLocationValueDimensions = nullopt) {
     validateFloatingDType("loss", lossDataType);
     ThorImplementation::Expression location = ThorImplementation::Expression::input(kLocationName, DataType::FP32, DataType::FP32);
     ThorImplementation::Expression scale = ThorImplementation::Expression::input(kScaleName, DataType::FP32, DataType::FP32);
@@ -77,6 +91,8 @@ ThorImplementation::DynamicExpression makeLaplaceNLLLossExpression(DataType loss
     if (weighted) {
         ThorImplementation::Expression exampleWeights =
             ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+        if (raggedLocationValueDimensions.has_value())
+            exampleWeights = exampleWeights.reshape(raggedPackedScalarWeightBroadcastDimensions(raggedLocationValueDimensions.value()));
         loss = loss * exampleWeights;
     }
     loss = loss.withOutputDType(lossDataType);
@@ -90,7 +106,8 @@ ThorImplementation::DynamicExpression makeLaplaceNLLGradientExpression(DataType 
                                                                        DataType scaleDType,
                                                                        bool logScale,
                                                                        float eps,
-                                                                       bool weighted) {
+                                                                       bool weighted,
+                                                                       optional<vector<uint64_t>> raggedLocationValueDimensions = nullopt) {
     validateFloatingDType("location", locationDType);
     validateFloatingDType("scale", scaleDType);
 
@@ -121,6 +138,8 @@ ThorImplementation::DynamicExpression makeLaplaceNLLGradientExpression(DataType 
     if (weighted) {
         ThorImplementation::Expression exampleWeights =
             ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+        if (raggedLocationValueDimensions.has_value())
+            exampleWeights = exampleWeights.reshape(raggedPackedScalarWeightBroadcastDimensions(raggedLocationValueDimensions.value()));
         locationGradient = locationGradient * exampleWeights;
         scaleGradient = scaleGradient * exampleWeights;
     }
@@ -144,6 +163,85 @@ void LaplaceNLLLoss::buildSupportLayersAndAddToNetwork() {
     THOR_THROW_IF_FALSE(predictionsTensor.getDimensions() == scaleTensor.getDimensions());
     THOR_THROW_IF_FALSE(predictionsTensor.getDimensions() == labelsTensor.getDimensions());
     THOR_THROW_IF_FALSE(eps > 0.0f);
+
+    if (isRagged()) {
+        if (lossShape == LossShape::PER_OUTPUT)
+            throw invalid_argument("LaplaceNLLLoss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+
+        optional<RaggedTensor> broadcastWeights;
+        if (exampleWeightsTensor.has_value()) {
+            if (exampleWeightsTensor->getDimensions() != vector<uint64_t>{1})
+                throw invalid_argument("LaplaceNLLLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");
+            TypeConverter weightConverter = TypeConverter::Builder()
+                                                .network(*network)
+                                                .featureInput(exampleWeightsTensor.value())
+                                                .newDataType(DataType::FP32)
+                                                .build();
+            SegmentedBroadcast weightBroadcast = SegmentedBroadcast::Builder()
+                                                     .network(*network)
+                                                     .featureInput(weightConverter.getFeatureOutput().value())
+                                                     .partitionInput(raggedPredictionsTensor.value())
+                                                     .build();
+            broadcastWeights = weightBroadcast.getRaggedFeatureOutput();
+        }
+
+        const vector<uint64_t> dims = raggedPredictionsTensor->getValuesDimensions();
+        RaggedCustomLoss::Builder builder;
+        builder.network(*network)
+            .predictions(raggedPredictionsTensor.value())
+            .labels(raggedLabelsTensor.value())
+            .secondaryInput(raggedScaleTensor.value(), kScaleName, kScaleGradientName)
+            .lossExpression(makeLaplaceNLLLossExpression(lossDataType,
+                                                         logScale,
+                                                         eps,
+                                                         broadcastWeights.has_value(),
+                                                         broadcastWeights.has_value()
+                                                             ? optional<vector<uint64_t>>(dims)
+                                                             : nullopt))
+            .gradientExpression(makeLaplaceNLLGradientExpression(predictionsTensor.getDataType(),
+                                                                 scaleTensor.getDataType(),
+                                                                 logScale,
+                                                                 eps,
+                                                                 broadcastWeights.has_value(),
+                                                                 broadcastWeights.has_value()
+                                                                     ? optional<vector<uint64_t>>(dims)
+                                                                     : nullopt))
+            .predictionsName(kLocationName)
+            .labelsName(kTargetName)
+            .lossName(kLossName)
+            .gradientName(kLocationGradientName)
+            .lossDataType(lossDataType)
+            .lossWeight(lossWeight.value_or(1.0f));
+        if (broadcastWeights.has_value())
+            builder.exampleWeights(broadcastWeights.value()).exampleWeightsName(kExampleWeightsName);
+
+        RaggedCustomLoss rawLaplaceNLLLoss = builder.build();
+        raggedRawLossTensor = rawLaplaceNLLLoss.getRaggedRawLoss();
+        lossShaperInput = raggedRawLossTensor->getValues();
+        if (lossShape == LossShape::NONE) {
+            lossTensor = lossShaperInput;
+            Stub::Builder().network(*network).inputTensor(lossShaperInput).build();
+        } else if (lossShape == LossShape::RAW) {
+            lossTensor = lossShaperInput;
+        } else if (lossShape == LossShape::PER_EXAMPLE) {
+            lossTensor = RaggedLossShaper::Builder()
+                             .network(*network)
+                             .lossInput(raggedRawLossTensor.value())
+                             .reportsPerExampleLoss()
+                             .build()
+                             .getLossOutput();
+        } else if (lossShape == LossShape::BATCH) {
+            lossTensor = RaggedLossShaper::Builder()
+                             .network(*network)
+                             .lossInput(raggedRawLossTensor.value())
+                             .reportsBatchLoss()
+                             .build()
+                             .getLossOutput();
+        } else {
+            THOR_UNREACHABLE();
+        }
+        return;
+    }
 
     MultiInputCustomLoss::Builder builder;
     builder.network(*network)
@@ -175,6 +273,12 @@ json LaplaceNLLLoss::architectureJson() const {
     j["scale_tensor"] = scaleTensor.architectureJson();
     j["log_scale"] = logScale;
     j["eps"] = eps;
+    if (isRagged()) {
+        j["ragged_predictions"] = raggedPredictionsTensor->architectureJson();
+        j["ragged_labels"] = raggedLabelsTensor->architectureJson();
+        j["ragged_scale"] = raggedScaleTensor->architectureJson();
+        if (raggedRawLossTensor.has_value()) j["ragged_raw_loss"] = raggedRawLossTensor->architectureJson();
+    }
     return j;
 }
 
@@ -183,6 +287,32 @@ void LaplaceNLLLoss::deserialize(const json& j, Network* network) {
         throw runtime_error("Unsupported version in LaplaceNLLLoss::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "laplace_nll_loss")
         throw runtime_error("Layer type mismatch in LaplaceNLLLoss::deserialize: " + j.at("layer_type").get<std::string>());
+
+    if (j.contains("ragged_predictions")) {
+        RaggedTensor location = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_predictions"), network, "LaplaceNLLLoss");
+        RaggedTensor target = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_labels"), network, "LaplaceNLLLoss");
+        RaggedTensor scale = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_scale"), network, "LaplaceNLLLoss");
+        Builder builder;
+        builder.network(*network)
+            .location(location)
+            .scale(scale)
+            .target(target)
+            .logScale(j.value("log_scale", true))
+            .eps(j.value("eps", 1.0e-8f))
+            .lossDataType(j.at("loss_data_type").get<DataType>())
+            .lossWeight(ThorImplementation::lossWeightFromJson(j).value_or(1.0f));
+        if (j.contains("example_weights_tensor"))
+            builder.exampleWeights(network->getApiTensorByOriginalId(j["example_weights_tensor"].at("id").get<uint64_t>()));
+        switch (j.at("loss_shape").get<LossShape>()) {
+            case LossShape::NONE: builder.reportsNoLoss(); break;
+            case LossShape::RAW: builder.reportsRawLoss(); break;
+            case LossShape::PER_EXAMPLE: builder.reportsPerExampleLoss(); break;
+            case LossShape::BATCH: builder.reportsBatchLoss(); break;
+            case LossShape::PER_OUTPUT: throw runtime_error("Serialized ragged LaplaceNLLLoss cannot use PER_OUTPUT.");
+        }
+        (void)builder.build();
+        return;
+    }
 
     uint64_t originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     Tensor location = network->getApiTensorByOriginalId(originalTensorId);

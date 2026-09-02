@@ -208,7 +208,7 @@ class Metric : public Layer {
     virtual void computeMetric(
         Tensor labels, Tensor predictions, Tensor metric, Stream stream, uint32_t validExampleCount) = 0;
 
-    enum class ConnectionType { FORWARD = 12, LABELS, METRIC };
+    enum class ConnectionType { FORWARD = 12, LABELS, METRIC, STRUCTURAL };
 
    protected:
     std::optional<Tensor> labelsInput;

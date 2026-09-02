@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Loss/NegativeBinomialNLLLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -99,6 +100,49 @@ void maybeSetExampleWeights(NegativeBinomialNLLLoss::Builder& builder,
     }
     builder.exampleWeights(exampleWeights.value());
 }
+
+void validateRaggedArguments(const RaggedTensor& mean,
+                            const RaggedTensor& dispersion,
+                            const RaggedTensor& labels,
+                            optional<DataType> lossDataType,
+                            LossShape reportedLossShape,
+                            float eps) {
+    if (!isFloatingDType(mean.getValuesDataType()))
+        throw nb::value_error("NegativeBinomialNLLLoss instance: mean must use fp16 or fp32 dtype.");
+    if (!isFloatingDType(dispersion.getValuesDataType()))
+        throw nb::value_error("NegativeBinomialNLLLoss instance: dispersion must use fp16 or fp32 dtype.");
+    if (!isCountTargetDType(labels.getValuesDataType()))
+        throw nb::value_error("NegativeBinomialNLLLoss instance: labels must use boolean, unsigned integer, fp16, or fp32 dtype.");
+    if (mean.getOffsets() != dispersion.getOffsets() || mean.getOffsets() != labels.getOffsets())
+        throw nb::value_error("NegativeBinomialNLLLoss instance: ragged mean, dispersion, and labels must use the exact same row partition tensor.");
+    if (mean.getBatchSize() != dispersion.getBatchSize() || mean.getBatchSize() != labels.getBatchSize() ||
+        mean.getMaxTotalValues() != dispersion.getMaxTotalValues() || mean.getMaxTotalValues() != labels.getMaxTotalValues() ||
+        mean.getTrailingDimensions() != dispersion.getTrailingDimensions() || mean.getTrailingDimensions() != labels.getTrailingDimensions())
+        throw nb::value_error("NegativeBinomialNLLLoss instance: ragged mean, dispersion, and labels must have identical value geometry.");
+    DataType effectiveLossDataType = lossDataType.value_or(mean.getValuesDataType());
+    if (!isFloatingDType(effectiveLossDataType))
+        throw nb::value_error("NegativeBinomialNLLLoss instance: loss_data_type must be fp16 or fp32.");
+    if (eps <= 0.0f) throw nb::value_error("NegativeBinomialNLLLoss instance: eps must be greater than zero.");
+    validateReportedLossShape(reportedLossShape, "NegativeBinomialNLLLoss instance");
+    if (reportedLossShape == LossShape::PER_OUTPUT)
+        throw nb::value_error("NegativeBinomialNLLLoss instance: reported_loss_shape per_output is undefined for ragged sequences.");
+}
+
+void maybeSetRaggedExampleWeights(NegativeBinomialNLLLoss::Builder& builder,
+                                  const RaggedTensor& mean,
+                                  const RaggedTensor& dispersion,
+                                  const RaggedTensor& labels,
+                                  optional<Tensor> exampleWeights) {
+    if (!exampleWeights.has_value()) return;
+    if (exampleWeights.value() == mean.getValues() || exampleWeights.value() == dispersion.getValues() ||
+        exampleWeights.value() == labels.getValues())
+        throw nb::value_error("NegativeBinomialNLLLoss instance: example_weights must be distinct from ragged value tensors.");
+    if (!isFloatingDType(exampleWeights->getDataType()))
+        throw nb::value_error("NegativeBinomialNLLLoss instance: example_weights must use fp16 or fp32 dtype.");
+    if (exampleWeights->getDimensions() != vector<uint64_t>{1})
+        throw nb::value_error("NegativeBinomialNLLLoss instance: ragged example_weights dimensions must be [1] for one scalar weight per logical row.");
+    builder.exampleWeights(exampleWeights.value());
+}
 }  // namespace
 
 void bind_negative_binomial_nll_loss(nb::module_& losses) {
@@ -109,9 +153,9 @@ void bind_negative_binomial_nll_loss(nb::module_& losses) {
         "__init__",
         [](NegativeBinomialNLLLoss* self,
            Network& network,
-           Tensor mean,
-           Tensor dispersion,
-           Tensor labels,
+           nb::object meanObject,
+           nb::object dispersionObject,
+           nb::object labelsObject,
            bool log_mean,
            bool log_dispersion,
            float eps,
@@ -119,19 +163,30 @@ void bind_negative_binomial_nll_loss(nb::module_& losses) {
            LossShape reported_loss_shape,
            optional<float> loss_weight,
            optional<Tensor> example_weights) {
-            validateArguments(mean, dispersion, labels, loss_data_type, reported_loss_shape, eps);
-
             NegativeBinomialNLLLoss::Builder builder;
             builder.network(network)
-                .mean(mean)
-                .dispersion(dispersion)
-                .labels(labels)
                 .logMean(log_mean)
                 .logDispersion(log_dispersion)
                 .eps(eps)
-                .lossDataType(loss_data_type.value_or(mean.getDataType()))
                 .lossWeight(loss_weight.value_or(1.0f));
-            maybeSetExampleWeights(builder, mean, dispersion, labels, example_weights);
+            if (nb::isinstance<Tensor>(meanObject) && nb::isinstance<Tensor>(dispersionObject) && nb::isinstance<Tensor>(labelsObject)) {
+                Tensor mean = nb::cast<Tensor>(meanObject);
+                Tensor dispersion = nb::cast<Tensor>(dispersionObject);
+                Tensor labels = nb::cast<Tensor>(labelsObject);
+                validateArguments(mean, dispersion, labels, loss_data_type, reported_loss_shape, eps);
+                builder.mean(mean).dispersion(dispersion).labels(labels).lossDataType(loss_data_type.value_or(mean.getDataType()));
+                maybeSetExampleWeights(builder, mean, dispersion, labels, example_weights);
+            } else if (nb::isinstance<RaggedTensor>(meanObject) && nb::isinstance<RaggedTensor>(dispersionObject) &&
+                       nb::isinstance<RaggedTensor>(labelsObject)) {
+                RaggedTensor mean = nb::cast<RaggedTensor>(meanObject);
+                RaggedTensor dispersion = nb::cast<RaggedTensor>(dispersionObject);
+                RaggedTensor labels = nb::cast<RaggedTensor>(labelsObject);
+                validateRaggedArguments(mean, dispersion, labels, loss_data_type, reported_loss_shape, eps);
+                builder.mean(mean).dispersion(dispersion).labels(labels).lossDataType(loss_data_type.value_or(mean.getValuesDataType()));
+                maybeSetRaggedExampleWeights(builder, mean, dispersion, labels, example_weights);
+            } else {
+                throw nb::type_error("NegativeBinomialNLLLoss mean, dispersion, and labels must all be thor.Tensor or all be thor.RaggedTensor.");
+            }
             setReportedLossShape(builder, reported_loss_shape);
             NegativeBinomialNLLLoss built = builder.build();
             new (self) NegativeBinomialNLLLoss(std::move(built));
@@ -148,10 +203,33 @@ void bind_negative_binomial_nll_loss(nb::module_& losses) {
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
         "example_weights"_a.none() = nb::none(),
-        R"nbdoc(Construct a Negative Binomial negative log-likelihood loss.)nbdoc");
+        R"nbdoc(Construct a dense or rank-1 ragged Negative Binomial negative log-likelihood loss.)nbdoc");
 
-    lossClass.def_prop_ro("mean", &NegativeBinomialNLLLoss::getMean);
-    lossClass.def_prop_ro("dispersion", &NegativeBinomialNLLLoss::getDispersion);
+    lossClass.def("get_predictions", [](const NegativeBinomialNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.Loss::getPredictions());
+    });
+    lossClass.def("get_labels", [](const NegativeBinomialNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedLabels());
+        return nb::cast(self.Loss::getLabels());
+    });
+    lossClass.def("get_raw_loss", [](const NegativeBinomialNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedRawLoss());
+        return nb::cast(self.Loss::getRawLoss());
+    });
+    lossClass.def("get_loss", [](const NegativeBinomialNLLLoss& self) -> nb::object {
+        if (self.isRagged() && self.getLossShape() == LossShape::RAW) return nb::cast(self.getRaggedLoss());
+        return nb::cast(self.Loss::getLoss());
+    });
+    lossClass.def_prop_ro("is_ragged", &NegativeBinomialNLLLoss::isRagged);
+    lossClass.def_prop_ro("mean", [](const NegativeBinomialNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.getMean());
+    });
+    lossClass.def_prop_ro("dispersion", [](const NegativeBinomialNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedDispersion());
+        return nb::cast(self.getDispersion());
+    });
     lossClass.def_prop_ro("log_mean", &NegativeBinomialNLLLoss::getLogMean);
     lossClass.def_prop_ro("log_dispersion", &NegativeBinomialNLLLoss::getLogDispersion);
     lossClass.def_prop_ro("eps", &NegativeBinomialNLLLoss::getEps);
@@ -171,8 +249,9 @@ supplying positive parameters directly; direct parameters are floored by eps.
 labels must contain non-negative counts. Floating labels are accepted for
 training pipelines that represent counts in fp16/fp32.
 
-example_weights may be [1] for per-example weighting or may match mean for
-elementwise weighting. Weights scale the raw NLL and both learned-parameter
+For dense inputs, example_weights may be [1] for per-example weighting or may
+match mean for elementwise weighting. Ragged inputs support dense [1] per-row
+example weights only. Weights scale the raw NLL and both learned-parameter
 gradients before loss-shape reduction.
 )nbdoc";
 }

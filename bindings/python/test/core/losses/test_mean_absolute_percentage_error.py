@@ -118,3 +118,27 @@ def test_mape_rejects_wrong_arity():
 
     with pytest.raises(TypeError):
         thor.losses.MAPE(n, preds, labels, None, thor.losses.LossShape.batch, 123, 456)  # extra arg
+
+
+def _ragged_pair_mape(network):
+    predictions = thor.layers.RaggedNetworkInput(
+        network, "ragged_predictions", thor.DataType.fp32, [2], batch_size=3, max_total_values=8, max_values_per_row=4
+    )
+    labels = thor.layers.RaggedNetworkInput(network, "ragged_labels", thor.DataType.uint8, [2], partition=predictions)
+    return predictions, labels
+
+
+def test_mape_constructs_ragged_and_rejects_per_output():
+    n = _net()
+    predictions, labels = _ragged_pair_mape(n)
+    loss = thor.losses.MAPE(n, predictions, labels, thor.DataType.fp32, thor.losses.LossShape.raw)
+    assert loss.is_ragged
+    assert loss.get_predictions() == predictions
+    assert loss.get_labels() == labels
+    assert isinstance(loss.get_loss(), thor.RaggedTensor)
+    assert loss.get_loss().offsets == predictions.offsets
+
+    n2 = _net()
+    predictions2, labels2 = _ragged_pair_mape(n2)
+    with pytest.raises(ValueError, match=r"per_output.*undefined"):
+        thor.losses.MAPE(n2, predictions2, labels2, reported_loss_shape=thor.losses.LossShape.per_output)

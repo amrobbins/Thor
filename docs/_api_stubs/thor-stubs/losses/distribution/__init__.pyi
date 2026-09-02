@@ -23,11 +23,22 @@ class GammaNLLLoss(thor.losses.Loss):
     gradients before loss-shape reduction.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, eps: float = 9.999999974752427e-07, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, dispersion: thor.Tensor | None = None, log_mean: bool | None = False, log_dispersion: bool = False, example_weights: thor.Tensor | None = None) -> None:
-        """Construct a Gamma negative log-likelihood loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, eps: float = 9.999999974752427e-07, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, dispersion: object | None = None, log_mean: bool = False, log_dispersion: bool = False, example_weights: thor.Tensor | None = None) -> None:
+        """Construct a dense or rank-1 ragged Gamma negative log-likelihood loss."""
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
 
     @property
-    def dispersion(self) -> thor.Tensor | None: ...
+    def is_ragged(self) -> bool: ...
+
+    @property
+    def dispersion(self) -> object: ...
 
     @property
     def log_mean(self) -> bool: ...
@@ -56,11 +67,24 @@ class GaussianNLLLoss(thor.losses.Loss):
     gradients before loss-shape reduction.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, variance: thor.Tensor, full: bool = False, eps: float = 9.999999974752427e-07, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, log_variance: bool | None = False, example_weights: thor.Tensor | None = None) -> None:
-        """Construct a Gaussian negative log-likelihood loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, variance: object, full: bool = False, eps: float = 9.999999974752427e-07, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, log_variance: bool | None = False, example_weights: thor.Tensor | None = None) -> None:
+        """
+        Construct a dense or rank-1 ragged Gaussian negative log-likelihood loss.
+        """
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
 
     @property
-    def variance(self) -> thor.Tensor: ...
+    def is_ragged(self) -> bool: ...
+
+    @property
+    def variance(self) -> object: ...
 
     @property
     def log_variance(self) -> bool: ...
@@ -88,14 +112,27 @@ class LaplaceNLLLoss(thor.losses.Loss):
     gradients before loss-shape reduction.
     """
 
-    def __init__(self, network: thor.Network, location: thor.Tensor, scale: thor.Tensor, labels: thor.Tensor, log_scale: bool = True, eps: float = 9.99999993922529e-09, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
-        """Construct a Laplace negative log-likelihood loss."""
+    def __init__(self, network: thor.Network, location: object, scale: object, labels: object, log_scale: bool = True, eps: float = 9.99999993922529e-09, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
+        """
+        Construct a dense or rank-1 ragged Laplace negative log-likelihood loss.
+        """
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
 
     @property
-    def location(self) -> thor.Tensor: ...
+    def is_ragged(self) -> bool: ...
 
     @property
-    def scale(self) -> thor.Tensor: ...
+    def location(self) -> object: ...
+
+    @property
+    def scale(self) -> object: ...
 
     @property
     def log_scale(self) -> bool: ...
@@ -119,19 +156,33 @@ class NegativeBinomialNLLLoss(thor.losses.Loss):
     labels must contain non-negative counts. Floating labels are accepted for
     training pipelines that represent counts in fp16/fp32.
 
-    example_weights may be [1] for per-example weighting or may match mean for
-    elementwise weighting. Weights scale the raw NLL and both learned-parameter
+    For dense inputs, example_weights may be [1] for per-example weighting or may
+    match mean for elementwise weighting. Ragged inputs support dense [1] per-row
+    example weights only. Weights scale the raw NLL and both learned-parameter
     gradients before loss-shape reduction.
     """
 
-    def __init__(self, network: thor.Network, mean: thor.Tensor, dispersion: thor.Tensor, labels: thor.Tensor, log_mean: bool = True, log_dispersion: bool = True, eps: float = 9.99999993922529e-09, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
-        """Construct a Negative Binomial negative log-likelihood loss."""
+    def __init__(self, network: thor.Network, mean: object, dispersion: object, labels: object, log_mean: bool = True, log_dispersion: bool = True, eps: float = 9.99999993922529e-09, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
+        """
+        Construct a dense or rank-1 ragged Negative Binomial negative log-likelihood loss.
+        """
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
 
     @property
-    def mean(self) -> thor.Tensor: ...
+    def is_ragged(self) -> bool: ...
 
     @property
-    def dispersion(self) -> thor.Tensor: ...
+    def mean(self) -> object: ...
+
+    @property
+    def dispersion(self) -> object: ...
 
     @property
     def log_mean(self) -> bool: ...
@@ -163,25 +214,39 @@ class StudentTNLLLoss(thor.losses.Loss):
     degrees of freedom is supplied, fixed nu defaults to 3.0. Fixed nu must be
     greater than the configured minimum.
 
-    example_weights may be [1] for per-example weighting or may match location for
-    elementwise weighting. Weights scale the raw NLL and all learned-parameter
+    For dense inputs, example_weights may be [1] for per-example weighting or may
+    match location for elementwise weighting. Ragged inputs support dense [1]
+    per-row example weights only. Weights scale the raw NLL and all learned-parameter
     gradients before loss-shape reduction.
     """
 
-    def __init__(self, network: thor.Network, location: thor.Tensor, log_scale: thor.Tensor, labels: thor.Tensor, degrees_of_freedom: float | None = None, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, minimum_degrees_of_freedom: float = 0.0, learned_log_degrees_of_freedom: thor.Tensor | None = None, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
-        """Construct a Student-t negative log-likelihood loss."""
+    def __init__(self, network: thor.Network, location: object, log_scale: object, labels: object, degrees_of_freedom: float | None = None, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, minimum_degrees_of_freedom: float = 0.0, learned_log_degrees_of_freedom: object | None = None, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
+        """
+        Construct a dense or rank-1 ragged Student-t negative log-likelihood loss.
+        """
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
 
     @property
-    def location(self) -> thor.Tensor: ...
+    def is_ragged(self) -> bool: ...
 
     @property
-    def log_scale(self) -> thor.Tensor: ...
+    def location(self) -> object: ...
+
+    @property
+    def log_scale(self) -> object: ...
 
     @property
     def degrees_of_freedom(self) -> float | None: ...
 
     @property
-    def learned_log_degrees_of_freedom(self) -> thor.Tensor | None: ...
+    def learned_log_degrees_of_freedom(self) -> object: ...
 
     @property
     def minimum_degrees_of_freedom(self) -> float: ...
@@ -205,8 +270,21 @@ class PoissonNLLLoss(thor.losses.Loss):
     prediction gradient before loss-shape reduction.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, log_input: bool = True, full: bool = False, eps: float = 9.99999993922529e-09, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
-        """Construct a Poisson negative log-likelihood loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, log_input: bool = True, full: bool = False, eps: float = 9.99999993922529e-09, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
+        """
+        Construct a dense or rank-1 ragged Poisson negative log-likelihood loss.
+        """
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
     @property
     def log_input(self) -> bool: ...
@@ -228,8 +306,19 @@ class TweedieLoss(thor.losses.Loss):
     cases.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, power: float = 1.5, eps: float = 9.999999974752427e-07, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
-        """Construct a Tweedie unit-deviance loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, power: float = 1.5, eps: float = 9.999999974752427e-07, loss_data_type: thor.DataType | None = None, reported_loss_shape: thor.losses.LossShape | None = thor.losses.LossShape.batch, *, loss_weight: float | None = None, example_weights: thor.Tensor | None = None) -> None:
+        """Construct a dense or rank-1 ragged Tweedie unit-deviance loss."""
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
     @property
     def power(self) -> float: ...

@@ -251,3 +251,62 @@ def test_student_t_nll_loss_save_load_round_trip_serializes_support_layers(tmp_p
     loaded_arch = json.loads(loaded.get_architecture_json())
     assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "multi_input_custom_loss") == 1
     assert sum(1 for layer in loaded_arch["layers"] if layer["layer_type"] == "loss_shaper") == 1
+
+
+def _r10k_student_t_ragged_inputs(network, prefix="r10k_student_t", learned_df=False):
+    location = thor.layers.RaggedNetworkInput(
+        network, f"{prefix}_location", thor.DataType.fp32, [2], batch_size=3, max_total_values=8, max_values_per_row=4
+    )
+    log_scale = thor.layers.RaggedNetworkInput(network, f"{prefix}_log_scale", thor.DataType.fp32, [2], partition=location)
+    labels = thor.layers.RaggedNetworkInput(network, f"{prefix}_labels", thor.DataType.fp32, [2], partition=location)
+    log_df = None
+    if learned_df:
+        log_df = thor.layers.RaggedNetworkInput(network, f"{prefix}_log_df", thor.DataType.fp32, [2], partition=location)
+    return location, log_scale, labels, log_df
+
+
+def test_student_t_nll_loss_r10k_constructs_ragged_fixed_and_learned_df():
+    fixed_network = thor.Network("r10k_student_t_fixed")
+    location, log_scale, labels, _ = _r10k_student_t_ragged_inputs(fixed_network)
+    fixed = thor.losses.distribution.StudentTNLLLoss(
+        fixed_network, location, log_scale, labels, degrees_of_freedom=4.5,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert fixed.is_ragged
+    assert fixed.location == location
+    assert fixed.log_scale == log_scale
+    assert fixed.get_labels() == labels
+    assert fixed.learned_log_degrees_of_freedom is None
+    assert isinstance(fixed.get_loss(), thor.RaggedTensor)
+    assert fixed.get_loss().offsets == location.offsets
+
+    learned_network = thor.Network("r10k_student_t_learned")
+    location, log_scale, labels, log_df = _r10k_student_t_ragged_inputs(learned_network, learned_df=True)
+    weights = thor.layers.NetworkInput(learned_network, "weights", [1], thor.DataType.fp16).get_feature_output()
+    learned = thor.losses.distribution.StudentTNLLLoss(
+        learned_network, location, log_scale, labels,
+        minimum_degrees_of_freedom=2.0,
+        learned_log_degrees_of_freedom=log_df,
+        example_weights=weights,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert learned.is_ragged
+    assert learned.learned_log_degrees_of_freedom == log_df
+    assert learned.example_weights == weights
+    assert isinstance(learned.get_raw_loss(), thor.RaggedTensor)
+
+
+def test_student_t_nll_loss_r10k_rejects_ragged_per_output_and_mismatched_learned_df_partition():
+    n = thor.Network("r10k_student_t_reject")
+    location, log_scale, labels, _ = _r10k_student_t_ragged_inputs(n)
+    with pytest.raises(ValueError, match=r"per_output.*undefined"):
+        thor.losses.distribution.StudentTNLLLoss(
+            n, location, log_scale, labels, reported_loss_shape=thor.losses.LossShape.per_output
+        )
+    different_df = thor.layers.RaggedNetworkInput(
+        n, "different_df", thor.DataType.fp32, [2], batch_size=3, max_total_values=8, max_values_per_row=4
+    )
+    with pytest.raises(ValueError, match=r"exact same row partition"):
+        thor.losses.distribution.StudentTNLLLoss(
+            n, location, log_scale, labels, learned_log_degrees_of_freedom=different_df
+        )

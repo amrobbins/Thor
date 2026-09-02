@@ -155,3 +155,154 @@ def test_mae_rejects_bad_example_weights():
 
     with pytest.raises(ValueError, match=r"example_weights dimensions must be \[1\]"):
         thor.losses.MAE(n, preds, labels, example_weights=_tensor_1d(3, thor.DataType.fp32))
+
+
+def _ragged_pair(network, dtype=thor.DataType.fp32):
+    predictions = thor.layers.RaggedNetworkInput(
+        network,
+        "ragged_predictions",
+        dtype,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    labels = thor.layers.RaggedNetworkInput(
+        network,
+        "ragged_labels",
+        dtype,
+        [2],
+        partition=predictions,
+    )
+    return predictions, labels
+
+
+def test_mae_constructs_ragged_raw_and_preserves_partition():
+    n = _net()
+    predictions, labels = _ragged_pair(n)
+    loss = thor.losses.MAE(n, predictions, labels, reported_loss_shape=thor.losses.LossShape.raw)
+
+    assert loss.is_ragged
+    assert loss.get_predictions() == predictions
+    assert loss.get_labels() == labels
+    raw = loss.get_loss()
+    assert isinstance(raw, thor.RaggedTensor)
+    assert raw.offsets == predictions.offsets
+    assert raw.trailing_dimensions == [2]
+    assert loss.get_raw_loss() == raw
+
+
+def test_mae_constructs_ragged_dense_reporting_shapes():
+    for shape in (thor.losses.LossShape.per_example, thor.losses.LossShape.batch):
+        n = _net()
+        predictions, labels = _ragged_pair(n, thor.DataType.fp16)
+        loss = thor.losses.MAE(n, predictions, labels, thor.DataType.fp32, shape)
+        reported = loss.get_loss()
+        assert isinstance(reported, thor.Tensor)
+        assert reported.get_dimensions() == [1]
+        assert loss.get_raw_loss().offsets == predictions.offsets
+
+
+def test_mae_ragged_rejects_per_output_and_different_partition():
+    n = _net()
+    predictions, labels = _ragged_pair(n)
+    with pytest.raises(ValueError, match=r"per_output.*undefined"):
+        thor.losses.MAE(n, predictions, labels, reported_loss_shape=thor.losses.LossShape.per_output)
+
+    different_labels = thor.layers.RaggedNetworkInput(
+        n,
+        "different_labels",
+        thor.DataType.fp32,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    with pytest.raises(ValueError, match=r"exact same row partition"):
+        thor.losses.MAE(n, predictions, different_labels)
+
+
+@pytest.mark.parametrize(
+    "weight_dtype",
+    [
+        thor.DataType.fp8_e4m3,
+        thor.DataType.fp8_e5m2,
+        thor.DataType.fp16,
+        thor.DataType.bf16,
+        thor.DataType.fp32,
+    ],
+)
+def test_mae_ragged_accepts_dense_per_row_example_weights_with_dense_dtype_parity(weight_dtype):
+    n = _net()
+    predictions, labels = _ragged_pair(n)
+    weights_input = thor.layers.NetworkInput(n, "weights", [1], weight_dtype)
+    weights = weights_input.get_feature_output()
+    loss = thor.losses.MAE(n, predictions, labels, example_weights=weights)
+    assert loss.example_weights == weights
+    assert loss.get_example_weights() == weights
+
+
+def test_mae_ragged_rejects_non_per_row_or_non_floating_example_weights():
+    n = _net()
+    predictions, labels = _ragged_pair(n)
+    with pytest.raises(ValueError, match=r"ragged example_weights dimensions must be \[1\]"):
+        thor.losses.MAE(n, predictions, labels, example_weights=thor.Tensor([2], thor.DataType.fp32))
+    with pytest.raises(ValueError, match=r"example_weights must use fp8_e4m3"):
+        thor.losses.MAE(n, predictions, labels, example_weights=thor.Tensor([1], thor.DataType.uint32))
+
+
+@pytest.mark.parametrize(
+    "dtype, expected_loss_dtype",
+    [
+        (thor.DataType.fp8_e4m3, thor.DataType.fp32),
+        (thor.DataType.fp8_e5m2, thor.DataType.fp32),
+        (thor.DataType.fp16, thor.DataType.fp16),
+        (thor.DataType.bf16, thor.DataType.fp32),
+        (thor.DataType.fp32, thor.DataType.fp32),
+    ],
+)
+def test_mae_ragged_matches_dense_prediction_dtype_and_default_loss_storage(dtype, expected_loss_dtype):
+    n = _net()
+    predictions, labels = _ragged_pair(n, dtype)
+    loss = thor.losses.MAE(n, predictions, labels, reported_loss_shape=thor.losses.LossShape.raw)
+    assert loss.get_raw_loss().values.get_data_type() == expected_loss_dtype
+
+
+@pytest.mark.parametrize(
+    "label_dtype",
+    [
+        thor.DataType.bool,
+        thor.DataType.int8,
+        thor.DataType.int16,
+        thor.DataType.int32,
+        thor.DataType.int64,
+        thor.DataType.uint8,
+        thor.DataType.uint16,
+        thor.DataType.uint32,
+        thor.DataType.uint64,
+        thor.DataType.fp8_e4m3,
+        thor.DataType.fp8_e5m2,
+        thor.DataType.fp16,
+        thor.DataType.bf16,
+        thor.DataType.fp32,
+    ],
+)
+def test_mae_ragged_matches_dense_label_dtype_contract(label_dtype):
+    n = _net()
+    predictions = thor.layers.RaggedNetworkInput(
+        n,
+        "ragged_predictions",
+        thor.DataType.bf16,
+        [2],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    labels = thor.layers.RaggedNetworkInput(
+        n,
+        "ragged_labels",
+        label_dtype,
+        [2],
+        partition=predictions,
+    )
+    thor.losses.MAE(n, predictions, labels, thor.DataType.fp32, thor.losses.LossShape.raw)

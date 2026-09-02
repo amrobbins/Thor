@@ -4,7 +4,10 @@
 #include "DeepLearning/Api/Layers/Loss/Loss.h"
 #include "DeepLearning/Api/Layers/Loss/LossShaper.h"
 #include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 #include "DeepLearning/Api/Network/Network.h"
+
+#include <utility>
 
 #include <optional>
 #include <stdexcept>
@@ -28,6 +31,29 @@ class NegativeBinomialNLLLoss : public Loss {
     bool getLogMean() const { return logMean; }
     bool getLogDispersion() const { return logDispersion; }
     float getEps() const { return eps; }
+    [[nodiscard]] bool isRagged() const { return raggedPredictionsTensor.has_value(); }
+    [[nodiscard]] RaggedTensor getRaggedPredictions() const {
+        if (!isRagged()) throw std::runtime_error("NegativeBinomialNLLLoss mean is dense.");
+        return raggedPredictionsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLabels() const {
+        if (!isRagged()) throw std::runtime_error("NegativeBinomialNLLLoss target is dense.");
+        return raggedLabelsTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedDispersion() const {
+        if (!isRagged()) throw std::runtime_error("NegativeBinomialNLLLoss dispersion is dense.");
+        return raggedDispersionTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedRawLoss() const {
+        if (!raggedRawLossTensor.has_value()) throw std::runtime_error("NegativeBinomialNLLLoss raw loss is dense.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] RaggedTensor getRaggedLoss() const {
+        if (!isRagged() || lossShape != LossShape::RAW || !raggedRawLossTensor.has_value())
+            throw std::runtime_error("NegativeBinomialNLLLoss does not expose a ragged reported loss for this LossShape.");
+        return raggedRawLossTensor.value();
+    }
+    [[nodiscard]] LossShape getLossShape() const { return lossShape; }
 
     std::vector<Tensor> getLossInputTensors() const override {
         std::vector<Tensor> inputs{predictionsTensor, labelsTensor, dispersionTensor};
@@ -52,6 +78,11 @@ class NegativeBinomialNLLLoss : public Loss {
     static void deserialize(const nlohmann::json &j, Network *network);
 
    protected:
+    std::optional<RaggedTensor> raggedPredictionsTensor;
+    std::optional<RaggedTensor> raggedLabelsTensor;
+    std::optional<RaggedTensor> raggedDispersionTensor;
+    std::optional<RaggedTensor> raggedRawLossTensor;
+
     virtual bool isMultiLayer() const { return true; }
 
     virtual void buildSupportLayersAndAddToNetwork();
@@ -94,35 +125,67 @@ class NegativeBinomialNLLLoss::Builder {
 
     virtual NegativeBinomialNLLLoss build() {
         THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_mean.has_value());
-        THOR_THROW_IF_FALSE(_dispersion.has_value());
-        THOR_THROW_IF_FALSE(_labels.has_value());
-        THOR_THROW_IF_FALSE(_mean.value() != _dispersion.value());
-        THOR_THROW_IF_FALSE(_mean.value() != _labels.value());
-        THOR_THROW_IF_FALSE(_dispersion.value() != _labels.value());
-        if (_exampleWeights.has_value()) {
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _mean.value());
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _dispersion.value());
-            THOR_THROW_IF_FALSE(_exampleWeights.value() != _labels.value());
-        }
-        THOR_THROW_IF_FALSE(!_mean.value().getDimensions().empty());
-        THOR_THROW_IF_FALSE(_mean.value().getDimensions() == _dispersion.value().getDimensions());
-        THOR_THROW_IF_FALSE(_mean.value().getDimensions() == _labels.value().getDimensions());
-
-        if (!_lossShape.has_value())
-            _lossShape = LossShape::BATCH;
-        if (!_lossDataType.has_value())
-            _lossDataType = _mean.value().getDataType();
-        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
+        const bool hasDenseMean = _mean.has_value();
+        const bool hasDenseDispersion = _dispersion.has_value();
+        const bool hasDenseLabels = _labels.has_value();
+        const bool hasRaggedMean = _raggedMean.has_value();
+        const bool hasRaggedDispersion = _raggedDispersion.has_value();
+        const bool hasRaggedLabels = _raggedLabels.has_value();
+        THOR_THROW_IF_FALSE(hasDenseMean == hasDenseDispersion && hasDenseDispersion == hasDenseLabels);
+        THOR_THROW_IF_FALSE(hasRaggedMean == hasRaggedDispersion && hasRaggedDispersion == hasRaggedLabels);
+        THOR_THROW_IF_FALSE(hasDenseMean != hasRaggedMean);
+        if (!_lossShape.has_value()) _lossShape = LossShape::BATCH;
 
         float eps = _eps.value_or(1.0e-8f);
         THOR_THROW_IF_FALSE(eps > 0.0f);
 
         NegativeBinomialNLLLoss loss;
-        loss.predictionsTensor = _mean.value();
-        loss.dispersionTensor = _dispersion.value();
-        loss.labelsTensor = _labels.value();
-        loss.exampleWeightsTensor = _exampleWeights;
+        if (hasDenseMean) {
+            THOR_THROW_IF_FALSE(_mean.value() != _dispersion.value());
+            THOR_THROW_IF_FALSE(_mean.value() != _labels.value());
+            THOR_THROW_IF_FALSE(_dispersion.value() != _labels.value());
+            if (_exampleWeights.has_value()) {
+                THOR_THROW_IF_FALSE(_exampleWeights.value() != _mean.value());
+                THOR_THROW_IF_FALSE(_exampleWeights.value() != _dispersion.value());
+                THOR_THROW_IF_FALSE(_exampleWeights.value() != _labels.value());
+            }
+            THOR_THROW_IF_FALSE(!_mean.value().getDimensions().empty());
+            THOR_THROW_IF_FALSE(_mean.value().getDimensions() == _dispersion.value().getDimensions());
+            THOR_THROW_IF_FALSE(_mean.value().getDimensions() == _labels.value().getDimensions());
+            if (!_lossDataType.has_value()) _lossDataType = _mean.value().getDataType();
+            loss.predictionsTensor = _mean.value();
+            loss.dispersionTensor = _dispersion.value();
+            loss.labelsTensor = _labels.value();
+            loss.exampleWeightsTensor = _exampleWeights;
+        } else {
+            const RaggedTensor& mean = _raggedMean.value();
+            const RaggedTensor& dispersion = _raggedDispersion.value();
+            const RaggedTensor& labels = _raggedLabels.value();
+            THOR_THROW_IF_FALSE(mean.isInitialized() && dispersion.isInitialized() && labels.isInitialized());
+            THOR_THROW_IF_FALSE(mean.getValues() != dispersion.getValues());
+            THOR_THROW_IF_FALSE(mean.getValues() != labels.getValues());
+            THOR_THROW_IF_FALSE(dispersion.getValues() != labels.getValues());
+            if (mean.getOffsets() != dispersion.getOffsets() || mean.getOffsets() != labels.getOffsets())
+                throw std::invalid_argument("NegativeBinomialNLLLoss ragged mean, dispersion, and labels must use the exact same row partition tensor.");
+            if (mean.getBatchSize() != dispersion.getBatchSize() || mean.getBatchSize() != labels.getBatchSize() ||
+                mean.getMaxTotalValues() != dispersion.getMaxTotalValues() || mean.getMaxTotalValues() != labels.getMaxTotalValues() ||
+                mean.getTrailingDimensions() != dispersion.getTrailingDimensions() || mean.getTrailingDimensions() != labels.getTrailingDimensions())
+                throw std::invalid_argument("NegativeBinomialNLLLoss ragged mean, dispersion, and labels must have identical value geometry.");
+            if (_exampleWeights.has_value() && _exampleWeights->getDimensions() != std::vector<uint64_t>{1})
+                throw std::invalid_argument("NegativeBinomialNLLLoss ragged example_weights must have dimensions [1] for one scalar weight per logical row.");
+            if (_lossShape.value() == LossShape::PER_OUTPUT)
+                throw std::invalid_argument("NegativeBinomialNLLLoss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+            if (!_lossDataType.has_value()) _lossDataType = mean.getValuesDataType();
+            loss.predictionsTensor = mean.getValues();
+            loss.dispersionTensor = dispersion.getValues();
+            loss.labelsTensor = labels.getValues();
+            loss.raggedPredictionsTensor = mean;
+            loss.raggedDispersionTensor = dispersion;
+            loss.raggedLabelsTensor = labels;
+            loss.exampleWeightsTensor = _exampleWeights;
+        }
+
+        THOR_THROW_IF_FALSE(_lossDataType.value() == DataType::FP16 || _lossDataType.value() == DataType::FP32);
         loss.lossDataType = _lossDataType.value();
         loss.lossWeight = ThorImplementation::normalizeLossWeight(_lossWeight);
         loss.lossShape = _lossShape.value();
@@ -148,12 +211,26 @@ class NegativeBinomialNLLLoss::Builder {
         return *this;
     }
 
+    virtual NegativeBinomialNLLLoss::Builder &mean(RaggedTensor mean) {
+        THOR_THROW_IF_FALSE(!this->_raggedMean.has_value());
+        THOR_THROW_IF_FALSE(mean.isInitialized());
+        this->_raggedMean = std::move(mean);
+        return *this;
+    }
+
     virtual NegativeBinomialNLLLoss::Builder &predictions(Tensor _mean) { return mean(_mean); }
+    virtual NegativeBinomialNLLLoss::Builder &predictions(RaggedTensor mean) { return this->mean(std::move(mean)); }
 
     virtual NegativeBinomialNLLLoss::Builder &dispersion(Tensor _dispersion) {
         THOR_THROW_IF_FALSE(!this->_dispersion.has_value());
         THOR_THROW_IF_FALSE(!_dispersion.getDimensions().empty());
         this->_dispersion = _dispersion;
+        return *this;
+    }
+    virtual NegativeBinomialNLLLoss::Builder &dispersion(RaggedTensor dispersion) {
+        THOR_THROW_IF_FALSE(!this->_raggedDispersion.has_value());
+        THOR_THROW_IF_FALSE(dispersion.isInitialized());
+        this->_raggedDispersion = std::move(dispersion);
         return *this;
     }
 
@@ -163,8 +240,15 @@ class NegativeBinomialNLLLoss::Builder {
         this->_labels = _labels;
         return *this;
     }
+    virtual NegativeBinomialNLLLoss::Builder &labels(RaggedTensor labels) {
+        THOR_THROW_IF_FALSE(!this->_raggedLabels.has_value());
+        THOR_THROW_IF_FALSE(labels.isInitialized());
+        this->_raggedLabels = std::move(labels);
+        return *this;
+    }
 
     virtual NegativeBinomialNLLLoss::Builder &target(Tensor _target) { return labels(_target); }
+    virtual NegativeBinomialNLLLoss::Builder &target(RaggedTensor target) { return labels(std::move(target)); }
 
     virtual NegativeBinomialNLLLoss::Builder &logMean(bool _logMean) {
         THOR_THROW_IF_FALSE(!this->_logMean.has_value());
@@ -241,6 +325,9 @@ class NegativeBinomialNLLLoss::Builder {
     std::optional<Tensor> _mean;
     std::optional<Tensor> _dispersion;
     std::optional<Tensor> _labels;
+    std::optional<RaggedTensor> _raggedMean;
+    std::optional<RaggedTensor> _raggedDispersion;
+    std::optional<RaggedTensor> _raggedLabels;
     std::optional<Tensor> _exampleWeights;
     std::optional<LossShape> _lossShape;
     std::optional<DataType> _lossDataType;

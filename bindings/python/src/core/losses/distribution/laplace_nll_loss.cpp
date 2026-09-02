@@ -6,6 +6,7 @@
 #include "DeepLearning/Api/Layers/Loss/LaplaceNLLLoss.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Tensor/Tensor.h"
+#include "DeepLearning/Api/Tensor/RaggedTensor.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -95,6 +96,51 @@ void maybeSetExampleWeights(LaplaceNLLLoss::Builder& builder,
     }
     builder.exampleWeights(exampleWeights.value());
 }
+
+void validateRaggedArguments(const RaggedTensor& location,
+                            const RaggedTensor& scale,
+                            const RaggedTensor& labels,
+                            optional<DataType> lossDataType,
+                            LossShape reportedLossShape,
+                            float eps) {
+    const string lossName = "LaplaceNLLLoss instance";
+    if (!isFloatingDType(location.getValuesDataType()))
+        throw nb::value_error("LaplaceNLLLoss instance: location must use fp16 or fp32 dtype.");
+    if (!isFloatingDType(scale.getValuesDataType()))
+        throw nb::value_error("LaplaceNLLLoss instance: scale must use fp16 or fp32 dtype.");
+    if (!isFloatingDType(labels.getValuesDataType()))
+        throw nb::value_error("LaplaceNLLLoss instance: labels must use fp16 or fp32 dtype.");
+    if (location.getOffsets() != scale.getOffsets() || location.getOffsets() != labels.getOffsets())
+        throw nb::value_error("LaplaceNLLLoss instance: ragged location, scale, and labels must use the exact same row partition tensor.");
+    if (location.getBatchSize() != scale.getBatchSize() || location.getBatchSize() != labels.getBatchSize() ||
+        location.getMaxTotalValues() != scale.getMaxTotalValues() || location.getMaxTotalValues() != labels.getMaxTotalValues() ||
+        location.getTrailingDimensions() != scale.getTrailingDimensions() ||
+        location.getTrailingDimensions() != labels.getTrailingDimensions())
+        throw nb::value_error("LaplaceNLLLoss instance: ragged location, scale, and labels must have identical value geometry.");
+    const DataType effectiveLossDataType = lossDataType.value_or(location.getValuesDataType());
+    if (!isFloatingDType(effectiveLossDataType))
+        throw nb::value_error("LaplaceNLLLoss instance: loss_data_type must be fp16 or fp32.");
+    if (eps <= 0.0f) throw nb::value_error("LaplaceNLLLoss instance: eps must be greater than zero.");
+    validateReportedLossShape(reportedLossShape, lossName);
+    if (reportedLossShape == LossShape::PER_OUTPUT)
+        throw nb::value_error("LaplaceNLLLoss instance: reported_loss_shape per_output is undefined for ragged sequences.");
+}
+
+void maybeSetRaggedExampleWeights(LaplaceNLLLoss::Builder& builder,
+                                  const RaggedTensor& location,
+                                  const RaggedTensor& scale,
+                                  const RaggedTensor& labels,
+                                  optional<Tensor> exampleWeights) {
+    if (!exampleWeights.has_value()) return;
+    if (exampleWeights.value() == location.getValues() || exampleWeights.value() == scale.getValues() ||
+        exampleWeights.value() == labels.getValues())
+        throw nb::value_error("LaplaceNLLLoss instance: example_weights must be distinct from location, scale, and labels values.");
+    if (!isFloatingDType(exampleWeights->getDataType()))
+        throw nb::value_error("LaplaceNLLLoss instance: example_weights must use fp16 or fp32 dtype.");
+    if (exampleWeights->getDimensions() != vector<uint64_t>{1})
+        throw nb::value_error("LaplaceNLLLoss instance: ragged example_weights dimensions must be [1] for one scalar weight per logical row.");
+    builder.exampleWeights(exampleWeights.value());
+}
 }  // namespace
 
 void bind_laplace_nll_loss(nb::module_& losses) {
@@ -105,27 +151,45 @@ void bind_laplace_nll_loss(nb::module_& losses) {
         "__init__",
         [](LaplaceNLLLoss* self,
            Network& network,
-           Tensor location,
-           Tensor scale,
-           Tensor labels,
+           nb::object locationObject,
+           nb::object scaleObject,
+           nb::object labelsObject,
            bool log_scale,
            float eps,
            optional<DataType> loss_data_type,
            LossShape reported_loss_shape,
            optional<float> loss_weight,
            optional<Tensor> example_weights) {
-            validateArguments(location, scale, labels, loss_data_type, reported_loss_shape, eps);
-
+            if (eps <= 0.0f) throw nb::value_error("LaplaceNLLLoss instance: eps must be greater than zero");
             LaplaceNLLLoss::Builder builder;
-            builder.network(network)
-                .location(location)
-                .scale(scale)
-                .labels(labels)
-                .logScale(log_scale)
-                .eps(eps)
-                .lossDataType(loss_data_type.value_or(location.getDataType()))
-                .lossWeight(loss_weight.value_or(1.0f));
-            maybeSetExampleWeights(builder, location, scale, labels, example_weights);
+            builder.network(network).logScale(log_scale).eps(eps).lossWeight(loss_weight.value_or(1.0f));
+
+            if (nb::isinstance<Tensor>(locationObject) && nb::isinstance<Tensor>(scaleObject) &&
+                nb::isinstance<Tensor>(labelsObject)) {
+                Tensor location = nb::cast<Tensor>(locationObject);
+                Tensor scale = nb::cast<Tensor>(scaleObject);
+                Tensor labels = nb::cast<Tensor>(labelsObject);
+                validateArguments(location, scale, labels, loss_data_type, reported_loss_shape, eps);
+                builder.location(location)
+                    .scale(scale)
+                    .labels(labels)
+                    .lossDataType(loss_data_type.value_or(location.getDataType()));
+                maybeSetExampleWeights(builder, location, scale, labels, example_weights);
+            } else if (nb::isinstance<RaggedTensor>(locationObject) && nb::isinstance<RaggedTensor>(scaleObject) &&
+                       nb::isinstance<RaggedTensor>(labelsObject)) {
+                RaggedTensor location = nb::cast<RaggedTensor>(locationObject);
+                RaggedTensor scale = nb::cast<RaggedTensor>(scaleObject);
+                RaggedTensor labels = nb::cast<RaggedTensor>(labelsObject);
+                validateRaggedArguments(location, scale, labels, loss_data_type, reported_loss_shape, eps);
+                builder.location(location)
+                    .scale(scale)
+                    .labels(labels)
+                    .lossDataType(loss_data_type.value_or(location.getValuesDataType()));
+                maybeSetRaggedExampleWeights(builder, location, scale, labels, example_weights);
+            } else {
+                throw nb::type_error(
+                    "LaplaceNLLLoss location, scale, and labels must all be thor.Tensor or all be thor.RaggedTensor.");
+            }
             setReportedLossShape(builder, reported_loss_shape);
             LaplaceNLLLoss built = builder.build();
             new (self) LaplaceNLLLoss(std::move(built));
@@ -141,10 +205,33 @@ void bind_laplace_nll_loss(nb::module_& losses) {
         nb::kw_only(),
         "loss_weight"_a.none() = nb::none(),
         "example_weights"_a.none() = nb::none(),
-        R"nbdoc(Construct a Laplace negative log-likelihood loss.)nbdoc");
+        R"nbdoc(Construct a dense or rank-1 ragged Laplace negative log-likelihood loss.)nbdoc");
 
-    lossClass.def_prop_ro("location", &LaplaceNLLLoss::getLocation);
-    lossClass.def_prop_ro("scale", &LaplaceNLLLoss::getScale);
+    lossClass.def("get_predictions", [](const LaplaceNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.Loss::getPredictions());
+    });
+    lossClass.def("get_labels", [](const LaplaceNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedLabels());
+        return nb::cast(self.Loss::getLabels());
+    });
+    lossClass.def("get_raw_loss", [](const LaplaceNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedRawLoss());
+        return nb::cast(self.Loss::getRawLoss());
+    });
+    lossClass.def("get_loss", [](const LaplaceNLLLoss& self) -> nb::object {
+        if (self.isRagged() && self.getLossShape() == LossShape::RAW) return nb::cast(self.getRaggedLoss());
+        return nb::cast(self.Loss::getLoss());
+    });
+    lossClass.def_prop_ro("is_ragged", &LaplaceNLLLoss::isRagged);
+    lossClass.def_prop_ro("location", [](const LaplaceNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedPredictions());
+        return nb::cast(self.getLocation());
+    });
+    lossClass.def_prop_ro("scale", [](const LaplaceNLLLoss& self) -> nb::object {
+        if (self.isRagged()) return nb::cast(self.getRaggedScale());
+        return nb::cast(self.getScale());
+    });
     lossClass.def_prop_ro("log_scale", &LaplaceNLLLoss::getLogScale);
     lossClass.def_prop_ro("eps", &LaplaceNLLLoss::getEps);
 

@@ -1216,6 +1216,46 @@ TEST(RaggedExpression, SegmentReductionsBuildDensePerRowOutputsForScalarValues) 
     EXPECT_EQ(outputNode(sum).ragged_runtime_max_active_values, 12ULL);
 }
 
+TEST(RaggedExpression, SegmentSumCanEmitFp32WithoutWideningLowPrecisionInputMaterialization) {
+    for (DataType sourceDType : {DataType::FP8_E4M3, DataType::FP8_E5M2, DataType::FP16, DataType::BF16}) {
+        const RaggedExpression ragged =
+            RaggedExpression::input("x", makeDescriptor(sourceDType, {2}, 3, 9, DataType::UINT32));
+        PhysicalOutputs outputs =
+            Expression::outputs({{"y", ragged.segment_sum().withOutputDType(DataType::FP32)}}).physicalOutputs();
+
+        std::vector<DataType> inputDTypes(outputs.expr->inputs.size(), sourceDType);
+        for (const NamedInput& input : outputs.expr->inputs) {
+            if (input.name == "x.offsets")
+                inputDTypes.at(input.slot) = DataType::UINT32;
+        }
+        ASSERT_NO_THROW(resolveOutputsDTypesInPlace(outputs, inputDTypes));
+
+        bool foundSegmentedSum = false;
+        bool foundValuesInput = false;
+        for (uint32_t nodeIndex = 0; nodeIndex < outputs.expr->nodes.size(); ++nodeIndex) {
+            const ExprNode& node = outputs.expr->nodes[nodeIndex];
+            if (node.op == ExprOp::SEGMENTED_REDUCE_SUM) {
+                foundSegmentedSum = true;
+                ASSERT_TRUE(node.output_dtype.has_value());
+                EXPECT_EQ(node.output_dtype.value(), DataType::FP32);
+            }
+            if (node.op == ExprOp::INPUT && node.input_slot < outputs.expr->inputs.size() &&
+                outputs.expr->inputs.at(node.input_slot).name == "x.values") {
+                foundValuesInput = true;
+                ASSERT_TRUE(node.input_tensor_dtype.has_value());
+                ASSERT_TRUE(node.output_dtype.has_value());
+                EXPECT_EQ(node.input_tensor_dtype.value(), sourceDType);
+                EXPECT_EQ(node.output_dtype.value(), sourceDType);
+                const std::optional<DataType> storageDType = materializedValueStorageDType(*outputs.expr, nodeIndex);
+                ASSERT_TRUE(storageDType.has_value());
+                EXPECT_EQ(storageDType.value(), sourceDType);
+            }
+        }
+        EXPECT_TRUE(foundSegmentedSum);
+        EXPECT_TRUE(foundValuesInput);
+    }
+}
+
 TEST(RaggedExpression, SegmentReductionsCarryVectorElementsPerValueMetadata) {
     const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {2, 3}, 3, 9));
 

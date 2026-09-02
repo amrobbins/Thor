@@ -183,3 +183,46 @@ def test_negative_binomial_nll_loss_elementwise_weights_scale_raw_loss():
     )
     expected = _nb_nll_reference(mean, dispersion, labels) * weights
     np.testing.assert_allclose(np.array(outputs["loss"].numpy(), copy=True), expected, rtol=2e-5, atol=2e-5)
+
+
+def _r10k_negative_binomial_ragged_inputs(network, prefix="r10k_nb"):
+    mean = thor.layers.RaggedNetworkInput(
+        network, f"{prefix}_mean", thor.DataType.fp32, [2], batch_size=3, max_total_values=8, max_values_per_row=4
+    )
+    dispersion = thor.layers.RaggedNetworkInput(network, f"{prefix}_dispersion", thor.DataType.fp32, [2], partition=mean)
+    labels = thor.layers.RaggedNetworkInput(network, f"{prefix}_labels", thor.DataType.fp32, [2], partition=mean)
+    return mean, dispersion, labels
+
+
+def test_negative_binomial_nll_loss_r10k_constructs_ragged_parameters_and_raw_loss():
+    n = thor.Network("r10k_negative_binomial_api")
+    mean, dispersion, labels = _r10k_negative_binomial_ragged_inputs(n)
+    weights = thor.layers.NetworkInput(n, "weights", [1], thor.DataType.fp16).get_feature_output()
+    loss = thor.losses.distribution.NegativeBinomialNLLLoss(
+        n, mean, dispersion, labels,
+        log_mean=False,
+        log_dispersion=False,
+        example_weights=weights,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert loss.is_ragged
+    assert loss.mean == mean
+    assert loss.dispersion == dispersion
+    assert loss.get_labels() == labels
+    assert loss.example_weights == weights
+    assert isinstance(loss.get_loss(), thor.RaggedTensor)
+    assert loss.get_loss().offsets == mean.offsets
+
+
+def test_negative_binomial_nll_loss_r10k_rejects_ragged_per_output_and_mismatched_partition():
+    n = thor.Network("r10k_negative_binomial_reject")
+    mean, dispersion, labels = _r10k_negative_binomial_ragged_inputs(n)
+    with pytest.raises(ValueError, match=r"per_output.*undefined"):
+        thor.losses.distribution.NegativeBinomialNLLLoss(
+            n, mean, dispersion, labels, reported_loss_shape=thor.losses.LossShape.per_output
+        )
+    different = thor.layers.RaggedNetworkInput(
+        n, "different_dispersion", thor.DataType.fp32, [2], batch_size=3, max_total_values=8, max_values_per_row=4
+    )
+    with pytest.raises(ValueError, match=r"exact same row partition"):
+        thor.losses.distribution.NegativeBinomialNLLLoss(n, mean, different, labels)

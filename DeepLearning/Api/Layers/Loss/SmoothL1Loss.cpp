@@ -2,6 +2,10 @@
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Api/Layers/Loss/SmoothL1Loss.h"
 
+#include "DeepLearning/Api/Layers/Loss/RaggedCustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedLossShaper.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 
@@ -32,8 +36,7 @@ void validateLabelsDType(DataType dtype) {
 
 void validatePredictionsDType(DataType dtype) {
     if (dtype != DataType::FP16 && dtype != DataType::FP32) {
-        throw runtime_error("Unsupported SmoothL1Loss predictions dtype: " +
-                            ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
+        throw runtime_error("Unsupported SmoothL1Loss predictions dtype: " + ThorImplementation::TensorDescriptor::getElementTypeName(dtype));
     }
 }
 
@@ -85,25 +88,70 @@ ThorImplementation::DynamicExpression makeSmoothL1GradientExpression(DataType pr
 void SmoothL1Loss::buildSupportLayersAndAddToNetwork() {
     validatePredictionsDType(predictionsTensor.getDataType());
     validateLabelsDType(labelsTensor.getDataType());
+    THOR_THROW_IF_FALSE(lossDataType == DataType::FP16 || lossDataType == DataType::FP32);
     THOR_THROW_IF_FALSE(beta > 0.0f);
 
+    if (isRagged()) {
+        if (lossShape == LossShape::PER_OUTPUT)
+            throw invalid_argument("SmoothL1Loss LossShape::PER_OUTPUT is undefined for ragged sequences.");
+
+        RaggedCustomLoss rawSmoothL1Loss = RaggedCustomLoss::Builder()
+                                            .network(*network)
+                                            .lossExpression(makeSmoothL1LossExpression(lossDataType, beta))
+                                            .gradientExpression(makeSmoothL1GradientExpression(predictionsTensor.getDataType(), beta))
+                                            .predictions(raggedPredictionsTensor.value())
+                                            .labels(raggedLabelsTensor.value())
+                                            .predictionsName(kPredictionsName)
+                                            .labelsName(kLabelsName)
+                                            .lossName(kLossName)
+                                            .gradientName(kGradientName)
+                                            .lossDataType(lossDataType)
+                                            .lossWeight(lossWeight.value_or(1.0f))
+                                            .build();
+        raggedRawLossTensor = rawSmoothL1Loss.getRaggedRawLoss();
+        lossShaperInput = raggedRawLossTensor->getValues();
+
+        if (lossShape == LossShape::NONE) {
+            lossTensor = lossShaperInput;
+            Stub::Builder().network(*network).inputTensor(lossShaperInput).build();
+        } else if (lossShape == LossShape::RAW) {
+            lossTensor = lossShaperInput;
+        } else if (lossShape == LossShape::PER_EXAMPLE) {
+            RaggedLossShaper shaper = RaggedLossShaper::Builder()
+                                          .network(*network)
+                                          .lossInput(raggedRawLossTensor.value())
+                                          .reportsPerExampleLoss()
+                                          .build();
+            lossTensor = shaper.getLossOutput();
+        } else if (lossShape == LossShape::BATCH) {
+            RaggedLossShaper shaper = RaggedLossShaper::Builder()
+                                          .network(*network)
+                                          .lossInput(raggedRawLossTensor.value())
+                                          .reportsBatchLoss()
+                                          .build();
+            lossTensor = shaper.getLossOutput();
+        } else {
+            THOR_UNREACHABLE();
+        }
+        return;
+    }
+
     CustomLoss rawSmoothL1Loss = CustomLoss::Builder()
-                                      .network(*network)
-                                      .lossExpression(makeSmoothL1LossExpression(lossDataType, beta))
-                                      .gradientExpression(makeSmoothL1GradientExpression(predictionsTensor.getDataType(), beta))
-                                      .predictions(predictionsTensor)
-                                      .labels(labelsTensor)
-                                      .predictionsName(kPredictionsName)
-                                      .labelsName(kLabelsName)
-                                      .lossName(kLossName)
-                                      .gradientName(kGradientName)
-                                      .lossDataType(lossDataType)
-                                       .lossWeight(lossWeight.value_or(1.0f))
-                                      .reportsRawLoss()
-                                      .build();
+                                  .network(*network)
+                                  .lossExpression(makeSmoothL1LossExpression(lossDataType, beta))
+                                  .gradientExpression(makeSmoothL1GradientExpression(predictionsTensor.getDataType(), beta))
+                                  .predictions(predictionsTensor)
+                                  .labels(labelsTensor)
+                                  .predictionsName(kPredictionsName)
+                                  .labelsName(kLabelsName)
+                                  .lossName(kLossName)
+                                  .gradientName(kGradientName)
+                                  .lossDataType(lossDataType)
+                                  .lossWeight(lossWeight.value_or(1.0f))
+                                  .reportsRawLoss()
+                                  .build();
 
     lossShaperInput = rawSmoothL1Loss.getLoss();
-
     finalizeLossReporting();
 }
 
@@ -111,6 +159,11 @@ json SmoothL1Loss::architectureJson() const {
     json j = Loss::architectureJson();
     j["loss_shape"] = lossShape;
     j["beta"] = beta;
+    if (isRagged()) {
+        j["ragged_predictions"] = raggedPredictionsTensor->architectureJson();
+        j["ragged_labels"] = raggedLabelsTensor->architectureJson();
+        if (raggedRawLossTensor.has_value()) j["ragged_raw_loss"] = raggedRawLossTensor->architectureJson();
+    }
     return j;
 }
 
@@ -120,6 +173,25 @@ void SmoothL1Loss::deserialize(const json& j, Network* network) {
     if (j.at("layer_type").get<std::string>() != "smooth_l1_loss")
         throw runtime_error("Layer type mismatch in SmoothL1Loss::deserialize: " + j.at("layer_type").get<std::string>());
 
+    if (j.contains("ragged_predictions")) {
+        RaggedTensor predictions = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_predictions"), network, "SmoothL1Loss");
+        RaggedTensor labels = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_labels"), network, "SmoothL1Loss");
+        SmoothL1Loss::Builder builder;
+        builder.network(*network).predictions(predictions).labels(labels).beta(j.value("beta", 1.0f));
+        builder.lossDataType(j.at("loss_data_type").get<DataType>());
+        builder.lossWeight(ThorImplementation::lossWeightFromJson(j).value_or(1.0f));
+        switch (j.at("loss_shape").get<LossShape>()) {
+            case LossShape::NONE: builder.reportsNoLoss(); break;
+            case LossShape::BATCH: builder.reportsBatchLoss(); break;
+            case LossShape::PER_EXAMPLE: builder.reportsPerExampleLoss(); break;
+            case LossShape::RAW: builder.reportsRawLoss(); break;
+            case LossShape::PER_OUTPUT:
+                throw runtime_error("Serialized ragged SmoothL1Loss cannot use LossShape::PER_OUTPUT.");
+        }
+        (void)builder.build();
+        return;
+    }
+
     uint64_t originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     Tensor predictions = network->getApiTensorByOriginalId(originalTensorId);
     originalTensorId = j["labels_tensor"].at("id").get<uint64_t>();
@@ -128,7 +200,6 @@ void SmoothL1Loss::deserialize(const json& j, Network* network) {
     SmoothL1Loss smoothL1Loss;
     smoothL1Loss.lossShape = j.at("loss_shape").get<LossShape>();
     smoothL1Loss.lossDataType = j.at("loss_data_type").get<DataType>();
-
     smoothL1Loss.lossWeight = ThorImplementation::lossWeightFromJson(j);
     smoothL1Loss.beta = j.value("beta", 1.0f);
     smoothL1Loss.predictionsTensor = predictions;

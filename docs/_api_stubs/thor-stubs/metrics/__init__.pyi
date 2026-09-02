@@ -1,3 +1,5 @@
+from typing import overload
+
 import thor
 import thor._thor.metrics
 from thor._thor.metrics import LossFormula as LossFormula
@@ -84,18 +86,32 @@ class CustomMetric(Metric):
     def uses_batch_validity(self) -> bool: ...
 
 class Mean(Metric):
+    @overload
     def __init__(self, network: thor.Network, values: thor.Tensor) -> None:
-        """Construct a Mean metric over a values tensor."""
+        """Construct a Mean metric over dense or ragged values."""
+
+    @overload
+    def __init__(self, network: thor.Network, values: thor.RaggedTensor) -> None: ...
 
     @property
     def values(self) -> thor.Tensor: ...
+
+    @property
+    def ragged_values(self) -> thor.RaggedTensor | None: ...
 
 class Sum(Metric):
+    @overload
     def __init__(self, network: thor.Network, values: thor.Tensor) -> None:
-        """Construct a Sum metric over a values tensor."""
+        """Construct a Sum metric over dense or ragged values."""
+
+    @overload
+    def __init__(self, network: thor.Network, values: thor.RaggedTensor) -> None: ...
 
     @property
     def values(self) -> thor.Tensor: ...
+
+    @property
+    def ragged_values(self) -> thor.RaggedTensor | None: ...
 
 class Min(Metric):
     def __init__(self, network: thor.Network, values: thor.Tensor) -> None:
@@ -104,12 +120,18 @@ class Min(Metric):
     @property
     def values(self) -> thor.Tensor: ...
 
+    @property
+    def ragged_values(self) -> thor.RaggedTensor | None: ...
+
 class Max(Metric):
     def __init__(self, network: thor.Network, values: thor.Tensor) -> None:
         """Construct a Max metric over a values tensor."""
 
     @property
     def values(self) -> thor.Tensor: ...
+
+    @property
+    def ragged_values(self) -> thor.RaggedTensor | None: ...
 
 class WeightedMean(Metric):
     def __init__(self, network: thor.Network, values: thor.Tensor, weights: thor.Tensor) -> None:

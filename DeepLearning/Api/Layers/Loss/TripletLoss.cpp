@@ -38,7 +38,7 @@ ThorImplementation::Expression squaredDistance(const ThorImplementation::Express
                                                 const ThorImplementation::Expression& rhs,
                                                 float eps) {
     ThorImplementation::Expression diff = lhs - rhs;
-    return ((diff * diff).reduce_sum({1}, {}) + ThorImplementation::Expression(eps));
+    return (diff.reduce_sum_squares({1}, {}, DataType::FP32) + ThorImplementation::Expression(eps));
 }
 
 ThorImplementation::DynamicExpression makeTripletLossExpression(DataType lossDataType, float margin, float eps) {
@@ -69,8 +69,10 @@ ThorImplementation::DynamicExpression makeTripletGradientExpression(DataType inp
 
     ThorImplementation::Expression ap = anchor - positive;
     ThorImplementation::Expression an = anchor - negative;
-    ThorImplementation::Expression dAp = ((ap * ap).reduce_sum({1}, {}) + ThorImplementation::Expression(eps)).sqrt();
-    ThorImplementation::Expression dAn = ((an * an).reduce_sum({1}, {}) + ThorImplementation::Expression(eps)).sqrt();
+    ThorImplementation::Expression dAp =
+        (ap.reduce_sum_squares({1}, {}, DataType::FP32) + ThorImplementation::Expression(eps)).sqrt();
+    ThorImplementation::Expression dAn =
+        (an.reduce_sum_squares({1}, {}, DataType::FP32) + ThorImplementation::Expression(eps)).sqrt();
     ThorImplementation::Expression active = ThorImplementation::Expression::where(dAp - dAn + ThorImplementation::Expression(margin) > zero,
                                                                                    ThorImplementation::Expression(1.0),
                                                                                    zero);

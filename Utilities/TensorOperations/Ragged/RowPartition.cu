@@ -65,6 +65,26 @@ __global__ void offsetsToLengthsKernel(const OffsetT* offsets, LengthT* lengths,
 }
 
 template <typename OffsetT>
+__global__ void activeScalarCountKernel(const OffsetT* offsets,
+                                        float* active_scalar_count,
+                                        uint64_t valid_row_count,
+                                        uint64_t elements_per_value) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    const uint64_t active_values = static_cast<uint64_t>(offsets[valid_row_count]);
+    active_scalar_count[0] = static_cast<float>(active_values) * static_cast<float>(elements_per_value);
+}
+
+template <typename OffsetT>
+__global__ void clampOffsetsToValidRowsKernel(const OffsetT* offsets,
+                                               OffsetT* clamped_offsets,
+                                               uint64_t batch_size,
+                                               uint64_t valid_row_count) {
+    const uint64_t idx = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx > batch_size) return;
+    clamped_offsets[idx] = offsets[idx <= valid_row_count ? idx : valid_row_count];
+}
+
+template <typename OffsetT>
 __global__ void offsetsToInt32LengthsCheckedKernel(const OffsetT* offsets,
                                                     int32_t* lengths,
                                                     uint32_t* validation_error_bits,
@@ -545,6 +565,78 @@ void rowPartitionLengthsToOffsets(const Tensor& temp_storage,
 void rowPartitionOffsetsToLengths(const Tensor& offsets, Tensor& lengths, uint64_t batch_size, Stream& stream) {
     validateOffsetsAndLengths(offsets, lengths, batch_size);
     dispatchOffsetDType(offsets.getDataType(), OffsetsToLengthsFn{offsets, lengths, batch_size, stream});
+}
+
+void rowPartitionActiveScalarCount(const Tensor& offsets,
+                                   Tensor& active_scalar_count,
+                                   uint64_t valid_row_count,
+                                   uint64_t elements_per_value,
+                                   Stream& stream) {
+    requireRowPartitionVectorGpuTensor(offsets, "row partition offsets");
+    requireRowPartitionOffsetDType(offsets.getDataType(), "row partition offsets");
+    requireDenseContiguousGpuTensor(active_scalar_count, "active scalar count");
+    requireSameGpuPlacement(offsets, active_scalar_count, "row partition offsets", "active scalar count");
+    if (active_scalar_count.getDataType() != DataType::FP32 || active_scalar_count.getTotalNumElements() != 1) {
+        throw std::invalid_argument("row partition active scalar count output must be one FP32 scalar.");
+    }
+    if (valid_row_count == 0) {
+        throw std::invalid_argument("row partition valid_row_count must be non-zero.");
+    }
+    if (elements_per_value == 0) {
+        throw std::invalid_argument("row partition elements_per_value must be non-zero.");
+    }
+    requireStorageForNumItems(offsets, "row partition offsets", checkedOffsetsElements(valid_row_count));
+
+    switch (offsets.getDataType()) {
+        case DataType::UINT32:
+            activeScalarCountKernel<uint32_t><<<1, 1, 0, stream.getStream()>>>(
+                offsets.getMemPtr<uint32_t>(), active_scalar_count.getMemPtr<float>(), valid_row_count, elements_per_value);
+            break;
+        case DataType::UINT64:
+            activeScalarCountKernel<uint64_t><<<1, 1, 0, stream.getStream()>>>(
+                offsets.getMemPtr<uint64_t>(), active_scalar_count.getMemPtr<float>(), valid_row_count, elements_per_value);
+            break;
+        default:
+            throw std::invalid_argument("row partition offsets dtype must be UINT32 or UINT64.");
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void rowPartitionClampOffsetsToValidRows(const Tensor& offsets,
+                                         Tensor& clamped_offsets,
+                                         uint64_t batch_size,
+                                         uint64_t valid_row_count,
+                                         Stream& stream) {
+    requireRowPartitionVectorGpuTensor(offsets, "row partition offsets");
+    requireRowPartitionVectorGpuTensor(clamped_offsets, "clamped row partition offsets");
+    requireSameGpuPlacement(offsets, clamped_offsets, "row partition offsets", "clamped row partition offsets");
+    requireRowPartitionOffsetDType(offsets.getDataType(), "row partition offsets");
+    requireRowPartitionOffsetDType(clamped_offsets.getDataType(), "clamped row partition offsets");
+    if (offsets.getDataType() != clamped_offsets.getDataType()) {
+        throw std::invalid_argument("clamped row partition offsets must preserve the offsets dtype.");
+    }
+    if (valid_row_count == 0 || valid_row_count > batch_size) {
+        throw std::invalid_argument("row partition valid_row_count must be in [1, batch_size].");
+    }
+    requireStorageForNumItems(offsets, "row partition offsets", checkedOffsetsElements(batch_size));
+    requireStorageForNumItems(clamped_offsets, "clamped row partition offsets", checkedOffsetsElements(batch_size));
+
+    constexpr uint32_t threads = 256;
+    const uint64_t items = checkedOffsetsElements(batch_size);
+    const uint32_t blocks = static_cast<uint32_t>((items + threads - 1) / threads);
+    switch (offsets.getDataType()) {
+        case DataType::UINT32:
+            clampOffsetsToValidRowsKernel<uint32_t><<<blocks, threads, 0, stream.getStream()>>>(
+                offsets.getMemPtr<uint32_t>(), clamped_offsets.getMemPtr<uint32_t>(), batch_size, valid_row_count);
+            break;
+        case DataType::UINT64:
+            clampOffsetsToValidRowsKernel<uint64_t><<<blocks, threads, 0, stream.getStream()>>>(
+                offsets.getMemPtr<uint64_t>(), clamped_offsets.getMemPtr<uint64_t>(), batch_size, valid_row_count);
+            break;
+        default:
+            throw std::invalid_argument("row partition offsets dtype must be UINT32 or UINT64.");
+    }
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void rowPartitionOffsetsToInt32LengthsChecked(const Tensor& offsets,

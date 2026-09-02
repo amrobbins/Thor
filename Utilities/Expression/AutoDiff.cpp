@@ -522,6 +522,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
             case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
             case ExprOp::REDUCE_NORM2:
+            case ExprOp::REDUCE_SUM_SQUARES:
             case ExprOp::SCAN:
             case ExprOp::SEGMENTED_SCAN:
                 reaches[i] = reaches.at(node.lhs);
@@ -3195,7 +3196,8 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::REDUCE_ARGMAX:
             case ExprOp::REDUCE_AVG:
             case ExprOp::REDUCE_NORM1:
-            case ExprOp::REDUCE_NORM2: {
+            case ExprOp::REDUCE_NORM2:
+            case ExprOp::REDUCE_SUM_SQUARES: {
                 const std::vector<uint64_t>& lhs_dims = node_dims[node.lhs];
                 const std::vector<uint64_t> reduction_axes = resolveReductionAxesForAutodiff(node.reduction_axes, lhs_dims.size());
                 node_dims[i] = StampedEquation::computeReductionOutputDims(lhs_dims, reduction_axes, node.squeeze_axes);
@@ -5022,6 +5024,26 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     }
 
                     addContributionToChild(node.lhs, scaled_grad, lhs_dims);
+                }
+                break;
+            }
+
+            case ExprOp::REDUCE_SUM_SQUARES: {
+                if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
+
+                    uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                    if (has_forward_dims && !node.squeeze_axes.empty()) {
+                        const std::vector<uint64_t> unsqueeze_axes =
+                            normalizedReductionUnsqueezeAxes(lhs_dims, node.reduction_axes, node.squeeze_axes);
+                        grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
+                    }
+
+                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t expanded_grad =
+                        broadcastGradToDims(grad_before_expand, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                    const uint32_t scaled = builder.mul(builder.scalar(2.0), builder.mul(expanded_grad, lhs));
+                    addContributionToChild(node.lhs, scaled, lhs_dims);
                 }
                 break;
             }

@@ -4,6 +4,12 @@
 #include "DeepLearning/Api/Layers/Loss/MeanPowerError.h"
 
 #include "DeepLearning/Api/Layers/Loss/MultiInputCustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedCustomLoss.h"
+#include "DeepLearning/Api/Layers/Loss/RaggedLossShaper.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedBroadcast.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
@@ -64,6 +70,14 @@ ThorImplementation::Expression meanPowerLossExpression(float exponent) {
     return diff.abs().pow(exponentExpr);
 }
 
+vector<uint64_t> raggedPackedScalarWeightBroadcastDimensions(const vector<uint64_t>& predictionValueDimensions) {
+    if (predictionValueDimensions.empty())
+        throw invalid_argument("MeanPowerError ragged prediction values must have a packed-capacity dimension.");
+    vector<uint64_t> dimensions(predictionValueDimensions.size(), 1);
+    dimensions.front() = predictionValueDimensions.front();
+    return dimensions;
+}
+
 ThorImplementation::DynamicExpression makeMeanPowerLossExpression(float exponent, DataType lossDataType) {
     validateExponent(exponent);
     ThorImplementation::Expression loss = meanPowerLossExpression(exponent).withOutputDType(lossDataType);
@@ -72,10 +86,15 @@ ThorImplementation::DynamicExpression makeMeanPowerLossExpression(float exponent
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
-ThorImplementation::DynamicExpression makeWeightedMeanPowerLossExpression(float exponent, DataType lossDataType) {
+ThorImplementation::DynamicExpression makeWeightedMeanPowerLossExpression(
+    float exponent, DataType lossDataType, optional<vector<uint64_t>> raggedPredictionValueDimensions = nullopt) {
     validateExponent(exponent);
     ThorImplementation::Expression exampleWeights =
         ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
+    if (raggedPredictionValueDimensions.has_value()) {
+        exampleWeights = exampleWeights.reshape(
+            raggedPackedScalarWeightBroadcastDimensions(raggedPredictionValueDimensions.value()));
+    }
     ThorImplementation::Expression loss = (meanPowerLossExpression(exponent) * exampleWeights).withOutputDType(lossDataType);
     ThorImplementation::ExpressionDefinition definition =
         ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs({{kLossName, loss}}));
@@ -115,13 +134,18 @@ ThorImplementation::DynamicExpression makeMeanPowerGradientExpression(float expo
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
 }
 
-ThorImplementation::DynamicExpression makeWeightedMeanPowerGradientExpression(float exponent, DataType predictionsDataType) {
+ThorImplementation::DynamicExpression makeWeightedMeanPowerGradientExpression(
+    float exponent, DataType predictionsDataType, optional<vector<uint64_t>> raggedPredictionValueDimensions = nullopt) {
     validateExponent(exponent);
     validatePredictionsDType(predictionsDataType);
-
     ThorImplementation::Expression exampleWeights =
         ThorImplementation::Expression::input(kExampleWeightsName, DataType::FP32, DataType::FP32);
-    ThorImplementation::Expression gradient = (meanPowerGradientExpression(exponent) * exampleWeights).withOutputDType(predictionsDataType);
+    if (raggedPredictionValueDimensions.has_value()) {
+        exampleWeights = exampleWeights.reshape(
+            raggedPackedScalarWeightBroadcastDimensions(raggedPredictionValueDimensions.value()));
+    }
+    ThorImplementation::Expression gradient =
+        (meanPowerGradientExpression(exponent) * exampleWeights).withOutputDType(predictionsDataType);
     ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
         ThorImplementation::Expression::outputs({{kGradientName, gradient}}));
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
@@ -134,8 +158,76 @@ void MeanPowerError::buildSupportLayersAndAddToNetwork() {
     validateExponent(exponent);
     validatePredictionsDType(predictionsTensor.getDataType());
     validateLabelsDType(labelsTensor.getDataType());
-    validateExampleWeights(predictionsTensor, labelsTensor, exampleWeightsTensor);
 
+    if (isRagged()) {
+        if (lossShape == LossShape::PER_OUTPUT)
+            throw invalid_argument("MeanPowerError LossShape::PER_OUTPUT is undefined for ragged sequences.");
+
+        RaggedCustomLoss::Builder rawBuilder;
+        rawBuilder.network(*network)
+            .predictions(raggedPredictionsTensor.value())
+            .labels(raggedLabelsTensor.value())
+            .predictionsName(kPredictionsName)
+            .labelsName(kLabelsName)
+            .lossName(kLossName)
+            .gradientName(kGradientName)
+            .lossDataType(lossDataType)
+            .lossWeight(lossWeight.value_or(1.0f));
+
+        if (exampleWeightsTensor.has_value()) {
+            validateExampleWeights(predictionsTensor, labelsTensor, exampleWeightsTensor);
+            if (exampleWeightsTensor->getDimensions() != vector<uint64_t>{1})
+                throw invalid_argument("MeanPowerError ragged example_weights must have dimensions [1] for one scalar weight per logical row.");
+            TypeConverter weightConverter = TypeConverter::Builder()
+                                                .network(*network)
+                                                .featureInput(exampleWeightsTensor.value())
+                                                .newDataType(DataType::FP32)
+                                                .build();
+            SegmentedBroadcast weightBroadcast = SegmentedBroadcast::Builder()
+                                                     .network(*network)
+                                                     .featureInput(weightConverter.getFeatureOutput().value())
+                                                     .partitionInput(raggedPredictionsTensor.value())
+                                                     .build();
+            const vector<uint64_t> predictionValueDimensions = raggedPredictionsTensor->getValuesDimensions();
+            rawBuilder.lossExpression(makeWeightedMeanPowerLossExpression(exponent, lossDataType, predictionValueDimensions))
+                .gradientExpression(makeWeightedMeanPowerGradientExpression(exponent, predictionsTensor.getDataType(), predictionValueDimensions))
+                .exampleWeights(weightBroadcast.getRaggedFeatureOutput())
+                .exampleWeightsName(kExampleWeightsName);
+        } else {
+            rawBuilder.lossExpression(makeMeanPowerLossExpression(exponent, lossDataType))
+                .gradientExpression(makeMeanPowerGradientExpression(exponent, predictionsTensor.getDataType()));
+        }
+
+        RaggedCustomLoss rawMeanPowerError = rawBuilder.build();
+        raggedRawLossTensor = rawMeanPowerError.getRaggedRawLoss();
+        lossShaperInput = raggedRawLossTensor->getValues();
+
+        if (lossShape == LossShape::NONE) {
+            lossTensor = lossShaperInput;
+            Stub::Builder().network(*network).inputTensor(lossShaperInput).build();
+        } else if (lossShape == LossShape::RAW) {
+            lossTensor = lossShaperInput;
+        } else if (lossShape == LossShape::PER_EXAMPLE) {
+            RaggedLossShaper shaper = RaggedLossShaper::Builder()
+                                          .network(*network)
+                                          .lossInput(raggedRawLossTensor.value())
+                                          .reportsPerExampleLoss()
+                                          .build();
+            lossTensor = shaper.getLossOutput();
+        } else if (lossShape == LossShape::BATCH) {
+            RaggedLossShaper shaper = RaggedLossShaper::Builder()
+                                          .network(*network)
+                                          .lossInput(raggedRawLossTensor.value())
+                                          .reportsBatchLoss()
+                                          .build();
+            lossTensor = shaper.getLossOutput();
+        } else {
+            THOR_UNREACHABLE();
+        }
+        return;
+    }
+
+    validateExampleWeights(predictionsTensor, labelsTensor, exampleWeightsTensor);
     if (exampleWeightsTensor.has_value()) {
         MultiInputCustomLoss rawMeanPowerError =
             MultiInputCustomLoss::Builder()
@@ -166,7 +258,6 @@ void MeanPowerError::buildSupportLayersAndAddToNetwork() {
                                            .lossWeight(lossWeight.value_or(1.0f))
                                            .reportsRawLoss()
                                            .build();
-
         lossShaperInput = rawMeanPowerError.getLoss();
     }
 
@@ -177,6 +268,14 @@ json MeanPowerError::architectureJson() const {
     json j = Loss::architectureJson();
     j["layer_type"] = "mean_power_error";
     j["exponent"] = exponent;
+    if (isRagged()) {
+        // Unlike the graph-visible raw support layer, the MeanPowerError facade remembers
+        // the user-requested reporting shape when serialized directly.
+        j["loss_shape"] = lossShape;
+        j["ragged_predictions"] = raggedPredictionsTensor->architectureJson();
+        j["ragged_labels"] = raggedLabelsTensor->architectureJson();
+        if (raggedRawLossTensor.has_value()) j["ragged_raw_loss"] = raggedRawLossTensor->architectureJson();
+    }
     return j;
 }
 
@@ -185,6 +284,29 @@ void MeanPowerError::deserialize(const json& j, Network* network) {
         throw runtime_error("Unsupported version in MeanPowerError::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "mean_power_error")
         throw runtime_error("Layer type mismatch in MeanPowerError::deserialize: " + j.at("layer_type").get<std::string>());
+
+    if (j.contains("ragged_predictions")) {
+        RaggedTensor predictions = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_predictions"), network, "MeanPowerError");
+        RaggedTensor labels = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_labels"), network, "MeanPowerError");
+        MeanPowerError::Builder builder;
+        builder.network(*network).predictions(predictions).labels(labels).exponent(j.value("exponent", 1.5f));
+        if (j.contains("example_weights_tensor")) {
+            const uint64_t weightsId = j.at("example_weights_tensor").at("id").get<uint64_t>();
+            builder.exampleWeights(network->getApiTensorByOriginalId(weightsId));
+        }
+        builder.lossDataType(j.at("loss_data_type").get<DataType>());
+        builder.lossWeight(ThorImplementation::lossWeightFromJson(j).value_or(1.0f));
+        switch (j.at("loss_shape").get<LossShape>()) {
+            case LossShape::NONE: builder.reportsNoLoss(); break;
+            case LossShape::BATCH: builder.reportsBatchLoss(); break;
+            case LossShape::PER_EXAMPLE: builder.reportsPerExampleLoss(); break;
+            case LossShape::RAW: builder.reportsRawLoss(); break;
+            case LossShape::PER_OUTPUT:
+                throw runtime_error("Serialized ragged MeanPowerError cannot use LossShape::PER_OUTPUT.");
+        }
+        (void)builder.build();
+        return;
+    }
 
     uint64_t originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     Tensor predictions = network->getApiTensorByOriginalId(originalTensorId);
