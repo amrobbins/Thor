@@ -90,7 +90,7 @@ RaggedSequenceSlice RaggedSequenceSlice::makeLayer(const RaggedTensor& input,
         !output.hasMaxValuesPerRow() || output.getMaxValuesPerRow() != outputMaxValuesPerRow) {
         throw std::runtime_error("RaggedSequenceSlice serialized output descriptor does not match its input and slice window.");
     }
-    if (output.getOffsets().getOriginalId() == input.getOffsets().getOriginalId()) {
+    if (output.sharesPartitionWith(input)) {
         throw std::runtime_error("RaggedSequenceSlice must own a newly produced offsets tensor.");
     }
 

@@ -1175,8 +1175,9 @@ RaggedBatchExtent DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity
     THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= rowIndicesHost.getDimensions().front());
 
     const uint64_t *rowIndices = rowIndicesHost.getMemPtr<uint64_t>();
+    const uint64_t physicalBatchSize = rowIndicesHost.getDimensions().front();
+    std::vector<uint64_t> hostOffsets(physicalBatchSize + 1, 0);
     uint64_t active = 0;
-    uint64_t maxActiveRowLength = 0;
     for (uint64_t row = 0; row < logicalRows; ++row) {
         const uint64_t sourceRow = rowIndices[row];
         if (sourceRow >= found->second.valueCounts.size()) {
@@ -1200,9 +1201,10 @@ RaggedBatchExtent DeviceResidentNamedDataset::validateCompactRaggedBatchCapacity
                 std::to_string(maxTotalValues) + ".");
         }
         active += count;
-        maxActiveRowLength = std::max(maxActiveRowLength, count);
+        hostOffsets[row + 1] = active;
     }
-    return RaggedBatchExtent{.activeValueCount = active, .maxActiveRowLength = maxActiveRowLength};
+    for (uint64_t row = logicalRows; row < physicalBatchSize; ++row) hostOffsets[row + 1] = active;
+    return RaggedBatchExtent{.hostOffsets = std::move(hostOffsets)};
 }
 
 void DeviceResidentNamedDataset::enqueueCompactRaggedFieldMaterialization(
@@ -1273,8 +1275,9 @@ RaggedBatchExtent DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacit
     THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= rowIndicesHost.getDimensions().front());
 
     const uint64_t *rowIndices = rowIndicesHost.getMemPtr<uint64_t>();
+    const uint64_t physicalBatchSize = rowIndicesHost.getDimensions().front();
+    std::vector<uint64_t> hostOffsets(physicalBatchSize + 1, 0);
     uint64_t active = 0;
-    uint64_t maxActiveRowLength = 0;
     for (uint64_t row = 0; row < logicalRows; ++row) {
         const uint64_t sourceRow = rowIndices[row];
         if (sourceRow >= found->second.valueCounts.size()) {
@@ -1298,9 +1301,10 @@ RaggedBatchExtent DeviceResidentNamedDataset::validateSnapshotRaggedBatchCapacit
                 std::to_string(maxTotalValues) + ".");
         }
         active += count;
-        maxActiveRowLength = std::max(maxActiveRowLength, count);
+        hostOffsets[row + 1] = active;
     }
-    return RaggedBatchExtent{.activeValueCount = active, .maxActiveRowLength = maxActiveRowLength};
+    for (uint64_t row = logicalRows; row < physicalBatchSize; ++row) hostOffsets[row + 1] = active;
+    return RaggedBatchExtent{.hostOffsets = std::move(hostOffsets)};
 }
 
 void DeviceResidentNamedDataset::enqueueSnapshotRaggedFieldMaterialization(

@@ -156,6 +156,42 @@ TEST(RowPartition, ActiveValueCountAliasesLastOffsetWithoutCopy) {
 }
 
 
+TEST(RowPartition, HostPartitionPublicationCanRideOnGenericCarrierWithoutBecomingOffsets) {
+    const RowPartitionDescriptor descriptor(3, 8, DataType::UINT32, 5);
+    Tensor offsets(cpuPlacement, descriptor.getOffsetsDescriptor());
+    RowPartitionRuntime canonical(offsets, descriptor);
+    canonical.setHostOffsets({0, 2, 2, 6});
+
+    Tensor valuesCarrier(cpuPlacement, TensorDescriptor(DataType::FP32, {8, 4}));
+    canonical.publishHostStateTo(valuesCarrier);
+
+    RowPartitionRuntime carried = RowPartitionRuntime::fromHostStateCarrier(valuesCarrier, descriptor);
+    EXPECT_EQ(carried.getRowPartitionId(), canonical.getRowPartitionId());
+    EXPECT_TRUE(carried.sharesPartitionWith(canonical));
+    EXPECT_FALSE(carried.hasDeviceOffsetsRepresentation());
+    EXPECT_EQ(carried.requireHostOffsets(), (std::vector<uint64_t>{0, 2, 2, 6}));
+    EXPECT_EQ(carried.requireHostActiveValueCount(), 6U);
+    EXPECT_EQ(carried.requireHostMaxActiveRowLength(), 4U);
+    EXPECT_THROW((void)carried.getOffsets(), std::runtime_error);
+}
+
+
+TEST(RowPartition, HostPartitionPublicationPropagatesAcrossPartitionPreservingValueTensor) {
+    const RowPartitionDescriptor descriptor(2, 6, DataType::UINT64, 4);
+    Tensor sourceCarrier(cpuPlacement, TensorDescriptor(DataType::BF16, {6, 3}));
+    RowPartitionRuntime::publishHostState(sourceCarrier, descriptor, 0x6B000005ULL, {0, 1, 5});
+
+    Tensor outputValues(cpuPlacement, TensorDescriptor(DataType::FP32, {6, 7}));
+    RowPartitionRuntime::propagateHostState(sourceCarrier, outputValues);
+
+    RowPartitionRuntime propagated = RowPartitionRuntime::fromHostStateCarrier(outputValues, descriptor);
+    EXPECT_EQ(propagated.getRowPartitionId(), 0x6B000005ULL);
+    EXPECT_FALSE(propagated.hasDeviceOffsetsRepresentation());
+    EXPECT_EQ(propagated.requireHostOffsets(), (std::vector<uint64_t>{0, 1, 5}));
+    EXPECT_EQ(propagated.requireHostActiveValueCount(), 5U);
+    EXPECT_EQ(propagated.requireHostMaxActiveRowLength(), 4U);
+}
+
 TEST(RowPartition, CanonicalAndBackendOffsetDTypePoliciesAreExplicitlyDistinct) {
     EXPECT_EQ(kDefaultRowPartitionOffsetDataType, DataType::UINT32);
     EXPECT_TRUE(isCanonicalRowPartitionOffsetDataType(DataType::UINT32));
@@ -191,12 +227,24 @@ TEST(RowPartition, RaggedTensorRuntimeExtentDerivesTrailingElementsPerValue) {
     Tensor values(gpuPlacement, TensorDescriptor(DataType::FP32, {9, 3, 4}));
     Tensor offsets = makeGpuVector<uint32_t>({0U, 2U, 5U}, stream);
     RaggedTensor ragged(values, offsets);
+    ragged.getRowPartitionRuntime().setHostOffsets({0, 2, 5});
 
     const RaggedRuntimeExtent extent = ragged.getRuntimeExtent();
     EXPECT_EQ(extent.maxActiveValues, 9ULL);
     EXPECT_EQ(extent.elementsPerValue, 12ULL);
     EXPECT_EQ(extent.maxLaunchElements(), 108ULL);
     EXPECT_EQ(extent.activeValueCount.getMemPtr<uint32_t>(), offsets.getMemPtr<uint32_t>() + 2);
+}
+
+TEST(RowPartition, RaggedTensorRuntimeExtentRequiresAuthoritativeHostPartition) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor values(gpuPlacement, TensorDescriptor(DataType::FP32, {9, 3}));
+    Tensor offsets = makeGpuVector<uint32_t>({0U, 2U, 5U}, stream);
+    RaggedTensor ragged(values, offsets);
+
+    EXPECT_THROW((void)ragged.getRuntimeExtent(), std::runtime_error);
 }
 
 TEST(RowPartition, RuntimeExtentRejectsInvalidStaticCapacityAndElementsPerValue) {

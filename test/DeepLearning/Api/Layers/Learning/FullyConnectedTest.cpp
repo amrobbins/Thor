@@ -295,6 +295,7 @@ struct PlacedRaggedFullyConnectedFixture {
     Impl::StampedNetwork* stampedNetwork = nullptr;
     shared_ptr<Impl::NetworkInput> physicalValuesInput;
     shared_ptr<Impl::NetworkInput> physicalOffsetsInput;
+    Impl::RowPartitionId rowPartitionId = 0;
     shared_ptr<Impl::NetworkOutput> physicalOutput;
     shared_ptr<Impl::RaggedFullyConnected> physicalFc;
 };
@@ -312,13 +313,19 @@ PlacedRaggedFullyConnectedFixture placeSingleRaggedFullyConnectedNetwork(Api::Ne
     EXPECT_NE(fixture.placedNetwork, nullptr);
     fixture.stampedNetwork = &fixture.placedNetwork->getStampedNetwork(0);
     fixture.physicalValuesInput = fixture.stampedNetwork->getNamedInput(raggedInputName + ".values");
-    fixture.physicalOffsetsInput = fixture.stampedNetwork->getNamedInput(raggedInputName + ".offsets");
+    for (const Api::RaggedNetworkInputReference& inputReference : network.getExternalRaggedNetworkInputs()) {
+        if (inputReference.name == raggedInputName) {
+            fixture.rowPartitionId = inputReference.raggedTensor.getRowPartitionId();
+            break;
+        }
+    }
+    EXPECT_NE(fixture.rowPartitionId, 0u);
+    fixture.physicalOffsetsInput = fixture.stampedNetwork->getManagedPartitionOffsetsInputForTest(fixture.rowPartitionId);
     fixture.physicalOutput =
         dynamic_pointer_cast<Impl::NetworkOutput>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiOutput.getId()));
     fixture.physicalFc =
         dynamic_pointer_cast<Impl::RaggedFullyConnected>(fixture.stampedNetwork->getPhysicalLayerFromApiLayer(apiFc.getId()));
     EXPECT_NE(fixture.physicalValuesInput, nullptr);
-    EXPECT_NE(fixture.physicalOffsetsInput, nullptr);
     EXPECT_NE(fixture.physicalOutput, nullptr);
     EXPECT_NE(fixture.physicalFc, nullptr);
     return fixture;
@@ -330,29 +337,28 @@ vector<float> runRaggedForward(PlacedRaggedFullyConnectedFixture& fixture,
                                uint32_t logicalBatchSize,
                                uint64_t fullCapacityRows,
                                DataType offsetsDataType) {
-    Impl::Tensor offsetsHost(cpuPlacement, Impl::TensorDescriptor(offsetsDataType, {logicalBatchSize + 1}));
-    if (offsetsDataType == DataType::UINT32) {
-        auto* offsets = offsetsHost.getMemPtr<uint32_t>();
-        for (uint32_t i = 0; i <= logicalBatchSize; ++i) {
-            offsets[i] = static_cast<uint32_t>((activeRows * i) / logicalBatchSize);
-        }
-    } else if (offsetsDataType == DataType::UINT64) {
-        auto* offsets = offsetsHost.getMemPtr<uint64_t>();
-        for (uint32_t i = 0; i <= logicalBatchSize; ++i) {
-            offsets[i] = (activeRows * i) / logicalBatchSize;
-        }
-    } else {
+    if (offsetsDataType != DataType::UINT32 && offsetsDataType != DataType::UINT64) {
         ADD_FAILURE() << "Unsupported offsets dtype for ragged FC test.";
         return {};
     }
 
-    fixture.physicalOffsetsInput->forward(offsetsHost, false, logicalBatchSize);
-    Impl::Tensor physicalOffsets = fixture.physicalOffsetsInput->getFeatureOutput().value();
-    Impl::RowPartitionRuntime rowPartition(
-        physicalOffsets, Impl::RowPartitionDescriptor(logicalBatchSize, fullCapacityRows, offsetsDataType));
-    rowPartition.setHostActiveValueCount(activeRows);
+    std::vector<uint64_t> hostOffsets(logicalBatchSize + 1, 0);
+    for (uint32_t i = 0; i <= logicalBatchSize; ++i)
+        hostOffsets[i] = (activeRows * i) / logicalBatchSize;
 
-    fixture.physicalValuesInput->forward(featureInHost, false, logicalBatchSize);
+    const Impl::RowPartitionDescriptor descriptor(
+        logicalBatchSize, fullCapacityRows, offsetsDataType);
+    fixture.physicalValuesInput->forwardWithRowPartitionHostState(
+        featureInHost,
+        false,
+        logicalBatchSize,
+        descriptor,
+        fixture.rowPartitionId,
+        hostOffsets);
+    if (fixture.physicalOffsetsInput != nullptr) {
+        fixture.physicalOffsetsInput->forwardManagedRowPartitionOffsets(
+            false, descriptor, logicalBatchSize, hostOffsets, fixture.rowPartitionId);
+    }
     Event featureOutReadyEvent = fixture.physicalOutput->getOutputReadyEvent();
     featureOutReadyEvent.synchronize();
     return readCpuTensor(fixture.physicalOutput->getFeatureOutput().value());
@@ -747,7 +753,7 @@ TEST(FullyConnectedApi, RaggedDropOutToFcLeavesInactiveCapacityToTheFcConsumer) 
     ASSERT_NE(placed, nullptr);
     Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
     auto physicalValuesInput = stamped.getNamedInput("tokens.values");
-    auto physicalOffsetsInput = stamped.getNamedInput("tokens.offsets");
+    auto physicalOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId());
     auto physicalDropOut =
         dynamic_pointer_cast<Impl::DropOut>(stamped.getPhysicalLayerFromApiLayer(dropOut.getId()));
     auto physicalFc =
@@ -755,7 +761,8 @@ TEST(FullyConnectedApi, RaggedDropOutToFcLeavesInactiveCapacityToTheFcConsumer) 
     auto physicalOutput =
         dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
     ASSERT_NE(physicalValuesInput, nullptr);
-    ASSERT_NE(physicalOffsetsInput, nullptr);
+    EXPECT_EQ(physicalOffsetsInput, nullptr)
+        << "HOST_EXTENT-only DropOut -> FullyConnected must not materialize full device offsets";
     ASSERT_NE(physicalDropOut, nullptr);
     ASSERT_NE(physicalFc, nullptr);
     ASSERT_NE(physicalOutput, nullptr);
@@ -778,13 +785,13 @@ TEST(FullyConnectedApi, RaggedDropOutToFcLeavesInactiveCapacityToTheFcConsumer) 
     offsetsHost.getMemPtr<uint32_t>()[1] = 4;
     offsetsHost.getMemPtr<uint32_t>()[2] = static_cast<uint32_t>(activeRows);
 
-    physicalOffsetsInput->forwardRowPartitionOffsets(offsetsHost,
-                                                     /*validationPass=*/false,
-                                                     Impl::RowPartitionDescriptor(logicalBatchSize, fullRows, DataType::UINT32),
-                                                     activeRows,
-                                                     std::nullopt,
-                                                     logicalBatchSize);
-    physicalValuesInput->forward(valuesHost, false, logicalBatchSize);
+    physicalValuesInput->forwardWithRowPartitionHostState(
+        valuesHost,
+        /*validationPass=*/false,
+        logicalBatchSize,
+        Impl::RowPartitionDescriptor(logicalBatchSize, fullRows, DataType::UINT32),
+        input.getRowPartitionId(),
+        std::vector<uint64_t>{0, 4, activeRows});
     physicalOutput->getOutputReadyEvent().synchronize();
 
     const uint64_t selectedRows = Impl::chooseRaggedMatmulCapacityBucket(
@@ -935,10 +942,13 @@ TEST(FullyConnectedApi, RaggedForwardBackwardSanitizesOnlySelectedConsumerBucket
                     << "forward consumer touched storage beyond its selected bucket";
             }
         }
-        const vector<float> producedOutput = readCpuTensor(copyTensorToCpu(fcFeatureOutput, stream));
+        // The bucketed producer should write only the selected physical bucket.
+        // Preserve poison beyond it as a performance invariant: a full-capacity
+        // output materialization would turn a small ragged bucket into O(capacity)
+        // memory traffic even though those rows are not part of this execution.
         for (uint64_t row = selectedRows; row < fullRows; ++row) {
             for (uint64_t col = 0; col < outputFeatures; ++col) {
-                EXPECT_TRUE(std::isnan(producedOutput[row * outputFeatures + col]))
+                EXPECT_TRUE(std::isnan(actualForward[row * outputFeatures + col]))
                     << "ragged FC producer canonicalized storage beyond the selected bucket";
             }
         }
@@ -1004,10 +1014,13 @@ TEST(FullyConnectedApi, RaggedForwardBackwardSanitizesOnlySelectedConsumerBucket
                     << "backward consumer touched storage beyond its selected bucket";
             }
         }
+        // The dX producer is bucketed as well.  Rows beyond the selected bucket
+        // must remain untouched so backward does not pay a full-capacity output
+        // materialization cost for a short ragged batch.
         for (uint64_t row = selectedRows; row < fullRows; ++row) {
             for (uint64_t col = 0; col < inputFeatures; ++col) {
                 EXPECT_TRUE(std::isnan(actualDX[row * inputFeatures + col]))
-                    << "ragged FC producer canonicalized dX storage beyond the selected bucket";
+                    << "ragged FC backward producer canonicalized dX beyond its selected bucket";
             }
         }
 

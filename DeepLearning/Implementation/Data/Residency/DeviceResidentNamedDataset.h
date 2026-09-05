@@ -30,8 +30,7 @@ class Stream;
  * gathered into reusable batch-capacity buffers for the selected rows.
  */
 struct RaggedBatchExtent {
-    uint64_t activeValueCount = 0;
-    uint64_t maxActiveRowLength = 0;
+    std::vector<uint64_t> hostOffsets;
 
     bool operator==(const RaggedBatchExtent&) const = default;
 };

@@ -193,58 +193,53 @@ class Tensor {
    private:
     void copyFromAsyncImpl(Tensor source, Stream copyStream);
 
-    // BackingMemory may carry host-side caches derived from its payload. Any
-    // generic mutation invalidates those caches; the structural owner (currently
-    // RowPartitionRuntime) republishes them only after the new payload is known.
+    // A row partition's host offsets are authoritative structural state. The
+    // offsets Tensor payload is only an execution mirror and generic Tensor
+    // mutations must not mutate or invalidate the logical partition.
     //
-    // This metadata follows the same single-owner host scheduling contract as
-    // mutable tensor payload. It is not a cross-thread synchronization primitive:
-    // producer/consumer transitions must already occur through Thor's synchronized
-    // queue/session handoff before another host thread reads or mutates it.
-    void invalidatePayloadDerivedRuntimeMetadata() {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        backingMemory->rowPartitionHostActiveValueCount.reset();
-        backingMemory->rowPartitionHostMaxActiveRowLength.reset();
-        backingMemory->rowPartitionHostOffsets.reset();
-    }
+    // The state follows BackingMemory so independently-created RowPartitionRuntime
+    // wrappers around the same canonical offsets allocation share one host partition.
+    struct RowPartitionHostState {
+        uint64_t rowPartitionId = 0;
+        std::vector<uint64_t> offsets;
+        uint64_t activeValueCount = 0;
+        uint64_t maxActiveRowLength = 0;
+    };
 
-    void setRowPartitionHostActiveValueCount(uint64_t activeValueCount) {
+    void setRowPartitionHostOffsets(uint64_t rowPartitionId,
+                                    std::vector<uint64_t> hostOffsets,
+                                    uint64_t activeValueCount,
+                                    uint64_t maxActiveRowLength) {
         THOR_THROW_IF_FALSE(!uninitialized());
-        backingMemory->rowPartitionHostActiveValueCount = activeValueCount;
+        THOR_THROW_IF_FALSE(rowPartitionId != 0);
+        auto nextState = std::make_shared<RowPartitionHostState>();
+        nextState->rowPartitionId = rowPartitionId;
+        nextState->offsets = std::move(hostOffsets);
+        nextState->activeValueCount = activeValueCount;
+        nextState->maxActiveRowLength = maxActiveRowLength;
+        backingMemory->rowPartitionHostState = std::move(nextState);
     }
-    void clearRowPartitionHostActiveValueCount() {
+    [[nodiscard]] std::optional<uint64_t> getRowPartitionHostId() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        backingMemory->rowPartitionHostActiveValueCount.reset();
-    }
-    [[nodiscard]] std::optional<uint64_t> getRowPartitionHostActiveValueCount() const {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        return backingMemory->rowPartitionHostActiveValueCount;
-    }
-    void setRowPartitionHostMaxActiveRowLength(uint64_t maxActiveRowLength) {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        backingMemory->rowPartitionHostMaxActiveRowLength = maxActiveRowLength;
-    }
-    void clearRowPartitionHostMaxActiveRowLength() {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        backingMemory->rowPartitionHostMaxActiveRowLength.reset();
-    }
-    [[nodiscard]] std::optional<uint64_t> getRowPartitionHostMaxActiveRowLength() const {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        return backingMemory->rowPartitionHostMaxActiveRowLength;
-    }
-    void setRowPartitionHostOffsets(std::vector<uint64_t> hostOffsets) {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        backingMemory->rowPartitionHostOffsets = std::move(hostOffsets);
-    }
-    void clearRowPartitionHostOffsets() {
-        THOR_THROW_IF_FALSE(!uninitialized());
-        backingMemory->rowPartitionHostOffsets.reset();
+        if (backingMemory->rowPartitionHostState == nullptr) return std::nullopt;
+        THOR_THROW_IF_FALSE(backingMemory->rowPartitionHostState->rowPartitionId != 0);
+        return backingMemory->rowPartitionHostState->rowPartitionId;
     }
     [[nodiscard]] std::optional<std::vector<uint64_t>> getRowPartitionHostOffsets() const {
         THOR_THROW_IF_FALSE(!uninitialized());
-        return backingMemory->rowPartitionHostOffsets;
+        if (backingMemory->rowPartitionHostState == nullptr) return std::nullopt;
+        return backingMemory->rowPartitionHostState->offsets;
     }
-
+    [[nodiscard]] std::optional<uint64_t> getRowPartitionHostActiveValueCount() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        if (backingMemory->rowPartitionHostState == nullptr) return std::nullopt;
+        return backingMemory->rowPartitionHostState->activeValueCount;
+    }
+    [[nodiscard]] std::optional<uint64_t> getRowPartitionHostMaxActiveRowLength() const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        if (backingMemory->rowPartitionHostState == nullptr) return std::nullopt;
+        return backingMemory->rowPartitionHostState->maxActiveRowLength;
+    }
     TensorPlacement placement;
     struct BackingMemory {
         explicit BackingMemory(TensorPlacement placement) : placement(placement) {}
@@ -255,9 +250,7 @@ class Tensor {
         TensorPlacement placement;
         void *mem = nullptr;
         bool cpuMemPinnedViaCudaHostRegister = false;
-        std::optional<uint64_t> rowPartitionHostActiveValueCount;
-        std::optional<uint64_t> rowPartitionHostMaxActiveRowLength;
-        std::optional<std::vector<uint64_t>> rowPartitionHostOffsets;
+        std::shared_ptr<RowPartitionHostState> rowPartitionHostState;
     };
 
     std::shared_ptr<BackingMemory> backingMemory;

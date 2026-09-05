@@ -9,11 +9,11 @@
 namespace {
 
 __device__ __forceinline__ uint64_t activePackedRows(
-    const void *offsets, unsigned long offsetsElementSizeBytes, uint64_t batchSize) {
-    if (offsetsElementSizeBytes == sizeof(uint32_t)) {
-        return static_cast<uint64_t>(reinterpret_cast<const uint32_t *>(offsets)[batchSize]);
+    const void *activeCount, unsigned long activeCountElementSizeBytes) {
+    if (activeCountElementSizeBytes == sizeof(uint32_t)) {
+        return static_cast<uint64_t>(reinterpret_cast<const uint32_t *>(activeCount)[0]);
     }
-    return reinterpret_cast<const uint64_t *>(offsets)[batchSize];
+    return reinterpret_cast<const uint64_t *>(activeCount)[0];
 }
 
 __device__ __forceinline__ void computeIndex(
@@ -59,9 +59,8 @@ __global__ void raggedConcatenate(unsigned char *dest,
                                   long axisElementsPerSourceArray[],
                                   long stridePerDestDimension[],
                                   long stridePerSourceDimension[],
-                                  const void *offsets,
-                                  unsigned long offsetsElementSizeBytes,
-                                  uint64_t batchSize) {
+                                  const void *activeCount,
+                                  unsigned long activeCountElementSizeBytes) {
     extern __shared__ long shared[];
     long *destIndex = &(shared[threadIdx.x * numDimensions]);
     long *axisElementsShared = &(shared[256 * numDimensions]);
@@ -84,7 +83,7 @@ __global__ void raggedConcatenate(unsigned char *dest,
     }
     __syncthreads();
 
-    const uint64_t activeRows = activePackedRows(offsets, offsetsElementSizeBytes, batchSize);
+    const uint64_t activeRows = activePackedRows(activeCount, activeCountElementSizeBytes);
     const uint64_t activeNumElements = activeRows * elementsPerOutputValue;
     long destFlatIndex = blockIdx.x * (256 * 16) + threadIdx.x;
 
@@ -118,9 +117,8 @@ __global__ void raggedSplit(unsigned char *dest[],
                             long axisElementsPerDestArray[],
                             long stridePerSourceDimension[],
                             long stridePerDestDimension[],
-                            const void *offsets,
-                            unsigned long offsetsElementSizeBytes,
-                            uint64_t batchSize) {
+                            const void *activeCount,
+                            unsigned long activeCountElementSizeBytes) {
     extern __shared__ long shared[];
     long *sourceIndex = &(shared[threadIdx.x * numDimensions]);
     long *axisElementsShared = &(shared[256 * numDimensions]);
@@ -143,7 +141,7 @@ __global__ void raggedSplit(unsigned char *dest[],
     }
     __syncthreads();
 
-    const uint64_t activeRows = activePackedRows(offsets, offsetsElementSizeBytes, batchSize);
+    const uint64_t activeRows = activePackedRows(activeCount, activeCountElementSizeBytes);
     const uint64_t activeNumElements = activeRows * elementsPerSourceValue;
     long sourceFlatIndex = blockIdx.x * (256 * 16) + threadIdx.x;
 
@@ -166,9 +164,9 @@ __global__ void raggedSplit(unsigned char *dest[],
     }
 }
 
-void validateOffsetsElementSize(std::size_t offsetsElementSizeBytes) {
-    if (offsetsElementSizeBytes != sizeof(uint32_t) && offsetsElementSizeBytes != sizeof(uint64_t)) {
-        throw std::invalid_argument("Ragged concatenate requires UINT32 or UINT64 offsets storage.");
+void validateActiveCountElementSize(std::size_t activeCountElementSizeBytes) {
+    if (activeCountElementSizeBytes != sizeof(uint32_t) && activeCountElementSizeBytes != sizeof(uint64_t)) {
+        throw std::invalid_argument("Ragged concatenate requires UINT32 or UINT64 active-count storage.");
     }
 }
 
@@ -185,11 +183,10 @@ void launchRaggedConcatenate(void *dest,
                              long axisElementsPerSourceArray[],
                              long stridePerDestDimension[],
                              long stridePerSourceDimension[],
-                             const void *offsets,
-                             std::size_t offsetsElementSizeBytes,
-                             uint64_t batchSize,
+                             const void *activeCount,
+                             std::size_t activeCountElementSizeBytes,
                              Stream stream) {
-    validateOffsetsElementSize(offsetsElementSizeBytes);
+    validateActiveCountElementSize(activeCountElementSizeBytes);
     ScopedGpu scopedGpu(stream.getGpuNum());
     dim3 blockSize(256);
     dim3 gridSize((fullCapacityNumElements + 4095) / 4096);
@@ -207,9 +204,8 @@ void launchRaggedConcatenate(void *dest,
         axisElementsPerSourceArray,
         stridePerDestDimension,
         stridePerSourceDimension,
-        offsets,
-        static_cast<unsigned long>(offsetsElementSizeBytes),
-        batchSize);
+        activeCount,
+        static_cast<unsigned long>(activeCountElementSizeBytes));
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -224,11 +220,10 @@ void launchRaggedSplit(void *dest[],
                        long axisElementsPerDestArray[],
                        long stridePerSourceDimension[],
                        long stridePerDestDimension[],
-                       const void *offsets,
-                       std::size_t offsetsElementSizeBytes,
-                       uint64_t batchSize,
+                       const void *activeCount,
+                       std::size_t activeCountElementSizeBytes,
                        Stream stream) {
-    validateOffsetsElementSize(offsetsElementSizeBytes);
+    validateActiveCountElementSize(activeCountElementSizeBytes);
     ScopedGpu scopedGpu(stream.getGpuNum());
     dim3 blockSize(256);
     dim3 gridSize((fullCapacityNumElements + 4095) / 4096);
@@ -246,8 +241,7 @@ void launchRaggedSplit(void *dest[],
         axisElementsPerDestArray,
         stridePerSourceDimension,
         stridePerDestDimension,
-        offsets,
-        static_cast<unsigned long>(offsetsElementSizeBytes),
-        batchSize);
+        activeCount,
+        static_cast<unsigned long>(activeCountElementSizeBytes));
     CUDA_CHECK(cudaGetLastError());
 }

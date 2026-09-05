@@ -129,6 +129,7 @@ RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
             throw std::invalid_argument("RaggedCustomLayer output row widths must be non-zero.");
         }
     }
+    rowPartitionInputPort = offsetsInputPort;
     for (size_t i = 0; i < valuesInputPorts.size(); ++i) {
         if (valuesInputPorts[i] >= inputPortCount || valuesInputPorts[i] == offsetsInputPort ||
             inputElementsPerValue[i] == 0) {
@@ -140,6 +141,10 @@ RaggedCustomLayer::RaggedCustomLayer(DynamicExpression expression,
             }
         }
     }
+}
+
+void RaggedCustomLayer::prepareApplicationOutputsForDownstream(uint32_t applicationIndex) {
+    propagateApplicationRowPartitionHostState(applicationIndex, rowPartitionInputPort);
 }
 
 }  // namespace ThorImplementation

@@ -1,10 +1,17 @@
 #pragma once
 
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
+
 #include <cstdint>
 #include <span>
 #include <vector>
 
 namespace ThorImplementation {
+
+// Runtime bucket selection is driven exclusively by the authoritative host
+// packed-prefix extent. No device row-boundary data is consumed here.
+inline constexpr RaggedPartitionRequirement kRaggedMatmulCapacitySelectionPartitionRequirement =
+    RaggedPartitionRequirement::HOST_EXTENT;
 
 /**
  * Build the finite packed-row capacity classes used by a ragged GEMM.

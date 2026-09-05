@@ -16,6 +16,15 @@ struct MetricBatchStatisticTensors {
     std::optional<Tensor> numerator;
     std::optional<Tensor> denominator;
     Event readyEvent;
+    // Optional FP32 scalar active-contribution count.  A value of zero means
+    // that this batch must not participate in extrema aggregation.
+    std::optional<Tensor> contributionCount;
+    // R10N: some ratio metrics (currently ragged WeightedMean) define an exact
+    // zero denominator as no statistical contribution.  Keep this as metric
+    // metadata rather than changing the generic RATIO contract: ragged Mean's
+    // all-empty 0/0 batch intentionally retains its existing contributing-zero
+    // semantics.
+    bool zeroDenominatorMeansNoContribution = false;
 };
 
 /**

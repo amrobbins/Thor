@@ -111,6 +111,43 @@ class FullyConnected : public TrainableLayer, public TrainingDropoutControllable
     static void validateEpilogueAuxInputName(const std::string &inputName);
 
     int getConnectionType(Tensor connectingTensor) const override;
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        for (const RaggedTensor& ragged : raggedFeatureInputs) {
+            if (inputTensor == ragged.getOffsets()) {
+                // The packed GEMM always needs host extent for bucket selection.
+                // Bias/activation/epilogue valuewise stages and the fused output-dropout
+                // post-op consume only the RP6B managed [1] active-count source.
+                // That scalar carrier also publishes authoritative host state.
+                if (hasBias || activation != nullptr || epilogue.has_value() || outputDropoutProbability > 0.0f || getUseResidual())
+                    return ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT |
+                           ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
+                return ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT;
+            }
+        }
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
+
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForPlacement(const Tensor& inputTensor, bool inferenceOnly) const override {
+        for (const RaggedTensor& ragged : raggedFeatureInputs) {
+            if (inputTensor != ragged.getOffsets()) continue;
+
+            // Forward inference keeps the RP6B scalar/host-only representations.
+            // During training, a biased FC's parameter-gradient graph performs a
+            // row-segmented reduction for dBias so inactive packed capacity can
+            // never contribute.  That backward-only operation genuinely consumes
+            // full row boundaries.  Route this one structural port through the
+            // managed [B+1] representation; forward valuewise stages can derive
+            // activeValueCount as offsets[B] from that same carrier.
+            if (!inferenceOnly && hasBias) {
+                return ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT |
+                       ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+            }
+            return getRaggedPartitionRequirementForInput(inputTensor);
+        }
+        return Layer::getRaggedPartitionRequirementForPlacement(inputTensor, inferenceOnly);
+    }
     std::vector<Tensor> getFeatureInputs() const override;
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
     void informThatInputConnectionMade(Tensor inputTensor) override;

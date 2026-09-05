@@ -162,7 +162,7 @@ def test_concatenate_ragged_rejects_distinct_row_partitions():
         offsets_data_type=thor.DataType.uint32,
         max_values_per_row=4,
     )
-    with pytest.raises(RuntimeError, match=r"share the exact same offsets tensor"):
+    with pytest.raises(RuntimeError, match=r"share the exact same row partition"):
         thor.layers.Concatenate(network, [left, right], 0)
 
 

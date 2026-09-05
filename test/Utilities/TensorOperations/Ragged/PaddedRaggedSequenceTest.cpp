@@ -101,8 +101,7 @@ void expectBitPreservingAdapterRoundTrip(DataType dtype, WordT storagePoison, Wo
     Tensor gpuOffsets = makeGpuTensor<uint32_t>({batchSize + 1}, offsets32, stream);
     RowPartitionRuntime partition(
         gpuOffsets, RowPartitionDescriptor(batchSize, maxTotalValues, DataType::UINT32, maxValuesPerRow));
-    partition.setHostActiveValueCount(offsets.back());
-    partition.setHostMaxActiveRowLength(selectedWidth);
+    partition.setHostOffsets(offsets);
     const PaddedRaggedSequencePlan plan =
         preparePaddedRaggedSequencePlan(partition, channels, dtype, selectedWidth);
 
@@ -149,8 +148,7 @@ TEST(PaddedRaggedSequence, PlanDescribesOneCompactDenseBatchAtSelectedWidth) {
     Stream stream(0);
     Tensor offsets = makeGpuTensor<uint32_t>({batchSize + 1}, {0, 3, 3, 8, 10, 19}, stream);
     RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batchSize, maxTotalValues, DataType::UINT32, maxValuesPerRow));
-    partition.setHostActiveValueCount(19);
-    partition.setHostMaxActiveRowLength(9);
+    partition.setHostOffsets({0, 3, 3, 8, 10, 19});
 
     const PaddedRaggedSequencePlan plan =
         preparePaddedRaggedSequencePlan(partition, channels, DataType::FP32, selectedWidth);
@@ -165,19 +163,18 @@ TEST(PaddedRaggedSequence, PlanDescribesOneCompactDenseBatchAtSelectedWidth) {
     EXPECT_EQ(plan.totalWorkspaceBytes(), plan.valueBytes);
 }
 
-TEST(PaddedRaggedSequence, PlanRequiresOnlyPublishedScalarsNotAHostOffsetsMirror) {
+TEST(PaddedRaggedSequence, PlanUsesScalarsDerivedFromAuthoritativeHostOffsets) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
     Tensor offsets = makeGpuTensor<uint32_t>({4}, {0, 3, 8, 10}, stream);
     RowPartitionRuntime partition(offsets, RowPartitionDescriptor(3, 12, DataType::UINT32, 8));
     EXPECT_FALSE(partition.getHostOffsetsIfAvailable().has_value());
-    partition.setHostActiveValueCount(10);
-    partition.setHostMaxActiveRowLength(5);
+    partition.setHostOffsets({0, 5, 10, 10});
 
     const PaddedRaggedSequencePlan plan = preparePaddedRaggedSequencePlan(partition, 4, DataType::FP32, 5);
     EXPECT_EQ(plan.activeValues, 10u);
     EXPECT_EQ(plan.widthCapacity, 5u);
-    EXPECT_FALSE(partition.getHostOffsetsIfAvailable().has_value());
+    EXPECT_EQ(partition.requireHostOffsets(), (std::vector<uint64_t>{0, 5, 10, 10}));
 }
 
 TEST(PaddedRaggedSequence, AdaptersCanonicalizeSelectedDenseTailsAndRoundTripLogicalPackedPositions) {
@@ -203,8 +200,7 @@ TEST(PaddedRaggedSequence, AdaptersCanonicalizeSelectedDenseTailsAndRoundTripLog
     Tensor gpuValues = makeGpuTensor<float>({maxTotalValues, channels}, values, stream);
     Tensor gpuOffsets = makeGpuTensor<uint32_t>({batchSize + 1}, offsets32, stream);
     RowPartitionRuntime partition(gpuOffsets, RowPartitionDescriptor(batchSize, maxTotalValues, DataType::UINT32, maxValuesPerRow));
-    partition.setHostActiveValueCount(offsets.back());
-    partition.setHostMaxActiveRowLength(selectedWidth);
+    partition.setHostOffsets(offsets);
     const PaddedRaggedSequencePlan plan = preparePaddedRaggedSequencePlan(partition, channels, DataType::FP32, selectedWidth);
 
     PaddedRaggedSequence padded(plan, gpuOffsets, gpuPlacement, maxValuesPerRow);

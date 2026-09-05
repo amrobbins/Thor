@@ -28,6 +28,11 @@ class RaggedRMSNorm final : public CustomLayer {
 
     std::string getType() override { return "RaggedRMSNorm"; }
     std::string getLayerType() override { return "RaggedRMSNorm"; }
+
+   protected:
+    void prepareApplicationOutputsForDownstream(uint32_t applicationIndex) override {
+        propagateApplicationRowPartitionHostState(applicationIndex, 1);
+    }
 };
 
 }  // namespace ThorImplementation

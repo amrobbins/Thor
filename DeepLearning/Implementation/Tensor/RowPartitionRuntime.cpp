@@ -12,18 +12,140 @@ namespace ThorImplementation {
 RowPartitionRuntime::RowPartitionRuntime(Tensor offsets, RowPartitionDescriptor descriptor)
     : offsets(std::move(offsets)), descriptor(descriptor) {
     THOR_THROW_IF_FALSE(this->offsets.isInitialized());
+    hostStateCarrier = this->offsets;
     THOR_THROW_IF_FALSE(this->offsets.getDescriptor() == descriptor.getOffsetsDescriptor());
-    // A row partition is represented by one canonical dense offsets tensor. Keeping
-    // the runtime cache on that allocation is safe only if views cannot reinterpret it.
+    // The offsets allocation remains the transitional storage anchor for the
+    // authoritative host publication, but it is no longer the semantic row-
+    // partition identity. Views are rejected so one execution representation
+    // still has exactly one host publication during this migration.
     THOR_THROW_IF_FALSE(this->offsets.isDenseContiguous());
     THOR_THROW_IF_FALSE(this->offsets.getStorageElementOffset() == 0);
     THOR_THROW_IF_FALSE(!this->offsets.hasCustomStrides());
+    rowPartitionId = this->offsets.getTensorId();
+    THOR_THROW_IF_FALSE(rowPartitionId != 0);
     initialized = true;
+}
+
+
+bool RowPartitionRuntime::hasPublishedHostState(const Tensor& carrier) {
+    THOR_THROW_IF_FALSE(carrier.isInitialized());
+    return carrier.getRowPartitionHostId().has_value();
+}
+
+void RowPartitionRuntime::publishHostState(Tensor carrier,
+                                           RowPartitionDescriptor descriptor,
+                                           RowPartitionId rowPartitionId,
+                                           std::vector<uint64_t> hostOffsets) {
+    THOR_THROW_IF_FALSE(carrier.isInitialized());
+    THOR_THROW_IF_FALSE(rowPartitionId != 0);
+    THOR_THROW_IF_FALSE(hostOffsets.size() == descriptor.getBatchSize() + 1);
+    THOR_THROW_IF_FALSE(!hostOffsets.empty());
+    THOR_THROW_IF_FALSE(hostOffsets.front() == 0);
+
+    uint64_t maxActiveRowLength = 0;
+    for (uint64_t row = 0; row < descriptor.getBatchSize(); ++row) {
+        THOR_THROW_IF_FALSE(hostOffsets[row] <= hostOffsets[row + 1]);
+        const uint64_t rowLength = hostOffsets[row + 1] - hostOffsets[row];
+        if (descriptor.hasMaxValuesPerRow()) {
+            THOR_THROW_IF_FALSE(rowLength <= descriptor.getMaxValuesPerRow());
+        }
+        maxActiveRowLength = std::max(maxActiveRowLength, rowLength);
+    }
+    THOR_THROW_IF_FALSE(hostOffsets.back() <= descriptor.getMaxTotalValues());
+
+    const uint64_t activeValueCount = hostOffsets.back();
+    carrier.setRowPartitionHostOffsets(
+        rowPartitionId, std::move(hostOffsets), activeValueCount, maxActiveRowLength);
+}
+
+void RowPartitionRuntime::propagateHostState(Tensor sourceCarrier, Tensor destinationCarrier) {
+    THOR_THROW_IF_FALSE(sourceCarrier.isInitialized());
+    THOR_THROW_IF_FALSE(destinationCarrier.isInitialized());
+    const std::optional<uint64_t> rowPartitionId = sourceCarrier.getRowPartitionHostId();
+    const std::optional<std::vector<uint64_t>> hostOffsets = sourceCarrier.getRowPartitionHostOffsets();
+    const std::optional<uint64_t> activeValueCount = sourceCarrier.getRowPartitionHostActiveValueCount();
+    const std::optional<uint64_t> maxActiveRowLength = sourceCarrier.getRowPartitionHostMaxActiveRowLength();
+    const bool hasAnyHostPublication = rowPartitionId.has_value() || hostOffsets.has_value() ||
+                                       activeValueCount.has_value() || maxActiveRowLength.has_value();
+    if (!hasAnyHostPublication) {
+        // Transitional compatibility for direct implementation tests and legacy
+        // internally-produced device-offset carriers.  External RP6B managed
+        // inputs always publish authoritative host state before notification.
+        return;
+    }
+    if (!rowPartitionId.has_value() || !hostOffsets.has_value() || !activeValueCount.has_value() ||
+        !maxActiveRowLength.has_value()) {
+        throw std::runtime_error(
+            "RowPartitionRuntime cannot propagate an incomplete authoritative host partition publication.");
+    }
+    THOR_THROW_IF_FALSE(rowPartitionId.value() != 0);
+    THOR_THROW_IF_FALSE(!hostOffsets->empty());
+    THOR_THROW_IF_FALSE(hostOffsets->front() == 0);
+    THOR_THROW_IF_FALSE(hostOffsets->back() == activeValueCount.value());
+    destinationCarrier.setRowPartitionHostOffsets(rowPartitionId.value(),
+                                                   hostOffsets.value(),
+                                                   activeValueCount.value(),
+                                                   maxActiveRowLength.value());
+}
+
+RowPartitionRuntime RowPartitionRuntime::fromHostStateCarrier(
+    Tensor carrier, RowPartitionDescriptor descriptor) {
+    THOR_THROW_IF_FALSE(carrier.isInitialized());
+    const std::optional<uint64_t> publishedId = carrier.getRowPartitionHostId();
+    if (!publishedId.has_value()) {
+        throw std::runtime_error(
+            "RowPartitionRuntime host-state carrier has no authoritative host row partition publication.");
+    }
+
+    RowPartitionRuntime runtime;
+    runtime.hostStateCarrier = std::move(carrier);
+    runtime.rowPartitionId = publishedId.value();
+    runtime.descriptor = descriptor;
+    runtime.initialized = true;
+    // Validate the complete publication against the descriptor immediately.
+    (void)runtime.requireHostOffsets();
+    return runtime;
+}
+
+RowPartitionRuntime RowPartitionRuntime::fromHostStateCarrier(
+    Tensor carrier, uint64_t expectedBatchSize, uint64_t maxTotalValues) {
+    // HOST_EXTENT consumers never inspect a device offsets payload. UINT64 is
+    // used only as a canonical host-only descriptor dtype; the logical
+    // partition id and authoritative offsets come from the carrier publication.
+    RowPartitionRuntime runtime = fromHostStateCarrier(
+        std::move(carrier), RowPartitionDescriptor(expectedBatchSize, maxTotalValues, DataType::UINT64));
+    THOR_THROW_IF_FALSE(runtime.getBatchSize() == expectedBatchSize);
+    return runtime;
+}
+
+RowPartitionRuntime RowPartitionRuntime::fromHostStateCarrier(
+    Tensor carrier, uint64_t maxTotalValues) {
+    THOR_THROW_IF_FALSE(carrier.isInitialized());
+    const std::optional<std::vector<uint64_t>> hostOffsets = carrier.getRowPartitionHostOffsets();
+    if (!hostOffsets.has_value() || hostOffsets->empty()) {
+        throw std::runtime_error(
+            "RowPartitionRuntime host-state carrier has no authoritative offsets from which to infer batch size.");
+    }
+    return fromHostStateCarrier(
+        std::move(carrier), hostOffsets->size() - 1, maxTotalValues);
 }
 
 Tensor RowPartitionRuntime::getOffsets() const {
     THOR_THROW_IF_FALSE(initialized);
+    if (!offsets.isInitialized()) {
+        throw std::runtime_error("RowPartitionRuntime has no device offsets representation.");
+    }
     return offsets;
+}
+
+void RowPartitionRuntime::publishHostStateTo(Tensor carrier) const {
+    THOR_THROW_IF_FALSE(initialized);
+    publishHostState(std::move(carrier), descriptor, rowPartitionId, requireHostOffsets());
+}
+
+RowPartitionId RowPartitionRuntime::getRowPartitionId() const {
+    THOR_THROW_IF_FALSE(initialized);
+    return rowPartitionId;
 }
 
 RowPartitionDescriptor RowPartitionRuntime::getDescriptor() const {
@@ -43,133 +165,34 @@ DataType RowPartitionRuntime::getOffsetsDataType() const { return getDescriptor(
 
 TensorPlacement RowPartitionRuntime::getPlacement() const {
     THOR_THROW_IF_FALSE(initialized);
-    return offsets.getPlacement();
-}
-
-void RowPartitionRuntime::setHostActiveValueCount(uint64_t activeValueCount) {
-    THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(activeValueCount <= getMaxTotalValues());
-    if (const std::optional<std::vector<uint64_t>> hostOffsets = offsets.getRowPartitionHostOffsets(); hostOffsets.has_value()) {
-        validateHostOffsets(hostOffsets.value());
-        THOR_THROW_IF_FALSE(hostOffsets->back() == activeValueCount);
-    }
-    if (offsets.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        // CPU offsets are immediately inspectable, so never permit the cache to
-        // become a competing source of truth.
-        THOR_THROW_IF_FALSE(activeValueCount == readCpuActiveValueCount());
-    }
-    offsets.setRowPartitionHostActiveValueCount(activeValueCount);
-}
-
-void RowPartitionRuntime::clearHostActiveValueCount() {
-    THOR_THROW_IF_FALSE(initialized);
-    offsets.clearRowPartitionHostActiveValueCount();
+    THOR_THROW_IF_FALSE(hostStateCarrier.isInitialized());
+    return hostStateCarrier.getPlacement();
 }
 
 std::optional<uint64_t> RowPartitionRuntime::getHostActiveValueCountIfAvailable() const {
     THOR_THROW_IF_FALSE(initialized);
-    if (const std::optional<uint64_t> cached = offsets.getRowPartitionHostActiveValueCount(); cached.has_value()) {
-        THOR_THROW_IF_FALSE(cached.value() <= getMaxTotalValues());
-        if (offsets.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            // Mutable CPU access can bypass Tensor's mutation hooks. Detect that
-            // case here rather than silently returning stale structural state.
-            THOR_THROW_IF_FALSE(cached.value() == readCpuActiveValueCount());
-        }
-        return cached;
-    }
-
-    if (const std::optional<std::vector<uint64_t>> hostOffsets = offsets.getRowPartitionHostOffsets(); hostOffsets.has_value()) {
-        validateHostOffsets(hostOffsets.value());
-        if (offsets.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            THOR_THROW_IF_FALSE(hostOffsets.value() == readCpuOffsets());
-        }
-        return hostOffsets->back();
-    }
-
-    if (offsets.getPlacement().getMemDevice() != TensorPlacement::MemDevices::CPU) {
-        return std::nullopt;
-    }
-
-    return readCpuActiveValueCount();
-}
-
-
-void RowPartitionRuntime::setHostMaxActiveRowLength(uint64_t maxActiveRowLength) {
-    THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(maxActiveRowLength <= getMaxTotalValues());
-    if (hasMaxValuesPerRow()) {
-        THOR_THROW_IF_FALSE(maxActiveRowLength <= getMaxValuesPerRow());
-    }
-    if (const std::optional<std::vector<uint64_t>> hostOffsets = offsets.getRowPartitionHostOffsets(); hostOffsets.has_value()) {
-        validateHostOffsets(hostOffsets.value());
-        THOR_THROW_IF_FALSE(maxActiveRowLengthFromHostOffsets(hostOffsets.value()) == maxActiveRowLength);
-    }
-    if (offsets.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        THOR_THROW_IF_FALSE(maxActiveRowLength == readCpuMaxActiveRowLength());
-    }
-    offsets.setRowPartitionHostMaxActiveRowLength(maxActiveRowLength);
-}
-
-void RowPartitionRuntime::clearHostMaxActiveRowLength() {
-    THOR_THROW_IF_FALSE(initialized);
-    offsets.clearRowPartitionHostMaxActiveRowLength();
+    const std::optional<uint64_t> activeValueCount = hostStateCarrier.getRowPartitionHostActiveValueCount();
+    if (activeValueCount.has_value()) THOR_THROW_IF_FALSE(activeValueCount.value() <= getMaxTotalValues());
+    return activeValueCount;
 }
 
 std::optional<uint64_t> RowPartitionRuntime::getHostMaxActiveRowLengthIfAvailable() const {
     THOR_THROW_IF_FALSE(initialized);
-    if (const std::optional<uint64_t> cached = offsets.getRowPartitionHostMaxActiveRowLength(); cached.has_value()) {
-        THOR_THROW_IF_FALSE(cached.value() <= getMaxTotalValues());
-        if (hasMaxValuesPerRow()) {
-            THOR_THROW_IF_FALSE(cached.value() <= getMaxValuesPerRow());
-        }
-        if (offsets.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            THOR_THROW_IF_FALSE(cached.value() == readCpuMaxActiveRowLength());
-        }
-        return cached;
+    const std::optional<uint64_t> maxActiveRowLength = hostStateCarrier.getRowPartitionHostMaxActiveRowLength();
+    if (maxActiveRowLength.has_value()) {
+        THOR_THROW_IF_FALSE(maxActiveRowLength.value() <= getMaxTotalValues());
+        if (hasMaxValuesPerRow()) THOR_THROW_IF_FALSE(maxActiveRowLength.value() <= getMaxValuesPerRow());
     }
-    if (const std::optional<std::vector<uint64_t>> hostOffsets = offsets.getRowPartitionHostOffsets(); hostOffsets.has_value()) {
-        validateHostOffsets(hostOffsets.value());
-        return maxActiveRowLengthFromHostOffsets(hostOffsets.value());
-    }
-    if (offsets.getPlacement().getMemDevice() != TensorPlacement::MemDevices::CPU) {
-        return std::nullopt;
-    }
-    return readCpuMaxActiveRowLength();
+    return maxActiveRowLength;
 }
 
 uint64_t RowPartitionRuntime::requireHostMaxActiveRowLength() const {
     const std::optional<uint64_t> maxActiveRowLength = getHostMaxActiveRowLengthIfAvailable();
     if (!maxActiveRowLength.has_value()) {
         throw std::runtime_error(
-            "Ragged Conv1D requires host-resolved maximum row length metadata. "
-            "The row-partition producer did not publish max_active_row_length, and Thor will not "
-            "introduce an implicit device-to-host synchronization to recover it.");
+            "RowPartitionRuntime has no authoritative host row partition bound for this batch.");
     }
     return maxActiveRowLength.value();
-}
-
-uint64_t RowPartitionRuntime::readCpuActiveValueCount() const {
-    THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(offsets.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
-
-    uint64_t activeValueCount = 0;
-    switch (getOffsetsDataType()) {
-        case DataType::UINT32:
-            activeValueCount = static_cast<uint64_t>(offsets.getMemPtr<uint32_t>()[getBatchSize()]);
-            break;
-        case DataType::UINT64:
-            activeValueCount = offsets.getMemPtr<uint64_t>()[getBatchSize()];
-            break;
-        default:
-            THOR_UNREACHABLE();
-    }
-
-    THOR_THROW_IF_FALSE(activeValueCount <= getMaxTotalValues());
-    return activeValueCount;
-}
-
-uint64_t RowPartitionRuntime::readCpuMaxActiveRowLength() const {
-    return maxActiveRowLengthFromHostOffsets(readCpuOffsets());
 }
 
 uint64_t RowPartitionRuntime::maxActiveRowLengthFromHostOffsets(const std::vector<uint64_t>& hostOffsets) const {
@@ -182,33 +205,6 @@ uint64_t RowPartitionRuntime::maxActiveRowLengthFromHostOffsets(const std::vecto
         THOR_THROW_IF_FALSE(maxActiveRowLength <= getMaxValuesPerRow());
     }
     return maxActiveRowLength;
-}
-
-std::vector<uint64_t> RowPartitionRuntime::readCpuOffsets() const {
-    THOR_THROW_IF_FALSE(initialized);
-    THOR_THROW_IF_FALSE(offsets.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
-
-    std::vector<uint64_t> hostOffsets(getBatchSize() + 1);
-    switch (getOffsetsDataType()) {
-        case DataType::UINT32: {
-            const uint32_t *rawOffsets = offsets.getMemPtr<uint32_t>();
-            for (uint64_t i = 0; i <= getBatchSize(); ++i) {
-                hostOffsets[i] = static_cast<uint64_t>(rawOffsets[i]);
-            }
-            break;
-        }
-        case DataType::UINT64: {
-            const uint64_t *rawOffsets = offsets.getMemPtr<uint64_t>();
-            for (uint64_t i = 0; i <= getBatchSize(); ++i) {
-                hostOffsets[i] = rawOffsets[i];
-            }
-            break;
-        }
-        default:
-            THOR_UNREACHABLE();
-    }
-    validateHostOffsets(hostOffsets);
-    return hostOffsets;
 }
 
 void RowPartitionRuntime::validateHostOffsets(const std::vector<uint64_t> &hostOffsets) const {
@@ -228,44 +224,29 @@ void RowPartitionRuntime::validateHostOffsets(const std::vector<uint64_t> &hostO
 void RowPartitionRuntime::setHostOffsets(std::vector<uint64_t> hostOffsets) {
     THOR_THROW_IF_FALSE(initialized);
     validateHostOffsets(hostOffsets);
-    if (offsets.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-        // CPU offsets are inspectable. An explicitly published mirror must be an
-        // exact copy, never a competing source of row-partition truth.
-        THOR_THROW_IF_FALSE(hostOffsets == readCpuOffsets());
-    }
     const uint64_t activeValueCount = hostOffsets.back();
     const uint64_t maxActiveRowLength = maxActiveRowLengthFromHostOffsets(hostOffsets);
-    offsets.setRowPartitionHostOffsets(std::move(hostOffsets));
-    offsets.setRowPartitionHostActiveValueCount(activeValueCount);
-    offsets.setRowPartitionHostMaxActiveRowLength(maxActiveRowLength);
+    hostStateCarrier.setRowPartitionHostOffsets(
+        rowPartitionId, std::move(hostOffsets), activeValueCount, maxActiveRowLength);
 }
 
-void RowPartitionRuntime::clearHostOffsets() {
+bool RowPartitionRuntime::hasHostOffsets() const {
     THOR_THROW_IF_FALSE(initialized);
-    offsets.clearRowPartitionHostOffsets();
+    return hostStateCarrier.getRowPartitionHostOffsets().has_value();
 }
 
 std::optional<std::vector<uint64_t>> RowPartitionRuntime::getHostOffsetsIfAvailable() const {
     THOR_THROW_IF_FALSE(initialized);
-    if (const std::optional<std::vector<uint64_t>> cached = offsets.getRowPartitionHostOffsets(); cached.has_value()) {
-        validateHostOffsets(cached.value());
-        if (offsets.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
-            THOR_THROW_IF_FALSE(cached.value() == readCpuOffsets());
-        }
-        return cached;
-    }
-
-    if (offsets.getPlacement().getMemDevice() != TensorPlacement::MemDevices::CPU) {
-        return std::nullopt;
-    }
-    return readCpuOffsets();
+    const std::optional<std::vector<uint64_t>> hostOffsets = hostStateCarrier.getRowPartitionHostOffsets();
+    if (hostOffsets.has_value()) validateHostOffsets(hostOffsets.value());
+    return hostOffsets;
 }
 
 std::vector<uint64_t> RowPartitionRuntime::requireHostOffsets() const {
     const std::optional<std::vector<uint64_t>> hostOffsets = getHostOffsetsIfAvailable();
     if (!hostOffsets.has_value()) {
         throw std::runtime_error(
-            "RowPartitionRuntime requires host-known row offsets for this host-dispatched operation.");
+            "RowPartitionRuntime has no authoritative host row partition bound for this batch.");
     }
     return hostOffsets.value();
 }
@@ -274,26 +255,41 @@ uint64_t RowPartitionRuntime::requireHostActiveValueCount() const {
     const std::optional<uint64_t> activeValueCount = getHostActiveValueCountIfAvailable();
     if (!activeValueCount.has_value()) {
         throw std::runtime_error(
-            "RowPartitionRuntime requires a host-known active-value count for this host-dispatched operation.");
+            "RowPartitionRuntime has no authoritative host row partition bound for this batch.");
     }
     return activeValueCount.value();
 }
 
 RaggedRuntimeExtent RowPartitionRuntime::getRuntimeExtent(uint64_t elementsPerValue) const {
     THOR_THROW_IF_FALSE(initialized);
+    // A device-side active-count view is an execution representation, not a
+    // substitute for the semantic row partition. RP2 requires the authoritative
+    // host partition to be bound before an executing RaggedTensor exposes a
+    // runtime extent, even though the eventual CUDA consumer reads offsets[B].
+    (void)requireHostOffsets();
+    if (!offsets.isInitialized()) {
+        throw std::runtime_error(
+            "RowPartitionRuntime has no device active-count/offsets representation for runtime extent execution.");
+    }
     return raggedRuntimeExtentFromOffsets(offsets, getBatchSize(), getMaxTotalValues(), elementsPerValue);
 }
 
 bool RowPartitionRuntime::describesSamePartition(const RowPartitionRuntime &rhs) const {
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(rhs.initialized);
-    return offsets == rhs.offsets && descriptor == rhs.descriptor;
+    return rowPartitionId == rhs.rowPartitionId && descriptor == rhs.descriptor;
+}
+
+bool RowPartitionRuntime::sharesPartitionWith(const RowPartitionRuntime &rhs) const {
+    THOR_THROW_IF_FALSE(initialized);
+    THOR_THROW_IF_FALSE(rhs.initialized);
+    return rowPartitionId == rhs.rowPartitionId;
 }
 
 bool RowPartitionRuntime::sharesRuntimeStateWith(const RowPartitionRuntime &rhs) const {
     THOR_THROW_IF_FALSE(initialized);
     THOR_THROW_IF_FALSE(rhs.initialized);
-    return offsets.backingMemory == rhs.offsets.backingMemory;
+    return hostStateCarrier.backingMemory == rhs.hostStateCarrier.backingMemory;
 }
 
 }  // namespace ThorImplementation

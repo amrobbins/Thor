@@ -1,4 +1,5 @@
 #include "Utilities/TensorOperations/Ragged/RaggedSequenceConcatenate.h"
+#include "Utilities/TensorOperations/Ragged/RowPartition.h"
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
@@ -127,8 +128,8 @@ void runForwardBackwardCase(DataType expectedOffsetsDataType) {
     DeviceAllocation valueTable = makePointerTable({left.getMemPtr(), right.getMemPtr()}, stream);
     DeviceAllocation offsetsTable = makePointerTable({leftOffsets.getMemPtr(), rightOffsets.getMemPtr()}, stream);
 
+    rowPartitionUploadHostOffsets({0, 3, 6, 9}, outputOffsets, batchSize, stream);
     launchRaggedSequenceConcatenate(output.getMemPtr(),
-                                    outputOffsets.getMemPtr(),
                                     reinterpret_cast<void**>(valueTable.get()),
                                     reinterpret_cast<void**>(offsetsTable.get()),
                                     2,
@@ -220,8 +221,8 @@ void runAllEmptyCase() {
     DeviceAllocation valueTable = makePointerTable({left.getMemPtr(), right.getMemPtr()}, stream);
     DeviceAllocation offsetsTable = makePointerTable({leftOffsets.getMemPtr(), rightOffsets.getMemPtr()}, stream);
 
+    rowPartitionUploadHostOffsets({0, 0, 0, 0}, outputOffsets, batchSize, stream);
     launchRaggedSequenceConcatenate(output.getMemPtr(),
-                                    outputOffsets.getMemPtr(),
                                     reinterpret_cast<void**>(valueTable.get()),
                                     reinterpret_cast<void**>(offsetsTable.get()),
                                     2,
@@ -253,17 +254,17 @@ void runAllEmptyCase() {
 
 }  // namespace
 
-TEST(RaggedSequenceConcatenate, ForwardBackwardUint32ProducePartitionAndIgnoreInactiveCapacity) {
+TEST(RaggedSequenceConcatenate, ForwardBackwardUint32UsesHostDerivedPartitionAndIgnoresInactiveCapacity) {
     REQUIRE_CUDA_DEVICE();
     runForwardBackwardCase<uint32_t>(DataType::UINT32);
 }
 
-TEST(RaggedSequenceConcatenate, ForwardBackwardUint64ProducePartitionAndIgnoreInactiveCapacity) {
+TEST(RaggedSequenceConcatenate, ForwardBackwardUint64UsesHostDerivedPartitionAndIgnoresInactiveCapacity) {
     REQUIRE_CUDA_DEVICE();
     runForwardBackwardCase<uint64_t>(DataType::UINT64);
 }
 
-TEST(RaggedSequenceConcatenate, AllEmptyRowsProduceZeroOffsetsWithoutTouchingValueCapacity) {
+TEST(RaggedSequenceConcatenate, AllEmptyRowsUseHostDerivedZeroOffsetsWithoutTouchingValueCapacity) {
     REQUIRE_CUDA_DEVICE();
     runAllEmptyCase<uint32_t>();
     runAllEmptyCase<uint64_t>();

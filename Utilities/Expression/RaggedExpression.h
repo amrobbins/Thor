@@ -24,12 +24,20 @@ struct RaggedExpressionRuntimeExtent {
 class RaggedExpression {
    public:
     RaggedExpression() = default;
-    RaggedExpression(Expression values, Expression offsets, RaggedTensorDescriptor descriptor);
+    // partition_input is the physical structural carrier selected by placement.
+    // DEVICE_ACTIVE_COUNT is valid for partition-preserving valuewise operations;
+    // row-indexed operations explicitly require DEVICE_OFFSETS.
+    RaggedExpression(Expression values,
+                     Expression partition_input,
+                     RaggedTensorDescriptor descriptor,
+                     RaggedRuntimeExtentSource runtime_extent_source = RaggedRuntimeExtentSource::DEVICE_OFFSETS);
 
     [[nodiscard]] static RaggedExpression input(const std::string& logical_name, const RaggedTensorDescriptor& descriptor);
-    [[nodiscard]] static RaggedExpression input(const std::string& values_name,
-                                                const std::string& offsets_name,
-                                                const RaggedTensorDescriptor& descriptor);
+    [[nodiscard]] static RaggedExpression input(
+        const std::string& values_name,
+        const std::string& partition_input_name,
+        const RaggedTensorDescriptor& descriptor,
+        RaggedRuntimeExtentSource runtime_extent_source = RaggedRuntimeExtentSource::DEVICE_OFFSETS);
 
     [[nodiscard]] bool isInitialized() const { return initialized; }
 
@@ -115,7 +123,10 @@ class RaggedExpression {
     [[nodiscard]] RaggedExpression log() const { return ln(); }
     [[nodiscard]] RaggedExpression relu() const;
 
+    // Ordinary ragged softmax normalizes the final trailing dimension independently
+    // for every active packed value and every preceding trailing coordinate.
     [[nodiscard]] RaggedExpression softmax() const;
+    [[nodiscard]] RaggedExpression log_softmax() const;
     [[nodiscard]] Expression reduce_sum() const;
 
     [[nodiscard]] Expression segment_sum() const;
@@ -136,12 +147,14 @@ class RaggedExpression {
     Expression offsets = Expression::constantScalar(0.0);
     RaggedTensorDescriptor descriptor;
     RaggedExpressionRuntimeExtent runtimeExtent;
+    RaggedRuntimeExtentSource runtimeExtentSource = RaggedRuntimeExtentSource::DEVICE_OFFSETS;
     bool initialized = false;
 
     RaggedExpression(Expression values,
-                     Expression offsets,
+                     Expression partition_input,
                      RaggedTensorDescriptor descriptor,
-                     RaggedExpressionRuntimeExtent runtime_extent);
+                     RaggedExpressionRuntimeExtent runtime_extent,
+                     RaggedRuntimeExtentSource runtime_extent_source);
 
     [[nodiscard]] RaggedExpression unaryValuewise(ExprOp op, const char* op_name) const;
     [[nodiscard]] RaggedExpression binaryValuewise(const RaggedExpression& other, ExprOp op, const char* op_name) const;
@@ -151,11 +164,15 @@ class RaggedExpression {
                                                      std::optional<uint64_t> elements_per_value_override = std::nullopt) const;
 
     void validateInitialized(const char* caller) const;
+    void requireDeviceOffsets(const char* caller) const;
     static void validateDescriptor(const RaggedTensorDescriptor& descriptor);
-    static RaggedExpressionRuntimeExtent makeRuntimeExtent(const Expression& offsets, const RaggedTensorDescriptor& descriptor);
+    static RaggedExpressionRuntimeExtent makeRuntimeExtent(const Expression& partition_input,
+                                                           const RaggedTensorDescriptor& descriptor,
+                                                           RaggedRuntimeExtentSource source);
     static Expression markExecutionValues(const Expression& values,
-                                          const Expression& offsets,
-                                          const RaggedTensorDescriptor& descriptor);
+                                          const Expression& partition_input,
+                                          const RaggedTensorDescriptor& descriptor,
+                                          RaggedRuntimeExtentSource source);
     static uint64_t elementsPerValue(const RaggedTensorDescriptor& descriptor);
     static RaggedTensorDescriptor descriptorWithValuesDataType(const RaggedTensorDescriptor& descriptor, DataType values_dtype);
     static RaggedTensorDescriptor descriptorWithValuesDescriptor(const RaggedTensorDescriptor& descriptor,
@@ -169,6 +186,8 @@ class RaggedExpression {
 [[nodiscard]] RaggedExpression exp(const RaggedExpression& input);
 [[nodiscard]] RaggedExpression log(const RaggedExpression& input);
 [[nodiscard]] RaggedExpression relu(const RaggedExpression& input);
+[[nodiscard]] RaggedExpression softmax(const RaggedExpression& input);
+[[nodiscard]] RaggedExpression log_softmax(const RaggedExpression& input);
 [[nodiscard]] Expression segment_sum(const RaggedExpression& input);
 [[nodiscard]] Expression segment_min(const RaggedExpression& input);
 [[nodiscard]] Expression segment_max(const RaggedExpression& input);

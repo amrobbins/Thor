@@ -3,9 +3,9 @@
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
-#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -89,7 +89,30 @@ uint32_t readValidationErrorBits(const Tensor& validation_error_bits, Stream& st
     return copyGpuTensor<uint32_t>(validation_error_bits, stream).at(0);
 }
 
+void publishHostPartition(Tensor offsets,
+                          uint64_t batch_size,
+                          uint64_t max_total_values,
+                          std::vector<uint64_t> host_offsets) {
+    RowPartitionRuntime partition(
+        offsets, RowPartitionDescriptor(batch_size, max_total_values, offsets.getDataType()));
+    partition.setHostOffsets(std::move(host_offsets));
+}
+
 }  // namespace
+
+TEST(RaggedDenseAdapters, FromDenseRequiresAuthoritativeHostPartition) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    Tensor dense = makeGpuTensor<float>({2, 2}, {1.0F, 2.0F, 3.0F, 4.0F}, stream);
+    Tensor offsets = makeGpuTensor<uint32_t>({3}, {0U, 1U, 2U}, stream);
+    Tensor values = makeFilledGpuTensor({3}, -1.0F, stream);
+    Tensor validation_error_bits = makeValidationErrorBits();
+
+    EXPECT_THROW(
+        static_cast<void>(raggedFromDense(dense, offsets, values, validation_error_bits, stream)),
+        std::runtime_error);
+}
 
 TEST(RaggedDenseAdapters, FromDenseWithOffsetsCopiesLogicalRowsAndLeavesUnusedCapacityUntouched) {
     REQUIRE_CUDA_DEVICE();
@@ -103,6 +126,7 @@ TEST(RaggedDenseAdapters, FromDenseWithOffsetsCopiesLogicalRowsAndLeavesUnusedCa
                                          30.0F, 31.0F, 32.0F, 33.0F, 34.0F, 35.0F, 36.0F, 37.0F},
                                         stream);
     Tensor offsets = makeGpuTensor<uint64_t>({5}, {0ULL, 2ULL, 2ULL, 5ULL, 6ULL}, stream);
+    publishHostPartition(offsets, 4, 8, {0, 2, 2, 5, 6});
     Tensor values = makeFilledGpuTensor({8, 2}, -777.0F, stream);
 
     Tensor validation_error_bits = makeValidationErrorBits();
@@ -114,36 +138,12 @@ TEST(RaggedDenseAdapters, FromDenseWithOffsetsCopiesLogicalRowsAndLeavesUnusedCa
     EXPECT_EQ(ragged.getBatchSize(), 4ULL);
     EXPECT_EQ(ragged.getMaxTotalValues(), 8ULL);
     EXPECT_EQ(ragged.getOffsetsDataType(), DataType::UINT64);
+    EXPECT_EQ(ragged.getRowPartitionRuntime().requireHostOffsets(), (std::vector<uint64_t>{0, 2, 2, 5, 6}));
     EXPECT_EQ(copyGpuTensor<float>(values, stream),
               (std::vector<float>{0.0F, 1.0F, 2.0F, 3.0F,
                                   20.0F, 21.0F, 22.0F, 23.0F, 24.0F, 25.0F,
                                   30.0F, 31.0F,
                                   -777.0F, -777.0F, -777.0F, -777.0F}));
-}
-
-TEST(RaggedDenseAdapters, FromDenseWithLengthsBuildsOffsetsAndCopiesValuesWithoutAllocatingTempInternally) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    Tensor dense = makeGpuTensor<float>({3, 3}, {1.0F, 2.0F, 3.0F, 10.0F, 11.0F, 12.0F, 20.0F, 21.0F, 22.0F}, stream);
-    Tensor lengths = makeGpuTensor<uint32_t>({3}, {2U, 0U, 1U}, stream);
-    Tensor values = makeFilledGpuTensor({5}, -9.0F, stream);
-    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
-
-    const RaggedFromDenseWithLengthsPlan plan = prepareRaggedFromDenseWithLengths(dense, lengths, values, offsets);
-    Tensor temp_storage(gpuPlacement, TensorDescriptor(DataType::UINT8, {std::max<uint64_t>(static_cast<uint64_t>(plan.tempStorageBytes), 1ULL)}));
-
-    Tensor validation_error_bits = makeValidationErrorBits();
-    RaggedTensor ragged = raggedFromDense(plan, temp_storage, dense, lengths, values, offsets, validation_error_bits, stream);
-    stream.synchronize();
-
-    EXPECT_EQ(readValidationErrorBits(validation_error_bits, stream), ROW_PARTITION_VALID);
-    EXPECT_TRUE(ragged.isInitialized());
-    EXPECT_EQ(plan.batchSize, 3ULL);
-    EXPECT_EQ(plan.maxLength, 3ULL);
-    EXPECT_EQ(plan.maxTotalValues, 5ULL);
-    EXPECT_EQ(copyGpuTensor<uint32_t>(offsets, stream), (std::vector<uint32_t>{0U, 2U, 2U, 3U}));
-    EXPECT_EQ(copyGpuTensor<float>(values, stream), (std::vector<float>{1.0F, 2.0F, 20.0F, -9.0F, -9.0F}));
 }
 
 TEST(RaggedDenseAdapters, RaggedToDensePadsAndCopiesLogicalValues) {
@@ -155,6 +155,7 @@ TEST(RaggedDenseAdapters, RaggedToDensePadsAndCopiesLogicalValues) {
                                                 30.0F, 31.0F},
                                         stream);
     Tensor offsets = makeGpuTensor<uint32_t>({5}, {0U, 2U, 2U, 5U, 6U}, stream);
+    publishHostPartition(offsets, 4, 6, {0, 2, 2, 5, 6});
     RaggedTensor ragged(values, offsets);
     Tensor dense(gpuPlacement, TensorDescriptor(DataType::FP32, {4, 4, 2}));
 
@@ -176,6 +177,7 @@ TEST(RaggedDenseAdapters, RoundTripDenseOffsetsRaggedDensePreservesLogicalRowsAn
 
     Tensor dense = makeGpuTensor<float>({3, 3}, {1.0F, 2.0F, 3.0F, 10.0F, 11.0F, 12.0F, 20.0F, 21.0F, 22.0F}, stream);
     Tensor offsets = makeGpuTensor<uint32_t>({4}, {0U, 2U, 2U, 3U}, stream);
+    publishHostPartition(offsets, 3, 5, {0, 2, 2, 3});
     Tensor values = makeFilledGpuTensor({5}, -1.0F, stream);
 
     Tensor validation_error_bits = makeValidationErrorBits();
@@ -187,18 +189,6 @@ TEST(RaggedDenseAdapters, RoundTripDenseOffsetsRaggedDensePreservesLogicalRowsAn
     EXPECT_EQ(readValidationErrorBits(validation_error_bits, stream), ROW_PARTITION_VALID);
     EXPECT_EQ(copyGpuTensor<float>(dense_out, stream),
               (std::vector<float>{1.0F, 2.0F, 99.0F, 99.0F, 99.0F, 99.0F, 20.0F, 99.0F, 99.0F}));
-}
-
-TEST(RaggedDenseAdapters, RejectsSignedLengthDType) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    Tensor dense = makeGpuTensor<float>({2, 2}, {1.0F, 2.0F, 3.0F, 4.0F}, stream);
-    Tensor lengths = makeGpuTensor<int32_t>({2}, {1, 1}, stream);
-    Tensor values(gpuPlacement, TensorDescriptor(DataType::FP32, {2}));
-    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
-
-    EXPECT_THROW(static_cast<void>(prepareRaggedFromDenseWithLengths(dense, lengths, values, offsets)), std::invalid_argument);
 }
 
 TEST(RaggedDenseAdapters, RejectsImplicitDenseShapeMismatch) {
@@ -222,6 +212,7 @@ TEST(RaggedDenseAdapters, InvalidOffsetsSetDeviceStatusAndDoNotWriteValues) {
 
     Tensor dense = makeGpuTensor<float>({2, 2}, {1.0F, 2.0F, 3.0F, 4.0F}, stream);
     Tensor offsets = makeGpuTensor<uint32_t>({3}, {0U, 3U, 2U}, stream);
+    publishHostPartition(offsets, 2, 4, {0, 1, 2});
     Tensor values = makeFilledGpuTensor({4}, -17.0F, stream);
     Tensor validation_error_bits = makeValidationErrorBits();
 
@@ -234,31 +225,13 @@ TEST(RaggedDenseAdapters, InvalidOffsetsSetDeviceStatusAndDoNotWriteValues) {
     EXPECT_EQ(copyGpuTensor<float>(values, stream), (std::vector<float>{-17.0F, -17.0F, -17.0F, -17.0F}));
 }
 
-TEST(RaggedDenseAdapters, LengthsExceedingDenseRowsSetDeviceStatusAndDoNotWriteValues) {
-    REQUIRE_CUDA_DEVICE();
-    Stream stream(0);
-
-    Tensor dense = makeGpuTensor<float>({2, 2}, {1.0F, 2.0F, 3.0F, 4.0F}, stream);
-    Tensor lengths = makeGpuTensor<uint32_t>({2}, {3U, 1U}, stream);
-    Tensor values = makeFilledGpuTensor({4}, -19.0F, stream);
-    Tensor offsets(gpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
-    const RaggedFromDenseWithLengthsPlan plan = prepareRaggedFromDenseWithLengths(dense, lengths, values, offsets);
-    Tensor temp_storage(gpuPlacement, TensorDescriptor(DataType::UINT8, {std::max<uint64_t>(static_cast<uint64_t>(plan.tempStorageBytes), 1ULL)}));
-    Tensor validation_error_bits = makeValidationErrorBits();
-
-    static_cast<void>(raggedFromDense(plan, temp_storage, dense, lengths, values, offsets, validation_error_bits, stream));
-    stream.synchronize();
-
-    EXPECT_NE(readValidationErrorBits(validation_error_bits, stream) & ROW_PARTITION_ROW_LENGTH_EXCEEDS_MAX, 0U);
-    EXPECT_EQ(copyGpuTensor<float>(values, stream), (std::vector<float>{-19.0F, -19.0F, -19.0F, -19.0F}));
-}
-
 TEST(RaggedDenseAdapters, RaggedToDenseInvalidOffsetsLeavePaddingOnly) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
     Tensor values = makeGpuTensor<float>({4}, {1.0F, 2.0F, 3.0F, 4.0F}, stream);
     Tensor offsets = makeGpuTensor<uint32_t>({3}, {1U, 2U, 4U}, stream);
+    publishHostPartition(offsets, 2, 4, {0, 2, 4});
     RaggedTensor ragged(values, offsets);
     Tensor dense(gpuPlacement, TensorDescriptor(DataType::FP32, {2, 2}));
     Tensor validation_error_bits = makeValidationErrorBits();

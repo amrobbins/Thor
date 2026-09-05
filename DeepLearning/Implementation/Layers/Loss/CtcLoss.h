@@ -3,11 +3,17 @@
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "DeepLearning/Implementation/Layers/Loss/LossWeight.h"
 #include "Utilities/TensorOperations/Loss/CtcLoss.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <memory>
 #include <optional>
 
 namespace ThorImplementation {
+
+// CTC derives one label length per row from canonical label offsets immediately
+// before the cuDNN call, so individual row boundaries are required.
+inline constexpr RaggedPartitionRequirement kCtcLossLabelPartitionRequirement =
+    RaggedPartitionRequirement::DEVICE_OFFSETS;
 
 // cuDNN-backed CTC loss implementation layer.
 //

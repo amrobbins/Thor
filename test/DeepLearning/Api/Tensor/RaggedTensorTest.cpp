@@ -39,6 +39,24 @@ TEST(RaggedTensorApi, ConstructsFromValuesAndOffsets) {
     EXPECT_EQ(ragged.getDescriptor().getValuesDimensions(), (vector<uint64_t>{17, 64}));
 }
 
+
+TEST(RaggedTensorApi, RowPartitionIdentityIsDistinctFromRaggedTensorIdentityAndPreservedByWithValues) {
+    Tensor offsets(DataType::UINT32, {4});
+    RaggedTensor first(Tensor(DataType::FP32, {7, 3}), offsets);
+    RaggedTensor sibling(Tensor(DataType::FP16, {7, 5}), offsets);
+    RaggedTensor replaced = first.withValues(Tensor(DataType::BF16, {7, 9}));
+    RaggedTensor different(Tensor(DataType::FP32, {7, 3}), Tensor(DataType::UINT32, {4}));
+
+    EXPECT_NE(first.getId(), sibling.getId());
+    EXPECT_EQ(first.getRowPartitionId(), sibling.getRowPartitionId());
+    EXPECT_TRUE(first.sharesPartitionWith(sibling));
+    EXPECT_TRUE(first.sharesPartitionWith(replaced));
+    EXPECT_EQ(first.getRowPartitionId(), replaced.getRowPartitionId());
+
+    EXPECT_FALSE(first.sharesPartitionWith(different));
+    EXPECT_NE(first.getRowPartitionId(), different.getRowPartitionId());
+}
+
 TEST(RaggedTensorApi, RejectsInvalidOffsets) {
     Tensor values(DataType::INT32, {7});
     Tensor rankTwoOffsets(DataType::UINT32, {4, 1});
@@ -60,6 +78,8 @@ TEST(RaggedTensorApi, ArchitectureJsonRoundTrips) {
     ASSERT_TRUE(copy.isInitialized());
     EXPECT_NE(copy.getId(), original.getId());
     EXPECT_EQ(copy.getOriginalId(), original.getId());
+    EXPECT_NE(copy.getRowPartitionId(), original.getRowPartitionId());
+    EXPECT_FALSE(copy.sharesPartitionWith(original));
     EXPECT_EQ(copy.getBatchSize(), original.getBatchSize());
     EXPECT_EQ(copy.getMaxTotalValues(), original.getMaxTotalValues());
     ASSERT_TRUE(copy.hasMaxValuesPerRow());

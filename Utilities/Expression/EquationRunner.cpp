@@ -277,8 +277,9 @@ void EquationRunner::run(const std::shared_ptr<CompiledEquation>& compiledEquati
     const uint64_t grid64 = (launch_numel + block - 1ULL) / block;
     uint32_t grid;
     if (compiledEquation->uses_device_runtime_extent) {
-        // The kernel reads offsets[B] and uses a grid-stride loop. Keep launch
-        // overhead independent of reserved ragged capacity without a host readback.
+        // The kernel reads its explicit device runtime-extent input and uses a
+        // grid-stride loop. Keep launch overhead independent of reserved ragged
+        // capacity without a host readback.
         constexpr uint64_t MAX_RAGGED_VALUEWISE_GRID_BLOCKS = 256;
         grid = static_cast<uint32_t>(std::min(grid64, MAX_RAGGED_VALUEWISE_GRID_BLOCKS));
     } else {

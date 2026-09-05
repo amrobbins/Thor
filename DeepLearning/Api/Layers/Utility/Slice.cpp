@@ -139,7 +139,10 @@ std::shared_ptr<ThorImplementation::Layer> Slice::stamp(ThorImplementation::Tens
         const uint64_t normalizedStart = Slice::normalizeStart(start, trailingDimensions[axis]);
 
         ThorImplementation::RaggedExpression input = ThorImplementation::RaggedExpression::input(
-            "feature_input", "feature_offsets", raggedInput.getDescriptor());
+            "feature_input",
+            "feature_offsets",
+            raggedInput.getDescriptor(),
+            ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
         ThorImplementation::RaggedExpression output = input.sliceTrailingDimension(axis, normalizedStart, length);
         if (output.getDescriptor() != raggedFeatureOutput->getDescriptor()) {
             throw std::runtime_error("Ragged Slice expression output descriptor does not match its API output.");

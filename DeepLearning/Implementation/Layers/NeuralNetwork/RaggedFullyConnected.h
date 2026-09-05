@@ -15,9 +15,9 @@ namespace ThorImplementation {
 // FullyConnected implementation (matmul -> bias -> activation -> optional
 // epilogue). The row partition is carried as an explicit structural input.
 // Same-partition ragged epilogue auxiliaries contribute packed value inputs but
-// reuse that one canonical partition input. Packed consumers receive the runtime
-// extent explicitly, so this wrapper owns no inactive-tail canonicalization or
-// host active-row cache.
+// reuse that one placement-selected partition carrier. The carrier publishes the
+// authoritative host partition and may also carry a managed [1] active count for
+// device valuewise consumers. This wrapper owns no inactive-tail canonicalization.
 class RaggedFullyConnected final : public CustomLayer, public TrainingDropoutControllable {
    public:
     static constexpr const char* ROW_PARTITION_INPUT_NAME = "row_partition";
@@ -37,6 +37,11 @@ class RaggedFullyConnected final : public CustomLayer, public TrainingDropoutCon
 
     std::string getType() override { return "RaggedFullyConnected"; }
     std::string getLayerType() override { return "RaggedFullyConnected"; }
+
+   protected:
+    void prepareApplicationOutputsForDownstream(uint32_t applicationIndex) override {
+        propagateApplicationRowPartitionHostState(applicationIndex, 1);
+    }
 
    private:
     std::optional<DynamicExpressionVariantId> deterministicTrainingVariantId;

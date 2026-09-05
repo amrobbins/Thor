@@ -45,7 +45,6 @@ void bind_slice(nb::module_ &m);
 void bind_stop_gradient(nb::module_ &m);
 void bind_network_input(nb::module_ &m);
 void bind_ragged_network_input(nb::module_ &m);
-void bind_ragged_filter(nb::module_ &m);
 void bind_ragged_gather(nb::module_ &m);
 void bind_ragged_row_lengths(nb::module_ &m);
 void bind_ragged_to_padded_dense(nb::module_ &m);
@@ -107,7 +106,6 @@ void bind_layers(nb::module_ &layers) {
     bind_stop_gradient(layers);
     bind_network_input(layers);
     bind_ragged_network_input(layers);
-    bind_ragged_filter(layers);
     bind_ragged_gather(layers);
     bind_ragged_row_lengths(layers);
     bind_ragged_to_padded_dense(layers);

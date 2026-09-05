@@ -245,14 +245,18 @@ void FiniteCheck::validateRaggedInputs() const {
     if (featureInput->getTotalNumElements() != config.maxTotalValues * config.elementsPerValue) {
         throw std::runtime_error("Ragged FiniteCheck values input does not match its configured packed capacity.");
     }
-    const TensorDescriptor offsetsDescriptor = rowPartitionInput->getDescriptor();
-    if (offsetsDescriptor.getDimensions() != std::vector<uint64_t>{config.batchSize + 1} ||
-        offsetsDescriptor.getDataType() != config.offsetsDataType ||
+    const TensorDescriptor partitionCarrierDescriptor = rowPartitionInput->getDescriptor();
+    const std::vector<uint64_t> carrierDimensions = partitionCarrierDescriptor.getDimensions();
+    const bool isManagedActiveCount = carrierDimensions == std::vector<uint64_t>{1};
+    const bool isTransitionalOffsets = carrierDimensions == std::vector<uint64_t>{config.batchSize + 1};
+    if ((!isManagedActiveCount && !isTransitionalOffsets) ||
+        partitionCarrierDescriptor.getDataType() != config.offsetsDataType ||
         !rowPartitionInput->isDenseContiguous() || rowPartitionInput->getStorageElementOffset() != 0) {
-        throw std::runtime_error("Ragged FiniteCheck offsets input does not match its canonical row partition descriptor.");
+        throw std::runtime_error(
+            "Ragged FiniteCheck partition carrier must be managed active count [1] or transitional offsets [B+1] with the canonical partition dtype.");
     }
     if (featureInput->getPlacement() != rowPartitionInput->getPlacement()) {
-        throw std::runtime_error("Ragged FiniteCheck values and offsets must have the same placement.");
+        throw std::runtime_error("Ragged FiniteCheck values and active count must have the same placement.");
     }
 }
 
@@ -387,9 +391,8 @@ void FiniteCheck::checkRaggedTensor(const Tensor &tensor, const char *direction,
     FiniteCheckResult result{};
     if (tensor.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
         stream.synchronize();
-        RowPartitionRuntime rowPartition(
-            rowPartitionInput.value(),
-            RowPartitionDescriptor(config.batchSize, config.maxTotalValues, config.offsetsDataType));
+        RowPartitionRuntime rowPartition = RowPartitionRuntime::fromHostStateCarrier(
+            rowPartitionInput.value(), config.batchSize, config.maxTotalValues);
         const uint64_t activeValues = rowPartition.requireHostActiveValueCount();
         const uint64_t activeElements = activeValues * config.elementsPerValue;
         result = checkCpuTensor(tensor, activeElements);
@@ -403,11 +406,14 @@ void FiniteCheck::checkRaggedTensor(const Tensor &tensor, const char *direction,
         THOR_THROW_IF_FALSE(gpuResult != nullptr);
         ScopedGpu scopedGpu(tensor.getPlacement().getDeviceNum());
         CUDA_CHECK(cudaMemsetAsync(gpuResult, 0, sizeof(FiniteCheckResult), stream.getStream()));
+        Tensor activeCount = rowPartitionInput.value();
+        if (activeCount.getDimensions() == std::vector<uint64_t>{config.batchSize + 1}) {
+            activeCount = activeCount.aliasView({1}, {1}, config.batchSize);
+        }
         launchRaggedFiniteCheck(tensor.getMemPtr(),
                                 tensor.getDataType(),
-                                rowPartitionInput->getMemPtr(),
+                                activeCount.getMemPtr(),
                                 config.offsetsDataType,
-                                config.batchSize,
                                 config.maxTotalValues,
                                 config.elementsPerValue,
                                 maxReportedIndices,

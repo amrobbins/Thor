@@ -2074,6 +2074,8 @@ TEST(FiniteCheck, RaggedForwardAndBackwardIgnoreUndefinedInactiveCapacity) {
     offsetValues[1] = 1;
     offsetValues[2] = 1;
     offsetValues[3] = 3;
+    RowPartitionRuntime(offsets, RowPartitionDescriptor(3, 6, DataType::UINT32))
+        .setHostOffsets({0, 1, 1, 3});
 
     auto* packedValues = values.getMemPtr<float>();
     auto* packedGradient = gradient.getMemPtr<float>();

@@ -59,7 +59,7 @@ RaggedGather RaggedGather::makeLayer(const RaggedTensor& sourceInput,
         output.getTrailingDimensions() != sourceInput.getTrailingDimensions() ||
         output.getBatchSize() != indicesInput.getBatchSize() ||
         output.getMaxTotalValues() != indicesInput.getMaxTotalValues() ||
-        output.getOffsets() != indicesInput.getOffsets() ||
+        !output.sharesPartitionWith(indicesInput) ||
         output.hasMaxValuesPerRow() != indicesInput.hasMaxValuesPerRow() ||
         (indicesInput.hasMaxValuesPerRow() && output.getMaxValuesPerRow() != indicesInput.getMaxValuesPerRow())) {
         throw std::runtime_error("RaggedGather serialized output must use source value geometry and preserve indices partition Q exactly.");
@@ -69,10 +69,10 @@ RaggedGather RaggedGather::makeLayer(const RaggedTensor& sourceInput,
     layer.raggedSourceInput = sourceInput;
     layer.raggedIndicesInput = indicesInput;
     layer.raggedFeatureOutput = output;
-    layer.sharedOffsets = sourceInput.getOffsets() == indicesInput.getOffsets();
-    layer.indicesOffsetsInputPort = layer.sharedOffsets ? 2U : 3U;
+    layer.sharedPartition = sourceInput.sharesPartitionWith(indicesInput);
+    layer.indicesOffsetsInputPort = layer.sharedPartition ? 2U : 3U;
     layer.featureInputs = {sourceInput.getValues(), indicesInput.getValues(), sourceInput.getOffsets()};
-    if (!layer.sharedOffsets) layer.featureInputs.push_back(indicesInput.getOffsets());
+    if (!layer.sharedPartition) layer.featureInputs.push_back(indicesInput.getOffsets());
     layer.featureOutputs = {output.getValues()};
     layer.initialized = true;
     return layer;
@@ -109,7 +109,7 @@ int RaggedGather::getConnectionType(Tensor connectingTensor) const {
     if (connectingTensor == raggedSourceInput.getValues()) return 0;
     if (connectingTensor == raggedIndicesInput.getValues()) return 1;
     if (connectingTensor == raggedSourceInput.getOffsets()) return 2;
-    if (!sharedOffsets && connectingTensor == raggedIndicesInput.getOffsets()) return 3;
+    if (!sharedPartition && connectingTensor == raggedIndicesInput.getOffsets()) return 3;
     if (connectingTensor == raggedFeatureOutput.getValues()) return 0;
     throw std::runtime_error("Tensor is not connected to this RaggedGather layer.");
 }
@@ -117,8 +117,8 @@ int RaggedGather::getConnectionType(Tensor connectingTensor) const {
 std::optional<std::string> RaggedGather::getInputPortName(const Tensor& inputTensor) const {
     if (inputTensor == raggedSourceInput.getValues()) return "source_values";
     if (inputTensor == raggedIndicesInput.getValues()) return "indices_values";
-    if (inputTensor == raggedSourceInput.getOffsets()) return sharedOffsets ? "shared_offsets" : "source_offsets";
-    if (!sharedOffsets && inputTensor == raggedIndicesInput.getOffsets()) return "indices_offsets";
+    if (inputTensor == raggedSourceInput.getOffsets()) return sharedPartition ? "shared_offsets" : "source_offsets";
+    if (!sharedPartition && inputTensor == raggedIndicesInput.getOffsets()) return "indices_offsets";
     return std::nullopt;
 }
 
@@ -158,7 +158,7 @@ std::shared_ptr<ThorImplementation::Layer> RaggedGather::stamp(
     (void)getConnectionType(connectingApiTensor);
     THOR_THROW_IF_FALSE(initialized);
     auto physical = std::make_shared<ThorImplementation::RaggedGather>(
-        raggedSourceInput.getDescriptor(), raggedIndicesInput.getDescriptor(), raggedFeatureOutput.getDescriptor(), sharedOffsets);
+        raggedSourceInput.getDescriptor(), raggedIndicesInput.getDescriptor(), raggedFeatureOutput.getDescriptor(), sharedPartition);
     physical->setConstructForInferenceOnly(inferenceOnly);
     physical->setName(getLayerType());
     return physical;

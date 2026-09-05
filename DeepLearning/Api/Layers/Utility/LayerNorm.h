@@ -45,6 +45,14 @@ class LayerNorm : public TrainableLayer {
 
     using MultiConnectionLayer::getFeatureOutput;
     int getConnectionType(Tensor connectingTensor) const override;
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        for (const RaggedTensor& ragged : raggedFeatureInputs) {
+            if (inputTensor == ragged.getOffsets())
+                return ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT;
+        }
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
     std::vector<Tensor> getFeatureInputs() const override;
     Tensor getFeatureOutput(Tensor inputTensor) const override;
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;

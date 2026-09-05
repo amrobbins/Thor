@@ -6,13 +6,22 @@
 #include <cub/cub.cuh>
 
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 namespace ThorImplementation {
 namespace {
 using namespace CubDevicePrimitiveSupport;
+
+struct HostOffsetsUploadArgs : public HostFunctionArgsBase {
+    std::vector<uint32_t> offsets32;
+    std::vector<uint64_t> offsets64;
+};
+
+static void releaseHostOffsetsUpload(void*) {}
 
 template <typename T>
 size_t queryInclusiveSum(uint64_t batch_size) {
@@ -513,6 +522,57 @@ struct ValidateOffsetsFn {
 };
 
 }  // namespace
+
+void rowPartitionUploadHostOffsets(const std::vector<uint64_t>& host_offsets,
+                                   Tensor& offsets,
+                                   uint64_t batch_size,
+                                   Stream& stream) {
+    requireRowPartitionVectorGpuTensor(offsets, "row partition offsets");
+    requireStorageForNumItems(offsets, "row partition offsets", checkedOffsetsElements(batch_size));
+    requireRowPartitionOffsetDType(offsets.getDataType(), "row partition offsets");
+    if (offsets.getPlacement().getDeviceNum() != stream.getGpuNum()) {
+        throw std::invalid_argument("row partition offsets upload stream must target the offsets GPU.");
+    }
+    if (host_offsets.size() != checkedOffsetsElements(batch_size)) {
+        throw std::invalid_argument("authoritative host row partition size must equal batch_size + 1.");
+    }
+    if (host_offsets.front() != 0) {
+        throw std::invalid_argument("authoritative host row partition must start at zero.");
+    }
+    for (uint64_t row = 0; row < batch_size; ++row) {
+        if (host_offsets[row] > host_offsets[row + 1]) {
+            throw std::invalid_argument("authoritative host row partition must be monotonic.");
+        }
+    }
+
+    auto args = std::make_unique<HostOffsetsUploadArgs>();
+    const void* source = nullptr;
+    size_t bytes = 0;
+    switch (offsets.getDataType()) {
+        case DataType::UINT32:
+            args->offsets32.reserve(host_offsets.size());
+            for (uint64_t value : host_offsets) {
+                if (value > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+                    throw std::overflow_error("authoritative host row partition does not fit UINT32 offsets storage.");
+                }
+                args->offsets32.push_back(static_cast<uint32_t>(value));
+            }
+            source = args->offsets32.data();
+            bytes = args->offsets32.size() * sizeof(uint32_t);
+            break;
+        case DataType::UINT64:
+            args->offsets64 = host_offsets;
+            source = args->offsets64.data();
+            bytes = args->offsets64.size() * sizeof(uint64_t);
+            break;
+        default:
+            throw std::invalid_argument("row partition offsets dtype must be UINT32 or UINT64.");
+    }
+
+    ScopedGpu scopedGpu(offsets.getPlacement().getDeviceNum());
+    CUDA_CHECK(cudaMemcpyAsync(offsets.getMemPtr<void>(), source, bytes, cudaMemcpyHostToDevice, stream.getStream()));
+    stream.enqueueHostFunction(&releaseHostOffsetsUpload, std::move(args));
+}
 
 bool isRowPartitionOffsetDTypeSupported(DataType dtype) { return isCanonicalRowPartitionOffsetDataType(dtype); }
 

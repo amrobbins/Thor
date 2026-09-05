@@ -61,6 +61,15 @@ class Concatenate : public MultiConnectionLayer {
 
     std::string getLayerType() const override { return "Concatenate"; }
 
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (getUseRagged() && !raggedFeatureInputs.empty() &&
+            inputTensor == raggedFeatureInputs.front().getOffsets()) {
+            return ThorImplementation::kRaggedTrailingConcatenatePartitionRequirement;
+        }
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
+
     int getConnectionType(Tensor connectingTensor) const override {
         for (uint32_t i = 0; i < featureInputs.size(); ++i) {
             if (connectingTensor == featureInputs[i])
@@ -143,8 +152,8 @@ class Concatenate::Builder {
             outputTrailing[concatenationAxis] = 0;
             for (uint32_t i = 0; i < _raggedFeatureInputs.size(); ++i) {
                 const RaggedTensor &input = _raggedFeatureInputs[i];
-                if (input.getOffsets() != reference.getOffsets()) {
-                    THOR_THROW_LOGIC_ERROR("Concatenate RaggedTensor inputs must share the exact same offsets tensor.");
+                if (!input.sharesPartitionWith(reference)) {
+                    THOR_THROW_LOGIC_ERROR("Concatenate RaggedTensor inputs must share the exact same row partition.");
                 }
                 if (input.getBatchSize() != reference.getBatchSize() ||
                     input.getMaxTotalValues() != reference.getMaxTotalValues() ||

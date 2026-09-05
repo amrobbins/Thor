@@ -110,8 +110,8 @@ void validateRaggedArguments(const RaggedTensor& location,
         throw nb::value_error("LaplaceNLLLoss instance: scale must use fp16 or fp32 dtype.");
     if (!isFloatingDType(labels.getValuesDataType()))
         throw nb::value_error("LaplaceNLLLoss instance: labels must use fp16 or fp32 dtype.");
-    if (location.getOffsets() != scale.getOffsets() || location.getOffsets() != labels.getOffsets())
-        throw nb::value_error("LaplaceNLLLoss instance: ragged location, scale, and labels must use the exact same row partition tensor.");
+    if (!location.sharesPartitionWith(scale) || !location.sharesPartitionWith(labels))
+        throw nb::value_error("LaplaceNLLLoss instance: ragged location, scale, and labels must use the exact same row partition.");
     if (location.getBatchSize() != scale.getBatchSize() || location.getBatchSize() != labels.getBatchSize() ||
         location.getMaxTotalValues() != scale.getMaxTotalValues() || location.getMaxTotalValues() != labels.getMaxTotalValues() ||
         location.getTrailingDimensions() != scale.getTrailingDimensions() ||

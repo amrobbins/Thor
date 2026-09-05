@@ -111,7 +111,11 @@ ThorImplementation::ExpressionDefinition addRaggedRuntimeExtents(
             ThorImplementation::Expression::fromPhysicalNode(definition.outputs.expr, found->second);
         outputs.emplace_back(outputName,
                              value.withRaggedRuntimeExtent(
-                                 offsets, batchSize, maxTotalValues, outputElementsPerValue[outputIndex]));
+                                 offsets,
+                                 batchSize,
+                                 maxTotalValues,
+                                 outputElementsPerValue[outputIndex],
+                                 ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT));
     }
     return ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs(outputs));
 }
@@ -906,6 +910,7 @@ void CustomLayer::enableRaggedInterfaces(const std::vector<RaggedTensorMap>& rag
             throw std::invalid_argument("Ragged CustomLayer input interface name count mismatch.");
         }
 
+        std::optional<RaggedTensor> commonPartition;
         std::optional<Tensor> commonOffsets;
         for (uint32_t inputPortIndex = 0; inputPortIndex < inputNames.size(); ++inputPortIndex) {
             const std::string& name = inputNames[inputPortIndex];
@@ -914,11 +919,12 @@ void CustomLayer::enableRaggedInterfaces(const std::vector<RaggedTensorMap>& rag
                 throw std::invalid_argument("Ragged CustomLayer input interface is missing initialized input '" + name + "'.");
             }
             const RaggedTensor& ragged = found->second;
-            if (!commonOffsets.has_value()) {
+            if (!commonPartition.has_value()) {
+                commonPartition = ragged;
                 commonOffsets = ragged.getOffsets();
-            } else if (commonOffsets.value() != ragged.getOffsets()) {
+            } else if (!commonPartition->sharesPartitionWith(ragged)) {
                 throw std::invalid_argument(
-                    "All RaggedTensor inputs in one CustomLayer interface must share the exact same offsets tensor.");
+                    "All RaggedTensor inputs in one CustomLayer interface must share the exact same row partition.");
             }
 
             if (!referenceBatchSize.has_value()) {
@@ -946,7 +952,8 @@ void CustomLayer::enableRaggedInterfaces(const std::vector<RaggedTensorMap>& rag
     }
 
     for (uint32_t interfaceIndex = 0; interfaceIndex < outputInterfaces.size(); ++interfaceIndex) {
-        const Tensor offsets = raggedInputs[interfaceIndex].at(inputNames.front()).getOffsets();
+        const RaggedTensor& partition = raggedInputs[interfaceIndex].at(inputNames.front());
+        const Tensor offsets = partition.getOffsets();
         RaggedTensorMap outputInterface;
         for (const std::string& outputName : outputNames) {
             const Tensor& outputValues = outputInterfaces[interfaceIndex].at(outputName);
@@ -959,9 +966,9 @@ void CustomLayer::enableRaggedInterfaces(const std::vector<RaggedTensorMap>& rag
                 auto explicitOutput = raggedOutputs[interfaceIndex].find(outputName);
                 if (explicitOutput == raggedOutputs[interfaceIndex].end() ||
                     explicitOutput->second.getValues() != outputValues ||
-                    explicitOutput->second.getOffsets() != offsets) {
+                    !explicitOutput->second.sharesPartitionWith(partition)) {
                     throw std::invalid_argument(
-                        "Explicit Ragged CustomLayer outputs must use the inferred values tensor and preserve input offsets.");
+                        "Explicit Ragged CustomLayer outputs must use the inferred values tensor and preserve the input row partition.");
                 }
                 outputInterface.emplace(outputName, explicitOutput->second);
             } else {
@@ -1140,6 +1147,19 @@ CustomLayer::TensorMap CustomLayer::getOutputInterface(const TensorMap& inputInt
     }
 
     return outputInterfaces[matchedIndex];
+}
+
+ThorImplementation::RaggedPartitionRequirement CustomLayer::getRaggedPartitionRequirementForInput(
+    const Tensor& inputTensor) const {
+    if (raggedInterfacesEnabled) {
+        for (const RaggedTensorMap& inputInterface : raggedInputInterfaces) {
+            if (inputInterface.empty()) continue;
+            const RaggedTensor& partition = inputInterface.at(inputNames.front());
+            if (inputTensor == partition.getOffsets())
+                return ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
+        }
+    }
+    return Layer::getRaggedPartitionRequirementForInput(inputTensor);
 }
 
 int CustomLayer::getConnectionType(Tensor connectingTensor) const {

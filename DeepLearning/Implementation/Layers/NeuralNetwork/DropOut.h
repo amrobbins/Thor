@@ -10,8 +10,12 @@
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOutKernel.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 namespace ThorImplementation {
+
+inline constexpr RaggedPartitionRequirement kRaggedDropOutPartitionRequirement =
+    RaggedPartitionRequirement::HOST_EXTENT;
 
 /**
  * Performs DropOut, and corresponding scaling, during training.
@@ -61,7 +65,11 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         // connected in the graph, but identity execution neither waits for it nor
         // queries RowPartitionRuntime because no packed rows are read or written.
         if (!training || probabilityOfDroppingOut == 0.0f) {
-            if (partitionArrival) return;
+            // HOST_EXTENT routing may intentionally bind the structural port to
+            // the same physical values carrier.  In that case one arrival is
+            // simultaneously the values and partition arrival and must execute
+            // the identity path rather than being mistaken for partition-only.
+            if (partitionArrival && !valuesArrival) return;
             forwardValues(featureInput, validationPass, batchSize);
             return;
         }
@@ -192,7 +200,6 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         if (raggedConfiguration.has_value()) {
             THOR_THROW_IF_FALSE(rowPartitionInput.has_value());
             validateRaggedTensorShape(featureInput.value());
-            validateRowPartitionTensor(rowPartitionInput.value());
         }
         // No random-state or keep-mask allocation: Philox is counter based and
         // backward regenerates the exact forward mask from the saved sequence.
@@ -357,29 +364,24 @@ class DropOut : public Layer, public TrainingDropoutControllable {
         THOR_THROW_IF_FALSE(totalElements / raggedConfiguration->fullCapacityRows == raggedConfiguration->elementsPerValue);
     }
 
-    void validateRowPartitionTensor(const Tensor& offsets) const {
-        THOR_THROW_IF_FALSE(raggedConfiguration.has_value());
-        const TensorDescriptor descriptor = offsets.getDescriptor();
-        if (descriptor.getNumDimensions() != 1 || descriptor.getDimensions()[0] == 0 ||
-            !RowPartitionDescriptor::isValidOffsetsDataType(descriptor.getDataType())) {
-            throw std::runtime_error("Ragged DropOut row-partition offsets input is not canonical.");
-        }
-    }
-
     [[nodiscard]] uint64_t requireRaggedActiveValueCount() const {
         THOR_THROW_IF_FALSE(raggedConfiguration.has_value());
         if (!rowPartitionInput.has_value())
-            throw std::runtime_error("Ragged DropOut row-partition offsets input is not connected.");
-        validateRowPartitionTensor(rowPartitionInput.value());
-        const TensorDescriptor descriptor = rowPartitionInput->getDescriptor();
-        const uint64_t batchSize = descriptor.getDimensions()[0] - 1;
-        RowPartitionRuntime rowPartition(
-            rowPartitionInput.value(),
-            RowPartitionDescriptor(batchSize, raggedConfiguration->fullCapacityRows, descriptor.getDataType()));
+            throw std::runtime_error("Ragged DropOut row-partition host carrier is not connected.");
+        RowPartitionRuntime rowPartition = RowPartitionRuntime::fromHostStateCarrier(
+            rowPartitionInput.value(), raggedConfiguration->fullCapacityRows);
         const uint64_t activeRows = rowPartition.requireHostActiveValueCount();
         if (activeRows > raggedConfiguration->fullCapacityRows)
             throw std::runtime_error("Ragged DropOut active row count exceeds packed capacity.");
         return activeRows;
+    }
+
+    void prepareFeatureOutputForDownstream() override {
+        if (!raggedConfiguration.has_value() || !featureOutput.has_value() || !rowPartitionInput.has_value())
+            return;
+        if (featureOutput.value() == rowPartitionInput.value())
+            return;
+        RowPartitionRuntime::propagateHostState(rowPartitionInput.value(), featureOutput.value());
     }
 
     void forwardValues(std::optional<Tensor> valuesInput, bool validationPass, uint32_t batchSize) {

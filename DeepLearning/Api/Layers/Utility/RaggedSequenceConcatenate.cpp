@@ -58,7 +58,7 @@ RaggedSequenceConcatenate RaggedSequenceConcatenate::makeLayer(
     bool allInputsHaveMaxValuesPerRow = true;
     std::set<Tensor> uniqueValues;
     std::vector<Tensor> uniqueOffsets;
-    std::map<Tensor, uint32_t> offsetPortByTensor;
+    std::map<RowPartitionId, uint32_t> offsetPortByPartition;
     std::vector<uint32_t> offsetPortForInput;
     offsetPortForInput.reserve(inputs.size());
 
@@ -93,14 +93,14 @@ RaggedSequenceConcatenate RaggedSequenceConcatenate::makeLayer(
             allInputsHaveMaxValuesPerRow = false;
         }
 
-        auto foundOffset = offsetPortByTensor.find(input.getOffsets());
-        if (foundOffset == offsetPortByTensor.end()) {
+        auto foundPartition = offsetPortByPartition.find(input.getRowPartitionId());
+        if (foundPartition == offsetPortByPartition.end()) {
             const uint32_t newPort = static_cast<uint32_t>(uniqueOffsets.size());
             uniqueOffsets.push_back(input.getOffsets());
-            offsetPortByTensor.emplace(input.getOffsets(), newPort);
+            offsetPortByPartition.emplace(input.getRowPartitionId(), newPort);
             offsetPortForInput.push_back(newPort);
         } else {
-            offsetPortForInput.push_back(foundOffset->second);
+            offsetPortForInput.push_back(foundPartition->second);
         }
     }
 
@@ -131,7 +131,7 @@ RaggedSequenceConcatenate RaggedSequenceConcatenate::makeLayer(
         throw std::runtime_error("RaggedSequenceConcatenate serialized output descriptor does not match its inputs.");
     }
     for (const RaggedTensor& input : inputs) {
-        if (output.getOffsets().getOriginalId() == input.getOffsets().getOriginalId()) {
+        if (output.sharesPartitionWith(input)) {
             throw std::runtime_error("RaggedSequenceConcatenate must own a newly produced offsets tensor.");
         }
     }

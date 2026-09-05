@@ -159,18 +159,40 @@ TEST(ReductionMetricApi, R10LRaggedSumAndMeanBuildWithDistinctAggregationContrac
     }
 }
 
-TEST(ReductionMetricApi, R10LExtremaRemainOutsideRaggedContract) {
-    Network network("r10l_extrema_outside_contract");
-    RaggedTensor values = RaggedNetworkInput::Builder()
-                              .network(network)
-                              .name("values")
-                              .valuesDataType(DataType::FP32)
-                              .trailingDimensions({2})
-                              .batchSize(3)
-                              .maxTotalValues(7)
-                              .build();
-    EXPECT_THROW((void)Min::Builder().network(network).values(values), std::invalid_argument);
-    EXPECT_THROW((void)Max::Builder().network(network).values(values), std::invalid_argument);
+TEST(ReductionMetricApi, R10MRaggedMinAndMaxBuildWithExtremaAggregationContracts) {
+    for (DataType offsetsDType : {DataType::UINT32, DataType::UINT64}) {
+        Network network("r10m_ragged_extrema_" + ThorImplementation::TensorDescriptor::getElementTypeName(offsetsDType));
+        RaggedTensor values = RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("values")
+                                  .valuesDataType(DataType::FP16)
+                                  .offsetsDataType(offsetsDType)
+                                  .trailingDimensions({2})
+                                  .batchSize(4)
+                                  .maxTotalValues(9)
+                                  .maxValuesPerRow(4)
+                                  .build();
+        Min minimum = Min::Builder().network(network).values(values).build();
+        Max maximum = Max::Builder().network(network).values(values).build();
+
+        ASSERT_TRUE(minimum.getUseRagged());
+        ASSERT_TRUE(maximum.getUseRagged());
+        EXPECT_EQ(minimum.getAggregation(), MetricAggregation::MIN);
+        EXPECT_EQ(maximum.getAggregation(), MetricAggregation::MAX);
+        EXPECT_EQ(minimum.getConnectionType(values.getOffsets()),
+                  static_cast<int>(ThorImplementation::Metric::ConnectionType::STRUCTURAL));
+        EXPECT_EQ(maximum.getConnectionType(values.getOffsets()),
+                  static_cast<int>(ThorImplementation::Metric::ConnectionType::STRUCTURAL));
+        EXPECT_EQ(minimum.getMetric().getDataType(), DataType::FP32);
+        EXPECT_EQ(maximum.getMetric().getDataType(), DataType::FP32);
+
+        const json minJson = minimum.architectureJson();
+        const json maxJson = maximum.architectureJson();
+        EXPECT_TRUE(minJson.contains("ragged_values"));
+        EXPECT_TRUE(maxJson.contains("ragged_values"));
+        EXPECT_EQ(minJson.at("aggregation").get<MetricAggregation>(), MetricAggregation::MIN);
+        EXPECT_EQ(maxJson.at("aggregation").get<MetricAggregation>(), MetricAggregation::MAX);
+    }
 }
 
 TEST(ReductionMetricApi, R10LPlacedRaggedSumAndMeanExposeActiveScalarStatisticsForBothOffsetWidths) {
@@ -302,6 +324,125 @@ TEST(ReductionMetricApi, R10LPlacedRaggedSumAndMeanExposeActiveScalarStatisticsF
         emptyMeanStatistics.readyEvent.synchronize();
         EXPECT_FLOAT_EQ(*emptyMeanStatistics.numerator->getMemPtr<float>(), 0.0f);
         EXPECT_FLOAT_EQ(*emptyMeanStatistics.denominator->getMemPtr<float>(), 0.0f);
+        placed->synchronize();
+    }
+}
+
+
+TEST(ReductionMetricApi, R10MRaggedExtremaIgnoreEmptyRowsAndPublishNoContributionForAllEmptyBatch) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "R10M ragged extrema execution requires a GPU";
+
+    constexpr uint32_t batchSize = 4;
+    constexpr uint64_t maxTotalValues = 9;
+    constexpr uint64_t trailingWidth = 2;
+    for (DataType offsetsDType : {DataType::UINT32, DataType::UINT64}) {
+        Network network("r10m_extrema_runtime_" + ThorImplementation::TensorDescriptor::getElementTypeName(offsetsDType));
+        RaggedTensor values = RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("values")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(offsetsDType)
+                                  .trailingDimensions({trailingWidth})
+                                  .batchSize(batchSize)
+                                  .maxTotalValues(maxTotalValues)
+                                  .maxValuesPerRow(4)
+                                  .build();
+        Min minimum = Min::Builder().network(network).values(values).build();
+        Max maximum = Max::Builder().network(network).values(values).build();
+        NetworkOutput::Builder().network(network).name("minimum").inputTensor(minimum.getMetric()).dataType(DataType::FP32).build();
+        NetworkOutput::Builder().network(network).name("maximum").inputTensor(maximum.getMetric()).dataType(DataType::FP32).build();
+
+        vector<Event> initializationDone;
+        shared_ptr<PlacedNetwork> placed = network.place(
+            batchSize, initializationDone, /*inferenceOnly=*/true, vector<int32_t>{0}, /*forcedNumStampsPerGpu=*/1);
+        ASSERT_NE(placed, nullptr);
+        for (Event& event : initializationDone) event.synchronize();
+        placed->preallocateInputSlots(1);
+        placed->preallocateOutputSlots(1);
+        placed->synchronize();
+
+        ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        ThorImplementation::Tensor packedValues(
+            cpuPlacement, ThorImplementation::TensorDescriptor(DataType::FP32, {maxTotalValues, trailingWidth}));
+        float* packed = packedValues.getMemPtr<float>();
+        fill(packed, packed + maxTotalValues * trailingWidth, numeric_limits<float>::quiet_NaN());
+        const array<float, 10> active{3.0f, -8.0f, 5.0f, 6.0f, -2.0f, 12.0f, 7.0f, 1.0f, 9.0f, -4.0f};
+        copy(active.begin(), active.end(), packed);
+        ThorImplementation::Tensor offsets(
+            cpuPlacement, ThorImplementation::TensorDescriptor(offsetsDType, {batchSize + 1}));
+        // Row 1 and row 3 are empty; inactive capacity remains NaN-poisoned.
+        writeR10LOffsets(offsets, offsetsDType, {0, 2, 2, 5, 5});
+
+        Batch batch;
+        batch.insert("values", ThorImplementation::RaggedTensor(packedValues, offsets, /*maxValuesPerRow=*/4));
+        map<string, ThorImplementation::Tensor> outputs;
+        map<string, Event> outputReadyEvents;
+        Event done = placed->submitBatch(0, batch, outputs, outputReadyEvents, /*isInferenceOnly=*/true);
+        done.synchronize();
+        outputReadyEvents.at("minimum").synchronize();
+        outputReadyEvents.at("maximum").synchronize();
+        EXPECT_FLOAT_EQ(copyR10LFp32ToHost(outputs.at("minimum")).front(), -8.0f);
+        EXPECT_FLOAT_EQ(copyR10LFp32ToHost(outputs.at("maximum")).front(), 12.0f);
+
+        map<string, ThorImplementation::MetricBatchStatisticTensors> statistics =
+            placed->getMetricBatchStatisticTensorsForSlot(0, 0);
+        for (const string& name : {string("minimum"), string("maximum")}) {
+            ASSERT_TRUE(statistics.count(name));
+            auto& stat = statistics.at(name);
+            ASSERT_TRUE(stat.contributionCount.has_value());
+            ASSERT_TRUE(stat.readyEvent.isInitialized());
+            stat.readyEvent.synchronize();
+            EXPECT_FLOAT_EQ(*stat.contributionCount->getMemPtr<float>(), static_cast<float>(active.size()));
+            EXPECT_FALSE(stat.numerator.has_value());
+            EXPECT_FALSE(stat.denominator.has_value());
+        }
+        placed->synchronize();
+
+        // Mark only rows 0 and 1 valid. Row 1 is empty, so only the first four
+        // active scalars contribute even though later rows remain populated.
+        Batch partialBatch;
+        partialBatch.insert("values", ThorImplementation::RaggedTensor(packedValues, offsets, /*maxValuesPerRow=*/4));
+        partialBatch.setValidExampleCount(2);
+        outputs.clear();
+        outputReadyEvents.clear();
+        done = placed->submitBatch(0, partialBatch, outputs, outputReadyEvents, /*isInferenceOnly=*/true);
+        done.synchronize();
+        outputReadyEvents.at("minimum").synchronize();
+        outputReadyEvents.at("maximum").synchronize();
+        EXPECT_FLOAT_EQ(copyR10LFp32ToHost(outputs.at("minimum")).front(), -8.0f);
+        EXPECT_FLOAT_EQ(copyR10LFp32ToHost(outputs.at("maximum")).front(), 6.0f);
+        statistics = placed->getMetricBatchStatisticTensorsForSlot(0, 0);
+        for (const string& name : {string("minimum"), string("maximum")}) {
+            auto& stat = statistics.at(name);
+            stat.readyEvent.synchronize();
+            ASSERT_TRUE(stat.contributionCount.has_value());
+            EXPECT_FLOAT_EQ(*stat.contributionCount->getMemPtr<float>(), 4.0f);
+        }
+        placed->synchronize();
+
+        ThorImplementation::Tensor emptyOffsets(
+            cpuPlacement, ThorImplementation::TensorDescriptor(offsetsDType, {batchSize + 1}));
+        writeR10LOffsets(emptyOffsets, offsetsDType, {0, 0, 0, 0, 0});
+        Batch emptyBatch;
+        emptyBatch.insert("values", ThorImplementation::RaggedTensor(packedValues, emptyOffsets, /*maxValuesPerRow=*/4));
+        outputs.clear();
+        outputReadyEvents.clear();
+        done = placed->submitBatch(0, emptyBatch, outputs, outputReadyEvents, /*isInferenceOnly=*/true);
+        done.synchronize();
+        outputReadyEvents.at("minimum").synchronize();
+        outputReadyEvents.at("maximum").synchronize();
+        // The physical graph output stays concrete, but the statistic below is
+        // authoritative for aggregation and marks this batch non-contributing.
+        EXPECT_FLOAT_EQ(copyR10LFp32ToHost(outputs.at("minimum")).front(), 0.0f);
+        EXPECT_FLOAT_EQ(copyR10LFp32ToHost(outputs.at("maximum")).front(), 0.0f);
+        statistics = placed->getMetricBatchStatisticTensorsForSlot(0, 0);
+        for (const string& name : {string("minimum"), string("maximum")}) {
+            auto& stat = statistics.at(name);
+            stat.readyEvent.synchronize();
+            ASSERT_TRUE(stat.contributionCount.has_value());
+            EXPECT_FLOAT_EQ(*stat.contributionCount->getMemPtr<float>(), 0.0f);
+        }
         placed->synchronize();
     }
 }
@@ -512,4 +653,213 @@ TEST(ReductionMetricApi, PlacedNetworkExposesSlotLocalWeightedMeanStatistics) {
     firstDone.synchronize();
     secondDone.synchronize();
     placed->synchronize();
+}
+
+TEST(ReductionMetricApi, R10NWeightedMeanBuildsFromSamePartitionRaggedValuesAndWeights) {
+    for (DataType offsetsDType : {DataType::UINT32, DataType::UINT64}) {
+        Network network("r10n_weighted_mean_" + ThorImplementation::TensorDescriptor::getElementTypeName(offsetsDType));
+        RaggedTensor values = RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("values")
+                                  .valuesDataType(DataType::FP16)
+                                  .offsetsDataType(offsetsDType)
+                                  .trailingDimensions({2})
+                                  .batchSize(4)
+                                  .maxTotalValues(9)
+                                  .maxValuesPerRow(4)
+                                  .build();
+        RaggedTensor weights = RaggedNetworkInput::Builder()
+                                   .network(network)
+                                   .name("weights")
+                                   .valuesDataType(DataType::BF16)
+                                   .trailingDimensions({2})
+                                   .partition(values)
+                                   .build();
+
+        WeightedMean metric = WeightedMean::Builder().network(network).values(values).weights(weights).build();
+        ASSERT_TRUE(metric.getUseRagged());
+        ASSERT_TRUE(metric.getRaggedValues().has_value());
+        ASSERT_TRUE(metric.getRaggedWeights().has_value());
+        EXPECT_EQ(metric.getRaggedValues().value(), values);
+        EXPECT_EQ(metric.getRaggedWeights().value(), weights);
+        EXPECT_EQ(metric.getAggregation(), MetricAggregation::RATIO);
+        ASSERT_EQ(metric.getAllInputTensors().size(), 3U);
+        EXPECT_EQ(metric.getConnectionType(values.getValues()),
+                  static_cast<int>(ThorImplementation::Metric::ConnectionType::FORWARD));
+        EXPECT_EQ(metric.getConnectionType(weights.getValues()),
+                  static_cast<int>(ThorImplementation::Metric::ConnectionType::LABELS));
+        EXPECT_EQ(metric.getConnectionType(values.getOffsets()),
+                  static_cast<int>(ThorImplementation::Metric::ConnectionType::STRUCTURAL));
+
+        const json serialized = metric.architectureJson();
+        EXPECT_TRUE(serialized.contains("ragged_values"));
+        EXPECT_TRUE(serialized.contains("ragged_weights"));
+        EXPECT_FALSE(serialized.contains("values"));
+        EXPECT_FALSE(serialized.contains("weights"));
+        EXPECT_EQ(serialized.at("aggregation").get<MetricAggregation>(), MetricAggregation::RATIO);
+
+        shared_ptr<Layer> cloneLayer = metric.clone();
+        WeightedMean* clone = dynamic_cast<WeightedMean*>(cloneLayer.get());
+        ASSERT_NE(clone, nullptr);
+        ASSERT_TRUE(clone->getRaggedValues().has_value());
+        ASSERT_TRUE(clone->getRaggedWeights().has_value());
+        EXPECT_EQ(clone->getRaggedValues()->getOffsets(), clone->getRaggedWeights()->getOffsets());
+    }
+}
+
+TEST(ReductionMetricApi, R10NRaggedWeightedMeanUsesActivePrefixAndClampsPartialTail) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "R10N ragged WeightedMean execution requires a GPU";
+
+    constexpr uint32_t batchSize = 4;
+    constexpr uint64_t maxTotalValues = 9;
+    constexpr uint64_t trailingWidth = 2;
+    for (DataType offsetsDType : {DataType::UINT32, DataType::UINT64}) {
+        Network network("r10n_weighted_runtime_" +
+                        ThorImplementation::TensorDescriptor::getElementTypeName(offsetsDType));
+        RaggedTensor values = RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("values")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(offsetsDType)
+                                  .trailingDimensions({trailingWidth})
+                                  .batchSize(batchSize)
+                                  .maxTotalValues(maxTotalValues)
+                                  .maxValuesPerRow(4)
+                                  .build();
+        RaggedTensor weights = RaggedNetworkInput::Builder()
+                                   .network(network)
+                                   .name("weights")
+                                   .valuesDataType(DataType::FP32)
+                                   .trailingDimensions({trailingWidth})
+                                   .partition(values)
+                                   .build();
+        WeightedMean metric = WeightedMean::Builder().network(network).values(values).weights(weights).build();
+        NetworkOutput::Builder()
+            .network(network)
+            .name("weighted_mean")
+            .inputTensor(metric.getMetric())
+            .dataType(DataType::FP32)
+            .build();
+
+        vector<Event> initializationDone;
+        shared_ptr<PlacedNetwork> placed = network.place(
+            batchSize, initializationDone, /*inferenceOnly=*/true, vector<int32_t>{0}, /*forcedNumStampsPerGpu=*/1);
+        ASSERT_NE(placed, nullptr);
+        for (Event& event : initializationDone) event.synchronize();
+        placed->preallocateInputSlots(1);
+        placed->preallocateOutputSlots(1);
+        placed->synchronize();
+
+        ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
+        ThorImplementation::Tensor packedValues(
+            cpuPlacement, ThorImplementation::TensorDescriptor(DataType::FP32, {maxTotalValues, trailingWidth}));
+        ThorImplementation::Tensor packedWeights(
+            cpuPlacement, ThorImplementation::TensorDescriptor(DataType::FP32, {maxTotalValues, trailingWidth}));
+        float* valueData = packedValues.getMemPtr<float>();
+        float* weightData = packedWeights.getMemPtr<float>();
+        fill(valueData,
+             valueData + maxTotalValues * trailingWidth,
+             numeric_limits<float>::quiet_NaN());
+        fill(weightData,
+             weightData + maxTotalValues * trailingWidth,
+             numeric_limits<float>::quiet_NaN());
+
+        // Rows 2 and 3 are deliberately populated with very large values and
+        // weights. A validExampleCount=2 tail batch must stop at offsets[2]
+        // and exclude them even though they are part of the canonical runtime
+        // partition. Capacity after offsets[4] remains NaN poison.
+        const array<float, 14> definedValues{
+            1.0f, 10.0f, 2.0f, 20.0f,
+            1000.0f, 2000.0f, 3000.0f, 4000.0f, 5000.0f, 6000.0f,
+            7000.0f, 8000.0f, 9000.0f, 10000.0f};
+        const array<float, 14> definedWeights{
+            1.0f, 2.0f, 3.0f, 4.0f,
+            50.0f, 60.0f, 70.0f, 80.0f, 90.0f, 100.0f,
+            110.0f, 120.0f, 130.0f, 140.0f};
+        copy(definedValues.begin(), definedValues.end(), valueData);
+        copy(definedWeights.begin(), definedWeights.end(), weightData);
+
+        ThorImplementation::Tensor offsets(
+            cpuPlacement, ThorImplementation::TensorDescriptor(offsetsDType, {batchSize + 1}));
+        writeR10LOffsets(offsets, offsetsDType, {0, 2, 2, 5, 7});
+
+        Batch partialBatch;
+        partialBatch.insert("values", ThorImplementation::RaggedTensor(packedValues, offsets, /*maxValuesPerRow=*/4));
+        partialBatch.insert("weights", packedWeights);
+        partialBatch.setValidExampleCount(2);
+
+        map<string, ThorImplementation::Tensor> outputs;
+        map<string, Event> outputReadyEvents;
+        Event done = placed->submitBatch(0, partialBatch, outputs, outputReadyEvents, /*isInferenceOnly=*/true);
+        done.synchronize();
+        outputReadyEvents.at("weighted_mean").synchronize();
+
+        const float expectedNumerator =
+            1.0f * 1.0f + 10.0f * 2.0f + 2.0f * 3.0f + 20.0f * 4.0f;
+        const float expectedDenominator = 1.0f + 2.0f + 3.0f + 4.0f;
+        EXPECT_NEAR(copyR10LFp32ToHost(outputs.at("weighted_mean")).front(),
+                    expectedNumerator / expectedDenominator,
+                    1.0e-5f);
+
+        map<string, ThorImplementation::MetricBatchStatisticTensors> statistics =
+            placed->getMetricBatchStatisticTensorsForSlot(0, 0);
+        ASSERT_TRUE(statistics.count("weighted_mean"));
+        auto& weightedStatistics = statistics.at("weighted_mean");
+        EXPECT_EQ(weightedStatistics.aggregation, MetricAggregation::RATIO);
+        EXPECT_TRUE(weightedStatistics.zeroDenominatorMeansNoContribution);
+        ASSERT_TRUE(weightedStatistics.numerator.has_value());
+        ASSERT_TRUE(weightedStatistics.denominator.has_value());
+        ASSERT_TRUE(weightedStatistics.readyEvent.isInitialized());
+        weightedStatistics.readyEvent.synchronize();
+        EXPECT_NEAR(*weightedStatistics.numerator->getMemPtr<float>(), expectedNumerator, 1.0e-5f);
+        EXPECT_NEAR(*weightedStatistics.denominator->getMemPtr<float>(), expectedDenominator, 1.0e-5f);
+        placed->synchronize();
+
+        // Reuse the same placed metric with zero active weight mass. The graph
+        // must expose a concrete zero while the reporting metadata marks a zero
+        // denominator as no statistical contribution.
+        fill(weightData, weightData + 4, 0.0f);
+        Batch zeroWeightBatch;
+        zeroWeightBatch.insert(
+            "values", ThorImplementation::RaggedTensor(packedValues, offsets, /*maxValuesPerRow=*/4));
+        zeroWeightBatch.insert("weights", packedWeights);
+        zeroWeightBatch.setValidExampleCount(2);
+        outputs.clear();
+        outputReadyEvents.clear();
+        done = placed->submitBatch(0, zeroWeightBatch, outputs, outputReadyEvents, /*isInferenceOnly=*/true);
+        done.synchronize();
+        outputReadyEvents.at("weighted_mean").synchronize();
+        EXPECT_FLOAT_EQ(copyR10LFp32ToHost(outputs.at("weighted_mean")).front(), 0.0f);
+        statistics = placed->getMetricBatchStatisticTensorsForSlot(0, 0);
+        auto& zeroStatistics = statistics.at("weighted_mean");
+        ASSERT_TRUE(zeroStatistics.denominator.has_value());
+        zeroStatistics.readyEvent.synchronize();
+        EXPECT_FLOAT_EQ(*zeroStatistics.denominator->getMemPtr<float>(), 0.0f);
+        EXPECT_TRUE(zeroStatistics.zeroDenominatorMeansNoContribution);
+        placed->synchronize();
+    }
+}
+
+TEST(ReductionMetricApi, R10NWeightedMeanRejectsDifferentRaggedPartitions) {
+    Network network("r10n_partition_reject");
+    RaggedTensor values = RaggedNetworkInput::Builder()
+                              .network(network)
+                              .name("values")
+                              .valuesDataType(DataType::FP32)
+                              .trailingDimensions({2})
+                              .batchSize(4)
+                              .maxTotalValues(9)
+                              .maxValuesPerRow(4)
+                              .build();
+    RaggedTensor weights = RaggedNetworkInput::Builder()
+                               .network(network)
+                               .name("weights")
+                               .valuesDataType(DataType::FP32)
+                               .trailingDimensions({2})
+                               .batchSize(4)
+                               .maxTotalValues(9)
+                               .maxValuesPerRow(4)
+                               .build();
+    EXPECT_THROW(WeightedMean::Builder().network(network).values(values).weights(weights).build(), std::invalid_argument);
 }

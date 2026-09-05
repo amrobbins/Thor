@@ -2,6 +2,7 @@
 #include "Utilities/TensorOperations/Embedding/ReduceStageController.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingSparseGradient.h"
 
@@ -185,20 +186,20 @@ void Embedding::compileImpl() {
                 throw std::invalid_argument("Ragged Embedding requires values, offsets, and output for every application.");
             }
             const Tensor& indices = featureInputs[valuesSlot].value();
-            const Tensor& offsets = featureInputs[offsetsSlot].value();
+            const Tensor& activeCount = featureInputs[offsetsSlot].value();
             if (indices.getDimensions().empty() || indices.getDimensions()[0] != config.maxTotalValues) {
                 throw std::invalid_argument("Ragged Embedding indices packed capacity does not match max_total_values.");
             }
-            if (offsets.getDimensions() != std::vector<uint64_t>{config.batchSize + 1} ||
-                offsets.getDataType() != config.offsetsDataType) {
-                throw std::invalid_argument("Ragged Embedding offsets descriptor does not match its row-partition metadata.");
+            if (activeCount.getDimensions() != std::vector<uint64_t>{1} ||
+                activeCount.getDataType() != config.offsetsDataType) {
+                throw std::invalid_argument("Ragged Embedding active-count input must have shape [1] and the canonical partition dtype.");
             }
             if (config.maxTotalValues > std::numeric_limits<uint64_t>::max() / config.elementsPerValue ||
                 indices.getTotalNumElements() != config.maxTotalValues * config.elementsPerValue) {
                 throw std::invalid_argument("Ragged Embedding indices trailing geometry does not match elements_per_value.");
             }
-            raggedRuntimeExtents[app] =
-                raggedRuntimeExtentFromOffsets(offsets, config.batchSize, config.maxTotalValues, config.elementsPerValue);
+            raggedRuntimeExtents[app] = raggedRuntimeExtentFromActiveValueCount(
+                activeCount, config.maxTotalValues, config.elementsPerValue);
             preparedRaggedForwards[app] = prepareEmbeddingForwardRagged(indices,
                                                                         weightsTensor,
                                                                         featureOutputs[app].value(),
@@ -351,9 +352,9 @@ std::optional<Tensor> Embedding::connectToPreviousLayer(
             throw std::invalid_argument("Ragged Embedding values input must use the configured packed capacity.");
         }
     } else {
-        if (featureInput->getDimensions() != std::vector<uint64_t>{config.batchSize + 1} ||
+        if (featureInput->getDimensions() != std::vector<uint64_t>{1} ||
             featureInput->getDataType() != config.offsetsDataType) {
-            throw std::invalid_argument("Ragged Embedding offsets input does not match the configured row partition.");
+            throw std::invalid_argument("Ragged Embedding active-count input must have shape [1] and the configured partition dtype.");
         }
     }
 
@@ -450,6 +451,7 @@ void Embedding::forward(std::optional<Tensor> featureInput, bool validationPass,
         const uint32_t offsetsSlot = raggedOffsetsSlot(app);
         streams[valuesSlot].waitFor(streams[offsetsSlot], raggedOffsetsReadyEvents[app]);
         computeFeatureOut(app);
+        RowPartitionRuntime::propagateHostState(featureInputs[offsetsSlot].value(), featureOutputs[app].value());
         if (nextLayers[app].has_value()) {
             nextLayers[app].value()->forward(featureOutputs[app], validationPass, raggedCurrentValidExampleCounts[app]);
         }

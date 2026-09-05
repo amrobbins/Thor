@@ -43,6 +43,7 @@ resident offsets.
         )nbdoc");
     ragged.def_prop_ro("values", &ThorImplementation::RaggedTensor::getValues);
     ragged.def_prop_ro("offsets", &ThorImplementation::RaggedTensor::getOffsets);
+    ragged.def_prop_ro("row_partition_id", &ThorImplementation::RaggedTensor::getRowPartitionId);
     ragged.def_prop_ro("batch_size", &ThorImplementation::RaggedTensor::getBatchSize);
     ragged.def_prop_ro("max_total_values", &ThorImplementation::RaggedTensor::getMaxTotalValues);
     ragged.def_prop_ro("max_values_per_row", [](const ThorImplementation::RaggedTensor& value) -> std::optional<uint64_t> {
@@ -53,4 +54,6 @@ resident offsets.
     ragged.def_prop_ro("offsets_data_type", &ThorImplementation::RaggedTensor::getOffsetsDataType);
     ragged.def("get_values", &ThorImplementation::RaggedTensor::getValues);
     ragged.def("get_offsets", &ThorImplementation::RaggedTensor::getOffsets);
+    ragged.def("get_row_partition_id", &ThorImplementation::RaggedTensor::getRowPartitionId);
+    ragged.def("shares_partition_with", &ThorImplementation::RaggedTensor::sharesPartitionWith, "other"_a);
 }

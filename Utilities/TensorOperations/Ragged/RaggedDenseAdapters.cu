@@ -107,26 +107,11 @@ void validateOffsetsForDense(const Tensor& dense, const Tensor& offsets, const T
     }
 }
 
-void validateLengthsForDense(const Tensor& dense, const Tensor& lengths, const Tensor& values, const Tensor& offsets) {
-    validateOffsetsForDense(dense, offsets, values);
-    requireRank1GpuVector(lengths, "ragged dense adapter lengths");
-    requireSameGpuPlacement(dense, lengths, "ragged dense adapter dense input", "ragged dense adapter lengths");
-    if (!isRowPartitionOffsetDTypeSupported(lengths.getDataType())) {
-        throw std::invalid_argument("ragged dense adapter lengths dtype must be UINT32 or UINT64.");
-    }
-    if (lengths.getDataType() != offsets.getDataType()) {
-        throw std::invalid_argument("ragged dense adapter lengths and offsets must have the same dtype.");
-    }
-    const uint64_t batch_size = dense.getDimensions()[0];
-    if (lengths.getDimensions()[0] != batch_size) {
-        throw std::invalid_argument("ragged dense adapter lengths must have shape [B].");
-    }
-}
-
 void validateRaggedToDense(const RaggedTensor& ragged, const Tensor& dense) {
     if (!ragged.isInitialized()) {
         throw std::invalid_argument("raggedToDense requires an initialized RaggedTensor.");
     }
+    (void)ragged.getRowPartitionRuntime().requireHostOffsets();
     requireDenseContiguousGpuTensor(dense, "raggedToDense dense output");
     const Tensor values = ragged.getValues();
     const Tensor offsets = ragged.getOffsets();
@@ -337,106 +322,14 @@ uint64_t bytesPerValue(const Tensor& dense) {
 
 }  // namespace
 
-RaggedFromDenseWithLengthsPlan prepareRaggedFromDenseWithLengths(const Tensor& dense,
-                                                                const Tensor& lengths,
-                                                                const Tensor& values,
-                                                                const Tensor& offsets) {
-    validateLengthsForDense(dense, lengths, values, offsets);
-
-    RaggedFromDenseWithLengthsPlan plan;
-    plan.placement = dense.getPlacement();
-    plan.valuesDataType = dense.getDataType();
-    plan.offsetsDataType = offsets.getDataType();
-    plan.batchSize = dense.getDimensions()[0];
-    plan.maxLength = dense.getDimensions()[1];
-    plan.maxTotalValues = values.getDimensions()[0];
-    plan.elementsPerValue = trailingElementsFromDense(dense);
-    plan.valueElementSizeBytes = elementSizeBytes(dense.getDataType());
-    plan.tempStorageBytes = rowPartitionLengthsToOffsetsTempBytes(lengths, offsets, plan.batchSize);
-    return plan;
-}
-
-size_t raggedFromDenseWithLengthsTempBytes(const Tensor& dense,
-                                           const Tensor& lengths,
-                                           const Tensor& values,
-                                           const Tensor& offsets) {
-    return prepareRaggedFromDenseWithLengths(dense, lengths, values, offsets).tempStorageBytes;
-}
-
-RaggedTensor raggedFromDense(const RaggedFromDenseWithLengthsPlan& plan,
-                             const Tensor& temp_storage,
-                             const Tensor& dense,
-                             const Tensor& lengths,
-                             Tensor& values,
-                             Tensor& offsets,
-                             Tensor& validation_error_bits,
-                             Stream& stream) {
-    validateLengthsForDense(dense, lengths, values, offsets);
-    if (dense.getPlacement() != plan.placement || dense.getDataType() != plan.valuesDataType ||
-        offsets.getDataType() != plan.offsetsDataType || dense.getDimensions()[0] != plan.batchSize ||
-        dense.getDimensions()[1] != plan.maxLength || values.getDimensions()[0] != plan.maxTotalValues ||
-        trailingElementsFromDense(dense) != plan.elementsPerValue || elementSizeBytes(dense.getDataType()) != plan.valueElementSizeBytes) {
-        throw std::invalid_argument("raggedFromDense tensors do not match prepared plan.");
-    }
-    validateValidationErrorBits(validation_error_bits, plan.placement);
-    if (plan.tempStorageBytes > 0) {
-        requireTempStorage(temp_storage, plan.placement, plan.tempStorageBytes);
-    }
-
-    RowPartitionLengthsToOffsetsPlan offsets_plan = prepareRowPartitionLengthsToOffsets(lengths, offsets, plan.batchSize);
-    if (offsets_plan.temp_storage_bytes > plan.tempStorageBytes) {
-        throw std::invalid_argument("raggedFromDense prepared temp storage is too small for lengths-to-offsets.");
-    }
-    offsets_plan.temp_storage_bytes = plan.tempStorageBytes;
-    rowPartitionLengthsToOffsets(offsets_plan, temp_storage, lengths, offsets, stream);
-
-    switch (offsets.getDataType()) {
-        case DataType::UINT32:
-            launchValidateDenseAdapterOffsets<uint32_t>(offsets, validation_error_bits, plan.batchSize, plan.maxLength, plan.maxTotalValues, stream);
-            break;
-        case DataType::UINT64:
-            launchValidateDenseAdapterOffsets<uint64_t>(offsets, validation_error_bits, plan.batchSize, plan.maxLength, plan.maxTotalValues, stream);
-            break;
-        default:
-            throw std::invalid_argument("raggedFromDense offsets dtype must be UINT32 or UINT64.");
-    }
-
-    const uint64_t bytes_per_value = checkedMul(plan.elementsPerValue, plan.valueElementSizeBytes, "raggedFromDense bytes_per_value");
-    switch (offsets.getDataType()) {
-        case DataType::UINT32:
-            launchDenseToRaggedValues<uint32_t>(dense, values, offsets, plan.batchSize, plan.maxLength, bytes_per_value, validation_error_bits, stream);
-            break;
-        case DataType::UINT64:
-            launchDenseToRaggedValues<uint64_t>(dense, values, offsets, plan.batchSize, plan.maxLength, bytes_per_value, validation_error_bits, stream);
-            break;
-        default:
-            throw std::invalid_argument("raggedFromDense offsets dtype must be UINT32 or UINT64.");
-    }
-    return RaggedTensor(values, offsets);
-}
-
-RaggedTensor raggedFromDense(const Tensor& temp_storage,
-                             size_t temp_storage_bytes,
-                             const Tensor& dense,
-                             const Tensor& lengths,
-                             Tensor& values,
-                             Tensor& offsets,
-                             Tensor& validation_error_bits,
-                             Stream& stream) {
-    RaggedFromDenseWithLengthsPlan plan = prepareRaggedFromDenseWithLengths(dense, lengths, values, offsets);
-    if (temp_storage_bytes < plan.tempStorageBytes) {
-        throw std::invalid_argument("raggedFromDense temp_storage_bytes is smaller than the prepared requirement.");
-    }
-    plan.tempStorageBytes = temp_storage_bytes;
-    return raggedFromDense(plan, temp_storage, dense, lengths, values, offsets, validation_error_bits, stream);
-}
-
 RaggedTensor raggedFromDense(const Tensor& dense,
                              const Tensor& offsets,
                              Tensor& values,
                              Tensor& validation_error_bits,
                              Stream& stream) {
     validateOffsetsForDense(dense, offsets, values);
+    RaggedTensor ragged(values, offsets);
+    (void)ragged.getRowPartitionRuntime().requireHostOffsets();
     const uint64_t batch_size = dense.getDimensions()[0];
     const uint64_t max_length = dense.getDimensions()[1];
     const uint64_t max_total_values = values.getDimensions()[0];
@@ -455,7 +348,7 @@ RaggedTensor raggedFromDense(const Tensor& dense,
         default:
             throw std::invalid_argument("raggedFromDense offsets dtype must be UINT32 or UINT64.");
     }
-    return RaggedTensor(values, offsets);
+    return ragged;
 }
 
 void raggedToDense(const RaggedTensor& ragged,

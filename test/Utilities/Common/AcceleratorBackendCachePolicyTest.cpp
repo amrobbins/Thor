@@ -565,3 +565,38 @@ TEST(AcceleratorBackendCachePolicy, LegacyGpuConvolutionProductionFacilityIsRemo
     EXPECT_TRUE(filesContaining(root, "GpuConvolution::instance").empty());
     EXPECT_TRUE(filesContaining(root, "ConvolutionKernelRequirement").empty());
 }
+
+TEST(AcceleratorBackendCachePolicy, RaggedSoftmaxUsesOnlyOperationLocalFixedFunctionCudnnState) {
+    const filesystem::path root = findThorSourceRoot();
+    const string header = readTextFile(root / "Utilities/TensorOperations/DeepLearning/CudnnRaggedSoftmax.h");
+    const string source = readTextFile(root / "Utilities/TensorOperations/DeepLearning/CudnnRaggedSoftmax.cpp");
+
+    EXPECT_NE(header.find("class CudnnRaggedSoftmaxExecutionState final : public AcceleratorBackendLocalExecutionStateTag"),
+              string::npos);
+    EXPECT_NE(header.find("CudnnRaggedSoftmaxExecutionState(const CudnnRaggedSoftmaxExecutionState&) = delete"), string::npos);
+    EXPECT_EQ(header.find("CudnnFrontend"), string::npos);
+    EXPECT_EQ(source.find("cudnn_frontend"), string::npos);
+    EXPECT_EQ(source.find("CudnnFrontend"), string::npos);
+    EXPECT_EQ(source.find("cudaMemcpy"), string::npos);
+    EXPECT_EQ(source.find("cudaStreamSynchronize"), string::npos);
+    EXPECT_EQ(source.find("cudaDeviceSynchronize"), string::npos);
+    EXPECT_NE(source.find("cudnnCreateTensorDescriptor"), string::npos);
+    EXPECT_NE(source.find("cudnnSetTensor4dDescriptor"), string::npos);
+    EXPECT_NE(source.find("cudnnSoftmaxForward"), string::npos);
+    EXPECT_NE(source.find("cudnnSoftmaxBackward"), string::npos);
+
+    const size_t forwardBegin = source.find("void CudnnRaggedSoftmax::forward(");
+    const size_t backwardBegin = source.find("void CudnnRaggedSoftmax::backward(");
+    ASSERT_NE(forwardBegin, string::npos);
+    ASSERT_NE(backwardBegin, string::npos);
+    ASSERT_LT(forwardBegin, backwardBegin);
+    const string forwardBody = source.substr(forwardBegin, backwardBegin - forwardBegin);
+    const string backwardBody = source.substr(backwardBegin);
+    for (const string* body : {&forwardBody, &backwardBody}) {
+        EXPECT_EQ(body->find("cudnnCreateTensorDescriptor"), string::npos);
+        EXPECT_EQ(body->find("cudnnDestroyTensorDescriptor"), string::npos);
+        EXPECT_EQ(body->find("prepare("), string::npos);
+        EXPECT_EQ(body->find("cudaMemcpy"), string::npos);
+        EXPECT_EQ(body->find("synchronize"), string::npos);
+    }
+}

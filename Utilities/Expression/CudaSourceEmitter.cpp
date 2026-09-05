@@ -232,7 +232,8 @@ static void collectRequiredNodes(const PhysicalExpression& expr, uint32_t node_i
     if (node.op == ExprOp::ROPE && node.rope_position_ids_node != UINT32_MAX) {
         collectRequiredNodes(expr, node.rope_position_ids_node, required);
     }
-    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
+    if ((Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) &&
+        node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
         collectRequiredNodes(expr, node.rhs, required);
     }
     if (Expression::isTernaryOp(node.op)) {
@@ -256,7 +257,8 @@ static void collectRequiredNodesExcludingIndexAwareChildren(const PhysicalExpres
     if (node.op == ExprOp::ROPE && node.rope_effective_sequence_length_node != UINT32_MAX) {
         collectRequiredNodesExcludingIndexAwareChildren(expr, node.rope_effective_sequence_length_node, required);
     }
-    if (Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) {
+    if ((Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) &&
+        node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
         collectRequiredNodesExcludingIndexAwareChildren(expr, node.rhs, required);
     }
     if (Expression::isTernaryOp(node.op)) {
@@ -988,9 +990,10 @@ static std::optional<DataType> getVectorizedStageStorageDTypeImpl(const Physical
 }
 
 struct RaggedValuewiseExtentEmissionSpec {
-    uint32_t offsets_input_slot = UINT32_MAX;
-    uint32_t offsets_node_idx = UINT32_MAX;
-    DataType offsets_dtype = DataType::UINT32;
+    uint32_t partition_input_slot = UINT32_MAX;
+    uint32_t partition_node_idx = UINT32_MAX;
+    DataType partition_dtype = DataType::UINT32;
+    RaggedRuntimeExtentSource source = RaggedRuntimeExtentSource::DEVICE_OFFSETS;
     uint64_t batch_size = 0;
     uint64_t max_active_values = 0;
     uint64_t elements_per_value = 1;
@@ -1051,7 +1054,7 @@ static void validateRaggedExtentStageIsolation(const StageT& stage,
             return false;
         }
         const ExprNode& candidate = stage.expr.nodes[node_idx];
-        return candidate.op == ExprOp::INPUT && candidate.input_slot == spec.offsets_input_slot;
+        return candidate.op == ExprOp::INPUT && candidate.input_slot == spec.partition_input_slot;
     };
 
     for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
@@ -1085,6 +1088,38 @@ static void validateRaggedExtentStageIsolation(const StageT& stage,
     }
 }
 
+static std::string raggedActiveValueCountLoadIndex(const RaggedValuewiseExtentEmissionSpec& extent) {
+    switch (extent.source) {
+        case RaggedRuntimeExtentSource::DEVICE_OFFSETS:
+            return std::to_string(extent.batch_size) + "ULL";
+        case RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT:
+            return "0ULL";
+        case RaggedRuntimeExtentSource::HOST_EXTENT:
+            break;
+    }
+    throw runtime_error("ragged valuewise extent has no device active-count source.");
+}
+
+static bool hasAnyRaggedValuewiseExtentMarker(const PhysicalExpression& expr) {
+    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {
+        return node.op == ExprOp::RAGGED_VALUEWISE_EXTENT;
+    });
+}
+
+static std::unordered_set<uint32_t> raggedValuewiseExtentPartitionInputSlots(const PhysicalExpression& expr) {
+    std::unordered_set<uint32_t> slots;
+    for (const ExprNode& node : expr.nodes) {
+        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT || node.rhs >= expr.nodes.size()) {
+            continue;
+        }
+        const ExprNode& partition = expr.nodes[node.rhs];
+        if (partition.op == ExprOp::INPUT && partition.input_slot < expr.inputs.size()) {
+            slots.insert(partition.input_slot);
+        }
+    }
+    return slots;
+}
+
 static std::optional<RaggedValuewiseExtentEmissionSpec> findRaggedValuewiseExtentSpec(const PhysicalExpression& expr) {
     struct MarkerSpec {
         uint32_t node_idx = UINT32_MAX;
@@ -1094,20 +1129,22 @@ static std::optional<RaggedValuewiseExtentEmissionSpec> findRaggedValuewiseExten
     std::vector<MarkerSpec> markers;
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
         const ExprNode& node = expr.nodes[node_idx];
-        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
+        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT ||
+            node.ragged_runtime_extent_source == RaggedRuntimeExtentSource::HOST_EXTENT) {
             continue;
         }
         if (node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
             throw runtime_error("ragged valuewise extent node has invalid values or offsets input.");
         }
-        const ExprNode& offsets_node = expr.nodes[node.rhs];
-        if (offsets_node.op != ExprOp::INPUT || offsets_node.input_slot >= expr.inputs.size() ||
-            expr.inputs[offsets_node.input_slot].kind != NamedInput::Kind::Tensor) {
-            throw runtime_error("ragged valuewise extent offsets must be a direct tensor input.");
+        const ExprNode& partition_node = expr.nodes[node.rhs];
+        if (partition_node.op != ExprOp::INPUT || partition_node.input_slot >= expr.inputs.size() ||
+            expr.inputs[partition_node.input_slot].kind != NamedInput::Kind::Tensor) {
+            throw runtime_error("ragged valuewise extent partition source must be a direct tensor input.");
         }
-        const DataType offsets_dtype = requireNodeInputTensorDType(offsets_node);
-        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
-            throw runtime_error("ragged valuewise extent offsets dtype must be UINT32 or UINT64.");
+        const DataType partition_dtype = requireNodeInputTensorDType(partition_node);
+        if (!isCanonicalRowPartitionOffsetDataType(partition_dtype)) {
+            throw runtime_error(
+                "device ragged valuewise extent source must use the canonical UINT32 or UINT64 row-partition dtype.");
         }
         if (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
             node.ragged_runtime_elements_per_value == 0) {
@@ -1115,9 +1152,10 @@ static std::optional<RaggedValuewiseExtentEmissionSpec> findRaggedValuewiseExten
         }
 
         RaggedValuewiseExtentEmissionSpec candidate;
-        candidate.offsets_input_slot = offsets_node.input_slot;
-        candidate.offsets_node_idx = node.rhs;
-        candidate.offsets_dtype = offsets_dtype;
+        candidate.partition_input_slot = partition_node.input_slot;
+        candidate.partition_node_idx = node.rhs;
+        candidate.partition_dtype = partition_dtype;
+        candidate.source = node.ragged_runtime_extent_source;
         candidate.batch_size = node.ragged_runtime_batch_size;
         candidate.max_active_values = node.ragged_runtime_max_active_values;
         candidate.elements_per_value = node.ragged_runtime_elements_per_value;
@@ -1132,8 +1170,9 @@ static std::optional<RaggedValuewiseExtentEmissionSpec> findRaggedValuewiseExten
     uint64_t launch_elements_per_value = partition.elements_per_value;
     for (const MarkerSpec& marker : markers) {
         const RaggedValuewiseExtentEmissionSpec& candidate = marker.spec;
-        if (partition.offsets_input_slot != candidate.offsets_input_slot || partition.offsets_dtype != candidate.offsets_dtype ||
-            partition.batch_size != candidate.batch_size || partition.max_active_values != candidate.max_active_values) {
+        if (partition.partition_input_slot != candidate.partition_input_slot || partition.partition_dtype != candidate.partition_dtype ||
+            partition.source != candidate.source || partition.batch_size != candidate.batch_size ||
+            partition.max_active_values != candidate.max_active_values) {
             throw runtime_error("one fused kernel cannot combine different ragged row partitions.");
         }
         launch_elements_per_value = std::max(launch_elements_per_value, candidate.elements_per_value);
@@ -1244,7 +1283,7 @@ std::optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const 
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
         return std::nullopt;
     }
-    if (findRaggedValuewiseExtentSpec(stage.expr).has_value()) {
+    if (hasAnyRaggedValuewiseExtentMarker(stage.expr)) {
         return std::nullopt;
     }
     return getVectorizedStageStorageDTypeImpl(stage.expr, collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
@@ -1254,7 +1293,7 @@ std::optional<DataType> CudaSourceEmitter::getVectorizedStageStorageDType(const 
     if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
         return std::nullopt;
     }
-    if (findRaggedValuewiseExtentSpec(stage.expr).has_value()) {
+    if (hasAnyRaggedValuewiseExtentMarker(stage.expr)) {
         return std::nullopt;
     }
     return getVectorizedStageStorageDTypeImpl(stage.expr, collectInputSlotDTypes(stage.expr), collectOutputDTypes(stage));
@@ -1504,7 +1543,7 @@ uint32_t CudaSourceEmitter::flatElementsPerThread(const PhysicalExecutionStage& 
     if (stage.kind != PhysicalExecutionStage::Kind::FusedKernel) {
         return 1;
     }
-    if (findRaggedValuewiseExtentSpec(stage.expr).has_value()) {
+    if (hasAnyRaggedValuewiseExtentMarker(stage.expr)) {
         return 1;
     }
     if (stageHasTransposedMaterializedOutput(stage.outputs)) {
@@ -6872,8 +6911,8 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
     std::string scalar_indent = "  ";
     if (ragged_extent.has_value()) {
         const auto& extent = ragged_extent.value();
-        ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.offsets_input_slot << "["
-           << extent.batch_size << "ULL]);\n";
+        ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.partition_input_slot << "["
+           << raggedActiveValueCountLoadIndex(extent) << "]);\n";
         ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
            << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
         ss << "  const unsigned long long runtime_numel_u64 = active_values * " << extent.elements_per_value << "ULL;\n";
@@ -6889,12 +6928,16 @@ std::string CudaSourceEmitter::emitFlat(const PhysicalExecutionStage& stage, con
         ss << "  if (idx >= numel) return;";
     }
 
-    const std::unordered_set<uint32_t> index_aware_skip_nodes = collectIndexAwareInputNodesToSkipForFlatOutput(stage.expr, stage.outputs);
+    const std::unordered_set<uint32_t> structuralPartitionInputSlots =
+        raggedValuewiseExtentPartitionInputSlots(stage.expr);
+    const std::unordered_set<uint32_t> index_aware_skip_nodes =
+        collectIndexAwareInputNodesToSkipForFlatOutput(stage.expr, stage.outputs);
     for (uint32_t node_idx = 0; node_idx < stage.expr.nodes.size(); ++node_idx) {
         const ExprNode& node = stage.expr.nodes[node_idx];
-        const bool is_extent_offsets_input = ragged_extent.has_value() && node.op == ExprOp::INPUT &&
-                                             node.input_slot == ragged_extent->offsets_input_slot;
-        if (is_extent_offsets_input || index_aware_skip_nodes.contains(node_idx) || !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
+        const bool isStructuralPartitionInput =
+            node.op == ExprOp::INPUT && structuralPartitionInputSlots.contains(node.input_slot);
+        if (isStructuralPartitionInput || index_aware_skip_nodes.contains(node_idx) ||
+            !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
             continue;
         }
         emitScalarNode(ss, stage.expr, node_idx, /*broadcast_support=*/false, scalar_indent);
@@ -7878,8 +7921,8 @@ static std::string emitTiledLogicalTransposeConsumerSpecializedBroadcast(const C
     ss << ") {\n";
     if (ragged_extent.has_value()) {
         const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
-        ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.offsets_input_slot << "["
-           << extent.batch_size << "ULL]);\n";
+        ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.partition_input_slot << "["
+           << raggedActiveValueCountLoadIndex(extent) << "]);\n";
         ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
            << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
         ss << "  const " << index_type << " thread_idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
@@ -8025,8 +8068,8 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
     ss << ") {\n";
     if (ragged_extent.has_value()) {
         const RaggedValuewiseExtentEmissionSpec& extent = ragged_extent.value();
-        ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.offsets_input_slot << "["
-           << extent.batch_size << "ULL]);\n";
+        ss << "  const unsigned long long active_values_raw = static_cast<unsigned long long>(in" << extent.partition_input_slot << "["
+           << raggedActiveValueCountLoadIndex(extent) << "]);\n";
         ss << "  const unsigned long long active_values = active_values_raw < " << extent.max_active_values
            << "ULL ? active_values_raw : " << extent.max_active_values << "ULL;\n";
         ss << "  const " << index_type << " thread_idx = " << emitFlatThreadIndexExpr(use_uint32_index_math) << ";\n";
@@ -8073,7 +8116,7 @@ std::string CudaSourceEmitter::emitSpecializedBroadcast(const CompiledExecutionS
         for (uint32_t node_idx : required_nodes) {
             const ExprNode& node = stage.expr.nodes.at(node_idx);
             const bool is_extent_offsets_input = ragged_extent.has_value() && node.op == ExprOp::INPUT &&
-                                                 node.input_slot == ragged_extent->offsets_input_slot;
+                                                 node.input_slot == ragged_extent->partition_input_slot;
             if (is_extent_offsets_input || !shouldEmitScalarNodeDefinition(stage.expr, node_idx)) {
                 continue;
             }

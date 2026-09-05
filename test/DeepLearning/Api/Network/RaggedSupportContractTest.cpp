@@ -179,6 +179,31 @@ TEST(RaggedSupportContract, CanonicalBoundaryCoversOffsetWidthsPoisonAllEmptyAnd
     }
 }
 
+
+TEST(RaggedSupportContract, PartitionOwningGpuSubmissionRequiresAuthoritativeHostPartition) {
+    if (!cudaAvailable()) GTEST_SKIP() << "CUDA device required for ragged support contract runtime coverage.";
+
+    Api::Network network("ragged_support_contract_gpu_host_partition_required");
+    (void)buildIdentityRaggedNetwork(network, DataType::UINT32);
+    std::shared_ptr<Api::PlacedNetwork> placed = placeIdentityRaggedNetwork(network);
+    ASSERT_NE(placed, nullptr);
+
+    const Impl::TensorPlacement gpuPlacement(Impl::TensorPlacement::MemDevices::GPU, 0);
+    Impl::Tensor values(gpuPlacement, Impl::TensorDescriptor(DataType::FP32, {kMaxTotalValues, kWidth}));
+    Impl::Tensor offsets(gpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {kBatchSize + 1}));
+
+    Batch batch;
+    batch.insert("tokens", Impl::RaggedTensor(values, offsets));
+    try {
+        (void)placed->inferLogical(batch);
+        FAIL() << "Expected a GPU-only ragged submission without authoritative host offsets to be rejected.";
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("no authoritative host row partition"), std::string::npos);
+        EXPECT_NE(message.find("device-to-host"), std::string::npos);
+    }
+}
+
 TEST(RaggedSupportContract, SaveLoadDoesNotPersistRuntimeExtentAndLoadedModelAcceptsDifferentPartition) {
     if (!cudaAvailable()) GTEST_SKIP() << "CUDA device required for ragged support contract runtime coverage.";
 
@@ -192,8 +217,8 @@ TEST(RaggedSupportContract, SaveLoadDoesNotPersistRuntimeExtentAndLoadedModelAcc
         std::shared_ptr<Api::PlacedNetwork> sourcePlaced = placeIdentityRaggedNetwork(source);
         ASSERT_NE(sourcePlaced, nullptr);
 
-        // Populate the runtime cache with a short partition before saving. That
-        // payload-derived extent must not become serialized model state.
+        // Publish a short runtime host partition before saving. Runtime partition
+        // state must not become serialized model state.
         runIdentityCase(*sourcePlaced, DataType::UINT64, {0, 1, 2}, 50.0f);
         sourcePlaced->save(archiveDir.string(), /*overwrite=*/true, /*saveOptimizerState=*/false);
 
@@ -208,7 +233,7 @@ TEST(RaggedSupportContract, SaveLoadDoesNotPersistRuntimeExtentAndLoadedModelAcc
         ASSERT_NE(loadedPlaced, nullptr);
 
         // A newly placed loaded model must derive state from the newly submitted
-        // partition, not from the short active count that preceded save().
+        // partition, not from the short host partition that preceded save().
         runIdentityCase(*loadedPlaced, DataType::UINT64, {0, 3, 6}, 60.0f);
         runIdentityCase(*loadedPlaced, DataType::UINT64, {0, 1, 2}, 70.0f);
     } catch (...) {

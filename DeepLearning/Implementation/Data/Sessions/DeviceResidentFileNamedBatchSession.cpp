@@ -752,8 +752,7 @@ Batch DeviceResidentFileNamedBatchSession::acquireBatch(
                     descriptor.getMaxTotalValues(),
                     descriptor.getMaxValuesPerRowOrZero());
                 RowPartitionRuntime& rowPartition = raggedSlot->raggedTensors.at(fieldName).getRowPartitionRuntime();
-                rowPartition.setHostActiveValueCount(extent.activeValueCount);
-                rowPartition.setHostMaxActiveRowLength(extent.maxActiveRowLength);
+                rowPartition.setHostOffsets(extent.hostOffsets);
             }
         }
 

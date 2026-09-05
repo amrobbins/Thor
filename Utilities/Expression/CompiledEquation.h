@@ -9,6 +9,7 @@
 #include "CudaHelpers.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Expression/Expression.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 namespace ThorImplementation {
 
@@ -80,8 +81,12 @@ struct CompiledEquation {
     bool uses_uint32_numel_arg = false;
     bool uses_uint32_tiled_transpose_index_math = true;
     // True only for explicitly marked ragged valuewise kernels. Such kernels
-    // compute logical numel from offsets[B] on device and use a grid-stride loop.
+    // compute logical numel from their explicit device partition input and use
+    // a grid-stride loop. The source tag is part of the compiled physical
+    // contract: legacy kernels read offsets[B], while RP6B.7 kernels read the
+    // managed active-count scalar at [0].
     bool uses_device_runtime_extent = false;
+    RaggedRuntimeExtentSource device_runtime_extent_source = RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT;
 
     // Debug/test metadata for the tiled logical-transpose consumer auto-swizzle path.
     // These are intentionally not consulted by the runtime launcher; they let tests
@@ -100,6 +105,13 @@ struct CompiledEquation {
     uint64_t numInputs() { return input_kinds.size(); }
     uint64_t numInputs() const { return input_kinds.size(); }
     uint64_t numOutputs() const { return output_dtypes.size(); }
+
+    [[nodiscard]] RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        if (!uses_device_runtime_extent) return RaggedPartitionRequirement::NONE;
+        return device_runtime_extent_source == RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT
+            ? RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT
+            : RaggedPartitionRequirement::DEVICE_OFFSETS;
+    }
 
     CompiledEquation() = default;
     CompiledEquation(const CompiledEquation&) = delete;
@@ -156,6 +168,10 @@ struct CompiledSegmentedReduction {
     DataType offset_dtype = DataType::UINT32;
     uint64_t elements_per_value = 1;
 
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return RaggedPartitionRequirement::DEVICE_OFFSETS;
+    }
+
     bool operator==(const CompiledSegmentedReduction& other) const = default;
 
     CompiledSegmentedReduction(ExprOp op,
@@ -177,6 +193,10 @@ struct CompiledSegmentedBroadcast {
     uint64_t max_output_values = 0;
     uint64_t elements_per_value = 1;
     bool normalize_by_segment_length = false;
+
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return RaggedPartitionRequirement::DEVICE_OFFSETS;
+    }
 
     bool operator==(const CompiledSegmentedBroadcast& other) const = default;
 
@@ -224,6 +244,10 @@ struct CompiledRaggedConv1dCausal {
     int32_t dilation = 1;
     CompiledPaddedRaggedSequenceLayout padded_input_layout;
     CompiledPaddedRaggedSequenceLayout padded_output_layout;
+
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return RaggedPartitionRequirement::HOST_EXTENT | RaggedPartitionRequirement::DEVICE_OFFSETS;
+    }
 
     bool operator==(const CompiledRaggedConv1dCausal& other) const = default;
 
@@ -273,6 +297,10 @@ struct CompiledRaggedConv1dCausalBackwardData {
     int32_t dilation = 1;
     CompiledPaddedRaggedSequenceLayout padded_grad_output_layout;
     CompiledPaddedRaggedSequenceLayout padded_output_layout;
+
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return RaggedPartitionRequirement::HOST_EXTENT | RaggedPartitionRequirement::DEVICE_OFFSETS;
+    }
 
     bool operator==(const CompiledRaggedConv1dCausalBackwardData& other) const = default;
 
@@ -328,6 +356,10 @@ struct CompiledRaggedConv1dCausalBackwardFilter {
     CompiledPaddedRaggedSequenceLayout padded_input_layout;
     CompiledPaddedRaggedSequenceLayout padded_grad_output_layout;
 
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return RaggedPartitionRequirement::HOST_EXTENT | RaggedPartitionRequirement::DEVICE_OFFSETS;
+    }
+
     bool operator==(const CompiledRaggedConv1dCausalBackwardFilter& other) const = default;
 
     CompiledRaggedConv1dCausalBackwardFilter(DataType input_dtype,
@@ -375,6 +407,10 @@ struct CompiledScan {
     const DataType output_dtype;
     const std::optional<DataType> offset_dtype;
 
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return segmented_by_offsets ? RaggedPartitionRequirement::DEVICE_OFFSETS : RaggedPartitionRequirement::NONE;
+    }
+
     bool operator==(const CompiledScan& other) const = default;
 
     CompiledScan(ScanOp op,
@@ -407,6 +443,10 @@ struct CompiledScanMinMaxBackward {
     const DataType output_dtype;
     const std::optional<DataType> offset_dtype;
 
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return segmented_by_offsets ? RaggedPartitionRequirement::DEVICE_OFFSETS : RaggedPartitionRequirement::NONE;
+    }
+
     bool operator==(const CompiledScanMinMaxBackward& other) const = default;
 
     CompiledScanMinMaxBackward(ScanOp value_op,
@@ -434,14 +474,37 @@ struct CompiledSoftmax {
     const cudnnSoftmaxMode_t mode;
     const DataType input_dtype;
     const DataType output_dtype;
+    const bool backward;
+    const uint32_t ragged_offsets_input_slot;
+    const uint64_t ragged_batch_size;
+    const uint64_t ragged_max_active_values;
+    const uint64_t ragged_elements_per_value;
+
+    [[nodiscard]] bool isRagged() const noexcept { return ragged_offsets_input_slot != UINT32_MAX; }
+    [[nodiscard]] RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return isRagged() ? RaggedPartitionRequirement::HOST_EXTENT : RaggedPartitionRequirement::NONE;
+    }
 
     bool operator==(const CompiledSoftmax& other) const = default;
 
     CompiledSoftmax(cudnnSoftmaxAlgorithm_t algorithm,
                     cudnnSoftmaxMode_t mode,
                     DataType input_dtype,
-                    DataType output_dtype)
-        : algorithm(algorithm), mode(mode), input_dtype(input_dtype), output_dtype(output_dtype) {}
+                    DataType output_dtype,
+                    bool backward = false,
+                    uint32_t ragged_offsets_input_slot = UINT32_MAX,
+                    uint64_t ragged_batch_size = 0,
+                    uint64_t ragged_max_active_values = 0,
+                    uint64_t ragged_elements_per_value = 0)
+        : algorithm(algorithm),
+          mode(mode),
+          input_dtype(input_dtype),
+          output_dtype(output_dtype),
+          backward(backward),
+          ragged_offsets_input_slot(ragged_offsets_input_slot),
+          ragged_batch_size(ragged_batch_size),
+          ragged_max_active_values(ragged_max_active_values),
+          ragged_elements_per_value(ragged_elements_per_value) {}
 };
 
 struct CompiledArgMinMax {
@@ -484,6 +547,10 @@ struct CompiledReduceMinMaxBackward {
     const DataType compute_dtype;
     const bool segmented_by_offsets;
     const std::optional<DataType> offset_dtype;
+
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return segmented_by_offsets ? RaggedPartitionRequirement::DEVICE_OFFSETS : RaggedPartitionRequirement::NONE;
+    }
 
     bool operator==(const CompiledReduceMinMaxBackward& other) const = default;
 
@@ -674,6 +741,11 @@ struct CompiledMatmul {
     const uint64_t ragged_batch_size;
     const std::optional<DataType> epilogue_aux_dtype;
     const std::optional<DataType> bgrad_output_dtype;
+
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return ragged_offsets_input_slot != UINT32_MAX ? RaggedPartitionRequirement::HOST_EXTENT
+                                                       : RaggedPartitionRequirement::NONE;
+    }
 
     bool operator==(const CompiledMatmul& other) const = default;
 

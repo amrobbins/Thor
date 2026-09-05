@@ -26,8 +26,19 @@ class BinaryAccuracy(Metric):
     labels : thor.Tensor
     """
 
+    @overload
     def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor) -> None:
         """Construct a Binary Accuracy metric."""
+
+    @overload
+    def __init__(self, network: thor.Network, predictions: thor.RaggedTensor, labels: thor.RaggedTensor) -> None:
+        """Construct a Binary Accuracy metric over same-partition ragged tokens."""
+
+    @property
+    def ragged_predictions(self) -> thor.RaggedTensor | None: ...
+
+    @property
+    def ragged_labels(self) -> thor.RaggedTensor | None: ...
 
 class CategoricalAccuracy(Metric):
     """
@@ -40,8 +51,21 @@ class CategoricalAccuracy(Metric):
     labels : thor.Tensor
     """
 
+    @overload
     def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, label_type: thor.losses.LabelType, num_classes: int | None = None) -> None:
         """Construct a Categorical Accuracy metric."""
+
+    @overload
+    def __init__(self, network: thor.Network, predictions: thor.RaggedTensor, labels: thor.RaggedTensor, label_type: thor.losses.LabelType, num_classes: int | None = None) -> None:
+        """
+        Construct a Categorical Accuracy metric over same-partition ragged tokens.
+        """
+
+    @property
+    def ragged_predictions(self) -> thor.RaggedTensor | None: ...
+
+    @property
+    def ragged_labels(self) -> thor.RaggedTensor | None: ...
 
 class CustomMetric(Metric):
     """
@@ -114,8 +138,12 @@ class Sum(Metric):
     def ragged_values(self) -> thor.RaggedTensor | None: ...
 
 class Min(Metric):
+    @overload
     def __init__(self, network: thor.Network, values: thor.Tensor) -> None:
-        """Construct a Min metric over a values tensor."""
+        """Construct a Min metric over dense or ragged values."""
+
+    @overload
+    def __init__(self, network: thor.Network, values: thor.RaggedTensor) -> None: ...
 
     @property
     def values(self) -> thor.Tensor: ...
@@ -124,8 +152,12 @@ class Min(Metric):
     def ragged_values(self) -> thor.RaggedTensor | None: ...
 
 class Max(Metric):
+    @overload
     def __init__(self, network: thor.Network, values: thor.Tensor) -> None:
-        """Construct a Max metric over a values tensor."""
+        """Construct a Max metric over dense or ragged values."""
+
+    @overload
+    def __init__(self, network: thor.Network, values: thor.RaggedTensor) -> None: ...
 
     @property
     def values(self) -> thor.Tensor: ...
@@ -134,14 +166,27 @@ class Max(Metric):
     def ragged_values(self) -> thor.RaggedTensor | None: ...
 
 class WeightedMean(Metric):
+    @overload
     def __init__(self, network: thor.Network, values: thor.Tensor, weights: thor.Tensor) -> None:
-        """Construct a WeightedMean metric over values and weights tensors."""
+        """Construct a WeightedMean metric over dense values and weights tensors."""
+
+    @overload
+    def __init__(self, network: thor.Network, values: thor.RaggedTensor, weights: thor.RaggedTensor) -> None:
+        """
+        Construct a WeightedMean metric over same-partition ragged values and weights.
+        """
 
     @property
     def values(self) -> thor.Tensor: ...
 
     @property
     def weights(self) -> thor.Tensor: ...
+
+    @property
+    def ragged_values(self) -> thor.RaggedTensor | None: ...
+
+    @property
+    def ragged_weights(self) -> thor.RaggedTensor | None: ...
 
 mean_squared_error: thor._thor.metrics.LossFormula = thor._thor.metrics.LossFormula.mean_squared_error
 

@@ -38,8 +38,8 @@ void requireCompatibleDense(const Tensor& left, const Tensor& right) {
 }
 
 void requireCompatibleRagged(const RaggedTensor& left, const RaggedTensor& right) {
-    if (left.getOffsets() != right.getOffsets()) {
-        throw std::invalid_argument("Add RaggedTensor inputs must share the exact same offsets tensor.");
+    if (!left.sharesPartitionWith(right)) {
+        throw std::invalid_argument("Add RaggedTensor inputs must share the exact same row partition.");
     }
     if (left.getDescriptor() != right.getDescriptor()) {
         throw std::invalid_argument("Add RaggedTensor inputs must have identical row partitions, value shapes, and dtypes.");
@@ -135,8 +135,14 @@ std::shared_ptr<ThorImplementation::Layer> Add::stamp(
     if (raggedLeft.has_value()) {
         THOR_THROW_IF_FALSE(raggedRight.has_value() && raggedOutput.has_value());
         Expression offsets = Expression::input("offsets");
-        RaggedExpression left(Expression::input("left"), offsets, raggedLeft->getDescriptor());
-        RaggedExpression right(Expression::input("right"), offsets, raggedRight->getDescriptor());
+        RaggedExpression left(Expression::input("left"),
+                              offsets,
+                              raggedLeft->getDescriptor(),
+                              ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+        RaggedExpression right(Expression::input("right"),
+                               offsets,
+                               raggedRight->getDescriptor(),
+                               ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
         RaggedExpression output = left + right;
         ExpressionDefinition definition = ExpressionDefinition::fromOutputs(
             Expression::outputs({{"feature_output", output.getValues()}}));

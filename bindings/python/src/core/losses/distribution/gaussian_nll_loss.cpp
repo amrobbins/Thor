@@ -114,8 +114,8 @@ void validateRaggedGaussianNLLLossArguments(const string& lossName,
         throw nb::value_error("GaussianNLLLoss instance: labels must use fp16 or fp32 dtype");
     if (!isFloatingDType(variance.getValuesDataType()))
         throw nb::value_error("GaussianNLLLoss instance: variance must use fp16 or fp32 dtype");
-    if (predictions.getOffsets() != labels.getOffsets() || predictions.getOffsets() != variance.getOffsets())
-        throw nb::value_error("GaussianNLLLoss instance: ragged predictions, labels, and variance must use the exact same row partition tensor.");
+    if (!predictions.sharesPartitionWith(labels) || !predictions.sharesPartitionWith(variance))
+        throw nb::value_error("GaussianNLLLoss instance: ragged predictions, labels, and variance must use the exact same row partition.");
     if (predictions.getBatchSize() != labels.getBatchSize() || predictions.getBatchSize() != variance.getBatchSize() ||
         predictions.getMaxTotalValues() != labels.getMaxTotalValues() || predictions.getMaxTotalValues() != variance.getMaxTotalValues() ||
         predictions.getTrailingDimensions() != labels.getTrailingDimensions() ||

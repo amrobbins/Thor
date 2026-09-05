@@ -34,6 +34,7 @@ class MetricEpochAccumulator {
     long double accumulatedNumerator = 0.0L;
     long double accumulatedDenominator = 0.0L;
     double extremum = 0.0;
+    std::optional<bool> ratioZeroDenominatorMeansNoContribution{};
 };
 
 /**

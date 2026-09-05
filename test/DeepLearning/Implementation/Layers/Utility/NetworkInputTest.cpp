@@ -137,6 +137,17 @@ void expectAllEqual(const vector<float> &values, float expected) {
     }
 }
 
+class ManagedHostTestNetworkInput : public NetworkInput {
+   public:
+    using NetworkInput::NetworkInput;
+
+    void gateUploadStream(const shared_ptr<HostGate>& gate) {
+        loadStream.enqueueHostFunction(
+            &waitForHostGate,
+            std::make_unique<WaitForHostGateArgs>(gate));
+    }
+};
+
 
 class CopyTensorDeviceBatchMaterializer : public Thor::DeviceBatchMaterializer {
    public:
@@ -812,6 +823,112 @@ TEST(NetworkInput, DeviceReferenceAccessPolicyCacheRefreshesWhenManagerGeneratio
     expectAllEqual(capture.readCapture(0), 7.0f);
     expectAllEqual(capture.readCapture(1), 7.0f);
     expectAllEqual(capture.readCapture(2), 7.0f);
+}
+
+TEST(NetworkInput, ManagedHostPartitionSourceCannotBeOverwrittenBeforeAsyncUploadConsumesSlot) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput managed-host lifetime test requires a GPU";
+    }
+
+    constexpr uint64_t batchSize = 3;
+    const RowPartitionDescriptor descriptor(batchSize, 8, DataType::UINT32, 4);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    ManagedHostTestNetworkInput input(
+        gpuPlacement, DataType::UINT32, descriptor.getOffsetsDescriptor().getDimensions());
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+    input.preallocateInputSlots(2);
+
+    auto uploadGate = make_shared<HostGate>();
+    input.gateUploadStream(uploadGate);
+
+    input.setActiveInputSlot(0);
+    input.forwardManagedRowPartitionOffsets(
+        false, descriptor, static_cast<uint32_t>(batchSize), {0, 1, 3, 4});
+
+    // A different slot owns different CPU source storage. Its submission must not
+    // wait for slot zero's generated source to be consumed (both copies remain
+    // queued behind the deliberately stalled upload stream).
+    input.setActiveInputSlot(1);
+    auto otherSlot = async(launch::async, [&] {
+        input.forwardManagedRowPartitionOffsets(
+            false, descriptor, static_cast<uint32_t>(batchSize), {0, 2, 5, 6});
+    });
+    EXPECT_EQ(otherSlot.wait_for(chrono::milliseconds(250)), future_status::ready);
+    otherSlot.get();
+
+    // Reusing slot zero would overwrite the pinned CPU bytes from the first
+    // submission. It must block until the first H2D copy has consumed them.
+    input.setActiveInputSlot(0);
+    auto sameSlot = async(launch::async, [&] {
+        input.forwardManagedRowPartitionOffsets(
+            false, descriptor, static_cast<uint32_t>(batchSize), {0, 3, 4, 7});
+    });
+    EXPECT_EQ(sameSlot.wait_for(chrono::milliseconds(250)), future_status::timeout);
+
+    releaseHostGate(uploadGate);
+    EXPECT_EQ(sameSlot.wait_for(chrono::seconds(2)), future_status::ready);
+    sameSlot.get();
+
+    for (Event event : input.getSynchronizeEvents()) event.synchronize();
+    ASSERT_TRUE(input.getFeatureOutput().has_value());
+    RowPartitionRuntime published(input.getFeatureOutput().value(), descriptor);
+    EXPECT_EQ(published.requireHostOffsets(), (vector<uint64_t>{0, 3, 4, 7}));
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor downloaded(cpuPlacement, descriptor.getOffsetsDescriptor());
+    Stream downloadStream(0);
+    downloaded.copyFromAsync(input.getFeatureOutput().value(), downloadStream);
+    downloadStream.synchronize();
+    const uint32_t* downloadedOffsets = downloaded.getMemPtr<uint32_t>();
+    EXPECT_EQ(downloadedOffsets[0], 0u);
+    EXPECT_EQ(downloadedOffsets[1], 3u);
+    EXPECT_EQ(downloadedOffsets[2], 4u);
+    EXPECT_EQ(downloadedOffsets[3], 7u);
+}
+
+TEST(NetworkInput, ManagedActiveCountPublishesScalarAndLogicalPartitionState) {
+    if (MachineEvaluator::instance().getNumGpus() == 0) {
+        GTEST_SKIP() << "NetworkInput managed active-count test requires a GPU";
+    }
+
+    constexpr uint64_t batchSize = 3;
+    constexpr RowPartitionId logicalPartitionId = 0x6B000001ULL;
+    const RowPartitionDescriptor descriptor(batchSize, 8, DataType::UINT32, 4);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    ManagedHostTestNetworkInput input(
+        gpuPlacement, DataType::UINT32, vector<uint64_t>{1});
+    RuntimeForwardedInputCaptureLayer capture;
+    input.connectToNextLayer(&capture);
+    input.preallocateInputSlots(1);
+    input.setActiveInputSlot(0);
+
+    input.forwardManagedRowPartitionActiveCount(
+        false,
+        descriptor,
+        static_cast<uint32_t>(batchSize),
+        {0, 1, 3, 6},
+        logicalPartitionId);
+
+    for (Event event : input.getSynchronizeEvents()) event.synchronize();
+    ASSERT_TRUE(input.getFeatureOutput().has_value());
+    Tensor physicalActiveCount = input.getFeatureOutput().value();
+    EXPECT_EQ(physicalActiveCount.getDescriptor(), TensorDescriptor(DataType::UINT32, {1}));
+
+    RowPartitionRuntime published =
+        RowPartitionRuntime::fromHostStateCarrier(physicalActiveCount, descriptor);
+    EXPECT_EQ(published.getRowPartitionId(), logicalPartitionId);
+    EXPECT_FALSE(published.hasDeviceOffsetsRepresentation());
+    EXPECT_EQ(published.requireHostOffsets(), (vector<uint64_t>{0, 1, 3, 6}));
+    EXPECT_EQ(published.requireHostActiveValueCount(), 6u);
+    EXPECT_EQ(published.requireHostMaxActiveRowLength(), 3u);
+
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor downloaded(cpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
+    Stream downloadStream(0);
+    downloaded.copyFromAsync(physicalActiveCount, downloadStream);
+    downloadStream.synchronize();
+    EXPECT_EQ(downloaded.getMemPtr<uint32_t>()[0], 6u);
 }
 
 TEST(NetworkInput, DeviceReferenceUsesReferenceRingAndMaterializesDirectlyIntoFeatureOutput) {

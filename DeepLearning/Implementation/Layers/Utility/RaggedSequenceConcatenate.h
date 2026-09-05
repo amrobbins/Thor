@@ -7,6 +7,7 @@
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Ragged/RaggedSequenceConcatenate.h"
+#include "Utilities/TensorOperations/Ragged/RowPartition.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -26,8 +27,8 @@ namespace ThorImplementation {
 // structural offset ports, allowing distinct sequence values to share an exact
 // canonical row partition without requiring duplicate graph edges.
 //
-// Output connection type 0 is packed values and 1 is the newly-produced offsets
-// tensor. Only output 0 participates in autodiff.
+// Output connection type 0 is packed values and 1 is the host-derived offsets
+// tensor materialized for GPU consumers. Only output 0 participates in autodiff.
 class RaggedSequenceConcatenate : public MultiConnectionLayer {
    public:
     RaggedSequenceConcatenate(uint32_t valueInputCount,
@@ -144,12 +145,9 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         for (uint32_t d = 1; d < dimensions.size(); ++d) elementsPerValue *= dimensions[d];
 
         RowPartitionRuntime outputPartition(featureOutputs[1].value(), outputDescriptor.getRowPartition());
-        outputPartition.clearHostOffsets();
-        outputPartition.clearHostActiveValueCount();
-        outputPartition.clearHostMaxActiveRowLength();
+        publishAndUploadOutputHostPartition(outputPartition, streams[0]);
 
         launchRaggedSequenceConcatenate(featureOutputs[0]->getMemPtr(),
-                                        featureOutputs[1]->getMemPtr(),
                                         valueInputPointers_d,
                                         sequenceOffsetPointers_d,
                                         valueInputCount,
@@ -158,7 +156,6 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
                                         TensorDescriptor::getElementSizeInBytes(outputDescriptor.getOffsetsDataType()),
                                         batchSize,
                                         streams[0]);
-        publishOutputHostPartition(outputPartition);
 
         streams[0].putEvent(outputsReadyEvent);
         for (uint32_t outputIndex = 0; outputIndex < 2; ++outputIndex) {
@@ -362,7 +359,7 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         stream.enqueueHostFunction(&releasePointerRefresh, std::move(args));
     }
 
-    void publishOutputHostPartition(RowPartitionRuntime& outputPartition) {
+    void publishAndUploadOutputHostPartition(RowPartitionRuntime& outputPartition, Stream& stream) {
         const uint64_t batchSize = outputDescriptor.getBatchSize();
         std::vector<std::vector<uint64_t>> inputHostOffsets;
         inputHostOffsets.reserve(valueInputCount);
@@ -372,9 +369,7 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
             RowPartitionRuntime inputPartition(
                 featureInputs[valueInputCount + offsetPortForInput[i]].value(),
                 RowPartitionDescriptor(batchSize, dimensions[0], outputDescriptor.getOffsetsDataType()));
-            const std::optional<std::vector<uint64_t>> hostOffsets = inputPartition.getHostOffsetsIfAvailable();
-            if (!hostOffsets.has_value()) return;
-            inputHostOffsets.push_back(hostOffsets.value());
+            inputHostOffsets.push_back(inputPartition.requireHostOffsets());
         }
 
         std::vector<uint64_t> outputHostOffsets(batchSize + 1, 0);
@@ -388,7 +383,8 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
             outputHostOffsets[boundary] = sum;
         }
         THOR_THROW_IF_FALSE(outputHostOffsets.back() <= outputDescriptor.getMaxTotalValues());
-        outputPartition.setHostOffsets(std::move(outputHostOffsets));
+        outputPartition.setHostOffsets(outputHostOffsets);
+        rowPartitionUploadHostOffsets(outputHostOffsets, featureOutputs[1].value(), batchSize, stream);
     }
 
     void pruneUpstreamValueGradients() {

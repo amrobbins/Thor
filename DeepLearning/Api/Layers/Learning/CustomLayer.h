@@ -83,6 +83,8 @@ class CustomLayer : public TrainableLayer {
     // Graph bookkeeping
     std::shared_ptr<Layer> clone() const override { return std::make_shared<CustomLayer>(*this); }
     int getConnectionType(Tensor connectingTensor) const override;
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override;
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
     bool mustConnectAllInputsToDriveOutput() const override { return true; }
     void informThatInputConnectionMade(Tensor inputTensor) override;

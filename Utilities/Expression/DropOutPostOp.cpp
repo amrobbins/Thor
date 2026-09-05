@@ -48,10 +48,10 @@ __device__ __forceinline__ ThorDropoutStorage thor_dropout_store(ThorDropoutAccu
     }
 }
 
-std::string offsetPrelude(DataType offsetsDataType, const std::string& debugName) {
-    if (offsetsDataType == DataType::UINT32) return "typedef uint32_t ThorDropoutOffset;\n";
-    if (offsetsDataType == DataType::UINT64) return "typedef uint64_t ThorDropoutOffset;\n";
-    throw std::invalid_argument(debugName + " ragged dropout post-op offsets must use UINT32 or UINT64.");
+std::string partitionPrelude(DataType partitionDataType, const std::string& debugName) {
+    if (partitionDataType == DataType::UINT32) return "typedef uint32_t ThorDropoutPartitionValue;\n";
+    if (partitionDataType == DataType::UINT64) return "typedef uint64_t ThorDropoutPartitionValue;\n";
+    throw std::invalid_argument(debugName + " ragged dropout post-op partition carrier must use UINT32 or UINT64.");
 }
 
 std::string philoxSource() {
@@ -154,10 +154,11 @@ CudaKernelExpression makeDropOutPostOpKernel(DataType dataType,
                                              float probability,
                                              bool useResidual,
                                              bool ragged,
-                                             DataType offsetsDataType,
+                                             DataType partitionDataType,
                                              uint64_t raggedBatchSize,
                                              uint64_t featuresPerValue,
-                                             const std::string& debugName) {
+                                             const std::string& debugName,
+                                             RaggedRuntimeExtentSource raggedRuntimeExtentSource) {
     if (!std::isfinite(probability) || probability <= 0.0f || probability >= 1.0f) {
         throw std::invalid_argument(debugName + " dropout post-op requires probability in (0, 1).");
     }
@@ -169,24 +170,31 @@ CudaKernelExpression makeDropOutPostOpKernel(DataType dataType,
 
     const std::string kernelName = kernelNameForDebugName(debugName);
     const std::string typePrelude = storagePrelude(dataType, debugName);
-    const std::string offsetsPrelude = ragged ? offsetPrelude(offsetsDataType, debugName) : std::string{};
+    const std::string partitionTypePrelude = ragged ? partitionPrelude(partitionDataType, debugName) : std::string{};
     const std::string philox = philoxSource();
     const std::string residualParam = useResidual ? ", const ThorDropoutStorage* residual" : "";
-    const std::string offsetsParam = ragged ? ", const ThorDropoutOffset* offsets" : "";
-    const std::string activeExpression = ragged
-        ? "static_cast<uint64_t>(offsets[batch]) * static_cast<uint64_t>(features_per_value)"
-        : "static_cast<uint64_t>(num_elements)";
+    const bool useManagedActiveCount =
+        ragged && raggedRuntimeExtentSource == RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT;
+    const std::string partitionParam = !ragged
+        ? ""
+        : (useManagedActiveCount ? ", const ThorDropoutPartitionValue* active_count"
+                                 : ", const ThorDropoutPartitionValue* offsets");
+    const std::string activeExpression = !ragged
+        ? "static_cast<uint64_t>(num_elements)"
+        : (useManagedActiveCount
+               ? "static_cast<uint64_t>(active_count[0]) * static_cast<uint64_t>(features_per_value)"
+               : "static_cast<uint64_t>(offsets[batch]) * static_cast<uint64_t>(features_per_value)");
     const std::string residualVectorLoad = useResidual
         ? "const ThorDropoutVector4 residual_values = reinterpret_cast<const ThorDropoutVector4*>(residual)[group];"
         : "";
     const std::string residualValueVector = useResidual ? " + thor_dropout_load(residual_values.values[lane])" : "";
     const std::string residualValueScalar = useResidual ? " + thor_dropout_load(residual[index])" : "";
 
-    const std::string forwardSource = typePrelude + offsetsPrelude + philox + R"cuda(
+    const std::string forwardSource = typePrelude + partitionTypePrelude + philox + R"cuda(
 extern "C" __global__
 void thor_dropout_postop_forward(const ThorDropoutStorage* projected)cuda" + residualParam + R"cuda(,
                                   const int64_t* seed,
-                                  const int64_t* sequence)cuda" + offsetsParam + R"cuda(,
+                                  const int64_t* sequence)cuda" + partitionParam + R"cuda(,
                                   ThorDropoutStorage* output,
                                   float probability,
                                   float scale,
@@ -234,11 +242,11 @@ void thor_dropout_postop_forward(const ThorDropoutStorage* projected)cuda" + res
     const std::string residualBackwardVectorStore =
         useResidual ? "reinterpret_cast<ThorDropoutVector4*>(d_residual)[group] = dy_values;" : "";
     const std::string residualBackwardScalarStore = useResidual ? "d_residual[index] = dy[index];" : "";
-    const std::string backwardSource = typePrelude + offsetsPrelude + philox + R"cuda(
+    const std::string backwardSource = typePrelude + partitionTypePrelude + philox + R"cuda(
 extern "C" __global__
 void thor_dropout_postop_backward(const ThorDropoutStorage* dy,
                                    const int64_t* seed,
-                                   const int64_t* sequence)cuda" + offsetsParam + R"cuda(,
+                                   const int64_t* sequence)cuda" + partitionParam + R"cuda(,
                                    ThorDropoutStorage* d_projected)cuda" + residualBackwardParam + R"cuda(,
                                    float probability,
                                    float scale,
@@ -287,7 +295,7 @@ void thor_dropout_postop_backward(const ThorDropoutStorage* dy,
                                .input("dy", dataType)
                                .tensorRuntimeScalarInput("seed", DataType::INT64)
                                .tensorRuntimeScalarInput("sequence", DataType::INT64);
-    if (ragged) backwardBuilder.input("offsets", offsetsDataType);
+    if (ragged) backwardBuilder.input(useManagedActiveCount ? "active_count" : "offsets", partitionDataType);
     backwardBuilder.outputLike("d_projected", dataType, "dy");
     if (useResidual) backwardBuilder.outputLike("d_residual", dataType, "dy");
     backwardBuilder.scalar("probability", DataType::FP32, probability)
@@ -308,7 +316,7 @@ void thor_dropout_postop_backward(const ThorDropoutStorage* dy,
     if (useResidual) forwardBuilder.input("residual", dataType);
     forwardBuilder.tensorRuntimeScalarInput("seed", DataType::INT64)
         .tensorRuntimeScalarInput("sequence", DataType::INT64);
-    if (ragged) forwardBuilder.input("offsets", offsetsDataType);
+    if (ragged) forwardBuilder.input(useManagedActiveCount ? "active_count" : "offsets", partitionDataType);
     forwardBuilder.outputLike("output", dataType, "projected")
         .scalar("probability", DataType::FP32, probability)
         .scalar("scale", DataType::FP32, 1.0f / (1.0f - probability))

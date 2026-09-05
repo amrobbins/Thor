@@ -126,8 +126,8 @@ class MeanPowerError::Builder {
             THOR_THROW_IF_FALSE(predictions.getValues() != labels.getValues());
             ThorImplementation::RegressionLossDType::validatePredictionsDType("MeanPowerError", predictions.getValuesDataType());
             ThorImplementation::RegressionLossDType::validateLabelsDType("MeanPowerError", labels.getValuesDataType());
-            if (predictions.getOffsets() != labels.getOffsets())
-                throw std::invalid_argument("MeanPowerError ragged predictions and labels must use the exact same row partition tensor.");
+            if (!predictions.sharesPartitionWith(labels))
+                throw std::invalid_argument("MeanPowerError ragged predictions and labels must use the exact same row partition.");
             if (predictions.getBatchSize() != labels.getBatchSize() ||
                 predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
                 predictions.getTrailingDimensions() != labels.getTrailingDimensions())

@@ -58,6 +58,14 @@ class Embedding : public TrainableLayer {
     bool mustConnectAllInputsToDriveOutput() const override { return !raggedFeatureInputs.empty(); }
 
     int getConnectionType(Tensor connectingTensor) const override;
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        for (const RaggedTensor& ragged : raggedFeatureInputs) {
+            if (inputTensor == ragged.getOffsets())
+                return ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
+        }
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
 
     uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
         if (raggedFeatureOutputs.empty()) return MultiConnectionLayer::getOutputTensorBytes(batchSize);

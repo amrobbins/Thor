@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
 #include "Utilities/TensorOperations/Ragged/RuntimeExtent.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <cstdint>
 #include <memory>
@@ -11,6 +12,9 @@
 #include <vector>
 
 namespace ThorImplementation {
+
+inline constexpr RaggedPartitionRequirement kRaggedEmbeddingPartitionRequirement =
+    RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
 
 struct PreparedEmbeddingForward;
 

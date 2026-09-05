@@ -62,12 +62,12 @@ THOR_DEFINE_UNARY_REDUCTION_DESERIALIZE(Sum,
 THOR_DEFINE_UNARY_REDUCTION_DESERIALIZE(Min,
                                         "min",
                                         MetricAggregation::MIN,
-                                        false,
+                                        true,
                                         MetricAggregation::MIN)
 THOR_DEFINE_UNARY_REDUCTION_DESERIALIZE(Max,
                                         "max",
                                         MetricAggregation::MAX,
-                                        false,
+                                        true,
                                         MetricAggregation::MAX)
 
 #undef THOR_DEFINE_UNARY_REDUCTION_DESERIALIZE
@@ -78,8 +78,14 @@ json WeightedMean::architectureJson() const {
     j["version"] = getLayerVersion();
     j["layer_type"] = "weighted_mean";
     j["aggregation"] = getAggregation();
-    j["values"] = getValues().architectureJson();
-    j["weights"] = getWeights().architectureJson();
+    if (getUseRagged()) {
+        THOR_THROW_IF_FALSE(raggedValues.has_value() && raggedWeights.has_value());
+        j["ragged_values"] = raggedValues->architectureJson();
+        j["ragged_weights"] = raggedWeights->architectureJson();
+    } else {
+        j["values"] = getValues().architectureJson();
+        j["weights"] = getWeights().architectureJson();
+    }
     j["metric"] = metricTensor.architectureJson();
     return j;
 }
@@ -89,28 +95,62 @@ void WeightedMean::deserialize(const json& j, Network* network) {
         throw runtime_error("Unsupported version in WeightedMean::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "weighted_mean")
         throw runtime_error("Layer type mismatch in WeightedMean::deserialize: " + j.at("layer_type").get<std::string>());
+    if (j.at("aggregation").get<MetricAggregation>() != MetricAggregation::RATIO)
+        throw runtime_error("Serialized WeightedMean must use RATIO aggregation.");
 
-    nlohmann::json valuesJson = j["values"].get<nlohmann::json>();
-    uint64_t originalTensorId = valuesJson.at("id").get<uint64_t>();
-    Tensor values = network->getApiTensorByOriginalId(originalTensorId);
-
-    nlohmann::json weightsJson = j["weights"].get<nlohmann::json>();
-    originalTensorId = weightsJson.at("id").get<uint64_t>();
-    Tensor weights = network->getApiTensorByOriginalId(originalTensorId);
-
-    ThorImplementation::ReductionMetricDType::validateValueDType(
-        "WeightedMean", "values", values.getDataType());
-    ThorImplementation::ReductionMetricDType::validateValueDType(
-        "WeightedMean", "weights", weights.getDataType());
-    if (values.getDimensions() != weights.getDimensions())
-        throw runtime_error("WeightedMean values and weights dimensions must match during deserialization.");
-
-    Tensor metricTensor = Tensor::deserialize(j.at("metric").get<nlohmann::json>());
+    const bool hasRaggedValues = j.contains("ragged_values");
+    const bool hasRaggedWeights = j.contains("ragged_weights");
+    if (hasRaggedValues != hasRaggedWeights)
+        throw runtime_error("Serialized WeightedMean ragged values and weights must both be present.");
+    if (hasRaggedValues && (j.contains("values") || j.contains("weights")))
+        throw runtime_error("Serialized WeightedMean cannot mix dense and ragged inputs.");
 
     WeightedMean metric;
-    metric.featureInput = values;
-    metric.labelsTensor = weights;
-    metric.metricTensor = metricTensor;
+    if (hasRaggedValues) {
+        RaggedTensor values = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_values"), network, "WeightedMean");
+        RaggedTensor weights = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_weights"), network, "WeightedMean");
+        ThorImplementation::ReductionMetricDType::validateValueDType(
+            "WeightedMean", "values", values.getValuesDataType());
+        ThorImplementation::ReductionMetricDType::validateValueDType(
+            "WeightedMean", "weights", weights.getValuesDataType());
+        if (!values.sharesPartitionWith(weights))
+            throw runtime_error("WeightedMean ragged values and weights must use the exact same row partition during deserialization.");
+        if (values.getBatchSize() != weights.getBatchSize() ||
+            values.getMaxTotalValues() != weights.getMaxTotalValues() ||
+            values.getOffsetsDataType() != weights.getOffsetsDataType() ||
+            values.getTrailingDimensions() != weights.getTrailingDimensions() ||
+            values.hasMaxValuesPerRow() != weights.hasMaxValuesPerRow() ||
+            (values.hasMaxValuesPerRow() && values.getMaxValuesPerRow() != weights.getMaxValuesPerRow())) {
+            throw runtime_error("WeightedMean ragged values and weights metadata must match during deserialization.");
+        }
+        metric.raggedValues = values;
+        metric.raggedWeights = weights;
+        metric.featureInput = values.getValues();
+        metric.labelsTensor = weights.getValues();
+    } else {
+        nlohmann::json valuesJson = j.at("values").get<nlohmann::json>();
+        uint64_t originalTensorId = valuesJson.at("id").get<uint64_t>();
+        Tensor values = network->getApiTensorByOriginalId(originalTensorId);
+
+        nlohmann::json weightsJson = j.at("weights").get<nlohmann::json>();
+        originalTensorId = weightsJson.at("id").get<uint64_t>();
+        Tensor weights = network->getApiTensorByOriginalId(originalTensorId);
+
+        ThorImplementation::ReductionMetricDType::validateValueDType(
+            "WeightedMean", "values", values.getDataType());
+        ThorImplementation::ReductionMetricDType::validateValueDType(
+            "WeightedMean", "weights", weights.getDataType());
+        if (values.getDimensions() != weights.getDimensions())
+            throw runtime_error("WeightedMean values and weights dimensions must match during deserialization.");
+        metric.featureInput = values;
+        metric.labelsTensor = weights;
+    }
+
+    metric.metricTensor = Tensor::deserialize(j.at("metric").get<nlohmann::json>());
+    if (metric.metricTensor.getDataType() != DataType::FP32 ||
+        metric.metricTensor.getDimensions() != vector<uint64_t>{1}) {
+        throw runtime_error("Serialized WeightedMean metric output must be FP32 [1].");
+    }
     metric.initialized = true;
     metric.addToNetwork(network);
 }

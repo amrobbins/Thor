@@ -1,24 +1,26 @@
 #pragma once
 
 #include "Utilities/Common/Stream.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <cstddef>
 #include <cstdint>
 
+namespace ThorImplementation {
+inline constexpr RaggedPartitionRequirement kRaggedSequenceConcatenatePartitionRequirement = RaggedPartitionRequirement::DEVICE_OFFSETS;
+}  // namespace ThorImplementation
+
 // Sequence-axis concatenate for canonical rank-1 ragged tensors.
 //
 // Every input has the same logical batch size and trailing value shape, but may
-// have a different row partition and packed capacity. The output row partition
-// is produced explicitly:
-//
-//     output_offsets[row] = sum_i input_offsets_i[row]
-//
-// Packed values are then copied row-by-row in input order. Only logical active
+// have a different row partition and packed capacity. The authoritative output
+// partition is derived on the host by the layer and materialized separately as
+// an explicit offsets tensor when needed by downstream GPU consumers. This
+// kernel only moves packed values row-by-row in input order. Only logical active
 // values are read/written; inactive source and destination capacity is left
 // untouched. `input_values` and `input_offsets` are device arrays containing one
 // pointer per logical sequence input. Repeated offsets pointers are allowed.
 void launchRaggedSequenceConcatenate(void *output_values,
-                                     void *output_offsets,
                                      void *input_values[],
                                      void *input_offsets[],
                                      uint32_t num_inputs,

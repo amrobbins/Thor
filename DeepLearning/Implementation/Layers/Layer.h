@@ -127,6 +127,7 @@ class Layer {
 
         const auto inferStart = emitDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
         infer(featureInput, featureOutput, stream);
+        prepareFeatureOutputForDownstream();
         const uint64_t inferMicros = emitDiagnostics ? layerSubmitDiagnosticElapsedMicros(inferStart, layerSubmitDiagnosticNow()) : 0;
 
         uint64_t downstreamMicros = 0;
@@ -456,6 +457,10 @@ class Layer {
     Stream stream;
     std::optional<Layer *> nextLayer;
     std::optional<Layer *> previousLayer;
+
+    // Hook for physical layers that must publish metadata on featureOutput after
+    // submitting compute but before downstream layers observe the tensor.
+    virtual void prepareFeatureOutputForDownstream() {}
 
     virtual void infer(std::optional<Tensor> inputTensor, std::optional<Tensor> outputTensor, Stream stream) = 0;
 

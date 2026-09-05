@@ -120,8 +120,8 @@ void bind_mean_squared_error(nb::module_ &losses) {
                 if (reported_loss_shape == LossShape::PER_OUTPUT) {
                     throw nb::value_error("MSE instance: per_output reporting is undefined for ragged predictions.");
                 }
-                if (predictions.getOffsets() != labels.getOffsets()) {
-                    throw nb::value_error("MSE instance: ragged predictions and labels must use the exact same row partition tensor.");
+                if (!predictions.sharesPartitionWith(labels)) {
+                    throw nb::value_error("MSE instance: ragged predictions and labels must use the exact same row partition.");
                 }
                 if (predictions.getBatchSize() != labels.getBatchSize() ||
                     predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||

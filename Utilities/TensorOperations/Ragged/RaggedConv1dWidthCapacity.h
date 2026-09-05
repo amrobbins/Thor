@@ -1,10 +1,17 @@
 #pragma once
 
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
+
 #include <cstdint>
 #include <span>
 #include <vector>
 
 namespace ThorImplementation {
+
+// Width dispatch uses maxActiveRowLength derived from the authoritative host
+// partition; the capacity selector never reads device offsets.
+inline constexpr RaggedPartitionRequirement kRaggedConv1dWidthSelectionPartitionRequirement =
+    RaggedPartitionRequirement::HOST_EXTENT;
 
 /**
  * Build the finite width-capacity family used by padded ragged Conv1D.

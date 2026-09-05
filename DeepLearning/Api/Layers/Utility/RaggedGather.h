@@ -75,7 +75,7 @@ class RaggedGather : public MultiConnectionLayer {
     RaggedTensor raggedSourceInput;
     RaggedTensor raggedIndicesInput;
     RaggedTensor raggedFeatureOutput;
-    bool sharedOffsets = false;
+    bool sharedPartition = false;
     uint32_t indicesOffsetsInputPort = 3;
     std::set<uint32_t> connectedInputPortIndices;
     bool emittedOutputsAfterAllInputsConnected = false;

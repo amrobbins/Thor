@@ -165,8 +165,8 @@ class NegativeBinomialNLLLoss::Builder {
             THOR_THROW_IF_FALSE(mean.getValues() != dispersion.getValues());
             THOR_THROW_IF_FALSE(mean.getValues() != labels.getValues());
             THOR_THROW_IF_FALSE(dispersion.getValues() != labels.getValues());
-            if (mean.getOffsets() != dispersion.getOffsets() || mean.getOffsets() != labels.getOffsets())
-                throw std::invalid_argument("NegativeBinomialNLLLoss ragged mean, dispersion, and labels must use the exact same row partition tensor.");
+            if (!mean.sharesPartitionWith(dispersion) || !mean.sharesPartitionWith(labels))
+                throw std::invalid_argument("NegativeBinomialNLLLoss ragged mean, dispersion, and labels must use the exact same row partition.");
             if (mean.getBatchSize() != dispersion.getBatchSize() || mean.getBatchSize() != labels.getBatchSize() ||
                 mean.getMaxTotalValues() != dispersion.getMaxTotalValues() || mean.getMaxTotalValues() != labels.getMaxTotalValues() ||
                 mean.getTrailingDimensions() != dispersion.getTrailingDimensions() || mean.getTrailingDimensions() != labels.getTrailingDimensions())

@@ -1214,16 +1214,16 @@ static void validateRopePositionIdsDims(const ExprNode& node,
 
 static std::vector<uint64_t> inferRaggedValuewiseExtentDims(const ExprNode& node,
                                                                const std::vector<uint64_t>& values_dims,
-                                                               const std::vector<uint64_t>& offsets_dims) {
+                                                               const std::vector<uint64_t>& partition_carrier_dims) {
+    (void)partition_carrier_dims;
     if (node.ragged_runtime_max_active_values == 0 || node.ragged_runtime_elements_per_value == 0) {
         throw std::runtime_error("ragged valuewise extent metadata must be non-zero.");
     }
-    if (node.ragged_runtime_batch_size == std::numeric_limits<uint64_t>::max()) {
-        throw std::runtime_error("ragged valuewise extent batch size overflows offsets element count.");
-    }
-    if (offsets_dims != std::vector<uint64_t>{node.ragged_runtime_batch_size + 1}) {
-        throw std::runtime_error("ragged valuewise extent offsets must have shape [B + 1].");
-    }
+    // RAGGED_VALUEWISE_EXTENT is also the structural carrier into packed host
+    // stages. That carrier may be the values tensor itself, the managed [1]
+    // active-count tensor, or legacy [B+1] offsets. Its shape does not affect
+    // the marker's logical value shape. Fused GPU stages validate the selected
+    // device payload representation separately.
     uint64_t expected_numel = node.ragged_runtime_max_active_values;
     if (node.ragged_runtime_elements_per_value > std::numeric_limits<uint64_t>::max() / expected_numel) {
         throw std::runtime_error("ragged valuewise extent maximum element count overflows uint64_t.");
@@ -1417,6 +1417,15 @@ static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization
                 }
                 break;
             }
+            case ExprOp::SOFTMAX:
+                node_dims[i] = node_dims[node.lhs];
+                break;
+            case ExprOp::RAGGED_SOFTMAX_BACKWARD:
+                if (node.rhs == UINT32_MAX || node.rhs >= node_dims.size() || node_dims[node.rhs] != node_dims[node.lhs]) {
+                    throw std::runtime_error("Ragged Softmax backward requires Y and dY with identical shapes.");
+                }
+                node_dims[i] = node_dims[node.lhs];
+                break;
             case ExprOp::RMSNORM:
                 node_dims[i] = inferRmsNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
@@ -3047,10 +3056,8 @@ static std::vector<uint64_t> inferRmsNormBackwardOutputDims(const CompiledRmsNor
     if (input_dims[2] != y_dims) {
         throw std::runtime_error("RMSNorm backward dY shape must match the forward output shape.");
     }
-    if (packed) {
-        if (compiled.ragged_batch_size == 0 || input_dims[3] != std::vector<uint64_t>{compiled.ragged_batch_size + 1}) {
-            throw std::runtime_error("Packed RMSNorm backward offsets shape must be [batch_size + 1].");
-        }
+    if (packed && compiled.ragged_batch_size == 0) {
+        throw std::runtime_error("Packed RMSNorm backward is missing its logical ragged batch size.");
     }
     if (output_op == ExprOp::RMSNORM_BACKWARD_X) return input_dims[0];
     if (output_op == ExprOp::RMSNORM_BACKWARD_SCALE) return input_dims[1];
@@ -4271,6 +4278,15 @@ static std::vector<std::vector<uint64_t>> inferFusedStageNodeDimsForReachable(co
                 }
                 break;
             }
+            case ExprOp::SOFTMAX:
+                node_dims[i] = node_dims[node.lhs];
+                break;
+            case ExprOp::RAGGED_SOFTMAX_BACKWARD:
+                if (node.rhs == UINT32_MAX || node.rhs >= node_dims.size() || node_dims[node.rhs] != node_dims[node.lhs]) {
+                    throw std::runtime_error("Ragged Softmax backward requires Y and dY with identical shapes.");
+                }
+                node_dims[i] = node_dims[node.lhs];
+                break;
             case ExprOp::RMSNORM:
                 node_dims[i] = inferRmsNormOutputDims(node, node_dims[node.lhs], node_dims[node.rhs]);
                 break;
@@ -4463,6 +4479,7 @@ static uint64_t computeFusedStageNodeFlops(const PhysicalExpression& expr,
         case ExprOp::SEGMENTED_BROADCAST:
         case ExprOp::EMBEDDING_LOOKUP:
         case ExprOp::SOFTMAX:
+        case ExprOp::RAGGED_SOFTMAX_BACKWARD:
         case ExprOp::ATTENTION:
         case ExprOp::ATTENTION_BACKWARD_Q:
         case ExprOp::ATTENTION_BACKWARD_K:
@@ -4613,12 +4630,68 @@ static std::optional<RaggedFusedStageFlopModelSpec> computeActiveExtentFusedStag
     };
 }
 
+static void adaptTransitionalOffsetsCarrierForDeviceActiveCount(
+    const PhysicalExpression& expr, std::vector<RuntimeInputValue>& stage_inputs) {
+    std::optional<uint32_t> active_count_input_slot;
+    std::optional<uint64_t> batch_size;
+    for (const ExprNode& node : expr.nodes) {
+        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT ||
+            node.ragged_runtime_extent_source != RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT) {
+            continue;
+        }
+        if (node.rhs >= expr.nodes.size()) {
+            throw std::runtime_error("Ragged active-count carrier adaptation encountered an invalid runtime-extent marker.");
+        }
+        const ExprNode& partition_node = expr.nodes[node.rhs];
+        if (partition_node.op != ExprOp::INPUT || partition_node.input_slot >= stage_inputs.size()) {
+            throw std::runtime_error("Ragged active-count carrier adaptation requires a direct physical partition input.");
+        }
+        if (node.ragged_runtime_batch_size == 0) {
+            throw std::runtime_error("Ragged active-count carrier adaptation requires non-zero batch size metadata.");
+        }
+        if (!active_count_input_slot.has_value()) {
+            active_count_input_slot = partition_node.input_slot;
+            batch_size = node.ragged_runtime_batch_size;
+        } else if (active_count_input_slot.value() != partition_node.input_slot ||
+                   batch_size.value() != node.ragged_runtime_batch_size) {
+            throw std::runtime_error(
+                "One fused stage cannot adapt multiple logical row partitions to one managed active-count input.");
+        }
+    }
+
+    if (!active_count_input_slot.has_value()) {
+        return;
+    }
+    RuntimeInputValue& input = stage_inputs.at(active_count_input_slot.value());
+    if (!runtimeInputIsTensor(input)) {
+        throw std::runtime_error("Ragged active-count carrier adaptation requires a tensor physical input.");
+    }
+    Tensor carrier = runtimeInputTensor(input);
+    if (carrier.getDimensions() == std::vector<uint64_t>{1}) {
+        return;
+    }
+    if (carrier.getDimensions() != std::vector<uint64_t>{batch_size.value() + 1} ||
+        !isCanonicalRowPartitionOffsetDataType(carrier.getDataType()) || !carrier.isDenseContiguous() ||
+        carrier.getStorageElementOffset() != 0) {
+        throw std::runtime_error(
+            "Ragged DEVICE_ACTIVE_COUNT consumer received neither managed [1] active count nor transitional [B+1] offsets.");
+    }
+
+    // RP6C will physicalize internally-created partitions through the same
+    // hidden managed inputs as external partitions. Until then, preserve
+    // composition by presenting the legacy offsets[B] cell as an ordinary [1]
+    // tensor input to the already-migrated fused kernel. The alias shares the
+    // backing allocation and therefore the authoritative host publication.
+    input = carrier.aliasView({1}, {1}, batch_size.value());
+}
+
 static std::optional<RaggedFusedStageFlopModelSpec> computeRaggedFusedStageFlopModel(
     const PhysicalExpression& expr,
     const std::vector<std::vector<uint64_t>>& stage_input_dims,
     const std::vector<CompiledStageOutput>& outputs) {
     struct MarkerMetadata {
-        uint32_t offsets_input_slot = UINT32_MAX;
+        uint32_t partition_input_slot = UINT32_MAX;
+        RaggedRuntimeExtentSource source = RaggedRuntimeExtentSource::DEVICE_OFFSETS;
         uint64_t batch_size = 0;
         uint64_t max_active_values = 0;
         std::unordered_set<uint64_t> elements_per_value;
@@ -4632,9 +4705,9 @@ static std::optional<RaggedFusedStageFlopModelSpec> computeRaggedFusedStageFlopM
         if (node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size()) {
             throw std::runtime_error("Ragged fused FLOP accounting encountered an invalid runtime-extent marker.");
         }
-        const ExprNode& offsets_node = expr.nodes[node.rhs];
-        if (offsets_node.op != ExprOp::INPUT || offsets_node.input_slot >= stage_input_dims.size()) {
-            throw std::runtime_error("Ragged fused FLOP accounting requires a direct offsets input.");
+        const ExprNode& partition_node = expr.nodes[node.rhs];
+        if (partition_node.op != ExprOp::INPUT || partition_node.input_slot >= stage_input_dims.size()) {
+            throw std::runtime_error("Ragged fused FLOP accounting requires a direct partition input.");
         }
         if (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
             node.ragged_runtime_elements_per_value == 0) {
@@ -4643,12 +4716,14 @@ static std::optional<RaggedFusedStageFlopModelSpec> computeRaggedFusedStageFlopM
 
         if (!marker_metadata.has_value()) {
             marker_metadata = MarkerMetadata{
-                .offsets_input_slot = offsets_node.input_slot,
+                .partition_input_slot = partition_node.input_slot,
+                .source = node.ragged_runtime_extent_source,
                 .batch_size = node.ragged_runtime_batch_size,
                 .max_active_values = node.ragged_runtime_max_active_values,
                 .elements_per_value = {},
             };
-        } else if (marker_metadata->offsets_input_slot != offsets_node.input_slot ||
+        } else if (marker_metadata->partition_input_slot != partition_node.input_slot ||
+                   marker_metadata->source != node.ragged_runtime_extent_source ||
                    marker_metadata->batch_size != node.ragged_runtime_batch_size ||
                    marker_metadata->max_active_values != node.ragged_runtime_max_active_values) {
             // Independent row partitions cannot share one runtime active-value
@@ -4663,13 +4738,33 @@ static std::optional<RaggedFusedStageFlopModelSpec> computeRaggedFusedStageFlopM
         return std::nullopt;
     }
     const MarkerMetadata& metadata = marker_metadata.value();
-    if (stage_input_dims.at(metadata.offsets_input_slot) != std::vector<uint64_t>{metadata.batch_size + 1}) {
-        throw std::runtime_error("Ragged fused FLOP accounting offsets shape does not match [B+1].");
+    if (metadata.source == RaggedRuntimeExtentSource::HOST_EXTENT) {
+        // HOST_EXTENT is compile/runtime metadata for host-dispatched packed
+        // stages, not a device launch bound. Keep the ordinary static FLOP
+        // model for any fused stage that merely carries such a marker.
+        return std::nullopt;
+    }
+    const std::vector<uint64_t> expected_partition_dims = [&]() -> std::vector<uint64_t> {
+        switch (metadata.source) {
+            case RaggedRuntimeExtentSource::DEVICE_OFFSETS:
+                if (metadata.batch_size == std::numeric_limits<uint64_t>::max()) {
+                    throw std::runtime_error("Ragged fused FLOP accounting batch size overflows offsets shape.");
+                }
+                return {metadata.batch_size + 1};
+            case RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT:
+                return {1};
+            case RaggedRuntimeExtentSource::HOST_EXTENT:
+                break;
+        }
+        throw std::runtime_error("Ragged fused FLOP accounting encountered an unknown device extent source.");
+    }();
+    if (stage_input_dims.at(metadata.partition_input_slot) != expected_partition_dims) {
+        throw std::runtime_error("Ragged fused FLOP accounting partition input shape does not match its physical source.");
     }
 
     std::unordered_set<uint32_t> active_extent_input_slots;
     for (uint32_t input_slot = 0; input_slot < stage_input_dims.size(); ++input_slot) {
-        if (input_slot == metadata.offsets_input_slot) {
+        if (input_slot == metadata.partition_input_slot) {
             continue;
         }
         const std::vector<uint64_t>& dims = stage_input_dims[input_slot];
@@ -4697,7 +4792,7 @@ static std::optional<RaggedFusedStageFlopModelSpec> computeRaggedFusedStageFlopM
     if (!model.has_value()) {
         return std::nullopt;
     }
-    model->offsets_input_slot = metadata.offsets_input_slot;
+    model->offsets_input_slot = metadata.partition_input_slot;
     model->batch_size = metadata.batch_size;
     return model;
 }
@@ -8050,15 +8145,25 @@ std::shared_ptr<StampedArgMinMax> FusedEquation::stampArgMinMax(const std::share
 }
 
 std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_ptr<CompiledSoftmax>& compiledStage,
-                                                            Tensor& input,
+                                                            const std::vector<Tensor>& inputs,
                                                             const std::optional<Tensor>& preallocatedOutput,
                                                             const Stream& stream,
                                                             const std::vector<uint64_t>& requested_output_shape) const {
     if (!compiledStage) {
         throw std::runtime_error("stampSoftmax requires non-null compiled stage.");
     }
+    const size_t expected_inputs = compiledStage->backward ? 3u : (compiledStage->isRagged() ? 2u : 1u);
+    if (inputs.size() != expected_inputs) {
+        throw std::runtime_error("stampSoftmax input count does not match compiled dense/ragged forward/backward contract.");
+    }
 
-    Tensor adaptedInput = allocateCudnnSoftmaxInputAdapterIfNeeded(input, compiledStage->input_dtype, ExprOp::SOFTMAX);
+    Tensor primaryInput = inputs[0];
+    Tensor adaptedInput = primaryInput;
+    if (!compiledStage->isRagged()) {
+        adaptedInput = allocateCudnnSoftmaxInputAdapterIfNeeded(primaryInput, compiledStage->input_dtype, ExprOp::SOFTMAX);
+    } else if (primaryInput.getDataType() != compiledStage->input_dtype) {
+        throw std::runtime_error("Ragged Softmax does not permit a runtime dtype adapter at the exact-prefix boundary.");
+    }
 
     const std::vector<uint64_t> resolved_output_dimensions = adaptedInput.getDimensions();
     std::vector<uint64_t> output_dimensions = resolved_output_dimensions;
@@ -8085,8 +8190,38 @@ std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_pt
         output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
     }
 
-    std::unique_ptr<BuiltSoftmax> built = StampedEquation::buildSoftmax(compiledStage, adaptedInput, output);
-    return make_shared<StampedSoftmax>(compiledStage, std::move(built), input, adaptedInput, output, stream);
+    if (!compiledStage->isRagged()) {
+        std::unique_ptr<BuiltSoftmax> built = StampedEquation::buildSoftmax(compiledStage, adaptedInput, output);
+        return make_shared<StampedSoftmax>(compiledStage, std::move(built), primaryInput, adaptedInput, output, stream);
+    }
+
+    const std::vector<uint64_t>& packed_dims = adaptedInput.getDimensions();
+    if (packed_dims.size() < 2 || packed_dims.front() != compiledStage->ragged_max_active_values) {
+        throw std::runtime_error("Ragged Softmax packed input shape does not match max_active_values or lacks a trailing axis.");
+    }
+    std::vector<uint64_t> trailing_dims(packed_dims.begin() + 1, packed_dims.end());
+    if (numelFromDims(trailing_dims) != compiledStage->ragged_elements_per_value) {
+        throw std::runtime_error("Ragged Softmax packed trailing shape does not match the row-partition extent metadata.");
+    }
+    CudnnRaggedSoftmaxDescriptor descriptor;
+    descriptor.maxTotalValues = compiledStage->ragged_max_active_values;
+    descriptor.trailingDimensions = trailing_dims;
+    descriptor.dataType = compiledStage->input_dtype;
+    descriptor.kind = compiledStage->algorithm == CUDNN_SOFTMAX_LOG ? CudnnRaggedSoftmaxKind::LogSoftmax
+                                                                    : CudnnRaggedSoftmaxKind::Softmax;
+    descriptor.debugName = compiledStage->backward ? "expression_ragged_softmax_backward" : "expression_ragged_softmax_forward";
+    CudnnRaggedSoftmaxExecutionState state = CudnnRaggedSoftmax::instance().prepare(descriptor, stream);
+
+    if (compiledStage->backward) {
+        const Tensor& dy = inputs[1];
+        const Tensor& offsets = inputs[2];
+        if (dy.getDimensions() != packed_dims || dy.getDataType() != compiledStage->input_dtype) {
+            throw std::runtime_error("Ragged Softmax backward dY must match Y shape and dtype.");
+        }
+        return make_shared<StampedSoftmax>(compiledStage, std::move(state), adaptedInput, dy, output, offsets, stream);
+    }
+
+    return make_shared<StampedSoftmax>(compiledStage, std::move(state), adaptedInput, output, inputs[1], stream);
 }
 
 std::shared_ptr<StampedRmsNorm> FusedEquation::stampRmsNorm(const std::shared_ptr<CompiledRmsNorm>& compiledStage,
@@ -9558,6 +9693,57 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         }
     };
 
+    // A specialized stage should write directly into a caller-preallocated final output
+    // whenever that final logical value has a unique destination.  Stage-local output names
+    // are not required to match public output names, so name-only routing can otherwise force
+    // a temporary full-capacity tensor followed by an unnecessary materialization copy.  That
+    // is especially costly for ragged bucketed stages: a GEMM/RMSNorm may execute only a small
+    // selected row bucket while a fallback D2D materialization copies the entire allocation.
+    //
+    // Do not broaden in-place update semantics while doing this optimization.  Optimizer
+    // outputs intentionally alias weights/state root inputs, and the Expression DAG still
+    // refers to the old root value until all of its readers have completed.  Such aliased
+    // outputs keep the historical name-based/materialization path unless a stage was already
+    // explicitly named as that final output.  Otherwise routing by logical value id can make
+    // an internal producer overwrite the root allocation too early and create an impossible
+    // write-after-read/dataflow dependency cycle.
+    std::unordered_set<uint64_t> root_input_tensor_ids;
+    root_input_tensor_ids.reserve(inputs.size() + tensor_scalar_inputs.size());
+    for (const auto& input : inputs) {
+        root_input_tensor_ids.insert(input.second.getTensorId());
+    }
+    for (const auto& tensor_scalar_input : tensor_scalar_inputs) {
+        root_input_tensor_ids.insert(tensor_scalar_input.second.buffer.getTensorId());
+    }
+
+    // Keep duplicate public outputs of the same mathematical value on the existing
+    // materialization path unless they intentionally share the exact same destination.  One
+    // producer cannot directly target two distinct caller-provided allocations.
+    std::unordered_map<uint32_t, Tensor> direct_preallocated_final_by_value_id;
+    std::unordered_set<uint32_t> ambiguous_direct_preallocated_value_ids;
+    for (const CompiledStageOutput& final_output : compiled_outputs->final_outputs) {
+        if (alias_by_value_id.contains(final_output.value_id)) {
+            continue;
+        }
+        auto destination_it = preallocated_final_outputs_by_name.find(final_output.name);
+        if (destination_it == preallocated_final_outputs_by_name.end()) {
+            continue;
+        }
+        if (root_input_tensor_ids.contains(destination_it->second.getTensorId())) {
+            continue;
+        }
+
+        if (ambiguous_direct_preallocated_value_ids.contains(final_output.value_id)) {
+            continue;
+        }
+        auto [existing_it, inserted] =
+            direct_preallocated_final_by_value_id.emplace(final_output.value_id, destination_it->second);
+        if (!inserted && existing_it->second.getTensorId() != destination_it->second.getTensorId()) {
+            direct_preallocated_final_by_value_id.erase(existing_it);
+            ambiguous_direct_preallocated_value_ids.insert(final_output.value_id);
+        }
+    }
+
     std::unordered_map<uint32_t, Tensor> preallocated_outputs_by_source_value_id;
     for (const CompiledStageOutput& final_output : compiled_outputs->final_outputs) {
         auto preallocated_it = preallocated_final_outputs_by_name.find(final_output.name);
@@ -9577,6 +9763,10 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         auto named_it = preallocated_final_outputs_by_name.find(stage_output.name);
         if (named_it != preallocated_final_outputs_by_name.end()) {
             return named_it->second;
+        }
+        auto direct_it = direct_preallocated_final_by_value_id.find(stage_output.value_id);
+        if (direct_it != direct_preallocated_final_by_value_id.end()) {
+            return direct_it->second;
         }
         auto value_it = preallocated_outputs_by_source_value_id.find(stage_output.value_id);
         if (value_it != preallocated_outputs_by_source_value_id.end()) {
@@ -9703,17 +9893,6 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         findPackedAttentionBackwardDirectOutputs(
             compiled_outputs->stages, compiled_outputs->final_outputs, attention_stage_by_elided_packing_stage);
 
-
-    std::unordered_map<uint32_t, Tensor> direct_preallocated_final_by_value_id;
-    for (const CompiledStageOutput& final_output : compiled_outputs->final_outputs) {
-        if (alias_by_value_id.contains(final_output.value_id)) {
-            continue;
-        }
-        auto destination_it = preallocated_final_outputs_by_name.find(final_output.name);
-        if (destination_it != preallocated_final_outputs_by_name.end()) {
-            direct_preallocated_final_by_value_id.emplace(final_output.value_id, destination_it->second);
-        }
-    }
 
     auto stageDependsOn = [&](const std::vector<uint32_t>& direct_dependencies, uint32_t candidate_stage_idx) {
         std::unordered_set<uint32_t> visited;
@@ -10395,6 +10574,10 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             }
         }
 
+        if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
+            adaptTransitionalOffsetsCarrierForDeviceActiveCount(stage.expr, stageInputs);
+        }
+
         std::vector<std::vector<uint64_t>> stage_input_dims;
         stage_input_dims.reserve(stageInputs.size());
         for (const RuntimeInputValue& input : stageInputs) {
@@ -10517,9 +10700,15 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 const TensorPlacement outputPlacement = pickStageOutputPlacement(stageInputs, values);
                 for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
                     const CompiledStageOutput& stageOutput = stage.outputs[output_idx];
-                    auto preallocated_it = preallocated_final_outputs_by_name.find(stageOutput.name);
-                    if (preallocated_it != preallocated_final_outputs_by_name.end()) {
-                        const Tensor& outputTensor = preallocated_it->second;
+                    // Stage-local names are an implementation detail and need not match the
+                    // public output name. Route a unique caller-preallocated final value by
+                    // logical value id as well, otherwise an active-aware ragged fused stage
+                    // can write a temporary and the final full-capacity materialization copy
+                    // defeats bucketed execution by touching the entire allocation.
+                    std::optional<Tensor> preallocated =
+                        preallocatedForStageOutput(stageOutput, expected_output_dims[output_idx]);
+                    if (preallocated.has_value()) {
+                        const Tensor& outputTensor = preallocated.value();
 
                         if (!outputTensor.isInitialized()) {
                             throw std::runtime_error("Preallocated fused-stage output tensor is not initialized.");
@@ -11275,14 +11464,19 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (!stage.softmax) {
                     throw std::runtime_error("Softmax stage missing compiled payload.");
                 }
-                if (stageInputs.size() != 1) {
-                    throw std::runtime_error("Softmax stage expects exactly one input.");
+                const size_t expected_inputs = stage.softmax->backward ? 3u : (stage.softmax->isRagged() ? 2u : 1u);
+                if (stageInputs.size() != expected_inputs) {
+                    throw std::runtime_error("Softmax stage input count does not match compiled dense/ragged forward/backward contract.");
                 }
                 if (stage.outputs.size() != 1) {
                     throw std::runtime_error("Softmax stage expects exactly one output.");
                 }
 
-                Tensor inputTensor = runtimeInputTensor(stageInputs[0]);
+                std::vector<Tensor> softmaxInputs;
+                softmaxInputs.reserve(stageInputs.size());
+                for (const RuntimeInputValue& stageInput : stageInputs) {
+                    softmaxInputs.push_back(runtimeInputTensor(stageInput));
+                }
                 const CompiledStageOutput& stageOutput = stage.outputs[0];
                 std::vector<uint64_t> output_dims = resolveOutputDimsForStageOutput(stage, 0, stageInputs);
                 auto requested_it = effectiveRequestedOutputShapes.find(stageOutput.name);
@@ -11298,7 +11492,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
 
                 std::shared_ptr<StampedSoftmax> stampedSoftmax =
-                    stampSoftmax(stage.softmax, inputTensor, preallocated, stream, output_dims);
+                    stampSoftmax(stage.softmax, softmaxInputs, preallocated, stream, output_dims);
                 Tensor outputTensor = stampedSoftmax->getOutputTensor();
 
                 values[stageOutput.value_id] = outputTensor;

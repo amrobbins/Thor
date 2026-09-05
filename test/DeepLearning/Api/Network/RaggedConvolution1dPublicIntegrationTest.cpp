@@ -325,24 +325,43 @@ void feedRaggedInput(Api::PlacedNetwork& placed,
                      const vector<float>& values) {
     Impl::StampedNetwork& stamped = placed.getStampedNetwork(0);
     auto physicalValuesInput = stamped.getNamedInput(inputReference.valuesInputName);
-    auto physicalOffsetsInput = stamped.getNamedInput(inputReference.offsetsInputName);
+    auto physicalOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(inputReference.raggedTensor.getRowPartitionId());
+    auto physicalActiveCountInput =
+        stamped.getManagedPartitionActiveCountInputForTest(inputReference.raggedTensor.getRowPartitionId());
     ASSERT_NE(physicalValuesInput, nullptr);
     ASSERT_NE(physicalOffsetsInput, nullptr);
 
-    Impl::Tensor offsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {kBatchSize + 1}));
-    auto* offsets = offsetsHost.getMemPtr<uint32_t>();
-    for (uint32_t i = 0; i <= kBatchSize; ++i) offsets[i] = kOffsets[i];
-    physicalOffsetsInput->forwardRowPartitionOffsets(
-        offsetsHost,
-        false,
-        Impl::RowPartitionDescriptor(kBatchSize, kMaxTotalValues, DataType::UINT32, kMaxValuesPerRow),
-        kActiveValues,
-        kActiveMaxRowLength,
-        kBatchSize);
+    const Impl::RowPartitionDescriptor descriptor(
+        kBatchSize, kMaxTotalValues, DataType::UINT32, kMaxValuesPerRow);
+    const std::vector<uint64_t> hostOffsets(kOffsets.begin(), kOffsets.end());
 
+    // RP6B makes hostOffsets authoritative and publishes them on every physical
+    // carrier that may satisfy HOST_EXTENT. This integration helper bypasses the
+    // public Batch submission path, so reproduce that contract explicitly instead
+    // of feeding only the hidden device-offset representation.
     Impl::Tensor valuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {kMaxTotalValues, kInputFeatures}));
     writeCpuFp32(valuesHost, values);
-    physicalValuesInput->forward(valuesHost, false, kBatchSize);
+    physicalValuesInput->forwardWithRowPartitionHostState(
+        valuesHost,
+        false,
+        kBatchSize,
+        descriptor,
+        inputReference.raggedTensor.getRowPartitionId(),
+        hostOffsets);
+    physicalOffsetsInput->forwardManagedRowPartitionOffsets(
+        false,
+        descriptor,
+        kBatchSize,
+        hostOffsets,
+        inputReference.raggedTensor.getRowPartitionId());
+    if (physicalActiveCountInput != nullptr) {
+        physicalActiveCountInput->forwardManagedRowPartitionActiveCount(
+            false,
+            descriptor,
+            kBatchSize,
+            hostOffsets,
+            inputReference.raggedTensor.getRowPartitionId());
+    }
 }
 
 vector<float> runRaggedForward(Api::PlacedNetwork& placed,

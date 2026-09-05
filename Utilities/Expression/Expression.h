@@ -152,6 +152,9 @@ enum class ExprOp : uint16_t {
     RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER,
     BROADCAST_TO,
     REDUCE_SUM_SQUARES,
+    // Internal R11A.2 exact-prefix backward boundary. Keep new internal ops at
+    // the end so existing ExprOp numeric values remain archive-compatible.
+    RAGGED_SOFTMAX_BACKWARD,
 };
 
 enum class RotaryScalingKind : uint8_t {
@@ -183,6 +186,17 @@ enum class MatmulPackedRowBinding : uint8_t {
     RowsA = 1,
     RowsB = 2,
     RowsAAndRowsB = 3,
+};
+
+// Physical source used by a RAGGED_VALUEWISE_EXTENT marker. HOST_EXTENT keeps
+// logical packed-row metadata attached to host-dispatched stages without
+// authorizing a CUDA kernel to interpret carrier payload bytes. Device sources
+// are explicit so a kernel compiled for offsets[B] cannot be reused when
+// placement supplies the RP6B managed [1] active-count representation.
+enum class RaggedRuntimeExtentSource : uint8_t {
+    DEVICE_OFFSETS = 0,
+    DEVICE_ACTIVE_COUNT = 1,
+    HOST_EXTENT = 2,
 };
 
 enum class ScanOp : uint8_t {
@@ -234,7 +248,7 @@ inline bool isReductionOp(ExprOp op) {
     return isValueReductionOp(op) || op == ExprOp::REDUCE_ARGMIN || op == ExprOp::REDUCE_ARGMAX;
 }
 
-inline bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX; }
+inline bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX || op == ExprOp::RAGGED_SOFTMAX_BACKWARD; }
 
 // Validate ordinary dense broadcasting and return the target dimensions.
 // BROADCAST_TO never carries dtype conversion semantics; it only expands the
@@ -362,7 +376,11 @@ struct ExprNode {
     uint64_t scan_axis = UINT64_MAX;  // UINT64_MAX means final axis.
     bool scan_reverse = false;
 
-    // Ragged runtime-extent metadata. RAGGED_VALUEWISE_EXTENT uses rhs as the canonical offsets tensor; explicit segmented stages carry the same extent for autodiff.
+    // Ragged runtime-extent metadata. RAGGED_VALUEWISE_EXTENT uses rhs as the
+    // physical row-partition carrier. The device payload source is explicit so
+    // fused kernels can distinguish legacy offsets[B] from RP6B managed [1]
+    // active-count inputs. Explicit segmented stages still use full offsets.
+    RaggedRuntimeExtentSource ragged_runtime_extent_source = RaggedRuntimeExtentSource::DEVICE_OFFSETS;
     // ragged_runtime_offsets_input_slot is compiler-lowered stage metadata for packed
     // MATMUL/RMSNORM/LAYERNORM and is UINT32_MAX on ordinary user-authored expression nodes.
     uint32_t ragged_runtime_offsets_input_slot = UINT32_MAX;
@@ -754,10 +772,12 @@ class Expression {
     [[nodiscard]] static Expression segmentedReduceMin(const Expression& input, const Expression& offsets);
     [[nodiscard]] static Expression segmentedReduceMax(const Expression& input, const Expression& offsets);
     [[nodiscard]] static Expression segmentedReduceMean(const Expression& input, const Expression& offsets);
-    [[nodiscard]] Expression withRaggedRuntimeExtent(const Expression& offsets,
-                                                     uint64_t batch_size,
-                                                     uint64_t max_active_values,
-                                                     uint64_t elements_per_value) const;
+    [[nodiscard]] Expression withRaggedRuntimeExtent(
+        const Expression& partition_input,
+        uint64_t batch_size,
+        uint64_t max_active_values,
+        uint64_t elements_per_value,
+        RaggedRuntimeExtentSource source = RaggedRuntimeExtentSource::DEVICE_OFFSETS) const;
     [[nodiscard]] std::pair<Expression, Expression> scanWithIndices(ScanOp op, int64_t axis = -1, bool inclusive = true) const;
     [[nodiscard]] std::pair<Expression, Expression> segmentedScanWithIndices(const Expression& offsets,
                                                                              ScanOp op,

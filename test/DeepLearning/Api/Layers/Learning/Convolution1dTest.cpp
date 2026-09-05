@@ -120,7 +120,7 @@ vector<float> runRaggedConvolution1dNetworkForward(
     uint64_t inputChannels) {
     Impl::StampedNetwork &stamped = placed.getStampedNetwork(0);
     auto physicalValuesInput = stamped.getNamedInput(inputReference.valuesInputName);
-    auto physicalOffsetsInput = stamped.getNamedInput(inputReference.offsetsInputName);
+    auto physicalOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(inputReference.raggedTensor.getRowPartitionId());
     auto physicalValuesOutput = stamped.getNamedOutput(outputReference.valuesOutputName);
     EXPECT_NE(physicalValuesInput, nullptr);
     EXPECT_NE(physicalOffsetsInput, nullptr);
@@ -136,9 +136,8 @@ vector<float> runRaggedConvolution1dNetworkForward(
                                                      false,
                                                      Impl::RowPartitionDescriptor(
                                                          batchSize, maxTotalValues, DataType::UINT32, maxValuesPerRow),
-                                                     activeValueCount,
-                                                     activeMaxRowLength,
-                                                     batchSize);
+                                                     batchSize,
+                                                     std::vector<uint64_t>(offsets.begin(), offsets.end()));
 
     Impl::Tensor valuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {maxTotalValues, inputChannels}));
     writeCpuFp32(valuesHost, values);
@@ -776,7 +775,7 @@ TEST(Convolution1dApi, RaggedPublicLayerLowersToQualifiedCausalBackendForwardAnd
     ASSERT_NE(placed, nullptr);
     Impl::StampedNetwork &stamped = placed->getStampedNetwork(0);
     auto physicalValuesInput = stamped.getNamedInput("tokens.values");
-    auto physicalOffsetsInput = stamped.getNamedInput("tokens.offsets");
+    auto physicalOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(networkInput.getRowPartitionId());
     auto physicalConv = std::dynamic_pointer_cast<Impl::RaggedCustomLayer>(stamped.getPhysicalLayerFromApiLayer(conv.getId()));
     auto physicalOutput =
         std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
@@ -812,9 +811,8 @@ TEST(Convolution1dApi, RaggedPublicLayerLowersToQualifiedCausalBackendForwardAnd
                                                      false,
                                                      Impl::RowPartitionDescriptor(
                                                          batchSize, maxTotalValues, DataType::UINT32, maxValuesPerRow),
-                                                     activeValues,
-                                                     maxValuesPerRow,
-                                                     batchSize);
+                                                     batchSize,
+                                                     std::vector<uint64_t>(offsets.begin(), offsets.end()));
     Impl::Tensor valuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {maxTotalValues, inputChannels}));
     writeCpuFp32(valuesHost, inputValues);
     physicalValuesInput->forward(valuesHost, false, batchSize);

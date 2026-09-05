@@ -78,6 +78,12 @@ class Transpose : public Layer {
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;
     int getConnectionType(Tensor connectingTensor) const override;
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedFeatureInput.has_value() && inputTensor == raggedFeatureInput->getOffsets())
+            return ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json &j, Network *network);

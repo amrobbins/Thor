@@ -15,13 +15,17 @@ MetricBatchStat batchStat(MetricAggregation aggregation,
                           double value,
                           uint64_t validExamples,
                           std::optional<double> numerator = std::nullopt,
-                          std::optional<double> denominator = std::nullopt) {
+                          std::optional<double> denominator = std::nullopt,
+                          bool hasContribution = true,
+                          bool zeroDenominatorMeansNoContribution = false) {
     MetricBatchStat statistic;
     statistic.aggregation = aggregation;
     statistic.value = value;
     statistic.validExamples = validExamples;
     statistic.numerator = numerator;
     statistic.denominator = denominator;
+    statistic.hasContribution = hasContribution;
+    statistic.zeroDenominatorMeansNoContribution = zeroDenominatorMeansNoContribution;
     return statistic;
 }
 
@@ -83,6 +87,62 @@ TEST(MetricEpochAccumulator, R10LRaggedMeanAggregatesActiveScalarsAcrossUnequalA
     EXPECT_EQ(combined->validExamples, 10u);
 }
 
+
+TEST(MetricEpochAccumulator, R10MExtremaIgnoreNoContributionBatches) {
+    MetricEpochAccumulator minimum(MetricAggregation::MIN);
+    minimum.add(batchStat(MetricAggregation::MIN, 4.0, 3));
+    minimum.add(batchStat(MetricAggregation::MIN, 0.0, 5, std::nullopt, std::nullopt, false));
+    minimum.add(batchStat(MetricAggregation::MIN, 6.0, 2));
+    ASSERT_TRUE(minimum.value().has_value());
+    // A fake zero for the empty middle batch would incorrectly win here.
+    EXPECT_DOUBLE_EQ(minimum.value().value(), 4.0);
+
+    MetricEpochAccumulator maximum(MetricAggregation::MAX);
+    maximum.add(batchStat(MetricAggregation::MAX, -7.0, 3));
+    maximum.add(batchStat(MetricAggregation::MAX, 0.0, 5, std::nullopt, std::nullopt, false));
+    maximum.add(batchStat(MetricAggregation::MAX, -3.0, 2));
+    ASSERT_TRUE(maximum.value().has_value());
+    EXPECT_DOUBLE_EQ(maximum.value().value(), -3.0);
+
+    // The extrema value ignores the empty batch, while validExamples still
+    // records all logical rows processed in the population.
+    ASSERT_TRUE(minimum.statistic().has_value());
+    EXPECT_EQ(minimum.statistic()->validExamples, 10u);
+    ASSERT_TRUE(maximum.statistic().has_value());
+    EXPECT_EQ(maximum.statistic()->validExamples, 10u);
+}
+
+TEST(MetricEpochAccumulator, R10MAllEmptyExtremaPopulationHasNoResult) {
+    MetricEpochAccumulator minimum(MetricAggregation::MIN);
+    minimum.add(batchStat(MetricAggregation::MIN, 0.0, 4, std::nullopt, std::nullopt, false));
+    minimum.add(batchStat(MetricAggregation::MIN, 0.0, 2, std::nullopt, std::nullopt, false));
+    EXPECT_TRUE(minimum.empty());
+    EXPECT_FALSE(minimum.value().has_value());
+    EXPECT_FALSE(minimum.statistic().has_value());
+
+    MetricEpochAccumulator maximum(MetricAggregation::MAX);
+    maximum.add(batchStat(MetricAggregation::MAX, 0.0, 4, std::nullopt, std::nullopt, false));
+    EXPECT_TRUE(maximum.empty());
+    EXPECT_FALSE(maximum.value().has_value());
+    EXPECT_FALSE(maximum.statistic().has_value());
+}
+
+TEST(MetricEpochAccumulator, R10MNoContributionIsExtremaOnly) {
+    MetricEpochAccumulator sum(MetricAggregation::SUM);
+    EXPECT_THROW(sum.add(batchStat(MetricAggregation::SUM, 0.0, 4, std::nullopt, std::nullopt, false)),
+                 std::logic_error);
+    MetricEpochAccumulator ratio(MetricAggregation::RATIO);
+    EXPECT_THROW(ratio.add(batchStat(MetricAggregation::RATIO, 0.0, 4, 0.0, 0.0, false)),
+                 std::logic_error);
+}
+
+TEST(MetricEpochAccumulator, R10NRatioNoContributionRequiresMetricOptIn) {
+    MetricEpochAccumulator ratio(MetricAggregation::RATIO);
+    EXPECT_NO_THROW(ratio.add(
+        batchStat(MetricAggregation::RATIO, 0.0, 4, 0.0, 0.0, false, true)));
+    EXPECT_FALSE(ratio.value().has_value());
+}
+
 TEST(MetricEpochAccumulator, RatioRetainsNumeratorFromZeroDenominatorBatch) {
     MetricEpochAccumulator ratio(MetricAggregation::RATIO);
     ratio.add(batchStat(MetricAggregation::RATIO, 0.0, 4, 10.0, 0.0));
@@ -110,6 +170,15 @@ TEST(MetricEpochAccumulator, RatioReturnsZeroWhenSignedWeightsCancel) {
     ASSERT_TRUE(combined.has_value());
     EXPECT_DOUBLE_EQ(combined->numerator.value(), -2.0);
     EXPECT_DOUBLE_EQ(combined->denominator.value(), 0.0);
+}
+
+TEST(MetricEpochAccumulator, R10NOptedInRatioHasNoResultWhenEpochWeightCancelsToZero) {
+    MetricEpochAccumulator ratio(MetricAggregation::RATIO);
+    ratio.add(batchStat(MetricAggregation::RATIO, 2.0, 4, 4.0, 2.0, true, true));
+    ratio.add(batchStat(MetricAggregation::RATIO, 3.0, 2, -6.0, -2.0, true, true));
+
+    EXPECT_FALSE(ratio.value().has_value());
+    EXPECT_FALSE(ratio.statistic().has_value());
 }
 
 TEST(MetricEpochAccumulator, RejectsMissingRatioStatisticsAndAggregationChanges) {
@@ -220,4 +289,61 @@ TEST(MetricEpochAccumulator, RatioAcceptsFp32ScaleRoundingDifference) {
                                         2,
                                         static_cast<double>(numerator),
                                         static_cast<double>(denominator))));
+}
+
+TEST(MetricEpochAccumulator, R10NWeightedMeanAggregatesGlobalWeightedSufficientStatistics) {
+    MetricEpochAccumulator ratio(MetricAggregation::RATIO);
+
+    // Local weighted means 2 and 10 with very different denominator mass.
+    ratio.add(batchStat(MetricAggregation::RATIO, 2.0, 4, 2.0, 1.0, true, true));
+    // A zero-weight ragged WeightedMean batch is explicitly no-contribution.
+    // It retains logical-row population accounting without making an undefined
+    // local 0/0 ratio part of the epoch sufficient statistics.
+    ratio.add(batchStat(MetricAggregation::RATIO, 0.0, 5, 0.0, 0.0, false, true));
+    ratio.add(batchStat(MetricAggregation::RATIO, 10.0, 2, 900.0, 90.0, true, true));
+
+    ASSERT_TRUE(ratio.value().has_value());
+    EXPECT_NEAR(ratio.value().value(), 902.0 / 91.0, 1e-12);
+    // Averaging the two nonzero local ratios would incorrectly produce 6.
+    EXPECT_NE(ratio.value().value(), 6.0);
+    const std::optional<MetricBatchStat> combined = ratio.statistic();
+    ASSERT_TRUE(combined.has_value());
+    EXPECT_DOUBLE_EQ(combined->numerator.value(), 902.0);
+    EXPECT_DOUBLE_EQ(combined->denominator.value(), 91.0);
+    EXPECT_EQ(combined->validExamples, 11u);
+}
+
+TEST(MetricEpochAccumulator, R10NZeroWeightRatioPopulationHasNoResultUntilAContributingBatchArrives) {
+    MetricEpochAccumulator ratio(MetricAggregation::RATIO);
+
+    ratio.add(batchStat(MetricAggregation::RATIO, 0.0, 4, 0.0, 0.0, false, true));
+    EXPECT_FALSE(ratio.value().has_value());
+    EXPECT_FALSE(ratio.statistic().has_value());
+
+    ratio.add(batchStat(MetricAggregation::RATIO, 3.0, 2, 15.0, 5.0, true, true));
+    ASSERT_TRUE(ratio.value().has_value());
+    EXPECT_DOUBLE_EQ(ratio.value().value(), 3.0);
+    const std::optional<MetricBatchStat> combined = ratio.statistic();
+    ASSERT_TRUE(combined.has_value());
+    EXPECT_DOUBLE_EQ(combined->numerator.value(), 15.0);
+    EXPECT_DOUBLE_EQ(combined->denominator.value(), 5.0);
+    EXPECT_EQ(combined->validExamples, 6u);
+}
+
+TEST(MetricEpochAccumulator, R10OAccuracyAggregatesCorrectAndTokenCountsAcrossUnequalBatches) {
+    MetricEpochAccumulator ratio(MetricAggregation::RATIO);
+
+    // Batch-local accuracies are 1/2 and 9/10. Averaging them would produce
+    // 0.7, but the correct population accuracy is 10/12.
+    ratio.add(batchStat(MetricAggregation::RATIO, 0.5, 4, 1.0, 2.0));
+    ratio.add(batchStat(MetricAggregation::RATIO, 0.9, 4, 9.0, 10.0));
+
+    ASSERT_TRUE(ratio.value().has_value());
+    EXPECT_NEAR(ratio.value().value(), 10.0 / 12.0, 1e-12);
+    const std::optional<MetricBatchStat> combined = ratio.statistic();
+    ASSERT_TRUE(combined.has_value());
+    ASSERT_TRUE(combined->numerator.has_value());
+    ASSERT_TRUE(combined->denominator.has_value());
+    EXPECT_DOUBLE_EQ(combined->numerator.value(), 10.0);
+    EXPECT_DOUBLE_EQ(combined->denominator.value(), 12.0);
 }

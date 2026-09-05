@@ -162,8 +162,8 @@ class LaplaceNLLLoss::Builder {
             THOR_THROW_IF_FALSE(location.getValues() != scale.getValues());
             THOR_THROW_IF_FALSE(location.getValues() != target.getValues());
             THOR_THROW_IF_FALSE(scale.getValues() != target.getValues());
-            if (location.getOffsets() != scale.getOffsets() || location.getOffsets() != target.getOffsets())
-                throw std::invalid_argument("LaplaceNLLLoss ragged location, scale, and target must use the exact same row partition tensor.");
+            if (!location.sharesPartitionWith(scale) || !location.sharesPartitionWith(target))
+                throw std::invalid_argument("LaplaceNLLLoss ragged location, scale, and target must use the exact same row partition.");
             if (location.getBatchSize() != scale.getBatchSize() || location.getBatchSize() != target.getBatchSize() ||
                 location.getMaxTotalValues() != scale.getMaxTotalValues() || location.getMaxTotalValues() != target.getMaxTotalValues() ||
                 location.getTrailingDimensions() != scale.getTrailingDimensions() || location.getTrailingDimensions() != target.getTrailingDimensions())

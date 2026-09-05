@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 namespace Thor {
 
@@ -17,6 +18,43 @@ void MetricEpochAccumulator::add(const MetricBatchStat& statistic) {
     const bool hasNumerator = statistic.numerator.has_value();
     const bool hasDenominator = statistic.denominator.has_value();
     THOR_THROW_IF_FALSE(hasNumerator == hasDenominator);
+    if (aggregation == MetricAggregation::RATIO) {
+        THOR_THROW_IF_FALSE(hasNumerator);
+        if (!ratioZeroDenominatorMeansNoContribution.has_value()) {
+            ratioZeroDenominatorMeansNoContribution =
+                statistic.zeroDenominatorMeansNoContribution;
+        } else {
+            THOR_THROW_IF_FALSE(
+                ratioZeroDenominatorMeansNoContribution.value() ==
+                statistic.zeroDenominatorMeansNoContribution);
+        }
+        if (statistic.zeroDenominatorMeansNoContribution &&
+            statistic.denominator.value() == 0.0) {
+            THOR_THROW_IF_FALSE(!statistic.hasContribution);
+            // Ragged WeightedMean canonicalizes its undefined 0-weight batch
+            // sufficient statistics so NaN*0 or signed cancellation cannot leak
+            // a meaningless numerator into reporting.
+            THOR_THROW_IF_FALSE(statistic.numerator.value() == 0.0);
+        }
+    } else {
+        THOR_THROW_IF_FALSE(!statistic.zeroDenominatorMeansNoContribution);
+    }
+    if (!statistic.hasContribution) {
+        // R10M extrema and explicitly opted-in R10N zero-weight ragged
+        // WeightedMean batches are genuine absences of metric data, not fake
+        // zero values. Keep logical population row accounting, but do not
+        // update the aggregate state.
+        if (aggregation == MetricAggregation::MIN || aggregation == MetricAggregation::MAX) {
+            THOR_THROW_IF_FALSE(!hasNumerator);
+        } else if (aggregation == MetricAggregation::RATIO) {
+            THOR_THROW_IF_FALSE(statistic.zeroDenominatorMeansNoContribution);
+            THOR_THROW_IF_FALSE(statistic.denominator.value() == 0.0);
+        } else {
+            throw std::logic_error("Non-contributing batch statistic is unsupported for this aggregation.");
+        }
+        totalValidExamples += statistic.validExamples;
+        return;
+    }
     if (aggregation == MetricAggregation::RATIO) {
         THOR_THROW_IF_FALSE(hasNumerator);
         const double numerator = statistic.numerator.value();
@@ -101,10 +139,13 @@ std::optional<double> MetricEpochAccumulator::value() const {
         case MetricAggregation::MAX:
             return extremum;
         case MetricAggregation::RATIO:
-            return accumulatedDenominator == 0.0L
-                       ? 0.0
-                       : static_cast<double>(
-                             accumulatedNumerator / accumulatedDenominator);
+            if (accumulatedDenominator == 0.0L) {
+                if (ratioZeroDenominatorMeansNoContribution.value_or(false))
+                    return std::nullopt;
+                return 0.0;
+            }
+            return static_cast<double>(
+                accumulatedNumerator / accumulatedDenominator);
     }
     THOR_UNREACHABLE();
 }
@@ -119,9 +160,12 @@ std::optional<MetricBatchStat> MetricEpochAccumulator::statistic() const {
     result.aggregation = aggregation;
     result.value = combinedValue.value();
     result.validExamples = totalValidExamples;
+    result.hasContribution = true;
     if (aggregation == MetricAggregation::RATIO) {
         result.numerator = static_cast<double>(accumulatedNumerator);
         result.denominator = static_cast<double>(accumulatedDenominator);
+        result.zeroDenominatorMeansNoContribution =
+            ratioZeroDenominatorMeansNoContribution.value_or(false);
     }
     return result;
 }

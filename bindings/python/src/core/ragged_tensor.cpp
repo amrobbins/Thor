@@ -54,6 +54,7 @@ Construct a logical ragged tensor descriptor with an explicit maximum logical ro
 
     ragged.def_prop_ro("values", &RaggedTensor::getValues);
     ragged.def_prop_ro("offsets", &RaggedTensor::getOffsets);
+    ragged.def_prop_ro("row_partition_id", &RaggedTensor::getRowPartitionId);
     ragged.def_prop_ro("values_data_type", &RaggedTensor::getValuesDataType);
     ragged.def_prop_ro("offsets_data_type", &RaggedTensor::getOffsetsDataType);
     ragged.def_prop_ro("trailing_dimensions", &RaggedTensor::getTrailingDimensions);
@@ -66,6 +67,8 @@ Construct a logical ragged tensor descriptor with an explicit maximum logical ro
     ragged.def_prop_ro("ragged_rank", &RaggedTensor::getRaggedRank);
     ragged.def("get_values", &RaggedTensor::getValues);
     ragged.def("get_offsets", &RaggedTensor::getOffsets);
+    ragged.def("get_row_partition_id", &RaggedTensor::getRowPartitionId);
+    ragged.def("shares_partition_with", &RaggedTensor::sharesPartitionWith, "other"_a);
     ragged.def("get_values_data_type", &RaggedTensor::getValuesDataType);
     ragged.def("get_offsets_data_type", &RaggedTensor::getOffsetsDataType);
     ragged.def("get_trailing_dimensions", &RaggedTensor::getTrailingDimensions);

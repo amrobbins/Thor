@@ -170,8 +170,8 @@ class GaussianNLLLoss::Builder {
             THOR_THROW_IF_FALSE(mean.getValues() != target.getValues());
             THOR_THROW_IF_FALSE(mean.getValues() != variance.getValues());
             THOR_THROW_IF_FALSE(target.getValues() != variance.getValues());
-            if (mean.getOffsets() != target.getOffsets() || mean.getOffsets() != variance.getOffsets())
-                throw std::invalid_argument("GaussianNLLLoss ragged mean, target, and variance must use the exact same row partition tensor.");
+            if (!mean.sharesPartitionWith(target) || !mean.sharesPartitionWith(variance))
+                throw std::invalid_argument("GaussianNLLLoss ragged mean, target, and variance must use the exact same row partition.");
             if (mean.getBatchSize() != target.getBatchSize() || mean.getBatchSize() != variance.getBatchSize() ||
                 mean.getMaxTotalValues() != target.getMaxTotalValues() || mean.getMaxTotalValues() != variance.getMaxTotalValues() ||
                 mean.getTrailingDimensions() != target.getTrailingDimensions() || mean.getTrailingDimensions() != variance.getTrailingDimensions())

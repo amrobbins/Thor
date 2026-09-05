@@ -1783,14 +1783,28 @@ void CUDART_CB completeNativeQueuedBatch(void* data) {
             statistic.value = static_cast<double>(
                 params->scalarStats[scalarIndex->second].value);
             statistic.validExamples = params->validExampleCount;
+            if (tensors.contributionCount.has_value()) {
+                THOR_THROW_IF_FALSE(tensors.aggregation == MetricAggregation::MIN ||
+                                    tensors.aggregation == MetricAggregation::MAX);
+                const float contributionCount = copyCpuScalarTensor(tensors.contributionCount.value());
+                THOR_THROW_IF_FALSE(std::isfinite(contributionCount));
+                THOR_THROW_IF_FALSE(contributionCount >= 0.0f);
+                statistic.hasContribution = contributionCount > 0.0f;
+            }
             if (tensors.aggregation == MetricAggregation::RATIO) {
+                THOR_THROW_IF_FALSE(!tensors.contributionCount.has_value());
                 THOR_THROW_IF_FALSE(tensors.numerator.has_value());
                 THOR_THROW_IF_FALSE(tensors.denominator.has_value());
                 statistic.numerator = static_cast<double>(
                     copyCpuScalarTensor(tensors.numerator.value()));
                 statistic.denominator = static_cast<double>(
                     copyCpuScalarTensor(tensors.denominator.value()));
+                statistic.zeroDenominatorMeansNoContribution =
+                    tensors.zeroDenominatorMeansNoContribution;
+                if (statistic.zeroDenominatorMeansNoContribution)
+                    statistic.hasContribution = statistic.denominator.value() != 0.0;
             } else {
+                THOR_THROW_IF_FALSE(!tensors.zeroDenominatorMeansNoContribution);
                 THOR_THROW_IF_FALSE(!tensors.numerator.has_value());
                 THOR_THROW_IF_FALSE(!tensors.denominator.has_value());
             }

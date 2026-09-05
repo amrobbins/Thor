@@ -2,21 +2,13 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <cstdint>
 
 namespace ThorImplementation {
 
-// Compute one clipped output length per logical row for a fixed sequence-axis
-// slice. The output is length=min(length, max(input_row_length-start, 0)).
-// input_offsets is canonical UINT32/UINT64 [B+1]; output_lengths has the same
-// dtype and shape [B].
-void launchRaggedSequenceSliceRowLengths(const Tensor& input_offsets,
-                                         Tensor& output_lengths,
-                                         uint64_t start,
-                                         uint64_t length,
-                                         uint64_t batch_size,
-                                         Stream& stream);
+inline constexpr RaggedPartitionRequirement kRaggedSequenceSlicePartitionRequirement = RaggedPartitionRequirement::DEVICE_OFFSETS;
 
 // Compact the selected row windows into output_values according to
 // output_offsets. Only selected active values are read and written; inactive

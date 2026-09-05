@@ -62,6 +62,127 @@ uint64_t checkedFlopMul(uint64_t lhs, uint64_t rhs, const char* where) {
 
 }  // namespace
 
+std::shared_ptr<Layer> StampedNetwork::selectExternalRowPartitionDrivingLayer(
+    RowPartitionId rowPartitionId,
+    RaggedPartitionRequirement requirement) const {
+    auto physicalizationIt = externalRowPartitions.find(rowPartitionId);
+    if (physicalizationIt == externalRowPartitions.end()) {
+        throw std::logic_error("External row-partition physicalization is missing for the requested logical partition.");
+    }
+    if (!consumesAnyRaggedPartitionInformation(requirement)) {
+        throw std::logic_error(
+            "External row-partition token reached a physical consumer that declares no partition requirement.");
+    }
+
+    const ExternalRowPartitionPhysicalization& physicalization = physicalizationIt->second;
+    if (hasRaggedPartitionRequirement(requirement, RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT) &&
+        hasRaggedPartitionRequirement(requirement, RaggedPartitionRequirement::DEVICE_OFFSETS)) {
+        throw std::logic_error(
+            "One external row-partition input port cannot simultaneously consume DEVICE_ACTIVE_COUNT and DEVICE_OFFSETS; "
+            "the physical operator must expose distinct structural inputs if it needs both representations.");
+    }
+    auto requireAggregated = [&](RaggedPartitionRequirement requested, const char* representation) {
+        if (!hasRaggedPartitionRequirement(physicalization.requirements, requested)) {
+            throw std::logic_error(
+                std::string("External row-partition consumer requested ") + representation +
+                " after placement aggregation omitted that representation.");
+        }
+    };
+
+    // One logical structural port carries one device representation. HOST_EXTENT
+    // may combine with either device representation because both managed carriers
+    // publish the authoritative host partition without interpreting payload bytes.
+    if (hasRaggedPartitionRequirement(requirement, RaggedPartitionRequirement::DEVICE_OFFSETS)) {
+        requireAggregated(RaggedPartitionRequirement::DEVICE_OFFSETS, "DEVICE_OFFSETS");
+        if (physicalization.offsetsDrivingLayer == nullptr) {
+            throw std::logic_error("External row-partition DEVICE_OFFSETS representation was not materialized.");
+        }
+        return physicalization.offsetsDrivingLayer;
+    }
+    if (hasRaggedPartitionRequirement(requirement, RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT)) {
+        requireAggregated(RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT, "DEVICE_ACTIVE_COUNT");
+        if (physicalization.activeCountDrivingLayer == nullptr) {
+            throw std::logic_error("External row-partition DEVICE_ACTIVE_COUNT representation was not materialized.");
+        }
+        return physicalization.activeCountDrivingLayer;
+    }
+    if (hasRaggedPartitionRequirement(requirement, RaggedPartitionRequirement::HOST_EXTENT)) {
+        requireAggregated(RaggedPartitionRequirement::HOST_EXTENT, "HOST_EXTENT");
+        if (physicalization.hostCarrierDrivingLayer == nullptr) {
+            throw std::logic_error("External row-partition HOST_EXTENT carrier was not materialized.");
+        }
+        return physicalization.hostCarrierDrivingLayer;
+    }
+
+    throw std::logic_error("External row-partition consumer declared an unsupported partition requirement.");
+}
+
+void StampedNetwork::auditExternalRowPartitionPhysicalizations() const {
+    std::set<const NetworkInput*> expectedManagedInputs;
+
+    for (const auto& [rowPartitionId, physicalization] : externalRowPartitions) {
+        THOR_THROW_IF_FALSE(rowPartitionId != 0);
+        THOR_THROW_IF_FALSE(physicalization.rowPartitionId == rowPartitionId);
+        THOR_THROW_IF_FALSE(physicalization.logicalOffsetsTensor.isInitialized());
+        THOR_THROW_IF_FALSE(!physicalization.valuesInputName.empty());
+        THOR_THROW_IF_FALSE(physicalization.ownerValuesInput != nullptr);
+
+        auto logicalIt = externalRowPartitionByLogicalOffsetsTensor.find(physicalization.logicalOffsetsTensor);
+        THOR_THROW_IF_FALSE(logicalIt != externalRowPartitionByLogicalOffsetsTensor.end());
+        THOR_THROW_IF_FALSE(logicalIt->second == rowPartitionId);
+        auto valuesIt = externalRowPartitionByValuesInputName.find(physicalization.valuesInputName);
+        THOR_THROW_IF_FALSE(valuesIt != externalRowPartitionByValuesInputName.end());
+        THOR_THROW_IF_FALSE(valuesIt->second == rowPartitionId);
+
+        const bool needsHostExtent = hasRaggedPartitionRequirement(
+            physicalization.requirements, RaggedPartitionRequirement::HOST_EXTENT);
+        const bool needsActiveCount = hasRaggedPartitionRequirement(
+            physicalization.requirements, RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
+        const bool needsOffsets = hasRaggedPartitionRequirement(
+            physicalization.requirements, RaggedPartitionRequirement::DEVICE_OFFSETS);
+
+        THOR_THROW_IF_FALSE((physicalization.hostCarrierDrivingLayer != nullptr) == needsHostExtent);
+        THOR_THROW_IF_FALSE((physicalization.activeCountInput != nullptr) == needsActiveCount);
+        THOR_THROW_IF_FALSE((physicalization.activeCountDrivingLayer != nullptr) == needsActiveCount);
+        THOR_THROW_IF_FALSE((physicalization.offsetsInput != nullptr) == needsOffsets);
+        THOR_THROW_IF_FALSE((physicalization.offsetsDrivingLayer != nullptr) == needsOffsets);
+
+        auto auditManagedInput = [&](const std::shared_ptr<NetworkInput>& input,
+                                     const std::vector<uint64_t>& expectedDimensions) {
+            THOR_THROW_IF_FALSE(input != nullptr);
+            THOR_THROW_IF_FALSE(expectedManagedInputs.insert(input.get()).second);
+            THOR_THROW_IF_FALSE(input->getFeatureOutput().has_value());
+            THOR_THROW_IF_FALSE(input->getFeatureOutput()->getDimensions() == expectedDimensions);
+            THOR_THROW_IF_FALSE(input->getFeatureOutput()->getDataType() == physicalization.descriptor.getOffsetsDataType());
+
+            // Managed partition inputs are ordinary execution NetworkInputs but
+            // must remain absent from the public named/input surface.
+            THOR_THROW_IF_FALSE(
+                std::find(inputsShared.begin(), inputsShared.end(), input) == inputsShared.end());
+            for (const auto& [name, publicInput] : inputNamedShared) {
+                (void)name;
+                THOR_THROW_IF_FALSE(publicInput != input);
+            }
+        };
+
+        if (needsActiveCount) {
+            auditManagedInput(physicalization.activeCountInput, {1});
+        }
+        if (needsOffsets) {
+            auditManagedInput(physicalization.offsetsInput,
+                              physicalization.descriptor.getOffsetsDescriptor().getDimensions());
+        }
+    }
+
+    THOR_THROW_IF_FALSE(expectedManagedInputs.size() == managedPartitionInputsShared.size());
+    THOR_THROW_IF_FALSE(managedPartitionInputsShared.size() == managedPartitionInputs.size());
+    for (size_t i = 0; i < managedPartitionInputsShared.size(); ++i) {
+        THOR_THROW_IF_FALSE(managedPartitionInputsShared[i] != nullptr);
+        THOR_THROW_IF_FALSE(managedPartitionInputs[i] == managedPartitionInputsShared[i].get());
+        THOR_THROW_IF_FALSE(expectedManagedInputs.count(managedPartitionInputs[i]) == 1);
+    }
+}
+
 uint64_t StampedNetwork::getFloatingPointOperationsCurrentBatchForward() {
     uint64_t total = 0;
     for (ThorImplementation::TrainableLayer* layer : trainableLayers) {
@@ -131,6 +252,8 @@ void StampedNetwork::initializeProcessingDataStreamJoin() {
     };
 
     for (NetworkInput* input : inputs)
+        appendLayerStreams(input);
+    for (NetworkInput* input : managedPartitionInputs)
         appendLayerStreams(input);
     for (NetworkOutput* output : outputs)
         appendLayerStreams(output);
@@ -281,6 +404,7 @@ std::vector<Event> StampedNetwork::getSynchronizeEvents() const {
     };
 
     appendLayerEvents(inputsShared);
+    appendLayerEvents(managedPartitionInputsShared);
     appendLayerEvents(outputsShared);
     appendLayerEvents(trainableLayersShared);
     appendLayerEvents(otherLayersShared);
@@ -292,6 +416,8 @@ void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOthe
     // First, ensure the shared pointers and raw pointers match
     for (auto it = inputsShared.begin(); it != inputsShared.end(); ++it)
         THOR_THROW_IF_FALSE(count(inputs, it->get()) == 1);
+    for (auto it = managedPartitionInputsShared.begin(); it != managedPartitionInputsShared.end(); ++it)
+        THOR_THROW_IF_FALSE(count(managedPartitionInputs, it->get()) == 1);
     for (auto it = outputsShared.begin(); it != outputsShared.end(); ++it)
         THOR_THROW_IF_FALSE(count(outputs, it->get()) == 1);
     for (auto it = trainableLayersShared.begin(); it != trainableLayersShared.end(); ++it)
@@ -324,6 +450,7 @@ void StampedNetwork::initialize(bool initializeWeights, bool copyWeightsFromOthe
         THOR_THROW_IF_FALSE(raggedInputNamed[it->first].offsetsInputName == it->second.offsetsInputName);
         THOR_THROW_IF_FALSE(raggedInputNamed[it->first].partitionInputName == it->second.partitionInputName);
         THOR_THROW_IF_FALSE(raggedInputNamed[it->first].descriptor == it->second.descriptor);
+        THOR_THROW_IF_FALSE(raggedInputNamed[it->first].rowPartitionId == it->second.rowPartitionId);
     }
     for (auto it = outputNamedShared.begin(); it != outputNamedShared.end(); ++it) {
         THOR_THROW_IF_FALSE(outputNamed.count(it->first) == 1);
@@ -489,7 +616,7 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
         }
     };
 
-    std::map<std::string, std::vector<uint64_t>> submittedHostOffsetsByPartition;
+    std::map<RowPartitionId, std::vector<uint64_t>> submittedHostOffsetsByPartition;
     for (const auto& [name, value] : batchInputs.values()) {
         const std::optional<Thor::BatchSourceReference> sourceReference =
             batchInputs.getSourceReference(name);
@@ -535,34 +662,84 @@ Event StampedNetwork::sendBatch(const Batch& batchInputs,
                     " expected=" + binding.descriptor.toString() + ".");
             }
             requireConsistentBatchCapacity(raggedTensor.getBatchSize());
-            const std::optional<uint64_t> activeValueCount =
-                raggedTensor.getHostActiveValueCountIfAvailable();
-            const std::optional<uint64_t> maxActiveRowLength =
-                raggedTensor.getHostMaxActiveRowLengthIfAvailable();
-            const std::optional<std::vector<uint64_t>> hostOffsets =
+            std::optional<std::vector<uint64_t>> maybeHostOffsets =
                 raggedTensor.getHostOffsetsIfAvailable();
-            if (hostOffsets.has_value()) {
-                auto [it, inserted] = submittedHostOffsetsByPartition.emplace(binding.offsetsInputName, hostOffsets.value());
-                if (!inserted && it->second != hostOffsets.value()) {
+            Tensor submittedOffsets = raggedTensor.getOffsets();
+            if (submittedOffsets.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU) {
+                std::vector<uint64_t> cpuOffsets(raggedTensor.getBatchSize() + 1, 0);
+                if (submittedOffsets.getDataType() == DataType::UINT32) {
+                    const uint32_t* raw = submittedOffsets.getMemPtr<uint32_t>();
+                    for (uint64_t i = 0; i <= raggedTensor.getBatchSize(); ++i) cpuOffsets[i] = raw[i];
+                } else {
+                    THOR_THROW_IF_FALSE(submittedOffsets.getDataType() == DataType::UINT64);
+                    const uint64_t* raw = submittedOffsets.getMemPtr<uint64_t>();
+                    for (uint64_t i = 0; i <= raggedTensor.getBatchSize(); ++i) cpuOffsets[i] = raw[i];
+                }
+                if (maybeHostOffsets.has_value() && maybeHostOffsets.value() != cpuOffsets) {
                     throw std::runtime_error(
-                        "StampedNetwork::sendBatch ragged inputs sharing partition '" + binding.offsetsInputName +
-                        "' were submitted with different host offsets.");
+                        "StampedNetwork::sendBatch ragged input '" + name +
+                        "' has CPU offsets that disagree with its authoritative host row partition.");
+                }
+                if (!maybeHostOffsets.has_value()) {
+                    raggedTensor.getRowPartitionRuntime().setHostOffsets(cpuOffsets);
+                    maybeHostOffsets = cpuOffsets;
                 }
             }
-            THOR_THROW_IF_FALSE(
-                physicalBatchInputs.emplace(
-                    binding.valuesInputName,
-                    PhysicalBatchInput{raggedTensor.getValues(), sourceReference}).second);
+            if (!maybeHostOffsets.has_value()) {
+                throw std::runtime_error(
+                    "StampedNetwork::sendBatch ragged input '" + name +
+                    "' has no authoritative host row partition. GPU-only offsets cannot establish ragged semantics without an implicit device-to-host synchronization.");
+            }
+            const std::vector<uint64_t>& hostOffsets = maybeHostOffsets.value();
+            THOR_THROW_IF_FALSE(binding.rowPartitionId != 0);
+            auto [it, inserted] = submittedHostOffsetsByPartition.emplace(binding.rowPartitionId, hostOffsets);
+            if (!inserted && it->second != hostOffsets) {
+                throw std::runtime_error(
+                    "StampedNetwork::sendBatch ragged inputs sharing logical partition " +
+                    std::to_string(binding.rowPartitionId) +
+                    " were submitted with different authoritative host offsets.");
+            }
+            PhysicalBatchInput valuesInput{raggedTensor.getValues(), sourceReference};
             if (binding.ownsPartition()) {
-                THOR_THROW_IF_FALSE(
-                    physicalBatchInputs.emplace(
-                        binding.offsetsInputName,
-                        PhysicalBatchInput{raggedTensor.getOffsets(),
-                                           sourceReference,
-                                           raggedTensor.getRowPartitionRuntime().getDescriptor(),
-                                           activeValueCount,
-                                           maxActiveRowLength,
-                                           hostOffsets}).second);
+                // The owning packed-values input is also the host-state carrier.
+                // Publishing metadata here costs no device partition allocation and
+                // lets HOST_EXTENT consumers route to an ordinary values tensor.
+                valuesInput.rowPartitionDescriptor =
+                    raggedTensor.getRowPartitionRuntime().getDescriptor();
+                valuesInput.rowPartitionHostOffsets = hostOffsets;
+                valuesInput.logicalRowPartitionId = binding.rowPartitionId;
+            }
+            THOR_THROW_IF_FALSE(
+                physicalBatchInputs.emplace(binding.valuesInputName, std::move(valuesInput)).second);
+            if (binding.ownsPartition()) {
+                // The physical offsets input is hidden from the user-visible input
+                // map. Thor populates it from the authoritative host partition
+                // using the same managed NetworkInput ring as RP6A.
+                auto physicalizationIt = externalRowPartitions.find(binding.rowPartitionId);
+                THOR_THROW_IF_FALSE(physicalizationIt != externalRowPartitions.end());
+                if (physicalizationIt->second.activeCountInput != nullptr) {
+                    const std::string& physicalInputName =
+                        physicalizationIt->second.activeCountInput->getName();
+                    THOR_THROW_IF_FALSE(
+                        physicalBatchInputs.emplace(
+                            physicalInputName,
+                            PhysicalBatchInput{ManagedRowPartitionOffsetsInput{
+                                raggedTensor.getRowPartitionRuntime().getDescriptor(),
+                                hostOffsets,
+                                binding.rowPartitionId,
+                                /*activeCountOnly=*/true}}).second);
+                }
+                if (physicalizationIt->second.offsetsInput != nullptr) {
+                    const std::string& physicalInputName = physicalizationIt->second.offsetsInput->getName();
+                    THOR_THROW_IF_FALSE(
+                        physicalBatchInputs.emplace(
+                            physicalInputName,
+                            PhysicalBatchInput{ManagedRowPartitionOffsetsInput{
+                                raggedTensor.getRowPartitionRuntime().getDescriptor(),
+                                hostOffsets,
+                                binding.rowPartitionId,
+                                /*activeCountOnly=*/false}}).second);
+                }
             }
         } else if (std::holds_alternative<Thor::DeviceBatchReference>(value)) {
             Thor::DeviceBatchReference reference = std::get<Thor::DeviceBatchReference>(value);
@@ -634,10 +811,31 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
                                         BatchSubmissionTiming* submitTiming,
                                         std::optional<uint32_t> outputSlotIndex) {
     const auto physicalStart = timingNow(submitTiming);
-    THOR_THROW_IF_FALSE(batchInputs.size() == inputs.size());
+    THOR_THROW_IF_FALSE(batchInputs.size() == inputs.size() + managedPartitionInputs.size());
     THOR_THROW_IF_FALSE(physicalBatchCapacity >= 1);
     THOR_THROW_IF_FALSE(validExampleCount >= 1);
     THOR_THROW_IF_FALSE(validExampleCount <= physicalBatchCapacity);
+
+    for (const auto& [inputName, input] : batchInputs) {
+        if (std::holds_alternative<ManagedRowPartitionOffsetsInput>(input.value)) {
+            THOR_THROW_IF_FALSE(!input.sourceReference.has_value());
+            THOR_THROW_IF_FALSE(!input.rowPartitionDescriptor.has_value());
+            THOR_THROW_IF_FALSE(!input.rowPartitionHostOffsets.has_value());
+            const auto& managed = std::get<ManagedRowPartitionOffsetsInput>(input.value);
+            THOR_THROW_IF_FALSE(managed.descriptor.getBatchSize() == physicalBatchCapacity);
+            THOR_THROW_IF_FALSE(managed.hostOffsets.size() == managed.descriptor.getBatchSize() + 1);
+            if (managed.logicalRowPartitionId.has_value())
+                THOR_THROW_IF_FALSE(managed.logicalRowPartitionId.value() != 0);
+            continue;
+        }
+        const bool carriesRowPartitionHostState = input.rowPartitionDescriptor.has_value();
+        if (carriesRowPartitionHostState != input.rowPartitionHostOffsets.has_value() ||
+            input.logicalRowPartitionId.has_value() != carriesRowPartitionHostState) {
+            throw std::runtime_error(
+                "StampedNetwork::sendPhysicalBatch physical input '" + inputName +
+                "' must provide descriptor, logical partition id, and authoritative host offsets together.");
+        }
+    }
 
     if (validExampleCount < physicalBatchCapacity) {
         auto requirePartialBatchSupport = [](ThorImplementation::Layer* layer) {
@@ -656,8 +854,11 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
 
     const uint32_t queueSlot = outputSlotIndex.value_or(0);
     const uint32_t outputSlot = queueSlot;
-    for (uint32_t i = 0; i < inputs.size(); ++i) {
-        inputs[i]->setActiveInputSlot(queueSlot);
+    for (NetworkInput* input : inputs) {
+        input->setActiveInputSlot(queueSlot);
+    }
+    for (NetworkInput* input : managedPartitionInputs) {
+        input->setActiveInputSlot(queueSlot);
     }
     for (uint32_t i = 0; i < outputs.size(); ++i) {
         outputs[i]->setActiveOutputSlot(outputSlot);
@@ -673,51 +874,44 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
 
     const auto inputForwardStart = timingNow(submitTiming);
 
-    // A partition-owning logical RaggedNetworkInput materializes values and
-    // offsets through two physical NetworkInput ports. Shared-partition inputs
-    // materialize only their values port and reuse the owner's offsets port.
-    // Values use the ordinary tensor-copy path: packed storage beyond offsets[B]
-    // is undefined and the input boundary does not inspect or canonicalize it.
-    // The canonical offsets port alone publishes row-partition runtime metadata.
+    // A partition-owning logical RaggedNetworkInput always materializes values.
+    // The values input carries authoritative host partition metadata, while hidden
+    // active-count/full-offset inputs exist only when placement requested them.
+    // Packed storage beyond the active prefix remains undefined.
 
-    for (uint32_t i = 0; i < inputs.size(); ++i) {
-        auto it = batchInputs.find(inputs[i]->getName());
+    auto forwardPhysicalInput = [&](NetworkInput* input, bool managedPartitionInput) {
+        THOR_THROW_IF_FALSE(input != nullptr);
+        auto it = batchInputs.find(input->getName());
         THOR_THROW_IF_FALSE(it != batchInputs.end());
-        const auto readyIt = inputReadyEvents.find(inputs[i]->getName());
+        const auto readyIt = inputReadyEvents.find(input->getName());
+        if (managedPartitionInput) {
+            THOR_THROW_IF_FALSE(readyIt == inputReadyEvents.end());
+        }
         if (std::holds_alternative<Tensor>(it->second.value)) {
             Tensor inputTensor = std::get<Tensor>(it->second.value);
             if (it->second.rowPartitionDescriptor.has_value()) {
-                if (readyIt != inputReadyEvents.end()) {
-                    inputs[i]->forwardRowPartitionOffsets(
-                        inputTensor,
-                        isInferenceOnly,
-                        readyIt->second,
-                        it->second.rowPartitionDescriptor.value(),
-                        it->second.rowPartitionHostActiveValueCount,
-                        it->second.rowPartitionHostMaxActiveRowLength,
-                        validExampleCount,
-                        it->second.rowPartitionHostOffsets,
-                        it->second.sourceReference);
-                } else {
-                    inputs[i]->forwardRowPartitionOffsets(
-                        inputTensor,
-                        isInferenceOnly,
-                        it->second.rowPartitionDescriptor.value(),
-                        it->second.rowPartitionHostActiveValueCount,
-                        it->second.rowPartitionHostMaxActiveRowLength,
-                        validExampleCount,
-                        it->second.rowPartitionHostOffsets,
-                        it->second.sourceReference);
-                }
+                THOR_THROW_IF_FALSE(it->second.logicalRowPartitionId.has_value());
+                // Logical ragged Batch submission has no separate per-field ready
+                // event. Publish authoritative host state on the ordinary values
+                // NetworkInput before downstream notification.
+                THOR_THROW_IF_FALSE(readyIt == inputReadyEvents.end());
+                input->forwardWithRowPartitionHostState(
+                    inputTensor,
+                    isInferenceOnly,
+                    validExampleCount,
+                    it->second.rowPartitionDescriptor.value(),
+                    it->second.logicalRowPartitionId.value(),
+                    it->second.rowPartitionHostOffsets.value(),
+                    it->second.sourceReference);
             } else if (readyIt != inputReadyEvents.end()) {
-                inputs[i]->forward(
+                input->forward(
                     inputTensor,
                     isInferenceOnly,
                     readyIt->second,
                     validExampleCount,
                     it->second.sourceReference);
             } else {
-                inputs[i]->forward(
+                input->forward(
                     inputTensor,
                     isInferenceOnly,
                     validExampleCount,
@@ -725,15 +919,41 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
             }
         } else if (std::holds_alternative<Thor::DeviceBatchReference>(it->second.value)) {
             THOR_THROW_IF_FALSE(readyIt == inputReadyEvents.end());
-            inputs[i]->forward(
+            input->forward(
                 std::get<Thor::DeviceBatchReference>(it->second.value),
                 isInferenceOnly,
                 validExampleCount,
                 it->second.sourceReference);
+        } else if (std::holds_alternative<ManagedRowPartitionOffsetsInput>(it->second.value)) {
+            THOR_THROW_IF_FALSE(readyIt == inputReadyEvents.end());
+            THOR_THROW_IF_FALSE(!it->second.sourceReference.has_value());
+            ManagedRowPartitionOffsetsInput managed =
+                std::get<ManagedRowPartitionOffsetsInput>(std::move(it->second.value));
+            if (managed.activeCountOnly) {
+                THOR_THROW_IF_FALSE(managed.logicalRowPartitionId.has_value());
+                input->forwardManagedRowPartitionActiveCount(
+                    isInferenceOnly,
+                    managed.descriptor,
+                    validExampleCount,
+                    std::move(managed.hostOffsets),
+                    managed.logicalRowPartitionId.value());
+            } else {
+                input->forwardManagedRowPartitionOffsets(
+                    isInferenceOnly,
+                    managed.descriptor,
+                    validExampleCount,
+                    std::move(managed.hostOffsets),
+                    managed.logicalRowPartitionId);
+            }
         } else {
             THOR_UNREACHABLE();
         }
-    }
+    };
+
+    for (NetworkInput* input : inputs)
+        forwardPhysicalInput(input, /*managedPartitionInput=*/false);
+    for (NetworkInput* input : managedPartitionInputs)
+        forwardPhysicalInput(input, /*managedPartitionInput=*/true);
     const auto inputForwardFinish = timingNow(submitTiming);
 
     // Capture each NetworkOutput-owned ready event.  NetworkOutput may offload its
@@ -785,6 +1005,9 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
     for (uint i = 1; i < inputs.size(); ++i) {
         inputs[i]->getStream().waitEvent(processingFinishedEvent);
     }
+    for (NetworkInput* input : managedPartitionInputs) {
+        input->getStream().waitEvent(processingFinishedEvent);
+    }
     const auto inputFanoutFinish = timingNow(submitTiming);
 
     if (submitTiming != nullptr) {
@@ -794,7 +1017,7 @@ Event StampedNetwork::sendPhysicalBatch(std::map<std::string, PhysicalBatchInput
         submitTiming->outputWaitOnProcessingMicros += elapsedMicros(outputWaitStart, outputWaitFinish);
         submitTiming->processingEventMicros += elapsedMicros(processingEventStart, processingEventFinish);
         submitTiming->inputFanoutMicros += elapsedMicros(inputFanoutStart, inputFanoutFinish);
-        submitTiming->numInputs += inputs.size();
+        submitTiming->numInputs += inputs.size() + managedPartitionInputs.size();
         submitTiming->numOutputs += outputs.size();
     }
 
@@ -827,6 +1050,7 @@ void StampedNetwork::clearImpl(bool propagateCleanupFailure) {
     // many cleanup() implementations; stopping at the first exception leaks the
     // rest of the physical graph.
     cleanupLayers(inputs);
+    cleanupLayers(managedPartitionInputs);
     cleanupLayers(outputs);
     cleanupLayers(trainableLayers);
     cleanupLayers(otherLayers);
@@ -840,6 +1064,10 @@ void StampedNetwork::clearImpl(bool propagateCleanupFailure) {
     outputNamed.clear();
 
     inputsShared.clear();
+    managedPartitionInputsShared.clear();
+    externalRowPartitions.clear();
+    externalRowPartitionByLogicalOffsetsTensor.clear();
+    externalRowPartitionByValuesInputName.clear();
     outputsShared.clear();
     trainableLayersShared.clear();
     gradientUpdateStreamPool.reset();
@@ -874,6 +1102,9 @@ void StampedNetwork::clearNoThrow() noexcept {
 void StampedNetwork::preallocateInputSlots(uint32_t numSlots) {
     THOR_THROW_IF_FALSE(numSlots >= 1);
     for (NetworkInput* input : inputs) {
+        input->preallocateInputSlots(numSlots);
+    }
+    for (NetworkInput* input : managedPartitionInputs) {
         input->preallocateInputSlots(numSlots);
     }
 }

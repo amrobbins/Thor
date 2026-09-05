@@ -8,6 +8,7 @@
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <nlohmann/json.hpp>
 
@@ -93,6 +94,27 @@ class Layer {
     [[nodiscard]] virtual std::optional<std::string> getOutputPortName(const Tensor& outputTensor) const {
         (void)outputTensor;
         return std::nullopt;
+    }
+
+    // Placement-facing contract for a logical row-partition input. Network only
+    // calls this for tensors known to be row-partition routing tokens. The
+    // conservative default preserves legacy behavior for layers not yet migrated:
+    // they receive full device offsets. RP5-classified layers override this to
+    // request host extent or the one-element device active count instead.
+    [[nodiscard]] virtual ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const {
+        (void)inputTensor;
+        return ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+    }
+
+    // Placement may need a stronger representation in training than inference
+    // when a backward-only physical consumer requires additional partition
+    // information.  Most layers have identical forward/backward requirements,
+    // so the default delegates to the ordinary RP5 declaration.
+    [[nodiscard]] virtual ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForPlacement(const Tensor& inputTensor, bool inferenceOnly) const {
+        (void)inferenceOnly;
+        return getRaggedPartitionRequirementForInput(inputTensor);
     }
 
     // Returns true when the API tensor dimensions already describe the complete physical tensor,

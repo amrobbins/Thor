@@ -273,6 +273,8 @@ std::string exprOpExternalName(ExprOp op) {
             return "rope";
         case ExprOp::SOFTMAX:
             return "softmax";
+        case ExprOp::RAGGED_SOFTMAX_BACKWARD:
+            return "ragged_softmax_backward";
         case ExprOp::FILL:
             return "fill";
         case ExprOp::RESHAPE:
@@ -479,6 +481,7 @@ ExprOp exprOpFromExternalName(const std::string& op) {
         {"rope", ExprOp::ROPE},
         {"rotary_position_embedding", ExprOp::ROPE},
         {"softmax", ExprOp::SOFTMAX},
+        {"ragged_softmax_backward", ExprOp::RAGGED_SOFTMAX_BACKWARD},
         {"fill", ExprOp::FILL},
         {"reshape", ExprOp::RESHAPE},
         {"strided_view", ExprOp::STRIDED_VIEW},
@@ -755,6 +758,7 @@ json exprNodeToJson(const ExprNode& node) {
     j["scan_mode"] = scanModeToString(node.scan_mode);
     j["scan_axis"] = node.scan_axis;
     j["scan_reverse"] = node.scan_reverse;
+    j["ragged_runtime_extent_source"] = static_cast<int>(node.ragged_runtime_extent_source);
     j["ragged_runtime_batch_size"] = node.ragged_runtime_batch_size;
     j["ragged_runtime_max_active_values"] = node.ragged_runtime_max_active_values;
     j["ragged_runtime_max_values_per_row"] = node.ragged_runtime_max_values_per_row;
@@ -970,6 +974,15 @@ ExprNode exprNodeFromJson(const json& j) {
     node.scan_mode = scanModeFromString(j.value("scan_mode", std::string("exclusive")));
     node.scan_axis = j.value("scan_axis", UINT64_MAX);
     node.scan_reverse = j.value("scan_reverse", false);
+    {
+        const int source = j.value("ragged_runtime_extent_source",
+                                   static_cast<int>(RaggedRuntimeExtentSource::DEVICE_OFFSETS));
+        if (source < static_cast<int>(RaggedRuntimeExtentSource::DEVICE_OFFSETS) ||
+            source > static_cast<int>(RaggedRuntimeExtentSource::HOST_EXTENT)) {
+            throw std::runtime_error("Serialized ragged runtime extent has an invalid physical source.");
+        }
+        node.ragged_runtime_extent_source = static_cast<RaggedRuntimeExtentSource>(source);
+    }
     node.ragged_runtime_batch_size = j.value("ragged_runtime_batch_size", uint64_t{0});
     node.ragged_runtime_max_active_values = j.value("ragged_runtime_max_active_values", uint64_t{0});
     node.ragged_runtime_max_values_per_row = j.value("ragged_runtime_max_values_per_row", uint64_t{0});
@@ -1159,6 +1172,8 @@ std::string opName(ExprOp op) {
             return "ROPE";
         case ExprOp::SOFTMAX:
             return "SOFTMAX";
+        case ExprOp::RAGGED_SOFTMAX_BACKWARD:
+            return "RAGGED_SOFTMAX_BWD";
         case ExprOp::FILL:
             return "FILL";
         case ExprOp::RESHAPE:
@@ -1462,6 +1477,15 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                   ";algorithm=" + std::to_string(static_cast<int>(n.softmax_algorithm)) +
                   ";mode=" + std::to_string(static_cast<int>(n.softmax_mode)) + ")";
             break;
+        case ExprOp::RAGGED_SOFTMAX_BACKWARD:
+            out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) + "," +
+                  canonicalizeNode(expr, n.rhs, memo, memoReady) + "," + canonicalizeNode(expr, n.aux, memo, memoReady) +
+                  ";algorithm=" + std::to_string(static_cast<int>(n.softmax_algorithm)) +
+                  ";mode=" + std::to_string(static_cast<int>(n.softmax_mode)) +
+                  ";batch=" + std::to_string(n.ragged_runtime_batch_size) +
+                  ";maxActive=" + std::to_string(n.ragged_runtime_max_active_values) +
+                  ";elementsPerValue=" + std::to_string(n.ragged_runtime_elements_per_value) + ")";
+            break;
         case ExprOp::RESHAPE:
             out = opName(n.op) + "(" + canonicalizeNode(expr, n.lhs, memo, memoReady) +
                   ";dims=" + formatUIntVectorCanonical(n.reshape_dims) + ")";
@@ -1645,6 +1669,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 out += ";padding=";
                 out += n.embedding_has_padding_index ? std::to_string(n.embedding_padding_index) : std::string("none");
             } else if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+                out += ";source=" + std::to_string(static_cast<int>(n.ragged_runtime_extent_source));
                 out += ";batch=" + std::to_string(n.ragged_runtime_batch_size);
                 out += ";maxActive=" + std::to_string(n.ragged_runtime_max_active_values);
                 out += ";elementsPerValue=" + std::to_string(n.ragged_runtime_elements_per_value);
@@ -2876,6 +2901,7 @@ bool Expression::isTernaryOp(const ExprOp op) {
         case ExprOp::LAYERNORM:
         case ExprOp::RMSNORM_BACKWARD_X:
         case ExprOp::RMSNORM_BACKWARD_SCALE:
+        case ExprOp::RAGGED_SOFTMAX_BACKWARD:
         case ExprOp::ATTENTION:
         case ExprOp::ATTENTION_BACKWARD_Q:
         case ExprOp::ATTENTION_BACKWARD_K:
@@ -4378,24 +4404,27 @@ Expression Expression::segmentedReduceMean(const Expression& input, const Expres
     return segmentedReduceWithRaggedMetadata(input, offsets, ExprOp::SEGMENTED_REDUCE_MEAN, 0, 0);
 }
 
-Expression Expression::withRaggedRuntimeExtent(const Expression& offsets,
+Expression Expression::withRaggedRuntimeExtent(const Expression& partition_input,
                                                uint64_t batch_size,
                                                uint64_t max_active_values,
-                                               uint64_t elements_per_value) const {
-    if (batch_size + 1 <= batch_size) {
+                                               uint64_t elements_per_value,
+                                               RaggedRuntimeExtentSource source) const {
+    if (source == RaggedRuntimeExtentSource::DEVICE_OFFSETS && batch_size + 1 <= batch_size) {
         throw std::invalid_argument("Expression::withRaggedRuntimeExtent batch size overflows offsets element count.");
     }
     if (max_active_values == 0 || elements_per_value == 0) {
         throw std::invalid_argument("Expression::withRaggedRuntimeExtent requires non-zero maximum extent metadata.");
     }
-    PhysicalExpression offsets_expr = offsets.expression();
-    const ExprNode& offsets_node = offsets_expr.nodes.at(offsets_expr.output_node);
-    if (offsets_node.op != ExprOp::INPUT) {
-        throw std::invalid_argument("Expression::withRaggedRuntimeExtent currently requires offsets to be a direct input expression.");
+    PhysicalExpression partition_expr = partition_input.expression();
+    const ExprNode& partition_node = partition_expr.nodes.at(partition_expr.output_node);
+    if (partition_node.op != ExprOp::INPUT) {
+        throw std::invalid_argument(
+            "Expression::withRaggedRuntimeExtent currently requires the row-partition carrier to be a direct input expression.");
     }
 
-    Expression out = binaryOp(*this, offsets, ExprOp::RAGGED_VALUEWISE_EXTENT);
+    Expression out = binaryOp(*this, partition_input, ExprOp::RAGGED_VALUEWISE_EXTENT);
     ExprNode& node = out.expr->nodes.at(out.nodeIndex);
+    node.ragged_runtime_extent_source = source;
     node.ragged_runtime_batch_size = batch_size;
     node.ragged_runtime_max_active_values = max_active_values;
     node.ragged_runtime_elements_per_value = elements_per_value;

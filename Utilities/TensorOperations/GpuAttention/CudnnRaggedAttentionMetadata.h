@@ -2,10 +2,14 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <cstdint>
 
 namespace ThorImplementation {
+
+inline constexpr RaggedPartitionRequirement kCudnnRaggedAttentionMetadataPartitionRequirement =
+    RaggedPartitionRequirement::DEVICE_OFFSETS;
 
 /**
  * Converts Thor's canonical rank-1 row partition into the metadata expected by

@@ -125,8 +125,8 @@ void bind_binary_focal_loss(nb::module_ &losses) {
                     throw nb::value_error((loss_name + ": predictions must use fp16 or fp32 dtype").c_str());
                 if (!isBinaryLabelDType(labels.getValuesDataType()))
                     throw nb::value_error((loss_name + ": labels must use bool, uint8, uint16, uint32, fp16, or fp32 dtype").c_str());
-                if (predictions.getOffsets() != labels.getOffsets())
-                    throw nb::value_error((loss_name + ": ragged predictions and labels must use the exact same row partition tensor.").c_str());
+                if (!predictions.sharesPartitionWith(labels))
+                    throw nb::value_error((loss_name + ": ragged predictions and labels must use the exact same row partition.").c_str());
                 if (predictions.getBatchSize() != labels.getBatchSize() ||
                     predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
                     predictions.getTrailingDimensions() != labels.getTrailingDimensions())

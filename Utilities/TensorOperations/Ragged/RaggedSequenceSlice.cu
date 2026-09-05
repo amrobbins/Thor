@@ -33,20 +33,6 @@ __device__ __forceinline__ uint64_t clippedSliceLength(const OffsetT* offsets,
 }
 
 template <typename OffsetT>
-__global__ void sliceRowLengthsKernel(const OffsetT* inputOffsets,
-                                      OffsetT* outputLengths,
-                                      uint64_t start,
-                                      uint64_t length,
-                                      uint64_t batchSize) {
-    const uint64_t stride = static_cast<uint64_t>(blockDim.x) * gridDim.x;
-    for (uint64_t row = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         row < batchSize;
-         row += stride) {
-        outputLengths[row] = static_cast<OffsetT>(clippedSliceLength(inputOffsets, row, start, length));
-    }
-}
-
-template <typename OffsetT>
 __global__ void sliceValuesKernel(const unsigned char* inputValues,
                                   const OffsetT* inputOffsets,
                                   const OffsetT* outputOffsets,
@@ -123,12 +109,6 @@ __global__ void scatterSliceGradientKernel(const OffsetT* inputOffsets,
     }
 }
 
-uint32_t blocksForItems(uint64_t items) {
-    if (items == 0) return 1;
-    const uint64_t needed = (items + kThreads - 1U) / kThreads;
-    return static_cast<uint32_t>(std::min<uint64_t>(needed, kMaxPortableBlocks));
-}
-
 uint32_t blocksForRows(uint64_t batchSize) {
     return static_cast<uint32_t>(std::min<uint64_t>(std::max<uint64_t>(batchSize, 1), kMaxPortableBlocks));
 }
@@ -181,18 +161,6 @@ void validateValuesPair(const Tensor& inputValues, const Tensor& outputValues) {
     if (!std::equal(inputDimensions.begin() + 1, inputDimensions.end(), outputDimensions.begin() + 1)) {
         throw std::invalid_argument("RaggedSequenceSlice input/output values must share identical trailing dimensions.");
     }
-}
-
-template <typename OffsetT>
-void launchLengthsTyped(const Tensor& inputOffsets,
-                        Tensor& outputLengths,
-                        uint64_t start,
-                        uint64_t length,
-                        uint64_t batchSize,
-                        Stream& stream) {
-    sliceRowLengthsKernel<OffsetT><<<blocksForItems(batchSize), kThreads, 0, stream.getStream()>>>(
-        inputOffsets.getMemPtr<OffsetT>(), outputLengths.getMemPtr<OffsetT>(), start, length, batchSize);
-    CUDA_CHECK(cudaGetLastError());
 }
 
 template <typename OffsetT>
@@ -250,34 +218,6 @@ void launchBackwardTyped(const Tensor& inputOffsets,
 }
 
 }  // namespace
-
-void launchRaggedSequenceSliceRowLengths(const Tensor& input_offsets,
-                                         Tensor& output_lengths,
-                                         uint64_t start,
-                                         uint64_t length,
-                                         uint64_t batch_size,
-                                         Stream& stream) {
-    if (length == 0) throw std::invalid_argument("RaggedSequenceSlice length must be greater than zero.");
-    validateOffsets(input_offsets, batch_size, "input offsets");
-    requireGpu(output_lengths, "row lengths");
-    requireSamePlacement(input_offsets, output_lengths, "input offsets/row lengths");
-    if (output_lengths.getDataType() != input_offsets.getDataType() ||
-        output_lengths.getDimensions() != std::vector<uint64_t>{batch_size}) {
-        throw std::invalid_argument("RaggedSequenceSlice row lengths must match offsets dtype and have shape [batch_size].");
-    }
-
-    ScopedGpu scopedGpu(stream.getGpuNum());
-    switch (input_offsets.getDataType()) {
-        case DataType::UINT32:
-            launchLengthsTyped<uint32_t>(input_offsets, output_lengths, start, length, batch_size, stream);
-            return;
-        case DataType::UINT64:
-            launchLengthsTyped<uint64_t>(input_offsets, output_lengths, start, length, batch_size, stream);
-            return;
-        default:
-            throw std::invalid_argument("RaggedSequenceSlice offsets must use UINT32 or UINT64 storage.");
-    }
-}
 
 void launchRaggedSequenceSliceValues(const Tensor& input_values,
                                      const Tensor& input_offsets,

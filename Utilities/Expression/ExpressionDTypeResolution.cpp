@@ -420,12 +420,31 @@ static DataType resolveNodeLogicalInputDType(const ExprNode& node,
         if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
             throw std::runtime_error("ragged valuewise extent node has parent index out of range in resolveNodeLogicalInputDType.");
         }
-        const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
-        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
-            throw std::runtime_error("ragged valuewise extent offsets must have UINT32 or UINT64 dtype, received: " +
-                                     TensorDescriptor::getElementTypeName(offsets_dtype));
+        const DataType carrier_dtype = resolved_output_dtypes[node.rhs];
+        if (node.ragged_runtime_extent_source != RaggedRuntimeExtentSource::HOST_EXTENT &&
+            !isCanonicalRowPartitionOffsetDataType(carrier_dtype)) {
+            throw std::runtime_error(
+                "device ragged valuewise extent source must use the canonical UINT32 or UINT64 row-partition dtype, received: " +
+                TensorDescriptor::getElementTypeName(carrier_dtype));
         }
         return resolved_output_dtypes[node.lhs];
+    }
+
+    if (node.op == ExprOp::RAGGED_SOFTMAX_BACKWARD) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size() ||
+            node.aux >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("ragged Softmax backward node has parent index out of range in resolveNodeLogicalInputDType.");
+        }
+        const DataType y_dtype = resolved_output_dtypes[node.lhs];
+        const DataType dy_dtype = resolved_output_dtypes[node.rhs];
+        const DataType offsets_dtype = resolved_output_dtypes[node.aux];
+        if (y_dtype != dy_dtype) {
+            throw std::runtime_error("ragged Softmax backward requires Y and dY to have identical storage dtype.");
+        }
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
+            throw std::runtime_error("ragged Softmax backward offsets must have UINT32 or UINT64 dtype.");
+        }
+        return node.output_dtype.value_or(y_dtype);
     }
 
     if (node.op == ExprOp::RAGGED_CONV1D_CAUSAL || node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA ||
@@ -682,12 +701,31 @@ static DataType resolveNodeOutputDType(const ExprNode& node,
         if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size()) {
             throw std::runtime_error("ragged valuewise extent node has parent index out of range in resolveNodeOutputDType.");
         }
-        const DataType offsets_dtype = resolved_output_dtypes[node.rhs];
-        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
-            throw std::runtime_error("ragged valuewise extent offsets must have UINT32 or UINT64 dtype, received: " +
-                                     TensorDescriptor::getElementTypeName(offsets_dtype));
+        const DataType carrier_dtype = resolved_output_dtypes[node.rhs];
+        if (node.ragged_runtime_extent_source != RaggedRuntimeExtentSource::HOST_EXTENT &&
+            !isCanonicalRowPartitionOffsetDataType(carrier_dtype)) {
+            throw std::runtime_error(
+                "device ragged valuewise extent source must use the canonical UINT32 or UINT64 row-partition dtype, received: " +
+                TensorDescriptor::getElementTypeName(carrier_dtype));
         }
         return node.output_dtype.has_value() ? node.output_dtype.value() : resolved_output_dtypes[node.lhs];
+    }
+
+    if (node.op == ExprOp::RAGGED_SOFTMAX_BACKWARD) {
+        if (node.lhs >= resolved_output_dtypes.size() || node.rhs >= resolved_output_dtypes.size() ||
+            node.aux >= resolved_output_dtypes.size()) {
+            throw std::runtime_error("ragged Softmax backward node has parent index out of range in resolveNodeOutputDType.");
+        }
+        const DataType y_dtype = resolved_output_dtypes[node.lhs];
+        const DataType dy_dtype = resolved_output_dtypes[node.rhs];
+        const DataType offsets_dtype = resolved_output_dtypes[node.aux];
+        if (y_dtype != dy_dtype) {
+            throw std::runtime_error("ragged Softmax backward requires Y and dY to have identical storage dtype.");
+        }
+        if (!isCanonicalRowPartitionOffsetDataType(offsets_dtype)) {
+            throw std::runtime_error("ragged Softmax backward offsets must have UINT32 or UINT64 dtype.");
+        }
+        return node.output_dtype.value_or(y_dtype);
     }
 
     if (node.op == ExprOp::RAGGED_CONV1D_CAUSAL || node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA ||
@@ -1029,6 +1067,11 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
             // The offsets operand controls launch extent only. It is structural
             // metadata and never participates in value dtype propagation.
             propagate_to_parent(node.lhs);
+        } else if (node.op == ExprOp::RAGGED_SOFTMAX_BACKWARD) {
+            // Canonical offsets are structural metadata. The backward value
+            // compute requirement flows only through Y and dY.
+            propagate_to_parent(node.lhs);
+            propagate_to_parent(node.rhs);
         } else if (node.op == ExprOp::RAGGED_CONV1D_CAUSAL ||
                    node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_DATA ||
                    node.op == ExprOp::RAGGED_CONV1D_CAUSAL_BACKWARD_FILTER) {

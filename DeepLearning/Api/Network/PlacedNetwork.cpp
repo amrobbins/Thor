@@ -52,6 +52,30 @@ constexpr uint64_t elapsedMicros(BatchTimingTimePoint, BatchTimingTimePoint) {
 }
 #endif
 
+std::vector<uint64_t> readAuthoritativeHostOffsetsFromCpuTensor(
+    ThorImplementation::Tensor offsets,
+    const ThorImplementation::RowPartitionDescriptor& descriptor) {
+    if (offsets.getPlacement().getMemDevice() != ThorImplementation::TensorPlacement::MemDevices::CPU) {
+        throw std::runtime_error(
+            "PlacedNetwork::inferLogical cannot construct a host-authoritative ragged output from GPU-only offsets metadata.");
+    }
+    if (offsets.getDescriptor() != descriptor.getOffsetsDescriptor()) {
+        throw std::runtime_error(
+            "PlacedNetwork::inferLogical ragged output offsets descriptor does not match its row-partition descriptor.");
+    }
+
+    std::vector<uint64_t> hostOffsets(descriptor.getBatchSize() + 1, 0);
+    if (descriptor.getOffsetsDataType() == ThorImplementation::DataType::UINT32) {
+        const uint32_t* raw = offsets.getMemPtr<uint32_t>();
+        for (uint64_t i = 0; i <= descriptor.getBatchSize(); ++i) hostOffsets[i] = raw[i];
+    } else {
+        THOR_THROW_IF_FALSE(descriptor.getOffsetsDataType() == ThorImplementation::DataType::UINT64);
+        const uint64_t* raw = offsets.getMemPtr<uint64_t>();
+        for (uint64_t i = 0; i <= descriptor.getBatchSize(); ++i) hostOffsets[i] = raw[i];
+    }
+    return hostOffsets;
+}
+
 std::shared_ptr<ThorImplementation::PhysicalParameter> getPhysicalParameter(ThorImplementation::StampedNetwork& stampedNetwork,
                                                                             const ParameterReference& parameterReference) {
     std::shared_ptr<ThorImplementation::Layer> physicalLayer =
@@ -664,8 +688,22 @@ std::map<std::string, InferenceOutputValue> PlacedNetwork::inferLogical(const Ba
         if (logicalOutputs.contains(output.name)) {
             throw std::runtime_error("PlacedNetwork::inferLogical found duplicate logical output name '" + output.name + "'.");
         }
-        ThorImplementation::RowPartitionRuntime rowPartition(
-            offsetsIt->second, output.raggedTensor.getDescriptor().getRowPartition());
+        const ThorImplementation::RowPartitionDescriptor rowDescriptor =
+            output.raggedTensor.getDescriptor().getRowPartition();
+        ThorImplementation::RowPartitionRuntime rowPartition(offsetsIt->second, rowDescriptor);
+        if (offsetsIt->second.getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::CPU) {
+            // inferLogical() reuses physical output allocations across submissions.
+            // The CPU offsets payload has just been materialized for this batch, so
+            // it is authoritative even if that allocation still carries host
+            // partition state from a previous batch.  Re-publish on every call.
+            // This is a logical output-boundary operation, not a device-to-host
+            // extent probe in the execution path.
+            rowPartition.setHostOffsets(
+                readAuthoritativeHostOffsetsFromCpuTensor(offsetsIt->second, rowDescriptor));
+        } else if (!rowPartition.hasHostOffsets()) {
+            throw std::runtime_error(
+                "PlacedNetwork::inferLogical GPU ragged output has no authoritative host row partition bound for this batch.");
+        }
         logicalOutputs.emplace(output.name, ThorImplementation::RaggedTensor(valuesIt->second, rowPartition));
     }
 

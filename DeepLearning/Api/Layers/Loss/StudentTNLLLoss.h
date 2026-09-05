@@ -199,16 +199,16 @@ class StudentTNLLLoss::Builder {
             THOR_THROW_IF_FALSE(location.getValues() != logScale.getValues());
             THOR_THROW_IF_FALSE(location.getValues() != target.getValues());
             THOR_THROW_IF_FALSE(logScale.getValues() != target.getValues());
-            if (location.getOffsets() != logScale.getOffsets() || location.getOffsets() != target.getOffsets())
-                throw std::invalid_argument("StudentTNLLLoss ragged location, log_scale, and target must use the exact same row partition tensor.");
+            if (!location.sharesPartitionWith(logScale) || !location.sharesPartitionWith(target))
+                throw std::invalid_argument("StudentTNLLLoss ragged location, log_scale, and target must use the exact same row partition.");
             if (location.getBatchSize() != logScale.getBatchSize() || location.getBatchSize() != target.getBatchSize() ||
                 location.getMaxTotalValues() != logScale.getMaxTotalValues() || location.getMaxTotalValues() != target.getMaxTotalValues() ||
                 location.getTrailingDimensions() != logScale.getTrailingDimensions() || location.getTrailingDimensions() != target.getTrailingDimensions())
                 throw std::invalid_argument("StudentTNLLLoss ragged location, log_scale, and target must have identical value geometry.");
             if (_raggedLogDegreesOfFreedom.has_value()) {
                 const RaggedTensor& logDof = _raggedLogDegreesOfFreedom.value();
-                if (location.getOffsets() != logDof.getOffsets())
-                    throw std::invalid_argument("StudentTNLLLoss ragged learned log degrees of freedom must use the exact same row partition tensor.");
+                if (!location.sharesPartitionWith(logDof))
+                    throw std::invalid_argument("StudentTNLLLoss ragged learned log degrees of freedom must use the exact same row partition.");
                 if (location.getBatchSize() != logDof.getBatchSize() || location.getMaxTotalValues() != logDof.getMaxTotalValues() ||
                     location.getTrailingDimensions() != logDof.getTrailingDimensions())
                     throw std::invalid_argument("StudentTNLLLoss ragged learned log degrees of freedom must have identical value geometry.");

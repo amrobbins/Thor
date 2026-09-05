@@ -973,7 +973,8 @@ void TrainingRunsStatsReporter::updateSmoothedMetricState(
     }
 
     metricState.currentEpochAccumulator->add(statistic);
-    metricState.currentEpochValueCount += 1;
+    if (statistic.hasContribution)
+        metricState.currentEpochValueCount += 1;
     const std::optional<double> currentEpochValue =
         metricState.currentEpochAccumulator->value();
     if (!currentEpochValue.has_value()) {

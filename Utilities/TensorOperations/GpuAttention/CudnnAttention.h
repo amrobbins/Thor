@@ -3,6 +3,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/CudnnFrontendPlan.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <cstdint>
 #include <optional>
@@ -13,6 +14,11 @@
 #include <vector>
 
 namespace ThorImplementation {
+
+// Ragged SDPA converts canonical per-row boundaries to the sequence-length and
+// element-offset metadata consumed by cuDNN.
+inline constexpr RaggedPartitionRequirement kCudnnRaggedAttentionPartitionRequirement =
+    RaggedPartitionRequirement::DEVICE_OFFSETS;
 
 enum class AttentionTensorLayout {
     BHSD,

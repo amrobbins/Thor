@@ -109,6 +109,17 @@ RaggedRuntimeExtent raggedRuntimeExtentFromOffsets(const Tensor& offsets,
     return extent;
 }
 
+RaggedRuntimeExtent raggedRuntimeExtentFromActiveValueCount(const Tensor& active_value_count,
+                                                                  uint64_t max_total_values,
+                                                                  uint64_t elements_per_value) {
+    RaggedRuntimeExtent extent;
+    extent.activeValueCount = active_value_count;
+    extent.maxActiveValues = max_total_values;
+    extent.elementsPerValue = elements_per_value;
+    validateRuntimeExtent(extent);
+    return extent;
+}
+
 DynamicGrid1DFromScalarDescriptor raggedRuntimeExtentDynamicGrid1DDescriptor(const RaggedRuntimeExtent& extent,
                                                                              const DeviceUpdatableKernelNodeDeviceHandle* target_node,
                                                                              uint32_t target_block_dim_x,

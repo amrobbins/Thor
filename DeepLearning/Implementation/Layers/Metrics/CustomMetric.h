@@ -51,6 +51,12 @@ class CustomMetric : public Metric {
     std::string getType() override { return "CustomMetric"; }
 
    protected:
+    using TensorMap = std::unordered_map<std::string, Tensor>;
+
+    // Subclasses with structural inputs may extend the prepared expression input map
+    // without reimplementing CustomMetric descriptor inference/compilation.
+    virtual TensorMap buildMetricInputs() const;
+
     // Execute an already-validated/prepared metric expression and capture ratio
     // sufficient statistics when applicable.  Ragged metric substrates use this
     // after applying their own logical-row batch-cardinality semantics instead of
@@ -58,8 +64,6 @@ class CustomMetric : public Metric {
     void runPreparedMetricExpression(Stream runStream);
 
    private:
-    using TensorMap = std::unordered_map<std::string, Tensor>;
-
     struct OutputDescriptor {
         std::vector<uint64_t> dimensions;
         DataType dataType = DataType::FP32;
@@ -75,7 +79,6 @@ class CustomMetric : public Metric {
         Event writableEvent;
     };
 
-    TensorMap buildMetricInputs() const;
     TensorMap buildMetricOutputs() const;
     void validateMetricOutputNames(const std::vector<std::string>& outputNames) const;
     std::unordered_map<std::string, OutputDescriptor> inferMetricOutputDescriptors() const;

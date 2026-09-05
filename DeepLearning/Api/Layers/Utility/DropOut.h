@@ -38,6 +38,12 @@ class DropOut : public Layer, public TrainingDropoutControllable {
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;
     int getConnectionType(Tensor connectingTensor) const override;
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedFeatureInput.has_value() && inputTensor == raggedFeatureInput->getOffsets())
+            return ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
 
     [[nodiscard]] uint64_t getOutputTensorBytes(uint32_t batchSize) const override {
         THOR_THROW_IF_FALSE(featureOutput.has_value());

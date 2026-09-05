@@ -30,20 +30,27 @@ class PlacedNetwork;
 
 namespace ThorImplementation {
 
+struct ManagedRowPartitionOffsetsInput {
+    RowPartitionDescriptor descriptor;
+    std::vector<uint64_t> hostOffsets;
+    std::optional<RowPartitionId> logicalRowPartitionId = std::nullopt;
+    bool activeCountOnly = false;
+};
+
 struct PhysicalBatchInput {
-    std::variant<Tensor, Thor::DeviceBatchReference> value;
+    // ManagedRowPartitionOffsetsInput is intentionally a normal physical NetworkInput
+    // submission. The difference from Tensor is ownership: Thor generates and owns
+    // the host source bytes and the NetworkInput slot keeps them alive through the
+    // asynchronous H2D copy.
+    std::variant<Tensor, Thor::DeviceBatchReference, ManagedRowPartitionOffsetsInput> value;
     std::optional<Thor::BatchSourceReference> sourceReference;
 
-    // Present only for the physical offsets port of a logical ragged input.
-    // Generic Tensor mutations invalidate payload-derived runtime metadata; the
-    // NetworkInput boundary republishes these caches only after offsets
-    // materialization. The complete host offsets mirror remains optional. Consumers
-    // that require a scalar host dispatch extent must require that scalar explicitly
-    // rather than synchronously reading device offsets or silently changing backend.
+    // Transitional compatibility for callers that still submit a materialized
+    // physical offsets Tensor. Logical RaggedNetworkInput execution uses the managed
+    // variant above instead.
     std::optional<RowPartitionDescriptor> rowPartitionDescriptor;
-    std::optional<uint64_t> rowPartitionHostActiveValueCount;
-    std::optional<uint64_t> rowPartitionHostMaxActiveRowLength;
     std::optional<std::vector<uint64_t>> rowPartitionHostOffsets;
+    std::optional<RowPartitionId> logicalRowPartitionId;
 };
 
 struct PartialBatchIncompatibility {
@@ -131,8 +138,29 @@ class StampedNetwork {
         std::string offsetsInputName;
         std::optional<std::string> partitionInputName;
         ThorImplementation::RaggedTensorDescriptor descriptor;
+        RowPartitionId rowPartitionId = 0;
 
         [[nodiscard]] bool ownsPartition() const { return !partitionInputName.has_value(); }
+    };
+
+    // One external logical partition may have requirement-driven Thor-managed
+    // physical representations. HOST_EXTENT reuses the owning values carrier and
+    // therefore allocates no partition tensor; DEVICE_ACTIVE_COUNT and
+    // DEVICE_OFFSETS materialize hidden [1] and [B+1] NetworkInputs respectively.
+    // None of these inputs are part of the public batch-input surface.
+    struct ExternalRowPartitionPhysicalization {
+        RowPartitionId rowPartitionId = 0;
+        RowPartitionDescriptor descriptor;
+        Thor::Tensor logicalOffsetsTensor;
+        std::string valuesInputName;
+        ThorImplementation::RaggedPartitionRequirement requirements =
+            ThorImplementation::RaggedPartitionRequirement::NONE;
+        std::shared_ptr<ThorImplementation::NetworkInput> ownerValuesInput;
+        std::shared_ptr<ThorImplementation::Layer> hostCarrierDrivingLayer;
+        std::shared_ptr<ThorImplementation::NetworkInput> activeCountInput;
+        std::shared_ptr<ThorImplementation::Layer> activeCountDrivingLayer;
+        std::shared_ptr<ThorImplementation::NetworkInput> offsetsInput;
+        std::shared_ptr<ThorImplementation::Layer> offsetsDrivingLayer;
     };
 
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> getInputs() { return inputsShared; }
@@ -223,6 +251,27 @@ class StampedNetwork {
 
 #if defined(THOR_GTEST) || defined(__JETBRAINS_IDE__)
     std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> getApiLayerToPhysicalLayer() { return apiLayerToPhysicalLayerShared; }
+    std::shared_ptr<ThorImplementation::NetworkInput> getManagedPartitionOffsetsInputForTest(
+        RowPartitionId rowPartitionId) const {
+        auto it = externalRowPartitions.find(rowPartitionId);
+        if (it == externalRowPartitions.end())
+            return nullptr;
+        return it->second.offsetsInput;
+    }
+    std::shared_ptr<ThorImplementation::NetworkInput> getManagedPartitionActiveCountInputForTest(
+        RowPartitionId rowPartitionId) const {
+        auto it = externalRowPartitions.find(rowPartitionId);
+        if (it == externalRowPartitions.end())
+            return nullptr;
+        return it->second.activeCountInput;
+    }
+    std::optional<RaggedPartitionRequirement> getExternalRowPartitionRequirementsForTest(
+        RowPartitionId rowPartitionId) const {
+        auto it = externalRowPartitions.find(rowPartitionId);
+        if (it == externalRowPartitions.end())
+            return std::nullopt;
+        return it->second.requirements;
+    }
 #endif
 
    protected:
@@ -290,6 +339,15 @@ class StampedNetwork {
     // ratio numerator/denominator tensors never enter outputNamedShared.
     std::map<std::string, std::shared_ptr<ThorImplementation::Metric>> metricStatisticsByOutputNameShared;
 
+    // Thor-managed physical row-partition inputs are ordinary NetworkInputs for
+    // execution/lifetime purposes, but are intentionally absent from inputsShared,
+    // inputNamedShared, and the user-visible physical batch contract.
+    std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> managedPartitionInputsShared;
+    std::vector<ThorImplementation::NetworkInput*> managedPartitionInputs;
+    std::map<RowPartitionId, ExternalRowPartitionPhysicalization> externalRowPartitions;
+    std::map<Thor::Tensor, RowPartitionId> externalRowPartitionByLogicalOffsetsTensor;
+    std::map<std::string, RowPartitionId> externalRowPartitionByValuesInputName;
+
     // std::map<uint64_t, std::shared_ptr<ThorImplementation::Parameterizable>> apiParameterizableToPhysicalParameterizable;
     // FIXME: get rid of raw pointers
     // For performance, store and use the raw pointers
@@ -316,6 +374,10 @@ class StampedNetwork {
    private:
     void initializeProcessingDataStreamJoin();
     void joinProcessingDataStreams(const Stream& processingStream);
+    [[nodiscard]] std::shared_ptr<ThorImplementation::Layer> selectExternalRowPartitionDrivingLayer(
+        RowPartitionId rowPartitionId,
+        RaggedPartitionRequirement requirement) const;
+    void auditExternalRowPartitionPhysicalizations() const;
     void clearImpl(bool propagateCleanupFailure);
     void clearNoThrow() noexcept;
 

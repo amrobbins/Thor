@@ -188,6 +188,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                                                                     std::shared_ptr<Thor::Activation> activation,
                                                                     std::optional<uint64_t> packedRowCapacity,
                                                                     std::optional<std::string> rowPartitionInputName,
+                                                                    std::optional<ThorImplementation::RowPartitionDescriptor> rowPartitionDescriptor,
                                                                     std::optional<ThorImplementation::Expression> epilogue,
                                                                     std::vector<std::string> epilogueAuxInputNames,
                                                                     float outputDropoutProbability,
@@ -235,6 +236,7 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
          activation = std::move(activationClone),
          packedRowCapacity,
          rowPartitionInputName = std::move(rowPartitionInputName),
+         rowPartitionDescriptor,
          epilogue,
          epilogueAuxInputNames = std::move(epilogueAuxInputNames),
          outputDropoutProbability,
@@ -248,14 +250,40 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
             Tensor featureInputTensor = inputs.at("feature_input");
             std::optional<Tensor> rowPartitionTensor;
             if (rowPartitionInputName.has_value()) {
-                rowPartitionTensor = inputs.at(rowPartitionInputName.value());
-                const ThorImplementation::TensorDescriptor descriptor = rowPartitionTensor->getDescriptor();
-                if (descriptor.getNumDimensions() != 1 || descriptor.getDimensions()[0] == 0 ||
-                    !ThorImplementation::RowPartitionDescriptor::isValidOffsetsDataType(descriptor.getDataType())) {
-                    throw std::runtime_error("Ragged FullyConnected row-partition input must be a canonical offsets tensor.");
+                if (!rowPartitionDescriptor.has_value()) {
+                    throw std::runtime_error("Ragged FullyConnected is missing its logical row-partition descriptor.");
                 }
+                rowPartitionTensor = inputs.at(rowPartitionInputName.value());
                 if (rowPartitionTensor->getPlacement() != placement) {
-                    throw std::runtime_error("Ragged FullyConnected row-partition input placement does not match the layer placement.");
+                    throw std::runtime_error("Ragged FullyConnected row-partition carrier placement does not match the layer placement.");
+                }
+            } else if (rowPartitionDescriptor.has_value()) {
+                throw std::runtime_error("Dense FullyConnected unexpectedly received row-partition metadata.");
+            }
+            ThorImplementation::RaggedRuntimeExtentSource raggedRuntimeExtentSource =
+                ThorImplementation::RaggedRuntimeExtentSource::DEVICE_OFFSETS;
+            if (rowPartitionTensor.has_value()) {
+                const bool needsDeviceActiveExtent =
+                    hasBias || activation != nullptr || epilogue.has_value() || outputDropoutProbability > 0.0f || useResidual;
+                if (!needsDeviceActiveExtent) {
+                    raggedRuntimeExtentSource = ThorImplementation::RaggedRuntimeExtentSource::HOST_EXTENT;
+                } else {
+                    const ThorImplementation::RowPartitionDescriptor& partition = rowPartitionDescriptor.value();
+                    const std::vector<uint64_t>& carrierDims = rowPartitionTensor->getDimensions();
+                    if (carrierDims == partition.getOffsetsDescriptor().getDimensions() &&
+                        rowPartitionTensor->getDataType() == partition.getOffsetsDataType()) {
+                        // Training may strengthen a biased FC's physicalization to
+                        // full offsets for its backward dBias segmented reduction.
+                        // Reuse that representation for forward active-prefix
+                        // kernels by reading offsets[B].
+                        raggedRuntimeExtentSource = ThorImplementation::RaggedRuntimeExtentSource::DEVICE_OFFSETS;
+                    } else if (carrierDims == std::vector<uint64_t>{1} &&
+                               rowPartitionTensor->getDataType() == partition.getOffsetsDataType()) {
+                        raggedRuntimeExtentSource = ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT;
+                    } else {
+                        throw std::runtime_error(
+                            "Ragged FullyConnected device runtime extent requires managed [1] active count or [B+1] offsets.");
+                    }
                 }
             }
             const Tensor& wTensor = inputs.at("weights");
@@ -358,15 +386,16 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                 if (!packedRowCapacity.has_value() || logicalFeatureInputDimensions[0] != packedRowCapacity.value()) {
                     throw std::runtime_error("Ragged FullyConnected packed capacity does not match its flattened values rows.");
                 }
-                const ThorImplementation::TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
-                const uint64_t raggedBatchSize = offsetsDescriptor.getDimensions()[0] - 1;
+                const ThorImplementation::RowPartitionDescriptor& partition = rowPartitionDescriptor.value();
+                const uint64_t raggedBatchSize = partition.getBatchSize();
                 Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
-                                                       offsetsDescriptor.getDataType(),
-                                                       offsetsDescriptor.getDataType());
+                                                       partition.getOffsetsDataType(),
+                                                       partition.getOffsetsDataType());
                 fin = fin.withRaggedRuntimeExtent(offsets,
                                                   raggedBatchSize,
                                                   packedRowCapacity.value(),
-                                                  logicalFeatureInputDimensions[1]);
+                                                  logicalFeatureInputDimensions[1],
+                                                  raggedRuntimeExtentSource);
             }
             auto w = Expression::input("weights", weightsDataType, weightsDataType);
 
@@ -445,9 +474,12 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                     uint64_t raggedBatchSize = 0;
                     uint64_t featuresPerValue = 0;
                     if (ragged) {
-                        const ThorImplementation::TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
-                        offsetsDataType = offsetsDescriptor.getDataType();
-                        raggedBatchSize = offsetsDescriptor.getDimensions()[0] - 1;
+                        if (!rowPartitionDescriptor.has_value()) {
+                            throw std::runtime_error(
+                                "Ragged FullyConnected output dropout is missing its logical row-partition descriptor.");
+                        }
+                        offsetsDataType = rowPartitionDescriptor->getOffsetsDataType();
+                        raggedBatchSize = rowPartitionDescriptor->getBatchSize();
                         featuresPerValue = matmulOutputDimensions[1];
                     }
                     ThorImplementation::CudaKernelExpression outputDropout =
@@ -458,7 +490,8 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                                                                   offsetsDataType,
                                                                   raggedBatchSize,
                                                                   featuresPerValue,
-                                                                  "FullyConnected output");
+                                                                  "FullyConnected output",
+                                                                  raggedRuntimeExtentSource);
                     std::unordered_map<std::string, Expression> dropoutInputs{
                         {"projected", branch},
                         {"seed", Expression::tensorRuntimeScalar(
@@ -470,8 +503,12 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                         dropoutInputs.emplace("residual", flattenedResidual.value());
                     }
                     if (ragged) {
+                        const char* partitionInputName =
+                            raggedRuntimeExtentSource == ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT
+                                ? "active_count"
+                                : "offsets";
                         dropoutInputs.emplace(
-                            "offsets",
+                            partitionInputName,
                             Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT, offsetsDataType, offsetsDataType));
                     }
                     ThorImplementation::Outputs dropoutOutputs = outputDropout.apply(dropoutInputs);
@@ -507,15 +544,16 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                                 throw std::runtime_error(
                                     "Ragged FullyConnected epilogue auxiliary geometry does not match its packed row capacity.");
                             }
-                            const ThorImplementation::TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
+                            const ThorImplementation::RowPartitionDescriptor& partition = rowPartitionDescriptor.value();
                             Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
-                                                                   offsetsDescriptor.getDataType(),
-                                                                   offsetsDescriptor.getDataType());
+                                                                   partition.getOffsetsDataType(),
+                                                                   partition.getOffsetsDataType());
                             physicalAuxInput = physicalAuxInput.withRaggedRuntimeExtent(
                                 offsets,
-                                offsetsDescriptor.getDimensions()[0] - 1,
+                                partition.getBatchSize(),
                                 packedRowCapacity.value(),
-                                matmulOutputDimensions[1]);
+                                matmulOutputDimensions[1],
+                                raggedRuntimeExtentSource);
                         }
                         effectiveEpilogue = effectiveEpilogue.substituteInput(auxInputName, physicalAuxInput);
                     }
@@ -525,14 +563,15 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                             throw std::runtime_error(
                                 "Ragged FullyConnected epilogue primary geometry does not match its packed row capacity.");
                         }
-                        const ThorImplementation::TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
+                        const ThorImplementation::RowPartitionDescriptor& partition = rowPartitionDescriptor.value();
                         Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
-                                                               offsetsDescriptor.getDataType(),
-                                                               offsetsDescriptor.getDataType());
+                                                               partition.getOffsetsDataType(),
+                                                               partition.getOffsetsDataType());
                         branch = branch.withRaggedRuntimeExtent(offsets,
-                                                                offsetsDescriptor.getDimensions()[0] - 1,
+                                                                partition.getBatchSize(),
                                                                 packedRowCapacity.value(),
-                                                                matmulOutputDimensions[1]);
+                                                                matmulOutputDimensions[1],
+                                                                raggedRuntimeExtentSource);
                     }
                     branch = FullyConnected::applyEpilogue(branch, effectiveEpilogue);
                 }
@@ -558,14 +597,15 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                         }
                         outputElementsPerPackedValue *= runtimeFeatureOutputDimensions[axis];
                     }
-                    const ThorImplementation::TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
+                    const ThorImplementation::RowPartitionDescriptor& partition = rowPartitionDescriptor.value();
                     Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
-                                                           offsetsDescriptor.getDataType(),
-                                                           offsetsDescriptor.getDataType());
+                                                           partition.getOffsetsDataType(),
+                                                           partition.getOffsetsDataType());
                     branch = branch.withRaggedRuntimeExtent(offsets,
-                                                            offsetsDescriptor.getDimensions()[0] - 1,
+                                                            partition.getBatchSize(),
                                                             packedRowCapacity.value(),
-                                                            outputElementsPerPackedValue);
+                                                            outputElementsPerPackedValue,
+                                                            raggedRuntimeExtentSource);
                 }
                 return branch;
             };
@@ -585,9 +625,10 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                 stampInputs.erase(rowPartitionInputName.value());
                 stampInputs.emplace(RAGGED_ROW_PARTITION_EXPRESSION_INPUT, rowPartitionTensor.value());
                 preForwardOnlyInputs.emplace(rowPartitionInputName.value(), rowPartitionTensor.value());
-                // The public offsets port remains a non-differentiable structural dependency of
-                // RaggedFullyConnected.  The private binding gives packed Expression stages direct
-                // access to the same canonical offsets tensor for runtime bucket selection.
+                // The public logical row-partition port remains a non-differentiable structural dependency of
+                // RaggedFullyConnected. The private binding receives the placement-selected physical carrier:
+                // authoritative host metadata for packed bucket selection plus, when requested, the managed [1]
+                // active-count payload for device valuewise stages.
                 preForwardHook = [](Stream&) {};
             }
 
@@ -1126,7 +1167,7 @@ void FullyConnected::Builder::verifyConfig() const {
         if (_raggedResidualInput.has_value()) {
             const RaggedTensor& feature = _raggedFeatureInputs.front();
             const RaggedTensor& residual = _raggedResidualInput.value();
-            if (residual.getOffsets() != feature.getOffsets() ||
+            if (!residual.sharesPartitionWith(feature) ||
                 residual.getBatchSize() != feature.getBatchSize() ||
                 residual.getMaxTotalValues() != feature.getMaxTotalValues()) {
                 throw std::invalid_argument("FullyConnected ragged residualInput must preserve the exact feature-input row partition.");
@@ -1137,7 +1178,7 @@ void FullyConnected::Builder::verifyConfig() const {
             const bool sameMaxValuesPerRow =
                 auxiliary.hasMaxValuesPerRow() == feature.hasMaxValuesPerRow() &&
                 (!feature.hasMaxValuesPerRow() || auxiliary.getMaxValuesPerRow() == feature.getMaxValuesPerRow());
-            if (auxiliary.getOffsets() != feature.getOffsets() ||
+            if (!auxiliary.sharesPartitionWith(feature) ||
                 auxiliary.getBatchSize() != feature.getBatchSize() ||
                 auxiliary.getMaxTotalValues() != feature.getMaxTotalValues() ||
                 !sameMaxValuesPerRow) {
@@ -1249,6 +1290,7 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
                 activation,
                 inputDimensions[0],
                 std::string(ThorImplementation::RaggedFullyConnected::ROW_PARTITION_INPUT_NAME),
+                raggedFeatureInputs.front().getDescriptor().getRowPartition(),
                 epilogue,
                 epilogueAuxInputNames(),
                 outputDropoutProbability,
@@ -1278,6 +1320,7 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
             computeDataType,
             outputDataType,
             activation,
+            std::nullopt,
             std::nullopt,
             std::nullopt,
             epilogue,
@@ -1551,7 +1594,7 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
                 const bool sameMaxValuesPerRow =
                     auxiliary.hasMaxValuesPerRow() == feature.hasMaxValuesPerRow() &&
                     (!feature.hasMaxValuesPerRow() || auxiliary.getMaxValuesPerRow() == feature.getMaxValuesPerRow());
-                if (auxiliary.getOffsets() != feature.getOffsets() ||
+                if (!auxiliary.sharesPartitionWith(feature) ||
                     auxiliary.getBatchSize() != feature.getBatchSize() ||
                     auxiliary.getMaxTotalValues() != feature.getMaxTotalValues() ||
                     !sameMaxValuesPerRow) {
@@ -1586,7 +1629,7 @@ void FullyConnected::deserialize(shared_ptr<thor_file::TarReader>& archiveReader
             RaggedTensor raggedResidual = residualMaxValuesPerRow.has_value()
                 ? RaggedTensor(residualInput.value(), residualOffsets, residualMaxValuesPerRow.value())
                 : RaggedTensor(residualInput.value(), residualOffsets);
-            if (raggedResidual.getOffsets() != raggedFeature.getOffsets() ||
+            if (!raggedResidual.sharesPartitionWith(raggedFeature) ||
                 raggedResidual.getBatchSize() != raggedFeature.getBatchSize() ||
                 raggedResidual.getMaxTotalValues() != raggedFeature.getMaxTotalValues()) {
                 throw runtime_error("FullyConnected serialized ragged residual does not preserve the feature row partition.");

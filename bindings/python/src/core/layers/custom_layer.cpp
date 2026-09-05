@@ -891,7 +891,7 @@ strided_view are materialized generically into the layer's dense public output t
 Convenience forms:
 - inputs=<thor.Tensor or thor.RaggedTensor> defaults to {"feature_input": tensor}
 - output_names omitted defaults to ["feature_output"]
-- ragged inputs produce partition-preserving thor.RaggedTensor outputs; all named ragged inputs must share one offsets tensor
+- ragged inputs produce partition-preserving thor.RaggedTensor outputs; all named ragged inputs must share one logical row partition
 - activation=<thor.activations.Activation> stitches that activation onto each returned expression before compilation
 - uses_batch_validity=True declares runtime batch-validity use; Thor currently exposes it as
   ``thor.BATCH_VALIDITY_MASK_NAME`` through ``context.input(...)``

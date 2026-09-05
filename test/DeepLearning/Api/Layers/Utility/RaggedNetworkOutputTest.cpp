@@ -188,6 +188,7 @@ TEST(RaggedNetworkOutputApi, IdentityOutputPreservesLogicalValuesAndOffsetsWithP
     ThorImplementation::RaggedTensor result =
         std::get<ThorImplementation::RaggedTensor>(outputs.at("tokens_out"));
     EXPECT_EQ(result.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(4));
+    EXPECT_EQ(result.getHostOffsetsIfAvailable(), (std::optional<std::vector<uint64_t>>{{0, 1, 4}}));
     const uint32_t* resultOffsets = result.getOffsets().getMemPtr<uint32_t>();
     EXPECT_EQ(resultOffsets[0], 0u);
     EXPECT_EQ(resultOffsets[1], 1u);

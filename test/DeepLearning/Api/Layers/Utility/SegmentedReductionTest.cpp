@@ -41,14 +41,6 @@ void writeCpuFloat(Impl::Tensor& tensor, const vector<float>& values) {
     for (uint64_t i = 0; i < values.size(); ++i) ptr[i] = values[i];
 }
 
-void writeCpuU32(Impl::Tensor& tensor, const vector<uint32_t>& values) {
-    ASSERT_EQ(tensor.getPlacement(), cpuPlacement);
-    ASSERT_EQ(tensor.getDataType(), DataType::UINT32);
-    ASSERT_EQ(numel(tensor), values.size());
-    auto* ptr = static_cast<uint32_t*>(tensor.getMemPtr());
-    for (uint64_t i = 0; i < values.size(); ++i) ptr[i] = values[i];
-}
-
 vector<float> copyFloatToCpu(const Impl::Tensor& tensor, Stream& stream) {
     Impl::Tensor host = tensor.clone(cpuPlacement);
     host.copyFromAsync(tensor, stream);
@@ -76,6 +68,7 @@ struct ReductionFixture {
     Api::NetworkOutput output;
     shared_ptr<Api::NetworkInput> valuesInput;
     shared_ptr<Api::NetworkInput> offsetsInput;
+    Impl::RowPartitionId rowPartitionId = 0;
 };
 
 ReductionFixture makeReductionFixture(Api::SegmentedReduction::Type type) {
@@ -104,7 +97,12 @@ ReductionFixture makeReductionFixture(Api::SegmentedReduction::Type type) {
                                     .inputTensor(outputRivet.getFeatureOutput().value())
                                     .dataType(DataType::FP32)
                                     .build();
-    return {network, reduction, output, findInput(*network, "history.values"), findInput(*network, "history.offsets")};
+    return {network,
+            reduction,
+            output,
+            findInput(*network, "history.values"),
+            findInput(*network, "history.offsets"),
+            input.getRowPartitionId()};
 }
 
 struct ExpectedCase {
@@ -153,8 +151,7 @@ void runForwardBackwardCase(Api::SegmentedReduction::Type type) {
     Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
     auto physicalValues = std::dynamic_pointer_cast<Impl::NetworkInput>(
         stamped.getPhysicalLayerFromApiLayer(fixture.valuesInput->getId()));
-    auto physicalOffsets = std::dynamic_pointer_cast<Impl::NetworkInput>(
-        stamped.getPhysicalLayerFromApiLayer(fixture.offsetsInput->getId()));
+    auto physicalOffsets = stamped.getManagedPartitionOffsetsInputForTest(fixture.rowPartitionId);
     auto physicalReduction = std::dynamic_pointer_cast<Impl::CustomLayer>(
         stamped.getPhysicalLayerFromApiLayer(fixture.reduction.getId()));
     auto physicalOutput = std::dynamic_pointer_cast<Impl::NetworkOutput>(
@@ -172,11 +169,14 @@ void runForwardBackwardCase(Api::SegmentedReduction::Type type) {
         -1000.0F, 1000.0F, 1000.0F, -1000.0F};
     const vector<uint32_t> offsets{0U, 3U, 3U, 7U};
     Impl::Tensor valuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {9, 2}));
-    Impl::Tensor offsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {4}));
     writeCpuFloat(valuesHost, values);
-    writeCpuU32(offsetsHost, offsets);
     physicalValues->forward(valuesHost, false, batchSize);
-    physicalOffsets->forward(offsetsHost, false, batchSize);
+    physicalOffsets->forwardManagedRowPartitionOffsets(
+        false,
+        Impl::RowPartitionDescriptor(batchSize, 9, DataType::UINT32),
+        batchSize,
+        std::vector<uint64_t>(offsets.begin(), offsets.end()),
+        fixture.rowPartitionId);
     physicalOutput->getOutputReadyEvent().synchronize();
 
     const ExpectedCase expected = expectedFor(type);

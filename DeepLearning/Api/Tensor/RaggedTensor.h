@@ -17,7 +17,10 @@
 
 namespace Thor {
 
-// Public logical ragged tensor. offsets defines the logical packed extent.
+using RowPartitionId = uint64_t;
+
+// Public logical ragged tensor. The logical row partition has its own identity;
+// offsets is the current structural execution representation of that partition.
 // For batch size B, values[offsets[B]:maxTotalValues] is inactive capacity with
 // undefined contents. Callers must not depend on that storage being zero or
 // otherwise canonical, including for tensors entering or leaving a Network.
@@ -56,6 +59,22 @@ class RaggedTensor {
     Tensor getOffsets() const {
         THOR_THROW_IF_FALSE(initialized);
         return offsets;
+    }
+
+    // Logical row-partition identity. RP4 decouples semantic partition
+    // comparisons from the current offsets Tensor execution representation.
+    // While offsets remain mandatory, new partitions seed this stable identity
+    // from the live symbolic offsets id for backward-compatible construction inside
+    // one graph. Consumers must compare partitions through
+    // sharesPartitionWith(), never by comparing offsets tensors.
+    RowPartitionId getRowPartitionId() const {
+        THOR_THROW_IF_FALSE(initialized);
+        return rowPartitionId;
+    }
+    bool sharesPartitionWith(const RaggedTensor &other) const {
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(other.initialized);
+        return rowPartitionId == other.rowPartitionId;
     }
 
     RaggedTensor withValues(Tensor newValues) const;
@@ -123,6 +142,7 @@ class RaggedTensor {
 
     Tensor values;
     Tensor offsets;
+    RowPartitionId rowPartitionId = 0;
     uint64_t batchSize = 0;
     uint64_t maxTotalValues = 0;
     uint64_t maxValuesPerRow = 0;

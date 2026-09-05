@@ -44,7 +44,7 @@ void bind_add(nb::module_& m) {
     add.attr("__doc__") = R"nbdoc(
 Elementwise addition for dense tensors or canonical rank-1 ragged tensors.
 
-Ragged operands must share the exact same row-partition offsets tensor. The
+Ragged operands must share the exact same logical row partition. The
 result preserves that partition and executes only over the authoritative active
 packed prefix.
 )nbdoc";

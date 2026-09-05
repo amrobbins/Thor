@@ -87,8 +87,8 @@ void bind_binary_cross_entropy(nb::module_ &losses) {
                     throw nb::value_error("BinaryCrossEntropy instance: ragged predictions must use fp16 or fp32 dtype");
                 if (reported_loss_shape == LossShape::PER_OUTPUT)
                     throw nb::value_error("BinaryCrossEntropy instance: per_output reporting is undefined for ragged predictions.");
-                if (predictions.getOffsets() != labels.getOffsets())
-                    throw nb::value_error("BinaryCrossEntropy instance: ragged predictions and labels must use the exact same row partition tensor.");
+                if (!predictions.sharesPartitionWith(labels))
+                    throw nb::value_error("BinaryCrossEntropy instance: ragged predictions and labels must use the exact same row partition.");
                 if (predictions.getBatchSize() != labels.getBatchSize() ||
                     predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
                     predictions.getTrailingDimensions() != labels.getTrailingDimensions())

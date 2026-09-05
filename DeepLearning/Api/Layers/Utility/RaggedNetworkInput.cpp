@@ -46,7 +46,7 @@ RaggedTensor RaggedNetworkInput::Builder::build() {
         const RaggedTensor& partition = partition_.value();
         std::optional<RaggedNetworkInputReference> partitionSource;
         for (const RaggedNetworkInputReference& candidate : network_.value()->getExternalRaggedNetworkInputs()) {
-            if (candidate.raggedTensor.getOffsets() == partition.getOffsets()) {
+            if (candidate.raggedTensor.sharesPartitionWith(partition)) {
                 partitionSource = candidate;
                 break;
             }

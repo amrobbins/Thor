@@ -3,12 +3,10 @@
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
-#include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/TensorOperations/Ragged/RaggedSequenceSlice.h"
 #include "Utilities/TensorOperations/Ragged/RowPartition.h"
 
 #include <algorithm>
-#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -21,8 +19,8 @@ namespace ThorImplementation {
 
 // Physical R9B sequence-axis slice. Input connection type 0 is packed values
 // and 1 is canonical offsets. Output connection type 0 is compacted values and
-// 1 is a newly produced canonical offsets tensor. Only the values ports
-// participate in autodiff.
+// 1 is the host-derived output offsets tensor materialized for GPU consumers.
+// Only the values ports participate in autodiff.
 class RaggedSequenceSlice : public MultiConnectionLayer {
    public:
     RaggedSequenceSlice(uint64_t start,
@@ -71,14 +69,6 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
         ensureOutputAllocated(/*outputIndex=*/0);
         ensureOutputAllocated(/*outputIndex=*/1);
 
-        const TensorPlacement placement = featureInputs[0]->getPlacement();
-        const uint64_t batchSize = inputDescriptor.getBatchSize();
-        rowLengths = Tensor(placement, TensorDescriptor(inputDescriptor.getOffsetsDataType(), {batchSize}));
-        lengthsToOffsetsPlan = prepareRowPartitionLengthsToOffsets(rowLengths, featureOutputs[1].value(), batchSize);
-        scanTempStorage = Tensor(
-            placement,
-            TensorDescriptor(DataType::UINT8, {std::max<size_t>(lengthsToOffsetsPlan.temp_storage_bytes, 1)}));
-
         allFeatureInputTensorIds = {featureInputs[0]->getTensorId(), featureInputs[1]->getTensorId()};
     }
 
@@ -90,8 +80,6 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
     }
 
     void cleanup() override {
-        rowLengths = Tensor();
-        scanTempStorage = Tensor();
         for (Event& event : forwardInputReadyEvents) event = Event();
         outputsReadyEvent = Event();
         MultiConnectionLayer::cleanup();
@@ -125,14 +113,7 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
         streams[0].waitFor(streams[1], forwardInputReadyEvents[1]);
 
         RowPartitionRuntime outputPartition(featureOutputs[1].value(), outputDescriptor.getRowPartition());
-        outputPartition.clearHostOffsets();
-        outputPartition.clearHostActiveValueCount();
-        outputPartition.clearHostMaxActiveRowLength();
-
-        launchRaggedSequenceSliceRowLengths(
-            featureInputs[1].value(), rowLengths, start, length, batchSize, streams[0]);
-        rowPartitionLengthsToOffsets(
-            lengthsToOffsetsPlan, scanTempStorage, rowLengths, featureOutputs[1].value(), streams[0]);
+        publishAndUploadOutputHostPartition(outputPartition, streams[0]);
         launchRaggedSequenceSliceValues(featureInputs[0].value(),
                                         featureInputs[1].value(),
                                         featureOutputs[1].value(),
@@ -141,7 +122,6 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
                                         length,
                                         batchSize,
                                         streams[0]);
-        publishOutputHostPartition(outputPartition);
 
         streams[0].putEvent(outputsReadyEvent);
         for (uint32_t outputIndex = 0; outputIndex < 2; ++outputIndex) {
@@ -259,15 +239,14 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
         }
     }
 
-    void publishOutputHostPartition(RowPartitionRuntime& outputPartition) {
+    void publishAndUploadOutputHostPartition(RowPartitionRuntime& outputPartition, Stream& stream) {
         RowPartitionRuntime inputPartition(featureInputs[1].value(), inputDescriptor.getRowPartition());
-        const std::optional<std::vector<uint64_t>> inputHostOffsets = inputPartition.getHostOffsetsIfAvailable();
-        if (!inputHostOffsets.has_value()) return;
+        const std::vector<uint64_t> inputHostOffsets = inputPartition.requireHostOffsets();
 
         std::vector<uint64_t> outputHostOffsets(inputDescriptor.getBatchSize() + 1, 0);
         for (uint64_t row = 0; row < inputDescriptor.getBatchSize(); ++row) {
-            const uint64_t rowBegin = inputHostOffsets->at(row);
-            const uint64_t rowEnd = inputHostOffsets->at(row + 1);
+            const uint64_t rowBegin = inputHostOffsets.at(row);
+            const uint64_t rowEnd = inputHostOffsets.at(row + 1);
             THOR_THROW_IF_FALSE(rowEnd >= rowBegin);
             const uint64_t rowLength = rowEnd - rowBegin;
             const uint64_t slicedLength = rowLength <= start ? 0 : std::min<uint64_t>(length, rowLength - start);
@@ -276,7 +255,9 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
             outputHostOffsets[row + 1] = outputHostOffsets[row] + slicedLength;
         }
         THOR_THROW_IF_FALSE(outputHostOffsets.back() <= outputDescriptor.getMaxTotalValues());
-        outputPartition.setHostOffsets(std::move(outputHostOffsets));
+        outputPartition.setHostOffsets(outputHostOffsets);
+        rowPartitionUploadHostOffsets(
+            outputHostOffsets, featureOutputs[1].value(), inputDescriptor.getBatchSize(), stream);
     }
 
     void pruneUpstreamValueGradient() {
@@ -289,10 +270,6 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
     uint64_t length = 0;
     RaggedTensorDescriptor inputDescriptor;
     RaggedTensorDescriptor outputDescriptor;
-
-    Tensor rowLengths;
-    Tensor scanTempStorage;
-    RowPartitionLengthsToOffsetsPlan lengthsToOffsetsPlan;
 
     std::set<uint64_t> allFeatureInputTensorIds;
     std::set<uint64_t> stillWaitingForFeatureInputTensors;

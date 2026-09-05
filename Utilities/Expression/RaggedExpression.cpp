@@ -27,19 +27,30 @@ uint64_t RaggedExpressionRuntimeExtent::maxLaunchElements() const {
     return checkedMul(maxActiveValues, elementsPerValue, "ragged expression runtime extent max launch elements");
 }
 
-RaggedExpression::RaggedExpression(Expression values, Expression offsets, RaggedTensorDescriptor descriptor)
-    : values(std::move(values)), offsets(std::move(offsets)), descriptor(std::move(descriptor)) {
+RaggedExpression::RaggedExpression(Expression values,
+                                   Expression partition_input,
+                                   RaggedTensorDescriptor descriptor,
+                                   RaggedRuntimeExtentSource runtime_extent_source)
+    : values(std::move(values)),
+      offsets(std::move(partition_input)),
+      descriptor(std::move(descriptor)),
+      runtimeExtentSource(runtime_extent_source) {
     validateDescriptor(this->descriptor);
-    runtimeExtent = makeRuntimeExtent(this->offsets, this->descriptor);
-    executionValues = markExecutionValues(this->values, this->offsets, this->descriptor);
+    runtimeExtent = makeRuntimeExtent(this->offsets, this->descriptor, runtimeExtentSource);
+    executionValues = markExecutionValues(this->values, this->offsets, this->descriptor, runtimeExtentSource);
     initialized = true;
 }
 
 RaggedExpression::RaggedExpression(Expression values,
-                                   Expression offsets,
+                                   Expression partition_input,
                                    RaggedTensorDescriptor descriptor,
-                                   RaggedExpressionRuntimeExtent runtime_extent)
-    : values(std::move(values)), offsets(std::move(offsets)), descriptor(std::move(descriptor)), runtimeExtent(std::move(runtime_extent)) {
+                                   RaggedExpressionRuntimeExtent runtime_extent,
+                                   RaggedRuntimeExtentSource runtime_extent_source)
+    : values(std::move(values)),
+      offsets(std::move(partition_input)),
+      descriptor(std::move(descriptor)),
+      runtimeExtent(std::move(runtime_extent)),
+      runtimeExtentSource(runtime_extent_source) {
     validateDescriptor(this->descriptor);
     if (!runtimeExtent.isInitialized()) {
         throw std::invalid_argument("RaggedExpression requires an initialized runtime extent.");
@@ -50,7 +61,7 @@ RaggedExpression::RaggedExpression(Expression values,
     if (runtimeExtent.elementsPerValue != elementsPerValue(this->descriptor)) {
         throw std::invalid_argument("RaggedExpression runtime extent elementsPerValue must match descriptor trailing dimensions.");
     }
-    executionValues = markExecutionValues(this->values, this->offsets, this->descriptor);
+    executionValues = markExecutionValues(this->values, this->offsets, this->descriptor, runtimeExtentSource);
     initialized = true;
 }
 
@@ -62,15 +73,17 @@ RaggedExpression RaggedExpression::input(const std::string& logical_name, const 
 }
 
 RaggedExpression RaggedExpression::input(const std::string& values_name,
-                                         const std::string& offsets_name,
-                                         const RaggedTensorDescriptor& descriptor) {
-    if (values_name.empty() || offsets_name.empty()) {
-        throw std::invalid_argument("RaggedExpression::input requires non-empty values and offsets input names.");
+                                         const std::string& partition_input_name,
+                                         const RaggedTensorDescriptor& descriptor,
+                                         RaggedRuntimeExtentSource runtime_extent_source) {
+    if (values_name.empty() || partition_input_name.empty()) {
+        throw std::invalid_argument("RaggedExpression::input requires non-empty values and partition input names.");
     }
     validateDescriptor(descriptor);
     return RaggedExpression(Expression::input(values_name, std::nullopt, descriptor.getValuesDataType()),
-                            Expression::input(offsets_name, std::nullopt, descriptor.getOffsetsDataType()),
-                            descriptor);
+                            Expression::input(partition_input_name, std::nullopt, descriptor.getOffsetsDataType()),
+                            descriptor,
+                            runtime_extent_source);
 }
 
 const Expression& RaggedExpression::getValues() const {
@@ -129,7 +142,11 @@ RaggedExpression RaggedExpression::withValues(Expression new_values, RaggedTenso
     // expression while rebuilding the launch width from the new trailing shape.
     RaggedExpressionRuntimeExtent new_runtime_extent = runtimeExtent;
     new_runtime_extent.elementsPerValue = elementsPerValue(new_descriptor);
-    return RaggedExpression(std::move(new_values), offsets, std::move(new_descriptor), std::move(new_runtime_extent));
+    return RaggedExpression(std::move(new_values),
+                            offsets,
+                            std::move(new_descriptor),
+                            std::move(new_runtime_extent),
+                            runtimeExtentSource);
 }
 
 RaggedExpression RaggedExpression::mapValues(const std::function<Expression(const Expression&)>& mapper) const {
@@ -311,6 +328,7 @@ RaggedExpression RaggedExpression::conv1d(const Expression& filter,
                                           std::optional<DataType> output_dtype,
                                           uint64_t groups) const {
     validateInitialized("conv1d");
+    requireDeviceOffsets("conv1d");
     const std::vector<uint64_t> trailing = descriptor.getTrailingDimensions();
     if (trailing.size() != 1) {
         throw std::invalid_argument("RaggedExpression::conv1d requires exactly one trailing channel dimension.");
@@ -360,7 +378,7 @@ RaggedExpression RaggedExpression::conv1d(const Expression& filter,
                                                     descriptor.getMaxValuesPerRow(),
                                                     descriptor.getOffsetsDataType(),
                                                     descriptor.getRaggedRank());
-    return RaggedExpression(std::move(output_values), offsets, output_descriptor);
+    return RaggedExpression(std::move(output_values), offsets, output_descriptor, runtimeExtentSource);
 }
 
 RaggedExpression RaggedExpression::causalConv1d(const Expression& filter,
@@ -400,12 +418,45 @@ RaggedExpression RaggedExpression::relu() const {
     return withValues(values.relu(), descriptor);
 }
 
-RaggedExpression RaggedExpression::softmax() const { return segment_softmax(); }
+RaggedExpression RaggedExpression::softmax() const {
+    validateInitialized("softmax");
+    const std::vector<uint64_t> trailing = descriptor.getTrailingDimensions();
+    if (trailing.empty() || trailing.back() == 0) {
+        throw std::invalid_argument("RaggedExpression::softmax requires at least one non-zero trailing dimension.");
+    }
+    switch (descriptor.getValuesDataType()) {
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
+            break;
+        default:
+            throw std::invalid_argument("RaggedExpression::softmax supports FP16, BF16, and FP32 ragged values.");
+    }
+    return withValues(executionValues.softmax(CUDNN_SOFTMAX_ACCURATE, CUDNN_SOFTMAX_MODE_CHANNEL), descriptor);
+}
+
+RaggedExpression RaggedExpression::log_softmax() const {
+    validateInitialized("log_softmax");
+    const std::vector<uint64_t> trailing = descriptor.getTrailingDimensions();
+    if (trailing.empty() || trailing.back() == 0) {
+        throw std::invalid_argument("RaggedExpression::log_softmax requires at least one non-zero trailing dimension.");
+    }
+    switch (descriptor.getValuesDataType()) {
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
+            break;
+        default:
+            throw std::invalid_argument("RaggedExpression::log_softmax supports FP16, BF16, and FP32 ragged values.");
+    }
+    return withValues(executionValues.logSoftmax(CUDNN_SOFTMAX_MODE_CHANNEL), descriptor);
+}
 
 Expression RaggedExpression::reduce_sum() const { return segment_sum(); }
 
 Expression RaggedExpression::segment_sum() const {
     validateInitialized("segment_sum");
+    requireDeviceOffsets("segment_sum");
     return Expression::segmentedReduceWithRaggedMetadata(values,
                                                          offsets,
                                                          ExprOp::SEGMENTED_REDUCE_SUM,
@@ -416,6 +467,7 @@ Expression RaggedExpression::segment_sum() const {
 
 Expression RaggedExpression::segment_min() const {
     validateInitialized("segment_min");
+    requireDeviceOffsets("segment_min");
     return Expression::segmentedReduceWithRaggedMetadata(values,
                                                          offsets,
                                                          ExprOp::SEGMENTED_REDUCE_MIN,
@@ -426,6 +478,7 @@ Expression RaggedExpression::segment_min() const {
 
 Expression RaggedExpression::segment_max() const {
     validateInitialized("segment_max");
+    requireDeviceOffsets("segment_max");
     return Expression::segmentedReduceWithRaggedMetadata(values,
                                                          offsets,
                                                          ExprOp::SEGMENTED_REDUCE_MAX,
@@ -436,6 +489,7 @@ Expression RaggedExpression::segment_max() const {
 
 Expression RaggedExpression::segment_mean() const {
     validateInitialized("segment_mean");
+    requireDeviceOffsets("segment_mean");
 
     switch (descriptor.getValuesDataType()) {
         case DataType::FP8_E4M3:
@@ -558,6 +612,7 @@ RaggedExpression RaggedExpression::binaryValuewise(const RaggedExpression& other
 
 Expression RaggedExpression::segmentTotalBroadcast(ScanOp op, const char* op_name) const {
     validateInitialized(op_name);
+    requireDeviceOffsets(op_name);
     if (!descriptor.getTrailingDimensions().empty()) {
         throw std::invalid_argument(raggedOpErrorPrefix(op_name) +
                                     "scalar segmented-scan broadcast cannot be used with trailing value dimensions.");
@@ -588,6 +643,7 @@ Expression RaggedExpression::segmentDenseBroadcast(const Expression& per_segment
                                                     bool normalize_by_segment_length,
                                                    std::optional<uint64_t> elements_per_value_override) const {
     validateInitialized("segmentDenseBroadcast");
+    requireDeviceOffsets("segmentDenseBroadcast");
     Expression out = Expression::binaryOp(per_segment_values, offsets, ExprOp::SEGMENTED_BROADCAST);
     ExprNode& node = out.expr->nodes.at(out.nodeIndex);
     node.ragged_runtime_batch_size = descriptor.getBatchSize();
@@ -606,25 +662,44 @@ void RaggedExpression::validateInitialized(const char* caller) const {
     }
 }
 
+void RaggedExpression::requireDeviceOffsets(const char* caller) const {
+    if (runtimeExtentSource != RaggedRuntimeExtentSource::DEVICE_OFFSETS) {
+        throw std::invalid_argument(raggedOpErrorPrefix(caller) +
+                                    "requires a full device-offsets partition carrier, not DEVICE_ACTIVE_COUNT.");
+    }
+}
+
 void RaggedExpression::validateDescriptor(const RaggedTensorDescriptor& descriptor) {
     // Reconstructing validates the descriptor invariants and keeps future descriptor changes centralized.
     (void)RaggedTensorDescriptor(descriptor.getValuesDescriptor(), descriptor.getRowPartition(), descriptor.getRaggedRank());
 }
 
-RaggedExpressionRuntimeExtent RaggedExpression::makeRuntimeExtent(const Expression& offsets, const RaggedTensorDescriptor& descriptor) {
+RaggedExpressionRuntimeExtent RaggedExpression::makeRuntimeExtent(const Expression& partition_input,
+                                                                    const RaggedTensorDescriptor& descriptor,
+                                                                    RaggedRuntimeExtentSource source) {
     validateDescriptor(descriptor);
+    if (source == RaggedRuntimeExtentSource::HOST_EXTENT) {
+        throw std::invalid_argument(
+            "RaggedExpression device runtime extent cannot be sourced from HOST_EXTENT.");
+    }
     RaggedExpressionRuntimeExtent extent;
-    extent.activeValueCount = offsets.stridedView({1}, {1}, descriptor.getBatchSize());
+    extent.activeValueCount = source == RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT
+                                  ? partition_input
+                                  : partition_input.stridedView({1}, {1}, descriptor.getBatchSize());
     extent.maxActiveValues = descriptor.getMaxTotalValues();
     extent.elementsPerValue = elementsPerValue(descriptor);
     return extent;
 }
 
 Expression RaggedExpression::markExecutionValues(const Expression& values,
-                                                 const Expression& offsets,
-                                                 const RaggedTensorDescriptor& descriptor) {
-    return values.withRaggedRuntimeExtent(
-        offsets, descriptor.getBatchSize(), descriptor.getMaxTotalValues(), elementsPerValue(descriptor));
+                                                 const Expression& partition_input,
+                                                 const RaggedTensorDescriptor& descriptor,
+                                                 RaggedRuntimeExtentSource source) {
+    return values.withRaggedRuntimeExtent(partition_input,
+                                          descriptor.getBatchSize(),
+                                          descriptor.getMaxTotalValues(),
+                                          elementsPerValue(descriptor),
+                                          source);
 }
 
 uint64_t RaggedExpression::elementsPerValue(const RaggedTensorDescriptor& descriptor) {
@@ -646,9 +721,13 @@ RaggedTensorDescriptor RaggedExpression::descriptorWithValuesDescriptor(const Ra
 }
 
 void RaggedExpression::requireSameOffsetsObject(const RaggedExpression& lhs, const RaggedExpression& rhs, const char* op_name) {
+    if (lhs.runtimeExtentSource != rhs.runtimeExtentSource) {
+        throw std::invalid_argument(raggedOpErrorPrefix(op_name) +
+                                    "binary ragged valuewise ops require the same physical partition representation.");
+    }
     if (!lhs.offsets.isSameLogicalNode(rhs.offsets)) {
         throw std::invalid_argument(raggedOpErrorPrefix(op_name) +
-                                    "binary ragged valuewise ops require the exact same offsets expression object.");
+                                    "binary ragged valuewise ops require the exact same partition-carrier expression object.");
     }
 }
 
@@ -669,6 +748,8 @@ RaggedExpression abs(const RaggedExpression& input) { return input.abs(); }
 RaggedExpression exp(const RaggedExpression& input) { return input.exp(); }
 RaggedExpression log(const RaggedExpression& input) { return input.log(); }
 RaggedExpression relu(const RaggedExpression& input) { return input.relu(); }
+RaggedExpression softmax(const RaggedExpression& input) { return input.softmax(); }
+RaggedExpression log_softmax(const RaggedExpression& input) { return input.log_softmax(); }
 Expression segment_sum(const RaggedExpression& input) { return input.segment_sum(); }
 Expression segment_min(const RaggedExpression& input) { return input.segment_min(); }
 Expression segment_max(const RaggedExpression& input) { return input.segment_max(); }

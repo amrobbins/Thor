@@ -79,8 +79,8 @@ void bind_mean_absolute_percentage_error(nb::module_ &losses) {
                 validateLabelDType(labels.getValuesDataType(), loss_name);
                 if (reported_loss_shape == LossShape::PER_OUTPUT)
                     throw nb::value_error((loss_name + ": per_output reporting is undefined for ragged predictions").c_str());
-                if (predictions.getOffsets() != labels.getOffsets())
-                    throw nb::value_error((loss_name + ": ragged predictions and labels must use the exact same row partition tensor").c_str());
+                if (!predictions.sharesPartitionWith(labels))
+                    throw nb::value_error((loss_name + ": ragged predictions and labels must use the exact same row partition").c_str());
                 if (predictions.getBatchSize() != labels.getBatchSize() ||
                     predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
                     predictions.getTrailingDimensions() != labels.getTrailingDimensions())

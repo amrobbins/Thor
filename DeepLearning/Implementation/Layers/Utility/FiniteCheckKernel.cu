@@ -72,15 +72,14 @@ __global__ void finiteCheckKernel(const T *data,
     }
 }
 
-template <typename T, typename OffsetT>
+template <typename T, typename CountT>
 __global__ void raggedFiniteCheckKernel(const T *data,
-                                        const OffsetT *offsets,
-                                        uint64_t batchSize,
+                                        const CountT *activeValueCount,
                                         uint64_t maxTotalValues,
                                         uint64_t elementsPerValue,
                                         uint32_t maxReportedIndices,
                                         FiniteCheckResult *result) {
-    const uint64_t rawActiveValues = static_cast<uint64_t>(offsets[batchSize]);
+    const uint64_t rawActiveValues = static_cast<uint64_t>(activeValueCount[0]);
     const uint64_t activeValues = rawActiveValues < maxTotalValues ? rawActiveValues : maxTotalValues;
     const uint64_t activeElements = activeValues * elementsPerValue;
     if (blockIdx.x == 0 && threadIdx.x == 0) result->checkedElements = activeElements;
@@ -106,10 +105,9 @@ void launchTyped(const void *data,
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <typename T, typename OffsetT>
+template <typename T, typename CountT>
 void launchRaggedTyped(const void *data,
-                       const void *offsets,
-                       uint64_t batchSize,
+                       const void *activeValueCount,
                        uint64_t maxTotalValues,
                        uint64_t elementsPerValue,
                        uint32_t maxReportedIndices,
@@ -119,10 +117,9 @@ void launchRaggedTyped(const void *data,
     const uint64_t capacityElements = maxTotalValues * elementsPerValue;
     const uint64_t requestedBlocks = (capacityElements + threads - 1) / threads;
     const uint32_t blocks = static_cast<uint32_t>(std::max<uint64_t>(1, std::min<uint64_t>(requestedBlocks, 65535)));
-    raggedFiniteCheckKernel<T, OffsetT><<<blocks, threads, 0, stream.getStream()>>>(
+    raggedFiniteCheckKernel<T, CountT><<<blocks, threads, 0, stream.getStream()>>>(
         static_cast<const T *>(data),
-        static_cast<const OffsetT *>(offsets),
-        batchSize,
+        static_cast<const CountT *>(activeValueCount),
         maxTotalValues,
         elementsPerValue,
         maxReportedIndices,
@@ -131,24 +128,25 @@ void launchRaggedTyped(const void *data,
 }
 
 template <typename T>
-void dispatchRaggedOffsets(const void *data,
-                           const void *offsets,
-                           DataType offsetsDataType,
-                           uint64_t batchSize,
-                           uint64_t maxTotalValues,
-                           uint64_t elementsPerValue,
-                           uint32_t maxReportedIndices,
-                           FiniteCheckResult *result,
-                           Stream stream) {
-    switch (offsetsDataType) {
+void dispatchRaggedActiveCount(const void *data,
+                               const void *activeValueCount,
+                               DataType activeCountDataType,
+                               uint64_t maxTotalValues,
+                               uint64_t elementsPerValue,
+                               uint32_t maxReportedIndices,
+                               FiniteCheckResult *result,
+                               Stream stream) {
+    switch (activeCountDataType) {
         case DataType::UINT32:
-            launchRaggedTyped<T, uint32_t>(data, offsets, batchSize, maxTotalValues, elementsPerValue, maxReportedIndices, result, stream);
+            launchRaggedTyped<T, uint32_t>(data, activeValueCount, maxTotalValues, elementsPerValue,
+                                           maxReportedIndices, result, stream);
             return;
         case DataType::UINT64:
-            launchRaggedTyped<T, uint64_t>(data, offsets, batchSize, maxTotalValues, elementsPerValue, maxReportedIndices, result, stream);
+            launchRaggedTyped<T, uint64_t>(data, activeValueCount, maxTotalValues, elementsPerValue,
+                                           maxReportedIndices, result, stream);
             return;
         default:
-            throw std::invalid_argument("Ragged FiniteCheck offsets must use UINT32 or UINT64 storage.");
+            throw std::invalid_argument("Ragged FiniteCheck active count must use UINT32 or UINT64 storage.");
     }
 }
 
@@ -191,18 +189,16 @@ void launchFiniteCheck(const void *data,
 
 void launchRaggedFiniteCheck(const void *data,
                              DataType dataType,
-                             const void *offsets,
-                             DataType offsetsDataType,
-                             uint64_t batchSize,
+                             const void *activeValueCount,
+                             DataType activeCountDataType,
                              uint64_t maxTotalValues,
                              uint64_t elementsPerValue,
                              uint32_t maxReportedIndices,
                              FiniteCheckResult *result,
                              Stream stream) {
     THOR_THROW_IF_FALSE(data != nullptr);
-    THOR_THROW_IF_FALSE(offsets != nullptr);
+    THOR_THROW_IF_FALSE(activeValueCount != nullptr);
     THOR_THROW_IF_FALSE(result != nullptr);
-    THOR_THROW_IF_FALSE(batchSize > 0);
     THOR_THROW_IF_FALSE(maxTotalValues > 0);
     THOR_THROW_IF_FALSE(elementsPerValue > 0);
     THOR_THROW_IF_FALSE(maxReportedIndices <= FINITE_CHECK_MAX_REPORTED_INDICES);
@@ -210,28 +206,28 @@ void launchRaggedFiniteCheck(const void *data,
 
     switch (dataType) {
         case DataType::FP8_E4M3:
-            dispatchRaggedOffsets<__nv_fp8_e4m3>(data, offsets, offsetsDataType, batchSize, maxTotalValues, elementsPerValue,
-                                                  maxReportedIndices, result, stream);
+            dispatchRaggedActiveCount<__nv_fp8_e4m3>(data, activeValueCount, activeCountDataType, maxTotalValues,
+                                                      elementsPerValue, maxReportedIndices, result, stream);
             return;
         case DataType::FP8_E5M2:
-            dispatchRaggedOffsets<__nv_fp8_e5m2>(data, offsets, offsetsDataType, batchSize, maxTotalValues, elementsPerValue,
-                                                  maxReportedIndices, result, stream);
+            dispatchRaggedActiveCount<__nv_fp8_e5m2>(data, activeValueCount, activeCountDataType, maxTotalValues,
+                                                      elementsPerValue, maxReportedIndices, result, stream);
             return;
         case DataType::FP16:
-            dispatchRaggedOffsets<half>(data, offsets, offsetsDataType, batchSize, maxTotalValues, elementsPerValue,
-                                         maxReportedIndices, result, stream);
+            dispatchRaggedActiveCount<half>(data, activeValueCount, activeCountDataType, maxTotalValues,
+                                             elementsPerValue, maxReportedIndices, result, stream);
             return;
         case DataType::BF16:
-            dispatchRaggedOffsets<__nv_bfloat16>(data, offsets, offsetsDataType, batchSize, maxTotalValues, elementsPerValue,
-                                                  maxReportedIndices, result, stream);
+            dispatchRaggedActiveCount<__nv_bfloat16>(data, activeValueCount, activeCountDataType, maxTotalValues,
+                                                      elementsPerValue, maxReportedIndices, result, stream);
             return;
         case DataType::FP32:
-            dispatchRaggedOffsets<float>(data, offsets, offsetsDataType, batchSize, maxTotalValues, elementsPerValue,
-                                          maxReportedIndices, result, stream);
+            dispatchRaggedActiveCount<float>(data, activeValueCount, activeCountDataType, maxTotalValues,
+                                              elementsPerValue, maxReportedIndices, result, stream);
             return;
         case DataType::FP64:
-            dispatchRaggedOffsets<double>(data, offsets, offsetsDataType, batchSize, maxTotalValues, elementsPerValue,
-                                           maxReportedIndices, result, stream);
+            dispatchRaggedActiveCount<double>(data, activeValueCount, activeCountDataType, maxTotalValues,
+                                               elementsPerValue, maxReportedIndices, result, stream);
             return;
         default:
             throw std::invalid_argument("FiniteCheck GPU kernel only accepts floating-point tensor storage types.");

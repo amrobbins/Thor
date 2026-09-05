@@ -106,7 +106,7 @@ TEST(DropOut, RaggedInferenceIdentityAliasesValuesAndDoesNotRequireRuntimeExtent
     LayerTestHelper::connectNetwork(layers);
 
     // The structural offsets port is part of the physical graph, but inference
-    // identity must neither wait for it at runtime nor require its host cache.
+    // identity must neither wait for it at runtime nor require a bound host partition.
     Tensor rowPartitionGpu(gpuPlacement, TensorDescriptor(DataType::UINT32, {3}));
     dropOutLayer->connectToPreviousLayer(
         nullptr, rowPartitionGpu, stream, /*backPropagateError=*/false, /*connectionType=*/1);
@@ -116,8 +116,8 @@ TEST(DropOut, RaggedInferenceIdentityAliasesValuesAndDoesNotRequireRuntimeExtent
     ASSERT_TRUE(dropOutLayer->getFeatureOutput().has_value());
     EXPECT_EQ(dropOutLayer->getFeatureInput().value(), dropOutLayer->getFeatureOutput().value());
 
-    // Drive only the values edge. No offsets contents or RowPartitionRuntime cache
-    // are supplied because a true inference identity does not inspect packed rows.
+    // Drive only the values edge. No offsets contents or bound host partition are
+    // supplied because a true inference identity does not inspect packed rows.
     layers.front()->forward(sourceCpu, false);
     auto networkOutput = dynamic_pointer_cast<NetworkOutput>(layers.back());
     stream.waitEvent(networkOutput->getOutputReadyEvent());
@@ -602,7 +602,7 @@ TEST(DropOut, RaggedTrainingUsesOnlyActivePrefixAndBackwardReusesForwardMask) {
     rowPartitionGpu.copyFromAsync(rowPartitionCpu, stream);
     RowPartitionRuntime rowPartition(
         rowPartitionGpu, RowPartitionDescriptor(/*batchSize=*/2, fullRows, DataType::UINT32));
-    rowPartition.setHostActiveValueCount(activeRows);
+    rowPartition.setHostOffsets({0, activeRows / 2, activeRows});
     dropOutLayer->connectToPreviousLayer(nullptr, rowPartitionGpu, stream, /*backPropagateError=*/false, /*connectionType=*/1);
     LayerTestHelper::initializeNetwork(layers);
 
@@ -690,7 +690,7 @@ TEST(DropOut, RaggedTrainingMaskAndBackwardAreInvariantToInactivePoison) {
         offsetsGpu.copyFromAsync(offsetsCpu, stream);
         RowPartitionRuntime rowPartition(
             offsetsGpu, RowPartitionDescriptor(/*batchSize=*/2, fullRows, DataType::UINT32));
-        rowPartition.setHostActiveValueCount(activeRows);
+        rowPartition.setHostOffsets({0, activeRows / 2, activeRows});
         dropOutLayer->connectToPreviousLayer(
             nullptr, offsetsGpu, stream, /*backPropagateError=*/false, /*connectionType=*/1);
         LayerTestHelper::initializeNetwork(layers);
@@ -780,7 +780,7 @@ TEST(DropOut, RaggedValidationIsIdentityOverActivePrefixWithPoisonedInactiveStor
     rowPartitionGpu.copyFromAsync(rowPartitionCpu, stream);
     RowPartitionRuntime rowPartition(
         rowPartitionGpu, RowPartitionDescriptor(/*batchSize=*/2, fullRows, DataType::UINT32));
-    rowPartition.setHostActiveValueCount(activeRows);
+    rowPartition.setHostOffsets({0, 3, activeRows});
     dropOutLayer->connectToPreviousLayer(nullptr, rowPartitionGpu, stream, /*backPropagateError=*/false, /*connectionType=*/1);
     LayerTestHelper::initializeNetwork(layers);
 

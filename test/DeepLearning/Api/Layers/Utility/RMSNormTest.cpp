@@ -981,7 +981,7 @@ TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnores
     EXPECT_FALSE(physicalRmsNorm->getErrorOutputs()[1].has_value());
 
     Impl::Tensor packedInput = physicalRmsNorm->getFeatureInputs()[0].value();
-    Impl::Tensor rowPartitionOffsets = physicalRmsNorm->getFeatureInputs()[1].value();
+    Impl::Tensor rowPartitionCarrier = physicalRmsNorm->getFeatureInputs()[1].value();
     Impl::Tensor rmsOutput = physicalRmsNorm->getFeatureOutputs()[0].value();
     Impl::Tensor errorInput = physicalRmsNorm->getErrorInputs()[0].value();
     Impl::Tensor dXTensor = physicalRmsNorm->getErrorOutputs()[0].value();
@@ -1003,20 +1003,16 @@ TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnores
         }
         ThorTest::poisonInactiveRows(inputValues, activeRows, hidden, ThorTest::RaggedInactivePoison::NaN);
 
-        Impl::Tensor rowPartitionOffsetsHost(
-            rmsCpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {logicalBatchSize + 1}));
-        rowPartitionOffsetsHost.getMemPtr<uint32_t>()[0] = 0;
-        rowPartitionOffsetsHost.getMemPtr<uint32_t>()[1] = static_cast<uint32_t>(activeRows / 2);
-        rowPartitionOffsetsHost.getMemPtr<uint32_t>()[2] = static_cast<uint32_t>(activeRows);
-        rowPartitionOffsets.copyFromAsync(rowPartitionOffsetsHost, stream);
-        Impl::RowPartitionRuntime rowPartition(
-            rowPartitionOffsets,
-            Impl::RowPartitionDescriptor(logicalBatchSize, fullRows, rowPartitionOffsets.getDataType()));
-        rowPartition.setHostActiveValueCount(activeRows);
+        const std::vector<uint64_t> hostOffsets{0, activeRows / 2, activeRows};
 
         Impl::Tensor packedInputHost(rmsCpuPlacement, Impl::TensorDescriptor(dataType, {fullRows, hidden}));
         rmsWriteCpuTensor(packedInputHost, inputValues);
         packedInput.copyFromAsync(packedInputHost, stream);
+        Impl::RowPartitionRuntime::publishHostState(
+            rowPartitionCarrier,
+            Impl::RowPartitionDescriptor(logicalBatchSize, fullRows, DataType::UINT32),
+            networkInput.getRowPartitionId(),
+            hostOffsets);
 
         Impl::Tensor poisonedOutputHost = rmsOutput.clone(rmsCpuPlacement);
         rmsWriteCpuTensor(poisonedOutputHost,
@@ -1024,10 +1020,13 @@ TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnores
         rmsOutput.copyFromAsync(poisonedOutputHost, stream);
 
         // Bypass RaggedNetworkInput so the packed consumer sees deliberately
-        // poisoned inactive storage. Publish the offsets separately so host bucket
-        // selection receives the authoritative logical extent.
+        // poisoned inactive storage. RP6B HOST_EXTENT carries authoritative host
+        // partition state on the placement-selected structural carrier; its payload
+        // is not an offsets array and must not be overwritten as one.
         physicalRmsNorm->forward(packedInput, false, logicalBatchSize);
-        physicalRmsNorm->forward(rowPartitionOffsets, false, logicalBatchSize);
+        if (rowPartitionCarrier != packedInput) {
+            physicalRmsNorm->forward(rowPartitionCarrier, false, logicalBatchSize);
+        }
         Event outputReady = physicalOutput->getOutputReadyEvent();
         outputReady.synchronize();
 
@@ -1057,10 +1056,12 @@ TEST(UtilityApiLayers, RaggedRMSNormForwardBackwardUsesCapacityBucketsAndIgnores
                     << "RMSNorm forward touched storage beyond its selected bucket";
             }
         }
-        const vector<float> producedOutput = rmsReadCpuTensor(rmsCopyTensorToCpu(rmsOutput, stream));
+        // The bucketed RMSNorm producer must not turn a short execution into a
+        // full-capacity write through generic output materialization.  Preserve
+        // poison beyond the selected bucket as a performance regression guard.
         for (uint64_t row = selectedRows; row < fullRows; ++row) {
             for (uint64_t col = 0; col < hidden; ++col) {
-                EXPECT_TRUE(std::isnan(producedOutput[row * hidden + col]))
+                EXPECT_TRUE(std::isnan(actualForward[row * hidden + col]))
                     << "RMSNorm producer canonicalized output beyond its selected bucket";
             }
         }

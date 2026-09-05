@@ -3,10 +3,14 @@
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <cstdint>
 
 namespace ThorImplementation {
+
+inline constexpr RaggedPartitionRequirement kPaddedRaggedSequencePlanningPartitionRequirement =
+    RaggedPartitionRequirement::HOST_EXTENT;
 
 // One dense physical representation of an entire ragged batch. Logical values
 // remain packed [sum(L_i), C] plus canonical offsets; the padded representation

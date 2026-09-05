@@ -19,8 +19,8 @@ void requireSamePartitionAndShape(const RaggedTensor& predictions, const RaggedT
         throw invalid_argument("RaggedCustomLoss predictions and labels must be initialized RaggedTensor objects.");
     if (predictions.getValues() == labels.getValues())
         throw invalid_argument("RaggedCustomLoss predictions and labels values must be distinct graph tensors.");
-    if (predictions.getOffsets() != labels.getOffsets())
-        throw invalid_argument("RaggedCustomLoss predictions and labels must use the exact same row partition tensor.");
+    if (!predictions.sharesPartitionWith(labels))
+        throw invalid_argument("RaggedCustomLoss predictions and labels must use the exact same row partition.");
     if (predictions.getBatchSize() != labels.getBatchSize() ||
         predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
         predictions.getTrailingDimensions() != labels.getTrailingDimensions()) {
@@ -33,8 +33,8 @@ void requireSecondaryCompatible(const RaggedTensor& predictions, const RaggedTen
         throw invalid_argument("RaggedCustomLoss secondary input must be an initialized RaggedTensor.");
     if (secondary.getValues() == predictions.getValues() || secondary.getValues() == labels.getValues())
         throw invalid_argument("RaggedCustomLoss secondary input values must be distinct from predictions and labels values.");
-    if (secondary.getOffsets() != predictions.getOffsets())
-        throw invalid_argument("RaggedCustomLoss secondary input must use the exact same row partition tensor as predictions.");
+    if (!secondary.sharesPartitionWith(predictions))
+        throw invalid_argument("RaggedCustomLoss secondary input must use the exact same row partition as predictions.");
     if (secondary.getBatchSize() != predictions.getBatchSize() ||
         secondary.getMaxTotalValues() != predictions.getMaxTotalValues() ||
         secondary.getTrailingDimensions() != predictions.getTrailingDimensions())
@@ -52,8 +52,8 @@ void requireExampleWeightsCompatible(const RaggedTensor& predictions,
     for (const RaggedTensor& secondary : secondaries)
         if (exampleWeights.getValues() == secondary.getValues())
             throw invalid_argument("RaggedCustomLoss example_weights values must be distinct from differentiable input values.");
-    if (exampleWeights.getOffsets() != predictions.getOffsets())
-        throw invalid_argument("RaggedCustomLoss example_weights must use the exact same row partition tensor as predictions.");
+    if (!exampleWeights.sharesPartitionWith(predictions))
+        throw invalid_argument("RaggedCustomLoss example_weights must use the exact same row partition as predictions.");
     if (exampleWeights.getBatchSize() != predictions.getBatchSize() ||
         exampleWeights.getMaxTotalValues() != predictions.getMaxTotalValues() ||
         exampleWeights.getTrailingDimensions() != vector<uint64_t>{1})

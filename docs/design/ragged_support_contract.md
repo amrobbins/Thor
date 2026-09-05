@@ -31,8 +31,11 @@ The required structural invariants are:
   contents;
 - `max_values_per_row`, when present, is placement-time capacity metadata and
   every logical row length must fit it;
-- runtime caches such as the host active-value count are derived from the
-  canonical offsets allocation and are never serialized as model state.
+- the complete host offsets vector is the authoritative runtime row partition;
+  `active_value_count` and `max_active_row_length` are derived from it and cannot
+  be published independently;
+- the offsets tensor is an execution representation of that host partition and
+  runtime host partition state is never serialized as model state.
 
 Nested ragged ranks are outside this contract. A future nested/jagged tensor
 abstraction must not silently change the meaning of the existing rank-1 type.
@@ -43,14 +46,15 @@ The physical ownership and consumer-responsibility rules are specified in
 ## Operation classes
 
 A **partition-preserving** operation transforms values but retains the exact
-canonical offsets tensor:
+authoritative row partition:
 
 ```text
 (values A, offsets P) -> operation -> (values B, offsets P)
 ```
 
 A **partition-changing** operation changes row membership or segmentation and
-must explicitly produce a new canonical offsets tensor:
+must explicitly produce a new authoritative host partition (plus any required
+execution-side offsets representation):
 
 ```text
 (values A, offsets P) -> repartition -> (values B, offsets Q)
@@ -77,8 +81,8 @@ Status meanings:
 
 | Surface | Status | Rank-1 ragged contract / restriction | Primary regression evidence |
 | --- | --- | --- | --- |
-| `RaggedNetworkInput` / `RaggedNetworkOutput` | Supported | Logical boundary is values + authoritative offsets; `partition=<existing ragged input>` declares a values-only external stream sharing the exact existing partition instead of duplicating structural metadata/offset ports; inactive capacity remains undefined | `RaggedNetworkInputApi.*`, `RaggedNetworkOutputApi.*` |
-| `RaggedTensor` serialization / descriptors | Supported | `UINT32` and `UINT64`; optional `max_values_per_row`; runtime extent/cache is not serialized | `RaggedTensorApi.*`, implementation descriptor/runtime tests |
+| `RaggedNetworkInput` / `RaggedNetworkOutput` | Supported | Every executing logical boundary has complete authoritative host offsets. CPU offsets may establish that partition directly; GPU-only offsets without host partition state are rejected. `partition=<existing ragged input>` declares a values-only external stream sharing the exact existing partition instead of duplicating structural metadata/offset ports; inactive capacity remains undefined | `RaggedNetworkInputApi.*`, `RaggedNetworkOutputApi.*` |
+| `RaggedTensor` serialization / descriptors | Supported | `UINT32` and `UINT64`; optional `max_values_per_row`; authoritative runtime host partition state is not serialized | `RaggedTensorApi.*`, implementation descriptor/runtime tests |
 | `NumpyDataset` host/device residency | Supported | Canonical packed values + offsets materialize through both host-backed batching and generic device-resident snapshots; STRICT device storage supports dense/ragged mixtures and enforces requested `max_total_values` / `max_values_per_row` bounds | Python `test_numpy_dataset_ragged_batches_train_through_canonical_ctc_with_exact_partial_tail`, device-resident named-session capacity tests |
 | Ordinary standalone activations | Supported | Tokenwise over active packed values and partition-preserving | `Activations.ShapePreservingBuildersInferRaggedFromInputAndPreserveOffsets` |
 | GLU-family activations | Supported | Tokenwise; final trailing feature dimension must satisfy the gate/split geometry | `GatedLinearUnits.Ragged*` |
@@ -88,7 +92,7 @@ Status meanings:
 | `RMSNorm` | Restricted | Normalization axes must stay within trailing value dimensions; custom epilogues are supported; auxiliary bindings must be same-partition `RaggedTensor` inputs and remain active-prefix-aware | `UtilityApiLayers.RaggedRMSNorm*`, Python `test_rms_norm.py` |
 | `LayerNorm` | Restricted | Public ragged LayerNorm is token-wise over exactly one non-zero trailing channel dimension; `normalizedShape` must equal that trailing dimension. Multi-axis ragged normalization remains outside the current expression backend contract | `UtilityApiLayers.RaggedLayerNorm*`, Python `test_layer_norm.py`, `RaggedExpression.*LayerNorm*` |
 | `DropOut` | Supported | Training touches only the logical extent; inference/validation identity preserves the partition | `DropOut.Ragged*`, `UtilityApiLayers.RaggedDropOut*` |
-| `Add` | Restricted | Both operands must be ragged with the exact same canonical offsets tensor and compatible values descriptors | ragged `CustomLayer`/transformer integration coverage |
+| `Add` | Restricted | Both operands must share the exact same logical row partition and have compatible values descriptors | ragged `CustomLayer`/transformer integration coverage |
 | `Concatenate` | Restricted | Concatenates trailing feature axes only; every input must share the exact same partition | `UtilityApiLayers.RaggedConcatenate*` |
 | `Slice` | Restricted | Slices trailing value axes only; does not slice/repartition the sequence axis | `SegmentedReductionApi.RaggedSlice*`, `RaggedExpression.TrailingSlice*` |
 | `TypeConverter` | Supported | Active-prefix tokenwise conversion; partition-preserving | `UtilityApiLayers.TypeConverterRagged*` |
@@ -106,10 +110,10 @@ Status meanings:
 | `StopGradient` / `ScaleGradient` | Supported | Forward preserves the exact canonical offsets object; gradient control applies only to packed values and never changes row membership | `UtilityApiLayers.RaggedStopGradient*`, `UtilityApiLayers.RaggedScaleGradient*`, Python gradient-control tests |
 | trailing `Reshape` / `Flatten` | Supported | Metadata-only transforms of each packed value's trailing shape; element count per packed value and the exact canonical row partition are preserved | `UtilityApiLayers.RaggedReshape*`, `UtilityApiLayers.RaggedFlatten*`, Python `test_ragged_shape_ops.py` |
 | trailing `Transpose` | Restricted | Swaps only the final two trailing value dimensions; the packed row axis is never transposed. Materialization/backward uses an active-prefix non-overlapping strided view | `UtilityApiLayers.RaggedTranspose*`, `RaggedExpression.TrailingTranspose*`, Python `test_ragged_shape_ops.py` |
-| `RaggedSequenceConcatenate` | Supported | Concatenates corresponding rows in input order across independently partitioned rank-1 ragged inputs; same batch/values dtype/offsets dtype/trailing shape required; explicitly produces a new canonical offsets tensor `Q[row] = sum_i P_i[row]`; forward/backward touch only active packed values | `UtilityApiLayers.RaggedSequenceConcatenate*`, `RaggedSequenceConcatenate.*`, Python `test_ragged_sequence_concatenate.py` |
-| `RaggedSequenceSlice` | Supported | Applies a fixed non-negative `start` and positive `length` independently to each logical row, clips short rows, compacts selected active values, and explicitly produces a new canonical offsets tensor; backward zeros sliced-out active source gradients and scatters selected gradients without touching inactive capacity | `UtilityApiLayers.RaggedSequenceSlice*`, `RaggedSequenceSlice.*`, Python `test_ragged_sequence_slice.py` |
+| `RaggedSequenceConcatenate` | Supported | Concatenates corresponding rows in input order across independently partitioned rank-1 ragged inputs; same batch/values dtype/offsets dtype/trailing shape required; derives authoritative host offsets `Q[row] = sum_i P_i[row]` before GPU value movement and materializes those offsets as an explicit GPU input; forward/backward touch only active packed values | `UtilityApiLayers.RaggedSequenceConcatenate*`, `RaggedSequenceConcatenate.*`, Python `test_ragged_sequence_concatenate.py` |
+| `RaggedSequenceSlice` | Supported | Applies a fixed non-negative `start` and positive `length` independently to each logical row, clips short rows, derives the authoritative output host partition before GPU value movement, and materializes that partition as an explicit GPU offsets input; backward zeros sliced-out active source gradients and scatters selected gradients without touching inactive capacity | `UtilityApiLayers.RaggedSequenceSlice*`, `RaggedSequenceSlice.*`, Python `test_ragged_sequence_slice.py` |
 | `RaggedGather` | Supported | Interprets scalar UINT32/UINT64 indices row-locally against source partition P; output values use source dtype/trailing geometry and reuse the indices partition Q exactly; source and indices offsets dtypes may differ; duplicate indices accumulate during backward; inactive capacities are ignored | `UtilityApiLayers.RaggedGather*`, `RaggedGather.*`, Python `test_ragged_gather.py` |
-| `RaggedFilter` | Supported | Stable row-local filtering with one scalar BOOLEAN predicate per active token; mask and values must share the exact canonical partition; selected tokens are compacted in order into a fresh partition; forward/backward ignore inactive capacity and mask values are non-differentiable | `UtilityApiLayers.RaggedFilter*`, `RaggedFilter.*`, Python `test_ragged_filter.py` |
+| `RaggedFilter` / runtime device-data-dependent repartitioning | Out of scope | Thor requires every live ragged partition to have authoritative host offsets before execution. A filter whose output row lengths depend on runtime device BOOLEAN values cannot satisfy that contract without a device-to-host synchronization, so the former `RaggedFilter` layer was removed. Perform such filtering before batch submission, where the resulting host partition can be constructed directly. | none |
 | `RaggedToPaddedDense` | Supported | Losslessly materializes canonical ragged rows as ordinary dense `[B,W,...]` storage using the declared finite `max_values_per_row=W`; inactive packed capacity is ignored, short rows are filled with an explicit constant padding value, and backward discards padding gradients | `UtilityApiLayers.RaggedDenseAdapters*`, `RaggedDenseAdapters.*`, Python `test_ragged_dense_adapters.py` |
 | `PaddedDenseToRagged` | Supported | Packs ordinary dense `[B,W,...]` storage according to an existing canonical `partition_input`; only its offsets are consumed, `W` must cover `max_values_per_row`, output reuses the exact partition object, padding cells are ignored, and backward emits exact-zero padded gradients | `UtilityApiLayers.RaggedDenseAdapters*`, `RaggedDenseAdapters.*`, Python `test_ragged_dense_adapters.py` |
 | `AdaptiveLayerNorm` | Restricted | Rank-1 `[N,C]` ragged data uses dense per-logical-row `[C]` scale/bias inputs; `SegmentedBroadcast` expands each row's conditioning only across its active tokens, the exact partition is preserved, and normalization reuses packed finite-bucket `LayerNorm`. Multi-axis ragged normalization remains out of scope and training inherits the current packed `LayerNorm` autodiff gate | `UtilityApiLayers.RaggedAdaptiveLayerNorm*`, Python `test_ragged_adaptive_layer_norm_*` |

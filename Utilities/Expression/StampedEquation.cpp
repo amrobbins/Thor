@@ -683,27 +683,25 @@ uint64_t raggedFlopCheckedAdd(uint64_t lhs, uint64_t rhs, const char* where) {
     return lhs + rhs;
 }
 
-std::optional<uint64_t> runtimeRaggedActiveValueCount(const Tensor& offsets,
+std::optional<uint64_t> runtimeRaggedActiveValueCount(const Tensor& carrier,
                                                        uint64_t batch_size,
                                                        uint64_t max_active_values) {
-    if (batch_size == 0 || max_active_values == 0) {
+    if (batch_size == 0 || max_active_values == 0 || !RowPartitionRuntime::hasPublishedHostState(carrier)) {
         return std::nullopt;
     }
-    RowPartitionRuntime row_partition(
-        offsets,
-        RowPartitionDescriptor(batch_size, max_active_values, offsets.getDataType()));
+    RowPartitionRuntime row_partition =
+        RowPartitionRuntime::fromHostStateCarrier(carrier, batch_size, max_active_values);
     return row_partition.getHostActiveValueCountIfAvailable();
 }
 
-std::optional<std::vector<uint64_t>> runtimeRaggedHostOffsets(const Tensor& offsets,
+std::optional<std::vector<uint64_t>> runtimeRaggedHostOffsets(const Tensor& carrier,
                                                               uint64_t batch_size,
                                                               uint64_t max_active_values) {
-    if (batch_size == 0 || max_active_values == 0) {
+    if (batch_size == 0 || max_active_values == 0 || !RowPartitionRuntime::hasPublishedHostState(carrier)) {
         return std::nullopt;
     }
-    RowPartitionRuntime row_partition(
-        offsets,
-        RowPartitionDescriptor(batch_size, max_active_values, offsets.getDataType()));
+    RowPartitionRuntime row_partition =
+        RowPartitionRuntime::fromHostStateCarrier(carrier, batch_size, max_active_values);
     return row_partition.getHostOffsetsIfAvailable();
 }
 
@@ -727,13 +725,7 @@ std::optional<uint64_t> runtimePackedLogicalNumel(const Tensor& offsets,
 std::optional<std::vector<uint64_t>> attentionHostOffsetsIfAvailable(const Tensor& offsets,
                                                                      uint64_t batch_size,
                                                                      uint64_t max_total_values) {
-    if (batch_size == 0 || max_total_values == 0) {
-        return std::nullopt;
-    }
-    RowPartitionRuntime row_partition(
-        offsets,
-        RowPartitionDescriptor(batch_size, max_total_values, offsets.getDataType()));
-    return row_partition.getHostOffsetsIfAvailable();
+    return runtimeRaggedHostOffsets(offsets, batch_size, max_total_values);
 }
 
 std::optional<uint64_t> runtimeLogicalAttentionFlops(const CompiledAttention& attention,
@@ -3266,18 +3258,89 @@ StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
       input(input),
       output(output),
       stream(stream) {
-    if (!compiled_softmax || !built_softmax) {
-        throw std::runtime_error("StampedSoftmax requires compiled and built softmax payloads.");
+    if (!compiled_softmax || !built_softmax || compiled_softmax->isRagged() || compiled_softmax->backward) {
+        throw std::runtime_error("Dense StampedSoftmax requires a dense forward compiled/built payload.");
     }
     THOR_THROW_IF_FALSE(input.getDataType() == compiled_softmax->input_dtype);
     THOR_THROW_IF_FALSE(output.getDataType() == compiled_softmax->output_dtype);
 }
 
+StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
+                               CudnnRaggedSoftmaxExecutionState prepared_ragged_state,
+                               const Tensor& input,
+                               const Tensor& output,
+                               const Tensor& offsets,
+                               const Stream& stream)
+    : compiled_softmax(std::move(compiled)),
+      built_softmax(nullptr),
+      ragged_state(std::move(prepared_ragged_state)),
+      source_input(input),
+      input(input),
+      row_partition_offsets(offsets),
+      output(output),
+      stream(stream) {
+    if (!compiled_softmax || !compiled_softmax->isRagged() || compiled_softmax->backward) {
+        throw std::runtime_error("Ragged StampedSoftmax forward requires a ragged forward compiled payload.");
+    }
+    THOR_THROW_IF_FALSE(input.getDataType() == compiled_softmax->input_dtype);
+    THOR_THROW_IF_FALSE(output.getDataType() == compiled_softmax->output_dtype);
+}
+
+StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
+                               CudnnRaggedSoftmaxExecutionState prepared_ragged_state,
+                               const Tensor& y,
+                               const Tensor& dy,
+                               const Tensor& dx,
+                               const Tensor& offsets,
+                               const Stream& stream)
+    : compiled_softmax(std::move(compiled)),
+      built_softmax(nullptr),
+      ragged_state(std::move(prepared_ragged_state)),
+      source_input(y),
+      input(y),
+      grad_output(dy),
+      row_partition_offsets(offsets),
+      output(dx),
+      stream(stream) {
+    if (!compiled_softmax || !compiled_softmax->isRagged() || !compiled_softmax->backward) {
+        throw std::runtime_error("Ragged StampedSoftmax backward requires a ragged backward compiled payload.");
+    }
+    THOR_THROW_IF_FALSE(y.getDataType() == compiled_softmax->input_dtype);
+    THOR_THROW_IF_FALSE(dy.getDataType() == compiled_softmax->input_dtype);
+    THOR_THROW_IF_FALSE(dx.getDataType() == compiled_softmax->output_dtype);
+}
+
 void StampedSoftmax::run() { runOn(stream); }
 
 void StampedSoftmax::runOn(Stream& run_stream) const {
-    refreshCudnnSoftmaxInputAdapter(source_input, input, run_stream);
+    if (compiled_softmax->isRagged()) {
+        if (!ragged_state.has_value() || !row_partition_offsets.has_value()) {
+            throw std::runtime_error("Ragged StampedSoftmax is missing prepared execution state or row partition offsets.");
+        }
+        RowPartitionRuntime row_partition = RowPartitionRuntime::fromHostStateCarrier(
+            row_partition_offsets.value(),
+            compiled_softmax->ragged_batch_size,
+            compiled_softmax->ragged_max_active_values);
+        const uint64_t active_values = row_partition.requireHostActiveValueCount();
+        if (compiled_softmax->backward) {
+            if (!grad_output.has_value()) {
+                throw std::runtime_error("Ragged StampedSoftmax backward is missing dY.");
+            }
+            CudnnRaggedSoftmax::instance().backward(ragged_state.value(),
+                                                     {.y = input,
+                                                      .dy = grad_output.value(),
+                                                      .dx = output,
+                                                      .activeValueCount = active_values},
+                                                     run_stream);
+        } else {
+            CudnnRaggedSoftmax::instance().forward(ragged_state.value(),
+                                                    {.x = input, .y = output, .activeValueCount = active_values},
+                                                    run_stream);
+        }
+        return;
+    }
 
+    refreshCudnnSoftmaxInputAdapter(source_input, input, run_stream);
     CUDNN_CHECK(cudnnSoftmaxForward(run_stream.getCudnnHandle(),
                                     compiled_softmax->algorithm,
                                     compiled_softmax->mode,
@@ -3487,17 +3550,11 @@ StampedSanitizePackedTail::StampedSanitizePackedTail(const Tensor& tensor,
     if (tensor.getPlacement() != row_partition_offsets.getPlacement()) {
         throw std::runtime_error("SANITIZE_PACKED_TAIL tensor and row-partition offsets must share placement.");
     }
-    RowPartitionRuntime(row_partition_offsets,
-                        RowPartitionDescriptor(ragged_batch_size,
-                                               packed_row_capacity,
-                                               row_partition_offsets.getDataType()));
 }
 
 void StampedSanitizePackedTail::runOn(Stream& run_stream) const {
-    RowPartitionRuntime row_partition(row_partition_offsets,
-                                      RowPartitionDescriptor(ragged_batch_size,
-                                                             packed_row_capacity,
-                                                             row_partition_offsets.getDataType()));
+    RowPartitionRuntime row_partition = RowPartitionRuntime::fromHostStateCarrier(
+        row_partition_offsets, ragged_batch_size, packed_row_capacity);
     const uint64_t active_rows = row_partition.requireHostActiveValueCount();
     const uint64_t selected_rows =
         active_rows == 0 ? capacity_buckets.front() : chooseRaggedMatmulCapacityBucket(active_rows, capacity_buckets);
@@ -3582,11 +3639,6 @@ void StampedLayerNorm::prepareForwardExecutableFamily() {
         if (!row_partition_offsets.has_value() || compiled_layer_norm->ragged_batch_size == 0) {
             throw std::runtime_error("Packed-row LayerNorm requires an explicit row-partition runtime binding.");
         }
-        const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
-        RowPartitionRuntime(row_partition_offsets.value(),
-                            RowPartitionDescriptor(compiled_layer_norm->ragged_batch_size,
-                                                   compiled_layer_norm->packed_row_capacity,
-                                                   offsets_descriptor.getDataType()));
         const std::vector<uint64_t> input_dims = input.getDimensions();
         if (input_dims.size() != 2 || input_dims[0] % compiled_layer_norm->packed_row_capacity != 0) {
             throw std::runtime_error(
@@ -3685,11 +3737,8 @@ void StampedLayerNorm::runOn(Stream& run_stream) const {
     if (!row_partition_offsets.has_value()) {
         throw std::runtime_error("Packed-row LayerNorm is missing its row-partition runtime binding.");
     }
-    const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
-    RowPartitionRuntime row_partition(row_partition_offsets.value(),
-                                      RowPartitionDescriptor(compiled_layer_norm->ragged_batch_size,
-                                                             compiled_layer_norm->packed_row_capacity,
-                                                             offsets_descriptor.getDataType()));
+    RowPartitionRuntime row_partition = RowPartitionRuntime::fromHostStateCarrier(
+        row_partition_offsets.value(), compiled_layer_norm->ragged_batch_size, compiled_layer_norm->packed_row_capacity);
     const uint64_t active_rows = row_partition.requireHostActiveValueCount();
     if (active_rows == 0) {
         // Every output row is inactive, so the packed output is entirely
@@ -3773,11 +3822,6 @@ void StampedRmsNorm::prepareForwardExecutableFamily(bool training) {
         if (!row_partition_offsets.has_value() || compiled_rms_norm->ragged_batch_size == 0) {
             throw std::runtime_error("Packed-row RMSNorm requires an explicit row-partition runtime binding.");
         }
-        const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
-        RowPartitionRuntime(row_partition_offsets.value(),
-                            RowPartitionDescriptor(compiled_rms_norm->ragged_batch_size,
-                                                   compiled_rms_norm->packed_row_capacity,
-                                                   offsets_descriptor.getDataType()));
         const std::vector<uint64_t> input_dims = input.getDimensions();
         if (input_dims.size() != 2 || input_dims[0] % compiled_rms_norm->packed_row_capacity != 0) {
             throw std::runtime_error(
@@ -3894,11 +3938,8 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
     if (!row_partition_offsets.has_value()) {
         throw std::runtime_error("Packed-row RMSNorm is missing its row-partition runtime binding.");
     }
-    const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
-    RowPartitionRuntime row_partition(row_partition_offsets.value(),
-                                      RowPartitionDescriptor(compiled_rms_norm->ragged_batch_size,
-                                                             compiled_rms_norm->packed_row_capacity,
-                                                             offsets_descriptor.getDataType()));
+    RowPartitionRuntime row_partition = RowPartitionRuntime::fromHostStateCarrier(
+        row_partition_offsets.value(), compiled_rms_norm->ragged_batch_size, compiled_rms_norm->packed_row_capacity);
     const uint64_t active_rows = row_partition.requireHostActiveValueCount();
 
     const std::vector<uint64_t> input_dims = input.getDimensions();
@@ -3977,11 +4018,8 @@ std::optional<PackedRowConsumerDiagnostic> StampedRmsNorm::packedRowConsumerDiag
     if (!row_partition_offsets.has_value()) {
         throw std::runtime_error("Packed-row RMSNorm diagnostic is missing its row-partition runtime binding.");
     }
-    const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
-    RowPartitionRuntime row_partition(row_partition_offsets.value(),
-                                      RowPartitionDescriptor(compiled_rms_norm->ragged_batch_size,
-                                                             compiled_rms_norm->packed_row_capacity,
-                                                             offsets_descriptor.getDataType()));
+    RowPartitionRuntime row_partition = RowPartitionRuntime::fromHostStateCarrier(
+        row_partition_offsets.value(), compiled_rms_norm->ragged_batch_size, compiled_rms_norm->packed_row_capacity);
     const uint64_t active_rows = row_partition.requireHostActiveValueCount();
     const std::vector<uint64_t> buckets = makeRaggedRmsNormCapacityBuckets(compiled_rms_norm->packed_row_capacity);
     const uint64_t selected_rows =
@@ -4132,11 +4170,6 @@ void StampedRmsNormBackward::prepareBackwardExecutableFamilies() {
         if (!row_partition_offsets.has_value() || compiled_rms_norm_backward->ragged_batch_size == 0) {
             throw std::runtime_error("Packed-row RMSNorm backward requires an explicit row-partition runtime binding.");
         }
-        const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
-        RowPartitionRuntime(row_partition_offsets.value(),
-                            RowPartitionDescriptor(compiled_rms_norm_backward->ragged_batch_size,
-                                                   compiled_rms_norm_backward->packed_row_capacity,
-                                                   offsets_descriptor.getDataType()));
         const std::vector<uint64_t> input_dims = input.getDimensions();
         if (input_dims.size() != 2 || input_dims[0] % compiled_rms_norm_backward->packed_row_capacity != 0) {
             throw std::runtime_error(
@@ -4294,11 +4327,8 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
     if (!row_partition_offsets.has_value()) {
         throw std::runtime_error("Packed-row RMSNorm backward is missing its row-partition runtime binding.");
     }
-    const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
-    RowPartitionRuntime row_partition(row_partition_offsets.value(),
-                                      RowPartitionDescriptor(compiled_rms_norm_backward->ragged_batch_size,
-                                                             compiled_rms_norm_backward->packed_row_capacity,
-                                                             offsets_descriptor.getDataType()));
+    RowPartitionRuntime row_partition = RowPartitionRuntime::fromHostStateCarrier(
+        row_partition_offsets.value(), compiled_rms_norm_backward->ragged_batch_size, compiled_rms_norm_backward->packed_row_capacity);
     const uint64_t active_rows = row_partition.requireHostActiveValueCount();
     const std::vector<uint64_t> input_dims = input.getDimensions();
     const uint64_t hidden = input_dims[1];
@@ -4463,11 +4493,6 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
         if (!this->row_partition_offsets.has_value() || compiled_matmul->ragged_batch_size == 0) {
             throw std::runtime_error("Packed-row MATMUL requires an explicit row-partition runtime binding.");
         }
-        const TensorDescriptor offsets_descriptor = this->row_partition_offsets->getDescriptor();
-        RowPartitionRuntime(this->row_partition_offsets.value(),
-                            RowPartitionDescriptor(compiled_matmul->ragged_batch_size,
-                                                   compiled_matmul->packed_row_capacity,
-                                                   offsets_descriptor.getDataType()));
     } else if (this->row_partition_offsets.has_value()) {
         throw std::runtime_error("Dense MATMUL unexpectedly received a row-partition runtime binding.");
     }
@@ -4484,16 +4509,15 @@ std::optional<uint64_t> StampedMatmul::runtimeLogicalFlopCount() const {
         return std::nullopt;
     }
     if (!row_partition_offsets.has_value() || compiled_matmul->packed_row_capacity == 0 ||
-        compiled_matmul->ragged_batch_size == 0) {
+        compiled_matmul->ragged_batch_size == 0 ||
+        !RowPartitionRuntime::hasPublishedHostState(row_partition_offsets.value())) {
         return std::nullopt;
     }
 
-    const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
-    RowPartitionRuntime row_partition(
+    RowPartitionRuntime row_partition = RowPartitionRuntime::fromHostStateCarrier(
         row_partition_offsets.value(),
-        RowPartitionDescriptor(compiled_matmul->ragged_batch_size,
-                               compiled_matmul->packed_row_capacity,
-                               offsets_descriptor.getDataType()));
+        compiled_matmul->ragged_batch_size,
+        compiled_matmul->packed_row_capacity);
     const std::optional<uint64_t> active_rows = row_partition.getHostActiveValueCountIfAvailable();
     if (!active_rows.has_value()) {
         // FLOP reporting must not introduce a device synchronization. If the
@@ -4637,11 +4661,8 @@ std::optional<PackedRowConsumerDiagnostic> StampedMatmul::packedRowConsumerDiagn
     if (!row_partition_offsets.has_value()) {
         throw std::runtime_error("Packed-row MATMUL diagnostic is missing its row-partition runtime binding.");
     }
-    const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
-    RowPartitionRuntime row_partition(row_partition_offsets.value(),
-                                      RowPartitionDescriptor(compiled_matmul->ragged_batch_size,
-                                                             compiled_matmul->packed_row_capacity,
-                                                             offsets_descriptor.getDataType()));
+    RowPartitionRuntime row_partition = RowPartitionRuntime::fromHostStateCarrier(
+        row_partition_offsets.value(), compiled_matmul->ragged_batch_size, compiled_matmul->packed_row_capacity);
     const uint64_t active_rows = row_partition.requireHostActiveValueCount();
     const uint64_t selected_rows = built_matmul->bucketed_cublas_gemm->getSelectedCapacityRows(active_rows);
     if (selected_rows < active_rows || selected_rows > compiled_matmul->packed_row_capacity) {
@@ -4947,11 +4968,10 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                 if (!row_partition_offsets.has_value()) {
                     throw std::runtime_error("Packed-row expression MATMUL is missing its row-partition runtime binding.");
                 }
-                const TensorDescriptor offsets_descriptor = row_partition_offsets->getDescriptor();
-                RowPartitionRuntime row_partition(row_partition_offsets.value(),
-                                                  RowPartitionDescriptor(compiled_matmul->ragged_batch_size,
-                                                                         compiled_matmul->packed_row_capacity,
-                                                                         offsets_descriptor.getDataType()));
+                RowPartitionRuntime row_partition = RowPartitionRuntime::fromHostStateCarrier(
+                    row_partition_offsets.value(),
+                    compiled_matmul->ragged_batch_size,
+                    compiled_matmul->packed_row_capacity);
                 const uint64_t active_rows = row_partition.requireHostActiveValueCount();
                 // cuBLASLt executes a pre-tuned row bucket rather than an arbitrary logical
                 // row count. Expression plans prepare the bucket slack through an explicit

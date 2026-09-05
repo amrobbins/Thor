@@ -14,8 +14,8 @@
 namespace Thor {
 
 // Elementwise addition for dense or canonical rank-1 ragged tensors. The
-// ragged form requires both operands to share the exact same row-partition
-// offsets tensor; the output preserves that partition.
+// ragged form requires both operands to share the exact same logical row
+// partition; the output preserves that partition.
 class Add : public MultiConnectionLayer {
    public:
     class Builder;
@@ -34,6 +34,12 @@ class Add : public MultiConnectionLayer {
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;
     int getConnectionType(Tensor connectingTensor) const override;
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedLeft.has_value() && inputTensor == raggedLeft->getOffsets())
+            return ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
 
     [[nodiscard]] uint64_t getOutputTensorBytes(uint32_t batchSize) const override;
 

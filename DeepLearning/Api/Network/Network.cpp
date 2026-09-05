@@ -794,6 +794,89 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
             }
         }
 
+        // External ragged offsets are logical routing tokens. Aggregate the
+        // placement-facing RP5 requirements of their consumers, then materialize
+        // only the device representations actually requested. HOST_EXTENT has no
+        // dedicated GPU allocation; its carrier is the owning values input and is
+        // attached after that ordinary NetworkInput is stamped below.
+        std::set<std::string> externalPartitionOffsetsInputNames;
+        for (const auto& [name, record] : raggedNetworkInputs) {
+            (void)name;
+            if (record.partitionInputName.has_value())
+                continue;
+
+            THOR_THROW_IF_FALSE(record.raggedTensor.getBatchSize() == batchSize);
+            const ThorImplementation::RowPartitionId rowPartitionId =
+                record.raggedTensor.getRowPartitionId();
+            THOR_THROW_IF_FALSE(rowPartitionId != 0);
+            const ThorImplementation::RowPartitionDescriptor descriptor =
+                record.raggedTensor.getDescriptor().getRowPartition();
+            const Tensor logicalOffsetsTensor = record.raggedTensor.getOffsets();
+
+            ThorImplementation::RaggedPartitionRequirement requirements =
+                ThorImplementation::RaggedPartitionRequirement::NONE;
+            auto loadingLayersIt = apiTensorToApiLoadingLayers.find(logicalOffsetsTensor);
+            if (loadingLayersIt != apiTensorToApiLoadingLayers.end()) {
+                for (const shared_ptr<Layer>& loadingLayer : loadingLayersIt->second) {
+                    THOR_THROW_IF_FALSE(loadingLayer != nullptr);
+                    requirements |= loadingLayer->getRaggedPartitionRequirementForPlacement(logicalOffsetsTensor, inferenceOnly);
+                }
+            }
+
+            ThorImplementation::StampedNetwork::ExternalRowPartitionPhysicalization physicalization;
+            physicalization.rowPartitionId = rowPartitionId;
+            physicalization.descriptor = descriptor;
+            physicalization.logicalOffsetsTensor = logicalOffsetsTensor;
+            physicalization.valuesInputName = record.valuesInputName;
+            physicalization.requirements = requirements;
+
+            auto createManagedRepresentation = [&](const std::string& suffix,
+                                                   const std::vector<uint64_t>& dimensions,
+                                                   std::shared_ptr<ThorImplementation::NetworkInput>& inputOut,
+                                                   std::shared_ptr<ThorImplementation::Layer>& driverOut) {
+                auto managedInput = std::make_shared<ThorImplementation::NetworkInput>(
+                    ThorImplementation::TensorPlacement(TensorPlacement::MemDevices::GPU, gpuNum),
+                    descriptor.getOffsetsDataType(),
+                    dimensions);
+                managedInput->setName(
+                    "__thor_partition_" + std::to_string(rowPartitionId) + "." + suffix);
+                managedInput->setConstructForInferenceOnly(inferenceOnly);
+
+                auto fanout = std::make_shared<ThorImplementation::TensorFanout>();
+                fanout->setConstructForInferenceOnly(inferenceOnly);
+                Layer::connectTwoLayers(managedInput, fanout, nullptr, nullptr, logicalOffsetsTensor);
+
+                stampedNetwork.managedPartitionInputsShared.push_back(managedInput);
+                stampedNetwork.managedPartitionInputs.push_back(managedInput.get());
+                stampedNetwork.otherLayersShared.push_back(fanout);
+                stampedNetwork.otherLayers.push_back(fanout.get());
+                inputOut = std::move(managedInput);
+                driverOut = std::move(fanout);
+            };
+
+            if (ThorImplementation::hasRaggedPartitionRequirement(
+                    requirements, ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT)) {
+                createManagedRepresentation(
+                    "active_count", {1}, physicalization.activeCountInput, physicalization.activeCountDrivingLayer);
+            }
+            if (ThorImplementation::hasRaggedPartitionRequirement(
+                    requirements, ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS)) {
+                createManagedRepresentation(
+                    "offsets",
+                    descriptor.getOffsetsDescriptor().getDimensions(),
+                    physicalization.offsetsInput,
+                    physicalization.offsetsDrivingLayer);
+            }
+
+            THOR_THROW_IF_FALSE(
+                stampedNetwork.externalRowPartitions.emplace(rowPartitionId, std::move(physicalization)).second);
+            THOR_THROW_IF_FALSE(
+                stampedNetwork.externalRowPartitionByLogicalOffsetsTensor.emplace(logicalOffsetsTensor, rowPartitionId).second);
+            THOR_THROW_IF_FALSE(
+                stampedNetwork.externalRowPartitionByValuesInputName.emplace(record.valuesInputName, rowPartitionId).second);
+            externalPartitionOffsetsInputNames.insert(record.offsetsInputName);
+        }
+
         uint64_t orderedIndex = 0;
         for (auto it = orderedNetwork.begin(); it != orderedNetwork.end(); ++it, ++orderedIndex) {
             std::optional<Tensor> inputTensor = it->first;
@@ -801,7 +884,44 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
 
             const shared_ptr<NetworkInput> networkInput = dynamic_pointer_cast<NetworkInput>(layer);
             if (networkInput) {
+                if (externalPartitionOffsetsInputNames.count(networkInput->getName()) != 0) {
+                    // This API input remains discoverable as the logical partition
+                    // boundary, but its execution representation is the hidden
+                    // Thor-managed input created above.
+                    continue;
+                }
                 stampNetworkInput(networkInput, gpuNum, batchSize, stampedNetwork);
+
+                auto partitionValuesIt =
+                    stampedNetwork.externalRowPartitionByValuesInputName.find(networkInput->getName());
+                if (partitionValuesIt != stampedNetwork.externalRowPartitionByValuesInputName.end()) {
+                    auto physicalizationIt = stampedNetwork.externalRowPartitions.find(partitionValuesIt->second);
+                    THOR_THROW_IF_FALSE(physicalizationIt != stampedNetwork.externalRowPartitions.end());
+                    auto& physicalization = physicalizationIt->second;
+                    auto ownerInputIt = stampedNetwork.inputNamedShared.find(networkInput->getName());
+                    THOR_THROW_IF_FALSE(ownerInputIt != stampedNetwork.inputNamedShared.end());
+                    physicalization.ownerValuesInput = ownerInputIt->second;
+
+                    if (ThorImplementation::hasRaggedPartitionRequirement(
+                            physicalization.requirements,
+                            ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT)) {
+                        const Tensor valuesTensor = networkInput->getFeatureOutput().value();
+                        auto driverIt = stampedNetwork.apiTensorToPhysicalDrivingLayerShared.find(valuesTensor);
+                        THOR_THROW_IF_FALSE(driverIt != stampedNetwork.apiTensorToPhysicalDrivingLayerShared.end());
+                        auto valuesFanout = std::dynamic_pointer_cast<ThorImplementation::TensorFanout>(driverIt->second);
+                        if (valuesFanout == nullptr) {
+                            valuesFanout = std::make_shared<ThorImplementation::TensorFanout>();
+                            valuesFanout->setConstructForInferenceOnly(inferenceOnly);
+                            Layer::connectTwoLayers(
+                                driverIt->second, valuesFanout, networkInput, nullptr, valuesTensor);
+                            stampedNetwork.otherLayersShared.push_back(valuesFanout);
+                            stampedNetwork.otherLayers.push_back(valuesFanout.get());
+                            stampedNetwork.apiTensorToPhysicalDrivingLayerShared[valuesTensor] = valuesFanout;
+                            stampedNetwork.apiTensorToPhysicalDrivingLayer[valuesTensor] = valuesFanout.get();
+                        }
+                        physicalization.hostCarrierDrivingLayer = valuesFanout;
+                    }
+                }
                 continue;
             }
 
@@ -815,10 +935,20 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
             stampLayer(inputTensor.value(), layer, gpuNum, batchSize, stampedNetwork, inferenceOnly);
         }
 
+        // RP6B production closure: verify that requirement aggregation and the
+        // concrete hidden-input registry agree before compilation. This catches
+        // accidental reintroduction of unconditional offsets/scalar allocation
+        // and guarantees managed partition inputs remain outside the public API.
+        stampedNetwork.auditExternalRowPartitionPhysicalizations();
+
         for (const auto& [name, record] : raggedNetworkInputs) {
             THOR_THROW_IF_FALSE(record.raggedTensor.getBatchSize() == batchSize);
             ThorImplementation::StampedNetwork::RaggedInputBinding binding{
-                record.valuesInputName, record.offsetsInputName, record.partitionInputName, record.raggedTensor.getDescriptor()};
+                record.valuesInputName,
+                record.offsetsInputName,
+                record.partitionInputName,
+                record.raggedTensor.getDescriptor(),
+                record.raggedTensor.getRowPartitionId()};
             stampedNetwork.raggedInputNamedShared[name] = binding;
             stampedNetwork.raggedInputNamed[name] = binding;
         }
@@ -837,6 +967,16 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
         for (const auto &apiPhysicalLayer : stampedNetwork.apiLayerToPhysicalLayerShared) {
             if (apiPhysicalLayer.second != nullptr)
                 apiImplementationLayers.insert(apiPhysicalLayer.second.get());
+        }
+
+        for (const shared_ptr<ThorImplementation::NetworkInput>& managedInput :
+             stampedNetwork.managedPartitionInputsShared) {
+            THOR_THROW_IF_FALSE(managedInput != nullptr);
+            managedInput->compile();
+            stampedNetwork.floatingPointOperationsPerExampleForward +=
+                managedInput->floatingPointOperationsPerExampleForward();
+            stampedNetwork.floatingPointOperationsPerExampleBackward +=
+                managedInput->floatingPointOperationsPerExampleBackward();
         }
 
         for (const shared_ptr<ThorImplementation::Layer> &implementationLayer : stampedNetwork.otherLayersShared) {
@@ -885,6 +1025,12 @@ Network::StatusCode Network::stampNetwork(uint32_t gpuNum,
                                                                layerEvents.end());
                 initDoneEvents.insert(initDoneEvents.end(), make_move_iterator(layerEvents.begin()), make_move_iterator(layerEvents.end()));
             }
+        }
+
+        for (const shared_ptr<ThorImplementation::NetworkInput>& managedInput :
+             stampedNetwork.managedPartitionInputsShared) {
+            THOR_THROW_IF_FALSE(managedInput != nullptr);
+            managedInput->initialize();
         }
 
         for (const shared_ptr<ThorImplementation::Layer> &implementationLayer : stampedNetwork.otherLayersShared) {
@@ -1160,7 +1306,7 @@ void Network::registerRaggedNetworkInput(const std::string& name,
         // Partition references are canonicalized to the owning boundary.
         THOR_THROW_IF_FALSE(!sourceIt->second.partitionInputName.has_value());
         THOR_THROW_IF_FALSE(sourceIt->second.offsetsInputName == offsetsInputName);
-        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getOffsets() == raggedTensor.getOffsets());
+        THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.sharesPartitionWith(raggedTensor));
         THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getBatchSize() == raggedTensor.getBatchSize());
         THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getMaxTotalValues() == raggedTensor.getMaxTotalValues());
         THOR_THROW_IF_FALSE(sourceIt->second.raggedTensor.getOffsetsDataType() == raggedTensor.getOffsetsDataType());
@@ -3130,10 +3276,26 @@ Network::StatusCode Network::checkForFloatingInputs() {
  * A tensor has a dangling output when nothing is connected to read from it -> No consumer.
  */
 Network::StatusCode Network::checkForDanglingOutputs() {
+    // A RaggedNetworkInput's public offsets tensor is a transitional logical
+    // row-partition routing token. RP6B intentionally allows a values-only
+    // graph to have no structural partition consumer, in which case that
+    // logical token has no forward reader and no physical NetworkInput is
+    // stamped for it. Do not diagnose that specific API boundary as a dangling
+    // produced value; ordinary NetworkInput outputs remain subject to the
+    // normal dangling-output rule.
+    std::set<Tensor> unusedLogicalRaggedPartitionTokens;
+    for (const auto& [name, record] : raggedNetworkInputs) {
+        (void)name;
+        unusedLogicalRaggedPartitionTokens.insert(record.raggedTensor.getOffsets());
+    }
+
     vector<Tensor> danglingTensors;
     for (const Tensor& tensor : allTensors) {
         auto consumersIt = apiTensorToApiLoadingLayers.find(tensor);
         if (consumersIt == apiTensorToApiLoadingLayers.end() || consumersIt->second.empty()) {
+            if (unusedLogicalRaggedPartitionTokens.count(tensor) != 0) {
+                continue;
+            }
             danglingTensors.push_back(tensor);
         }
     }
@@ -3878,7 +4040,18 @@ void Network::stampLayer(Tensor inputTensor,
                          ThorImplementation::StampedNetwork &stampedNetwork,
                          const bool inferenceOnly) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
-    shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayerShared[inputTensor];
+    shared_ptr<ThorImplementation::Layer> physicalDrivingLayer;
+    auto externalPartitionIt = stampedNetwork.externalRowPartitionByLogicalOffsetsTensor.find(inputTensor);
+    if (externalPartitionIt != stampedNetwork.externalRowPartitionByLogicalOffsetsTensor.end()) {
+        const ThorImplementation::RaggedPartitionRequirement requirement =
+            layer->getRaggedPartitionRequirementForPlacement(inputTensor, inferenceOnly);
+        physicalDrivingLayer = stampedNetwork.selectExternalRowPartitionDrivingLayer(
+            externalPartitionIt->second, requirement);
+    } else {
+        auto drivingIt = stampedNetwork.apiTensorToPhysicalDrivingLayerShared.find(inputTensor);
+        THOR_THROW_IF_FALSE(drivingIt != stampedNetwork.apiTensorToPhysicalDrivingLayerShared.end());
+        physicalDrivingLayer = drivingIt->second;
+    }
     shared_ptr<Thor::Layer> apiDrivingLayer =
         apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
 
@@ -3992,7 +4165,18 @@ void Network::stampNetworkOutput(Tensor inputTensor,
                                  const bool inferenceOnly,
                                  bool networkOutputsOnGpu) {
     ThorImplementation::TensorPlacement placement(TensorPlacement::MemDevices::GPU, gpuNum);
-    shared_ptr<ThorImplementation::Layer> physicalDrivingLayer = stampedNetwork.apiTensorToPhysicalDrivingLayerShared[inputTensor];
+    shared_ptr<ThorImplementation::Layer> physicalDrivingLayer;
+    auto externalPartitionIt = stampedNetwork.externalRowPartitionByLogicalOffsetsTensor.find(inputTensor);
+    if (externalPartitionIt != stampedNetwork.externalRowPartitionByLogicalOffsetsTensor.end()) {
+        const ThorImplementation::RaggedPartitionRequirement requirement =
+            networkOutput->getRaggedPartitionRequirementForPlacement(inputTensor, inferenceOnly);
+        physicalDrivingLayer = stampedNetwork.selectExternalRowPartitionDrivingLayer(
+            externalPartitionIt->second, requirement);
+    } else {
+        auto drivingIt = stampedNetwork.apiTensorToPhysicalDrivingLayerShared.find(inputTensor);
+        THOR_THROW_IF_FALSE(drivingIt != stampedNetwork.apiTensorToPhysicalDrivingLayerShared.end());
+        physicalDrivingLayer = drivingIt->second;
+    }
     shared_ptr<Thor::Layer> apiDrivingLayer =
         apiTensorToApiDrivingLayer.count(inputTensor) == 0 ? nullptr : apiTensorToApiDrivingLayer[inputTensor];
 

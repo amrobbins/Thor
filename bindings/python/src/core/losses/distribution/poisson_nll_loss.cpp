@@ -155,7 +155,7 @@ void bind_poisson_nll_loss(nb::module_ &losses) {
                 if (!isFloatingDType(predictions.getValuesDataType())) throw nb::value_error("PoissonNLLLoss instance: predictions must use fp16 or fp32 dtype");
                 if (!isPoissonTargetDType(labels.getValuesDataType())) throw nb::value_error("PoissonNLLLoss instance: labels must use boolean, unsigned integer, fp16, or fp32 dtype");
                 if (reported_loss_shape == LossShape::PER_OUTPUT) throw nb::value_error("PoissonNLLLoss instance: per_output reporting is undefined for ragged predictions.");
-                if (predictions.getOffsets() != labels.getOffsets()) throw nb::value_error("PoissonNLLLoss instance: ragged predictions and labels must use the exact same row partition tensor.");
+                if (!predictions.sharesPartitionWith(labels)) throw nb::value_error("PoissonNLLLoss instance: ragged predictions and labels must use the exact same row partition.");
                 if (predictions.getBatchSize() != labels.getBatchSize() || predictions.getMaxTotalValues() != labels.getMaxTotalValues() || predictions.getTrailingDimensions() != labels.getTrailingDimensions())
                     throw nb::value_error("PoissonNLLLoss instance: ragged predictions and labels must have identical value geometry.");
                 DataType effective = loss_data_type.value_or(predictions.getValuesDataType());

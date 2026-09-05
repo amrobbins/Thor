@@ -59,3 +59,17 @@ def test_ragged_tensor_wrapped_values_can_declare_max_values_per_row():
 
     assert ragged.max_values_per_row == 7
     assert ragged.max_total_values == 12
+
+
+def test_ragged_tensor_row_partition_identity_is_shared_by_common_offsets():
+    offsets = thor.Tensor([4], thor.DataType.uint32)
+    first = thor.RaggedTensor(thor.Tensor([7, 2], thor.DataType.fp32), offsets)
+    second = thor.RaggedTensor(thor.Tensor([7, 5], thor.DataType.fp16), offsets)
+    different = thor.RaggedTensor(
+        thor.Tensor([7, 2], thor.DataType.fp32),
+        thor.Tensor([4], thor.DataType.uint32),
+    )
+
+    assert first.row_partition_id == second.row_partition_id
+    assert first.shares_partition_with(second)
+    assert not first.shares_partition_with(different)

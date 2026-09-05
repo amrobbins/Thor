@@ -70,8 +70,6 @@ Public API metadata source: **generated .pyi**.
 
 ::: thor.layers.NetworkInput
 
-::: thor.layers.RaggedFilter
-
 ::: thor.layers.RaggedGather
 
 ::: thor.layers.RaggedRowLengths

@@ -2,10 +2,13 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <cstdint>
 
 namespace ThorImplementation {
+
+inline constexpr RaggedPartitionRequirement kPaddedRaggedSequenceKernelPartitionRequirement = RaggedPartitionRequirement::DEVICE_OFFSETS;
 
 void launchPackedToPaddedRaggedSequence(const Tensor& packedValues,
                                         const Tensor& rowOffsets,

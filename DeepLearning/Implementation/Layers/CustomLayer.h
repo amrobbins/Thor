@@ -137,6 +137,15 @@ class CustomLayer : public TrainableLayer {
 
     void compileImpl() override;
     PhysicalParameter::StorageContext buildParameterStorageContext() const override;
+
+    // Called after this application's expression work has been submitted and
+    // before any downstream layer is notified. Ragged-preserving subclasses use
+    // this to publish authoritative host row-partition state on new value
+    // outputs without synchronizing the device.
+    virtual void prepareApplicationOutputsForDownstream(uint32_t applicationIndex) {
+        (void)applicationIndex;
+    }
+    void propagateApplicationRowPartitionHostState(uint32_t applicationIndex, uint32_t sourceInputPort);
     void pruneUpstreamErrorOutputsForApplication(uint32_t applicationIndex);
     void setActiveTrainingExecutionVariant(DynamicExpressionVariantId variantId);
     [[nodiscard]] DynamicExpressionVariantId getActiveTrainingExecutionVariant() const {

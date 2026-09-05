@@ -138,8 +138,8 @@ void bind_asymmetric_power_loss(nb::module_& losses) {
                 ThorPython::RegressionLossDType::validateLabels(loss_name, labels.getValues());
                 if (reported_loss_shape == LossShape::PER_OUTPUT)
                     throw nb::value_error("AsymmetricPowerLoss instance: per_output reporting is undefined for ragged predictions.");
-                if (predictions.getOffsets() != labels.getOffsets())
-                    throw nb::value_error("AsymmetricPowerLoss instance: ragged predictions and labels must use the exact same row partition tensor.");
+                if (!predictions.sharesPartitionWith(labels))
+                    throw nb::value_error("AsymmetricPowerLoss instance: ragged predictions and labels must use the exact same row partition.");
                 if (predictions.getBatchSize() != labels.getBatchSize() ||
                     predictions.getMaxTotalValues() != labels.getMaxTotalValues() ||
                     predictions.getTrailingDimensions() != labels.getTrailingDimensions())

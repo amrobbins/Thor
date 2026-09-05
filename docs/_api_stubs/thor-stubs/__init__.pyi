@@ -208,6 +208,9 @@ class RaggedTensor:
     def offsets(self) -> Tensor: ...
 
     @property
+    def row_partition_id(self) -> int: ...
+
+    @property
     def values_data_type(self) -> DataType: ...
 
     @property
@@ -231,6 +234,10 @@ class RaggedTensor:
     def get_values(self) -> Tensor: ...
 
     def get_offsets(self) -> Tensor: ...
+
+    def get_row_partition_id(self) -> int: ...
+
+    def shares_partition_with(self, other: RaggedTensor) -> bool: ...
 
     def get_values_data_type(self) -> DataType: ...
 
@@ -297,7 +304,7 @@ class Tensor:
 
     def version(self) -> str: ...
 
-__git_version__: str = '2512cc54-dirty'
+__git_version__: str = 'aee904e2-dirty'
 
 def einsum(equation: str, *operands: Tensor, network: Network | None = None) -> Tensor:
     """

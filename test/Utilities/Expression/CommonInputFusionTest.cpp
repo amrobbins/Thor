@@ -1163,6 +1163,112 @@ TEST(CudaSourceEmitter, RaggedValuewiseKernelReadsOffsetsBatchElementOnDevice) {
     EXPECT_NE(source.find("for (; idx < runtime_numel; idx += grid_stride)"), std::string::npos);
 }
 
+TEST(CudaSourceEmitter, RaggedValuewiseKernelReadsManagedActiveCountScalarAndSeparatesCacheIdentity) {
+    auto values = Expression::input("values", DataType::FP32, DataType::FP32);
+    auto partition = Expression::input("partition", DataType::UINT32, DataType::UINT32);
+
+    auto activeCountOutput = values.relu().withRaggedRuntimeExtent(
+        partition, 4, 12, 1, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+    auto offsetsOutput = values.relu().withRaggedRuntimeExtent(
+        partition, 4, 12, 1, RaggedRuntimeExtentSource::DEVICE_OFFSETS);
+
+    auto activePhysical = Expression::outputs({{"y", activeCountOutput}}).physicalOutputs();
+    auto offsetsPhysical = Expression::outputs({{"y", offsetsOutput}}).physicalOutputs();
+    EXPECT_NE(canonicalize(activePhysical), canonicalize(offsetsPhysical));
+
+    std::vector<DataType> inputDTypes(activePhysical.expr->inputs.size(), DataType::FP32);
+    for (const NamedInput& input : activePhysical.expr->inputs) {
+        if (input.name == "values") {
+            inputDTypes.at(input.slot) = DataType::FP32;
+        } else if (input.name == "partition") {
+            inputDTypes.at(input.slot) = DataType::UINT32;
+        } else {
+            FAIL() << "Unexpected ragged active-count test input: " << input.name;
+        }
+    }
+    resolveOutputsDTypesInPlace(activePhysical, inputDTypes);
+    auto stages = EquationCompiler::splitAtReductionBoundaries(activePhysical);
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+
+    uint32_t partitionInputSlot = UINT32_MAX;
+    for (uint32_t slot = 0; slot < stages[0].expr.inputs.size(); ++slot) {
+        if (stages[0].expr.inputs[slot].name == "partition") {
+            partitionInputSlot = slot;
+            break;
+        }
+    }
+    ASSERT_NE(partitionInputSlot, UINT32_MAX);
+
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_active_count_extent");
+    const std::string scalarLoad =
+        "active_values_raw = static_cast<unsigned long long>(in" + std::to_string(partitionInputSlot) + "[0ULL])";
+    const std::string legacyOffsetsLoad =
+        "active_values_raw = static_cast<unsigned long long>(in" + std::to_string(partitionInputSlot) + "[4ULL])";
+    EXPECT_NE(source.find(scalarLoad), std::string::npos);
+    EXPECT_EQ(source.find(legacyOffsetsLoad), std::string::npos);
+    EXPECT_NE(source.find("runtime_numel_u64 = active_values * 1ULL"), std::string::npos);
+}
+
+
+TEST(CudaSourceEmitter, RaggedHostExtentMarkerNeverReadsCarrierPayloadAsDeviceMetadata) {
+    auto values = Expression::input("values", DataType::FP32, DataType::FP32);
+    auto hostCarrier = Expression::input("partition_host_carrier", DataType::FP32, DataType::FP32);
+    auto output = values.relu().withRaggedRuntimeExtent(
+        hostCarrier, 4, 12, 1, RaggedRuntimeExtentSource::HOST_EXTENT);
+
+    auto physical = Expression::outputs({{"y", output}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32, DataType::FP32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+    ASSERT_EQ(stages.size(), 1U);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+
+    uint32_t hostCarrierSlot = UINT32_MAX;
+    for (uint32_t slot = 0; slot < stages[0].expr.inputs.size(); ++slot) {
+        if (stages[0].expr.inputs[slot].name == "partition_host_carrier") {
+            hostCarrierSlot = slot;
+            break;
+        }
+    }
+    EXPECT_EQ(hostCarrierSlot, UINT32_MAX)
+        << "HOST_EXTENT is metadata-only; after alias lowering its carrier must not be a fused CUDA input";
+
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "ragged_host_extent");
+    EXPECT_EQ(source.find("active_values_raw"), std::string::npos);
+    EXPECT_EQ(source.find("runtime_numel"), std::string::npos);
+}
+
+TEST(AutoDiff, RaggedActiveCountExtentSourceSurvivesBackward) {
+    auto values = Expression::input("values", DataType::FP32, DataType::FP32);
+    auto partition = Expression::input("partition", DataType::UINT32, DataType::UINT32);
+    auto output = values.relu().withRaggedRuntimeExtent(
+        partition, 4, 12, 1, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    auto forward = Expression::outputs({{"y", output}}).physicalOutputs();
+    std::vector<DataType> inputDTypes(forward.expr->inputs.size(), DataType::FP32);
+    for (const NamedInput& input : forward.expr->inputs) {
+        inputDTypes.at(input.slot) = input.name == "partition" ? DataType::UINT32 : DataType::FP32;
+    }
+    resolveOutputsDTypesInPlace(forward, inputDTypes);
+
+    PhysicalOutputs backward = buildBackwardOutputs(
+        forward,
+        {"values"},
+        std::optional<std::string>{"dy"},
+        std::unordered_map<std::string, std::vector<uint64_t>>{
+            {"values", {12}},
+            {"partition", {1}},
+        });
+
+    bool sawActiveCountExtent = false;
+    for (const ExprNode& node : backward.expr->nodes) {
+        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) continue;
+        sawActiveCountExtent = true;
+        EXPECT_EQ(node.ragged_runtime_extent_source, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+    }
+    EXPECT_TRUE(sawActiveCountExtent);
+}
+
 TEST(CudaSourceEmitter, RaggedExtentRejectsMixedDenseOutputInOneFusedKernel) {
     const RaggedTensorDescriptor descriptor(DataType::FP32, {}, 4, 12, DataType::UINT32);
     const RaggedExpression ragged = RaggedExpression::input("x", descriptor);

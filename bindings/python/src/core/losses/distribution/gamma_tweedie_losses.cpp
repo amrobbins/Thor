@@ -179,7 +179,7 @@ void validateRaggedMeanTarget(const string& loss_name, const RaggedTensor& predi
                               optional<DataType> loss_data_type, LossShape reported_loss_shape, float eps) {
     if (!isFloatingDType(predictions.getValuesDataType())) throw nb::value_error((loss_name + ": predictions must use fp16 or fp32 dtype").c_str());
     if (!isFloatingDType(labels.getValuesDataType())) throw nb::value_error((loss_name + ": labels must use fp16 or fp32 dtype").c_str());
-    if (predictions.getOffsets() != labels.getOffsets()) throw nb::value_error((loss_name + ": ragged predictions and labels must use the exact same row partition tensor.").c_str());
+    if (!predictions.sharesPartitionWith(labels)) throw nb::value_error((loss_name + ": ragged predictions and labels must use the exact same row partition.").c_str());
     if (predictions.getBatchSize() != labels.getBatchSize() || predictions.getMaxTotalValues() != labels.getMaxTotalValues() || predictions.getTrailingDimensions() != labels.getTrailingDimensions())
         throw nb::value_error((loss_name + ": ragged predictions and labels must have identical value geometry.").c_str());
     if (reported_loss_shape == LossShape::PER_OUTPUT) throw nb::value_error((loss_name + ": per_output reporting is undefined for ragged predictions.").c_str());
@@ -247,7 +247,7 @@ void bind_gamma_tweedie_losses(nb::module_ &losses) {
                     if (!nb::isinstance<RaggedTensor>(dispersionObject)) throw nb::type_error("GammaNLLLoss ragged predictions require ragged dispersion.");
                     dispersion = nb::cast<RaggedTensor>(dispersionObject);
                     if (!isFloatingDType(dispersion->getValuesDataType())) throw nb::value_error("GammaNLLLoss instance: dispersion must use fp16 or fp32 dtype.");
-                    if (dispersion->getOffsets() != predictions.getOffsets()) throw nb::value_error("GammaNLLLoss instance: ragged dispersion must use the exact same row partition tensor as predictions.");
+                    if (!dispersion->sharesPartitionWith(predictions)) throw nb::value_error("GammaNLLLoss instance: ragged dispersion must use the exact same row partition as predictions.");
                     if (dispersion->getBatchSize() != predictions.getBatchSize() || dispersion->getMaxTotalValues() != predictions.getMaxTotalValues() || dispersion->getTrailingDimensions() != predictions.getTrailingDimensions())
                         throw nb::value_error("GammaNLLLoss instance: ragged dispersion must have identical value geometry to predictions.");
                     builder.dispersion(dispersion.value());

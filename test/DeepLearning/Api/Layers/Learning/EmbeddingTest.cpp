@@ -1,7 +1,9 @@
 #include "DeepLearning/Api/Layers/Learning/Embedding.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Network/Network.h"
+#include "DeepLearning/Api/Network/PlacedNetwork.h"
 
 #include "gtest/gtest.h"
 
@@ -89,6 +91,49 @@ TEST(EmbeddingApi, RaggedBuildPreservesPartitionAndUsesPackedCapacityMemoryAccou
     ASSERT_EQ(architecture.at("ragged_outputs").size(), 1u);
     EXPECT_EQ(architecture.at("ragged_inputs").at(0).at("offsets").at("id").get<uint64_t>(),
               architecture.at("ragged_outputs").at(0).at("offsets").at("id").get<uint64_t>());
+}
+
+
+TEST(EmbeddingApi, RaggedValuesOnlyOutputUsesManagedActiveCountWithoutFullOffsets) {
+    constexpr uint32_t batchSize = 2;
+    Network network("ragged_embedding_active_count_physicalization");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::UINT32)
+                             .offsetsDataType(DataType::UINT64)
+                             .trailingDimensions({})
+                             .maxTotalValues(6)
+                             .batchSize(batchSize)
+                             .build();
+    Embedding embedding = Embedding::Builder()
+                              .network(network)
+                              .featureInput(input)
+                              .vocabularySize(16)
+                              .embeddingDim(4)
+                              .weightsDataType(DataType::FP32)
+                              .build();
+    ASSERT_TRUE(embedding.getRaggedFeatureOutput().has_value());
+    NetworkOutput::Builder()
+        .network(network)
+        .name("embedded_values")
+        .inputTensor(embedding.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true));
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const auto& stamp = placed->getStampedNetwork(0);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    auto activeCount = stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId());
+    ASSERT_NE(activeCount, nullptr);
+    ASSERT_TRUE(activeCount->getFeatureOutput().has_value());
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDataType(), DataType::UINT64);
 }
 
 TEST(EmbeddingApi, RaggedMultipleApplicationsPlaceWithIndependentCanonicalPartitions) {

@@ -326,13 +326,21 @@ void forwardPhysicalRowPartitionOffsets(Impl::NetworkInput& physicalRaggedOffset
         raggedOffsetsHost.getDataType() != offsets.getDataType()) {
         throw std::runtime_error("Ragged attention direct-physical test requires matching canonical UINT32/UINT64 offsets.");
     }
+    std::vector<uint64_t> hostOffsets(batchSize + 1, 0);
+    if (raggedOffsetsHost.getDataType() == DataType::UINT32) {
+        const auto* raw = raggedOffsetsHost.getMemPtr<uint32_t>();
+        for (uint32_t i = 0; i <= batchSize; ++i) hostOffsets[i] = raw[i];
+    } else {
+        const auto* raw = raggedOffsetsHost.getMemPtr<uint64_t>();
+        for (uint32_t i = 0; i <= batchSize; ++i) hostOffsets[i] = raw[i];
+    }
+    ASSERT_EQ(hostOffsets.back(), activeRows);
     physicalRaggedOffsetsInput.forwardRowPartitionOffsets(
         raggedOffsetsHost,
         /*validationPass=*/false,
         Impl::RowPartitionDescriptor(batchSize, maxTotalValues, offsets.getDataType()),
-        activeRows,
-        std::nullopt,
-        batchSize);
+        batchSize,
+        std::move(hostOffsets));
 }
 
 vector<float> runForwardWithRaggedRowPartitionRuntime(Impl::NetworkInput& physicalInput,
@@ -1145,7 +1153,7 @@ RaggedAttentionPoisonTrainingResult runRaggedQueryAttentionPoisonTrainingCase(
     Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
 
     auto queryValuesInput = stamped.getNamedInput("query.values");
-    auto queryOffsetsInput = stamped.getNamedInput("query.offsets");
+    auto queryOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(query.getRowPartitionId());
     auto physicalContext = denseContext ? stamped.getNamedInput("context") : nullptr;
     auto physicalAttention =
         dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
@@ -3526,9 +3534,9 @@ TEST(AttentionApi, DenseQueryRaggedKvRopeMatchesUniformRaggedQueryReference) {
         std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(raggedOutput.getId()));
     auto denseQueryInput = stamped.getNamedInput("dense_query");
     auto raggedQueryValuesInput = stamped.getNamedInput("ragged_query.values");
-    auto raggedQueryOffsetsInput = stamped.getNamedInput("ragged_query.offsets");
+    auto raggedQueryOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(raggedQuery.getRowPartitionId());
     auto contextValuesInput = stamped.getNamedInput("context.values");
-    auto contextOffsetsInput = stamped.getNamedInput("context.offsets");
+    auto contextOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(context.getRowPartitionId());
     auto raggedQueryOriginsInput = stamped.getNamedInput("ragged_query_origins");
     auto keyOriginsInput = stamped.getNamedInput("key_origins");
     ASSERT_NE(physicalMixed, nullptr);
@@ -3603,8 +3611,8 @@ TEST(AttentionApi, DenseQueryRaggedKvRopeMatchesUniformRaggedQueryReference) {
                          static_cast<int32_t>(historyBoundary - static_cast<int64_t>(contextLengths[1]))});
 
     // This test drives physical NetworkInput layers directly rather than using
-    // PlacedNetwork::infer(). Use the explicit ragged boundaries so the offsets
-    // payload is materialized before its host cache is published.
+    // PlacedNetwork::infer(). Use the explicit ragged boundary to publish the
+    // authoritative host partition together with its offsets execution mirror.
     denseQueryInput->forward(denseQueryHost, false, batchSize);
     raggedQueryValuesInput->forward(raggedQueryValuesHost, false, batchSize);
     forwardPhysicalRowPartitionOffsets(
@@ -3743,7 +3751,7 @@ TEST(AttentionApi, DenseQueryRaggedKvMatchesRightAlignedPaddedMaskedReference) {
         std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(referenceOutput.getId()));
     auto queryInput = stamped.getNamedInput("query");
     auto raggedContextValuesInput = stamped.getNamedInput("ragged_context.values");
-    auto raggedContextOffsetsInput = stamped.getNamedInput("ragged_context.offsets");
+    auto raggedContextOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(raggedContext.getRowPartitionId());
     auto paddedContextInput = stamped.getNamedInput("padded_context");
     auto paddedMaskInput = stamped.getNamedInput("padded_mask");
     auto keyOriginsInput = stamped.getNamedInput("key_origins");
@@ -3959,7 +3967,7 @@ TEST(AttentionApi, RaggedQueryDenseKvMatchesRightAlignedPaddedQueryReference) {
     auto physicalReferenceOutput =
         std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(referenceOutput.getId()));
     auto raggedQueryValuesInput = stamped.getNamedInput("ragged_query.values");
-    auto raggedQueryOffsetsInput = stamped.getNamedInput("ragged_query.offsets");
+    auto raggedQueryOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(raggedQuery.getRowPartitionId());
     auto paddedQueryInput = stamped.getNamedInput("padded_query");
     auto contextInput = stamped.getNamedInput("context");
     auto queryOriginsInput = stamped.getNamedInput("query_origins");
@@ -4363,9 +4371,9 @@ TEST(AttentionApi, RaggedCrossAttentionRopePerRowOriginsExecuteWithIndependentPa
     auto physicalOutput =
         std::dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
     auto queryValuesInput = stamped.getNamedInput("query.values");
-    auto queryOffsetsInput = stamped.getNamedInput("query.offsets");
+    auto queryOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(query.getRowPartitionId());
     auto contextValuesInput = stamped.getNamedInput("context.values");
-    auto contextOffsetsInput = stamped.getNamedInput("context.offsets");
+    auto contextOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(context.getRowPartitionId());
     auto queryOriginsInput = stamped.getNamedInput("query_origins");
     auto keyOriginsInput = stamped.getNamedInput("key_origins");
     ASSERT_NE(physicalAttention, nullptr);
@@ -4606,7 +4614,7 @@ TEST(AttentionApi, ForwardWithCanonicalRaggedTensorMatchesPackedReference) {
     ASSERT_NE(valuesApiInput, nullptr);
 
     PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, *valuesApiInput, output, attention, c.batchSize, true);
-    auto physicalRaggedOffsetsInput = fixture.stampedNetwork->getNamedInput("tokens.offsets");
+    auto physicalRaggedOffsetsInput = fixture.stampedNetwork->getManagedPartitionOffsetsInputForTest(input.getRowPartitionId());
     ASSERT_NE(physicalRaggedOffsetsInput, nullptr);
 
     Stream stream = fixture.physicalAttention->getStreams()[0];
@@ -4681,7 +4689,7 @@ TEST(AttentionApi, RaggedAttentionResidualAddUsesOffsetsRuntimeWithoutValuesMeta
     Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
 
     auto physicalValuesInput = stamped.getNamedInput("tokens.values");
-    auto physicalOffsetsInput = stamped.getNamedInput("tokens.offsets");
+    auto physicalOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId());
     auto physicalAttention = dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
     auto physicalResidual = dynamic_pointer_cast<Impl::RaggedCustomLayer>(stamped.getPhysicalLayerFromApiLayer(residual.getId()));
     auto physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
@@ -4708,15 +4716,15 @@ TEST(AttentionApi, RaggedAttentionResidualAddUsesOffsetsRuntimeWithoutValuesMeta
     Impl::Tensor offsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
     writeCpuUint32Tensor(offsetsHost, {0, 2, 5});
 
-    // A normal logical batch owns its runtime cache on the source offsets tensor.
-    // StampedNetwork must explicitly transfer that cache to the statically placed
-    // physical offsets allocation before forwarding the offsets payload.
+    // A normal logical batch owns authoritative host partition state on the source
+    // row partition. StampedNetwork transfers that complete publication to the
+    // statically placed runtime while forwarding the offsets execution mirror.
     Impl::Tensor logicalValuesHost(cpuPlacement, Impl::TensorDescriptor(DataType::FP16, {maxTotalValues, features}));
     writeCpuTensor(logicalValuesHost, packed);
     Impl::Tensor logicalOffsetsHost(cpuPlacement, Impl::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
     writeCpuUint32Tensor(logicalOffsetsHost, {0, 2, 5});
     Impl::RaggedTensor logicalInput(logicalValuesHost, logicalOffsetsHost);
-    logicalInput.getRowPartitionRuntime().setHostActiveValueCount(activeRows);
+    logicalInput.getRowPartitionRuntime().setHostOffsets({0, 2, 5});
     Batch logicalBatch;
     logicalBatch.insert("tokens", logicalInput);
     const auto logicalOutputs = placed->infer(logicalBatch);
@@ -4830,7 +4838,7 @@ TEST(AttentionApi, RaggedDynamicNtkUsesLongestLogicalRowNotPackedCapacity) {
     ASSERT_NE(valuesApiInput, nullptr);
 
     PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, *valuesApiInput, output, attention, c.batchSize, true);
-    auto physicalRaggedOffsetsInput = fixture.stampedNetwork->getNamedInput("tokens.offsets");
+    auto physicalRaggedOffsetsInput = fixture.stampedNetwork->getManagedPartitionOffsetsInputForTest(input.getRowPartitionId());
     ASSERT_NE(physicalRaggedOffsetsInput, nullptr);
 
     Stream stream = fixture.physicalAttention->getStreams()[0];

@@ -13,11 +13,14 @@ namespace ThorImplementation {
 
 // Logical rank-1 ragged tensor backed by fixed-capacity packed storage.
 //
-// For batch size B, the row partition is authoritative: only values in
-// [0, offsets[B]) are part of the logical tensor. Packed storage in
-// [offsets[B], maxTotalValues) has undefined contents and must not be inspected
+// Row-partition identity is independent of the offsets Tensor execution
+// representation. For batch size B, the authoritative host row partition defines the logical
+// extent: only values in [0, hostOffsets[B]) are part of the logical tensor.
+// The offsets Tensor is an execution representation of those row boundaries.
+// Packed storage in [hostOffsets[B], maxTotalValues) has undefined contents and
+// must not be inspected
 // or relied on by active-aware consumers. A physical implementation that
-// intentionally executes beyond offsets[B] owns sanitation of exactly the
+// intentionally executes beyond hostOffsets[B] owns sanitation of exactly the
 // additional region it will read, immediately before that read. Producers do
 // not owe canonical padding, and this contract continues across network I/O.
 class RaggedTensor {
@@ -34,6 +37,12 @@ class RaggedTensor {
         return values;
     }
     Tensor getOffsets() const { return getRowPartitionRuntime().getOffsets(); }
+    uint64_t getRowPartitionId() const { return getRowPartitionRuntime().getRowPartitionId(); }
+    bool sharesPartitionWith(const RaggedTensor &rhs) const {
+        THOR_THROW_IF_FALSE(initialized);
+        THOR_THROW_IF_FALSE(rhs.initialized);
+        return rowPartition.sharesPartitionWith(rhs.rowPartition);
+    }
     RowPartitionRuntime &getRowPartitionRuntime() {
         THOR_THROW_IF_FALSE(initialized);
         return rowPartition;

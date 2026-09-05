@@ -11,10 +11,11 @@ namespace ThorImplementation {
 // Internal execution specialization for a ragged-preserving DynamicExpression over
 // packed ragged values. Input/output trailing value shapes may differ, but the row
 // partition and packed-row capacity are preserved. The expression itself owns all
-// mathematical computation and carries RAGGED_VALUEWISE_EXTENT using a structural
-// offsets input. Runtime packed extent is obtained directly from that structural
-// row partition by the compiled Expression stages, never from host-side cached
-// active-row metadata attached to this layer. Inactive packed capacity is not part
+// mathematical computation and carries RAGGED_VALUEWISE_EXTENT using an explicit
+// structural partition carrier. RP6B valuewise callers use the managed [1]
+// active-count representation; legacy/specialized callers may still use full offsets.
+// The carrier also holds authoritative host partition publication for downstream
+// propagation. Inactive packed capacity is not part
 // of the logical result; active-aware Expression stages neither read nor canonicalize
 // it, and callers must not rely on its incidental contents.
 class RaggedCustomLayer final : public CustomLayer {
@@ -38,7 +39,7 @@ class RaggedCustomLayer final : public CustomLayer {
 
     // Multi-values-input/single-output form used by partition-preserving binary
     // ragged expressions such as residual addition. Every values port shares the
-    // explicitly identified structural offsets port.
+    // explicitly identified structural partition port.
     RaggedCustomLayer(DynamicExpression expression,
                       std::vector<std::string> inputNames,
                       std::vector<std::string> outputNames,
@@ -52,8 +53,9 @@ class RaggedCustomLayer final : public CustomLayer {
                       int64_t stampedId = -1);
 
     // General physical CustomLayer form. Every packed-values input listed in
-    // valuesInputPorts shares the single structural offsets input identified by
-    // offsetsInputPort. Every output preserves that row partition, while
+    // valuesInputPorts shares the single structural partition input identified by
+    // offsetsInputPort (a transitional port name retained until RP7). Every output
+    // preserves that row partition, while
     // outputElementsPerValue describes each output's physical row width. Inactive
     // capacity remains outside the logical output contract.
     RaggedCustomLayer(DynamicExpression expression,
@@ -72,6 +74,12 @@ class RaggedCustomLayer final : public CustomLayer {
 
     std::string getType() override { return "RaggedCustomLayer"; }
     std::string getLayerType() override { return "RaggedCustomLayer"; }
+
+   protected:
+    void prepareApplicationOutputsForDownstream(uint32_t applicationIndex) override;
+
+   private:
+    uint32_t rowPartitionInputPort = 0;
 };
 
 }  // namespace ThorImplementation

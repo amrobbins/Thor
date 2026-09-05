@@ -121,7 +121,6 @@ template <typename OffsetT>
 void runForwardAndSplitCase(DataType offsetsDataType) {
     constexpr uint64_t rows = 8;
     constexpr uint64_t activeRows = 5;
-    constexpr uint64_t batchSize = 3;
     constexpr uint64_t inner = 2;
     constexpr uint64_t leftAxis = 2;
     constexpr uint64_t rightAxis = 3;
@@ -131,9 +130,8 @@ void runForwardAndSplitCase(DataType offsetsDataType) {
     constexpr float splitSentinel = -8888.0F;
 
     Stream stream(0);
-    const std::vector<OffsetT> offsets{0, 2, 2, static_cast<OffsetT>(activeRows)};
-    Tensor offsetsGpu = makeGpuTensor<OffsetT>({batchSize + 1}, offsets, stream);
-    ASSERT_EQ(offsetsGpu.getDataType(), offsetsDataType);
+    Tensor activeCountGpu = makeGpuTensor<OffsetT>({1}, {static_cast<OffsetT>(activeRows)}, stream);
+    ASSERT_EQ(activeCountGpu.getDataType(), offsetsDataType);
 
     std::vector<float> leftValues = sourceValues(rows, leftAxis, inner, 1000.0F, inactiveInputPoison);
     std::vector<float> rightValues = sourceValues(rows, rightAxis, inner, 2000.0F, inactiveInputPoison);
@@ -163,9 +161,8 @@ void runForwardAndSplitCase(DataType offsetsDataType) {
                             static_cast<long *>(axisElements.get()),
                             static_cast<long *>(joinedStrides.get()),
                             static_cast<long *>(sourceStrides.get()),
-                            offsetsGpu.getMemPtr(),
+                            activeCountGpu.getMemPtr(),
                             sizeof(OffsetT),
-                            batchSize,
                             stream);
     stream.synchronize();
 
@@ -206,9 +203,8 @@ void runForwardAndSplitCase(DataType offsetsDataType) {
                       static_cast<long *>(axisElements.get()),
                       static_cast<long *>(joinedStrides.get()),
                       static_cast<long *>(sourceStrides.get()),
-                      offsetsGpu.getMemPtr(),
+                      activeCountGpu.getMemPtr(),
                       sizeof(OffsetT),
-                      batchSize,
                       stream);
     stream.synchronize();
 
@@ -235,15 +231,14 @@ void runForwardAndSplitCase(DataType offsetsDataType) {
 template <typename OffsetT>
 void runAllEmptyCase(DataType offsetsDataType) {
     constexpr uint64_t rows = 4;
-    constexpr uint64_t batchSize = 2;
     constexpr uint64_t leftAxis = 1;
     constexpr uint64_t rightAxis = 2;
     constexpr uint64_t joinedAxis = 3;
     constexpr float sentinel = -9191.0F;
 
     Stream stream(0);
-    Tensor offsets = makeGpuTensor<OffsetT>({batchSize + 1}, {0, 0, 0}, stream);
-    ASSERT_EQ(offsets.getDataType(), offsetsDataType);
+    Tensor activeCount = makeGpuTensor<OffsetT>({1}, {0}, stream);
+    ASSERT_EQ(activeCount.getDataType(), offsetsDataType);
     Tensor left = makeGpuTensor<float>({rows, leftAxis}, std::vector<float>(rows * leftAxis, 1.0F), stream);
     Tensor right = makeGpuTensor<float>({rows, rightAxis}, std::vector<float>(rows * rightAxis, 2.0F), stream);
     Tensor joined = makeGpuTensor<float>({rows, joinedAxis}, std::vector<float>(rows * joinedAxis, sentinel), stream);
@@ -264,9 +259,8 @@ void runAllEmptyCase(DataType offsetsDataType) {
                             static_cast<long *>(axisElements.get()),
                             static_cast<long *>(joinedStrides.get()),
                             static_cast<long *>(sourceStrides.get()),
-                            offsets.getMemPtr(),
+                            activeCount.getMemPtr(),
                             sizeof(OffsetT),
-                            batchSize,
                             stream);
     stream.synchronize();
     for (float value : copyGpuTensor<float>(joined, stream)) EXPECT_EQ(value, sentinel);
@@ -285,9 +279,8 @@ void runAllEmptyCase(DataType offsetsDataType) {
                       static_cast<long *>(axisElements.get()),
                       static_cast<long *>(joinedStrides.get()),
                       static_cast<long *>(sourceStrides.get()),
-                      offsets.getMemPtr(),
+                      activeCount.getMemPtr(),
                       sizeof(OffsetT),
-                      batchSize,
                       stream);
     stream.synchronize();
     for (float value : copyGpuTensor<float>(leftGradient, stream)) EXPECT_EQ(value, sentinel);

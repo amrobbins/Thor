@@ -54,8 +54,8 @@ void bind_unary_reduction_metric(nb::module_& metrics, const char* name, const c
 void bind_reduction_metrics(nb::module_& metrics) {
     bind_unary_reduction_metric<Mean>(metrics, "Mean", R"nbdoc(Construct a Mean metric over dense or ragged values.)nbdoc", true);
     bind_unary_reduction_metric<Sum>(metrics, "Sum", R"nbdoc(Construct a Sum metric over dense or ragged values.)nbdoc", true);
-    bind_unary_reduction_metric<Min>(metrics, "Min", R"nbdoc(Construct a Min metric over a values tensor.)nbdoc");
-    bind_unary_reduction_metric<Max>(metrics, "Max", R"nbdoc(Construct a Max metric over a values tensor.)nbdoc");
+    bind_unary_reduction_metric<Min>(metrics, "Min", R"nbdoc(Construct a Min metric over dense or ragged values.)nbdoc", true);
+    bind_unary_reduction_metric<Max>(metrics, "Max", R"nbdoc(Construct a Max metric over dense or ragged values.)nbdoc", true);
 
     auto weighted_mean = nb::class_<WeightedMean, Metric>(metrics, "WeightedMean");
     weighted_mean.attr("__module__") = "thor.metrics";
@@ -71,8 +71,23 @@ void bind_reduction_metrics(nb::module_& metrics) {
         "network"_a,
         "values"_a,
         "weights"_a,
-        R"nbdoc(Construct a WeightedMean metric over values and weights tensors.)nbdoc");
+        R"nbdoc(Construct a WeightedMean metric over dense values and weights tensors.)nbdoc");
+
+    weighted_mean.def(
+        "__init__",
+        [](WeightedMean* self, Network& network, RaggedTensor values, RaggedTensor weights) {
+            WeightedMean::Builder builder;
+            builder.network(network).values(std::move(values)).weights(std::move(weights));
+            WeightedMean built = builder.build();
+            new (self) WeightedMean(std::move(built));
+        },
+        "network"_a,
+        "values"_a,
+        "weights"_a,
+        R"nbdoc(Construct a WeightedMean metric over same-partition ragged values and weights.)nbdoc");
 
     weighted_mean.def_prop_ro("values", &WeightedMean::getValues);
     weighted_mean.def_prop_ro("weights", &WeightedMean::getWeights);
+    weighted_mean.def_prop_ro("ragged_values", &WeightedMean::getRaggedValues);
+    weighted_mean.def_prop_ro("ragged_weights", &WeightedMean::getRaggedWeights);
 }

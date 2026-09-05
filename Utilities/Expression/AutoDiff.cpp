@@ -457,6 +457,11 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
                 // Offsets are structural metadata; only per-segment values differentiate.
                 reaches[i] = reaches.at(node.lhs);
                 break;
+            case ExprOp::RAGGED_SOFTMAX_BACKWARD:
+                // Offsets are structural. Higher-order differentiation through the
+                // dedicated cuDNN backward primitive is intentionally unsupported.
+                reaches[i] = reaches.at(node.lhs) || reaches.at(node.rhs);
+                break;
             case ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD:
             case ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD:
                 // Offsets are structural metadata. Second derivatives are rejected
@@ -605,6 +610,7 @@ std::vector<bool> computeNodeReachesRequestedInputs(const PhysicalExpression& ex
 struct RaggedGradientExtent {
     uint32_t offsetsNode = UINT32_MAX;
     uint32_t offsetsInputSlot = UINT32_MAX;
+    RaggedRuntimeExtentSource source = RaggedRuntimeExtentSource::DEVICE_OFFSETS;
     uint64_t batchSize = 0;
     uint64_t maxActiveValues = 0;
     uint64_t elementsPerValue = 0;
@@ -690,13 +696,15 @@ class BackwardGraphBuilder {
             RaggedGradientExtent candidate;
             candidate.offsetsNode = offsets_node_idx;
             candidate.offsetsInputSlot = offsets_node.input_slot;
+            candidate.source = extent_node.ragged_runtime_extent_source;
             candidate.batchSize = extent_node.ragged_runtime_batch_size;
             candidate.maxActiveValues = extent_node.ragged_runtime_max_active_values;
             candidate.elementsPerValue = extent_node.ragged_runtime_elements_per_value;
 
             if (result.has_value()) {
-                if (result->offsetsInputSlot != candidate.offsetsInputSlot || result->batchSize != candidate.batchSize ||
-                    result->maxActiveValues != candidate.maxActiveValues || result->elementsPerValue != candidate.elementsPerValue) {
+                if (result->offsetsInputSlot != candidate.offsetsInputSlot || result->source != candidate.source ||
+                    result->batchSize != candidate.batchSize || result->maxActiveValues != candidate.maxActiveValues ||
+                    result->elementsPerValue != candidate.elementsPerValue) {
                     throw std::runtime_error(
                         "BackwardGraphBuilder gradient combines incompatible ragged runtime extents before a shape transform.");
                 }
@@ -1812,6 +1820,28 @@ class BackwardGraphBuilder {
         return push(std::move(node));
     }
 
+    uint32_t raggedSoftmaxBackward(uint32_t y,
+                                   uint32_t dy,
+                                   uint32_t offsets,
+                                   cudnnSoftmaxAlgorithm_t algorithm,
+                                   uint64_t batch_size,
+                                   uint64_t max_active_values,
+                                   uint64_t elements_per_value,
+                                   std::optional<DataType> output_dtype = std::nullopt) {
+        ExprNode node{};
+        node.op = ExprOp::RAGGED_SOFTMAX_BACKWARD;
+        node.lhs = y;
+        node.rhs = dy;
+        node.aux = offsets;
+        node.softmax_algorithm = algorithm;
+        node.softmax_mode = CUDNN_SOFTMAX_MODE_CHANNEL;
+        node.ragged_runtime_batch_size = batch_size;
+        node.ragged_runtime_max_active_values = max_active_values;
+        node.ragged_runtime_elements_per_value = elements_per_value;
+        node.output_dtype = output_dtype;
+        return push(std::move(node));
+    }
+
     uint32_t reduceMinMaxBackward(ExprOp op,
                                   uint32_t lhs,
                                   uint32_t grad,
@@ -1937,16 +1967,19 @@ class BackwardGraphBuilder {
         return push(std::move(node));
     }
 
-    uint32_t raggedValuewiseExtent(uint32_t lhs,
-                                   uint32_t offsets,
-                                   uint64_t batch_size,
-                                   uint64_t max_active_values,
-                                   uint64_t elements_per_value = 1,
-                                   std::optional<DataType> output_dtype = std::nullopt) {
+    uint32_t raggedValuewiseExtent(
+        uint32_t lhs,
+        uint32_t offsets,
+        uint64_t batch_size,
+        uint64_t max_active_values,
+        uint64_t elements_per_value = 1,
+        std::optional<DataType> output_dtype = std::nullopt,
+        RaggedRuntimeExtentSource source = RaggedRuntimeExtentSource::DEVICE_OFFSETS) {
         ExprNode node{};
         node.op = ExprOp::RAGGED_VALUEWISE_EXTENT;
         node.lhs = lhs;
         node.rhs = offsets;
+        node.ragged_runtime_extent_source = source;
         node.ragged_runtime_batch_size = batch_size;
         node.ragged_runtime_max_active_values = max_active_values;
         node.ragged_runtime_elements_per_value = elements_per_value;
@@ -3147,6 +3180,12 @@ std::vector<std::vector<uint64_t>> inferForwardNodeDims(
             case ExprOp::SOFTMAX:
                 node_dims[i] = node_dims[node.lhs];
                 break;
+            case ExprOp::RAGGED_SOFTMAX_BACKWARD:
+                if (node.rhs == UINT32_MAX || node.aux == UINT32_MAX || node_dims[node.rhs] != node_dims[node.lhs]) {
+                    throw std::runtime_error("Ragged Softmax backward requires Y and dY with identical shapes.");
+                }
+                node_dims[i] = node_dims[node.lhs];
+                break;
             case ExprOp::BROADCAST_TO:
                 node_dims[i] = inferBroadcastToOutputDims(node_dims[node.lhs], node.broadcast_dims);
                 break;
@@ -4024,7 +4063,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         node.ragged_runtime_batch_size,
                         node.ragged_runtime_max_active_values,
                         node.ragged_runtime_elements_per_value,
-                        preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                        preferredGradValueDType(forward_expr.nodes.at(node.lhs)),
+                        node.ragged_runtime_extent_source);
                     addContributionToChild(node.lhs, ragged_grad, node_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
                 }
                 break;
@@ -4406,7 +4446,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                             ragged_extent->batchSize,
                             ragged_extent->maxActiveValues,
                             source_elements_per_value,
-                            preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
+                            preferredGradValueDType(forward_expr.nodes.at(node.lhs)),
+                            ragged_extent->source);
                     }
 
                     builder.addContribution(node.lhs, strided_view_grad);
@@ -4555,6 +4596,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         custom_backward_ragged_extent = RaggedGradientExtent{
                             .offsetsNode = upstream_grad_node.rhs,
                             .offsetsInputSlot = offsets_node.input_slot,
+                            .source = upstream_grad_node.ragged_runtime_extent_source,
                             .batchSize = upstream_grad_node.ragged_runtime_batch_size,
                             .maxActiveValues = upstream_grad_node.ragged_runtime_max_active_values,
                             .elementsPerValue = upstream_grad_node.ragged_runtime_elements_per_value,
@@ -4638,7 +4680,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                                 extent.batchSize,
                                 extent.maxActiveValues,
                                 extent.elementsPerValue,
-                                preferredGradValueDType(forward_expr.nodes.at(forward_input_node)));
+                                preferredGradValueDType(forward_expr.nodes.at(forward_input_node)),
+                                extent.source);
                         }
                     }
                     builder.addContribution(forward_input_node, backward_contribution);
@@ -4770,6 +4813,52 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::SOFTMAX: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
+                    const ExprNode& forward_input = forward_expr.nodes.at(node.lhs);
+                    if (forward_input.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+                        if (!has_forward_dims) {
+                            if (allow_shape_deferred_placeholders) {
+                                addContributionToChild(node.lhs, grad, node_dims);
+                                break;
+                            }
+                            throw std::runtime_error("Ragged Softmax autodiff requires resolved forward dimensions.");
+                        }
+                        if (node.softmax_mode != CUDNN_SOFTMAX_MODE_CHANNEL ||
+                            forward_input.ragged_runtime_batch_size == 0 ||
+                            forward_input.ragged_runtime_max_active_values == 0 ||
+                            forward_input.ragged_runtime_elements_per_value == 0) {
+                            throw std::runtime_error("Ragged Softmax autodiff encountered invalid runtime-extent metadata.");
+                        }
+                        uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
+                        const ExprNode& forward_values = forward_expr.nodes.at(forward_input.lhs);
+                        if (!forward_values.output_dtype.has_value()) {
+                            throw std::runtime_error("Ragged Softmax autodiff requires resolved packed-value dtype.");
+                        }
+                        if (!node.output_dtype.has_value()) {
+                            throw std::runtime_error("Ragged Softmax autodiff requires resolved output dtype.");
+                        }
+                        // The fixed-function cuDNN backward requires Y and dY to use the
+                        // same storage dtype.  Shape-specialized autodiff may otherwise carry
+                        // an FP32 accumulator into an FP16/BF16 forward, so make the boundary
+                        // dtype explicit just as the RMSNorm backward path does.
+                        grad_like_output = builder.cast(grad_like_output, node.output_dtype.value());
+                        const uint32_t y = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                        const uint32_t offsets = builder.cloneForward(forward_input.rhs);
+                        uint32_t dx = builder.raggedSoftmaxBackward(y,
+                                                                   grad_like_output,
+                                                                   offsets,
+                                                                   node.softmax_algorithm,
+                                                                   forward_input.ragged_runtime_batch_size,
+                                                                   forward_input.ragged_runtime_max_active_values,
+                                                                   forward_input.ragged_runtime_elements_per_value,
+                                                                   forward_values.output_dtype);
+                        const std::optional<DataType> target_dx_dtype = preferredGradValueDType(forward_values);
+                        if (target_dx_dtype.has_value() && target_dx_dtype.value() != forward_values.output_dtype.value()) {
+                            dx = builder.cast(dx, target_dx_dtype.value());
+                        }
+                        addContributionToChild(node.lhs, dx, node_dims);
+                        break;
+                    }
+
                     const std::vector<uint64_t>& lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
 
                     if (lhs_dims.size() < 2) {
@@ -4801,6 +4890,9 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 }
                 break;
             }
+
+            case ExprOp::RAGGED_SOFTMAX_BACKWARD:
+                throw std::runtime_error("Second-order autodiff through ragged Softmax backward is not supported.");
 
             case ExprOp::RMSNORM: {
                 if (!has_forward_dims) {
@@ -5207,7 +5299,9 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                                                          builder.cloneForward(marker.rhs),
                                                          marker.ragged_runtime_batch_size,
                                                          marker.ragged_runtime_max_active_values,
-                                                         elements_per_value);
+                                                         elements_per_value,
+                                                         std::nullopt,
+                                                         marker.ragged_runtime_extent_source);
                 };
                 auto trailing_elements_per_packed_row = [&](const std::vector<uint64_t>& dims, const ExprNode& marker) {
                     if (node.matmul_packed_row_capacity == 0) {

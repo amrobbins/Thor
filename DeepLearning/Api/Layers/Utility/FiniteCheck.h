@@ -42,6 +42,12 @@ class FiniteCheck : public Layer {
     void informThatInputConnectionMade(Tensor inputTensor) override;
     void resetGraphTraversalState() override;
     int getConnectionType(Tensor connectingTensor) const override;
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedFeatureInput.has_value() && inputTensor == raggedFeatureInput->getOffsets())
+            return ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
 
     [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {
         THOR_THROW_IF_FALSE(featureOutput.has_value());

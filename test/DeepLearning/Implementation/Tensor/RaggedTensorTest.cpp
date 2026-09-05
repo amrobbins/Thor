@@ -21,6 +21,7 @@ TEST(RaggedTensorImplementation, OwnsRowPartitionRuntimeAndDelegatesPartitionMet
 
     RaggedTensor ragged(values, offsets);
     RowPartitionRuntime partition = ragged.getRowPartitionRuntime();
+    partition.setHostOffsets({0, 2, 5, 7});
 
     ASSERT_TRUE(partition.isInitialized());
     EXPECT_EQ(ragged.getOffsets(), offsets);
@@ -31,7 +32,8 @@ TEST(RaggedTensorImplementation, OwnsRowPartitionRuntimeAndDelegatesPartitionMet
     EXPECT_EQ(ragged.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(7));
 
     rawOffsets[3] = 6;
-    partition.setHostActiveValueCount(6);
+    EXPECT_EQ(ragged.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(7));
+    partition.setHostOffsets({0, 2, 5, 6});
     EXPECT_EQ(ragged.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(6));
 }
 
@@ -46,7 +48,7 @@ TEST(RaggedTensorImplementation, WithValuesPreservesExactRowPartitionRuntime) {
     rawOffsets[2] = 6;
 
     RaggedTensor original(values, offsets);
-    original.getRowPartitionRuntime().setHostActiveValueCount(6);
+    original.getRowPartitionRuntime().setHostOffsets({0, 4, 6});
 
     Tensor newValues(TensorPlacement(TensorPlacement::MemDevices::CPU), TensorDescriptor(DataType::FP16, {maxTotalValues, 11}));
     RaggedTensor replaced = original.withValues(newValues);
@@ -55,12 +57,15 @@ TEST(RaggedTensorImplementation, WithValuesPreservesExactRowPartitionRuntime) {
     EXPECT_EQ(replaced.getOffsets(), offsets);
     EXPECT_EQ(replaced.getValuesDataType(), DataType::FP16);
     EXPECT_EQ(replaced.getDescriptor().getTrailingDimensions(), (std::vector<uint64_t>{11}));
+    EXPECT_EQ(original.getRowPartitionId(), replaced.getRowPartitionId());
+    EXPECT_TRUE(original.sharesPartitionWith(replaced));
     EXPECT_TRUE(original.getRowPartitionRuntime().describesSamePartition(replaced.getRowPartitionRuntime()));
+    EXPECT_TRUE(original.getRowPartitionRuntime().sharesPartitionWith(replaced.getRowPartitionRuntime()));
     EXPECT_TRUE(original.getRowPartitionRuntime().sharesRuntimeStateWith(replaced.getRowPartitionRuntime()));
     EXPECT_EQ(replaced.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(6));
 
     rawOffsets[2] = 5;
-    replaced.getRowPartitionRuntime().setHostActiveValueCount(5);
+    replaced.getRowPartitionRuntime().setHostOffsets({0, 4, 5});
     EXPECT_EQ(original.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(5));
 
     Tensor wrongCapacityValues(
@@ -87,10 +92,31 @@ TEST(RaggedTensorImplementation, ExistingRuntimeConstructorSharesStateAcrossInde
     RaggedTensor second(secondValues, independentPartition);
 
     rawOffsets[2] = 3;
-    first.getRowPartitionRuntime().setHostActiveValueCount(3);
+    first.getRowPartitionRuntime().setHostOffsets({0, 1, 3});
     EXPECT_EQ(second.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(3));
+    EXPECT_EQ(first.getRowPartitionId(), second.getRowPartitionId());
+    EXPECT_TRUE(first.sharesPartitionWith(second));
     EXPECT_TRUE(first.getRowPartitionRuntime().describesSamePartition(second.getRowPartitionRuntime()));
+    EXPECT_TRUE(first.getRowPartitionRuntime().sharesPartitionWith(second.getRowPartitionRuntime()));
     EXPECT_TRUE(first.getRowPartitionRuntime().sharesRuntimeStateWith(second.getRowPartitionRuntime()));
+}
+
+
+TEST(RaggedTensorImplementation, DistinctOffsetsExecutionRepresentationsHaveDistinctLogicalPartitionIdentity) {
+    constexpr uint64_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 7;
+    TensorPlacement cpu(TensorPlacement::MemDevices::CPU);
+    Tensor firstOffsets(cpu, TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    Tensor secondOffsets(cpu, TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    Tensor firstValues(cpu, TensorDescriptor(DataType::FP32, {maxTotalValues, 2}));
+    Tensor secondValues(cpu, TensorDescriptor(DataType::FP32, {maxTotalValues, 2}));
+
+    RaggedTensor first(firstValues, firstOffsets);
+    RaggedTensor second(secondValues, secondOffsets);
+
+    EXPECT_NE(first.getRowPartitionId(), second.getRowPartitionId());
+    EXPECT_FALSE(first.sharesPartitionWith(second));
+    EXPECT_FALSE(first.getRowPartitionRuntime().sharesPartitionWith(second.getRowPartitionRuntime()));
 }
 
 TEST(RaggedTensorImplementation, ExistingRuntimeConstructorRejectsValuesCapacityMismatch) {
@@ -113,15 +139,14 @@ TEST(RaggedTensorImplementation, HostActiveValueCountDelegatesEntirelyToRowParti
     rawOffsets[2] = 6;
 
     RaggedTensor ragged(values, offsets);
+    ragged.getRowPartitionRuntime().setHostOffsets({0, 2, 6});
     EXPECT_EQ(ragged.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(6));
 
     rawOffsets[2] = 5;
-    ragged.getRowPartitionRuntime().setHostActiveValueCount(5);
+    EXPECT_EQ(ragged.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(6));
+    ragged.getRowPartitionRuntime().setHostOffsets({0, 2, 5});
     EXPECT_EQ(ragged.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(5));
 
-    ragged.getRowPartitionRuntime().clearHostActiveValueCount();
-    // With no explicit cache, CPU offsets remain the semantic source of truth.
-    EXPECT_EQ(ragged.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(5));
 }
 
 TEST(RaggedTensorImplementation, ValuesOffsetsCapacityConstructorPublishesBoundAndCpuRuntimeExtent) {
@@ -139,6 +164,7 @@ TEST(RaggedTensorImplementation, ValuesOffsetsCapacityConstructorPublishesBoundA
     rawOffsets[3] = 7;
 
     RaggedTensor ragged(values, offsets, maxValuesPerRow);
+    ragged.getRowPartitionRuntime().setHostOffsets({0, 3, 3, 7});
 
     ASSERT_TRUE(ragged.hasMaxValuesPerRow());
     EXPECT_EQ(ragged.getMaxValuesPerRow(), maxValuesPerRow);

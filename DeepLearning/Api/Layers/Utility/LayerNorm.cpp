@@ -306,17 +306,36 @@ shared_ptr<ThorImplementation::Layer> LayerNorm::stamp(ThorImplementation::Tenso
     THOR_THROW_IF_FALSE(trailingDims.size() == 1);
     const uint64_t elementsPerValue = trailingDims.front();
 
-    ThorImplementation::RaggedExpression input =
-        ThorImplementation::RaggedExpression::input("feature_input", "feature_offsets", ragged.getDescriptor());
+    // LayerNorm is a HOST_EXTENT consumer: its cuDNN stage chooses the packed
+    // execution bucket from authoritative host partition metadata and never reads
+    // the structural carrier payload on device. Build the marker explicitly with
+    // HOST_EXTENT rather than using RaggedExpression::input()'s conservative
+    // DEVICE_OFFSETS default; placement may legitimately route this port through
+    // the FP16/BF16/FP32 values carrier.
+    ThorImplementation::Expression featureInput = ThorImplementation::Expression::input(
+        "feature_input", std::nullopt, ragged.getValuesDataType());
+    ThorImplementation::Expression hostPartitionCarrier = ThorImplementation::Expression::input(
+        "feature_offsets", std::nullopt, ragged.getOffsetsDataType());
+    featureInput = featureInput.withRaggedRuntimeExtent(hostPartitionCarrier,
+                                                       ragged.getBatchSize(),
+                                                       ragged.getMaxTotalValues(),
+                                                       elementsPerValue,
+                                                       ThorImplementation::RaggedRuntimeExtentSource::HOST_EXTENT);
     ThorImplementation::Expression weights =
         ThorImplementation::Expression::input("weights", std::nullopt, parameterDataType);
     ThorImplementation::Expression biases =
         ThorImplementation::Expression::input("biases", std::nullopt, parameterDataType);
-    ThorImplementation::RaggedExpression output =
-        input.layerNorm(weights, biases, epsilon, DataType::FP32, ragged.getValuesDataType());
+    ThorImplementation::Expression output = ThorImplementation::Expression::layerNorm(featureInput,
+                                                                                      weights,
+                                                                                      biases,
+                                                                                      elementsPerValue,
+                                                                                      epsilon,
+                                                                                      DataType::FP32,
+                                                                                      ragged.getValuesDataType(),
+                                                                                      ragged.getMaxTotalValues());
 
     ThorImplementation::ExpressionDefinition definition = ThorImplementation::ExpressionDefinition::fromOutputs(
-        ThorImplementation::Expression::outputs({{"feature_output", output.getValues()}}));
+        ThorImplementation::Expression::outputs({{"feature_output", output}}));
     auto physicalLayer = make_shared<ThorImplementation::RaggedCustomLayer>(
         ThorImplementation::DynamicExpression::fromExpressionDefinition(definition),
         vector<string>{"feature_input", "feature_offsets"},

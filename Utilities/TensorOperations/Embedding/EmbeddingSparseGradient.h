@@ -6,6 +6,7 @@
 #include "Utilities/Common/Stream.h"
 #include "Utilities/CudaDriver/CudaGraph.h"
 #include "Utilities/Expression/SparseRowUpdate.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 #include "Utilities/TensorOperations/Ragged/RuntimeExtent.h"
 
 #include <cstddef>
@@ -16,6 +17,11 @@
 #include <unordered_map>
 
 namespace ThorImplementation {
+
+// Ragged sparse-gradient execution guards/materializes only the active packed
+// prefix through RaggedRuntimeExtent::activeValueCount.
+inline constexpr RaggedPartitionRequirement kRaggedEmbeddingSparseGradientPartitionRequirement =
+    RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
 
 struct PreparedEmbeddingSparseGradient;
 

@@ -1,10 +1,13 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <cstdint>
 
 namespace ThorImplementation {
+
+inline constexpr RaggedPartitionRequirement kRaggedRuntimeExtentPartitionRequirement = RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
 
 struct RaggedRuntimeExtent {
     Tensor activeValueCount;
@@ -22,5 +25,9 @@ struct RaggedRuntimeExtent {
                                                                  uint64_t batch_size,
                                                                  uint64_t max_total_values,
                                                                  uint64_t elements_per_value = 1);
+
+[[nodiscard]] RaggedRuntimeExtent raggedRuntimeExtentFromActiveValueCount(const Tensor& active_value_count,
+                                                                          uint64_t max_total_values,
+                                                                          uint64_t elements_per_value = 1);
 
 }  // namespace ThorImplementation

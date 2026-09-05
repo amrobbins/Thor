@@ -17,6 +17,9 @@
 #include "DeepLearning/Api/Layers/Activations/Tanh.h"
 #include "DeepLearning/Api/Layers/Activations/Threshold.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
+#include "Utilities/Common/Event.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "Utilities/Expression/Expression.h"
 
@@ -137,4 +140,43 @@ TEST(Activations, ShapePreservingBuildersInferRaggedFromInputAndPreserveOffsets)
 
     EXPECT_FALSE(Softmax().supportsRaggedStandalone());
     EXPECT_TRUE(Swiglu().supportsRaggedStandalone());
+}
+
+TEST(Activations, RaggedStandalonePointwiseMaterializesManagedActiveCountWithoutFullOffsets) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 8;
+    Network network("ragged_activation_active_count_physicalization");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({3})
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(5)
+                             .batchSize(batchSize)
+                             .build();
+
+    auto swish = std::dynamic_pointer_cast<Swish>(Swish::Builder().network(network).featureInput(input).build());
+    ASSERT_NE(swish, nullptr);
+    ASSERT_TRUE(swish->getRaggedFeatureOutput().has_value());
+    NetworkOutput::Builder()
+        .network(network)
+        .name("activated_values")
+        .inputTensor(swish->getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const auto& stamp = placed->getStampedNetwork(0);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    auto activeCount = stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId());
+    ASSERT_NE(activeCount, nullptr);
+    ASSERT_TRUE(activeCount->getFeatureOutput().has_value());
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDataType(), DataType::UINT32);
 }

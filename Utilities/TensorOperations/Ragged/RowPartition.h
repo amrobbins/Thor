@@ -4,12 +4,22 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 #include "Utilities/Common/Stream.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace ThorImplementation {
+
+// Partition-data transforms are themselves physical metadata consumers. Most
+// offsets-derived transforms need individual row boundaries; the scalar active
+// count extraction is the one intentional scalar-only exception.
+inline constexpr RaggedPartitionRequirement kRowPartitionActiveScalarRequirement =
+    RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
+inline constexpr RaggedPartitionRequirement kRowPartitionOffsetsTransformRequirement =
+    RaggedPartitionRequirement::DEVICE_OFFSETS;
 
 enum RowPartitionValidationErrorBits : uint32_t {
     ROW_PARTITION_VALID = 0U,
@@ -28,6 +38,16 @@ struct RowPartitionLengthsToOffsetsPlan {
 };
 
 [[nodiscard]] bool isRowPartitionOffsetDTypeSupported(DataType dtype);
+
+// Upload an already-authoritative host row partition into an explicit GPU offsets
+// tensor. The host vector remains the semantic source of truth; this function
+// only materializes the physical UINT32/UINT64 offsets input needed by GPU
+// consumers. The source storage is kept alive until the asynchronous H2D copy
+// has completed on `stream`.
+void rowPartitionUploadHostOffsets(const std::vector<uint64_t>& host_offsets,
+                                   Tensor& offsets,
+                                   uint64_t batch_size,
+                                   Stream& stream);
 
 [[nodiscard]] RowPartitionLengthsToOffsetsPlan prepareRowPartitionLengthsToOffsets(const Tensor& lengths,
                                                                                   const Tensor& offsets,

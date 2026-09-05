@@ -1,6 +1,17 @@
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/FiniteCheck.h"
+#include "DeepLearning/Api/Layers/Utility/RMSNorm.h"
+#include "DeepLearning/Api/Layers/Utility/Add.h"
+#include "DeepLearning/Api/Layers/Utility/Slice.h"
+#include "DeepLearning/Api/Layers/Utility/Transpose.h"
+#include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
+#include "DeepLearning/Api/Layers/Utility/Reshape.h"
+#include "DeepLearning/Api/Layers/Utility/Flatten.h"
+#include "DeepLearning/Api/Layers/Utility/StopGradient.h"
+#include "DeepLearning/Api/Layers/Utility/ScaleGradient.h"
+#include "DeepLearning/Api/Layers/Utility/SegmentedSoftmax.h"
 #include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -9,6 +20,7 @@
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/TensorPlacement.h"
+#include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 #include "Utilities/Common/Event.h"
 
 #include "gtest/gtest.h"
@@ -26,6 +38,48 @@
 
 using namespace Thor;
 using json = nlohmann::json;
+
+namespace {
+
+Batch makeFp32RaggedBatch(const std::string& inputName,
+                          const RaggedTensor& apiTensor,
+                          const std::vector<uint64_t>& hostOffsets) {
+    const ThorImplementation::TensorPlacement cpuPlacement(
+        ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor values(
+        cpuPlacement,
+        ThorImplementation::TensorDescriptor(DataType::FP32, apiTensor.getValuesDimensions()));
+    float* valuesPtr = values.getMemPtr<float>();
+    for (uint64_t i = 0; i < values.getTotalNumElements(); ++i) {
+        valuesPtr[i] = static_cast<float>(i + 1) * 0.03125f;
+    }
+
+    const DataType offsetsDataType = apiTensor.getOffsetsDataType();
+    ThorImplementation::Tensor offsets(
+        cpuPlacement,
+        ThorImplementation::TensorDescriptor(offsetsDataType, {apiTensor.getBatchSize() + 1}));
+    if (offsetsDataType == DataType::UINT32) {
+        uint32_t* offsetsPtr = offsets.getMemPtr<uint32_t>();
+        for (size_t i = 0; i < hostOffsets.size(); ++i) {
+            offsetsPtr[i] = static_cast<uint32_t>(hostOffsets[i]);
+        }
+    } else {
+        THOR_THROW_IF_FALSE(offsetsDataType == DataType::UINT64);
+        uint64_t* offsetsPtr = offsets.getMemPtr<uint64_t>();
+        for (size_t i = 0; i < hostOffsets.size(); ++i) {
+            offsetsPtr[i] = hostOffsets[i];
+        }
+    }
+
+    ThorImplementation::RowPartitionRuntime partition(
+        offsets, apiTensor.getDescriptor().getRowPartition());
+    partition.setHostOffsets(hostOffsets);
+    Batch batch;
+    batch.insert(inputName, ThorImplementation::RaggedTensor(values, partition));
+    return batch;
+}
+
+}  // namespace
 
 TEST(RaggedNetworkInputApi, BuildsLogicalRaggedInputBackedByPhysicalNetworkInputs) {
     Network network("ragged_network_input_api");
@@ -238,13 +292,759 @@ TEST(RaggedNetworkInputApi, FlattenedTensorMapSubmissionIsRejectedButLogicalBatc
     EXPECT_EQ(logicalOutputs.at("label_offsets").getDescriptor().getDimensions(),
               (std::vector<uint64_t>{batchSize + 1}));
 
-    auto physicalOffsetsInput = placed->getStampedNetwork(0).getNamedInput("labels.offsets");
+    // RP6B: the execution offsets input is Thor-managed and deliberately absent
+    // from the public named-input namespace. Test code may inspect it by logical
+    // partition identity without making that physical wiring user-visible.
+    EXPECT_EQ(placed->getStampedNetwork(0).getNamedInput("labels.offsets"), nullptr);
+    auto physicalOffsetsInput = placed->getStampedNetwork(0).getManagedPartitionOffsetsInputForTest(
+        labels.getRowPartitionId());
     ASSERT_NE(physicalOffsetsInput, nullptr);
     ASSERT_TRUE(physicalOffsetsInput->getFeatureOutput().has_value());
     ThorImplementation::RowPartitionRuntime publishedPartition(
         physicalOffsetsInput->getFeatureOutput().value(), labels.getDescriptor().getRowPartition());
     EXPECT_EQ(publishedPartition.getHostActiveValueCountIfAvailable(), std::optional<uint64_t>(3));
     EXPECT_EQ(publishedPartition.getHostMaxActiveRowLengthIfAvailable(), std::optional<uint64_t>(2));
+
+    // RP6A: the caller's device offsets payload is no longer the source for the
+    // physical offsets NetworkInput. Deliberately poison those device bytes while
+    // retaining the authoritative host partition; execution must materialize the
+    // host partition into the hidden input and expose {0,1,3}, not {0,5,5}.
+    const ThorImplementation::TensorPlacement gpuPlacement(
+        ThorImplementation::TensorPlacement::MemDevices::GPU, 0);
+    Stream uploadStream(0);
+    ThorImplementation::Tensor gpuValues(gpuPlacement, values.getDescriptor());
+    gpuValues.copyFromAsync(values, uploadStream);
+    ThorImplementation::Tensor poisonOffsetsCpu(
+        cpuPlacement, ThorImplementation::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    uint32_t* poisonPtr = poisonOffsetsCpu.getMemPtr<uint32_t>();
+    poisonPtr[0] = 0;
+    poisonPtr[1] = 5;
+    poisonPtr[2] = 5;
+    ThorImplementation::Tensor gpuOffsets(gpuPlacement, poisonOffsetsCpu.getDescriptor());
+    gpuOffsets.copyFromAsync(poisonOffsetsCpu, uploadStream);
+    uploadStream.synchronize();
+
+    ThorImplementation::RowPartitionRuntime gpuPartition(
+        gpuOffsets, labels.getDescriptor().getRowPartition());
+    gpuPartition.setHostOffsets({0, 1, 3});
+    Batch poisonedDeviceOffsetsBatch;
+    poisonedDeviceOffsetsBatch.insert(
+        "labels", ThorImplementation::RaggedTensor(gpuValues, gpuPartition));
+    std::map<std::string, ThorImplementation::Tensor> managedOutputs;
+    ASSERT_NO_THROW(managedOutputs = placed->infer(poisonedDeviceOffsetsBatch));
+    ASSERT_TRUE(managedOutputs.contains("label_offsets"));
+    ThorImplementation::Tensor managedOffsetsCpu =
+        managedOutputs.at("label_offsets").clone(cpuPlacement);
+    Stream downloadStream(managedOutputs.at("label_offsets").getPlacement());
+    managedOffsetsCpu.copyFromAsync(managedOutputs.at("label_offsets"), downloadStream);
+    downloadStream.synchronize();
+    ASSERT_EQ(managedOffsetsCpu.getDataType(), DataType::UINT32);
+    const uint32_t* managedOffsets = managedOffsetsCpu.getMemPtr<uint32_t>();
+    EXPECT_EQ(managedOffsets[0], 0u);
+    EXPECT_EQ(managedOffsets[1], 1u);
+    EXPECT_EQ(managedOffsets[2], 3u);
+}
+
+
+TEST(RaggedNetworkInputApi, HostExtentOnlyChainDoesNotMaterializeDevicePartitionInputs) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 5;
+    constexpr uint64_t inputWidth = 3;
+    constexpr uint64_t hiddenWidth = 4;
+    constexpr uint64_t outputWidth = 2;
+
+    Network network("ragged_network_input_host_extent_only_chain");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({inputWidth})
+                             .batchSize(batchSize)
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(3)
+                             .build();
+
+    FullyConnected first = FullyConnected::Builder()
+                               .network(network)
+                               .featureInput(input)
+                               .numOutputFeatures(hiddenWidth)
+                               .weightsDataType(DataType::FP32)
+                               .computeDataType(DataType::FP32)
+                               .outputDataType(DataType::FP32)
+                               .noActivation()
+                               .build();
+    ASSERT_TRUE(first.getRaggedFeatureOutput().has_value());
+
+    FullyConnected second = FullyConnected::Builder()
+                                .network(network)
+                                .featureInput(first.getRaggedFeatureOutput().value())
+                                .numOutputFeatures(outputWidth)
+                                .weightsDataType(DataType::FP32)
+                                .computeDataType(DataType::FP32)
+                                .outputDataType(DataType::FP32)
+                                .noActivation()
+                                .build();
+    ASSERT_TRUE(second.getRaggedFeatureOutput().has_value());
+
+    NetworkOutput::Builder()
+        .network(network)
+        .name("projected_values")
+        .inputTensor(second.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    // RP6B HOST_EXTENT is host metadata carried by the packed values input. A
+    // graph whose only partition consumers are packed GEMM stages must not
+    // allocate either GPU representation of the partition.
+    const auto& stamp = placed->getStampedNetwork(0);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    EXPECT_EQ(stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId()), nullptr);
+
+    const ThorImplementation::TensorPlacement cpuPlacement(
+        ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor values(
+        cpuPlacement,
+        ThorImplementation::TensorDescriptor(DataType::FP32, {maxTotalValues, inputWidth}));
+    ThorImplementation::Tensor offsets(
+        cpuPlacement, ThorImplementation::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    float* valuesPtr = values.getMemPtr<float>();
+    for (uint64_t i = 0; i < maxTotalValues * inputWidth; ++i)
+        valuesPtr[i] = static_cast<float>(i + 1) * 0.1f;
+    uint32_t* offsetsPtr = offsets.getMemPtr<uint32_t>();
+    offsetsPtr[0] = 0;
+    offsetsPtr[1] = 1;
+    offsetsPtr[2] = 3;
+
+    ThorImplementation::RowPartitionRuntime partition(
+        offsets,
+        ThorImplementation::RowPartitionDescriptor(batchSize, maxTotalValues, DataType::UINT32, 3));
+    Batch batch;
+    batch.insert("tokens", ThorImplementation::RaggedTensor(values, partition));
+
+    std::map<std::string, ThorImplementation::Tensor> outputs;
+    ASSERT_NO_THROW(outputs = placed->infer(batch));
+    ASSERT_TRUE(outputs.contains("projected_values"));
+    EXPECT_EQ(outputs.at("projected_values").getDescriptor().getDimensions(),
+              (std::vector<uint64_t>{maxTotalValues, outputWidth}));
+
+    // The second FullyConnected can select its packed-row bucket only if the
+    // first partition-preserving output republished the authoritative host
+    // partition before notifying downstream execution.
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    EXPECT_EQ(stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId()), nullptr);
+}
+
+
+TEST(RaggedNetworkInputApi, DeviceActiveCountConsumerMaterializesOnlyManagedScalar) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 5;
+    Network network("ragged_network_input_active_count_only");
+
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({3})
+                             .batchSize(batchSize)
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(3)
+                             .build();
+    FiniteCheck checked = FiniteCheck::Builder()
+                              .network(network)
+                              .featureInput(input)
+                              .tensorLabel("tokens")
+                              .enabled(false)
+                              .build();
+    ASSERT_TRUE(checked.getRaggedFeatureOutput().has_value());
+    NetworkOutput::Builder()
+        .network(network)
+        .name("checked_values")
+        .inputTensor(checked.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const auto& stamp = placed->getStampedNetwork(0);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    auto activeCount = stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId());
+    ASSERT_NE(activeCount, nullptr);
+    ASSERT_TRUE(activeCount->getFeatureOutput().has_value());
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDataType(), DataType::UINT32);
+}
+
+TEST(RaggedNetworkInputApi, FusedFullyConnectedMaterializesManagedActiveCountWithoutFullOffsets) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 5;
+    Network network("ragged_network_input_fused_fc_active_count");
+
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({3})
+                             .batchSize(batchSize)
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(3)
+                             .build();
+    ThorImplementation::Expression projected = FullyConnected::epilogueInput(DataType::FP32, DataType::FP32);
+    FullyConnected projection = FullyConnected::Builder()
+                                    .network(network)
+                                    .featureInput(input)
+                                    .numOutputFeatures(4)
+                                    .weightsDataType(DataType::FP32)
+                                    .computeDataType(DataType::FP32)
+                                    .outputDataType(DataType::FP32)
+                                    .noActivation()
+                                    .epilogue(projected.sin())
+                                    .build();
+    ASSERT_TRUE(projection.getRaggedFeatureOutput().has_value());
+    NetworkOutput::Builder()
+        .network(network)
+        .name("projected_values")
+        .inputTensor(projection.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const auto& stamp = placed->getStampedNetwork(0);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    auto activeCount = stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId());
+    ASSERT_NE(activeCount, nullptr);
+    ASSERT_TRUE(activeCount->getFeatureOutput().has_value());
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDataType(), DataType::UINT32);
+
+    const ThorImplementation::TensorPlacement cpuPlacement(
+        ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor values(
+        cpuPlacement, ThorImplementation::TensorDescriptor(DataType::FP32, {maxTotalValues, 3}));
+    ThorImplementation::Tensor offsets(
+        cpuPlacement, ThorImplementation::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    float* valuesPtr = values.getMemPtr<float>();
+    for (uint64_t i = 0; i < maxTotalValues * 3; ++i) valuesPtr[i] = static_cast<float>(i + 1) * 0.1f;
+    uint32_t* offsetsPtr = offsets.getMemPtr<uint32_t>();
+    offsetsPtr[0] = 0;
+    offsetsPtr[1] = 1;
+    offsetsPtr[2] = 3;
+
+    ThorImplementation::RowPartitionRuntime partition(
+        offsets, ThorImplementation::RowPartitionDescriptor(batchSize, maxTotalValues, DataType::UINT32, 3));
+    Batch batch;
+    batch.insert("tokens", ThorImplementation::RaggedTensor(values, partition));
+    std::map<std::string, ThorImplementation::Tensor> outputs;
+    ASSERT_NO_THROW(outputs = placed->infer(batch));
+    ASSERT_TRUE(outputs.contains("projected_values"));
+}
+
+
+TEST(RaggedNetworkInputApi, FullyConnectedOutputDropoutMaterializesManagedActiveCountWithoutFullOffsets) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 5;
+    Network network("ragged_network_input_fc_output_dropout_active_count");
+
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({3})
+                             .batchSize(batchSize)
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(3)
+                             .build();
+    FullyConnected projection = FullyConnected::Builder()
+                                    .network(network)
+                                    .featureInput(input)
+                                    .numOutputFeatures(4)
+                                    .hasBias(false)
+                                    .weightsDataType(DataType::FP32)
+                                    .computeDataType(DataType::FP32)
+                                    .outputDataType(DataType::FP32)
+                                    .noActivation()
+                                    .outputDropoutProbability(0.25f)
+                                    .outputDropoutSeed(12345)
+                                    .build();
+    ASSERT_TRUE(projection.getRaggedFeatureOutput().has_value());
+    NetworkOutput::Builder()
+        .network(network)
+        .name("projected_values")
+        .inputTensor(projection.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const auto& stamp = placed->getStampedNetwork(0);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    auto activeCount = stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId());
+    ASSERT_NE(activeCount, nullptr);
+    ASSERT_TRUE(activeCount->getFeatureOutput().has_value());
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDataType(), DataType::UINT32);
+}
+
+TEST(RaggedNetworkInputApi, RMSNormEpilogueMaterializesManagedActiveCountWithoutFullOffsets) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 5;
+    Network network("ragged_network_input_rmsnorm_epilogue_active_count");
+
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({3})
+                             .batchSize(batchSize)
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(3)
+                             .build();
+    ThorImplementation::Expression normalized = RMSNorm::epilogueInput(DataType::FP32, DataType::FP32);
+    RMSNorm rmsNorm = RMSNorm::Builder()
+                          .network(network)
+                          .featureInput(input)
+                          .normalizedShape({3})
+                          .parameterDataType(DataType::FP32)
+                          .epilogue(normalized + ThorImplementation::Expression(0.25))
+                          .build();
+    ASSERT_TRUE(rmsNorm.getRaggedFeatureOutput().has_value());
+    NetworkOutput::Builder()
+        .network(network)
+        .name("normalized_values")
+        .inputTensor(rmsNorm.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const auto& stamp = placed->getStampedNetwork(0);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    auto activeCount = stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId());
+    ASSERT_NE(activeCount, nullptr);
+    ASSERT_TRUE(activeCount->getFeatureOutput().has_value());
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDataType(), DataType::UINT32);
+}
+
+
+TEST(RaggedNetworkInputApi, PartitionPreservingValuewiseUtilitiesShareManagedActiveCountWithoutFullOffsets) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 6;
+    Network network("ragged_valuewise_utility_active_count_physicalization");
+
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({2, 4})
+                             .batchSize(batchSize)
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(4)
+                             .build();
+    TypeConverter converted = TypeConverter::Builder()
+                                  .network(network)
+                                  .featureInput(input)
+                                  .newDataType(DataType::BF16)
+                                  .build();
+    ASSERT_TRUE(converted.getRaggedFeatureOutput().has_value());
+    Slice sliced = Slice::Builder()
+                       .network(network)
+                       .featureInput(converted.getRaggedFeatureOutput().value())
+                       .axis(1)
+                       .start(1)
+                       .length(2)
+                       .build();
+    ASSERT_TRUE(sliced.getRaggedFeatureOutput().has_value());
+    Transpose left = Transpose::Builder()
+                         .network(network)
+                         .featureInput(sliced.getRaggedFeatureOutput().value())
+                         .outputDataType(DataType::BF16)
+                         .build();
+    Transpose right = Transpose::Builder()
+                          .network(network)
+                          .featureInput(sliced.getRaggedFeatureOutput().value())
+                          .outputDataType(DataType::BF16)
+                          .build();
+    ASSERT_TRUE(left.getRaggedFeatureOutput().has_value());
+    ASSERT_TRUE(right.getRaggedFeatureOutput().has_value());
+    Add sum = Add::Builder()
+                  .network(network)
+                  .left(left.getRaggedFeatureOutput().value())
+                  .right(right.getRaggedFeatureOutput().value())
+                  .build();
+    ASSERT_TRUE(sum.getRaggedFeatureOutput().has_value());
+    NetworkOutput::Builder()
+        .network(network)
+        .name("sum_values")
+        .inputTensor(sum.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::BF16)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const auto& stamp = placed->getStampedNetwork(0);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    auto activeCount = stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId());
+    ASSERT_NE(activeCount, nullptr);
+    ASSERT_TRUE(activeCount->getFeatureOutput().has_value());
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDataType(), DataType::UINT32);
+}
+
+TEST(RaggedNetworkInputApi, ValuesOnlyGraphDoesNotMaterializeAnyPartitionRepresentation) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 6;
+    Network network("ragged_values_only_no_partition_physicalization");
+
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({3})
+                             .batchSize(batchSize)
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(4)
+                             .build();
+    NetworkOutput::Builder()
+        .network(network)
+        .name("values")
+        .inputTensor(input.getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const auto& stamp = placed->getStampedNetwork(0);
+    const auto requirements = stamp.getExternalRowPartitionRequirementsForTest(input.getRowPartitionId());
+    ASSERT_TRUE(requirements.has_value());
+    EXPECT_EQ(requirements.value(), ThorImplementation::RaggedPartitionRequirement::NONE);
+    EXPECT_EQ(stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId()), nullptr);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+
+    std::map<std::string, ThorImplementation::Tensor> outputs;
+    ASSERT_NO_THROW(outputs = placed->infer(makeFp32RaggedBatch("tokens", input, {0, 2, 5})));
+    EXPECT_TRUE(outputs.contains("values"));
+}
+
+TEST(RaggedNetworkInputApi, MetadataOnlyPartitionPreservingChainCarriesHostExtentWithoutDevicePartitionInputs) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 6;
+    Network network("ragged_metadata_alias_host_extent_closure");
+
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({2, 2, 2})
+                             .batchSize(batchSize)
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(4)
+                             .build();
+    Reshape reshaped = Reshape::Builder()
+                           .network(network)
+                           .featureInput(input)
+                           .newDimensions({4, 2})
+                           .build();
+    ASSERT_TRUE(reshaped.getRaggedFeatureOutput().has_value());
+    Flatten flattened = Flatten::Builder()
+                            .network(network)
+                            .featureInput(reshaped.getRaggedFeatureOutput().value())
+                            .numOutputDimensions(1)
+                            .build();
+    ASSERT_TRUE(flattened.getRaggedFeatureOutput().has_value());
+    StopGradient stopped = StopGradient::Builder()
+                               .network(network)
+                               .featureInput(flattened.getRaggedFeatureOutput().value())
+                               .build();
+    ASSERT_TRUE(stopped.getRaggedFeatureOutput().has_value());
+    ScaleGradient scaled = ScaleGradient::Builder()
+                               .network(network)
+                               .featureInput(stopped.getRaggedFeatureOutput().value())
+                               .scale(0.5f)
+                               .build();
+    ASSERT_TRUE(scaled.getRaggedFeatureOutput().has_value());
+    FullyConnected projected = FullyConnected::Builder()
+                                   .network(network)
+                                   .featureInput(scaled.getRaggedFeatureOutput().value())
+                                   .numOutputFeatures(3)
+                                   .hasBias(false)
+                                   .weightsDataType(DataType::FP32)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::FP32)
+                                   .noActivation()
+                                   .build();
+    ASSERT_TRUE(projected.getRaggedFeatureOutput().has_value());
+    NetworkOutput::Builder()
+        .network(network)
+        .name("projected_values")
+        .inputTensor(projected.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const auto& stamp = placed->getStampedNetwork(0);
+    const auto requirements = stamp.getExternalRowPartitionRequirementsForTest(input.getRowPartitionId());
+    ASSERT_TRUE(requirements.has_value());
+    EXPECT_EQ(requirements.value(), ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT);
+    EXPECT_EQ(stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId()), nullptr);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+
+    std::map<std::string, ThorImplementation::Tensor> outputs;
+    ASSERT_NO_THROW(outputs = placed->infer(makeFp32RaggedBatch("tokens", input, {0, 2, 5})));
+    EXPECT_TRUE(outputs.contains("projected_values"));
+}
+
+TEST(RaggedNetworkInputApi, HostExtentAndActiveCountCompositionMaterializesOnlyManagedScalar) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 7;
+    Network network("ragged_host_and_active_count_closure");
+
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({4})
+                             .batchSize(batchSize)
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(5)
+                             .build();
+    FullyConnected projected = FullyConnected::Builder()
+                                   .network(network)
+                                   .featureInput(input)
+                                   .numOutputFeatures(4)
+                                   .hasBias(false)
+                                   .weightsDataType(DataType::FP32)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(DataType::FP32)
+                                   .noActivation()
+                                   .build();
+    ASSERT_TRUE(projected.getRaggedFeatureOutput().has_value());
+    RMSNorm normalized = RMSNorm::Builder()
+                             .network(network)
+                             .featureInput(projected.getRaggedFeatureOutput().value())
+                             .normalizedShape({4})
+                             .parameterDataType(DataType::FP32)
+                             .build();
+    ASSERT_TRUE(normalized.getRaggedFeatureOutput().has_value());
+    FiniteCheck checked = FiniteCheck::Builder()
+                              .network(network)
+                              .featureInput(normalized.getRaggedFeatureOutput().value())
+                              .tensorLabel("normalized")
+                              .enabled(false)
+                              .build();
+    ASSERT_TRUE(checked.getRaggedFeatureOutput().has_value());
+    NetworkOutput::Builder()
+        .network(network)
+        .name("checked_values")
+        .inputTensor(checked.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const auto& stamp = placed->getStampedNetwork(0);
+    const auto requirements = stamp.getExternalRowPartitionRequirementsForTest(input.getRowPartitionId());
+    ASSERT_TRUE(requirements.has_value());
+    EXPECT_EQ(requirements.value(),
+              ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT |
+                  ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
+    auto activeCount = stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId());
+    ASSERT_NE(activeCount, nullptr);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    ASSERT_TRUE(activeCount->getFeatureOutput().has_value());
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{1}));
+
+    std::map<std::string, ThorImplementation::Tensor> outputs;
+    ASSERT_NO_THROW(outputs = placed->infer(makeFp32RaggedBatch("tokens", input, {0, 2, 5})));
+    EXPECT_TRUE(outputs.contains("checked_values"));
+}
+
+TEST(RaggedNetworkInputApi, FullOffsetsOnlyConsumerDoesNotMaterializeRedundantActiveCount) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 7;
+    Network network("ragged_offsets_only_closure");
+
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({4})
+                             .batchSize(batchSize)
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(5)
+                             .build();
+    SegmentedSoftmax segmented = SegmentedSoftmax::Builder()
+                                     .network(network)
+                                     .featureInput(input)
+                                     .build();
+    NetworkOutput::Builder()
+        .network(network)
+        .name("segmented_values")
+        .inputTensor(segmented.getRaggedFeatureOutput().getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    auto& stamp = placed->getStampedNetwork(0);
+    const auto requirements = stamp.getExternalRowPartitionRequirementsForTest(input.getRowPartitionId());
+    ASSERT_TRUE(requirements.has_value());
+    EXPECT_EQ(requirements.value(), ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS);
+    EXPECT_EQ(stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId()), nullptr);
+    auto offsets = stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId());
+    ASSERT_NE(offsets, nullptr);
+    ASSERT_TRUE(offsets->getFeatureOutput().has_value());
+    EXPECT_EQ(offsets->getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{batchSize + 1}));
+
+    auto physicalSegmented = std::dynamic_pointer_cast<ThorImplementation::RaggedCustomLayer>(
+        stamp.getPhysicalLayerFromApiLayer(segmented.getId()));
+    ASSERT_NE(physicalSegmented, nullptr);
+    ASSERT_EQ(physicalSegmented->getFeatureInputs().size(), 2u);
+    ASSERT_TRUE(physicalSegmented->getFeatureInputs()[1].has_value());
+    EXPECT_EQ(physicalSegmented->getFeatureInputs()[1]->getDimensions(),
+              (std::vector<uint64_t>{batchSize + 1}));
+
+    std::map<std::string, ThorImplementation::Tensor> outputs;
+    ASSERT_NO_THROW(outputs = placed->infer(makeFp32RaggedBatch("tokens", input, {0, 2, 5})));
+    EXPECT_TRUE(outputs.contains("segmented_values"));
+}
+
+TEST(RaggedNetworkInputApi, MixedPartitionConsumersMaterializeAndRouteScalarAndOffsetsIndependently) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 7;
+    Network network("ragged_mixed_partition_physicalization_closure");
+
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({4})
+                             .batchSize(batchSize)
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(5)
+                             .build();
+
+    FullyConnected hostConsumer = FullyConnected::Builder()
+                                      .network(network)
+                                      .featureInput(input)
+                                      .numOutputFeatures(3)
+                                      .hasBias(false)
+                                      .weightsDataType(DataType::FP32)
+                                      .computeDataType(DataType::FP32)
+                                      .outputDataType(DataType::FP32)
+                                      .noActivation()
+                                      .build();
+    ASSERT_TRUE(hostConsumer.getRaggedFeatureOutput().has_value());
+    FiniteCheck scalarConsumer = FiniteCheck::Builder()
+                                     .network(network)
+                                     .featureInput(input)
+                                     .tensorLabel("tokens")
+                                     .enabled(false)
+                                     .build();
+    ASSERT_TRUE(scalarConsumer.getRaggedFeatureOutput().has_value());
+    SegmentedSoftmax offsetsConsumer = SegmentedSoftmax::Builder()
+                                           .network(network)
+                                           .featureInput(input)
+                                           .build();
+
+    NetworkOutput::Builder()
+        .network(network)
+        .name("host_values")
+        .inputTensor(hostConsumer.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+    NetworkOutput::Builder()
+        .network(network)
+        .name("scalar_values")
+        .inputTensor(scalarConsumer.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+    NetworkOutput::Builder()
+        .network(network)
+        .name("offset_values")
+        .inputTensor(offsetsConsumer.getRaggedFeatureOutput().getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    auto& stamp = placed->getStampedNetwork(0);
+    const auto requirements = stamp.getExternalRowPartitionRequirementsForTest(input.getRowPartitionId());
+    ASSERT_TRUE(requirements.has_value());
+    EXPECT_EQ(requirements.value(),
+              ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT |
+                  ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT |
+                  ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS);
+
+    auto activeCount = stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId());
+    auto offsets = stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId());
+    ASSERT_NE(activeCount, nullptr);
+    ASSERT_NE(offsets, nullptr);
+    ASSERT_TRUE(activeCount->getFeatureOutput().has_value());
+    ASSERT_TRUE(offsets->getFeatureOutput().has_value());
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{1}));
+    EXPECT_EQ(offsets->getFeatureOutput()->getDimensions(), (std::vector<uint64_t>{batchSize + 1}));
+
+    auto physicalOffsetsConsumer = std::dynamic_pointer_cast<ThorImplementation::RaggedCustomLayer>(
+        stamp.getPhysicalLayerFromApiLayer(offsetsConsumer.getId()));
+    ASSERT_NE(physicalOffsetsConsumer, nullptr);
+    ASSERT_EQ(physicalOffsetsConsumer->getFeatureInputs().size(), 2u);
+    ASSERT_TRUE(physicalOffsetsConsumer->getFeatureInputs()[1].has_value());
+    EXPECT_EQ(physicalOffsetsConsumer->getFeatureInputs()[1]->getDimensions(),
+              (std::vector<uint64_t>{batchSize + 1}));
+
+    std::map<std::string, ThorImplementation::Tensor> outputs;
+    ASSERT_NO_THROW(outputs = placed->infer(makeFp32RaggedBatch("tokens", input, {0, 2, 5})));
+    EXPECT_TRUE(outputs.contains("host_values"));
+    EXPECT_TRUE(outputs.contains("scalar_values"));
+    EXPECT_TRUE(outputs.contains("offset_values"));
 }
 
 TEST(RaggedNetworkInputApi, RejectsInvalidOffsetDType) {

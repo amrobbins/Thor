@@ -28,6 +28,7 @@
 #include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRmsNorm.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnLayerNorm.h"
+#include "Utilities/TensorOperations/DeepLearning/CudnnRaggedSoftmax.h"
 #include "Utilities/TensorOperations/Embedding/EmbeddingKernels.h"
 #include "Utilities/TensorOperations/Cub/CubDevicePrimitives.h"
 #include "Utilities/Expression/ReduceMinMaxBackwardKernel.h"
@@ -261,6 +262,11 @@ struct CompiledRmsNorm {
     CudnnRmsNormFusedActivation fused_activation = CudnnRmsNormFusedActivation::NONE;
     std::string debug_name = "thor_expr_rms_norm";
 
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return ragged_offsets_input_slot != UINT32_MAX ? RaggedPartitionRequirement::HOST_EXTENT
+                                                       : RaggedPartitionRequirement::NONE;
+    }
+
     [[nodiscard]] CudnnRmsNormDescriptor descriptorFor(const Tensor& input, const Tensor& scale, const Tensor& output) const;
 };
 
@@ -278,6 +284,11 @@ struct CompiledLayerNorm {
     DataType output_dtype = DataType::FP16;
     DataType compute_dtype = DataType::FP32;
     std::string debug_name = "thor_expr_layer_norm";
+
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return ragged_offsets_input_slot != UINT32_MAX ? RaggedPartitionRequirement::HOST_EXTENT
+                                                       : RaggedPartitionRequirement::NONE;
+    }
 
     [[nodiscard]] CudnnLayerNormDescriptor descriptorFor(const Tensor& input,
                                                          const Tensor& scale,
@@ -298,6 +309,11 @@ struct CompiledRmsNormBackward {
     DataType dscale_dtype = DataType::FP32;
     DataType compute_dtype = DataType::FP32;
     std::string debug_name = "thor_expr_rms_norm_backward";
+
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return ragged_offsets_input_slot != UINT32_MAX ? RaggedPartitionRequirement::HOST_EXTENT
+                                                       : RaggedPartitionRequirement::NONE;
+    }
 
     [[nodiscard]] CudnnRmsNormDescriptor descriptorFor(const Tensor& input,
                                                        const Tensor& scale,
@@ -327,6 +343,10 @@ struct CompiledAttention {
     DataType compute_dtype = DataType::FP32;
     DataType output_dtype = DataType::FP16;
     std::string debug_name = "thor_expr_attention";
+
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return use_ragged_offsets ? RaggedPartitionRequirement::DEVICE_OFFSETS : RaggedPartitionRequirement::NONE;
+    }
 
     CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o, uint64_t raggedBatchSize = 0) const;
 };
@@ -404,6 +424,10 @@ struct CompiledAttentionBackward {
     DataType dK_dtype = DataType::FP16;
     DataType dV_dtype = DataType::FP16;
     std::string debug_name = "thor_expr_attention_backward";
+
+    [[nodiscard]] constexpr RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return use_ragged_offsets ? RaggedPartitionRequirement::DEVICE_OFFSETS : RaggedPartitionRequirement::NONE;
+    }
 
     CudnnAttentionDescriptor descriptorFor(const Tensor& q, const Tensor& k, const Tensor& v, const Tensor& o, uint64_t raggedBatchSize = 0) const;
     [[nodiscard]] DataType outputDTypeFor(ExprOp op) const;
@@ -492,6 +516,10 @@ class StampedEquation {
     }
 
     const std::vector<Tensor>& getOutputTensors() const { return outputs; }
+
+    [[nodiscard]] RaggedPartitionRequirement raggedPartitionRequirement() const noexcept {
+        return compiledEquation->raggedPartitionRequirement();
+    }
 
     static std::vector<uint64_t> computeReductionOutputDims(const std::vector<uint64_t>& input_dims,
                                                             const std::vector<uint64_t>& reduction_axes,
@@ -718,6 +746,9 @@ class StampedPaddedRaggedPack {
     void run();
     void runOn(Stream& run_stream) const;
     uint32_t gpuNum() const { return packed_values.getPlacement().getDeviceNum(); }
+    [[nodiscard]] static constexpr RaggedPartitionRequirement raggedPartitionRequirement() noexcept {
+        return RaggedPartitionRequirement::HOST_EXTENT | RaggedPartitionRequirement::DEVICE_OFFSETS;
+    }
 
    private:
     CompiledPaddedRaggedSequenceLayout layout;
@@ -736,6 +767,9 @@ class StampedPaddedRaggedUnpack {
     void run();
     void runOn(Stream& run_stream) const;
     uint32_t gpuNum() const { return packed_values.getPlacement().getDeviceNum(); }
+    [[nodiscard]] static constexpr RaggedPartitionRequirement raggedPartitionRequirement() noexcept {
+        return RaggedPartitionRequirement::DEVICE_OFFSETS;
+    }
 
    private:
     std::shared_ptr<PaddedRaggedSequence> padded_values;
@@ -769,6 +803,9 @@ class StampedPaddedRaggedPointwise {
     // Used only while capturing a conditional CUDA graph after the retained
     // region has selected its current placement-defined W.
     [[nodiscard]] const StampedEquation& currentInvocationForCapture() const;
+    [[nodiscard]] static constexpr RaggedPartitionRequirement raggedPartitionRequirement() noexcept {
+        return RaggedPartitionRequirement::NONE;
+    }
 
    private:
     std::shared_ptr<CompiledEquation> compiled;
@@ -910,12 +947,28 @@ class StampedSoftmax {
                    const Tensor& input,
                    const Tensor& output,
                    const Stream& stream);
+    StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
+                   CudnnRaggedSoftmaxExecutionState ragged_state,
+                   const Tensor& input,
+                   const Tensor& output,
+                   const Tensor& row_partition_offsets,
+                   const Stream& stream);
+    StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
+                   CudnnRaggedSoftmaxExecutionState ragged_state,
+                   const Tensor& y,
+                   const Tensor& dy,
+                   const Tensor& dx,
+                   const Tensor& row_partition_offsets,
+                   const Stream& stream);
 
    private:
     const std::shared_ptr<CompiledSoftmax> compiled_softmax;
     const std::unique_ptr<BuiltSoftmax> built_softmax;
+    mutable std::optional<CudnnRaggedSoftmaxExecutionState> ragged_state;
     const Tensor source_input;
     mutable Tensor input;
+    std::optional<Tensor> grad_output;
+    std::optional<Tensor> row_partition_offsets;
     Tensor output;
     Stream stream;
 
@@ -990,6 +1043,9 @@ class StampedSanitizePackedTail {
     void runOn(Stream& run_stream) const;
 
     uint32_t gpuNum() const { return tensor.getPlacement().getDeviceNum(); }
+    [[nodiscard]] static constexpr RaggedPartitionRequirement raggedPartitionRequirement() noexcept {
+        return RaggedPartitionRequirement::HOST_EXTENT;
+    }
 
    private:
     const Tensor tensor;
@@ -1066,6 +1122,7 @@ class StampedRmsNormBackward {
 
     uint32_t gpuNum() const { return dX.getPlacement().getDeviceNum(); }
     const std::vector<Tensor>& getOutputTensors() const { return outputs; }
+
     [[nodiscard]] std::optional<uint64_t> runtimeLogicalFlopCount() const;
     [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes() const {
         return backward_workspace.has_value() ? backward_workspace->getArraySizeInBytes() : 0;
@@ -1338,6 +1395,7 @@ class StampedAttentionBackward {
     uint32_t gpuNum() const { return dQ.getPlacement().getDeviceNum(); }
 
     const std::vector<Tensor>& getOutputTensors() const { return outputs; }
+
     [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes() const {
         return backward_workspace.has_value() ? backward_workspace->getArraySizeInBytes() : 0;
     }

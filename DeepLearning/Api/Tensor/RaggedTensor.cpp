@@ -63,6 +63,8 @@ void RaggedTensor::constructFromValuesAndOffsets() {
 
     maxTotalValues = valuesDimensions[0];
     batchSize = offsetsDimensions[0] - 1;
+    rowPartitionId = offsets.getId();
+    THOR_THROW_IF_FALSE(rowPartitionId != 0);
     THOR_THROW_IF_FALSE(maxTotalValues > 0);
     initialized = true;
 }
@@ -73,8 +75,10 @@ RaggedTensor RaggedTensor::withValues(Tensor newValues) const {
     const std::vector<uint64_t> dimensions = newValues.getDimensions();
     THOR_THROW_IF_FALSE(!dimensions.empty());
     THOR_THROW_IF_FALSE(dimensions.front() == maxTotalValues);
-    return hasMaxValuesPerRow() ? RaggedTensor(std::move(newValues), offsets, maxValuesPerRow)
-                                : RaggedTensor(std::move(newValues), offsets);
+    RaggedTensor result = hasMaxValuesPerRow() ? RaggedTensor(std::move(newValues), offsets, maxValuesPerRow)
+                                                : RaggedTensor(std::move(newValues), offsets);
+    result.rowPartitionId = rowPartitionId;
+    return result;
 }
 
 std::vector<uint64_t> RaggedTensor::getTrailingDimensions() const {

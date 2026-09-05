@@ -13,6 +13,7 @@
 #include "DeepLearning/Implementation/Diagnostics/TrainingDiagnostics.h"
 #include "DeepLearning/Implementation/Layers/LayerSubmitDiagnostics.h"
 #include "DeepLearning/Implementation/Layers/Loss.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/Expression/AutoDiff.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 using namespace std;
@@ -2383,6 +2384,23 @@ void CustomLayer::synchronizeComputeStreamForForwardInputs(uint32_t applicationI
     }
 }
 
+void CustomLayer::propagateApplicationRowPartitionHostState(uint32_t applicationIndex, uint32_t sourceInputPort) {
+    THOR_THROW_IF_FALSE(applicationIndex < applications.size());
+    THOR_THROW_IF_FALSE(sourceInputPort < inputNames.size());
+    const uint32_t sourceFlat = inputFlatIndex(applicationIndex, sourceInputPort);
+    THOR_THROW_IF_FALSE(sourceFlat < featureInputs.size());
+    THOR_THROW_IF_FALSE(featureInputs[sourceFlat].has_value());
+    const Tensor sourceCarrier = featureInputs[sourceFlat].value();
+
+    for (uint32_t outputPort = 0; outputPort < outputNames.size(); ++outputPort) {
+        const uint32_t outputFlat = outputFlatIndex(applicationIndex, outputPort);
+        THOR_THROW_IF_FALSE(outputFlat < featureOutputs.size());
+        if (!featureOutputs[outputFlat].has_value())
+            continue;
+        RowPartitionRuntime::propagateHostState(sourceCarrier, featureOutputs[outputFlat].value());
+    }
+}
+
 void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t batchSize) {
     THOR_THROW_IF_FALSE(running);
     THOR_THROW_IF_FALSE(featureInput.has_value());
@@ -2559,6 +2577,7 @@ void CustomLayer::forward(std::optional<Tensor> featureInput, bool validationPas
             writeBatchValidityMask(app.batchValidityMask, app.currentValidExampleCount, computeStream(applicationIndex));
         }
         computeFeatureOutForPass(inputFlatIndex(applicationIndex, 0), validationPass);
+        prepareApplicationOutputsForDownstream(applicationIndex);
         if (emitLayerDiagnostics) {
             computeMicros = layerSubmitDiagnosticElapsedMicros(computeStart, layerSubmitDiagnosticNow());
         }

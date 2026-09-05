@@ -4162,11 +4162,45 @@ MetricBatchStat composedMetricBatchStat(
             "', expected '" + std::string(metricAggregationName(metric.aggregation)) + "'.");
     }
 
+    if (tensorIt == statisticTensors.end()) {
+        if (metric.aggregation == MetricAggregation::RATIO) {
+            throw std::runtime_error(
+                "TrainingRuns composed ensemble evaluator ratio metric '" + metric.metricName +
+                "' did not expose internal numerator and denominator statistics.");
+        }
+        return statistic;
+    }
+
+    ThorImplementation::MetricBatchStatisticTensors& tensors = tensorIt->second;
+    const bool hasContributionCount = tensors.contributionCount.has_value();
+    if (hasContributionCount) {
+        if (metric.aggregation != MetricAggregation::MIN && metric.aggregation != MetricAggregation::MAX) {
+            throw std::runtime_error(
+                "TrainingRuns composed ensemble evaluator metric '" + metric.metricName +
+                "' unexpectedly exposed an active-contribution count.");
+        }
+        if (!tensors.readyEvent.isInitialized()) {
+            throw std::runtime_error(
+                "TrainingRuns composed ensemble evaluator extrema metric '" + metric.metricName +
+                "' exposed an active-contribution count without a ready event.");
+        }
+        tensors.readyEvent.synchronize();
+        const double contributionCount = tensorScalarAsDoubleForMetricStatistic(
+            tensors.contributionCount.value(),
+            "TrainingRuns composed ensemble evaluator metric '" + metric.metricName +
+                "' active-contribution count");
+        if (contributionCount < 0.0) {
+            throw std::runtime_error(
+                "TrainingRuns composed ensemble evaluator metric '" + metric.metricName +
+                "' produced a negative active-contribution count.");
+        }
+        statistic.hasContribution = contributionCount > 0.0;
+    }
+
     if (metric.aggregation != MetricAggregation::RATIO) {
-        if (tensorIt != statisticTensors.end() &&
-            (tensorIt->second.numerator.has_value() ||
-             tensorIt->second.denominator.has_value() ||
-             tensorIt->second.readyEvent.isInitialized())) {
+        if (tensors.zeroDenominatorMeansNoContribution || tensors.numerator.has_value() ||
+            tensors.denominator.has_value() ||
+            (tensors.readyEvent.isInitialized() && !hasContributionCount)) {
             throw std::runtime_error(
                 "TrainingRuns composed ensemble evaluator non-ratio metric '" +
                 metric.metricName + "' unexpectedly exposed ratio statistics.");
@@ -4174,13 +4208,7 @@ MetricBatchStat composedMetricBatchStat(
         return statistic;
     }
 
-    if (tensorIt == statisticTensors.end()) {
-        throw std::runtime_error(
-            "TrainingRuns composed ensemble evaluator ratio metric '" + metric.metricName +
-            "' did not expose internal numerator and denominator statistics.");
-    }
-    ThorImplementation::MetricBatchStatisticTensors& tensors = tensorIt->second;
-    if (!tensors.numerator.has_value() || !tensors.denominator.has_value() ||
+    if (hasContributionCount || !tensors.numerator.has_value() || !tensors.denominator.has_value() ||
         !tensors.readyEvent.isInitialized()) {
         throw std::runtime_error(
             "TrainingRuns composed ensemble evaluator ratio metric '" + metric.metricName +
@@ -4195,6 +4223,10 @@ MetricBatchStat composedMetricBatchStat(
         tensors.denominator.value(),
         "TrainingRuns composed ensemble evaluator metric '" + metric.metricName +
             "' denominator");
+    statistic.zeroDenominatorMeansNoContribution =
+        tensors.zeroDenominatorMeansNoContribution;
+    if (statistic.zeroDenominatorMeansNoContribution)
+        statistic.hasContribution = statistic.denominator.value() != 0.0;
     return statistic;
 }
 

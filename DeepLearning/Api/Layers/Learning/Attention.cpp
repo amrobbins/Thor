@@ -1658,7 +1658,7 @@ void Attention::Builder::verifyConfig() const {
     if (keyValueRagged &&
         (_raggedKeyInput->getBatchSize() != _raggedValueInput->getBatchSize() ||
          _raggedKeyInput->getMaxTotalValues() != _raggedValueInput->getMaxTotalValues() ||
-         _raggedKeyInput->getOffsets() != _raggedValueInput->getOffsets())) {
+         !_raggedKeyInput->sharesPartitionWith(_raggedValueInput.value()))) {
         throw std::invalid_argument(
             "Attention ragged keyInput and valueInput must use the exact same row partition and capacity.");
     }
@@ -1812,7 +1812,7 @@ void Attention::Builder::verifyConfig() const {
             requireRaggedFeatureInput(_raggedResidualInput.value(), "residualInput(RaggedTensor)");
             if (_raggedResidualInput->getBatchSize() != _raggedQueryInput->getBatchSize() ||
                 _raggedResidualInput->getMaxTotalValues() != _raggedQueryInput->getMaxTotalValues() ||
-                _raggedResidualInput->getOffsets() != _raggedQueryInput->getOffsets()) {
+                !_raggedResidualInput->sharesPartitionWith(_raggedQueryInput.value())) {
                 throw std::invalid_argument(
                     "Attention ragged residualInput must use the exact query row partition and capacity.");
             }
@@ -2348,7 +2348,7 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
         }
         if (raggedKeyInput->getBatchSize() != raggedValueInput->getBatchSize() ||
             raggedKeyInput->getMaxTotalValues() != raggedValueInput->getMaxTotalValues() ||
-            raggedKeyInput->getOffsets() != raggedValueInput->getOffsets()) {
+            !raggedKeyInput->sharesPartitionWith(raggedValueInput.value())) {
             throw std::runtime_error(
                 "Attention serialized ragged key and value inputs must use the exact same row partition and capacity.");
         }
@@ -2446,7 +2446,7 @@ void Attention::deserialize(std::shared_ptr<thor_file::TarReader>& archiveReader
         if (raggedResidualInput.has_value() &&
             (raggedResidualInput->getBatchSize() != raggedQueryInput->getBatchSize() ||
              raggedResidualInput->getMaxTotalValues() != raggedQueryInput->getMaxTotalValues() ||
-             raggedResidualInput->getOffsets() != raggedQueryInput->getOffsets())) {
+             !raggedResidualInput->sharesPartitionWith(raggedQueryInput.value()))) {
             throw std::runtime_error("Attention serialized ragged residual must use the query row partition.");
         }
     }

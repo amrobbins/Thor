@@ -295,8 +295,13 @@ class FinalEpochStatsAccumulator {
             if (!std::isfinite(value)) {
                 continue;
             }
-            metricAccumulators.add(
-                name, resolveMetricBatchStat(stats, name, value));
+            const MetricBatchStat statistic = resolveMetricBatchStat(stats, name, value);
+            metricAccumulators.add(name, statistic);
+            if (!statistic.hasContribution && !metricAccumulators.value(name).has_value()) {
+                // A population with no statistical contributions has no result.
+                // Do not let a concrete per-batch graph scalar leak into final stats.
+                finalStats.metrics.erase(name);
+            }
         }
         for (const auto& [name, value] : metricAccumulators.values()) {
             finalStats.metrics[name] = value;

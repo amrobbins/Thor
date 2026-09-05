@@ -2,12 +2,16 @@
 
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/RaggedMatmulCapacityBuckets.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <cstdint>
 #include <optional>
 #include <vector>
 
 namespace ThorImplementation {
+
+inline constexpr RaggedPartitionRequirement kBucketedCublasGemmPartitionRequirement =
+    RaggedPartitionRequirement::HOST_EXTENT;
 
 /**
  * Identifies which raw row dimensions of a row-major GEMM are controlled by the

@@ -1691,7 +1691,7 @@ TEST(IndexedNamedBatchSessionTest, ExactRaggedTailUsesEmptyPhysicalTailRowsAndRe
     EXPECT_EQ(raggedOffsetsAsUint64(firstLabels), (vector<uint64_t>{0, 2, 2}));
     EXPECT_EQ(activeRaggedInt32Values(firstLabels), (vector<int32_t>{10, 11}));
     // Recycle this queue-depth-one buffer. The next materialization must install
-    // both the next offsets payload and its matching runtime cache.
+    // both the next offsets execution mirror and its matching authoritative host partition.
     first.reset();
 
     BatchLease tail = session.leaseBatch(ExampleType::TRAIN, batchNum);

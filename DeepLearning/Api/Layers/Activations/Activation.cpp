@@ -86,7 +86,11 @@ std::shared_ptr<ThorImplementation::Layer> Activation::stampExpressionBackedActi
     if (raggedFeatureInput.has_value()) {
         const RaggedTensor& ragged = raggedFeatureInput.value();
         ThorImplementation::RaggedExpression raggedInput =
-            ThorImplementation::RaggedExpression::input("feature_input", "feature_offsets", ragged.getDescriptor());
+            ThorImplementation::RaggedExpression::input(
+                "feature_input",
+                "feature_offsets",
+                ragged.getDescriptor(),
+                ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
         ThorImplementation::RaggedExpression raggedOutput =
             epilogue.has_value()
                 ? raggedInput.mapValues([&](const Expression& inputValues) {

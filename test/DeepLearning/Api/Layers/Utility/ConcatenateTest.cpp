@@ -1,6 +1,8 @@
 #include "DeepLearning/Api/Layers/Utility/Concatenate.h"
+#include "DeepLearning/Api/Layers/Learning/FullyConnected.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/Slice.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
@@ -478,6 +480,8 @@ TEST(UtilityApiLayers, RaggedConcatenateBuildsPreservesPartitionAndStampsDedicat
                                   .concatenationAxis(1)
                                   .build();
     ASSERT_TRUE(concatenate.getUseRagged());
+    EXPECT_EQ(concatenate.getRaggedPartitionRequirementForInput(input.getOffsets()),
+              ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
     ASSERT_TRUE(concatenate.getRaggedFeatureOutput().has_value());
     const RaggedTensor output = concatenate.getRaggedFeatureOutput().value();
     EXPECT_EQ(output.getValuesDimensions(), (vector<uint64_t>{maxTotalValues, 2, 5}));
@@ -504,9 +508,88 @@ TEST(UtilityApiLayers, RaggedConcatenateBuildsPreservesPartitionAndStampsDedicat
     ASSERT_NE(physical, nullptr);
     EXPECT_EQ(physical->getType(), "RaggedConcatenate");
     ASSERT_EQ(physical->getFeatureInputs().size(), 3u);
+    ASSERT_TRUE(physical->getFeatureInputs()[2].has_value());
+    EXPECT_EQ(physical->getFeatureInputs()[2]->getDimensions(), (vector<uint64_t>{1}));
+    EXPECT_EQ(physical->getFeatureInputs()[2]->getDataType(), DataType::UINT32);
     ASSERT_EQ(physical->getFeatureOutputs().size(), 1u);
     ASSERT_TRUE(physical->getFeatureOutputs()[0].has_value());
     EXPECT_EQ(physical->getFeatureOutputs()[0]->getDimensions(), (vector<uint64_t>{maxTotalValues, 2, 5}));
+}
+
+
+TEST(UtilityApiLayers, RaggedConcatenateMaterializesManagedActiveCountWithoutFullOffsets) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t maxTotalValues = 5;
+
+    Network network("ragged_concatenate_active_count_physicalization");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT32)
+                             .trailingDimensions({4})
+                             .maxTotalValues(maxTotalValues)
+                             .maxValuesPerRow(3)
+                             .batchSize(batchSize)
+                             .build();
+
+    FullyConnected left = FullyConnected::Builder()
+                              .network(network)
+                              .featureInput(input)
+                              .numOutputFeatures(2)
+                              .hasBias(false)
+                              .weightsDataType(DataType::FP32)
+                              .computeDataType(DataType::FP32)
+                              .outputDataType(DataType::FP32)
+                              .noActivation()
+                              .build();
+    FullyConnected right = FullyConnected::Builder()
+                               .network(network)
+                               .featureInput(input)
+                               .numOutputFeatures(3)
+                               .hasBias(false)
+                               .weightsDataType(DataType::FP32)
+                               .computeDataType(DataType::FP32)
+                               .outputDataType(DataType::FP32)
+                               .noActivation()
+                               .build();
+    ASSERT_TRUE(left.getRaggedFeatureOutput().has_value());
+    ASSERT_TRUE(right.getRaggedFeatureOutput().has_value());
+
+    Concatenate concatenate = Concatenate::Builder()
+                                  .network(network)
+                                  .featureInput(left.getRaggedFeatureOutput().value())
+                                  .featureInput(right.getRaggedFeatureOutput().value())
+                                  .concatenationAxis(0)
+                                  .build();
+    ASSERT_TRUE(concatenate.getRaggedFeatureOutput().has_value());
+    NetworkOutput::Builder()
+        .network(network)
+        .name("joined_values")
+        .inputTensor(concatenate.getRaggedFeatureOutput()->getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placed =
+        network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event &event : initDoneEvents) event.synchronize();
+
+    auto& stamp = placed->getStampedNetwork(0);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    auto activeCount = stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId());
+    ASSERT_NE(activeCount, nullptr);
+    ASSERT_TRUE(activeCount->getFeatureOutput().has_value());
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDataType(), DataType::UINT32);
+
+    auto physical = dynamic_pointer_cast<ThorImplementation::RaggedConcatenate>(
+        stamp.getPhysicalLayerFromApiLayer(concatenate.getId()));
+    ASSERT_NE(physical, nullptr);
+    ASSERT_EQ(physical->getFeatureInputs().size(), 3u);
+    ASSERT_TRUE(physical->getFeatureInputs()[2].has_value());
+    EXPECT_EQ(physical->getFeatureInputs()[2]->getDimensions(), (vector<uint64_t>{1}));
 }
 
 TEST(UtilityApiLayers, RaggedConcatenateRejectsDifferentPartitionsAndDuplicateValuePorts) {

@@ -135,7 +135,10 @@ shared_ptr<ThorImplementation::Layer> Transpose::stamp(ThorImplementation::Tenso
     if (raggedFeatureInput.has_value()) {
         THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
         ThorImplementation::RaggedExpression input = ThorImplementation::RaggedExpression::input(
-            "feature_input", "feature_offsets", raggedFeatureInput->getDescriptor());
+            "feature_input",
+            "feature_offsets",
+            raggedFeatureInput->getDescriptor(),
+            ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
         ThorImplementation::RaggedExpression output = input.transposeTrailingDimensions().cast(outputDataType);
         if (epilogue.has_value()) {
             output = output.mapValues([&](const Expression& values) {

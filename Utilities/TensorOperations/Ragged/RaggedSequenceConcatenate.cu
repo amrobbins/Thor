@@ -19,22 +19,6 @@ __device__ __forceinline__ uint64_t offsetAt(void *const *offsets, uint32_t inpu
 }
 
 template <typename OffsetT>
-__global__ void produceOutputOffsetsKernel(OffsetT *outputOffsets,
-                                           void *const *inputOffsets,
-                                           uint32_t numInputs,
-                                           uint64_t batchSize) {
-    for (uint64_t row = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         row <= batchSize;
-         row += static_cast<uint64_t>(blockDim.x) * gridDim.x) {
-        uint64_t outputOffset = 0;
-        for (uint32_t input = 0; input < numInputs; ++input) {
-            outputOffset += offsetAt<OffsetT>(inputOffsets, input, row);
-        }
-        outputOffsets[row] = static_cast<OffsetT>(outputOffset);
-    }
-}
-
-template <typename OffsetT>
 __device__ __forceinline__ void rowPlacement(void *const *inputOffsets,
                                              uint32_t numInputs,
                                              uint32_t input,
@@ -115,12 +99,6 @@ __global__ void splitGradientKernel(unsigned char *const *inputGradients,
     }
 }
 
-uint32_t blocksForItems(uint64_t items, uint32_t threads = kThreads) {
-    if (items == 0) return 1;
-    const uint64_t needed = (items + threads - 1U) / threads;
-    return static_cast<uint32_t>(std::min<uint64_t>(needed, kMaxPortableBlocks));
-}
-
 uint32_t blocksForPairs(uint64_t batchSize, uint32_t numInputs) {
     if (numInputs == 0) throw std::invalid_argument("RaggedSequenceConcatenate requires at least one input.");
     if (batchSize > std::numeric_limits<uint64_t>::max() / numInputs) {
@@ -138,7 +116,6 @@ void validateOffsetSize(std::size_t bytes) {
 
 template <typename OffsetT>
 void launchForwardTyped(void *outputValues,
-                        void *outputOffsets,
                         void *inputValues[],
                         void *inputOffsets[],
                         uint32_t numInputs,
@@ -146,10 +123,6 @@ void launchForwardTyped(void *outputValues,
                         uint64_t elementsPerValue,
                         uint64_t batchSize,
                         Stream stream) {
-    produceOutputOffsetsKernel<OffsetT><<<blocksForItems(batchSize + 1), kThreads, 0, stream.getStream()>>>(
-        static_cast<OffsetT *>(outputOffsets), inputOffsets, numInputs, batchSize);
-    CUDA_CHECK(cudaGetLastError());
-
     concatenateValuesKernel<OffsetT><<<blocksForPairs(batchSize, numInputs), kThreads, 0, stream.getStream()>>>(
         static_cast<unsigned char *>(outputValues),
         reinterpret_cast<unsigned char **>(inputValues),
@@ -184,7 +157,6 @@ void launchBackwardTyped(void *inputGradients[],
 }  // namespace
 
 void launchRaggedSequenceConcatenate(void *output_values,
-                                     void *output_offsets,
                                      void *input_values[],
                                      void *input_offsets[],
                                      uint32_t num_inputs,
@@ -201,7 +173,6 @@ void launchRaggedSequenceConcatenate(void *output_values,
     ScopedGpu scopedGpu(stream.getGpuNum());
     if (offsets_element_size_bytes == sizeof(uint32_t)) {
         launchForwardTyped<uint32_t>(output_values,
-                                     output_offsets,
                                      input_values,
                                      input_offsets,
                                      num_inputs,
@@ -211,7 +182,6 @@ void launchRaggedSequenceConcatenate(void *output_values,
                                      stream);
     } else {
         launchForwardTyped<uint64_t>(output_values,
-                                     output_offsets,
                                      input_values,
                                      input_offsets,
                                      num_inputs,

@@ -702,12 +702,14 @@ bool containsOp(const PhysicalOutputs& outputs, ExprOp op) {
     return false;
 }
 
-void resolveRaggedBackwardTestDTypes(PhysicalOutputs& outputs, DataType offsets_dtype) {
+void resolveRaggedBackwardTestDTypes(PhysicalOutputs& outputs,
+                                        DataType offsets_dtype,
+                                        DataType value_dtype = DataType::FP32) {
     if (!outputs.expr) {
         throw std::runtime_error("resolveRaggedBackwardTestDTypes requires non-null outputs.expr.");
     }
 
-    std::vector<DataType> input_dtypes(outputs.expr->inputs.size(), DataType::FP32);
+    std::vector<DataType> input_dtypes(outputs.expr->inputs.size(), value_dtype);
     for (const NamedInput& input : outputs.expr->inputs) {
         if (input.slot >= input_dtypes.size()) {
             throw std::runtime_error("ragged backward test input slot is out of range.");
@@ -978,6 +980,29 @@ TEST(RaggedExpression, WrapsValuesOffsetsAndBuildsRuntimeExtentAlias) {
     EXPECT_EQ(activeCountNode.view_dims, std::vector<uint64_t>{1});
     EXPECT_EQ(activeCountNode.view_strides, std::vector<uint64_t>{1});
     EXPECT_EQ(activeCountNode.view_element_offset, descriptor.getBatchSize());
+}
+
+
+TEST(RaggedExpression, ActiveCountCarrierMarksRuntimeExtentWithoutOffsetsIndexing) {
+    const RaggedTensorDescriptor descriptor = makeDescriptor(DataType::FP32, {4}, 3, 11, DataType::UINT32);
+    const RaggedExpression ragged = RaggedExpression::input(
+        "labels.values",
+        "labels.active_count",
+        descriptor,
+        RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+
+    const MarkedValueNodes marked = markedValueNodes(ragged.getValues());
+    EXPECT_EQ(marked.marker.ragged_runtime_extent_source, RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+    EXPECT_EQ(marked.marker.ragged_runtime_batch_size, descriptor.getBatchSize());
+    EXPECT_EQ(marked.marker.ragged_runtime_max_active_values, descriptor.getMaxTotalValues());
+
+    const PhysicalExpression activeCountPhysical = ragged.getRuntimeExtent().activeValueCount.expression();
+    const ExprNode& activeCountNode = activeCountPhysical.nodes.at(activeCountPhysical.output_node);
+    EXPECT_EQ(activeCountNode.op, ExprOp::INPUT);
+    ASSERT_LT(activeCountNode.input_slot, activeCountPhysical.inputs.size());
+    EXPECT_EQ(activeCountPhysical.inputs.at(activeCountNode.input_slot).name, "labels.active_count");
+
+    EXPECT_THROW((void)ragged.segment_sum(), std::invalid_argument);
 }
 
 TEST(RaggedExpression, LogicalInputCreatesValuesAndOffsetsInputs) {
@@ -1318,6 +1343,395 @@ TEST(RaggedExpression, SegmentMeanAcceptsFp8BecauseCentralCubMeanAccumulatesInFp
 
     EXPECT_EQ(outputNode(e4m3.segment_mean()).op, ExprOp::SEGMENTED_REDUCE_MEAN);
     EXPECT_EQ(outputNode(e5m2.segment_mean()).op, ExprOp::SEGMENTED_REDUCE_MEAN);
+}
+
+TEST(RaggedExpression, OrdinarySoftmaxAndLogSoftmaxNormalizeFinalTrailingDimensionAndRemainDistinctFromSegmentedOps) {
+    for (DataType offsets_dtype : {DataType::UINT32, DataType::UINT64}) {
+        const RaggedExpression ragged =
+            RaggedExpression::input("x", makeDescriptor(DataType::FP32, {2, 3}, 3, 9, offsets_dtype));
+
+        const RaggedExpression ordinary = ragged.softmax();
+        EXPECT_TRUE(ordinary.getOffsets().isSameLogicalNode(ragged.getOffsets()));
+        EXPECT_TRUE(ordinary.getRuntimeExtent().activeValueCount.isSameLogicalNode(ragged.getRuntimeExtent().activeValueCount));
+        EXPECT_EQ(ordinary.getDescriptor(), ragged.getDescriptor());
+
+        const PhysicalExpression ordinary_physical = ordinary.getValues().expression();
+        const ExprNode& result_extent = ordinary_physical.nodes.at(ordinary_physical.output_node);
+        ASSERT_EQ(result_extent.op, ExprOp::RAGGED_VALUEWISE_EXTENT);
+        const ExprNode& softmax = ordinary_physical.nodes.at(result_extent.lhs);
+        ASSERT_EQ(softmax.op, ExprOp::SOFTMAX);
+        EXPECT_EQ(softmax.softmax_algorithm, CUDNN_SOFTMAX_ACCURATE);
+        EXPECT_EQ(softmax.softmax_mode, CUDNN_SOFTMAX_MODE_CHANNEL);
+        ASSERT_LT(softmax.lhs, ordinary_physical.nodes.size());
+        EXPECT_EQ(ordinary_physical.nodes.at(softmax.lhs).op, ExprOp::RAGGED_VALUEWISE_EXTENT)
+            << "ordinary ragged Softmax must consume the active-prefix marker directly";
+
+        const RaggedExpression log_ordinary = ragged.log_softmax();
+        const PhysicalExpression log_physical = log_ordinary.getValues().expression();
+        const ExprNode& log_extent = log_physical.nodes.at(log_physical.output_node);
+        ASSERT_EQ(log_extent.op, ExprOp::RAGGED_VALUEWISE_EXTENT);
+        const ExprNode& log_softmax = log_physical.nodes.at(log_extent.lhs);
+        ASSERT_EQ(log_softmax.op, ExprOp::SOFTMAX);
+        EXPECT_EQ(log_softmax.softmax_algorithm, CUDNN_SOFTMAX_LOG);
+        EXPECT_EQ(log_softmax.softmax_mode, CUDNN_SOFTMAX_MODE_CHANNEL);
+        ASSERT_LT(log_softmax.lhs, log_physical.nodes.size());
+        EXPECT_EQ(log_physical.nodes.at(log_softmax.lhs).op, ExprOp::RAGGED_VALUEWISE_EXTENT);
+
+        EXPECT_EQ(markedValueNodes(ragged.segment_softmax().getValues()).values.op, ExprOp::DIV);
+        EXPECT_EQ(markedValueNodes(ragged.segment_log_softmax().getValues()).values.op, ExprOp::SUB);
+        EXPECT_NE(canonicalize(Expression::outputs({{"y", ordinary.getValues()}}).physicalOutputs()),
+                  canonicalize(Expression::outputs({{"y", ragged.segment_softmax().getValues()}}).physicalOutputs()));
+        EXPECT_NE(canonicalize(Expression::outputs({{"y", log_ordinary.getValues()}}).physicalOutputs()),
+                  canonicalize(Expression::outputs({{"y", ragged.segment_log_softmax().getValues()}}).physicalOutputs()));
+    }
+}
+
+TEST(RaggedExpression, OrdinarySoftmaxRejectsScalarAndUnsupportedFloatingStorage) {
+    const RaggedExpression scalar = RaggedExpression::input("scalar", makeDescriptor(DataType::FP32, {}, 3, 9));
+    EXPECT_THROW((void)scalar.softmax(), std::invalid_argument);
+    EXPECT_THROW((void)scalar.log_softmax(), std::invalid_argument);
+
+    const RaggedExpression fp64 = RaggedExpression::input("fp64", makeDescriptor(DataType::FP64, {4}, 3, 9));
+    EXPECT_THROW((void)fp64.softmax(), std::invalid_argument);
+    EXPECT_THROW((void)fp64.log_softmax(), std::invalid_argument);
+}
+
+TEST(RaggedExpression, OrdinarySoftmaxCompilerConsumesExtentAndAutodiffUsesDedicatedBackwardBoundary) {
+    for (DataType value_dtype : {DataType::FP16, DataType::BF16, DataType::FP32}) {
+        for (bool logarithmic : {false, true}) {
+            SCOPED_TRACE(TensorDescriptor::getElementTypeName(value_dtype));
+            SCOPED_TRACE(logarithmic ? "log_softmax" : "softmax");
+            const RaggedExpression ragged =
+                RaggedExpression::input("x", makeDescriptor(value_dtype, {2, 3}, 3, 9));
+            const RaggedExpression transformed = logarithmic ? ragged.log_softmax() : ragged.softmax();
+
+            PhysicalOutputs forward = Expression::outputs({{"y", transformed.getValues()}}).physicalOutputs();
+            resolveRaggedBackwardTestDTypes(forward, DataType::UINT32, value_dtype);
+            const std::vector<PhysicalExecutionStage> forward_stages =
+                EquationCompiler::splitAtReductionBoundaries(forward);
+            size_t forward_softmax_stages = 0;
+            for (const PhysicalExecutionStage& stage : forward_stages) {
+                if (stage.kind != PhysicalExecutionStage::Kind::Softmax) {
+                    continue;
+                }
+                ++forward_softmax_stages;
+                EXPECT_EQ(stage.input_value_ids.size(), 2u);
+                const std::shared_ptr<CompiledSoftmax> compiled = EquationCompiler::compileSoftmax(stage.expr);
+                ASSERT_NE(compiled, nullptr);
+                EXPECT_TRUE(compiled->isRagged());
+                EXPECT_FALSE(compiled->backward);
+                EXPECT_EQ(compiled->input_dtype, value_dtype);
+                EXPECT_EQ(compiled->output_dtype, value_dtype);
+                EXPECT_EQ(compiled->ragged_offsets_input_slot, 1u);
+                EXPECT_EQ(compiled->ragged_batch_size, 3u);
+                EXPECT_EQ(compiled->ragged_max_active_values, 9u);
+                EXPECT_EQ(compiled->ragged_elements_per_value, 6u);
+                EXPECT_EQ(compiled->algorithm, logarithmic ? CUDNN_SOFTMAX_LOG : CUDNN_SOFTMAX_ACCURATE);
+            }
+            EXPECT_EQ(forward_softmax_stages, 1u);
+
+            PhysicalOutputs backward = buildBackwardOutputs(
+                forward,
+                {"x.values"},
+                std::unordered_map<std::string, std::string>{{"y", "dy"}},
+                std::unordered_map<std::string, DataType>{{"y", value_dtype}},
+                std::unordered_map<std::string, std::vector<uint64_t>>{
+                    {"x.values", {9, 2, 3}},
+                    {"x.offsets", {4}},
+                });
+            resolveRaggedBackwardTestDTypes(backward, DataType::UINT32, value_dtype);
+
+            size_t ragged_backward_ops = 0;
+            for (const ExprNode& node : backward.expr->nodes) {
+                ragged_backward_ops += node.op == ExprOp::RAGGED_SOFTMAX_BACKWARD ? 1u : 0u;
+                EXPECT_NE(node.op, ExprOp::REDUCE_SUM)
+                    << "ordinary ragged Softmax autodiff must not expand through capacity-wide reductions";
+            }
+            EXPECT_EQ(ragged_backward_ops, 1u);
+
+            const std::vector<PhysicalExecutionStage> backward_stages =
+                EquationCompiler::splitAtReductionBoundaries(backward);
+            size_t backward_softmax_stages = 0;
+            for (const PhysicalExecutionStage& stage : backward_stages) {
+                if (stage.kind != PhysicalExecutionStage::Kind::Softmax) {
+                    continue;
+                }
+                const std::shared_ptr<CompiledSoftmax> compiled = EquationCompiler::compileSoftmax(stage.expr);
+                ASSERT_NE(compiled, nullptr);
+                if (!compiled->backward) {
+                    continue;
+                }
+                ++backward_softmax_stages;
+                EXPECT_TRUE(compiled->isRagged());
+                EXPECT_EQ(stage.input_value_ids.size(), 3u);
+                EXPECT_EQ(compiled->input_dtype, value_dtype);
+                EXPECT_EQ(compiled->output_dtype, value_dtype);
+                EXPECT_EQ(compiled->ragged_offsets_input_slot, 2u);
+                EXPECT_EQ(compiled->ragged_batch_size, 3u);
+                EXPECT_EQ(compiled->ragged_max_active_values, 9u);
+                EXPECT_EQ(compiled->ragged_elements_per_value, 6u);
+                EXPECT_EQ(compiled->algorithm, logarithmic ? CUDNN_SOFTMAX_LOG : CUDNN_SOFTMAX_ACCURATE);
+            }
+            EXPECT_EQ(backward_softmax_stages, 1u);
+        }
+    }
+}
+
+TEST(RaggedExpression, OrdinarySoftmaxExecutionUsesExactActivePrefixAndFinalAxis) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t capacity = 5;
+    constexpr uint64_t active_values = 4;
+    constexpr uint64_t outer_per_value = 2;
+    constexpr uint64_t channels = 3;
+    constexpr float sentinel = 73.0F;
+
+    const RaggedTensorDescriptor descriptor = makeDescriptor(DataType::FP32, {outer_per_value, channels}, batch_size, capacity);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    const RaggedExpression ordinary = ragged.softmax();
+
+    std::vector<float> packed(capacity * outer_per_value * channels, std::numeric_limits<float>::quiet_NaN());
+    for (uint64_t i = 0; i < active_values * outer_per_value * channels; ++i) {
+        packed[i] = static_cast<float>((static_cast<int>(i * 7) % 19) - 8) * 0.31F;
+    }
+    Tensor x = makeGpuTensor<float>({capacity, outer_per_value, channels}, packed, stream);
+    Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0, 2, 2, 4}, stream);
+    RowPartitionRuntime(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
+        .setHostOffsets({0, 2, 2, 4});
+
+    std::vector<float> output_init(capacity * outer_per_value * channels, sentinel);
+    Tensor output = makeGpuTensor<float>({capacity, outer_per_value, channels}, output_init, stream);
+    Tensor result = runExpressionOutput(ordinary.getValues(),
+                                        {{"x.values", x}, {"x.offsets", offsets}},
+                                        "y",
+                                        stream,
+                                        output);
+    const std::vector<float> actual = copyToCpuValues(result, stream);
+
+    std::vector<float> expected(output_init);
+    for (uint64_t value = 0; value < active_values; ++value) {
+        for (uint64_t outer = 0; outer < outer_per_value; ++outer) {
+            const uint64_t base = (value * outer_per_value + outer) * channels;
+            float maximum = -std::numeric_limits<float>::infinity();
+            for (uint64_t c = 0; c < channels; ++c) maximum = std::max(maximum, packed[base + c]);
+            float sum = 0.0F;
+            for (uint64_t c = 0; c < channels; ++c) sum += std::exp(packed[base + c] - maximum);
+            for (uint64_t c = 0; c < channels; ++c) expected[base + c] = std::exp(packed[base + c] - maximum) / sum;
+        }
+    }
+    expectNear(actual, expected, 2.0e-5F);
+
+    Tensor segmented = runExpressionOutput(ragged.segment_softmax().getValues(),
+                                           {{"x.values", x}, {"x.offsets", offsets}},
+                                           "segmented",
+                                           stream);
+    const std::vector<float> segmented_values = copyToCpuValues(segmented, stream);
+    bool found_deliberate_difference = false;
+    for (uint64_t i = 0; i < active_values * outer_per_value * channels; ++i) {
+        found_deliberate_difference = found_deliberate_difference || std::fabs(segmented_values[i] - actual[i]) > 1.0e-4F;
+    }
+    EXPECT_TRUE(found_deliberate_difference)
+        << "ordinary final-axis Softmax and segmented sequence Softmax must have different semantics";
+
+    std::vector<float> dy_values(capacity * outer_per_value * channels, std::numeric_limits<float>::quiet_NaN());
+    for (uint64_t i = 0; i < active_values * outer_per_value * channels; ++i) {
+        dy_values[i] = static_cast<float>((static_cast<int>(i * 5) % 13) - 6) * 0.17F;
+    }
+    Tensor dy = makeGpuTensor<float>({capacity, outer_per_value, channels}, dy_values, stream);
+    std::vector<float> dx_init(capacity * outer_per_value * channels, sentinel);
+    Tensor dx = makeGpuTensor<float>({capacity, outer_per_value, channels}, dx_init, stream);
+    Tensor backward = runBackwardOutput(ordinary.getValues(),
+                                        {{"x.values", x}, {"x.offsets", offsets}, {"dy", dy}},
+                                        "x.values",
+                                        "dy",
+                                        stream,
+                                        dx);
+    const std::vector<float> actual_dx = copyToCpuValues(backward, stream);
+    std::vector<float> expected_dx(dx_init);
+    for (uint64_t value = 0; value < active_values; ++value) {
+        for (uint64_t outer = 0; outer < outer_per_value; ++outer) {
+            const uint64_t base = (value * outer_per_value + outer) * channels;
+            float dot = 0.0F;
+            for (uint64_t c = 0; c < channels; ++c) dot += dy_values[base + c] * expected[base + c];
+            for (uint64_t c = 0; c < channels; ++c) {
+                expected_dx[base + c] = expected[base + c] * (dy_values[base + c] - dot);
+            }
+        }
+    }
+    expectNear(actual_dx, expected_dx, 3.0e-5F);
+}
+
+TEST(RaggedExpression, OrdinarySoftmaxReusesOneStampedStateAcrossShortLongAllEmptyShortActivePrefixes) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 3;
+    constexpr uint64_t capacity = 6;
+    constexpr uint64_t channels = 3;
+    constexpr float sentinel = 411.0F;
+
+    const RaggedTensorDescriptor descriptor =
+        makeDescriptor(DataType::FP32, {channels}, batch_size, capacity, DataType::UINT32);
+    const RaggedExpression ordinary = RaggedExpression::input("x", descriptor).softmax();
+
+    Tensor x = makeGpuTensor<float>({capacity, channels},
+                                    std::vector<float>(capacity * channels, std::numeric_limits<float>::quiet_NaN()),
+                                    stream);
+    Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 1U, 1U, 2U}, stream);
+    RowPartitionRuntime partition(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32));
+    partition.setHostOffsets({0, 1, 1, 2});
+
+    Tensor output(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, channels}));
+    output.fill(sentinel, stream);
+
+    FusedEquation equation =
+        FusedEquation::compile(Expression::outputs({{"y", ordinary.getValues()}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"x.values", x}, {"x.offsets", offsets}},
+                                               stream,
+                                               {},
+                                               {{"y", output}});
+
+    auto run_case = [&](const std::vector<uint32_t>& device_offsets, int seed) {
+        ASSERT_EQ(device_offsets.size(), batch_size + 1);
+        const uint64_t active_values = device_offsets.back();
+
+        std::vector<float> packed(capacity * channels, std::numeric_limits<float>::quiet_NaN());
+        for (uint64_t i = 0; i < active_values * channels; ++i) {
+            packed[i] = static_cast<float>((static_cast<int>(i * 7) + seed * 5) % 23 - 11) * 0.21F;
+        }
+        overwriteGpuTensor<float>(x, packed, stream);
+        overwriteGpuTensor<uint32_t>(offsets, device_offsets, stream);
+        std::vector<uint64_t> host_offsets(device_offsets.begin(), device_offsets.end());
+        partition.setHostOffsets(std::move(host_offsets));
+        output.fill(sentinel, stream);
+
+        plan.run();
+        stream.synchronize();
+        const std::vector<float> actual = copyToCpuValues(plan.output("y"), stream);
+        std::vector<float> expected(capacity * channels, sentinel);
+        for (uint64_t value = 0; value < active_values; ++value) {
+            const uint64_t base = value * channels;
+            float maximum = -std::numeric_limits<float>::infinity();
+            for (uint64_t c = 0; c < channels; ++c) maximum = std::max(maximum, packed[base + c]);
+            float denominator = 0.0F;
+            for (uint64_t c = 0; c < channels; ++c) denominator += std::exp(packed[base + c] - maximum);
+            for (uint64_t c = 0; c < channels; ++c) {
+                expected[base + c] = std::exp(packed[base + c] - maximum) / denominator;
+            }
+        }
+        expectNear(actual, expected, 3.0e-5F);
+    };
+
+    run_case({0U, 1U, 1U, 2U}, 1);  // short, with an interleaved empty row
+    run_case({0U, 2U, 4U, 5U}, 2);  // long
+    run_case({0U, 0U, 0U, 0U}, 3);  // all empty: true no-op over output storage
+    run_case({0U, 0U, 1U, 2U}, 4);  // short again, different partition
+}
+
+TEST(RaggedExpression, OrdinarySoftmaxRuntimeRequiresAuthoritativeHostPartition) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t capacity = 4;
+    constexpr uint64_t channels = 3;
+    const RaggedExpression ordinary =
+        RaggedExpression::input("x", makeDescriptor(DataType::FP32, {channels}, batch_size, capacity)).softmax();
+
+    Tensor x = makeGpuTensor<float>({capacity, channels},
+                                    {0.1F, 0.2F, 0.3F,
+                                     0.4F, 0.5F, 0.6F,
+                                     99.0F, 99.0F, 99.0F,
+                                     99.0F, 99.0F, 99.0F},
+                                    stream);
+    Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 1U, 2U}, stream);
+
+    FusedEquation equation =
+        FusedEquation::compile(Expression::outputs({{"y", ordinary.getValues()}}).physicalOutputs(), 0);
+    StampedExecutionPlan plan = equation.stamp({{"x.values", x}, {"x.offsets", offsets}}, stream);
+
+    try {
+        plan.run();
+        FAIL() << "Expected ordinary ragged Softmax to require an authoritative host row partition.";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("authoritative host row partition"), std::string::npos);
+    }
+}
+
+TEST(RaggedExpression, OrdinaryLogSoftmaxExecutionSupportsUint64OffsetsAndDedicatedBackward) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t capacity = 4;
+    constexpr uint64_t active_values = 3;
+    constexpr uint64_t outer_per_value = 2;
+    constexpr uint64_t channels = 2;
+    constexpr float sentinel = -91.0F;
+
+    const RaggedTensorDescriptor descriptor =
+        makeDescriptor(DataType::FP32, {outer_per_value, channels}, batch_size, capacity, DataType::UINT64);
+    const RaggedExpression ragged = RaggedExpression::input("x", descriptor);
+    const RaggedExpression log_softmax = ragged.log_softmax();
+
+    std::vector<float> packed(capacity * outer_per_value * channels, std::numeric_limits<float>::quiet_NaN());
+    for (uint64_t i = 0; i < active_values * outer_per_value * channels; ++i) {
+        packed[i] = static_cast<float>((static_cast<int>(i * 11) % 17) - 8) * 0.23F;
+    }
+    Tensor x = makeGpuTensor<float>({capacity, outer_per_value, channels}, packed, stream);
+    Tensor offsets = makeGpuTensor<uint64_t>({batch_size + 1}, {0, 1, 3}, stream);
+    RowPartitionRuntime(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT64))
+        .setHostOffsets({0, 1, 3});
+
+    Tensor y = makeGpuTensor<float>({capacity, outer_per_value, channels},
+                                    std::vector<float>(capacity * outer_per_value * channels, sentinel),
+                                    stream);
+    Tensor result = runExpressionOutput(log_softmax.getValues(),
+                                        {{"x.values", x}, {"x.offsets", offsets}},
+                                        "y",
+                                        stream,
+                                        y);
+    const std::vector<float> actual = copyToCpuValues(result, stream);
+    std::vector<float> expected(capacity * outer_per_value * channels, sentinel);
+    for (uint64_t value = 0; value < active_values; ++value) {
+        for (uint64_t outer = 0; outer < outer_per_value; ++outer) {
+            const uint64_t base = (value * outer_per_value + outer) * channels;
+            const float maximum = std::max(packed[base], packed[base + 1]);
+            const float log_denom = maximum + std::log(std::exp(packed[base] - maximum) + std::exp(packed[base + 1] - maximum));
+            expected[base] = packed[base] - log_denom;
+            expected[base + 1] = packed[base + 1] - log_denom;
+        }
+    }
+    expectNear(actual, expected, 3.0e-5F);
+
+    std::vector<float> dy_values(capacity * outer_per_value * channels, std::numeric_limits<float>::quiet_NaN());
+    for (uint64_t i = 0; i < active_values * outer_per_value * channels; ++i) {
+        dy_values[i] = static_cast<float>((static_cast<int>(i * 3) % 9) - 4) * 0.19F;
+    }
+    Tensor dy = makeGpuTensor<float>({capacity, outer_per_value, channels}, dy_values, stream);
+    Tensor dx = makeGpuTensor<float>({capacity, outer_per_value, channels},
+                                     std::vector<float>(capacity * outer_per_value * channels, sentinel),
+                                     stream);
+    Tensor backward = runBackwardOutput(log_softmax.getValues(),
+                                        {{"x.values", x}, {"x.offsets", offsets}, {"dy", dy}},
+                                        "x.values",
+                                        "dy",
+                                        stream,
+                                        dx);
+    const std::vector<float> actual_dx = copyToCpuValues(backward, stream);
+    std::vector<float> expected_dx(capacity * outer_per_value * channels, sentinel);
+    for (uint64_t value = 0; value < active_values; ++value) {
+        for (uint64_t outer = 0; outer < outer_per_value; ++outer) {
+            const uint64_t base = (value * outer_per_value + outer) * channels;
+            const float sum_dy = dy_values[base] + dy_values[base + 1];
+            for (uint64_t c = 0; c < channels; ++c) {
+                expected_dx[base + c] = dy_values[base + c] - std::exp(expected[base + c]) * sum_dy;
+            }
+        }
+    }
+    expectNear(actual_dx, expected_dx, 4.0e-5F);
 }
 
 TEST(RaggedExpression, SegmentSoftmaxPreservesOffsetsAndRuntimeExtentForScalarValues) {
@@ -2599,9 +3013,9 @@ TEST(RaggedExpression, PackedRmsNormC6OwnsFiniteExecutableFamiliesAndNeverPrepar
     for (const uint64_t active_rows : std::vector<uint64_t>{7, 9, capacity}) {
         SCOPED_TRACE("activeRows=" + std::to_string(active_rows));
         RowPartitionRuntime(offsets_a, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
-            .setHostActiveValueCount(active_rows);
+            .setHostOffsets({0, active_rows, active_rows});
         RowPartitionRuntime(offsets_b, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
-            .setHostActiveValueCount(active_rows);
+            .setHostOffsets({0, active_rows, active_rows});
         stamp_a->runOn(stream_a);
         stamp_b->runOn(stream_b);
         standalone_backward.runOn(stream_a);
@@ -2675,9 +3089,9 @@ TEST(RaggedExpression, PackedLayerNormUsesFiniteRmsNormCapacityFamilyWithoutTail
     const uint64_t preparations_after_stamping = cudnnFrontendExecutablePreparationCountForTests();
 
     RowPartitionRuntime(offsets_a, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
-        .setHostActiveValueCount(7);
+        .setHostOffsets({0, 7, 7});
     RowPartitionRuntime(offsets_b, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
-        .setHostActiveValueCount(7);
+        .setHostOffsets({0, 7, 7});
     stamp_a->runOn(stream_a);
     stamp_b->runOn(stream_b);
     stream_a.synchronize();
@@ -2701,9 +3115,9 @@ TEST(RaggedExpression, PackedLayerNormUsesFiniteRmsNormCapacityFamilyWithoutTail
     // Crossing into the 16-row bucket must select another executable that was
     // already prepared when the stamp was built.
     RowPartitionRuntime(offsets_a, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
-        .setHostActiveValueCount(9);
+        .setHostOffsets({0, 9, 9});
     RowPartitionRuntime(offsets_b, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
-        .setHostActiveValueCount(9);
+        .setHostOffsets({0, 9, 9});
     stamp_a->runOn(stream_a);
     stamp_b->runOn(stream_b);
     stream_a.synchronize();
@@ -2800,7 +3214,7 @@ TEST(RaggedExpression, PackedMatmulForwardAndAutodiffUseOffsetsRuntimeWithoutVal
                                           stream);
     Tensor offsets = makeGpuTensor<uint32_t>({batch_size + 1}, {0U, 1U, 3U}, stream);
     RowPartitionRuntime(offsets, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
-        .setHostActiveValueCount(active_rows);
+        .setHostOffsets({0, active_rows, active_rows});
 
 
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
@@ -3375,8 +3789,7 @@ TEST(RaggedExpression, CausalConv1dForwardRespectsRowsAndPoisonedCapacity) {
     Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
     RowPartitionRuntime partition(gpu_offsets,
                                   RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
-    partition.setHostActiveValueCount(offsets.back());
-    partition.setHostMaxActiveRowLength(4);
+    partition.setHostOffsets(offsets);
     Tensor output_storage = makeGpuTensor<float>(
         {max_total_values, output_channels},
         std::vector<float>(max_total_values * output_channels, inactive_sentinel),
@@ -3434,8 +3847,7 @@ TEST(RaggedExpression, CausalConv1dForwardSupportsDilationAndUint64Offsets) {
     Tensor gpu_offsets = makeGpuTensor<uint64_t>({batch_size + 1}, offsets, stream);
     RowPartitionRuntime partition(gpu_offsets,
                                   RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT64, max_total_values));
-    partition.setHostActiveValueCount(offsets.back());
-    partition.setHostMaxActiveRowLength(5);
+    partition.setHostOffsets(offsets);
     Tensor output_storage = makeGpuTensor<float>(
         {max_total_values, output_channels},
         std::vector<float>(max_total_values * output_channels, inactive_sentinel),
@@ -3507,8 +3919,7 @@ TEST(RaggedExpression, CausalConv1dForwardSupportsFp16Bf16AndFp32) {
     Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
     RowPartitionRuntime partition(gpu_offsets,
                                   RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
-    partition.setHostActiveValueCount(offsets.back());
-    partition.setHostMaxActiveRowLength(3);
+    partition.setHostOffsets(offsets);
     for (DataType dtype : {DataType::FP16, DataType::BF16, DataType::FP32}) {
         SCOPED_TRACE(TensorDescriptor::getElementTypeName(dtype));
         Tensor gpu_values = makeGpuTensorFromFloats({max_total_values, input_channels}, values, dtype, stream);
@@ -3535,7 +3946,7 @@ TEST(RaggedExpression, CausalConv1dForwardSupportsFp16Bf16AndFp32) {
     }
 }
 
-TEST(RaggedExpression, CausalConv1dRuntimeFailsLoudlyWhenProducerOmitsMaxActiveRowLength) {
+TEST(RaggedExpression, CausalConv1dRuntimeRequiresAuthoritativeHostPartition) {
     REQUIRE_CUDA_DEVICE();
 
     constexpr uint64_t batch_size = 2;
@@ -3565,10 +3976,9 @@ TEST(RaggedExpression, CausalConv1dRuntimeFailsLoudlyWhenProducerOmitsMaxActiveR
 
     try {
         plan.run();
-        FAIL() << "Expected ragged Conv1D to reject missing max_active_row_length metadata.";
+        FAIL() << "Expected ragged Conv1D to reject a missing authoritative host row partition.";
     } catch (const std::runtime_error& error) {
-        EXPECT_NE(std::string(error.what()).find("max_active_row_length"), std::string::npos);
-        EXPECT_NE(std::string(error.what()).find("implicit device-to-host"), std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("authoritative host row partition"), std::string::npos);
     }
 }
 
@@ -3616,12 +4026,12 @@ TEST(RaggedExpression, CausalConv1dT7R2PaddedCudnnMatchesIndependentDenseRows) {
     const RaggedExpression result =
         input.causalConv1d(filter_expr, output_channels, kernel_width, dilation, DataType::FP32, DataType::FP32);
 
-    // T7R2 requires only scalar dispatch metadata; no full host offsets mirror is needed.
+    // RP1 requires the complete authoritative host partition even when the
+    // physical consumer ultimately uses only derived dispatch scalars.
     Tensor scalar_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
     RowPartitionRuntime scalar_partition(
         scalar_offsets, RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
-    scalar_partition.setHostActiveValueCount(offsets.back());
-    scalar_partition.setHostMaxActiveRowLength(9);
+    scalar_partition.setHostOffsets(offsets);
     Tensor scalar_output = makeGpuTensor<float>(
         {max_total_values, output_channels},
         std::vector<float>(max_total_values * output_channels, inactive_sentinel),
@@ -4872,8 +5282,8 @@ TEST(RaggedExpression, CausalConv1dT7R5PrebuildsFixedPlanFamilyBeforeExecutionAn
         EXPECT_EQ(diagnostics.front().cudnn_workspace_bytes, placement_workspace_bytes);
     }
 
-    // A generic offsets write invalidates the host mirror; publish the new
-    // already-known metadata after the copy, exactly as NetworkInput does.
+    // Rebind the authoritative host partition alongside the execution-mirror
+    // update. Generic mirror writes do not redefine host semantics.
     overwriteGpuTensor<uint32_t>(gpu_offsets, second_offsets32, stream);
     partition.setHostOffsets(second_offsets);
     plan.run();

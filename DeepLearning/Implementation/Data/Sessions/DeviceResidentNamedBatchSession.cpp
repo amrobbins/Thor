@@ -437,8 +437,7 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
             requirement.raggedTensorDescriptor->getMaxTotalValues(),
             requirement.raggedTensorDescriptor->getMaxValuesPerRowOrZero());
         RowPartitionRuntime& rowPartition = storage.raggedTensors.at(field.name).getRowPartitionRuntime();
-        rowPartition.setHostActiveValueCount(extent.activeValueCount);
-        rowPartition.setHostMaxActiveRowLength(extent.maxActiveRowLength);
+        rowPartition.setHostOffsets(extent.hostOffsets);
     }
 
     runtime.rowIndicesDevice.copyFromAsync(

@@ -20,6 +20,15 @@ struct MetricBatchStat {
     // statistics, not public graph outputs or serialized runtime state.
     std::optional<double> numerator{};
     std::optional<double> denominator{};
+    // Metrics can explicitly state that this batch had no statistical
+    // contribution (for example, an all-empty ragged extremum or a ragged
+    // WeightedMean with zero total active weight). The scalar value is then
+    // only a physical graph output and must be ignored by epoch aggregation.
+    bool hasContribution = true;
+    // Metric-specific RATIO contract. Generic ratio metrics retain zero-denominator
+    // sufficient statistics; only metrics that explicitly publish this bit may
+    // reinterpret an exact zero denominator as no statistical contribution.
+    bool zeroDenominatorMeansNoContribution = false;
 };
 
 [[nodiscard]] const char* trainingPhaseName(TrainingEventPhase phase);

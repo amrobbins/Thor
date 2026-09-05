@@ -143,7 +143,11 @@ shared_ptr<ThorImplementation::Layer> TypeConverter::stamp(ThorImplementation::T
         THOR_THROW_IF_FALSE(raggedFeatureOutput.has_value());
         const RaggedTensor& raggedInput = raggedFeatureInput.value();
         ThorImplementation::RaggedExpression input =
-            ThorImplementation::RaggedExpression::input("feature_input", "feature_offsets", raggedInput.getDescriptor());
+            ThorImplementation::RaggedExpression::input(
+                "feature_input",
+                "feature_offsets",
+                raggedInput.getDescriptor(),
+                ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
         ThorImplementation::RaggedExpression output = input.cast(outputDataType);
         if (output.getDescriptor() != raggedFeatureOutput->getDescriptor()) {
             throw runtime_error("Ragged TypeConverter expression output descriptor does not match its API output.");

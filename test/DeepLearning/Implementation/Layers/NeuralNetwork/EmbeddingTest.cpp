@@ -367,7 +367,7 @@ struct EmbeddingNetworkFixture {
 
 struct RaggedEmbeddingNetworkFixture {
     std::shared_ptr<NetworkInput> valuesInput;
-    std::shared_ptr<NetworkInput> offsetsInput;
+    std::shared_ptr<NetworkInput> activeCountInput;
     std::shared_ptr<Embedding> embedding;
     std::shared_ptr<EmbeddingErrorSink> sink;
     std::shared_ptr<PhysicalParameter> weightsParameter;
@@ -500,8 +500,8 @@ RaggedEmbeddingNetworkFixture makeRaggedEmbeddingNetwork(uint64_t vocabularySize
                                                          float learningRate) {
     RaggedEmbeddingNetworkFixture f;
     f.valuesInput = std::make_shared<NetworkInput>(gpuPlacement, DataType::UINT32, std::vector<uint64_t>{maxTotalValues});
-    f.offsetsInput =
-        std::make_shared<NetworkInput>(gpuPlacement, offsetsDataType, std::vector<uint64_t>{static_cast<uint64_t>(batchSize) + 1});
+    f.activeCountInput =
+        std::make_shared<NetworkInput>(gpuPlacement, offsetsDataType, std::vector<uint64_t>{1});
     f.weightsParameter =
         std::make_shared<PhysicalParameter>("weights", true, std::vector<uint64_t>{vocabularySize, embeddingDim}, DataType::FP32);
     f.optimizer = std::make_shared<Sgd>(1002, learningRate, /*decay=*/0.0f, /*momentum=*/0.0f, /*useNesterovMomentum=*/false);
@@ -521,19 +521,19 @@ RaggedEmbeddingNetworkFixture makeRaggedEmbeddingNetwork(uint64_t vocabularySize
                                                                     .offsetsDataType = offsetsDataType});
     f.sink = std::make_shared<EmbeddingErrorSink>();
 
-    // One logical ragged application is represented physically as values port 0
-    // and offsets port 1.  Only the values output participates in backprop.
+    // RP6B represents this direct physical ragged application as values port 0
+    // plus the managed active-count scalar on port 1. Only values backpropagate.
     f.valuesInput->connectToNextLayer(f.embedding.get(), /*driverConnectionType=*/0, /*loaderConnectionType=*/0);
-    f.offsetsInput->connectToNextLayer(f.embedding.get(), /*driverConnectionType=*/0, /*loaderConnectionType=*/1);
+    f.activeCountInput->connectToNextLayer(f.embedding.get(), /*driverConnectionType=*/0, /*loaderConnectionType=*/1);
     f.embedding->connectToNextLayer(f.sink.get(), /*driverConnectionType=*/0);
 
     f.valuesInput->compile();
-    f.offsetsInput->compile();
+    f.activeCountInput->compile();
     f.embedding->compile();
     f.sink->compile();
 
     f.valuesInput->initialize();
-    f.offsetsInput->initialize();
+    f.activeCountInput->initialize();
     f.embedding->initialize();
     f.sink->initialize();
     return f;
@@ -545,7 +545,16 @@ void runRaggedEmbeddingTrainingPass(RaggedEmbeddingNetworkFixture& f,
                                     const std::vector<float>& upstreamGradient,
                                     uint32_t batchSize) {
     f.valuesInput->forward(cpuIndices, /*validationPass=*/false, batchSize);
-    f.offsetsInput->forward(cpuOffsets, /*validationPass=*/false, batchSize);
+
+    Tensor cpuActiveCount(cpuOffsets.getPlacement(), TensorDescriptor(cpuOffsets.getDataType(), {1}));
+    if (cpuOffsets.getDataType() == DataType::UINT32) {
+        cpuActiveCount.getMemPtr<uint32_t>()[0] = cpuOffsets.getMemPtr<uint32_t>()[batchSize];
+    } else if (cpuOffsets.getDataType() == DataType::UINT64) {
+        cpuActiveCount.getMemPtr<uint64_t>()[0] = cpuOffsets.getMemPtr<uint64_t>()[batchSize];
+    } else {
+        throw std::runtime_error("Ragged Embedding test received a non-canonical offsets dtype.");
+    }
+    f.activeCountInput->forward(cpuActiveCount, /*validationPass=*/false, batchSize);
 
     std::vector<Stream> dataStreams = f.embedding->getStreams();
     ASSERT_EQ(dataStreams.size(), 2u);

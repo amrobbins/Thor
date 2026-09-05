@@ -2,10 +2,13 @@
 
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "Utilities/Common/Stream.h"
+#include "Utilities/TensorOperations/Ragged/RaggedPartitionRequirement.h"
 
 #include <cstdint>
 
 namespace ThorImplementation {
+
+inline constexpr RaggedPartitionRequirement kRaggedGatherPartitionRequirement = RaggedPartitionRequirement::DEVICE_OFFSETS;
 
 // Gather source values with row-local UINT32/UINT64 indices. source_offsets
 // defines source partition P and indices_offsets defines destination partition

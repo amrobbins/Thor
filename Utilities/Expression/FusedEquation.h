@@ -310,6 +310,59 @@ struct CompiledExecutionStage {
         throw std::runtime_error("CompiledExecutionStage::outputDType encountered unknown stage kind.");
     }
 
+    [[nodiscard]] RaggedPartitionRequirement raggedPartitionRequirement() const {
+        auto missingPayload = [&]() -> RaggedPartitionRequirement {
+            throw std::runtime_error("CompiledExecutionStage::raggedPartitionRequirement missing payload for stage kind " +
+                                     kindToString(kind) + ".");
+        };
+
+        switch (kind) {
+            case Kind::FusedKernel:
+                return flat ? flat->raggedPartitionRequirement() : missingPayload();
+            case Kind::CudaKernel:
+            case Kind::Reduction:
+            case Kind::ArgMinMax:
+            case Kind::EmbeddingLookup:
+            case Kind::InPlaceRope:
+            case Kind::Convolution:
+            case Kind::ConvolutionBackward:
+                return RaggedPartitionRequirement::NONE;
+            case Kind::SegmentedReduction:
+                return segmented_reduction ? segmented_reduction->raggedPartitionRequirement() : missingPayload();
+            case Kind::SegmentedBroadcast:
+                return segmented_broadcast ? segmented_broadcast->raggedPartitionRequirement() : missingPayload();
+            case Kind::RaggedConv1dCausal:
+                return ragged_conv1d_causal ? ragged_conv1d_causal->raggedPartitionRequirement() : missingPayload();
+            case Kind::RaggedConv1dCausalBackwardData:
+                return ragged_conv1d_causal_backward_data ? ragged_conv1d_causal_backward_data->raggedPartitionRequirement()
+                                                          : missingPayload();
+            case Kind::RaggedConv1dCausalBackwardFilter:
+                return ragged_conv1d_causal_backward_filter ? ragged_conv1d_causal_backward_filter->raggedPartitionRequirement()
+                                                            : missingPayload();
+            case Kind::Scan:
+                return scan ? scan->raggedPartitionRequirement() : missingPayload();
+            case Kind::Softmax:
+                return softmax ? softmax->raggedPartitionRequirement() : missingPayload();
+            case Kind::RmsNorm:
+                return rms_norm ? rms_norm->raggedPartitionRequirement() : missingPayload();
+            case Kind::LayerNorm:
+                return layer_norm ? layer_norm->raggedPartitionRequirement() : missingPayload();
+            case Kind::RmsNormBackward:
+                return rms_norm_backward ? rms_norm_backward->raggedPartitionRequirement() : missingPayload();
+            case Kind::Matmul:
+                return matmul ? matmul->raggedPartitionRequirement() : missingPayload();
+            case Kind::Attention:
+                return attention ? attention->raggedPartitionRequirement() : missingPayload();
+            case Kind::AttentionBackward:
+                return attention_backward ? attention_backward->raggedPartitionRequirement() : missingPayload();
+            case Kind::ReduceMinMaxBackward:
+                return reduce_minmax_backward ? reduce_minmax_backward->raggedPartitionRequirement() : missingPayload();
+            case Kind::ScanMinMaxBackward:
+                return scan_minmax_backward ? scan_minmax_backward->raggedPartitionRequirement() : missingPayload();
+        }
+        throw std::runtime_error("CompiledExecutionStage::raggedPartitionRequirement encountered unknown stage kind.");
+    }
+
     const std::vector<ParameterFanOverride> parameter_fan_overrides;
 
     CompiledExecutionStage(const PhysicalExpression& expr,
@@ -603,6 +656,14 @@ struct CompiledOutputs {
     // a retained padded region anchored by at least one ragged Conv1D. The map
     // value is the canonical offsets value id for the region.
     std::unordered_map<uint32_t, uint32_t> padded_ragged_fused_stage_offsets;
+
+    [[nodiscard]] RaggedPartitionRequirement raggedPartitionRequirement() const {
+        RaggedPartitionRequirement requirements = RaggedPartitionRequirement::NONE;
+        for (const CompiledExecutionStage& stage : stages) {
+            requirements |= stage.raggedPartitionRequirement();
+        }
+        return requirements;
+    }
 };
 
 struct RuntimeDTypeKey {
@@ -814,7 +875,7 @@ class FusedEquation {
                                                                    const std::vector<uint64_t>& requested_output_shape) const;
 
     [[nodiscard]] std::shared_ptr<StampedSoftmax> stampSoftmax(const std::shared_ptr<CompiledSoftmax>& compiledStage,
-                                                               Tensor& input,
+                                                               const std::vector<Tensor>& inputs,
                                                                const std::optional<Tensor>& preallocatedOutput,
                                                                const Stream& stream,
                                                                const std::vector<uint64_t>& requested_output_shape) const;

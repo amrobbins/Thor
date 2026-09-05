@@ -1311,6 +1311,65 @@ TEST(CustomLayerApi, RaggedSingleInputPreservesPartitionAndPlaces) {
     ASSERT_NE(placed, nullptr);
 }
 
+
+TEST(CustomLayerApi, RaggedPointwiseMaterializesManagedActiveCountWithoutFullOffsets) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Ragged CustomLayer placement test requires a GPU";
+
+    constexpr uint32_t batchSize = 3;
+    constexpr uint64_t capacity = 8;
+    Api::Network network("custom_layer_ragged_active_count_physicalization");
+    Api::RaggedTensor input = Api::RaggedNetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .valuesDataType(DataType::FP32)
+                                  .offsetsDataType(DataType::UINT32)
+                                  .trailingDimensions({4})
+                                  .maxTotalValues(capacity)
+                                  .maxValuesPerRow(4)
+                                  .batchSize(batchSize)
+                                  .build();
+
+    Impl::Expression x = Impl::Expression::input("x", DataType::FP32, DataType::FP32);
+    Impl::ExpressionDefinition definition =
+        Impl::ExpressionDefinition::fromOutputs(Impl::Expression::outputs({{"y", x.gelu() + x}}));
+    Api::CustomLayer custom = Api::CustomLayer::Builder()
+                                  .network(network)
+                                  .expression(Impl::DynamicExpression::fromExpressionDefinition(definition))
+                                  .inputNames({"x"})
+                                  .outputNames({"y"})
+                                  .inputInterface(Api::CustomLayer::RaggedTensorMap{{"x", input}})
+                                  .build();
+
+    Api::RaggedTensor output = custom.getRaggedOutput("y");
+    Api::NetworkOutput::Builder()
+        .network(network)
+        .name("result_values")
+        .inputTensor(output.getValues())
+        .dataType(DataType::FP32)
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, true);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+
+    auto& stamp = placed->getStampedNetwork(0);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    auto activeCount = stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId());
+    ASSERT_NE(activeCount, nullptr);
+    ASSERT_TRUE(activeCount->getFeatureOutput().has_value());
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDataType(), DataType::UINT32);
+
+    auto physical = std::dynamic_pointer_cast<Impl::RaggedCustomLayer>(
+        stamp.getPhysicalLayerFromApiLayer(custom.getId()));
+    ASSERT_NE(physical, nullptr);
+    ASSERT_EQ(physical->getFeatureInputs().size(), 2u);
+    ASSERT_TRUE(physical->getFeatureInputs()[1].has_value());
+    EXPECT_EQ(physical->getFeatureInputs()[1]->getDimensions(), (vector<uint64_t>{1}));
+}
+
 TEST(CustomLayerApi, RaggedCompositePointwiseExpressionStampsAsSingleRaggedCustomLayer) {
     if (MachineEvaluator::instance().getNumGpus() == 0)
         GTEST_SKIP() << "Ragged CustomLayer placement test requires a GPU";

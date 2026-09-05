@@ -1588,8 +1588,6 @@ UtilityApiLayers.RaggedSequenceConcatenate*:
 RaggedSequenceConcatenate.*:
 UtilityApiLayers.RaggedSequenceSlice*:
 RaggedSequenceSlice.*:
-UtilityApiLayers.RaggedFilter*:
-RaggedFilter.*:
 UtilityApiLayers.RaggedGather*:
 RaggedGather.*:
 UtilityApiLayers.RaggedDenseAdapters*:

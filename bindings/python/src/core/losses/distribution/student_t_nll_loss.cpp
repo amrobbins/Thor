@@ -132,8 +132,8 @@ void validateRaggedArguments(const RaggedTensor& location,
     if (!isFloatingDType(location.getValuesDataType()) || !isFloatingDType(logScale.getValuesDataType()) ||
         !isFloatingDType(labels.getValuesDataType()))
         throw nb::value_error("StudentTNLLLoss instance: ragged location, log_scale, and labels must use fp16 or fp32 dtype.");
-    if (location.getOffsets() != logScale.getOffsets() || location.getOffsets() != labels.getOffsets())
-        throw nb::value_error("StudentTNLLLoss instance: ragged location, log_scale, and labels must use the exact same row partition tensor.");
+    if (!location.sharesPartitionWith(logScale) || !location.sharesPartitionWith(labels))
+        throw nb::value_error("StudentTNLLLoss instance: ragged location, log_scale, and labels must use the exact same row partition.");
     if (location.getBatchSize() != logScale.getBatchSize() || location.getBatchSize() != labels.getBatchSize() ||
         location.getMaxTotalValues() != logScale.getMaxTotalValues() || location.getMaxTotalValues() != labels.getMaxTotalValues() ||
         location.getTrailingDimensions() != logScale.getTrailingDimensions() || location.getTrailingDimensions() != labels.getTrailingDimensions())
@@ -142,8 +142,8 @@ void validateRaggedArguments(const RaggedTensor& location,
         const RaggedTensor& dof = learnedLogDegreesOfFreedom.value();
         if (!isFloatingDType(dof.getValuesDataType()))
             throw nb::value_error("StudentTNLLLoss instance: learned_log_degrees_of_freedom must use fp16 or fp32 dtype.");
-        if (dof.getOffsets() != location.getOffsets())
-            throw nb::value_error("StudentTNLLLoss instance: ragged learned_log_degrees_of_freedom must use the exact same row partition tensor.");
+        if (!dof.sharesPartitionWith(location))
+            throw nb::value_error("StudentTNLLLoss instance: ragged learned_log_degrees_of_freedom must use the exact same row partition.");
         if (dof.getBatchSize() != location.getBatchSize() || dof.getMaxTotalValues() != location.getMaxTotalValues() ||
             dof.getTrailingDimensions() != location.getTrailingDimensions())
             throw nb::value_error("StudentTNLLLoss instance: ragged learned_log_degrees_of_freedom must have identical value geometry.");

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Ragged/RaggedConcatenate.h"
@@ -19,16 +20,16 @@
 namespace ThorImplementation {
 
 // Concatenate canonical rank-1 RaggedTensor packed values along a trailing
-// value axis. The final input port is the shared structural offsets tensor.
-// Forward and backward kernels use offsets[batchSize] on-device and therefore
-// never read inactive packed capacity.
+// value axis. The final input port is the shared managed [1] active-count
+// carrier. Its payload bounds the GPU active prefix while its published host
+// partition state is propagated to the partition-preserving output values.
 class RaggedConcatenate : public MultiConnectionLayer {
    public:
     RaggedConcatenate(unsigned int valuesAxis, uint32_t expectedValueInputs, uint64_t batchSize)
         : axis(valuesAxis), valueInputCount(expectedValueInputs), batchSize(batchSize) {
         if (valueInputCount < 2) throw std::invalid_argument("RaggedConcatenate requires at least two values inputs.");
         if (batchSize == 0) throw std::invalid_argument("RaggedConcatenate batch size must be positive.");
-        offsetsInputIndex = valueInputCount;
+        activeCountInputIndex = valueInputCount;
         const uint32_t totalInputCount = valueInputCount + 1;
         previousLayers.resize(totalInputCount);
         featureInputs.resize(totalInputCount);
@@ -65,14 +66,15 @@ class RaggedConcatenate : public MultiConnectionLayer {
             }
             newAxisSize += dimensions[axis];
         }
-        if (!featureInputs[offsetsInputIndex].has_value()) throw std::logic_error("RaggedConcatenate offsets input is missing.");
-        const TensorDescriptor& offsetsDescriptor = featureInputs[offsetsInputIndex]->getDescriptor();
-        const auto& offsetsDimensions = offsetsDescriptor.getDimensions();
-        if (offsetsDimensions != std::vector<uint64_t>{batchSize + 1}) {
-            throw std::invalid_argument("RaggedConcatenate offsets shape must be [batch_size + 1].");
+        if (!featureInputs[activeCountInputIndex].has_value())
+            throw std::logic_error("RaggedConcatenate active-count input is missing.");
+        const TensorDescriptor& activeCountDescriptor = featureInputs[activeCountInputIndex]->getDescriptor();
+        if (activeCountDescriptor.getDimensions() != std::vector<uint64_t>{1}) {
+            throw std::invalid_argument("RaggedConcatenate active-count shape must be [1].");
         }
-        if (offsetsDescriptor.getDataType() != DataType::UINT32 && offsetsDescriptor.getDataType() != DataType::UINT64) {
-            throw std::invalid_argument("RaggedConcatenate offsets must use UINT32 or UINT64 storage.");
+        if (activeCountDescriptor.getDataType() != DataType::UINT32 &&
+            activeCountDescriptor.getDataType() != DataType::UINT64) {
+            throw std::invalid_argument("RaggedConcatenate active count must use UINT32 or UINT64 storage.");
         }
 
         std::vector<uint64_t> outputDimensions = referenceDimensions;
@@ -84,7 +86,7 @@ class RaggedConcatenate : public MultiConnectionLayer {
         MultiConnectionLayer::compileImpl();
         THOR_THROW_IF_FALSE(featureOutputs.size() == 1 && featureOutputs[0].has_value());
         THOR_THROW_IF_FALSE(nextLayers.size() == 1);
-        THOR_THROW_IF_FALSE(featureInputs[offsetsInputIndex].has_value());
+        THOR_THROW_IF_FALSE(featureInputs[activeCountInputIndex].has_value());
         THOR_THROW_IF_FALSE(featureInputs[0].has_value());
         THOR_THROW_IF_FALSE(featureInputs[0]->getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
@@ -164,9 +166,10 @@ class RaggedConcatenate : public MultiConnectionLayer {
 
     void forward(std::optional<Tensor> featureInput, bool validationPass, uint32_t runtimeBatchSize = 0) override {
         THOR_THROW_IF_FALSE(featureInput.has_value());
-        // The fixed descriptor batchSize still bounds offsets[batchSize] for the
-        // ragged kernels. runtimeBatchSize is valid-example metadata only; keep it
-        // intact for downstream losses/optimizers and require every input port to agree.
+        // runtimeBatchSize is valid-example metadata only. The managed [1]
+        // active-count input independently bounds the packed GPU prefix; keep the
+        // example count intact for downstream losses/optimizers and require every
+        // input port to agree.
         THOR_THROW_IF_FALSE(batchSize <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()));
         const uint32_t physicalBatchCapacity = static_cast<uint32_t>(batchSize);
         const uint32_t resolvedValidExampleCount =
@@ -195,7 +198,7 @@ class RaggedConcatenate : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(!outputDimensions.empty() && outputDimensions[0] > 0);
         const uint64_t elementsPerOutputValue = outputDescriptor.getTotalNumElements() / outputDimensions[0];
         THOR_THROW_IF_FALSE(outputDescriptor.getTotalNumElements() <= static_cast<uint64_t>(std::numeric_limits<long>::max()));
-        const TensorDescriptor& offsetsDescriptor = featureInputs[offsetsInputIndex]->getDescriptor();
+        const TensorDescriptor& activeCountDescriptor = featureInputs[activeCountInputIndex]->getDescriptor();
         launchRaggedConcatenate(
             featureOutputs[0]->getMemPtr(),
             splitTensorFeatureInputMemoriesArray_d,
@@ -208,11 +211,12 @@ class RaggedConcatenate : public MultiConnectionLayer {
             axisElementsPerSplitTensor_d,
             stridePerPackedTensorDimension_d,
             stridePerSplitTensorDimension_d,
-            featureInputs[offsetsInputIndex]->getMemPtr(),
-            TensorDescriptor::getElementSizeInBytes(offsetsDescriptor.getDataType()),
-            batchSize,
+            featureInputs[activeCountInputIndex]->getMemPtr(),
+            TensorDescriptor::getElementSizeInBytes(activeCountDescriptor.getDataType()),
             streams[0]);
 
+        RowPartitionRuntime::propagateHostState(
+            featureInputs[activeCountInputIndex].value(), featureOutputs[0].value());
         nextLayers[0].value()->forward(featureOutputs[0], validationPass, currentValidExampleCount);
         currentValidExampleCount = 0;
         batchCardinalitySet = false;
@@ -230,7 +234,7 @@ class RaggedConcatenate : public MultiConnectionLayer {
             const TensorDescriptor& errorDescriptor = errorInput->getDescriptor();
             const auto& dimensions = errorDescriptor.getDimensions();
             const uint64_t elementsPerSourceValue = errorDescriptor.getTotalNumElements() / dimensions[0];
-            const TensorDescriptor& offsetsDescriptor = featureInputs[offsetsInputIndex]->getDescriptor();
+            const TensorDescriptor& activeCountDescriptor = featureInputs[activeCountInputIndex]->getDescriptor();
             launchRaggedSplit(
                 splitTensorErrorOutputMemoriesArray_d,
                 errorInput->getMemPtr(),
@@ -243,9 +247,8 @@ class RaggedConcatenate : public MultiConnectionLayer {
                 axisElementsPerSplitTensor_d,
                 stridePerPackedTensorDimension_d,
                 stridePerSplitTensorDimension_d,
-                featureInputs[offsetsInputIndex]->getMemPtr(),
-                TensorDescriptor::getElementSizeInBytes(offsetsDescriptor.getDataType()),
-                batchSize,
+                featureInputs[activeCountInputIndex]->getMemPtr(),
+                TensorDescriptor::getElementSizeInBytes(activeCountDescriptor.getDataType()),
                 streams[0]);
         }
 
@@ -298,7 +301,7 @@ class RaggedConcatenate : public MultiConnectionLayer {
         Layer *previousLayer, std::optional<Tensor> featureInput, Stream stream,
         bool backPropagateError, int connectionType) override {
         THOR_THROW_IF_FALSE(!running && featureInput.has_value() && previousLayer != nullptr);
-        if (connectionType < 0 || static_cast<uint32_t>(connectionType) > offsetsInputIndex)
+        if (connectionType < 0 || static_cast<uint32_t>(connectionType) > activeCountInputIndex)
             throw std::logic_error("RaggedConcatenate connection type is outside its declared input range.");
         const uint32_t inputIndex = static_cast<uint32_t>(connectionType);
         if (featureInputs[inputIndex].has_value() || previousLayers[inputIndex].has_value())
@@ -330,7 +333,7 @@ class RaggedConcatenate : public MultiConnectionLayer {
 
     unsigned int axis;
     uint32_t valueInputCount;
-    uint32_t offsetsInputIndex;
+    uint32_t activeCountInputIndex;
     uint64_t batchSize;
     void **splitTensorFeatureInputMemoriesArray_d = nullptr;
     void **splitTensorErrorOutputMemoriesArray_d = nullptr;

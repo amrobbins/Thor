@@ -56,7 +56,36 @@ Expression packedExtent(const Expression& values,
     return values.withRaggedRuntimeExtent(offsets, 2, capacity, elements_per_value);
 }
 
+Expression packedHostExtent(const Expression& values,
+                            const Expression& host_carrier,
+                            uint64_t capacity,
+                            uint64_t elements_per_value) {
+    return values.withRaggedRuntimeExtent(
+        host_carrier, 2, capacity, elements_per_value, RaggedRuntimeExtentSource::HOST_EXTENT);
+}
+
 }  // namespace
+
+TEST(RaggedCapacityPerformance, HostExtentTerminalMarkerIsMetadataAliasNotFullCapacityKernel) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr uint64_t capacity = 66;
+
+    Tensor values(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, 4}));
+    Tensor host_carrier(gpuPlacement, TensorDescriptor(DataType::FP32, {capacity, 4}));
+
+    const Expression values_expr = Expression::input("values", DataType::FP32, DataType::FP32);
+    const Expression carrier_expr = Expression::input("host_carrier", DataType::FP32, DataType::FP32);
+    const Expression output = packedHostExtent(values_expr, carrier_expr, capacity, 4);
+
+    FusedEquation equation = FusedEquation::compile(Expression::outputs({{"y", output}}).physicalOutputs(), 0);
+    const auto compiled = equation.compileForInputs({{"values", values}, {"host_carrier", host_carrier}});
+    ASSERT_NE(compiled, nullptr);
+    EXPECT_TRUE(compiled->stages.empty())
+        << "HOST_EXTENT is metadata-only and must not create a full-capacity CUDA identity stage";
+    ASSERT_EQ(compiled->final_outputs.size(), 1u);
+    EXPECT_EQ(compiled->final_outputs[0].value_id, 0u)
+        << "HOST_EXTENT output should reuse the values input storage directly";
+}
 
 TEST(RaggedCapacityPerformance, RepresentativeExpressionChainsContainOnlyLogicalComputeAndPhysicalConsumers) {
     REQUIRE_CUDA_DEVICE();
@@ -427,7 +456,7 @@ TEST(RaggedCapacityPerformance, PackedConsumerSanitationAccountingTracksSelected
 
     RowPartitionRuntime row_partition(
         offsets, RowPartitionDescriptor(/*batchSize=*/2, capacity, DataType::UINT32));
-    row_partition.setHostActiveValueCount(9);
+    row_partition.setHostOffsets({0, 9, 9});
 
     const Expression x_expr = Expression::input("x", DataType::FP32, DataType::FP32);
     const Expression w_expr = Expression::input("w", DataType::FP32, DataType::FP32);
@@ -456,7 +485,7 @@ TEST(RaggedCapacityPerformance, PackedConsumerSanitationAccountingTracksSelected
                              uint64_t selected_rows,
                              uint64_t expected_sanitized_bytes_per_consumer,
                              uint64_t expected_full_tail_bytes_per_consumer) {
-        row_partition.setHostActiveValueCount(active_rows);
+        row_partition.setHostOffsets({0, active_rows, active_rows});
         const std::vector<PackedRowConsumerDiagnostic> diagnostics = plan.packedRowConsumerDiagnostics();
         ASSERT_EQ(diagnostics.size(), 2u);
         ASSERT_EQ(diagnostics[0].kind, PackedRowConsumerKind::Matmul);
@@ -504,7 +533,7 @@ TEST(RaggedCapacityPerformance, PackedTailSanitizationIsExplicitAndSharedAcrossI
 
     RowPartitionRuntime row_partition(
         offsets, RowPartitionDescriptor(/*batchSize=*/2, capacity, DataType::UINT32));
-    row_partition.setHostActiveValueCount(9);
+    row_partition.setHostOffsets({0, 9, 9});
 
     const Expression x_expr = Expression::input("x", DataType::FP32, DataType::FP32);
     const Expression w_expr = Expression::input("w", DataType::FP32, DataType::FP32);

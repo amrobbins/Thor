@@ -996,7 +996,7 @@ ScaledDotProductAttention ScaledDotProductAttention::Builder::build() {
             throw std::invalid_argument("ScaledDotProductAttention key/value cannot be provided as both Tensor and RaggedTensor.");
         }
         if (_keyRaggedInput->getBatchSize() != _valueRaggedInput->getBatchSize() ||
-            _keyRaggedInput->getOffsets() != _valueRaggedInput->getOffsets()) {
+            !_keyRaggedInput->sharesPartitionWith(_valueRaggedInput.value())) {
             throw std::invalid_argument("ScaledDotProductAttention ragged key and value inputs must share one logical row partition.");
         }
         if (_keyRaggedInput->getBatchSize() > std::numeric_limits<uint32_t>::max()) {
@@ -1281,7 +1281,7 @@ void ScaledDotProductAttention::deserialize(std::shared_ptr<thor_file::TarReader
         keyRaggedInput = raggedFromMetadata(j.at("key_ragged_input"), "key_ragged_input");
         valueRaggedInput = raggedFromMetadata(j.at("value_ragged_input"), "value_ragged_input");
         if (keyRaggedInput->getBatchSize() != valueRaggedInput->getBatchSize() ||
-            keyRaggedInput->getOffsets() != valueRaggedInput->getOffsets()) {
+            !keyRaggedInput->sharesPartitionWith(valueRaggedInput.value())) {
             throw std::runtime_error("ScaledDotProductAttention deserialize ragged key/value inputs do not share one logical row partition.");
         }
         if (keyRaggedInput->getBatchSize() > UINT32_MAX) {

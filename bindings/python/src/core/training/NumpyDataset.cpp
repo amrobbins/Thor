@@ -788,6 +788,7 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
         ThorImplementation::Tensor offsets = ragged.getOffsets();
         uint8_t *destination = static_cast<uint8_t *>(values.getMemPtr<void>());
         uint64_t activeValueCount = 0;
+        std::vector<uint64_t> hostOffsets(batchSize + 1, 0);
         writeNumpyRaggedOffset(offsets, 0, 0);
         for (uint64_t row = 0; row < selectedExampleIndices.size(); ++row) {
             const uint64_t exampleIndex = selectedExampleIndices[row];
@@ -800,17 +801,19 @@ Batch NumpyBatchSession::acquireBatch(ExampleType exampleType, uint64_t &batchNu
                             rowValueCount * source.bytesPerValue);
             }
             activeValueCount += rowValueCount;
+            hostOffsets[row + 1] = activeValueCount;
             writeNumpyRaggedOffset(offsets, row + 1, activeValueCount);
         }
         THOR_THROW_IF_FALSE(activeValueCount == raggedActiveValueCounts.at(fieldId));
         for (uint64_t row = validExampleCount; row < batchSize; ++row) {
+            hostOffsets[row + 1] = activeValueCount;
             writeNumpyRaggedOffset(offsets, row + 1, activeValueCount);
         }
         ThorImplementation::RowPartitionRuntime &rowPartition =
             ragged.getRowPartitionRuntime();
-        rowPartition.setHostActiveValueCount(activeValueCount);
-        rowPartition.setHostMaxActiveRowLength(
-            raggedMaxActiveRowLengths.at(fieldId));
+        rowPartition.setHostOffsets(std::move(hostOffsets));
+        THOR_THROW_IF_FALSE(
+            rowPartition.requireHostMaxActiveRowLength() == raggedMaxActiveRowLengths.at(fieldId));
     }
 
     split.nextBatchNum = (batchNum + 1) % batchesPerEpoch;

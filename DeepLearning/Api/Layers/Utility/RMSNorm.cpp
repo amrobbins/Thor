@@ -116,13 +116,13 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                                                              std::vector<std::string> epilogueAuxInputNames,
                                                              bool inferenceOnly,
                                                              std::optional<uint64_t> packedRowCapacity = std::nullopt,
-                                                             std::optional<std::string> rowPartitionInputName = std::nullopt) {
+                                                             std::optional<std::string> rowPartitionInputName = std::nullopt,
+                                                             std::optional<ThorImplementation::RowPartitionDescriptor> rowPartitionDescriptor = std::nullopt) {
     using ThorImplementation::DynamicExpression;
     using ThorImplementation::DynamicExpressionBuild;
     using ThorImplementation::Expression;
     using ThorImplementation::FusedEquation;
     using ThorImplementation::Tensor;
-    using ThorImplementation::TensorDescriptor;
 
     const bool epilogueIsSwish =
         epilogue.has_value() && epilogueAuxInputNames.empty() && isSwishEpilogueExpression(epilogue.value());
@@ -147,22 +147,23 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
          epilogueIsSwish,
          inferenceOnly,
          packedRowCapacity,
-         rowPartitionInputName = std::move(rowPartitionInputName)](
+         rowPartitionInputName = std::move(rowPartitionInputName),
+         rowPartitionDescriptor](
             const DynamicExpression::TensorMap& inputs,
             const DynamicExpression::TensorMap& outputs,
             Stream& stream) -> DynamicExpressionBuild {
             Tensor featureInputTensor = inputs.at("feature_input");
             std::optional<Tensor> rowPartitionTensor;
             if (rowPartitionInputName.has_value()) {
+                if (!rowPartitionDescriptor.has_value()) {
+                    throw std::runtime_error("Ragged RMSNorm is missing its logical row-partition descriptor.");
+                }
                 rowPartitionTensor = inputs.at(rowPartitionInputName.value());
-                const ThorImplementation::TensorDescriptor descriptor = rowPartitionTensor->getDescriptor();
-                if (descriptor.getNumDimensions() != 1 || descriptor.getDimensions()[0] == 0 ||
-                    !ThorImplementation::RowPartitionDescriptor::isValidOffsetsDataType(descriptor.getDataType())) {
-                    throw std::runtime_error("Ragged RMSNorm row-partition input must be a canonical offsets tensor.");
-                }
                 if (rowPartitionTensor->getPlacement() != placement) {
-                    throw std::runtime_error("Ragged RMSNorm row-partition input placement does not match the layer placement.");
+                    throw std::runtime_error("Ragged RMSNorm row-partition carrier placement does not match the layer placement.");
                 }
+            } else if (rowPartitionDescriptor.has_value()) {
+                throw std::runtime_error("Dense RMSNorm unexpectedly received row-partition metadata.");
             }
             const Tensor& weightsTensor = inputs.at("weights");
             const std::vector<uint64_t> originalInputDims = featureInputTensor.getDimensions();
@@ -208,6 +209,12 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                     throw std::runtime_error("RMSNorm feature output tensor dimensions must match the feature input dimensions.");
                 }
             }
+            const ThorImplementation::RaggedRuntimeExtentSource raggedRuntimeExtentSource =
+                !rowPartitionTensor.has_value()
+                    ? ThorImplementation::RaggedRuntimeExtentSource::DEVICE_OFFSETS
+                    : epilogue.has_value()
+                          ? ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT
+                          : ThorImplementation::RaggedRuntimeExtentSource::HOST_EXTENT;
             for (const std::string& auxInputName : epilogueAuxInputNames) {
                 const Tensor& auxTensor = inputs.at(auxInputName);
                 if (auxTensor.getPlacement() != placement) {
@@ -231,19 +238,20 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                 if (!packedRowCapacity.has_value() || originalInputDims.empty() || originalInputDims[0] != packedRowCapacity.value()) {
                     throw std::runtime_error("Ragged RMSNorm packed capacity does not match its values tensor first dimension.");
                 }
-                const TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
-                const uint64_t raggedBatchSize = offsetsDescriptor.getDimensions()[0] - 1;
+                const ThorImplementation::RowPartitionDescriptor& partition = rowPartitionDescriptor.value();
+                const uint64_t raggedBatchSize = partition.getBatchSize();
                 if (outer % packedRowCapacity.value() != 0) {
                     throw std::runtime_error("Ragged RMSNorm flattened outer dimension is not divisible by packed capacity.");
                 }
                 const uint64_t elementsPerPackedValue = (outer / packedRowCapacity.value()) * hidden;
                 Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
-                                                       offsetsDescriptor.getDataType(),
-                                                       offsetsDescriptor.getDataType());
+                                                       partition.getOffsetsDataType(),
+                                                       partition.getOffsetsDataType());
                 fin = fin.withRaggedRuntimeExtent(offsets,
                                                   raggedBatchSize,
                                                   packedRowCapacity.value(),
-                                                  elementsPerPackedValue);
+                                                  elementsPerPackedValue,
+                                                  raggedRuntimeExtentSource);
             }
             Expression weights = Expression::input("weights", parameterDataType, parameterDataType);
             const bool cudnnSwishFusionCandidate = epilogueIsSwish && parameterDataType == DataType::BF16 &&
@@ -335,23 +343,24 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                         throw std::runtime_error(
                             "Ragged RMSNorm epilogue primary geometry does not match its packed row capacity.");
                     }
-                    const TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
-                    const uint64_t raggedBatchSize = offsetsDescriptor.getDimensions()[0] - 1;
+                    const ThorImplementation::RowPartitionDescriptor& partition = rowPartitionDescriptor.value();
+                    const uint64_t raggedBatchSize = partition.getBatchSize();
                     if (outer % packedRowCapacity.value() != 0) {
                         throw std::runtime_error(
                             "Ragged RMSNorm epilogue primary flattened outer dimension is not divisible by packed capacity.");
                     }
                     const uint64_t elementsPerPackedValue = (outer / packedRowCapacity.value()) * hidden;
                     Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
-                                                           offsetsDescriptor.getDataType(),
-                                                           offsetsDescriptor.getDataType());
+                                                           partition.getOffsetsDataType(),
+                                                           partition.getOffsetsDataType());
                     // RMSNorm consumes its input's runtime extent at the cuDNN stage boundary.
                     // Re-wrap the normalized result before the custom epilogue so both the
                     // primary branch and every same-partition auxiliary remain active-prefix-aware.
                     rmsNorm = rmsNorm.withRaggedRuntimeExtent(offsets,
                                                               raggedBatchSize,
                                                               packedRowCapacity.value(),
-                                                              elementsPerPackedValue);
+                                                              elementsPerPackedValue,
+                                                              raggedRuntimeExtentSource);
                 }
 
                 ThorImplementation::Expression effectiveEpilogue = epilogue.value();
@@ -368,20 +377,21 @@ ThorImplementation::DynamicExpression buildRmsNormExpression(ThorImplementation:
                             throw std::runtime_error(
                                 "Ragged RMSNorm epilogue auxiliary geometry does not match its packed row capacity.");
                         }
-                        const TensorDescriptor offsetsDescriptor = rowPartitionTensor->getDescriptor();
-                        const uint64_t raggedBatchSize = offsetsDescriptor.getDimensions()[0] - 1;
+                        const ThorImplementation::RowPartitionDescriptor& partition = rowPartitionDescriptor.value();
+                        const uint64_t raggedBatchSize = partition.getBatchSize();
                         if (outer % packedRowCapacity.value() != 0) {
                             throw std::runtime_error(
                                 "Ragged RMSNorm epilogue auxiliary flattened outer dimension is not divisible by packed capacity.");
                         }
                         const uint64_t elementsPerPackedValue = (outer / packedRowCapacity.value()) * hidden;
                         Expression offsets = Expression::input(RAGGED_ROW_PARTITION_EXPRESSION_INPUT,
-                                                               offsetsDescriptor.getDataType(),
-                                                               offsetsDescriptor.getDataType());
+                                                               partition.getOffsetsDataType(),
+                                                               partition.getOffsetsDataType());
                         auxInput = auxInput.withRaggedRuntimeExtent(offsets,
                                                                    raggedBatchSize,
                                                                    packedRowCapacity.value(),
-                                                                   elementsPerPackedValue);
+                                                                   elementsPerPackedValue,
+                                                                   raggedRuntimeExtentSource);
                     }
                     effectiveEpilogue = effectiveEpilogue.substituteInput(auxInputName, auxInput);
                 }
@@ -797,7 +807,7 @@ void RMSNorm::Builder::verifyConfig() const {
                 const bool sameMaxValuesPerRow =
                     auxiliary.hasMaxValuesPerRow() == feature.hasMaxValuesPerRow() &&
                     (!feature.hasMaxValuesPerRow() || auxiliary.getMaxValuesPerRow() == feature.getMaxValuesPerRow());
-                if (auxiliary.getOffsets() != feature.getOffsets() ||
+                if (!auxiliary.sharesPartitionWith(feature) ||
                     auxiliary.getBatchSize() != feature.getBatchSize() ||
                     auxiliary.getMaxTotalValues() != feature.getMaxTotalValues() ||
                     !sameMaxValuesPerRow) {
@@ -875,7 +885,10 @@ shared_ptr<ThorImplementation::Layer> RMSNorm::stamp(ThorImplementation::TensorP
         auxNames,
         inferenceOnly,
         packedRowCapacity,
-        rowPartitionInputName);
+        rowPartitionInputName,
+        raggedTemplate == nullptr
+            ? std::nullopt
+            : std::optional<ThorImplementation::RowPartitionDescriptor>(raggedTemplate->getDescriptor().getRowPartition()));
 
     shared_ptr<ThorImplementation::CustomLayer> physicalRmsNorm;
     if (raggedTemplate != nullptr) {
@@ -1087,7 +1100,7 @@ void RMSNorm::deserialize(shared_ptr<thor_file::TarReader>& archiveReader, const
                 const bool sameMaxValuesPerRow =
                     auxiliary.hasMaxValuesPerRow() == feature.hasMaxValuesPerRow() &&
                     (!feature.hasMaxValuesPerRow() || auxiliary.getMaxValuesPerRow() == feature.getMaxValuesPerRow());
-                if (auxiliary.getOffsets() != feature.getOffsets() ||
+                if (!auxiliary.sharesPartitionWith(feature) ||
                     auxiliary.getBatchSize() != feature.getBatchSize() ||
                     auxiliary.getMaxTotalValues() != feature.getMaxTotalValues() ||
                     !sameMaxValuesPerRow) {

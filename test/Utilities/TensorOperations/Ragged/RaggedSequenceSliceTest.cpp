@@ -87,18 +87,11 @@ void runForwardBackwardCase(DataType expectedOffsetsDataType) {
     Tensor input = makeGpuTensor<float>({inputCapacity, width}, inputValues, stream);
     Tensor output = makeGpuTensor<float>(
         {outputCapacity, width}, std::vector<float>(outputCapacity * width, outputSentinel), stream);
-    Tensor rowLengths(gpuPlacement, TensorDescriptor(expectedOffsetsDataType, {batchSize}));
     Tensor outputOffsets = makeGpuTensor<OffsetT>({batchSize + 1}, std::vector<OffsetT>(batchSize + 1, 99), stream);
-    const RowPartitionLengthsToOffsetsPlan scanPlan =
-        prepareRowPartitionLengthsToOffsets(rowLengths, outputOffsets, batchSize);
-    Tensor scanTemp(gpuPlacement, TensorDescriptor(DataType::UINT8, {std::max<size_t>(scanPlan.temp_storage_bytes, 1)}));
-
-    launchRaggedSequenceSliceRowLengths(inputOffsets, rowLengths, start, length, batchSize, stream);
-    rowPartitionLengthsToOffsets(scanPlan, scanTemp, rowLengths, outputOffsets, stream);
+    rowPartitionUploadHostOffsets({0, 2, 2, 4, 4}, outputOffsets, batchSize, stream);
     launchRaggedSequenceSliceValues(input, inputOffsets, outputOffsets, output, start, length, batchSize, stream);
     stream.synchronize();
 
-    EXPECT_EQ(copyGpuTensor<OffsetT>(rowLengths, stream), (std::vector<OffsetT>{2, 0, 2, 0}));
     EXPECT_EQ(copyGpuTensor<OffsetT>(outputOffsets, stream), (std::vector<OffsetT>{0, 2, 2, 4, 4}));
     const std::vector<float> actual = copyGpuTensor<float>(output, stream);
     const std::vector<uint64_t> expectedInputTokens{1, 2, 6, 7};
@@ -150,14 +143,8 @@ void runAllRowsClippedCase() {
     Tensor inputOffsets = makeGpuTensor<OffsetT>({batchSize + 1}, {0, 1, 2, 2}, stream);
     Tensor input = makeGpuTensor<float>({inputCapacity}, {10.0F, 20.0F, 30.0F, 40.0F, 50.0F}, stream);
     Tensor output = makeGpuTensor<float>({outputCapacity}, {sentinel}, stream);
-    Tensor rowLengths(gpuPlacement, TensorDescriptor(dtypeFor<OffsetT>(), {batchSize}));
     Tensor outputOffsets = makeGpuTensor<OffsetT>({batchSize + 1}, std::vector<OffsetT>(batchSize + 1, 77), stream);
-    const RowPartitionLengthsToOffsetsPlan scanPlan =
-        prepareRowPartitionLengthsToOffsets(rowLengths, outputOffsets, batchSize);
-    Tensor scanTemp(gpuPlacement, TensorDescriptor(DataType::UINT8, {std::max<size_t>(scanPlan.temp_storage_bytes, 1)}));
-
-    launchRaggedSequenceSliceRowLengths(inputOffsets, rowLengths, start, length, batchSize, stream);
-    rowPartitionLengthsToOffsets(scanPlan, scanTemp, rowLengths, outputOffsets, stream);
+    rowPartitionUploadHostOffsets({0, 0, 0, 0}, outputOffsets, batchSize, stream);
     launchRaggedSequenceSliceValues(input, inputOffsets, outputOffsets, output, start, length, batchSize, stream);
     stream.synchronize();
 
@@ -188,7 +175,7 @@ TEST(RaggedSequenceSlice, ForwardBackwardUint64ClipRowsAndIgnoreInactiveCapacity
     runForwardBackwardCase<uint64_t>(DataType::UINT64);
 }
 
-TEST(RaggedSequenceSlice, AllRowsClippedProduceZeroOffsetsAndZeroOnlyActiveInputGradients) {
+TEST(RaggedSequenceSlice, AllRowsClippedUseHostDerivedZeroOffsetsAndZeroOnlyActiveInputGradients) {
     REQUIRE_CUDA_DEVICE();
     runAllRowsClippedCase<uint32_t>();
     runAllRowsClippedCase<uint64_t>();

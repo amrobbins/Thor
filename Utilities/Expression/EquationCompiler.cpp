@@ -305,6 +305,7 @@ struct StageNodeKey {
     std::vector<uint64_t> view_strides;
     uint64_t view_element_offset = 0;
     uint32_t ragged_runtime_offsets_input_slot = UINT32_MAX;
+    int32_t ragged_runtime_extent_source = static_cast<int32_t>(RaggedRuntimeExtentSource::DEVICE_OFFSETS);
     uint64_t ragged_runtime_batch_size = 0;
     uint64_t ragged_runtime_max_active_values = 0;
     uint64_t ragged_runtime_elements_per_value = 1;
@@ -404,6 +405,9 @@ struct StageNodeKeyHash {
             hashCombine(h, std::hash<uint64_t>{}(stride));
         hashCombine(h, std::hash<uint64_t>{}(k.view_element_offset));
         hashCombine(h, std::hash<uint32_t>{}(k.ragged_runtime_offsets_input_slot));
+        if (k.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            hashCombine(h, std::hash<int32_t>{}(k.ragged_runtime_extent_source));
+        }
         if (k.op == ExprOp::RAGGED_VALUEWISE_EXTENT || k.op == ExprOp::SEGMENTED_BROADCAST ||
             k.op == ExprOp::SEGMENTED_REDUCE_SUM || k.op == ExprOp::SEGMENTED_REDUCE_MIN ||
             k.op == ExprOp::SEGMENTED_REDUCE_MAX || k.op == ExprOp::SEGMENTED_REDUCE_MEAN ||
@@ -493,6 +497,7 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.attention_use_bias = n.attention_use_bias;
     key.attention_dropout_probability_bits = scalarBits(n.attention_dropout_probability);
     key.ragged_runtime_offsets_input_slot = n.ragged_runtime_offsets_input_slot;
+    key.ragged_runtime_extent_source = static_cast<int32_t>(n.ragged_runtime_extent_source);
     if (n.op == ExprOp::RAGGED_VALUEWISE_EXTENT || n.op == ExprOp::SEGMENTED_BROADCAST ||
         n.op == ExprOp::SEGMENTED_REDUCE_SUM || n.op == ExprOp::SEGMENTED_REDUCE_MIN ||
         n.op == ExprOp::SEGMENTED_REDUCE_MAX || n.op == ExprOp::SEGMENTED_REDUCE_MEAN ||
@@ -791,6 +796,7 @@ struct DirectRaggedRuntimeExtent {
     uint32_t values_node = UINT32_MAX;
     uint32_t offsets_node = UINT32_MAX;
     uint32_t offsets_input_slot = UINT32_MAX;
+    RaggedRuntimeExtentSource source = RaggedRuntimeExtentSource::DEVICE_OFFSETS;
     uint64_t batch_size = 0;
     uint64_t max_active_values = 0;
     uint64_t elements_per_value = 0;
@@ -809,7 +815,7 @@ static std::optional<DirectRaggedRuntimeExtent> directRaggedRuntimeExtent(const 
     }
     const ExprNode& offsets = expr.nodes[marker.rhs];
     if (offsets.op != ExprOp::INPUT || offsets.input_slot >= expr.inputs.size()) {
-        throw std::runtime_error("Packed MATMUL/RMSNORM/LAYERNORM ragged runtime extent requires canonical direct-input offsets.");
+        throw std::runtime_error("Ragged stage-boundary runtime extent requires canonical direct-input offsets.");
     }
     if (marker.ragged_runtime_batch_size == 0 || marker.ragged_runtime_max_active_values == 0 ||
         marker.ragged_runtime_elements_per_value == 0) {
@@ -819,6 +825,7 @@ static std::optional<DirectRaggedRuntimeExtent> directRaggedRuntimeExtent(const 
         .values_node = marker.lhs,
         .offsets_node = marker.rhs,
         .offsets_input_slot = offsets.input_slot,
+        .source = marker.ragged_runtime_extent_source,
         .batch_size = marker.ragged_runtime_batch_size,
         .max_active_values = marker.ragged_runtime_max_active_values,
         .elements_per_value = marker.ragged_runtime_elements_per_value,
@@ -891,12 +898,55 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
         depends_on_ragged_extent[node_idx] = depends;
         ragged_offsets_input_slot[node_idx] = dependency_offsets_slot;
         ambiguous_ragged_partition[node_idx] = ambiguous_partition;
+
+        // RAGGED_SOFTMAX_BACKWARD carries its partition explicitly through the
+        // structural offsets operand. Validate that contract even when Y and
+        // dY no longer retain a marker dependency of their own.
+        if (node.op == ExprOp::RAGGED_SOFTMAX_BACKWARD) {
+            if (node.aux == UINT32_MAX || node.aux >= expr.nodes.size()) {
+                throw std::runtime_error("ragged Softmax backward requires canonical offsets.");
+            }
+            const std::optional<uint32_t> aux_offsets_slot = directInputSlot(expr, node.aux);
+            if (!aux_offsets_slot.has_value() || node.ragged_runtime_batch_size == 0 ||
+                node.ragged_runtime_max_active_values == 0 || node.ragged_runtime_elements_per_value == 0) {
+                throw std::runtime_error("ragged Softmax backward is missing canonical row-partition metadata.");
+            }
+            if (depends && (ambiguous_partition || !dependency_offsets_slot.has_value() ||
+                            dependency_offsets_slot.value() != aux_offsets_slot.value())) {
+                throw std::runtime_error("ragged Softmax backward dY carries a different or ambiguous row partition.");
+            }
+            if (node.softmax_mode != CUDNN_SOFTMAX_MODE_CHANNEL) {
+                throw std::runtime_error("ragged Softmax backward requires CHANNEL mode.");
+            }
+            depends_on_ragged_extent[node_idx] = false;
+            ragged_offsets_input_slot[node_idx] = std::nullopt;
+            ambiguous_ragged_partition[node_idx] = false;
+            continue;
+        }
+
         if (!depends) {
             if (isRaggedConv1dCausalBackwardFilterOp(node.op)) {
                 throw std::runtime_error(
                     "ragged Conv1D backward-filter requires retained ragged extents on both X and dY.");
             }
             continue;
+        }
+
+        if (node.op == ExprOp::SOFTMAX) {
+            const std::optional<DirectRaggedRuntimeExtent> extent = directRaggedRuntimeExtent(expr, node.lhs);
+            if (extent.has_value()) {
+                if (ambiguous_partition || !dependency_offsets_slot.has_value() ||
+                    extent->offsets_input_slot != dependency_offsets_slot.value()) {
+                    throw std::runtime_error("ragged Softmax received ambiguous row-partition metadata.");
+                }
+                if (node.softmax_mode != CUDNN_SOFTMAX_MODE_CHANNEL) {
+                    throw std::runtime_error("ordinary ragged Softmax must normalize the final trailing dimension in CHANNEL mode.");
+                }
+                depends_on_ragged_extent[node_idx] = false;
+                ragged_offsets_input_slot[node_idx] = std::nullopt;
+                ambiguous_ragged_partition[node_idx] = false;
+                continue;
+            }
         }
 
         if (isMatmulOp(node.op)) {
@@ -926,6 +976,7 @@ static void validateRaggedRuntimeExtentConsumers(const PhysicalExpression& expr)
             }
             if (lhs_extent.has_value() && rhs_extent.has_value() &&
                 (lhs_extent->offsets_input_slot != rhs_extent->offsets_input_slot ||
+                 lhs_extent->source != rhs_extent->source ||
                  lhs_extent->batch_size != rhs_extent->batch_size ||
                  lhs_extent->max_active_values != rhs_extent->max_active_values)) {
                 throw std::runtime_error("packed MATMUL operands carry different row partitions.");
@@ -1400,6 +1451,8 @@ static const char* fusedOpTag(ExprOp op) {
             return "ROPE";
         case ExprOp::SOFTMAX:
             return "SOFTMAX";
+        case ExprOp::RAGGED_SOFTMAX_BACKWARD:
+            return "RAGGED_SOFTMAX_BACKWARD";
         case ExprOp::FILL:
             return "FILL";
         case ExprOp::RESHAPE:
@@ -1701,9 +1754,16 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                  ",axis=" + std::to_string(node.scan_axis) +
                  ",reverse=" + std::to_string(node.scan_reverse ? 1 : 0) + ")";
         } else if (isSoftmaxOp(node.op)) {
-            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs +
-                ",algorithm=" + std::to_string(static_cast<int>(node.softmax_algorithm)) +
-                ",mode=" + std::to_string(static_cast<int>(node.softmax_mode)) + ")";
+            s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs;
+            if (node.op == ExprOp::RAGGED_SOFTMAX_BACKWARD) {
+                s += ",dy=" + fusedRegionSignatureRec(expr, node.rhs) +
+                     ",offsets=" + fusedRegionSignatureRec(expr, node.aux) +
+                     ",batch=" + std::to_string(node.ragged_runtime_batch_size) +
+                     ",maxActive=" + std::to_string(node.ragged_runtime_max_active_values) +
+                     ",elementsPerValue=" + std::to_string(node.ragged_runtime_elements_per_value);
+            }
+            s += ",algorithm=" + std::to_string(static_cast<int>(node.softmax_algorithm)) +
+                 ",mode=" + std::to_string(static_cast<int>(node.softmax_mode)) + ")";
         } else if (isSegmentedReduceOp(node.op)) {
             const std::string rhs = fusedRegionSignatureRec(expr, node.rhs);
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",offsets=" + rhs + ")";
@@ -1935,7 +1995,8 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
     }
 
     if (node.op == ExprOp::RAGGED_VALUEWISE_EXTENT) {
-        return std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ",batch=" +
+        return std::string(fusedOpTag(node.op)) + "(" + lhs + "," + rhs + ",source=" +
+               std::to_string(static_cast<int>(node.ragged_runtime_extent_source)) + ",batch=" +
                std::to_string(node.ragged_runtime_batch_size) + ",maxActive=" +
                std::to_string(node.ragged_runtime_max_active_values) + ",elementsPerValue=" +
                std::to_string(node.ragged_runtime_elements_per_value) + ")";
@@ -2123,10 +2184,22 @@ vector<char> EquationCompiler::compileToLtoIr(const string& src, const string& k
     return ltoir;
 }
 
-static bool expressionUsesDeviceRaggedRuntimeExtent(const PhysicalExpression& expr) {
-    return std::any_of(expr.nodes.begin(), expr.nodes.end(), [](const ExprNode& node) {
-        return node.op == ExprOp::RAGGED_VALUEWISE_EXTENT;
-    });
+static std::optional<RaggedRuntimeExtentSource> expressionDeviceRaggedRuntimeExtentSource(
+    const PhysicalExpression& expr) {
+    std::optional<RaggedRuntimeExtentSource> source;
+    for (const ExprNode& node : expr.nodes) {
+        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT ||
+            node.ragged_runtime_extent_source == RaggedRuntimeExtentSource::HOST_EXTENT) {
+            continue;
+        }
+        if (!source.has_value()) {
+            source = node.ragged_runtime_extent_source;
+        } else if (source.value() != node.ragged_runtime_extent_source) {
+            throw std::runtime_error(
+                "one fused kernel cannot combine different ragged runtime-extent physical sources.");
+        }
+    }
+    return source;
 }
 
 shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalExecutionStage& stage,
@@ -2151,7 +2224,9 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
     const std::vector<DataType> input_dtypes = collectCompiledInputDTypes(stage.expr);
     const std::vector<DataType> output_dtypes = collectCompiledOutputDTypes(stage);
 
-    const bool uses_device_ragged_runtime_extent = expressionUsesDeviceRaggedRuntimeExtent(stage.expr);
+    const std::optional<RaggedRuntimeExtentSource> device_ragged_runtime_extent_source =
+        expressionDeviceRaggedRuntimeExtentSource(stage.expr);
+    const bool uses_device_ragged_runtime_extent = device_ragged_runtime_extent_source.has_value();
 
     // RoPE/logical-index operations and an internally fused STRIDED_VIEW need runtime
     // output dimensions to compute logical coordinates, so they are launched through
@@ -2177,6 +2252,8 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
         compiled->elements_per_thread = 1;
         compiled->uses_uint32_numel_arg = false;
         compiled->uses_device_runtime_extent = uses_device_ragged_runtime_extent;
+        if (device_ragged_runtime_extent_source.has_value())
+            compiled->device_runtime_extent_source = device_ragged_runtime_extent_source.value();
         cacheInsert(key, compiled);
         return compiled;
     }
@@ -2198,6 +2275,8 @@ shared_ptr<CompiledEquation> EquationCompiler::compileFusedStage(const PhysicalE
         compiled->uses_uint32_numel_arg = use_uint32_index_math;
     }
     compiled->uses_device_runtime_extent = uses_device_ragged_runtime_extent;
+    if (device_ragged_runtime_extent_source.has_value())
+        compiled->device_runtime_extent_source = device_ragged_runtime_extent_source.value();
 
     cacheInsert(key, compiled);
     return compiled;
@@ -2815,37 +2894,93 @@ shared_ptr<CompiledScan> EquationCompiler::compileScan(const PhysicalExpression&
 }
 
 shared_ptr<CompiledSoftmax> EquationCompiler::compileSoftmax(const PhysicalExpression& expr) {
-    if (expr.numInputs() != 1) {
-        throw std::runtime_error("Softmax stage must have exactly one input.");
-    }
-
     if (expr.output_node >= expr.nodes.size()) {
         throw std::runtime_error("Softmax stage output_node is out of range.");
     }
 
     const ExprNode& node = expr.nodes[expr.output_node];
     if (!isSoftmaxOp(node.op)) {
-        throw std::runtime_error("Softmax stage output node is not SOFTMAX.");
+        throw std::runtime_error("Softmax stage output node is not a softmax operation.");
     }
-
+    const bool backward = node.op == ExprOp::RAGGED_SOFTMAX_BACKWARD;
+    const bool ragged = node.ragged_runtime_offsets_input_slot != UINT32_MAX;
+    const size_t expected_inputs = backward ? 3u : (ragged ? 2u : 1u);
+    if (expr.numInputs() != expected_inputs) {
+        throw std::runtime_error("Softmax stage input count does not match its dense/ragged forward/backward contract.");
+    }
+    if (backward && !ragged) {
+        throw std::runtime_error("RAGGED_SOFTMAX_BACKWARD requires structural row-partition metadata.");
+    }
+    if (node.softmax_mode != CUDNN_SOFTMAX_MODE_CHANNEL) {
+        if (ragged || backward) {
+            throw std::runtime_error("Ragged Softmax supports only CHANNEL mode over the final trailing dimension.");
+        }
+    }
+    if (ragged && node.softmax_algorithm != CUDNN_SOFTMAX_ACCURATE && node.softmax_algorithm != CUDNN_SOFTMAX_LOG) {
+        throw std::runtime_error("Ragged Softmax supports only ACCURATE Softmax or LOG Softmax algorithms.");
+    }
     if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
-        throw std::runtime_error("Softmax node is missing its input.");
+        throw std::runtime_error("Softmax node is missing its primary input.");
     }
-
     const ExprNode& input_node = expr.nodes[node.lhs];
-    if (input_node.op != ExprOp::INPUT) {
-        throw std::runtime_error("Softmax stage input must be a local INPUT node.");
-    }
-
-    if (!input_node.input_tensor_dtype.has_value()) {
-        throw std::runtime_error("Softmax input node missing resolved input_tensor_dtype.");
+    if (input_node.op != ExprOp::INPUT || !input_node.input_tensor_dtype.has_value()) {
+        throw std::runtime_error("Softmax primary input must be a local INPUT with resolved dtype.");
     }
     if (!node.output_dtype.has_value()) {
         throw std::runtime_error("Softmax node missing resolved output_dtype.");
     }
 
     const DataType supported_input_dtype = toSupportedInputDType(node.op, input_node.input_tensor_dtype.value());
-    return make_shared<CompiledSoftmax>(node.softmax_algorithm, node.softmax_mode, supported_input_dtype, node.output_dtype.value());
+    if (ragged && node.output_dtype.value() != supported_input_dtype) {
+        throw std::runtime_error("Ragged Softmax forward/backward requires output storage dtype to match the cuDNN input dtype.");
+    }
+    if (backward) {
+        if (node.rhs == UINT32_MAX || node.rhs >= expr.nodes.size() || node.aux == UINT32_MAX || node.aux >= expr.nodes.size()) {
+            throw std::runtime_error("Ragged Softmax backward is missing dY or offsets.");
+        }
+        const ExprNode& dy = expr.nodes[node.rhs];
+        const ExprNode& offsets = expr.nodes[node.aux];
+        if (dy.op != ExprOp::INPUT || !dy.input_tensor_dtype.has_value() ||
+            toSupportedInputDType(node.op, dy.input_tensor_dtype.value()) != supported_input_dtype) {
+            throw std::runtime_error("Ragged Softmax backward requires Y and dY with the same supported dtype.");
+        }
+        if (offsets.op != ExprOp::INPUT || !offsets.input_tensor_dtype.has_value() ||
+            !isCanonicalRowPartitionOffsetDataType(offsets.input_tensor_dtype.value())) {
+            throw std::runtime_error("Ragged Softmax backward offsets must be canonical UINT32/UINT64 input.");
+        }
+    } else if (ragged) {
+        if (node.ragged_runtime_offsets_input_slot >= expr.inputs.size()) {
+            throw std::runtime_error("Ragged Softmax offsets input slot is out of range.");
+        }
+        bool found_offsets_input = false;
+        for (const ExprNode& candidate : expr.nodes) {
+            if (candidate.op == ExprOp::INPUT && candidate.input_slot == node.ragged_runtime_offsets_input_slot) {
+                if (!candidate.input_tensor_dtype.has_value() ||
+                    !isCanonicalRowPartitionOffsetDataType(candidate.input_tensor_dtype.value())) {
+                    throw std::runtime_error("Ragged Softmax offsets must be canonical UINT32/UINT64 input.");
+                }
+                found_offsets_input = true;
+                break;
+            }
+        }
+        if (!found_offsets_input) {
+            throw std::runtime_error("Ragged Softmax offsets slot does not reference a local INPUT node.");
+        }
+    }
+    if (ragged && (node.ragged_runtime_batch_size == 0 || node.ragged_runtime_max_active_values == 0 ||
+                   node.ragged_runtime_elements_per_value == 0)) {
+        throw std::runtime_error("Ragged Softmax stage is missing runtime partition metadata.");
+    }
+
+    return make_shared<CompiledSoftmax>(node.softmax_algorithm,
+                                        node.softmax_mode,
+                                        supported_input_dtype,
+                                        node.output_dtype.value(),
+                                        backward,
+                                        node.ragged_runtime_offsets_input_slot,
+                                        node.ragged_runtime_batch_size,
+                                        node.ragged_runtime_max_active_values,
+                                        node.ragged_runtime_elements_per_value);
 }
 
 shared_ptr<CompiledRmsNorm> EquationCompiler::compileRmsNorm(const PhysicalExpression& expr) {
@@ -2890,18 +3025,17 @@ shared_ptr<CompiledRmsNorm> EquationCompiler::compileRmsNorm(const PhysicalExpre
         if (node.ragged_runtime_offsets_input_slot >= expr.inputs.size()) {
             throw std::runtime_error("Packed RMSNorm row-partition input slot is out of range.");
         }
-        bool found_offsets_input = false;
+        bool found_partition_carrier_input = false;
         for (const ExprNode& candidate : expr.nodes) {
             if (candidate.op == ExprOp::INPUT && candidate.input_slot == node.ragged_runtime_offsets_input_slot) {
-                if (!candidate.input_tensor_dtype.has_value() ||
-                    !isCanonicalRowPartitionOffsetDataType(candidate.input_tensor_dtype.value())) {
-                    throw std::runtime_error("Packed RMSNorm row-partition offsets input has unsupported dtype.");
+                if (!candidate.input_tensor_dtype.has_value()) {
+                    throw std::runtime_error("Packed RMSNorm row-partition host carrier is missing its resolved dtype.");
                 }
-                found_offsets_input = true;
+                found_partition_carrier_input = true;
                 break;
             }
         }
-        if (!found_offsets_input) {
+        if (!found_partition_carrier_input) {
             throw std::runtime_error("Packed RMSNorm row-partition input slot does not reference a local INPUT node.");
         }
     } else if (node.ragged_runtime_offsets_input_slot != UINT32_MAX) {
@@ -2974,18 +3108,17 @@ shared_ptr<CompiledLayerNorm> EquationCompiler::compileLayerNorm(const PhysicalE
             node.ragged_runtime_offsets_input_slot >= expr.inputs.size()) {
             throw std::runtime_error("Packed LayerNorm stage is missing its explicit row-partition runtime binding.");
         }
-        bool found_offsets = false;
+        bool found_partition_carrier_input = false;
         for (const ExprNode& candidate : expr.nodes) {
             if (candidate.op == ExprOp::INPUT && candidate.input_slot == node.ragged_runtime_offsets_input_slot) {
-                if (!candidate.input_tensor_dtype.has_value() ||
-                    !isCanonicalRowPartitionOffsetDataType(candidate.input_tensor_dtype.value())) {
-                    throw std::runtime_error("Packed LayerNorm row-partition offsets input has unsupported dtype.");
+                if (!candidate.input_tensor_dtype.has_value()) {
+                    throw std::runtime_error("Packed LayerNorm row-partition host carrier is missing its resolved dtype.");
                 }
-                found_offsets = true;
+                found_partition_carrier_input = true;
                 break;
             }
         }
-        if (!found_offsets) {
+        if (!found_partition_carrier_input) {
             throw std::runtime_error("Packed LayerNorm row-partition slot does not reference a local INPUT node.");
         }
     } else if (node.ragged_runtime_offsets_input_slot != UINT32_MAX) {
@@ -3122,18 +3255,17 @@ shared_ptr<CompiledRmsNormBackward> EquationCompiler::compileRmsNormBackward(con
             node.ragged_runtime_offsets_input_slot >= expr.inputs.size()) {
             throw std::runtime_error("Packed RMSNorm backward stage is missing its explicit row-partition runtime binding.");
         }
-        bool found_offsets_input = false;
+        bool found_partition_carrier_input = false;
         for (const ExprNode& candidate : expr.nodes) {
             if (candidate.op == ExprOp::INPUT && candidate.input_slot == node.ragged_runtime_offsets_input_slot) {
-                if (!candidate.input_tensor_dtype.has_value() ||
-                    !isCanonicalRowPartitionOffsetDataType(candidate.input_tensor_dtype.value())) {
-                    throw std::runtime_error("Packed RMSNorm backward row-partition offsets input has unsupported dtype.");
+                if (!candidate.input_tensor_dtype.has_value()) {
+                    throw std::runtime_error("Packed RMSNorm backward row-partition host carrier is missing its resolved dtype.");
                 }
-                found_offsets_input = true;
+                found_partition_carrier_input = true;
                 break;
             }
         }
-        if (!found_offsets_input) {
+        if (!found_partition_carrier_input) {
             throw std::runtime_error("Packed RMSNorm backward row-partition slot does not reference a local INPUT node.");
         }
     } else if (node.ragged_runtime_offsets_input_slot != UINT32_MAX) {
@@ -3505,18 +3637,17 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
         if (node.ragged_runtime_offsets_input_slot >= expr.inputs.size()) {
             throw std::runtime_error("Packed MATMUL row-partition input slot is out of range.");
         }
-        bool found_offsets_input = false;
+        bool found_partition_carrier_input = false;
         for (const ExprNode& candidate : expr.nodes) {
             if (candidate.op == ExprOp::INPUT && candidate.input_slot == node.ragged_runtime_offsets_input_slot) {
-                if (!candidate.input_tensor_dtype.has_value() ||
-                    !isCanonicalRowPartitionOffsetDataType(candidate.input_tensor_dtype.value())) {
-                    throw std::runtime_error("Packed MATMUL row-partition offsets input has unsupported dtype.");
+                if (!candidate.input_tensor_dtype.has_value()) {
+                    throw std::runtime_error("Packed MATMUL row-partition host carrier is missing its resolved dtype.");
                 }
-                found_offsets_input = true;
+                found_partition_carrier_input = true;
                 break;
             }
         }
-        if (!found_offsets_input) {
+        if (!found_partition_carrier_input) {
             throw std::runtime_error("Packed MATMUL row-partition input slot does not reference a local INPUT node.");
         }
     } else if (node.ragged_runtime_offsets_input_slot != UINT32_MAX) {
@@ -5400,60 +5531,91 @@ static PhysicalExecutionStage buildSoftmaxStage(const PhysicalExpression& expr,
         throw std::runtime_error("buildSoftmaxStage called on non-softmax node.");
     }
 
-    if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
-        throw std::runtime_error("Softmax node missing lhs input.");
-    }
-
     PhysicalExpression stage_expr;
-    stage_expr.inputs.push_back(NamedInput{"__arg0", 0});
+    std::vector<uint32_t> input_value_ids;
+    auto inputNameForSlot = [](uint32_t slot) { return std::string("__arg") + std::to_string(slot); };
+
+    auto add_local_input = [&](uint32_t parent_idx, uint32_t local_slot, bool structural_input = false) {
+        if (parent_idx == UINT32_MAX || parent_idx >= expr.nodes.size()) {
+            throw std::runtime_error("Softmax stage input node is missing or out of range.");
+        }
+        const ExprNode& parent = expr.nodes[parent_idx];
+        uint32_t value_id = UINT32_MAX;
+        std::optional<DataType> actual_input_dtype = std::nullopt;
+        auto out_it = node_output_value_id.find(parent_idx);
+        if (out_it != node_output_value_id.end()) {
+            value_id = out_it->second;
+            actual_input_dtype = parent.output_dtype;
+        } else if (parent.op == ExprOp::INPUT) {
+            value_id = parent.input_slot;
+            actual_input_dtype = parent.input_tensor_dtype;
+        } else {
+            throw std::runtime_error("Missing value id for softmax stage input.");
+        }
+        if (!actual_input_dtype.has_value() || !parent.output_dtype.has_value()) {
+            throw std::runtime_error("Softmax stage input parent is missing resolved dtype metadata.");
+        }
+
+        DataType local_dtype = actual_input_dtype.value();
+        if (!structural_input) {
+            local_dtype = toSupportedInputDType(node.op, local_dtype);
+        }
+        input_value_ids.push_back(value_id);
+        stage_expr.inputs.push_back(NamedInput{inputNameForSlot(local_slot), local_slot, NamedInput::Kind::Tensor});
+        ExprNode input_node;
+        input_node.op = ExprOp::INPUT;
+        input_node.input_slot = local_slot;
+        input_node.input_tensor_dtype = local_dtype;
+        input_node.output_dtype = local_dtype;
+        input_node.compute_dtype = structural_input ? local_dtype : defaultComputeDType(local_dtype);
+        input_node.backward_output_dtype = local_dtype;
+        input_node.backward_compute_dtype = input_node.compute_dtype;
+        stage_expr.nodes.push_back(std::move(input_node));
+    };
 
     ExprNode softmax = node;
-    std::vector<uint32_t> input_value_ids;
-    input_value_ids.reserve(1);
-    std::optional<DataType> actual_input_dtype = std::nullopt;
-
-    const uint32_t parent_idx = softmax.lhs;
-    const ExprNode& parent = expr.nodes[parent_idx];
-    auto out_it = node_output_value_id.find(parent_idx);
-    if (out_it != node_output_value_id.end()) {
-        input_value_ids.push_back(out_it->second);
-        actual_input_dtype = parent.output_dtype;
-    } else if (parent.op == ExprOp::INPUT) {
-        input_value_ids.push_back(parent.input_slot);
-        actual_input_dtype = parent.input_tensor_dtype;
+    if (node.op == ExprOp::SOFTMAX) {
+        if (node.lhs == UINT32_MAX || node.lhs >= expr.nodes.size()) {
+            throw std::runtime_error("Softmax node missing lhs input.");
+        }
+        const std::optional<DirectRaggedRuntimeExtent> extent = directRaggedRuntimeExtent(expr, node.lhs);
+        add_local_input(extent.has_value() ? extent->values_node : node.lhs, 0);
+        softmax.lhs = 0;
+        softmax.rhs = UINT32_MAX;
+        softmax.aux = UINT32_MAX;
+        if (extent.has_value()) {
+            add_local_input(extent->offsets_node, 1, true);
+            softmax.ragged_runtime_offsets_input_slot = 1;
+            softmax.ragged_runtime_batch_size = extent->batch_size;
+            softmax.ragged_runtime_max_active_values = extent->max_active_values;
+            softmax.ragged_runtime_elements_per_value = extent->elements_per_value;
+        }
     } else {
-        throw std::runtime_error("Missing value id for softmax input.");
+        if (node.lhs == UINT32_MAX || node.rhs == UINT32_MAX || node.aux == UINT32_MAX ||
+            node.lhs >= expr.nodes.size() || node.rhs >= expr.nodes.size() || node.aux >= expr.nodes.size()) {
+            throw std::runtime_error("Ragged Softmax backward node is missing Y, dY, or offsets.");
+        }
+        const std::optional<uint32_t> aux_slot = directInputSlot(expr, node.aux);
+        if (!aux_slot.has_value() || node.ragged_runtime_batch_size == 0 ||
+            node.ragged_runtime_max_active_values == 0 || node.ragged_runtime_elements_per_value == 0) {
+            throw std::runtime_error("Ragged Softmax backward requires canonical row-partition metadata.");
+        }
+        add_local_input(node.lhs, 0);
+        add_local_input(node.rhs, 1);
+        add_local_input(node.aux, 2, true);
+        softmax.lhs = 0;
+        softmax.rhs = 1;
+        softmax.aux = 2;
+        softmax.ragged_runtime_offsets_input_slot = 2;
     }
 
-    if (!parent.output_dtype.has_value()) {
-        throw std::runtime_error("Softmax parent node is missing resolved output_dtype.");
-    }
-    if (!actual_input_dtype.has_value()) {
-        throw std::runtime_error("Softmax parent node is missing resolved actual input dtype.");
-    }
-
-    const DataType supported_input_dtype = toSupportedInputDType(node.op, actual_input_dtype.value());
-
-    ExprNode input_node;
-    input_node.op = ExprOp::INPUT;
-    input_node.input_slot = 0;
-    input_node.input_tensor_dtype = supported_input_dtype;
-    input_node.output_dtype = supported_input_dtype;
-    input_node.compute_dtype = defaultComputeDType(supported_input_dtype);
-    input_node.backward_output_dtype = supported_input_dtype;
-    input_node.backward_compute_dtype = defaultComputeDType(supported_input_dtype);
-
-    stage_expr.nodes.push_back(std::move(input_node));
-
-    softmax.lhs = 0;
-    softmax.rhs = UINT32_MAX;
     stage_expr.nodes.push_back(std::move(softmax));
-    stage_expr.output_node = 1;
+    stage_expr.output_node = static_cast<uint32_t>(stage_expr.nodes.size() - 1);
 
     std::vector<CompiledStageOutput> stage_outputs;
     stage_outputs.push_back(CompiledStageOutput{
         .name = output_name,
-        .local_node_idx = 1,
+        .local_node_idx = stage_expr.output_node,
         .value_id = output_value_id,
     });
 
@@ -7327,6 +7489,11 @@ static bool regionSupportsTiledTransposeMaterialization(const PhysicalExpression
 
 static bool isStorageAliasOp(ExprOp op) { return op == ExprOp::RESHAPE || op == ExprOp::STRIDED_VIEW; }
 
+static bool isHostExtentMetadataAlias(const ExprNode& node) {
+    return node.op == ExprOp::RAGGED_VALUEWISE_EXTENT &&
+           node.ragged_runtime_extent_source == RaggedRuntimeExtentSource::HOST_EXTENT;
+}
+
 static bool reshapeAliasPreservesDType(const PhysicalExpression& expr, uint32_t reshape_idx) {
     if (reshape_idx >= expr.nodes.size()) {
         throw std::runtime_error("reshapeAliasPreservesDType node index out of range.");
@@ -7623,18 +7790,21 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
     std::map<std::string, uint32_t> stage_boundary_value_id;
 
     struct TerminalRaggedExtentKey {
-        uint32_t offsets_input_slot = UINT32_MAX;
+        uint32_t partition_input_slot = UINT32_MAX;
+        RaggedRuntimeExtentSource source = RaggedRuntimeExtentSource::DEVICE_OFFSETS;
         uint64_t batch_size = 0;
         uint64_t max_active_values = 0;
         uint64_t elements_per_value = 0;
 
         [[nodiscard]] bool operator==(const TerminalRaggedExtentKey& other) const {
-            return offsets_input_slot == other.offsets_input_slot && batch_size == other.batch_size &&
-                   max_active_values == other.max_active_values && elements_per_value == other.elements_per_value;
+            return partition_input_slot == other.partition_input_slot && source == other.source &&
+                   batch_size == other.batch_size && max_active_values == other.max_active_values &&
+                   elements_per_value == other.elements_per_value;
         }
 
         [[nodiscard]] bool operator<(const TerminalRaggedExtentKey& other) const {
-            if (offsets_input_slot != other.offsets_input_slot) return offsets_input_slot < other.offsets_input_slot;
+            if (partition_input_slot != other.partition_input_slot) return partition_input_slot < other.partition_input_slot;
+            if (source != other.source) return source < other.source;
             if (batch_size != other.batch_size) return batch_size < other.batch_size;
             if (max_active_values != other.max_active_values) return max_active_values < other.max_active_values;
             return elements_per_value < other.elements_per_value;
@@ -7654,14 +7824,15 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 continue;
             }
             if (node.rhs == UINT32_MAX || node.rhs >= expr.nodes.size()) {
-                throw std::runtime_error("Terminal ragged runtime extent is missing its offsets input.");
+                throw std::runtime_error("Terminal ragged runtime extent is missing its partition input.");
             }
-            const ExprNode& offsets = expr.nodes[node.rhs];
-            if (offsets.op != ExprOp::INPUT) {
-                throw std::runtime_error("Terminal ragged runtime extent offsets must be a direct input.");
+            const ExprNode& partition = expr.nodes[node.rhs];
+            if (partition.op != ExprOp::INPUT) {
+                throw std::runtime_error("Terminal ragged runtime extent partition carrier must be a direct input.");
             }
             signature.insert(TerminalRaggedExtentKey{
-                .offsets_input_slot = offsets.input_slot,
+                .partition_input_slot = partition.input_slot,
+                .source = node.ragged_runtime_extent_source,
                 .batch_size = node.ragged_runtime_batch_size,
                 .max_active_values = node.ragged_runtime_max_active_values,
                 .elements_per_value = node.ragged_runtime_elements_per_value,
@@ -7737,6 +7908,7 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
 
     std::function<void(size_t)> materializeTerminalGroup;
     std::function<void(uint32_t)> emitForDependency;
+    std::function<uint32_t(uint32_t)> emitHostExtentMetadataAlias;
     std::function<void(uint32_t)> emitCudaKernelStage;
     std::function<uint32_t(uint32_t, std::optional<uint32_t>)> emitStorageAlias;
     std::function<bool(uint32_t, uint32_t, const std::string&)> tryEmitTiledTransposeMaterializedFusedStage;
@@ -7763,6 +7935,43 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         }
 
         group.emitted = true;
+    };
+
+    emitHostExtentMetadataAlias = [&](uint32_t marker_idx) -> uint32_t {
+        auto existing_it = node_output_value_id.find(marker_idx);
+        if (existing_it != node_output_value_id.end()) {
+            return existing_it->second;
+        }
+        if (marker_idx >= expr.nodes.size()) {
+            throw std::runtime_error("HOST_EXTENT metadata alias node index out of range.");
+        }
+        const ExprNode& marker = expr.nodes[marker_idx];
+        if (!isHostExtentMetadataAlias(marker)) {
+            throw std::runtime_error("emitHostExtentMetadataAlias called on a non-HOST_EXTENT marker.");
+        }
+        if (marker.lhs == UINT32_MAX || marker.lhs >= expr.nodes.size()) {
+            throw std::runtime_error("HOST_EXTENT metadata alias is missing its values source.");
+        }
+
+        const ExprNode& source = expr.nodes[marker.lhs];
+        uint32_t source_value_id = UINT32_MAX;
+        if (source.op == ExprOp::INPUT && !inputRequiresMaterialization(source)) {
+            source_value_id = source.input_slot;
+        } else {
+            emitForDependency(marker.lhs);
+            auto source_it = node_output_value_id.find(marker.lhs);
+            if (source_it == node_output_value_id.end()) {
+                throw std::runtime_error("HOST_EXTENT metadata alias source was not materialized.");
+            }
+            source_value_id = source_it->second;
+        }
+
+        // HOST_EXTENT carries authoritative host partition metadata for host-dispatched
+        // consumers. It has no device launch semantics and does not transform storage.
+        // Reuse the values producer directly instead of emitting a full-capacity CUDA
+        // identity kernel merely to preserve the logical row-partition annotation.
+        node_output_value_id[marker_idx] = source_value_id;
+        return source_value_id;
     };
 
     emitStorageAlias = [&](uint32_t reshape_idx, std::optional<uint32_t> forced_value_id) -> uint32_t {
@@ -8084,6 +8293,10 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
         }
 
         const ExprNode& root = expr.nodes[root_idx];
+        if (isHostExtentMetadataAlias(root)) {
+            emitHostExtentMetadataAlias(root_idx);
+            return;
+        }
         if (isStorageAliasOp(root.op) && reshapeAliasPreservesDType(expr, root_idx)) {
             emitStorageAlias(root_idx, std::nullopt);
             return;
@@ -8170,8 +8383,8 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
             }
             if (isReduceMinMaxBackwardOp(root.op) || isScanMinMaxBackwardOp(root.op) || isMatmulOp(root.op) || isEmbeddingLookupOp(root.op) ||
                 root.op == ExprOp::SEGMENTED_SCAN || isSegmentedReduceOp(root.op) || isAttentionOp(root.op) || isAttentionBackwardOp(root.op) ||
-                isLayerNormOp(root.op) || isRmsNormBackwardOp(root.op) || isConvolutionOp(root.op) ||
-                isRaggedConv1dCausalBackwardDataOp(root.op) ||
+                isLayerNormOp(root.op) || isRmsNormBackwardOp(root.op) || root.op == ExprOp::RAGGED_SOFTMAX_BACKWARD ||
+                isConvolutionOp(root.op) || isRaggedConv1dCausalBackwardDataOp(root.op) ||
                 isRaggedConv1dCausalBackwardFilterOp(root.op)) {
                 if (!grouped_rope_roots.contains(rhs_dependency_idx)) {
                     ensureBoundaryParentEmitted(rhs_dependency_idx, "rhs");
@@ -8454,6 +8667,16 @@ static PlannedExecution planExecution(const PhysicalOutputs& outputs) {
                 .name = named_output.name,
                 .local_node_idx = UINT32_MAX,
                 .value_id = root.input_slot,
+            });
+            continue;
+        }
+
+        if (isHostExtentMetadataAlias(root)) {
+            const uint32_t value_id = emitHostExtentMetadataAlias(named_output.node_idx);
+            planned.final_outputs.push_back(CompiledStageOutput{
+                .name = named_output.name,
+                .local_node_idx = UINT32_MAX,
+                .value_id = value_id,
             });
             continue;
         }
@@ -9630,7 +9853,9 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
         throw std::runtime_error("compileSpecializedBroadcastStage requires at least one broadcast group.");
     }
 
-    const bool uses_device_ragged_runtime_extent = expressionUsesDeviceRaggedRuntimeExtent(stage.expr);
+    const std::optional<RaggedRuntimeExtentSource> device_ragged_runtime_extent_source =
+        expressionDeviceRaggedRuntimeExtentSource(stage.expr);
+    const bool uses_device_ragged_runtime_extent = device_ragged_runtime_extent_source.has_value();
 
     ensureCudaContextCurrent(sig.device_num);
 
@@ -9674,6 +9899,8 @@ shared_ptr<CompiledEquation> EquationCompiler::compileSpecializedBroadcastStage(
                                                       sig.device_num);
     compiled->uses_uint32_numel_arg = false;
     compiled->uses_device_runtime_extent = uses_device_ragged_runtime_extent;
+    if (device_ragged_runtime_extent_source.has_value())
+        compiled->device_runtime_extent_source = device_ragged_runtime_extent_source.value();
 
     if (stageHasTransposedMaterializedOutput(stage.outputs)) {
         compiled->launch_kind = CompiledEquation::LaunchKind::FusedTiledTranspose;

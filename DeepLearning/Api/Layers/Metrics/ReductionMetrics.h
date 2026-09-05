@@ -67,11 +67,15 @@ class UnaryReductionMetric : public Metric {
         (void)batchSize;
         (void)tensorPlacement;
         // Ragged reductions do not allocate the dense per-row validity mask.
-        // RATIO metrics do use CustomMetric's two device statistics plus the
+        // RATIO metrics use CustomMetric's two device statistics plus the
         // slot-local device buffers used to publish exact batch statistics.
+        // Ragged extrema use one structural active-count scalar plus one
+        // slot-local device buffer for explicit no-contribution semantics.
         uint64_t bytes = metricTensor.getTotalSizeInBytes();
         if (aggregation == MetricAggregation::RATIO)
             bytes += 4 * sizeof(float);
+        else if (aggregation == MetricAggregation::MIN || aggregation == MetricAggregation::MAX)
+            bytes += 2 * sizeof(float);
         return bytes;
     }
 
@@ -228,15 +232,15 @@ THOR_DECLARE_UNARY_REDUCTION_METRIC(Sum,
 THOR_DECLARE_UNARY_REDUCTION_METRIC(Min,
                                     Min,
                                     MetricAggregation::MIN,
-                                    false,
+                                    true,
                                     MetricAggregation::MIN,
-                                    ThorImplementation::RaggedReductionMetric::Kind::SUM)
+                                    ThorImplementation::RaggedReductionMetric::Kind::MIN)
 THOR_DECLARE_UNARY_REDUCTION_METRIC(Max,
                                     Max,
                                     MetricAggregation::MAX,
-                                    false,
+                                    true,
                                     MetricAggregation::MAX,
-                                    ThorImplementation::RaggedReductionMetric::Kind::SUM)
+                                    ThorImplementation::RaggedReductionMetric::Kind::MAX)
 
 #undef THOR_DECLARE_UNARY_REDUCTION_METRIC
 
@@ -252,6 +256,43 @@ class WeightedMean : public Metric {
 
     Tensor getValues() const { return getFeatureInput().value(); }
     Tensor getWeights() const { return labelsTensor; }
+    std::optional<RaggedTensor> getRaggedValues() const { return raggedValues; }
+    std::optional<RaggedTensor> getRaggedWeights() const { return raggedWeights; }
+    bool getUseRagged() const { return raggedValues.has_value(); }
+
+    std::vector<Tensor> getAllInputTensors() const override {
+        if (getUseRagged()) {
+            THOR_THROW_IF_FALSE(raggedWeights.has_value());
+            return {raggedValues->getValues(), raggedWeights->getValues(), raggedValues->getOffsets()};
+        }
+        return Metric::getAllInputTensors();
+    }
+
+    int getConnectionType(Tensor connectingTensor) const override {
+        if (!getUseRagged())
+            return Metric::getConnectionType(connectingTensor);
+        if (connectingTensor == raggedValues->getValues())
+            return static_cast<int>(ThorImplementation::Metric::ConnectionType::FORWARD);
+        if (connectingTensor == raggedWeights->getValues())
+            return static_cast<int>(ThorImplementation::Metric::ConnectionType::LABELS);
+        if (connectingTensor == raggedValues->getOffsets())
+            return static_cast<int>(ThorImplementation::Metric::ConnectionType::STRUCTURAL);
+        if (connectingTensor == getMetric())
+            return static_cast<int>(ThorImplementation::Metric::ConnectionType::METRIC);
+        THOR_UNREACHABLE();
+    }
+
+    [[nodiscard]] std::optional<std::string> getInputPortName(const Tensor& inputTensor) const override {
+        if (!getUseRagged())
+            return Metric::getInputPortName(inputTensor);
+        if (inputTensor == raggedValues->getValues())
+            return "values";
+        if (inputTensor == raggedWeights->getValues())
+            return "weights";
+        if (inputTensor == raggedValues->getOffsets())
+            return "offsets";
+        return std::nullopt;
+    }
 
     nlohmann::json architectureJson() const override;
     static void deserialize(const nlohmann::json& j, Network* network);
@@ -259,7 +300,13 @@ class WeightedMean : public Metric {
    protected:
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
                                                    ThorImplementation::TensorPlacement tensorPlacement) const override {
-        return Metric::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement) + 4 * sizeof(float);
+        if (!getUseRagged())
+            return Metric::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement) + 4 * sizeof(float);
+        (void)batchSize;
+        (void)tensorPlacement;
+        // No dense validity mask. Device state is metric + ratio numerator/denominator
+        // + the slot-local device numerator/denominator buffers.
+        return metricTensor.getTotalSizeInBytes() + 4 * sizeof(float);
     }
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,
@@ -272,28 +319,55 @@ class WeightedMean : public Metric {
         (void)drivingApiLayer;
         (void)inferenceOnly;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value() || connectingApiTensor == labelsTensor);
-        return std::make_shared<ThorImplementation::WeightedMean>();
+        if (!getUseRagged()) {
+            THOR_THROW_IF_FALSE(connectingApiTensor == getFeatureInput().value() || connectingApiTensor == labelsTensor);
+            return std::make_shared<ThorImplementation::WeightedMean>();
+        }
+        THOR_THROW_IF_FALSE(raggedWeights.has_value());
+        if (connectingApiTensor != raggedValues->getValues() &&
+            connectingApiTensor != raggedWeights->getValues() &&
+            connectingApiTensor != raggedValues->getOffsets()) {
+            throw std::invalid_argument("WeightedMean ragged stamp received an unrelated tensor.");
+        }
+        return std::make_shared<ThorImplementation::RaggedWeightedMean>(
+            raggedValues->getBatchSize(), raggedValues->getMaxTotalValues());
     }
+
+    std::optional<RaggedTensor> raggedValues;
+    std::optional<RaggedTensor> raggedWeights;
 };
 
 class WeightedMean::Builder {
    public:
     virtual WeightedMean build() {
         THOR_THROW_IF_FALSE(_network.has_value());
-        THOR_THROW_IF_FALSE(_values.has_value());
-        THOR_THROW_IF_FALSE(_weights.has_value());
-        THOR_THROW_IF_FALSE(_values.value() != _weights.value());
-        THOR_THROW_IF_FALSE(!_values.value().getDimensions().empty());
-        THOR_THROW_IF_FALSE(_values.value().getDimensions() == _weights.value().getDimensions());
-        ThorImplementation::ReductionMetricDType::validateValueDType(
-            "WeightedMean", "values", _values.value().getDataType());
-        ThorImplementation::ReductionMetricDType::validateValueDType(
-            "WeightedMean", "weights", _weights.value().getDataType());
+        const bool dense = _values.has_value() || _weights.has_value();
+        const bool ragged = _raggedValues.has_value() || _raggedWeights.has_value();
+        if (dense == ragged)
+            throw std::invalid_argument("WeightedMean requires either dense values/weights or ragged values/weights.");
 
         WeightedMean metric;
-        metric.featureInput = _values.value();
-        metric.labelsTensor = _weights.value();
+        if (ragged) {
+            if (!_raggedValues.has_value() || !_raggedWeights.has_value())
+                throw std::invalid_argument("WeightedMean ragged values and weights must both be provided.");
+            validateRaggedPair(_raggedValues.value(), _raggedWeights.value());
+            metric.raggedValues = _raggedValues.value();
+            metric.raggedWeights = _raggedWeights.value();
+            metric.featureInput = _raggedValues->getValues();
+            metric.labelsTensor = _raggedWeights->getValues();
+        } else {
+            THOR_THROW_IF_FALSE(_values.has_value());
+            THOR_THROW_IF_FALSE(_weights.has_value());
+            THOR_THROW_IF_FALSE(_values.value() != _weights.value());
+            THOR_THROW_IF_FALSE(!_values.value().getDimensions().empty());
+            THOR_THROW_IF_FALSE(_values.value().getDimensions() == _weights.value().getDimensions());
+            ThorImplementation::ReductionMetricDType::validateValueDType(
+                "WeightedMean", "values", _values.value().getDataType());
+            ThorImplementation::ReductionMetricDType::validateValueDType(
+                "WeightedMean", "weights", _weights.value().getDataType());
+            metric.featureInput = _values.value();
+            metric.labelsTensor = _weights.value();
+        }
         metric.metricTensor = Tensor(DataType::FP32, {1});
         metric.initialized = true;
         metric.addToNetwork(_network.value());
@@ -307,7 +381,7 @@ class WeightedMean::Builder {
     }
 
     virtual WeightedMean::Builder& values(Tensor values) {
-        THOR_THROW_IF_FALSE(!this->_values.has_value());
+        THOR_THROW_IF_FALSE(!this->_values.has_value() && !this->_raggedValues.has_value());
         THOR_THROW_IF_FALSE(values.isInitialized());
         THOR_THROW_IF_FALSE(!values.getDimensions().empty());
         ThorImplementation::ReductionMetricDType::validateValueDType(
@@ -316,8 +390,18 @@ class WeightedMean::Builder {
         return *this;
     }
 
+    virtual WeightedMean::Builder& values(RaggedTensor values) {
+        THOR_THROW_IF_FALSE(!this->_values.has_value() && !this->_raggedValues.has_value());
+        if (!values.isInitialized())
+            throw std::invalid_argument("WeightedMean ragged values must be initialized.");
+        ThorImplementation::ReductionMetricDType::validateValueDType(
+            "WeightedMean", "values", values.getValuesDataType());
+        this->_raggedValues = std::move(values);
+        return *this;
+    }
+
     virtual WeightedMean::Builder& weights(Tensor weights) {
-        THOR_THROW_IF_FALSE(!this->_weights.has_value());
+        THOR_THROW_IF_FALSE(!this->_weights.has_value() && !this->_raggedWeights.has_value());
         THOR_THROW_IF_FALSE(weights.isInitialized());
         THOR_THROW_IF_FALSE(!weights.getDimensions().empty());
         ThorImplementation::ReductionMetricDType::validateValueDType(
@@ -326,10 +410,44 @@ class WeightedMean::Builder {
         return *this;
     }
 
+    virtual WeightedMean::Builder& weights(RaggedTensor weights) {
+        THOR_THROW_IF_FALSE(!this->_weights.has_value() && !this->_raggedWeights.has_value());
+        if (!weights.isInitialized())
+            throw std::invalid_argument("WeightedMean ragged weights must be initialized.");
+        ThorImplementation::ReductionMetricDType::validateValueDType(
+            "WeightedMean", "weights", weights.getValuesDataType());
+        this->_raggedWeights = std::move(weights);
+        return *this;
+    }
+
    private:
+    static void validateRaggedPair(const RaggedTensor& values, const RaggedTensor& weights) {
+        if (values.getValues() == weights.getValues())
+            throw std::invalid_argument("WeightedMean ragged values and weights must use distinct packed value tensors.");
+        if (!values.sharesPartitionWith(weights))
+            throw std::invalid_argument("WeightedMean ragged values and weights must use the exact same row partition.");
+        if (values.getBatchSize() != weights.getBatchSize() ||
+            values.getMaxTotalValues() != weights.getMaxTotalValues() ||
+            values.getOffsetsDataType() != weights.getOffsetsDataType()) {
+            throw std::invalid_argument("WeightedMean ragged values and weights partition metadata must match.");
+        }
+        if (values.getTrailingDimensions() != weights.getTrailingDimensions())
+            throw std::invalid_argument("WeightedMean ragged values and weights trailing dimensions must match.");
+        if (values.hasMaxValuesPerRow() != weights.hasMaxValuesPerRow() ||
+            (values.hasMaxValuesPerRow() && values.getMaxValuesPerRow() != weights.getMaxValuesPerRow())) {
+            throw std::invalid_argument("WeightedMean ragged values and weights max_values_per_row metadata must match.");
+        }
+        ThorImplementation::ReductionMetricDType::validateValueDType(
+            "WeightedMean", "values", values.getValuesDataType());
+        ThorImplementation::ReductionMetricDType::validateValueDType(
+            "WeightedMean", "weights", weights.getValuesDataType());
+    }
+
     std::optional<Network*> _network;
     std::optional<Tensor> _values;
     std::optional<Tensor> _weights;
+    std::optional<RaggedTensor> _raggedValues;
+    std::optional<RaggedTensor> _raggedWeights;
 };
 
 }  // namespace Thor

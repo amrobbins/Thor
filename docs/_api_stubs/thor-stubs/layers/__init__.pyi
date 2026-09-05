@@ -134,7 +134,7 @@ class CustomLayer(TrainableLayer):
         Convenience forms:
         - inputs=<thor.Tensor or thor.RaggedTensor> defaults to {"feature_input": tensor}
         - output_names omitted defaults to ["feature_output"]
-        - ragged inputs produce partition-preserving thor.RaggedTensor outputs; all named ragged inputs must share one offsets tensor
+        - ragged inputs produce partition-preserving thor.RaggedTensor outputs; all named ragged inputs must share one logical row partition
         - activation=<thor.activations.Activation> stitches that activation onto each returned expression before compilation
         - uses_batch_validity=True declares runtime batch-validity use; Thor currently exposes it as
           ``thor.BATCH_VALIDITY_MASK_NAME`` through ``context.input(...)``
@@ -185,7 +185,7 @@ class Add(MultiConnectionLayer):
     """
     Elementwise addition for dense tensors or canonical rank-1 ragged tensors.
 
-    Ragged operands must share the exact same row-partition offsets tensor. The
+    Ragged operands must share the exact same logical row partition. The
     result preserves that partition and executes only over the authoritative active
     packed prefix.
     """
@@ -1359,26 +1359,6 @@ class NetworkInput(Layer):
     def is_external(self) -> bool: ...
 
     def version(self) -> str: ...
-
-class RaggedFilter(MultiConnectionLayer):
-    def __init__(self, network: thor.Network, feature_input: thor.RaggedTensor, mask_input: thor.RaggedTensor) -> None:
-        """
-        Stable-filter every row of a rank-1 RaggedTensor with one BOOLEAN predicate per token.
-
-        ``mask_input`` must be a scalar BOOLEAN RaggedTensor sharing the exact same
-        canonical offsets tensor and row-partition descriptor as ``feature_input``.
-        Selected active tokens preserve their row-local order and are compacted into a
-        new packed values tensor with a newly produced canonical offsets tensor. Neither
-        forward nor backward reads inactive packed capacity. Backward writes zero to
-        active filtered-out feature positions and scatters gradients only to retained
-        positions; the BOOLEAN mask is non-differentiable.
-        """
-
-    def get_feature_output(self) -> thor.RaggedTensor: ...
-
-    def get_feature_input(self) -> thor.RaggedTensor: ...
-
-    def get_mask_input(self) -> thor.RaggedTensor: ...
 
 class RaggedGather(MultiConnectionLayer):
     def __init__(self, network: thor.Network, source_input: thor.RaggedTensor, indices_input: thor.RaggedTensor) -> None:
