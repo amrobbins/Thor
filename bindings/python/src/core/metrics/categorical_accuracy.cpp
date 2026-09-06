@@ -151,7 +151,13 @@ Categorical Accuracy metric.
 Parameters
 ----------
 network : thor.Network
-predictions : thor.Tensor
-labels : thor.Tensor
+predictions : thor.Tensor or thor.RaggedTensor
+labels : thor.Tensor or thor.RaggedTensor
+
+For ragged inputs, predictions and labels must share the exact logical row
+partition. Predictions have one trailing class dimension and are FP16 or FP32;
+labels follow the selected per-class or integer class-index contract. The metric
+aggregates correct-token and active-token sufficient statistics exactly across
+partial and unequal batches.
 )nbdoc";
 }

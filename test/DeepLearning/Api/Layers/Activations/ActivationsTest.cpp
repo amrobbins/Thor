@@ -138,7 +138,7 @@ TEST(Activations, ShapePreservingBuildersInferRaggedFromInputAndPreserveOffsets)
     ASSERT_TRUE(gelu->getRaggedFeatureOutput().has_value());
     EXPECT_EQ(gelu->getRaggedFeatureOutput()->getOffsets(), input.getOffsets());
 
-    EXPECT_FALSE(Softmax().supportsRaggedStandalone());
+    EXPECT_TRUE(Softmax().supportsRaggedStandalone());
     EXPECT_TRUE(Swiglu().supportsRaggedStandalone());
 }
 

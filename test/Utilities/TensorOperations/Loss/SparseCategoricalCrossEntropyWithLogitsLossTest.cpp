@@ -272,3 +272,128 @@ TEST(SparseCategoricalCrossEntropyWithLogitsLoss, ForwardOnlyMatchesReferenceWit
 
     assertVectorNear(actualLoss, reference.loss, 1.0e-5f, "loss");
 }
+
+TEST(SparseCategoricalCrossEntropyWithLogitsLoss, RaggedActiveCountGuardsPoisonedInactiveCapacityShortLongShortAndEmpty) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, 0);
+    Stream stream(0);
+
+    constexpr uint32_t rowCapacity = 6;
+    constexpr uint32_t numClasses = 4;
+    constexpr uint32_t lossScalingFactor = 3;
+    constexpr float lossWeight = 0.25f;
+    constexpr float lossSentinel = -77.0f;
+    constexpr float gradientSentinel = -55.0f;
+
+    static_assert(kRaggedSparseCategoricalCrossEntropyWithLogitsPartitionRequirement ==
+                  RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
+
+    Tensor labels(cpuPlacement, TensorDescriptor(DataType::UINT32, {rowCapacity}));
+    Tensor labelsD = labels.clone(gpuPlacement);
+    Tensor logits(cpuPlacement, TensorDescriptor(DataType::FP32, {rowCapacity, numClasses}));
+    Tensor logitsD = logits.clone(gpuPlacement);
+    Tensor mask(cpuPlacement, TensorDescriptor(DataType::UINT8, {rowCapacity}));
+    Tensor maskD = mask.clone(gpuPlacement);
+    Tensor loss(cpuPlacement, TensorDescriptor(DataType::FP32, {rowCapacity}));
+    Tensor lossD = loss.clone(gpuPlacement);
+    Tensor gradient(cpuPlacement, TensorDescriptor(DataType::FP32, {rowCapacity, numClasses}));
+    Tensor gradientD = gradient.clone(gpuPlacement);
+
+    const vector<uint32_t> activeCounts = {2, 5, 1, 0};
+    for (DataType activeCountDataType : {DataType::UINT32, DataType::UINT64}) {
+        Tensor activeCount(cpuPlacement, TensorDescriptor(activeCountDataType, {1}));
+        Tensor activeCountD = activeCount.clone(gpuPlacement);
+
+        for (size_t pass = 0; pass < activeCounts.size(); ++pass) {
+            const uint32_t activeRows = activeCounts[pass];
+            vector<uint32_t> labelsHost(rowCapacity, numeric_limits<uint32_t>::max());
+            vector<float> logitsHost(static_cast<size_t>(rowCapacity) * numClasses,
+                                     numeric_limits<float>::quiet_NaN());
+            vector<uint8_t> maskHost(rowCapacity, 0xff);
+            for (uint32_t row = 0; row < activeRows; ++row) {
+                labelsHost[row] = (row + static_cast<uint32_t>(pass)) % numClasses;
+                maskHost[row] = 1;
+                for (uint32_t c = 0; c < numClasses; ++c) {
+                    logitsHost[static_cast<size_t>(row) * numClasses + c] =
+                        static_cast<float>(10 * pass + 3 * row) * 0.1f + static_cast<float>(c) * 0.35f - 0.4f;
+                }
+            }
+
+            std::copy(labelsHost.begin(), labelsHost.end(), static_cast<uint32_t *>(labels.getMemPtr()));
+            std::copy(logitsHost.begin(), logitsHost.end(), static_cast<float *>(logits.getMemPtr()));
+            std::copy(maskHost.begin(), maskHost.end(), static_cast<uint8_t *>(mask.getMemPtr()));
+            std::fill_n(static_cast<float *>(loss.getMemPtr()), rowCapacity, lossSentinel);
+            std::fill_n(static_cast<float *>(gradient.getMemPtr()), static_cast<size_t>(rowCapacity) * numClasses, gradientSentinel);
+            if (activeCountDataType == DataType::UINT32)
+                *static_cast<uint32_t *>(activeCount.getMemPtr()) = activeRows;
+            else
+                *static_cast<uint64_t *>(activeCount.getMemPtr()) = activeRows;
+
+            labelsD.copyFromAsync(labels, stream);
+            logitsD.copyFromAsync(logits, stream);
+            maskD.copyFromAsync(mask, stream);
+            lossD.copyFromAsync(loss, stream);
+            gradientD.copyFromAsync(gradient, stream);
+            activeCountD.copyFromAsync(activeCount, stream);
+
+            launchRaggedSparseCategoricalCrossEntropyWithLogits<uint32_t, float, float, uint8_t>(
+                labelsD.getMemPtr(),
+                logitsD.getMemPtr(),
+                maskD.getMemPtr(),
+                lossD.getMemPtr(),
+                gradientD.getMemPtr(),
+                activeCountD.getMemPtr(),
+                activeCountDataType,
+                numClasses,
+                rowCapacity,
+                true,
+                lossScalingFactor,
+                lossWeight,
+                false,
+                0,
+                true,
+                stream);
+
+            loss.copyFromAsync(lossD, stream);
+            gradient.copyFromAsync(gradientD, stream);
+            stream.synchronize();
+
+            vector<float> actualLoss(rowCapacity);
+            vector<float> actualGradient(static_cast<size_t>(rowCapacity) * numClasses);
+            std::copy(static_cast<float *>(loss.getMemPtr()),
+                      static_cast<float *>(loss.getMemPtr()) + actualLoss.size(),
+                      actualLoss.begin());
+            std::copy(static_cast<float *>(gradient.getMemPtr()),
+                      static_cast<float *>(gradient.getMemPtr()) + actualGradient.size(),
+                      actualGradient.begin());
+
+            const vector<float> activeLogits(logitsHost.begin(), logitsHost.begin() + static_cast<size_t>(activeRows) * numClasses);
+            const vector<uint32_t> activeLabels(labelsHost.begin(), labelsHost.begin() + activeRows);
+            const vector<uint8_t> activeMask(maskHost.begin(), maskHost.begin() + activeRows);
+            const SparseCeReference reference = referenceSparseCategoricalCrossEntropyWithLogits(
+                activeLogits, activeLabels, &activeMask, activeRows, numClasses, lossScalingFactor, lossWeight, false, 0);
+
+            for (uint32_t row = 0; row < activeRows; ++row) {
+                EXPECT_NEAR(actualLoss[row], reference.loss[row], 1.0e-5f)
+                    << "activeCountDataType=" << static_cast<int>(activeCountDataType) << " pass=" << pass << " row=" << row;
+                for (uint32_t c = 0; c < numClasses; ++c) {
+                    const size_t i = static_cast<size_t>(row) * numClasses + c;
+                    EXPECT_NEAR(actualGradient[i], reference.gradient[i], 1.0e-5f)
+                        << "activeCountDataType=" << static_cast<int>(activeCountDataType) << " pass=" << pass
+                        << " row=" << row << " class=" << c;
+                }
+            }
+            for (uint32_t row = activeRows; row < rowCapacity; ++row) {
+                EXPECT_EQ(actualLoss[row], lossSentinel)
+                    << "inactive loss row was written for activeCountDataType=" << static_cast<int>(activeCountDataType)
+                    << " pass=" << pass << " row=" << row;
+                for (uint32_t c = 0; c < numClasses; ++c) {
+                    const size_t i = static_cast<size_t>(row) * numClasses + c;
+                    EXPECT_EQ(actualGradient[i], gradientSentinel)
+                        << "inactive gradient row was written for activeCountDataType=" << static_cast<int>(activeCountDataType)
+                        << " pass=" << pass << " row=" << row << " class=" << c;
+                }
+            }
+        }
+    }
+}

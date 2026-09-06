@@ -1554,12 +1554,13 @@ add_custom_target(check-retained-ragged-training-production-gate
         VERBATIM
 )
 
-# R1 rank-1 ragged support qualification. This gathers the canonical boundary,
+# R11D rank-1 ragged support closure qualification. This gathers the canonical boundary,
 # public API, partition-preservation, poisoned-tail, changing-runtime-extent,
 # save/load/clone, mixed-attention and representative backward regressions into
 # one executable contract gate. The disabled preflight prevents a GPU-less
-# machine from passing because constituent CUDA tests skipped. The heavier T10
-# retained-Conv1D performance qualification remains its own dedicated gate.
+# machine from passing because constituent CUDA tests skipped. R11D gathers the
+# shipped rank-1 ragged surface here rather than duplicating its numerical tests.
+# The heavier retained-Conv1D performance qualification remains its own gate.
 set(THOR_RAGGED_SUPPORT_CONTRACT_GTEST_FILTER
         "RaggedSupportContract.*:
 RaggedTensorApi.*:
@@ -1567,6 +1568,9 @@ RaggedNetworkInputApi.*:
 RaggedNetworkOutputApi.*:
 RaggedTransformerCompleteness.*:
 Activations.ShapePreservingBuildersInferRaggedFromInputAndPreserveOffsets:
+Activations.RaggedSoftmax*:
+CudnnRaggedSoftmaxDescriptor.*:
+CudnnRaggedSoftmaxR11A1.*:
 GatedLinearUnits.Ragged*:
 FullyConnectedApi.Ragged*:
 EmbeddingApi.Ragged*:
@@ -1602,21 +1606,45 @@ CtcRaggedArchitecture.*:
 RaggedCtcEndToEnd.*:
 TrainingRunsResult.Save*Ragged*:
 RaggedConvolution1dPublicIntegration.*:
+RaggedMAEApi.*:
+RaggedRegressionR10E.*:
+RaggedRegressionR10F.*:
+RaggedRegressionR10G.*:
+RaggedClassificationR10H.*:
+RaggedDistributionR10I.*:
+RaggedDistributionR10J.*:
+RaggedDistributionR10K.*:
+RaggedCategoricalR11C.*:
+RaggedSparseCategoricalR11C1.*:
+RaggedCustomLoss.*:
+RaggedLossShaper.*:
+SparseCategoricalCrossEntropyWithLogits.Ragged*:
+SparseCategoricalCrossEntropyWithLogitsLoss.Ragged*:
+ReductionMetricApi.R10L*:
+ReductionMetricApi.R10M*:
+ReductionMetricApi.R10N*:
+ReductionMetricApi.UnaryMetricsRejectUnsupportedStorageDTypes:
+ReductionMetricApi.WeightedMeanRejectsUnsupportedStorageDTypes:
+RaggedAccuracyApi.*:
+RaggedAccuracy.*:
+RaggedWeightedReduction.*:
+MetricEpochAccumulator*.*:
 RaggedExpression.SegmentSumAndMeanAutodiffLowerThroughSegmentedBroadcast:
+RaggedExpression.OrdinarySoftmax*:
 RaggedExpression.TrailingTranspose*:
 RaggedExpression.*Segment*Softmax*")
 string(REPLACE "\n" "" THOR_RAGGED_SUPPORT_CONTRACT_GTEST_FILTER "${THOR_RAGGED_SUPPORT_CONTRACT_GTEST_FILTER}")
 
 add_custom_target(check-ragged-support-contract
         COMMAND ${CMAKE_COMMAND} -E env
-        "THOR_R1_RAGGED_SUPPORT_GATE=1"
+        "THOR_RAGGED_SUPPORT_GATE=1"
         $<TARGET_FILE:thor_tests>
         --gtest_color=yes
         --gtest_also_run_disabled_tests
         "--gtest_filter=${THOR_RAGGED_SUPPORT_CONTRACT_GTEST_FILTER}"
         DEPENDS thor_tests
         USES_TERMINAL
-        COMMENT "Thor: running R1 rank-1 ragged support qualification"
+        COMMENT "Thor: running final rank-1 ragged support qualification"
         VERBATIM
 )
 

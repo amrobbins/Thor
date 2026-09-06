@@ -28,8 +28,15 @@ bool isSupportedMaskType(DataType dataType) {
 
 SparseCategoricalCrossEntropyWithLogits::SparseCategoricalCrossEntropyWithLogits(DataType lossDataType,
                                                                                  optional<float> lossWeight,
-                                                                                 optional<uint32_t> ignoreIndex)
-    : Loss(lossDataType), ignoreIndex(ignoreIndex), lossWeight(normalizeLossWeight(lossWeight)) {}
+                                                                                 optional<uint32_t> ignoreIndex,
+                                                                                 optional<uint32_t> raggedBatchSize)
+    : Loss(lossDataType),
+      ignoreIndex(ignoreIndex),
+      lossWeight(normalizeLossWeight(lossWeight)),
+      raggedBatchSize(raggedBatchSize) {
+    if (raggedBatchSize.has_value())
+        THOR_THROW_IF_FALSE(raggedBatchSize.value() > 0);
+}
 
 vector<uint64_t> SparseCategoricalCrossEntropyWithLogits::rawLossDimensionsForFeatureInput(const vector<uint64_t> &featureInputDimensions) {
     THOR_THROW_IF_FALSE(featureInputDimensions.size() >= 1);
@@ -88,6 +95,8 @@ optional<Tensor> SparseCategoricalCrossEntropyWithLogits::connectToPreviousLayer
         return connectToLabelsInputLayer(previousLayer, featureInput, stream);
     } else if (connectionType == MASK_CONNECTION_TYPE) {
         return connectToMaskInputLayer(previousLayer, featureInput, stream);
+    } else if (connectionType == ACTIVE_COUNT_CONNECTION_TYPE) {
+        return connectToActiveCountInputLayer(previousLayer, featureInput, stream);
     }
     THOR_UNREACHABLE();
 }
@@ -110,14 +119,41 @@ optional<Tensor> SparseCategoricalCrossEntropyWithLogits::connectToMaskInputLaye
     return nullopt;
 }
 
+optional<Tensor> SparseCategoricalCrossEntropyWithLogits::connectToActiveCountInputLayer(
+    Layer *activeCountLayer, optional<Tensor> activeCount, Stream activeCountStream) {
+    (void)activeCountLayer;
+    THOR_THROW_IF_FALSE(usesRaggedActiveCount());
+    THOR_THROW_IF_FALSE(!activeCountInput.has_value());
+    THOR_THROW_IF_FALSE(activeCount.has_value());
+    THOR_THROW_IF_FALSE(activeCount.value().getDimensions() == vector<uint64_t>{1});
+    THOR_THROW_IF_FALSE(activeCount.value().getDataType() == DataType::UINT32 ||
+                        activeCount.value().getDataType() == DataType::UINT64);
+
+    if (featureInput.has_value()) {
+        THOR_THROW_IF_FALSE(featureInput.value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
+        THOR_THROW_IF_FALSE(featureInput.value().getPlacement() == activeCount.value().getPlacement());
+    }
+    if (labelsInput.has_value())
+        THOR_THROW_IF_FALSE(labelsInput.value().getPlacement() == activeCount.value().getPlacement());
+    if (maskInput.has_value())
+        THOR_THROW_IF_FALSE(maskInput.value().getPlacement() == activeCount.value().getPlacement());
+
+    activeCountInput = activeCount;
+    this->activeCountStream = activeCountStream;
+    return nullopt;
+}
+
 void SparseCategoricalCrossEntropyWithLogits::initialize() {
     Loss::initialize();
     maskReceived = false;
+    activeCountReceived = false;
 }
 
 void SparseCategoricalCrossEntropyWithLogits::cleanup() {
     maskReadyEvent = Event();
     maskReusableEvent = Event();
+    activeCountReadyEvent = Event();
+    activeCountReusableEvent = Event();
     Loss::cleanup();
 }
 
@@ -141,7 +177,26 @@ void SparseCategoricalCrossEntropyWithLogits::compileImpl() {
     THOR_THROW_IF_FALSE(sparseLabelOrMaskDimensionsMatchFeaturePrefix(labelsInput.value().getDescriptor().getDimensions(), featureInputDimensions));
     THOR_THROW_IF_FALSE(featureOutput.value().getDescriptor().getDimensions() == rawLossDimensionsForFeatureInput(featureInputDimensions));
 
-    const uint64_t effectiveRows = featureInputDimensions.size() == 1 ? 1 : productDimensions(featureInputDimensions, 0, featureInputDimensions.size() - 1);
+    if (usesRaggedActiveCount()) {
+        THOR_THROW_IF_FALSE(activeCountInput.has_value());
+        THOR_THROW_IF_FALSE(activeCountInput.value().isInitialized());
+        THOR_THROW_IF_FALSE(activeCountInput.value().getPlacement() == featureInput.value().getPlacement());
+        THOR_THROW_IF_FALSE(activeCountInput.value().getDimensions() == vector<uint64_t>{1});
+        THOR_THROW_IF_FALSE(activeCountInput.value().getDataType() == DataType::UINT32 ||
+                            activeCountInput.value().getDataType() == DataType::UINT64);
+        // Ragged sparse CE is tokenwise over packed [capacity, C] values. The
+        // runtime active-count scalar, not a product of logical dimensions,
+        // selects the valid prefix within this capacity.
+        THOR_THROW_IF_FALSE(featureInputDimensions.size() == 2);
+    } else {
+        THOR_THROW_IF_FALSE(!activeCountInput.has_value());
+    }
+
+    const uint64_t effectiveRows = usesRaggedActiveCount()
+                                       ? featureInputDimensions.front()
+                                       : (featureInputDimensions.size() == 1
+                                              ? 1
+                                              : productDimensions(featureInputDimensions, 0, featureInputDimensions.size() - 1));
     THOR_THROW_IF_FALSE(effectiveRows <= numeric_limits<uint32_t>::max());
     numRows = static_cast<uint32_t>(effectiveRows);
     THOR_THROW_IF_FALSE(featureInputDimensions.back() <= numeric_limits<uint32_t>::max());
@@ -163,6 +218,38 @@ void SparseCategoricalCrossEntropyWithLogits::compileImpl() {
         THOR_THROW_IF_FALSE(sparseLabelOrMaskDimensionsMatchFeaturePrefix(maskInput.value().getDescriptor().getDimensions(), featureInputDimensions));
         THOR_THROW_IF_FALSE(isSupportedMaskType(maskInput.value().getDescriptor().getDataType()));
     }
+}
+
+uint32_t SparseCategoricalCrossEntropyWithLogits::resolveRaggedValidExampleCount(uint32_t validExampleCount) const {
+    THOR_THROW_IF_FALSE(raggedBatchSize.has_value());
+    const uint32_t resolved = validExampleCount == 0 ? raggedBatchSize.value() : validExampleCount;
+    THOR_THROW_IF_FALSE(resolved > 0);
+    THOR_THROW_IF_FALSE(resolved <= raggedBatchSize.value());
+    return resolved;
+}
+
+void SparseCategoricalCrossEntropyWithLogits::recordCurrentBatchCardinality(uint32_t validExampleCount) {
+    if (!usesRaggedActiveCount()) {
+        recordBatchCardinality(validExampleCount);
+        return;
+    }
+
+    const uint32_t resolved = resolveRaggedValidExampleCount(validExampleCount);
+    if (batchCardinalitySet) {
+        THOR_THROW_IF_FALSE(currentValidExampleCount == resolved);
+        return;
+    }
+    currentValidExampleCount = resolved;
+    batchCardinalitySet = true;
+}
+
+void SparseCategoricalCrossEntropyWithLogits::finishCurrentBatchCardinality() {
+    if (!usesRaggedActiveCount()) {
+        finishBatchCardinality();
+        return;
+    }
+    THOR_THROW_IF_FALSE(batchCardinalitySet);
+    batchCardinalitySet = false;
 }
 
 void SparseCategoricalCrossEntropyWithLogits::infer(optional<Tensor> logits, optional<Tensor> loss, Stream stream) {
@@ -195,7 +282,7 @@ void SparseCategoricalCrossEntropyWithLogits::forward(optional<Tensor> inputTens
     }
 
     if (inputTensor.has_value()) {
-        recordBatchCardinality(validExampleCount);
+        recordCurrentBatchCardinality(validExampleCount);
         if (inputTensor.value() == featureInput.value()) {
             forwardFeatures(inputTensor.value(), validationPass);
             return;
@@ -210,6 +297,12 @@ void SparseCategoricalCrossEntropyWithLogits::forward(optional<Tensor> inputTens
             advanceDataIfReady(validationPass);
             return;
         }
+        if (activeCountInput.has_value() && inputTensor.value() == activeCountInput.value()) {
+            THOR_THROW_IF_FALSE(activeCountReceived == false);
+            activeCountReceived = true;
+            advanceDataIfReady(validationPass);
+            return;
+        }
         THOR_UNREACHABLE();
     }
 
@@ -217,16 +310,21 @@ void SparseCategoricalCrossEntropyWithLogits::forward(optional<Tensor> inputTens
     THOR_THROW_IF_FALSE(featureInputReceived);
     THOR_THROW_IF_FALSE(labelsReceived);
     THOR_THROW_IF_FALSE(!maskInput.has_value() || maskReceived);
+    THOR_THROW_IF_FALSE(!usesRaggedActiveCount() || activeCountReceived);
     featureInputReceived = false;
     labelsReceived = false;
     maskReceived = false;
-    finishBatchCardinality();
+    activeCountReceived = false;
+    finishCurrentBatchCardinality();
 
     infer(featureInput, featureOutput, stream);
-    maskInvalidLossTail();
+    if (!usesRaggedActiveCount())
+        maskInvalidLossTail();
 
     if (maskInput.has_value())
         maskStream.waitFor(stream, maskReusableEvent);
+    if (activeCountInput.has_value())
+        activeCountStream.waitFor(stream, activeCountReusableEvent);
     if (isInferenceOnly() || validationPass)
         markLabelsReusableAfterCompute();
 
@@ -240,12 +338,40 @@ void SparseCategoricalCrossEntropyWithLogits::forward(optional<Tensor> inputTens
     backward(nullopt, currentValidExampleCount);
 }
 
+void SparseCategoricalCrossEntropyWithLogits::backward(optional<Tensor> errorInput, uint32_t validExampleCount) {
+    if (!usesRaggedActiveCount()) {
+        Loss::backward(errorInput, validExampleCount);
+        return;
+    }
+
+    THOR_THROW_IF_FALSE(running);
+    THOR_THROW_IF_FALSE(!errorInput.has_value());
+    THOR_THROW_IF_FALSE(labelsInput.has_value() && labelsInput.value().isInitialized());
+    THOR_THROW_IF_FALSE(errorOutput.has_value() && errorOutput.value().isInitialized());
+    THOR_THROW_IF_FALSE(labelsStream.isInitialized());
+    const uint32_t resolved = validExampleCount == 0 ? currentValidExampleCount : resolveRaggedValidExampleCount(validExampleCount);
+    THOR_THROW_IF_FALSE(resolved == currentValidExampleCount);
+
+    // The logits-native kernel materializes dL/dlogits during infer(). backProp
+    // preserves the ordinary Loss contract but must not apply dense
+    // valid-example tail masking: packed token extent is controlled solely by
+    // DEVICE_ACTIVE_COUNT.
+    backProp(labelsInput, featureInput, errorOutput, stream);
+    markLabelsReusableAfterCompute();
+
+    if (previousLayer.has_value())
+        previousLayer.value()->backward(errorOutput, resolved);
+}
+
 
 void SparseCategoricalCrossEntropyWithLogits::advanceDataIfReady(bool validationPass) {
-    if (featureInputReceived && labelsReceived && (!maskInput.has_value() || maskReceived)) {
+    if (featureInputReceived && labelsReceived && (!maskInput.has_value() || maskReceived) &&
+        (!usesRaggedActiveCount() || activeCountReceived)) {
         waitForLabelsReady();
         if (maskInput.has_value())
             stream.waitFor(maskStream, maskReadyEvent);
+        if (activeCountInput.has_value())
+            stream.waitFor(activeCountStream, activeCountReadyEvent);
         forward(nullopt, validationPass);
     }
 }
@@ -257,6 +383,14 @@ void SparseCategoricalCrossEntropyWithLogits::ensureNoDeviceCrossing() {
             THOR_THROW_IF_FALSE(maskInput.value().getPlacement() == featureInput.value().getPlacement());
         if (labelsInput.has_value())
             THOR_THROW_IF_FALSE(maskInput.value().getPlacement() == labelsInput.value().getPlacement());
+    }
+    if (activeCountInput.has_value()) {
+        if (featureInput.has_value())
+            THOR_THROW_IF_FALSE(activeCountInput.value().getPlacement() == featureInput.value().getPlacement());
+        if (labelsInput.has_value())
+            THOR_THROW_IF_FALSE(activeCountInput.value().getPlacement() == labelsInput.value().getPlacement());
+        if (maskInput.has_value())
+            THOR_THROW_IF_FALSE(activeCountInput.value().getPlacement() == maskInput.value().getPlacement());
     }
 }
 
@@ -271,21 +405,44 @@ void SparseCategoricalCrossEntropyWithLogits::launchForCurrentTypes() {
     const DataType maskType = maskInput.has_value() ? maskInput.value().getDescriptor().getDataType() : DataType::UINT8;
 
 #define LAUNCH_WITH_MASK(LABEL_CPP_TYPE, LOGIT_CPP_TYPE, LOSS_CPP_TYPE, MASK_CPP_TYPE) \
-    launchSparseCategoricalCrossEntropyWithLogits<LABEL_CPP_TYPE, LOGIT_CPP_TYPE, LOSS_CPP_TYPE, MASK_CPP_TYPE>( \
-        labelsInput.value().getMemPtr(), \
-        featureInput.value().getMemPtr(), \
-        maskInput.has_value() ? maskInput.value().getMemPtr() : nullptr, \
-        featureOutput.value().getMemPtr(), \
-        isInferenceOnly() ? nullptr : errorOutput.value().getMemPtr(), \
-        numClasses, \
-        numRows, \
-        !isInferenceOnly(), \
-        lossScalingFactor, \
-        materializeLossWeight(lossWeight), \
-        ignoreIndex.has_value(), \
-        ignoreIndex.value_or(0), \
-        maskInput.has_value(), \
-        stream)
+    do { \
+        if (usesRaggedActiveCount()) { \
+            THOR_THROW_IF_FALSE(activeCountInput.has_value()); \
+            launchRaggedSparseCategoricalCrossEntropyWithLogits<LABEL_CPP_TYPE, LOGIT_CPP_TYPE, LOSS_CPP_TYPE, MASK_CPP_TYPE>( \
+                labelsInput.value().getMemPtr(), \
+                featureInput.value().getMemPtr(), \
+                maskInput.has_value() ? maskInput.value().getMemPtr() : nullptr, \
+                featureOutput.value().getMemPtr(), \
+                isInferenceOnly() ? nullptr : errorOutput.value().getMemPtr(), \
+                activeCountInput.value().getMemPtr(), \
+                activeCountInput.value().getDataType(), \
+                numClasses, \
+                numRows, \
+                !isInferenceOnly(), \
+                lossScalingFactor, \
+                materializeLossWeight(lossWeight), \
+                ignoreIndex.has_value(), \
+                ignoreIndex.value_or(0), \
+                maskInput.has_value(), \
+                stream); \
+        } else { \
+            launchSparseCategoricalCrossEntropyWithLogits<LABEL_CPP_TYPE, LOGIT_CPP_TYPE, LOSS_CPP_TYPE, MASK_CPP_TYPE>( \
+                labelsInput.value().getMemPtr(), \
+                featureInput.value().getMemPtr(), \
+                maskInput.has_value() ? maskInput.value().getMemPtr() : nullptr, \
+                featureOutput.value().getMemPtr(), \
+                isInferenceOnly() ? nullptr : errorOutput.value().getMemPtr(), \
+                numClasses, \
+                numRows, \
+                !isInferenceOnly(), \
+                lossScalingFactor, \
+                materializeLossWeight(lossWeight), \
+                ignoreIndex.has_value(), \
+                ignoreIndex.value_or(0), \
+                maskInput.has_value(), \
+                stream); \
+        } \
+    } while (false)
 
 #define DISPATCH_MASK(LABEL_CPP_TYPE, LOGIT_CPP_TYPE, LOSS_CPP_TYPE) \
     do { \
@@ -346,6 +503,8 @@ vector<Stream> SparseCategoricalCrossEntropyWithLogits::getProcessingStreams() {
     vector<Stream> processingStreams = Loss::getProcessingStreams();
     if (maskStream.isInitialized())
         processingStreams.push_back(maskStream);
+    if (activeCountStream.isInitialized())
+        processingStreams.push_back(activeCountStream);
     return processingStreams;
 }
 
@@ -355,5 +514,6 @@ vector<Event> SparseCategoricalCrossEntropyWithLogits::getSynchronizeEvents() {
     appendSynchronizeEvent(events, synchronizedStreamIds, stream);
     appendSynchronizeEvent(events, synchronizedStreamIds, labelsStream);
     appendSynchronizeEvent(events, synchronizedStreamIds, maskStream);
+    appendSynchronizeEvent(events, synchronizedStreamIds, activeCountStream);
     return events;
 }

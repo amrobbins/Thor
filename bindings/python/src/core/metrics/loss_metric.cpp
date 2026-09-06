@@ -21,6 +21,12 @@ void bind_loss_metric(nb::module_& metrics) {
 
     auto loss_metric = nb::class_<LossMetric, Metric>(metrics, "LossMetric");
     loss_metric.attr("__module__") = "thor.metrics";
+    loss_metric.attr("__doc__") = R"nbdoc(
+Forward-only dense loss-formula metric.
+
+``LossMetric`` remains a dense-input API. Rank-1 ragged metric support is
+provided by the first-class reduction and accuracy metric classes.
+)nbdoc";
 
     loss_metric.def(
         "__init__",

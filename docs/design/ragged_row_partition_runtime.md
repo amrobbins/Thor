@@ -1,177 +1,225 @@
 # Ragged row-partition runtime model
 
 The repository-level public support matrix and qualification checklist live in
-[`ragged_support_contract.md`](ragged_support_contract.md). This document focuses
-on physical row-partition ownership and runtime extent semantics.
+[`ragged_support_contract.md`](ragged_support_contract.md). This document describes
+the final RP1-RP7 physical ownership model for rank-1 ragged row partitions.
 
-Thor's native ragged representation separates packed values from row-partition state:
+## Logical representation
+
+Thor separates ragged values, partition identity, graph topology, and runtime
+partition bytes:
 
 ```text
 RaggedTensor
   values: Tensor
-  rowPartition:
-    identity: RowPartitionId
-    hostOffsets: authoritative runtime partition
-    descriptor: RowPartitionDescriptor
-    offsets: Tensor  # transitional execution representation
+  rowPartitionId: RowPartitionId
+  rowPartitionToken: Tensor        # graph-local topology only
+  descriptor: RowPartitionDescriptor
 ```
 
-The values tensor is an ordinary dense-capacity tensor. It carries no ragged runtime metadata.
+The `rowPartitionToken` exists because Thor's API graph is tensor-edge based. It
+lets a layer declare that it consumes partition `P`, but it is **not** a promise
+that a device `[B+1]` offsets tensor exists. `RaggedTensor::getOffsets()` remains
+a compatibility alias for this graph-local token; semantic partition equality is
+`sharesPartitionWith()` / `RowPartitionId`, not Tensor equality.
 
-## Source of truth
+A partition-preserving operation carries the exact same `RowPartitionId` and
+partition token to its output. A partition-changing operation creates or adopts a
+new `RowPartitionId` whose authoritative host partition is established before its
+values execute.
 
-The complete host offsets vector is the authoritative semantic row partition. For
-batch size `B`, `hostOffsets[B]` is the active packed-value count and each pair
-`hostOffsets[i:i+2]` defines one logical row. `activeValueCount` and
-`maxActiveRowLength` are derived from that single publication and cannot be
-updated independently.
+## Runtime source of truth
 
-Logical partition identity is distinct from the offsets `Tensor`. RP4 gives every
-ragged value a stable row-partition identity and requires semantic compatibility checks
-to use that identity rather than Tensor equality. While the offsets representation is
-still mandatory during this transitional stage, new partition identities are seeded
-from the existing live symbolic offsets identity so legacy construction and loaded
-partition topology remain stable.
+For batch size `B`, the complete host vector
 
-The offsets `Tensor` is an execution representation of the same partition, not a
-second source of truth and not the definition of partition identity. Later migration
-steps may allocate or materialize device offsets only for physical consumers that
-actually need row boundaries on device. Generic Tensor payload mutation does not
-redefine or invalidate the authoritative host partition.
+```text
+hostOffsets[0 : B + 1]
+```
 
-Row partitions do not carry revision or generation counters. Device partition
-representations are not hidden mutable caches whose freshness is inferred from
-version state. If a GPU operation requires row boundaries or another partition
-quantity, that representation must appear explicitly among the operation's physical
-execution inputs and participate in ordinary stream/event dependency tracking.
+is the only semantic source of truth for a live partition. It must satisfy the
+canonical monotonic/capacity contract. Thor derives:
 
-Packed capacity in `[hostOffsets[B], maxTotalValues)` is undefined storage. It is
-not padding with a semantic value, and neither internal layers nor callers outside a
-network may rely on it being zero, finite, stable, or otherwise canonical. The same
-rule applies at `RaggedNetworkInput` and `RaggedNetworkOutput` boundaries.
+```text
+activeValueCount   = hostOffsets[B]
+maxActiveRowLength = max(hostOffsets[i + 1] - hostOffsets[i])
+```
 
-Thor uses a consumer-responsibility policy for physical kernels. An active-aware
-consumer executes only the logical extent and ignores inactive capacity. If a
-physical implementation deliberately chooses a larger execution extent (for example,
-a bucketed GEMM), that consumer must sanitize exactly the additional region it will
-read immediately before the read. After the consumer finishes, that region is
-undefined again. Producers do not canonicalize inactive capacity merely because they
-produced a ragged tensor.
+from that publication. Those quantities cannot be published independently.
+There are no generation/revision counters and generic writes to a device tensor
+do not redefine the logical partition.
 
-## Lifetime and persistence
+A supported executing partition must have authoritative host offsets. CPU offsets
+supplied at an external logical boundary can establish them immediately because
+the bytes are already host-resident. A GPU-only offsets payload without matching
+host partition state is rejected; Thor does not perform a D2H synchronization to
+make device bytes authoritative.
 
-The logical row-partition identity belongs to the ragged partition, not to a device
-offsets tensor. Partition-preserving operations propagate that identity; structural
-partition-changing operations create or adopt a different identity. The current RP4
-implementation still stores the authoritative host publication on the offsets backing
-allocation as a transitional runtime-storage detail, so independently-created
-`RowPartitionRuntime` wrappers around that same execution tensor share host state.
-That storage coupling is not semantic identity and will disappear when device
-partition inputs are physicalized explicitly in later patches.
+## Requirement-driven physical representations
 
-A newly allocated runtime may be temporarily *unbound* during graph placement, before
-a concrete batch partition is published. An executing supported ragged value must be
-bound: every partition-owning network submission publishes complete host offsets, and
-internal structural consumers require authoritative input offsets before executing.
-Once `setHostOffsets()` is called, generic writes or copies of the offsets Tensor do
-not change that logical partition. Only another complete host-offset publication can
-change it. Supported execution paths do not clear the authoritative host
-partition once a batch is bound.
+A logical partition does not inherently own a device offsets tensor. During
+placement, each physical consumer declares exactly which information it needs via
+`RaggedPartitionRequirement`:
 
-The host partition is runtime execution state and is not serialized into architecture
-or model/state files. Logical row-partition identity is graph-local as well: save/load
-reconstructs a new identity from the loaded graph topology rather than persisting a
-process-local handle. A freshly loaded and placed model obtains a new authoritative
-host partition from subsequent batch submission.
+```text
+NONE
+HOST_EXTENT
+DEVICE_ACTIVE_COUNT   # managed [1]
+DEVICE_OFFSETS        # managed [B+1]
+```
 
-RP1 removes the old independent host scalar setters/clearers entirely. This prevents
-representing combinations such as an active count or maximum row length that disagree
-with the row boundaries.
+Requirements are aggregated per `RowPartitionId`, but each consumer is wired to
+its own requested representation. For example, a valuewise loss may receive the
+managed `[1]` active-count carrier while a segmented reduction over the same
+partition independently receives `[B+1]` offsets.
+
+`HOST_EXTENT` is metadata carried with a values path for host-directed physical
+shape selection; it does not make the carrier payload an offsets tensor.
+`DEVICE_ACTIVE_COUNT` is a true scalar device input. `DEVICE_OFFSETS` is the full
+row-boundary representation and exists only when some physical consumer genuinely
+needs row starts/ends.
+
+The default requirement is `NONE`. A new physical ragged consumer therefore must
+explicitly declare the partition bytes it consumes rather than inheriting a
+conservative full-offset allocation.
+
+## Network boundaries
+
+A fresh public `RaggedNetworkInput` exposes one logical input name whose payload is
+a `PhysicalRaggedTensor`/logical ragged batch value. Its packed values are the only
+public graph input tensor. The partition token is represented internally by a
+non-external graph-local input used for topology and is never stamped or dataset-
+bound.
+
+At batch submission, the partition-owning input publishes complete authoritative
+host offsets. Placement-created managed `[1]` and `[B+1]` inputs are populated from
+that host state only if aggregate requirements requested them. A shared-partition
+`RaggedNetworkInput(..., partition=source)` contributes only another values stream
+and reuses the owner's `RowPartitionId`.
+
+A fresh `RaggedNetworkOutput` likewise has only a physical values output. Merely
+exposing a ragged result does not promote its partition to `HOST_EXTENT` or force a
+device offsets allocation. `inferLogical()` reconstructs the returned offsets view
+from the authoritative host partition for that output's `RowPartitionId`; no D2H
+read of a device offsets tensor is required.
+
+The legacy flattened `map<string, Tensor>` submission surface cannot represent a
+partition-owning ragged logical boundary and is rejected for networks that contain
+one. Submit a logical `Batch` with ragged values instead.
 
 ## Partition-preserving operations
 
-A partition-preserving operation changes packed values while retaining the exact row partition:
+A partition-preserving operation changes packed values while retaining partition
+`P`:
 
 ```text
-(values A, partition P)
-        |
-        v
-      layer
-        |
-        v
-(values B, partition P)
+(values A, P) -> layer -> (values B, P)
 ```
 
-FullyConnected, RMSNorm, training DropOut, Attention with ragged query/output, activations, TypeConverter, Slice, and ragged CustomLayer operations follow this model. Identity DropOut may alias the values tensor directly; the logical output still shares partition `P`.
+Examples include ordinary activations, FullyConnected, normalization, DropOut,
+TypeConverter, gradient-control layers, trailing shape operations, trailing-axis
+Concatenate/Slice, and ragged CustomLayer operations.
 
-Semantic partition compatibility is checked with `sharesPartitionWith()`, never by
-comparing offsets tensors. Operations that still need host dispatch may retain the
-transitional offsets tensor as an explicit structural input and query
-`RowPartitionRuntime`. They never annotate their values output or input gradient with
-hidden partition state.
+These APIs may still call `getOffsets()` as a graph-topology compatibility handle,
+but semantic compatibility uses `RowPartitionId`. Placement resolves that token to
+whatever physical representation the consumer declared.
 
-## Partition-changing operations
+## Internally-created partitions
 
-An operation that changes row membership or segmentation must explicitly produce a new canonical offsets tensor and therefore a new row partition:
+Partition-changing operations establish their output partition on the host before
+GPU values execute. The stamped network records how each internal `RowPartitionId`
+is derived so host state can be resolved recursively for every batch.
+
+### `RaggedSequenceConcatenate`
+
+For source partitions `P_i`, the CPU derives the output host partition `Q` by
+summing corresponding row lengths. The physical concatenate implementation outputs
+values only and consumes the source partitions needed to locate input rows. It does
+not force any physical representation of `Q`; downstream requirements decide whether
+`Q` gets `HOST_EXTENT`, `[1]`, `[B+1]`, or nothing.
+
+### `RaggedSequenceSlice`
+
+The CPU derives clipped output host offsets `Q` from the authoritative source
+partition. Slice compaction itself genuinely needs the new row starts, so its own
+placement requirement contributes `DEVICE_OFFSETS` for `Q`. The managed `[B+1]`
+representation is therefore an **input** to the values-only Slice implementation,
+not a GPU-produced semantic partition output.
+
+### `RaggedGather`
+
+Gather does not derive a new partition from source data. Its output adopts the
+already-authoritative partition of the ragged indices input.
+
+Thor deliberately does not support a partition-producing operation whose row
+boundaries depend on runtime device values. Such an operation would require a D2H
+synchronization to establish authoritative host offsets. The former `RaggedFilter`
+surface was removed for this reason.
+
+## Inactive packed capacity
+
+Storage in
 
 ```text
-(values A, partition P)
-        |
-        v
- segmented/repartitioning operation
-        |
-        v
-(values B, partition Q)
+[activeValueCount, maxTotalValues)
 ```
 
-`RaggedSequenceConcatenate`, `RaggedSequenceSlice`, and `RaggedGather` are the supported examples of this family. Concatenate and slice derive complete output host offsets from authoritative input host offsets before GPU value movement, then materialize those host-derived offsets as an explicit GPU input where their kernels need row boundaries. Gather adopts the authoritative partition already owned by its ragged indices input. Dense-to-ragged conversion likewise requires an existing authoritative partition; the former low-level GPU-lengths-to-ragged path was removed. Thor does not support partition-producing operations whose output row boundaries depend on runtime device values, because establishing their authoritative host partition would require a device-to-host synchronization.
+is undefined. It is not semantic zero-padding and may contain NaN, Inf, stale bytes,
+or arbitrary data.
 
-There is no implicit propagation convention on values tensors that can create `Q` accidentally.
+Active-aware kernels execute only the logical prefix. A physical consumer that
+intentionally reads a larger bucket (for example a selected packed GEMM shape) owns
+sanitation of exactly the extra region it reads immediately before the read. That
+sanitized slack is not persistent partition state and becomes undefined again after
+the consumer.
 
-## Network boundaries and inactive capacity
+The same rule applies at network boundaries: callers must use the returned logical
+partition to determine the valid prefix and must not assign meaning to capacity tail
+bytes.
 
-A partition-owning logical `RaggedNetworkInput` currently materializes values and the offsets execution representation through separate physical input ports. A shared-partition `RaggedNetworkInput(..., partition=source)` materializes only a new values port and reuses the same row-partition state. Every partition-owning batch submission must publish complete authoritative host offsets; active count and maximum row length are derived from that publication. CPU offsets supplied at the logical boundary may establish the host partition directly because they are already host-resident. GPU offsets without an accompanying authoritative host partition are rejected rather than synchronized back to the CPU.
+## Expression execution and backward
 
-At direct submission time, a shared-partition logical input may be supplied as packed values only. The referenced partition-owning input supplies the row partition for the batch. Supplying a full ragged value for a shared input remains accepted for dataset/materialization compatibility; its offsets are not wired as a second graph boundary, and its authoritative host offsets must agree with the owner's partition.
+Ragged expression stages carry an explicit runtime-extent source. Valuewise stages
+normally consume `DEVICE_ACTIVE_COUNT`; segmented/row-indexed stages consume
+`DEVICE_OFFSETS`; packed shape-selection paths may additionally require
+`HOST_EXTENT`. The compiler and API placement requirement must agree on that source.
 
-The consumer-responsibility contract continues unchanged across both network boundaries:
+Backward stages follow the same rule independently of forward. A forward operation
+that only needs `[1]` can strengthen to `[B+1]` during training when a genuine
+backward operation is segmented—for example a row-aware parameter reduction. This is
+an explicit backward requirement, not compatibility fallback from full offsets to a
+scalar carrier.
 
-- `RaggedNetworkInput` does not semantically promise zero or canonical values in `[offsets[B], maxTotalValues)`;
-- `RaggedNetworkOutput` exposes the values capacity and the authoritative offsets without assigning semantics to the inactive tail;
-- code consuming a ragged output after it leaves a network must treat `offsets[B]` as the logical boundary exactly as an internal consumer would.
+## Lifetime, save/load, and composition
 
-Current implementations may temporarily perform broader sanitation while the consumer-responsibility cleanup is staged. That behavior is incidental and is deliberately not part of the public or internal semantic contract. Tests therefore compare logical prefixes and poison inactive capacity rather than asserting tail bytes.
+Authoritative host offsets are per-batch runtime state and are not serialized.
+Model/architecture files persist structural descriptor/topology information only.
+After load, a newly placed network receives authoritative host partitions from new
+batch submissions and must accept a different valid partition from the one used
+before save.
 
-The legacy flattened `map<string, Tensor>` submission surface cannot represent a partition-owning logical ragged boundary and is rejected for stamped networks with such `RaggedNetworkInput`s. Submit a `Batch` containing `RaggedTensor` entries for partition owners. Shared-partition logical inputs may contribute packed `Tensor` values in that same `Batch` because their row partition is supplied by the referenced owner.
+`RowPartitionId` is graph-local. Save/load and subgraph/phase cloning reconstruct or
+remap partition identity together with values topology. The hidden partition token is
+also remapped so structural consumers in a cloned graph reference the destination
+partition rather than the source graph's token.
 
-## Expression execution
-
-Packed Expression operations currently retain the offsets execution mirror as a structural stage input when they need device-side runtime extent. Active-aware valuewise stages execute only the logical prefix. Bucketed physical operations such as MATMUL (and, after the RMSNorm lifecycle cleanup, bucketed RMSNorm) may choose a larger execution extent; each such consumer owns sanitation of exactly the bucket slack it will physically read. Expression values do not carry a parallel active-row annotation.
+Composed networks splice logical output/input boundaries before physical stamping;
+partition identity is preserved/remapped as part of that graph composition rather
+than by chaining a physical offsets output between networks.
 
 ## Regression gates
 
-The row-partition runtime tests compile-time check that implementation `Tensor` has no legacy active-row getter, setter, or clearer. End-to-end ragged transformer tests exercise FullyConnected, activations, RMSNorm, DropOut, self-attention, both mixed dense/ragged attention quadrants, residual Add/CustomLayer, segmented reduction, backward training, inference, save/load, and changing packed extents.
+The repository-level closure gate is:
 
-Save/load coverage deliberately saves after one host partition and reloads with a different partition, then reuses one placed model across shorter and longer extents. This guards against accidentally serializing runtime host partition state.
+```bash
+cmake --build <build-dir> --target check-ragged-support-contract
+```
 
-## Audit coverage
+It gathers the public boundary, structural, learning, loss, metric, Softmax,
+attention, CTC, adapter, and partition-changing regression suites. In particular,
+it exercises both offset widths, poisoned inactive capacity, empty/all-empty rows,
+short-long-short reuse, save/load with changed partitions, clone remapping, forward
+and backward, partial batches, weighted/ratio metric aggregation, no-contribution
+extrema, ordinary-vs-segmented Softmax semantics, and intentional unsupported dtype
+rejection.
 
-The cutover is covered at several levels rather than by one metadata-propagation test:
-
-| Surface | Primary regression coverage |
-| --- | --- |
-| Runtime ownership and generic copies | `RowPartitionRuntime.*`, `RaggedTensorImplementation.*` |
-| Logical ragged input/output boundary semantics | `RaggedNetworkOutputApi.*`, Python `test_placed_network.py` |
-| Indexed/File/NamedBatch session production | `IndexedNamedBatchSessionTest.*` and device-resident ragged session tests |
-| FullyConnected / packed MATMUL / autodiff | `FullyConnectedApi.Ragged*`, `RaggedExpression.*` |
-| RMSNorm / packed RMSNorm / parameter gradients | `UtilityApiLayers.RaggedRMSNorm*`, `RaggedExpression.*` |
-| DropOut training/inference identity behavior | `DropOut.Ragged*`, Python `test_drop_out.py` |
-| Attention and mixed dense/ragged quadrants | `AttentionApi.*Ragged*`, Python `test_attention.py`, transformer tests |
-| Ragged CustomLayer / residual Add | `RaggedCustomLayer.*`, Python `test_custom_layer_ragged.py` and transformer tests |
-| TypeConverter and activations | Python `test_type_converter.py` and `test_ragged_activations.py` |
-| Segmented reductions / trailing-dimension ragged Slice | Python `test_segmented_reduction.py` |
-| Partition-changing sequence concatenate/slice/gather | `RaggedSequenceConcatenate.*`, `RaggedSequenceSlice.*`, `RaggedGather.*`, Python sequence concatenate/slice/gather tests |
-| Architecture/model save-load | `RaggedTensorApi.*` and ragged transformer completeness test |
-| TrainingPhase and Python training | ragged transformer TrainingPhase round trip and training integration test |
-
-The final repository-level cutover gate is that the removed values-owned active-row identifier has no contiguous occurrences anywhere in the tree.
+The heavier retained ragged Conv1D performance/timing gate remains separate.

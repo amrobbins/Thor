@@ -2,6 +2,8 @@
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Api/Layers/Loss/SoftTargetCrossEntropy.h"
 
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 
@@ -59,6 +61,48 @@ void SoftTargetCrossEntropy::buildSupportLayersAndAddToNetwork() {
     validatePredictionsDType(predictionsTensor.getDataType());
     validateLabelsDType(labelsTensor.getDataType());
 
+    if (isRagged()) {
+        RaggedCustomLoss rawSoftTargetCrossEntropy =
+            RaggedCustomLoss::Builder()
+                .network(*network)
+                .lossExpression(makeSoftTargetCrossEntropyLossExpression(lossDataType))
+                .gradientExpression(makeSoftTargetCrossEntropyGradientExpression(predictionsTensor.getDataType()))
+                .predictions(raggedPredictionsTensor.value())
+                .labels(raggedLabelsTensor.value())
+                .predictionsName(kPredictionsName)
+                .labelsName(kLabelsName)
+                .lossName(kLossName)
+                .gradientName(kGradientName)
+                .lossDataType(lossDataType)
+                .lossWeight(lossWeight.value_or(1.0f))
+                .build();
+        raggedRawLossTensor = rawSoftTargetCrossEntropy.getRaggedRawLoss();
+        lossShaperInput = raggedRawLossTensor->getValues();
+        if (lossShape == LossShape::NONE) {
+            lossTensor = lossShaperInput;
+            Stub::Builder().network(*network).inputTensor(lossShaperInput).build();
+        } else if (lossShape == LossShape::RAW) {
+            lossTensor = lossShaperInput;
+        } else if (lossShape == LossShape::PER_EXAMPLE) {
+            lossTensor = RaggedLossShaper::Builder()
+                             .network(*network)
+                             .lossInput(raggedRawLossTensor.value())
+                             .reportsPerExampleLoss()
+                             .build()
+                             .getLossOutput();
+        } else if (lossShape == LossShape::BATCH) {
+            lossTensor = RaggedLossShaper::Builder()
+                             .network(*network)
+                             .lossInput(raggedRawLossTensor.value())
+                             .reportsBatchLoss()
+                             .build()
+                             .getLossOutput();
+        } else {
+            THOR_UNREACHABLE();
+        }
+        return;
+    }
+
     CustomLoss rawSoftTargetCrossEntropy = CustomLoss::Builder()
                                                .network(*network)
                                                .lossExpression(makeSoftTargetCrossEntropyLossExpression(lossDataType))
@@ -70,7 +114,7 @@ void SoftTargetCrossEntropy::buildSupportLayersAndAddToNetwork() {
                                                .lossName(kLossName)
                                                .gradientName(kGradientName)
                                                .lossDataType(lossDataType)
-                                       .lossWeight(lossWeight.value_or(1.0f))
+                                               .lossWeight(lossWeight.value_or(1.0f))
                                                .reportsRawLoss()
                                                .build();
 
@@ -81,6 +125,11 @@ void SoftTargetCrossEntropy::buildSupportLayersAndAddToNetwork() {
 
 json SoftTargetCrossEntropy::architectureJson() const {
     json j = Loss::architectureJson();
+    if (isRagged()) {
+        j["ragged_predictions"] = raggedPredictionsTensor->architectureJson();
+        j["ragged_labels"] = raggedLabelsTensor->architectureJson();
+        if (raggedRawLossTensor.has_value()) j["ragged_raw_loss"] = raggedRawLossTensor->architectureJson();
+    }
     j["loss_shape"] = lossShape;
     return j;
 }
@@ -90,6 +139,27 @@ void SoftTargetCrossEntropy::deserialize(const json& j, Network* network) {
         throw runtime_error("Unsupported version in SoftTargetCrossEntropy::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "soft_target_cross_entropy")
         throw runtime_error("Layer type mismatch in SoftTargetCrossEntropy::deserialize: " + j.at("layer_type").get<std::string>());
+
+    if (j.contains("ragged_predictions")) {
+        RaggedTensor predictions = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_predictions"), network, "SoftTargetCrossEntropy");
+        RaggedTensor labels = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_labels"), network, "SoftTargetCrossEntropy");
+        SoftTargetCrossEntropy::Builder builder;
+        builder.network(*network)
+            .predictions(predictions)
+            .labels(labels)
+            .lossDataType(j.at("loss_data_type").get<DataType>())
+            .lossWeight(ThorImplementation::lossWeightFromJson(j).value_or(1.0f));
+        switch (j.at("loss_shape").get<LossShape>()) {
+            case LossShape::NONE: builder.reportsNoLoss(); break;
+            case LossShape::BATCH: builder.reportsBatchLoss(); break;
+            case LossShape::PER_EXAMPLE: builder.reportsPerExampleLoss(); break;
+            case LossShape::RAW: builder.reportsRawLoss(); break;
+            case LossShape::PER_OUTPUT:
+                throw runtime_error("Serialized ragged SoftTargetCrossEntropy cannot use LossShape::PER_OUTPUT.");
+        }
+        (void)builder.build();
+        return;
+    }
 
     uint64_t originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     Tensor predictions = network->getApiTensorByOriginalId(originalTensorId);

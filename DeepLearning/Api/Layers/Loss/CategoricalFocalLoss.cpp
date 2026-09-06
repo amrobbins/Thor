@@ -2,6 +2,8 @@
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
 #include "DeepLearning/Api/Layers/Loss/CategoricalFocalLoss.h"
 
+#include "DeepLearning/Api/Layers/Utility/SegmentedPrimitiveCommon.h"
+#include "DeepLearning/Api/Layers/Utility/Stub.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 
@@ -40,7 +42,8 @@ ThorImplementation::DynamicExpression makeCategoricalFocalLossExpression(DataTyp
     ThorImplementation::Expression focalWeight = one;
     if (gamma != 0.0f)
         focalWeight = (one - probabilities).pow(ThorImplementation::Expression(gamma));
-    ThorImplementation::Expression loss = (-(ThorImplementation::Expression(alpha) * labels * focalWeight * logProbabilities)).withOutputDType(lossDataType);
+    ThorImplementation::Expression loss =
+        (-(ThorImplementation::Expression(alpha) * labels * focalWeight * logProbabilities)).withOutputDType(lossDataType);
     ThorImplementation::ExpressionDefinition definition =
         ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs({{kLossName, loss}}));
     return ThorImplementation::DynamicExpression::fromExpressionDefinition(definition);
@@ -83,6 +86,48 @@ void CategoricalFocalLoss::buildSupportLayersAndAddToNetwork() {
     THOR_THROW_IF_FALSE(gamma >= 0.0f);
     THOR_THROW_IF_FALSE(alpha >= 0.0f);
 
+    if (isRagged()) {
+        RaggedCustomLoss rawCategoricalFocalLoss =
+            RaggedCustomLoss::Builder()
+                .network(*network)
+                .lossExpression(makeCategoricalFocalLossExpression(lossDataType, gamma, alpha))
+                .gradientExpression(makeCategoricalFocalGradientExpression(predictionsTensor.getDataType(), gamma, alpha))
+                .predictions(raggedPredictionsTensor.value())
+                .labels(raggedLabelsTensor.value())
+                .predictionsName(kPredictionsName)
+                .labelsName(kLabelsName)
+                .lossName(kLossName)
+                .gradientName(kGradientName)
+                .lossDataType(lossDataType)
+                .lossWeight(lossWeight.value_or(1.0f))
+                .build();
+        raggedRawLossTensor = rawCategoricalFocalLoss.getRaggedRawLoss();
+        lossShaperInput = raggedRawLossTensor->getValues();
+        if (lossShape == LossShape::NONE) {
+            lossTensor = lossShaperInput;
+            Stub::Builder().network(*network).inputTensor(lossShaperInput).build();
+        } else if (lossShape == LossShape::RAW) {
+            lossTensor = lossShaperInput;
+        } else if (lossShape == LossShape::PER_EXAMPLE) {
+            lossTensor = RaggedLossShaper::Builder()
+                             .network(*network)
+                             .lossInput(raggedRawLossTensor.value())
+                             .reportsPerExampleLoss()
+                             .build()
+                             .getLossOutput();
+        } else if (lossShape == LossShape::BATCH) {
+            lossTensor = RaggedLossShaper::Builder()
+                             .network(*network)
+                             .lossInput(raggedRawLossTensor.value())
+                             .reportsBatchLoss()
+                             .build()
+                             .getLossOutput();
+        } else {
+            THOR_UNREACHABLE();
+        }
+        return;
+    }
+
     CustomLoss rawCategoricalFocalLoss = CustomLoss::Builder()
                                              .network(*network)
                                              .lossExpression(makeCategoricalFocalLossExpression(lossDataType, gamma, alpha))
@@ -94,7 +139,7 @@ void CategoricalFocalLoss::buildSupportLayersAndAddToNetwork() {
                                              .lossName(kLossName)
                                              .gradientName(kGradientName)
                                              .lossDataType(lossDataType)
-                                       .lossWeight(lossWeight.value_or(1.0f))
+                                             .lossWeight(lossWeight.value_or(1.0f))
                                              .reportsRawLoss()
                                              .build();
 
@@ -105,6 +150,11 @@ void CategoricalFocalLoss::buildSupportLayersAndAddToNetwork() {
 
 json CategoricalFocalLoss::architectureJson() const {
     json j = Loss::architectureJson();
+    if (isRagged()) {
+        j["ragged_predictions"] = raggedPredictionsTensor->architectureJson();
+        j["ragged_labels"] = raggedLabelsTensor->architectureJson();
+        if (raggedRawLossTensor.has_value()) j["ragged_raw_loss"] = raggedRawLossTensor->architectureJson();
+    }
     j["loss_shape"] = lossShape;
     j["gamma"] = gamma;
     j["alpha"] = alpha;
@@ -116,6 +166,29 @@ void CategoricalFocalLoss::deserialize(const json& j, Network* network) {
         throw runtime_error("Unsupported version in CategoricalFocalLoss::deserialize: " + j["version"].get<std::string>());
     if (j.at("layer_type").get<std::string>() != "categorical_focal_loss")
         throw runtime_error("Layer type mismatch in CategoricalFocalLoss::deserialize: " + j.at("layer_type").get<std::string>());
+
+    if (j.contains("ragged_predictions")) {
+        RaggedTensor predictions = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_predictions"), network, "CategoricalFocalLoss");
+        RaggedTensor labels = SegmentedPrimitiveDetail::reconstructInput(j.at("ragged_labels"), network, "CategoricalFocalLoss");
+        CategoricalFocalLoss::Builder builder;
+        builder.network(*network)
+            .predictions(predictions)
+            .labels(labels)
+            .focusingParameter(j.value("gamma", 2.0f))
+            .alpha(j.value("alpha", 1.0f))
+            .lossDataType(j.at("loss_data_type").get<DataType>())
+            .lossWeight(ThorImplementation::lossWeightFromJson(j).value_or(1.0f));
+        switch (j.at("loss_shape").get<LossShape>()) {
+            case LossShape::NONE: builder.reportsNoLoss(); break;
+            case LossShape::BATCH: builder.reportsBatchLoss(); break;
+            case LossShape::PER_EXAMPLE: builder.reportsPerExampleLoss(); break;
+            case LossShape::RAW: builder.reportsRawLoss(); break;
+            case LossShape::PER_OUTPUT:
+                throw runtime_error("Serialized ragged CategoricalFocalLoss cannot use LossShape::PER_OUTPUT.");
+        }
+        (void)builder.build();
+        return;
+    }
 
     uint64_t originalTensorId = j["predictions_tensor"].at("id").get<uint64_t>();
     Tensor predictions = network->getApiTensorByOriginalId(originalTensorId);

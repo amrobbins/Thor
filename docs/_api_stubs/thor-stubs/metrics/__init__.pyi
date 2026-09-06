@@ -22,8 +22,13 @@ class BinaryAccuracy(Metric):
     Parameters
     ----------
     network : thor.Network
-    predictions : thor.Tensor
-    labels : thor.Tensor
+    predictions : thor.Tensor or thor.RaggedTensor
+    labels : thor.Tensor or thor.RaggedTensor
+
+    For ragged inputs, predictions and labels must share the exact logical row
+    partition and contain one scalar per active token. Ragged predictions are FP16 or
+    FP32. The metric aggregates correct-token and active-token sufficient statistics,
+    so partial/unequal batches combine exactly across an epoch.
     """
 
     @overload
@@ -47,8 +52,14 @@ class CategoricalAccuracy(Metric):
     Parameters
     ----------
     network : thor.Network
-    predictions : thor.Tensor
-    labels : thor.Tensor
+    predictions : thor.Tensor or thor.RaggedTensor
+    labels : thor.Tensor or thor.RaggedTensor
+
+    For ragged inputs, predictions and labels must share the exact logical row
+    partition. Predictions have one trailing class dimension and are FP16 or FP32;
+    labels follow the selected per-class or integer class-index contract. The metric
+    aggregates correct-token and active-token sufficient statistics exactly across
+    partial and unequal batches.
     """
 
     @overload
@@ -89,6 +100,11 @@ class CustomMetric(Metric):
     uses_batch_validity : bool, default False
         Declares that the expression consumes runtime batch validity. Thor currently supplies it through the reserved
         ``__thor_batch_validity_mask`` FP32 prefix-mask input so invalid tail rows can be excluded from batch-coupled computation.
+
+    Notes
+    -----
+    ``CustomMetric`` remains a dense-input API. Use the first-class ragged reduction
+    or accuracy metric classes for rank-1 ragged values.
     """
 
     def __init__(self, network: thor.Network, expression: thor.physical.DynamicExpression, predictions: thor.Tensor, labels: thor.Tensor, aggregation: thor.MetricAggregation, predictions_name: str = 'predictions', labels_name: str = 'labels', metric_name: str = 'metric', display_name: str = 'Metric', uses_batch_validity: bool = False) -> None:
@@ -195,6 +211,13 @@ mean_absolute_error: thor._thor.metrics.LossFormula = thor._thor.metrics.LossFor
 mean_absolute_percentage_error: thor._thor.metrics.LossFormula = thor._thor.metrics.LossFormula.mean_absolute_percentage_error
 
 class LossMetric(Metric):
+    """
+    Forward-only dense loss-formula metric.
+
+    ``LossMetric`` remains a dense-input API. Rank-1 ragged metric support is
+    provided by the first-class reduction and accuracy metric classes.
+    """
+
     def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, formula: thor._thor.metrics.LossFormula = thor._thor.metrics.LossFormula.mean_squared_error, epsilon: float | None = None, max_magnitude: float | None = None, display_name: str | None = None) -> None:
         """Track a loss formula as a forward-only metric."""
 

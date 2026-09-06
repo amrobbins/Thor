@@ -183,7 +183,7 @@ MeanPowerError loss.
 
 ``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or
 rank-1 ``thor.RaggedTensor`` objects. Ragged inputs must share the exact same
-row-partition tensor. Ragged loss reporting supports ``none``, ``raw``,
+logical row partition. Ragged loss reporting supports ``none``, ``raw``,
 ``per_example``, and ``batch``; ``per_output`` is intentionally undefined.
 
 The exponent must be finite and greater than or equal to 1.0. For ragged

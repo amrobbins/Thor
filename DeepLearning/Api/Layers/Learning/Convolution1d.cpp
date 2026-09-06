@@ -284,8 +284,9 @@ Convolution1d Convolution1d::Builder::build() {
             throw invalid_argument(
                 "Convolution1d(RaggedTensor) does not support the dense Convolution1d custom epilogue surface.");
         }
-        if (_activation != nullptr && !_activation->supportsRaggedStandalone()) {
-            throw invalid_argument("Convolution1d(RaggedTensor) requires a ragged-compatible expression-backed activation.");
+        if (_activation != nullptr && !_activation->supportsRaggedLearningLayerFusion()) {
+            throw invalid_argument(
+                "Convolution1d(RaggedTensor) requires an activation that supports ragged learning-layer fusion.");
         }
         if (!supportedRaggedConvolutionStorageType(ragged.getValuesDataType())) {
             throw invalid_argument(
@@ -704,8 +705,9 @@ void Convolution1d::deserialize(shared_ptr<thor_file::TarReader> &archiveReader,
 
     if (j.contains("activation") && !j.at("activation").is_null())
         convolution1d.activation = Activation::deserializeTemplate(j.at("activation"));
-    if (useRagged && convolution1d.activation != nullptr && !convolution1d.activation->supportsRaggedStandalone())
-        throw runtime_error("Ragged Convolution1d serialized activation is not ragged-compatible.");
+    if (useRagged && convolution1d.activation != nullptr &&
+        !convolution1d.activation->supportsRaggedLearningLayerFusion())
+        throw runtime_error("Ragged Convolution1d serialized activation does not support ragged learning-layer fusion.");
 
     for (const json &inputJson : j.at("inputs")) {
         const uint64_t originalTensorId = inputJson.at("id").get<uint64_t>();

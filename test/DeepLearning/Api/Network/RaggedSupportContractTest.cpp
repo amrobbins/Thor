@@ -140,19 +140,19 @@ std::filesystem::path uniqueArchiveDir(const std::string& stem) {
 
 }  // namespace
 
-// The R1 CMake qualification target deliberately runs this disabled preflight
-// with --gtest_also_run_disabled_tests. Individual CUDA-backed tests may skip
-// during ordinary development; the aggregate contract gate must not pass
-// vacuously without a CUDA device.
+// The repository-level CMake qualification target deliberately runs this
+// disabled preflight with --gtest_also_run_disabled_tests. Individual
+// CUDA-backed tests may skip during ordinary development; the aggregate R11D
+// contract gate must not pass vacuously without a CUDA device.
 TEST(RaggedSupportContract, DISABLED_RequiresCudaDevice) {
-    if (std::getenv("THOR_R1_RAGGED_SUPPORT_GATE") == nullptr) {
-        GTEST_SKIP() << "R1 ragged support preflight only runs through check-ragged-support-contract.";
+    if (std::getenv("THOR_RAGGED_SUPPORT_GATE") == nullptr) {
+        GTEST_SKIP() << "Ragged support preflight only runs through check-ragged-support-contract.";
     }
 
     int deviceCount = 0;
     const cudaError_t status = cudaGetDeviceCount(&deviceCount);
     ASSERT_EQ(status, cudaSuccess) << cudaGetErrorString(status);
-    ASSERT_GT(deviceCount, 0) << "R1 ragged support qualification requires a CUDA device.";
+    ASSERT_GT(deviceCount, 0) << "Rank-1 ragged support qualification requires a CUDA device.";
 }
 
 TEST(RaggedSupportContract, CanonicalBoundaryCoversOffsetWidthsPoisonAllEmptyAndShortLongShortReuse) {

@@ -2,7 +2,10 @@
 #include "DeepLearning/Api/Layers/Activations/Softmax.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "test/DeepLearning/Implementation/Layers/LayerTestHelper.h"
+#include "Utilities/Expression/RaggedExpression.h"
 
 #include "gtest/gtest.h"
 
@@ -63,6 +66,99 @@ TEST(Activations, SoftmaxBuilds) {
 
     ASSERT_NE(softmax->getId(), clone->getId());
     ASSERT_GT(softmax->getId(), 1u);
+}
+
+
+TEST(Activations, RaggedSoftmaxBuildCloneAndExpressionPreservePartitionWithOrdinaryFinalAxisSemantics) {
+    Network network("raggedSoftmaxBuildCloneAndExpression");
+    RaggedTensor featureInput(DataType::FP32, {2, 3}, 2, 8, DataType::UINT64);
+
+    shared_ptr<Softmax> softmax = dynamic_pointer_cast<Softmax>(
+        Softmax::Builder().network(network).featureInput(featureInput).build());
+    ASSERT_NE(softmax, nullptr);
+    ASSERT_TRUE(softmax->isInitialized());
+    EXPECT_TRUE(softmax->supportsRaggedStandalone());
+    EXPECT_FALSE(softmax->supportsRaggedLearningLayerFusion());
+    EXPECT_TRUE(softmax->getUseRagged());
+    ASSERT_TRUE(softmax->getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(softmax->getRaggedFeatureOutput().has_value());
+    EXPECT_TRUE(softmax->getRaggedFeatureInput()->sharesPartitionWith(featureInput));
+    EXPECT_TRUE(softmax->getRaggedFeatureOutput()->sharesPartitionWith(featureInput));
+    EXPECT_EQ(softmax->getRaggedFeatureOutput()->getRowPartitionToken(), featureInput.getRowPartitionToken());
+    EXPECT_EQ(softmax->getRaggedFeatureOutput()->getValuesDimensions(), (vector<uint64_t>{8, 2, 3}));
+
+    shared_ptr<Layer> cloneLayer = softmax->clone();
+    auto* clone = dynamic_cast<Softmax*>(cloneLayer.get());
+    ASSERT_NE(clone, nullptr);
+    ASSERT_TRUE(clone->getRaggedFeatureInput().has_value());
+    ASSERT_TRUE(clone->getRaggedFeatureOutput().has_value());
+    EXPECT_TRUE(clone->getRaggedFeatureInput()->sharesPartitionWith(featureInput));
+    EXPECT_TRUE(clone->getRaggedFeatureOutput()->sharesPartitionWith(featureInput));
+    EXPECT_NE(clone->getId(), softmax->getId());
+
+    const json architecture = softmax->architectureJson();
+    EXPECT_TRUE(architecture.at("use_ragged").get<bool>());
+    EXPECT_EQ(architecture.at("ragged_feature_input").at("offsets").at("id").get<uint64_t>(),
+              architecture.at("ragged_feature_output").at("offsets").at("id").get<uint64_t>());
+
+    ThorImplementation::RaggedTensorDescriptor descriptor(
+        DataType::FP32, {2, 3}, 2, 8, DataType::UINT64);
+    ThorImplementation::RaggedExpression inputExpression =
+        ThorImplementation::RaggedExpression::input("tokens.values",
+                                                     "tokens.active_count",
+                                                     descriptor,
+                                                     ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+    ThorImplementation::RaggedExpression outputExpression = softmax->toRaggedExpression(inputExpression);
+    EXPECT_EQ(outputExpression.getDescriptor(), descriptor);
+    EXPECT_TRUE(outputExpression.getOffsets().isSameLogicalNode(inputExpression.getOffsets()));
+
+    const ThorImplementation::PhysicalExpression physical = outputExpression.getValues().expression();
+    const ThorImplementation::ExprNode& extent = physical.nodes.at(physical.output_node);
+    ASSERT_EQ(extent.op, ThorImplementation::ExprOp::RAGGED_VALUEWISE_EXTENT);
+    ASSERT_LT(extent.lhs, physical.nodes.size());
+    const ThorImplementation::ExprNode& ordinarySoftmax = physical.nodes.at(extent.lhs);
+    ASSERT_EQ(ordinarySoftmax.op, ThorImplementation::ExprOp::SOFTMAX);
+    EXPECT_EQ(ordinarySoftmax.softmax_algorithm, CUDNN_SOFTMAX_ACCURATE);
+    EXPECT_EQ(ordinarySoftmax.softmax_mode, CUDNN_SOFTMAX_MODE_CHANNEL);
+}
+
+
+TEST(Activations, RaggedSoftmaxStandaloneMaterializesManagedActiveCountWithoutFullOffsets) {
+    constexpr uint32_t batchSize = 3;
+    Network network("raggedSoftmaxManagedActiveCount");
+    RaggedTensor input = RaggedNetworkInput::Builder()
+                             .network(network)
+                             .name("tokens")
+                             .valuesDataType(DataType::FP32)
+                             .offsetsDataType(DataType::UINT64)
+                             .trailingDimensions({5})
+                             .maxTotalValues(11)
+                             .batchSize(batchSize)
+                             .build();
+
+    auto softmax = dynamic_pointer_cast<Softmax>(
+        Softmax::Builder().network(network).featureInput(input).build());
+    ASSERT_NE(softmax, nullptr);
+    ASSERT_TRUE(softmax->getRaggedFeatureOutput().has_value());
+    EXPECT_TRUE(softmax->getRaggedFeatureOutput()->sharesPartitionWith(input));
+    RaggedNetworkOutput::Builder()
+        .network(network)
+        .name("output")
+        .inputTensor(softmax->getRaggedFeatureOutput().value())
+        .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    const auto& stamp = placed->getStampedNetwork(0);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(input.getRowPartitionId()), nullptr);
+    auto activeCount = stamp.getManagedPartitionActiveCountInputForTest(input.getRowPartitionId());
+    ASSERT_NE(activeCount, nullptr);
+    ASSERT_TRUE(activeCount->getFeatureOutput().has_value());
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
+    EXPECT_EQ(activeCount->getFeatureOutput()->getDataType(), DataType::UINT64);
 }
 
 TEST(Activations, SoftmaxSerializeDeserialize) {

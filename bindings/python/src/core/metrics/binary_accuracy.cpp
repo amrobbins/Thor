@@ -53,7 +53,12 @@ Binary Accuracy metric.
 Parameters
 ----------
 network : thor.Network
-predictions : thor.Tensor
-labels : thor.Tensor
+predictions : thor.Tensor or thor.RaggedTensor
+labels : thor.Tensor or thor.RaggedTensor
+
+For ragged inputs, predictions and labels must share the exact logical row
+partition and contain one scalar per active token. Ragged predictions are FP16 or
+FP32. The metric aggregates correct-token and active-token sufficient statistics,
+so partial/unequal batches combine exactly across an epoch.
 )nbdoc";
 }

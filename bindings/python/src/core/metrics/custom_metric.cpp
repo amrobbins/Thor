@@ -87,5 +87,10 @@ display_name : str, default "Metric"
 uses_batch_validity : bool, default False
     Declares that the expression consumes runtime batch validity. Thor currently supplies it through the reserved
     ``__thor_batch_validity_mask`` FP32 prefix-mask input so invalid tail rows can be excluded from batch-coupled computation.
+
+Notes
+-----
+``CustomMetric`` remains a dense-input API. Use the first-class ragged reduction
+or accuracy metric classes for rank-1 ragged values.
 )nbdoc";
 }

@@ -175,7 +175,7 @@ MAE loss.
 
 ``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or
 rank-1 ``thor.RaggedTensor`` objects. Ragged inputs must share the exact same
-row-partition tensor. Ragged loss reporting supports ``none``, ``raw``,
+logical row partition. Ragged loss reporting supports ``none``, ``raw``,
 ``per_example``, and ``batch``; ``per_output`` is intentionally undefined.
 
 For ragged inputs, ``raw`` returns a ``thor.RaggedTensor`` with the same row

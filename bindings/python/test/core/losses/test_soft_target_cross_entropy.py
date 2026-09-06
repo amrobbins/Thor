@@ -178,3 +178,67 @@ def test_soft_target_cross_entropy_numerical_forward_matches_reference(reported_
     actual = _run_soft_target_cross_entropy_network(predictions, labels, reported_loss_shape)
 
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+def _r11c_soft_target_ragged_pair(network, *, offsets_dtype=thor.DataType.uint32, prefix="r11c_soft_target"):
+    predictions = thor.layers.RaggedNetworkInput(
+        network,
+        f"{prefix}_predictions",
+        thor.DataType.fp32,
+        [3],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+        offsets_data_type=offsets_dtype,
+    )
+    labels = thor.layers.RaggedNetworkInput(
+        network,
+        f"{prefix}_labels",
+        thor.DataType.fp32,
+        [3],
+        partition=predictions,
+    )
+    return predictions, labels
+
+
+@pytest.mark.parametrize("offsets_dtype", [thor.DataType.uint32, thor.DataType.uint64])
+def test_soft_target_cross_entropy_r11c_constructs_ragged_raw_and_preserves_partition(offsets_dtype):
+    n = thor.Network(f"test_soft_target_r11c_{offsets_dtype}")
+    predictions, labels = _r11c_soft_target_ragged_pair(n, offsets_dtype=offsets_dtype)
+    loss = thor.losses.SoftTargetCrossEntropy(
+        n,
+        predictions,
+        labels,
+        reported_loss_shape=thor.losses.LossShape.raw,
+    )
+    assert loss.is_ragged
+    assert loss.get_predictions() == predictions
+    assert loss.get_labels() == labels
+    assert isinstance(loss.get_raw_loss(), thor.RaggedTensor)
+    assert isinstance(loss.get_loss(), thor.RaggedTensor)
+    assert loss.get_loss().offsets == predictions.offsets
+    assert loss.get_loss().values.get_dimensions() == [8, 3]
+
+
+def test_soft_target_cross_entropy_r11c_rejects_per_output_mixed_inputs_and_different_partition():
+    n = thor.Network("test_soft_target_r11c_reject")
+    predictions, labels = _r11c_soft_target_ragged_pair(n)
+    with pytest.raises(ValueError, match=r"per_output.*undefined"):
+        thor.losses.SoftTargetCrossEntropy(
+            n, predictions, labels, reported_loss_shape=thor.losses.LossShape.per_output
+        )
+
+    different = thor.layers.RaggedNetworkInput(
+        n,
+        "r11c_soft_target_different",
+        thor.DataType.fp32,
+        [3],
+        batch_size=3,
+        max_total_values=8,
+        max_values_per_row=4,
+    )
+    with pytest.raises(ValueError, match=r"exact same row partition"):
+        thor.losses.SoftTargetCrossEntropy(n, predictions, different)
+
+    with pytest.raises(TypeError, match=r"both be thor.Tensor or both be thor.RaggedTensor"):
+        thor.losses.SoftTargetCrossEntropy(n, predictions, _tensor_1d(3))

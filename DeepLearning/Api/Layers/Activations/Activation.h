@@ -56,6 +56,14 @@ class Activation : public Layer {
     // override this when their ragged semantics differ.
     virtual bool supportsRaggedStandalone() const { return true; }
 
+    // Standalone ragged support is intentionally distinct from eligibility for
+    // inlining an activation inside a ragged learning-layer expression. Some
+    // activations (notably ordinary Softmax) require their own exact-prefix
+    // fixed-function execution boundary and therefore cannot be fused into a
+    // Ragged Convolution1d expression even though they are valid standalone
+    // RaggedTensor activations.
+    virtual bool supportsRaggedLearningLayerFusion() const { return supportsRaggedStandalone(); }
+
     std::string getLayerType() const override = 0;
 
     static const char* epilogueInputName() { return "__activation_epilogue_input"; }

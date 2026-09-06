@@ -28,7 +28,7 @@ Softmax across the active tokens of each ragged row.
 Each trailing component is normalized independently over its row's variable-length
 token axis. The exact canonical offsets object is preserved and inactive packed
 capacity is excluded. Values must be FP16, BF16, or FP32; FP64 is intentionally
-unsupported. This is distinct from ordinary ``Softmax``, which is not a segmented
-sequence-axis operation.
+unsupported. This is distinct from ordinary ``Softmax``, which normalizes the
+final trailing/channel dimension independently for every active token.
 )nbdoc";
 }

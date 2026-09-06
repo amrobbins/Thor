@@ -11,10 +11,12 @@ namespace ThorImplementation {
 class SparseCategoricalCrossEntropyWithLogits : public Loss {
    public:
     static constexpr int MASK_CONNECTION_TYPE = 9341;
+    static constexpr int ACTIVE_COUNT_CONNECTION_TYPE = 9342;
 
     SparseCategoricalCrossEntropyWithLogits(DataType lossDataType,
                                             std::optional<float> lossWeight = std::nullopt,
-                                            std::optional<uint32_t> ignoreIndex = std::nullopt);
+                                            std::optional<uint32_t> ignoreIndex = std::nullopt,
+                                            std::optional<uint32_t> raggedBatchSize = std::nullopt);
     ~SparseCategoricalCrossEntropyWithLogits() override {}
 
     std::optional<Tensor> createFeatureOutputTensor() override;
@@ -27,6 +29,9 @@ class SparseCategoricalCrossEntropyWithLogits : public Loss {
                                                  int connectionType) override;
 
     std::optional<Tensor> connectToMaskInputLayer(Layer *maskLayer, std::optional<Tensor> mask, Stream maskStream);
+    std::optional<Tensor> connectToActiveCountInputLayer(Layer *activeCountLayer,
+                                                         std::optional<Tensor> activeCount,
+                                                         Stream activeCountStream);
 
     void initialize() override;
     void cleanup() override;
@@ -34,6 +39,7 @@ class SparseCategoricalCrossEntropyWithLogits : public Loss {
     void infer(std::optional<Tensor> logits, std::optional<Tensor> loss, Stream stream) override;
     void backProp(std::optional<Tensor> labels, std::optional<Tensor> logits, std::optional<Tensor> lossGradient, Stream stream) override;
     void forward(std::optional<Tensor> inputTensor, bool validationPass, uint32_t validExampleCount = 0) override;
+    void backward(std::optional<Tensor> errorInput, uint32_t validExampleCount = 0) override;
     void ensureNoDeviceCrossing() override;
     std::string getType() override;
     std::vector<Stream> getProcessingStreams() override;
@@ -47,16 +53,26 @@ class SparseCategoricalCrossEntropyWithLogits : public Loss {
                                                               const std::vector<uint64_t> &featureInputDimensions);
     static std::vector<uint64_t> rawLossDimensionsForFeatureInput(const std::vector<uint64_t> &featureInputDimensions);
     void launchForCurrentTypes();
+    [[nodiscard]] bool usesRaggedActiveCount() const { return raggedBatchSize.has_value(); }
+    uint32_t resolveRaggedValidExampleCount(uint32_t validExampleCount) const;
+    void recordCurrentBatchCardinality(uint32_t validExampleCount);
+    void finishCurrentBatchCardinality();
 
     std::optional<Tensor> maskInput;
     Stream maskStream;
     Event maskReadyEvent;
     Event maskReusableEvent;
     bool maskReceived = false;
+    std::optional<Tensor> activeCountInput;
+    Stream activeCountStream;
+    Event activeCountReadyEvent;
+    Event activeCountReusableEvent;
+    bool activeCountReceived = false;
     uint32_t numRows = 0;
     uint32_t numClasses = 0;
     std::optional<uint32_t> ignoreIndex;
     std::optional<float> lossWeight;
+    std::optional<uint32_t> raggedBatchSize;
 };
 
 }  // namespace ThorImplementation

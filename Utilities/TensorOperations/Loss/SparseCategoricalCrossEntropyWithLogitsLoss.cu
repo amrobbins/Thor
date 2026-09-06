@@ -39,12 +39,14 @@ __device__ inline bool maskIsValid(const MASK_TYPE *mask, uint32_t row) {
 
 template <typename LABEL_TYPE, typename LOGIT_TYPE, typename LOSS_TYPE, typename MASK_TYPE>
 __global__ void sparseCategoricalCrossEntropyWithLogitsKernel(uint32_t numClasses,
-                                                              uint32_t numRows,
+                                                              uint32_t rowCapacity,
                                                               const LABEL_TYPE *labels,
                                                               const LOGIT_TYPE *logits,
                                                               const MASK_TYPE *mask,
                                                               LOSS_TYPE *loss,
                                                               LOGIT_TYPE *gradient,
+                                                              const void *activeCount,
+                                                              bool activeCountIsUint64,
                                                               bool computeGradient,
                                                               float gradientScale,
                                                               float lossScale,
@@ -52,8 +54,18 @@ __global__ void sparseCategoricalCrossEntropyWithLogitsKernel(uint32_t numClasse
                                                               uint32_t ignoreIndex,
                                                               bool hasMask) {
     const uint32_t row = blockIdx.x;
-    if (row >= numRows)
+    if (row >= rowCapacity)
         return;
+
+    // This check intentionally precedes every packed-value read. In ragged
+    // mode the inactive capacity may contain poison and must remain completely
+    // outside the semantic execution domain.
+    if (activeCount != nullptr) {
+        const uint64_t activeRows = activeCountIsUint64 ? *static_cast<const uint64_t *>(activeCount)
+                                                        : *static_cast<const uint32_t *>(activeCount);
+        if (static_cast<uint64_t>(row) >= activeRows)
+            return;
+    }
 
     __shared__ float scratch[256];
     __shared__ float rowMaxShared;
@@ -143,6 +155,62 @@ __global__ void sparseCategoricalCrossEntropyWithLogitsKernel(uint32_t numClasse
 }  // namespace
 
 template <typename LABEL_TYPE, typename LOGIT_TYPE, typename LOSS_TYPE, typename MASK_TYPE>
+void launchSparseCategoricalCrossEntropyWithLogitsImpl(void *labels_d,
+                                                       void *logits_d,
+                                                       void *mask_d,
+                                                       void *loss_d,
+                                                       void *gradient_d,
+                                                       void *activeCount_d,
+                                                       ThorImplementation::DataType activeCountDataType,
+                                                       uint32_t numClasses,
+                                                       uint32_t rowCapacity,
+                                                       bool computeGradient,
+                                                       uint32_t lossScalingFactor,
+                                                       float lossWeight,
+                                                       bool hasIgnoreIndex,
+                                                       uint32_t ignoreIndex,
+                                                       bool hasMask,
+                                                       Stream stream) {
+    if (std::is_same<LABEL_TYPE, half>::value || std::is_same<LABEL_TYPE, float>::value || std::is_same<LABEL_TYPE, bool>::value) {
+        THOR_UNREACHABLE();
+        return;
+    }
+    THOR_THROW_IF_FALSE(numClasses > 1);
+    THOR_THROW_IF_FALSE(rowCapacity > 0);
+    THOR_THROW_IF_FALSE(labels_d != nullptr);
+    THOR_THROW_IF_FALSE(logits_d != nullptr);
+    THOR_THROW_IF_FALSE(loss_d != nullptr);
+    THOR_THROW_IF_FALSE(!computeGradient || gradient_d != nullptr);
+    THOR_THROW_IF_FALSE(!hasMask || mask_d != nullptr);
+    THOR_THROW_IF_FALSE(activeCount_d == nullptr || activeCountDataType == ThorImplementation::DataType::UINT32 ||
+                        activeCountDataType == ThorImplementation::DataType::UINT64);
+
+    ScopedGpu scopedGpu(stream.getGpuNum());
+
+    constexpr uint32_t blockSize = 256;
+    const float lossScale = lossWeight;
+    const float gradientScale = static_cast<float>(lossScalingFactor) * lossWeight;
+    const bool activeCountIsUint64 = activeCountDataType == ThorImplementation::DataType::UINT64;
+
+    sparseCategoricalCrossEntropyWithLogitsKernel<LABEL_TYPE, LOGIT_TYPE, LOSS_TYPE, MASK_TYPE>
+        <<<rowCapacity, blockSize, 0, stream.getStream()>>>(numClasses,
+                                                            rowCapacity,
+                                                            static_cast<const LABEL_TYPE *>(labels_d),
+                                                            static_cast<const LOGIT_TYPE *>(logits_d),
+                                                            static_cast<const MASK_TYPE *>(mask_d),
+                                                            static_cast<LOSS_TYPE *>(loss_d),
+                                                            static_cast<LOGIT_TYPE *>(gradient_d),
+                                                            activeCount_d,
+                                                            activeCountIsUint64,
+                                                            computeGradient,
+                                                            gradientScale,
+                                                            lossScale,
+                                                            hasIgnoreIndex,
+                                                            ignoreIndex,
+                                                            hasMask);
+}
+
+template <typename LABEL_TYPE, typename LOGIT_TYPE, typename LOSS_TYPE, typename MASK_TYPE>
 void launchSparseCategoricalCrossEntropyWithLogits(void *labels_d,
                                                    void *logits_d,
                                                    void *mask_d,
@@ -157,43 +225,65 @@ void launchSparseCategoricalCrossEntropyWithLogits(void *labels_d,
                                                    uint32_t ignoreIndex,
                                                    bool hasMask,
                                                    Stream stream) {
-    if (std::is_same<LABEL_TYPE, half>::value || std::is_same<LABEL_TYPE, float>::value || std::is_same<LABEL_TYPE, bool>::value) {
-        THOR_UNREACHABLE();
-        return;
-    }
-    THOR_THROW_IF_FALSE(numClasses > 1);
-    THOR_THROW_IF_FALSE(numRows > 0);
-    THOR_THROW_IF_FALSE(labels_d != nullptr);
-    THOR_THROW_IF_FALSE(logits_d != nullptr);
-    THOR_THROW_IF_FALSE(loss_d != nullptr);
-    THOR_THROW_IF_FALSE(!computeGradient || gradient_d != nullptr);
-    THOR_THROW_IF_FALSE(!hasMask || mask_d != nullptr);
+    launchSparseCategoricalCrossEntropyWithLogitsImpl<LABEL_TYPE, LOGIT_TYPE, LOSS_TYPE, MASK_TYPE>(labels_d,
+                                                                                                    logits_d,
+                                                                                                    mask_d,
+                                                                                                    loss_d,
+                                                                                                    gradient_d,
+                                                                                                    nullptr,
+                                                                                                    ThorImplementation::DataType::UINT32,
+                                                                                                    numClasses,
+                                                                                                    numRows,
+                                                                                                    computeGradient,
+                                                                                                    lossScalingFactor,
+                                                                                                    lossWeight,
+                                                                                                    hasIgnoreIndex,
+                                                                                                    ignoreIndex,
+                                                                                                    hasMask,
+                                                                                                    stream);
+}
 
-    ScopedGpu scopedGpu(stream.getGpuNum());
-
-    constexpr uint32_t blockSize = 256;
-    const float lossScale = lossWeight;
-    const float gradientScale = static_cast<float>(lossScalingFactor) * lossWeight;
-
-    sparseCategoricalCrossEntropyWithLogitsKernel<LABEL_TYPE, LOGIT_TYPE, LOSS_TYPE, MASK_TYPE>
-        <<<numRows, blockSize, 0, stream.getStream()>>>(numClasses,
-                                                        numRows,
-                                                        static_cast<const LABEL_TYPE *>(labels_d),
-                                                        static_cast<const LOGIT_TYPE *>(logits_d),
-                                                        static_cast<const MASK_TYPE *>(mask_d),
-                                                        static_cast<LOSS_TYPE *>(loss_d),
-                                                        static_cast<LOGIT_TYPE *>(gradient_d),
-                                                        computeGradient,
-                                                        gradientScale,
-                                                        lossScale,
-                                                        hasIgnoreIndex,
-                                                        ignoreIndex,
-                                                        hasMask);
+template <typename LABEL_TYPE, typename LOGIT_TYPE, typename LOSS_TYPE, typename MASK_TYPE>
+void launchRaggedSparseCategoricalCrossEntropyWithLogits(void *labels_d,
+                                                         void *logits_d,
+                                                         void *mask_d,
+                                                         void *loss_d,
+                                                         void *gradient_d,
+                                                         void *activeCount_d,
+                                                         ThorImplementation::DataType activeCountDataType,
+                                                         uint32_t numClasses,
+                                                         uint32_t rowCapacity,
+                                                         bool computeGradient,
+                                                         uint32_t lossScalingFactor,
+                                                         float lossWeight,
+                                                         bool hasIgnoreIndex,
+                                                         uint32_t ignoreIndex,
+                                                         bool hasMask,
+                                                         Stream stream) {
+    THOR_THROW_IF_FALSE(activeCount_d != nullptr);
+    launchSparseCategoricalCrossEntropyWithLogitsImpl<LABEL_TYPE, LOGIT_TYPE, LOSS_TYPE, MASK_TYPE>(labels_d,
+                                                                                                    logits_d,
+                                                                                                    mask_d,
+                                                                                                    loss_d,
+                                                                                                    gradient_d,
+                                                                                                    activeCount_d,
+                                                                                                    activeCountDataType,
+                                                                                                    numClasses,
+                                                                                                    rowCapacity,
+                                                                                                    computeGradient,
+                                                                                                    lossScalingFactor,
+                                                                                                    lossWeight,
+                                                                                                    hasIgnoreIndex,
+                                                                                                    ignoreIndex,
+                                                                                                    hasMask,
+                                                                                                    stream);
 }
 
 #define INSTANTIATE_SPARSE_CE_WITH_LOGITS(LABEL_TYPE, LOGIT_TYPE, LOSS_TYPE, MASK_TYPE) \
     template void launchSparseCategoricalCrossEntropyWithLogits<LABEL_TYPE, LOGIT_TYPE, LOSS_TYPE, MASK_TYPE>( \
-        void *, void *, void *, void *, void *, uint32_t, uint32_t, bool, uint32_t, float, bool, uint32_t, bool, Stream)
+        void *, void *, void *, void *, void *, uint32_t, uint32_t, bool, uint32_t, float, bool, uint32_t, bool, Stream); \
+    template void launchRaggedSparseCategoricalCrossEntropyWithLogits<LABEL_TYPE, LOGIT_TYPE, LOSS_TYPE, MASK_TYPE>( \
+        void *, void *, void *, void *, void *, void *, ThorImplementation::DataType, uint32_t, uint32_t, bool, uint32_t, float, bool, uint32_t, bool, Stream)
 
 #define INSTANTIATE_FOR_MASKS(LABEL_TYPE, LOGIT_TYPE, LOSS_TYPE) \
     INSTANTIATE_SPARSE_CE_WITH_LOGITS(LABEL_TYPE, LOGIT_TYPE, LOSS_TYPE, bool); \

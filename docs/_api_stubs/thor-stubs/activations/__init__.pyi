@@ -309,9 +309,14 @@ class Softmax(Activation):
     """
     Softmax activation.
 
-    Softmax is typically applied along the last (feature) dimension of a tensor
-    to convert raw scores (logits) into a probability distribution. For an input
-    vector x, softmax is defined as
+    Softmax is applied along the final (feature/channel) dimension of a dense or
+    ragged tensor to convert raw scores (logits) into a probability distribution.
+    For ragged input, every active packed value is normalized independently over
+    that final trailing dimension and the logical row partition is preserved
+    exactly; this is distinct from ``thor.layers.SegmentedSoftmax``, which
+    normalizes across values within each ragged row. Ragged Softmax supports FP16,
+    BF16, and FP32 values; FP64 is intentionally unsupported. For an input vector x,
+    softmax is defined as
 
         softmax(x_i) = exp(x_i) / Σ_j exp(x_j)
 

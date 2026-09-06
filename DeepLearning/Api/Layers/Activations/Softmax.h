@@ -22,9 +22,20 @@ class Softmax : public Activation {
         return myClone;
     }
 
-    bool supportsRaggedStandalone() const override { return false; }
+    bool supportsRaggedStandalone() const override { return true; }
+    bool supportsRaggedLearningLayerFusion() const override { return false; }
 
     ThorImplementation::Expression toExpression(const ThorImplementation::Expression& input) const override {
+        return input.softmax();
+    }
+
+    ThorImplementation::RaggedExpression toRaggedExpression(
+        const ThorImplementation::RaggedExpression& input) const override {
+        // Ordinary ragged Softmax is tokenwise: normalize independently over the
+        // final trailing/channel dimension for every active packed value.  Do not
+        // route this through the default mapValues(toExpression) hook: R11A's
+        // RaggedExpression::softmax() carries the exact active-prefix metadata and
+        // lowers to the dedicated ragged softmax forward/backward boundary.
         return input.softmax();
     }
 
@@ -35,6 +46,14 @@ class Softmax : public Activation {
             throw std::runtime_error("Unsupported version in Softmax::deserialize: " + j["version"].get<std::string>());
         if (j.at("layer_type").get<std::string>() != "softmax")
             throw std::runtime_error("Layer type mismatch in Softmax::deserialize: " + j.at("layer_type").get<std::string>());
+
+        if (j.value("use_ragged", false)) {
+            Softmax softmax;
+            softmax.initialized = true;
+            softmax.deserializeStandaloneFields(j, network);
+            softmax.addToNetwork(network);
+            return;
+        }
 
         nlohmann::json input = j["feature_input"].get<nlohmann::json>();
         uint64_t originalTensorId = input.at("id").get<uint64_t>();
@@ -58,10 +77,12 @@ class Softmax : public Activation {
         (void)drivingLayer;
         (void)drivingApiLayer;
         THOR_THROW_IF_FALSE(initialized);
-        THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
 
         if (backwardComputedExternally) {
-            // Loss-owned softmax keeps the external-backward physical-layer contract.
+            // Loss-owned softmax keeps the legacy dense external-backward physical-layer contract.
+            // CategoricalCrossEntropy is still dense-only in R11B, so this path has no
+            // row-partition input and must be driven by the values tensor itself.
+            THOR_THROW_IF_FALSE(connectingApiTensor == featureInput.value());
             return std::make_shared<ThorImplementation::Softmax>(true);
         }
 
@@ -69,7 +90,9 @@ class Softmax : public Activation {
     }
 
     uint64_t getFirstInstanceMemRequirementInBytes(uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const override {
-        // feature out and error out
+        (void)tensorPlacement;
+        if (!backwardComputedExternally) return getExpressionBackedActivationMemRequirementInBytes(batchSize);
+        // Loss-owned dense softmax keeps the legacy physical-layer accounting.
         return batchSize * (featureOutput.value().getTotalSizeInBytes() + featureInput.value().getTotalSizeInBytes());
     }
 
@@ -80,18 +103,17 @@ class Softmax::Builder : public Activation::Builder {
    public:
     std::shared_ptr<Activation> build() override {
         std::shared_ptr<Softmax> softmax = std::make_shared<Softmax>();
+        softmax->backwardComputedExternally = _backwardComputedExternally.value_or(false);
         if (_featureInput.has_value()) {
-            // Standalone layer support.
+            // Standalone layer support.  Use the common initializer so a RaggedTensor
+            // remains ragged and preserves its logical row partition exactly.
             THOR_THROW_IF_FALSE(_network.has_value());
-            softmax->featureInput = _featureInput;
-            softmax->featureOutput = _featureInput.value().clone();
+            applyStandaloneConfiguration(*softmax);
             softmax->initialized = true;
-            softmax->backwardComputedExternally = _backwardComputedExternally.value_or(false);
             softmax->addToNetwork(_network.value());
         } else {
-            // Template activation support
+            // Template activation support.
             softmax->initialized = true;
-            softmax->backwardComputedExternally = _backwardComputedExternally.value_or(false);
         }
 
         return softmax;
@@ -103,6 +125,11 @@ class Softmax::Builder : public Activation::Builder {
     }
 
     Softmax::Builder &featureInput(Tensor _featureInput) override {
+        Activation::Builder::featureInput(_featureInput);
+        return *this;
+    }
+
+    Softmax::Builder &featureInput(RaggedTensor _featureInput) override {
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

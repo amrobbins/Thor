@@ -165,15 +165,15 @@ class BinaryCrossEntropy(Loss):
 
 class CategoricalCrossEntropy(Loss):
     r"""
-    Dense categorical cross-entropy loss.
+    Dense-target categorical cross-entropy loss.
 
     Parameters
     ----------
     network : thor.Network
-    predictions : thor.Tensor
-        Logits tensor whose final dimension is the class dimension.
-    labels : thor.Tensor
-        Dense class target tensor with the same dimensions as predictions. One-hot labels and soft labels are both supported.
+    predictions : thor.Tensor or thor.RaggedTensor
+        Logits whose final/trailing dimension is the class dimension. Ragged inputs must have exactly one trailing class dimension.
+    labels : thor.Tensor or thor.RaggedTensor
+        Dense class targets matching predictions. Ragged labels must share the exact same row partition.
     loss_data_type : thor.DataType, default thor.DataType.FP32
     reported_loss_shape : thor.losses.LossShape, default batch
         This setting does not affect training; it only controls the reported loss tensor shape.
@@ -188,11 +188,26 @@ class CategoricalCrossEntropy(Loss):
 
         L = -\sum_{c=1}^{C} y_c \log(p_c)
 
-    Use SparseCategoricalCrossEntropy when labels are integer class ids.
+    For ragged inputs, ``raw`` preserves the partition, ``per_example`` sums over all active tokens/classes in each logical row, and ``batch`` averages those row sums over valid logical examples. ``per_output`` is undefined for ragged input.
+
+    Use SparseCategoricalCrossEntropy when labels are integer class ids; dense and rank-1 ragged sparse targets are supported.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, loss_data_type: thor.DataType = thor.DataType.fp32, reported_loss_shape: LossShape = LossShape.batch, *, loss_weight: float | None = None) -> None:
-        """Construct a dense/soft-label categorical cross-entropy loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, loss_data_type: thor.DataType = thor.DataType.fp32, reported_loss_shape: LossShape = LossShape.batch, *, loss_weight: float | None = None) -> None:
+        """
+        Construct a dense or rank-1 ragged dense-target categorical cross-entropy loss.
+        """
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
 class SparseCategoricalCrossEntropy(CategoricalCrossEntropy):
     """
@@ -201,10 +216,11 @@ class SparseCategoricalCrossEntropy(CategoricalCrossEntropy):
     Parameters
     ----------
     network : thor.Network
-    predictions : thor.Tensor
-        Logits tensor whose final dimension is the class dimension.
-    labels : thor.Tensor
-        Sparse integer class ids. Dimensions must match the prediction prefix dimensions, or that prefix with a trailing singleton.
+    predictions : thor.Tensor or thor.RaggedTensor
+        Logits tensor whose final/trailing dimension is the class dimension. Ragged predictions must have trailing shape ``[C]``.
+    labels : thor.Tensor or thor.RaggedTensor
+        Sparse integer class ids. Dense dimensions must match the prediction prefix dimensions, or that prefix with a trailing singleton.
+        Ragged labels must share the exact prediction row partition and have scalar trailing shape ``[]`` or ``[1]``.
     num_classes : int
         Number of classes in predictions.
     loss_data_type : thor.DataType, default thor.DataType.FP32
@@ -212,8 +228,9 @@ class SparseCategoricalCrossEntropy(CategoricalCrossEntropy):
         This setting does not affect training; it only controls the reported loss tensor shape.
     ignore_index : int, optional keyword-only
         Label id that contributes zero loss and zero logits gradient.
-    mask : thor.Tensor, optional keyword-only
-        Prefix-shaped boolean/uint8/fp16/fp32 mask. Entries > 0.5 are valid; masked entries contribute zero loss and zero gradient.
+    mask : thor.Tensor or thor.RaggedTensor, optional keyword-only
+        Dense inputs use a prefix-shaped mask. Ragged inputs require a scalar-per-token ragged mask with the exact same row partition.
+        Boolean/uint8/fp16/fp32 masks are supported. Entries > 0.5 are valid; masked entries contribute zero loss and zero gradient.
 
     Notes
     -----
@@ -222,10 +239,14 @@ class SparseCategoricalCrossEntropy(CategoricalCrossEntropy):
     the predictions prefix shape, e.g. predictions [B, S, V] produce raw loss [B, S].
 
     The logits gradient is dense and equivalent to softmax(logits) - one_hot(class_id).
+    For ragged inputs, ``raw`` is one scalar per active token and preserves the prediction row partition; ``per_example`` and
+    ``batch`` use ragged row reductions. ``per_output`` is undefined.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, num_classes: int, loss_data_type: thor.DataType = thor.DataType.fp32, reported_loss_shape: LossShape = LossShape.batch, *, loss_weight: float | None = None, ignore_index: int | None = None, mask: thor.Tensor | None = None) -> None:
-        """Construct a sparse categorical cross-entropy loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, num_classes: int, loss_data_type: thor.DataType = thor.DataType.fp32, reported_loss_shape: LossShape = LossShape.batch, *, loss_weight: float | None = None, ignore_index: int | None = None, mask: object | None = None) -> None:
+        """
+        Construct a dense or rank-1 ragged sparse categorical cross-entropy loss.
+        """
 
 class MAE(Loss):
     """
@@ -233,7 +254,7 @@ class MAE(Loss):
 
     ``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or
     rank-1 ``thor.RaggedTensor`` objects. Ragged inputs must share the exact same
-    row-partition tensor. Ragged loss reporting supports ``none``, ``raw``,
+    logical row partition. Ragged loss reporting supports ``none``, ``raw``,
     ``per_example``, and ``batch``; ``per_output`` is intentionally undefined.
 
     For ragged inputs, ``raw`` returns a ``thor.RaggedTensor`` with the same row
@@ -290,7 +311,7 @@ class MSE(Loss):
 
     ``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or
     rank-1 ``thor.RaggedTensor`` objects. Ragged inputs must share the exact same
-    row-partition tensor. Ragged loss reporting supports ``none``, ``raw``,
+    logical row partition. Ragged loss reporting supports ``none``, ``raw``,
     ``per_example``, and ``batch``; ``per_output`` is intentionally undefined.
 
     For ragged inputs, ``raw`` returns a ``thor.RaggedTensor`` with the same row
@@ -321,7 +342,7 @@ class MeanPowerError(Loss):
 
     ``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or
     rank-1 ``thor.RaggedTensor`` objects. Ragged inputs must share the exact same
-    row-partition tensor. Ragged loss reporting supports ``none``, ``raw``,
+    logical row partition. Ragged loss reporting supports ``none``, ``raw``,
     ``per_example``, and ``batch``; ``per_output`` is intentionally undefined.
 
     The exponent must be finite and greater than or equal to 1.0. For ragged
@@ -411,16 +432,34 @@ class SoftTargetCrossEntropy(Loss):
     """
     Soft-target categorical cross entropy from logits.
 
-    The predictions tensor contains unnormalized logits and the labels tensor contains
-    a dense target distribution with the same class dimension. The raw loss is:
+    ``predictions`` and ``labels`` may both be dense ``thor.Tensor`` objects or
+    rank-1 ``thor.RaggedTensor`` objects. Ragged values must have exactly one
+    trailing class dimension ``[C]`` and predictions/labels must share the exact
+    same row partition.
+
+    The raw loss is:
 
         -target * log_softmax(logits)
 
+    For ragged inputs, ``raw`` preserves the partition, ``per_example`` sums over
+    all active tokens/classes in each logical row, and ``batch`` averages those row
+    sums over valid logical examples. ``per_output`` is undefined for ragged input.
     The gradient assumes targets are normalized distributions.
     """
 
-    def __init__(self, network: thor.Network, predictions: thor.Tensor, labels: thor.Tensor, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None) -> None:
-        """Construct a soft-target cross entropy loss."""
+    def __init__(self, network: thor.Network, predictions: object, labels: object, loss_data_type: thor.DataType | None = None, reported_loss_shape: LossShape | None = LossShape.batch, *, loss_weight: float | None = None) -> None:
+        """Construct a dense or rank-1 ragged soft-target cross entropy loss."""
+
+    def get_predictions(self) -> object: ...
+
+    def get_labels(self) -> object: ...
+
+    def get_raw_loss(self) -> object: ...
+
+    def get_loss(self) -> object: ...
+
+    @property
+    def is_ragged(self) -> bool: ...
 
 class KLDivLoss(Loss):
     """

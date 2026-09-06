@@ -6885,8 +6885,11 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
             if (!stage.softmax) {
                 throw std::runtime_error("Missing compiled softmax stage.");
             }
-            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
-                throw std::runtime_error("Softmax stage expected exactly one input and one output.");
+            const size_t expected_softmax_inputs =
+                stage.softmax->backward ? 3u : (stage.softmax->isRagged() ? 2u : 1u);
+            if (stage.input_value_ids.size() != expected_softmax_inputs || stage.outputs.size() != 1) {
+                throw std::runtime_error(
+                    "Softmax stage input count does not match its compiled dense/ragged forward/backward contract.");
             }
             value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
         } else if (stage.kind == CompiledExecutionStage::Kind::RmsNorm) {
@@ -13085,8 +13088,11 @@ FusedEquation::ParameterFanOverrideMap FusedEquation::getParameterFanOverrides(
             if (!stage.softmax) {
                 throw std::runtime_error("Missing compiled softmax stage.");
             }
-            if (stage.input_value_ids.size() != 1 || stage.outputs.size() != 1) {
-                throw std::runtime_error("Softmax stage expected exactly one input and one output.");
+            const size_t expected_softmax_inputs =
+                stage.softmax->backward ? 3u : (stage.softmax->isRagged() ? 2u : 1u);
+            if (stage.input_value_ids.size() != expected_softmax_inputs || stage.outputs.size() != 1) {
+                throw std::runtime_error(
+                    "Softmax stage input count does not match its compiled dense/ragged forward/backward contract.");
             }
             value_dims[stage.outputs[0].value_id] = stage_input_dims[0];
         } else if (stage.kind == CompiledExecutionStage::Kind::RmsNorm) {
