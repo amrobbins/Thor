@@ -14,10 +14,10 @@ RowPartitionRuntime::RowPartitionRuntime(Tensor offsets, RowPartitionDescriptor 
     THOR_THROW_IF_FALSE(this->offsets.isInitialized());
     hostStateCarrier = this->offsets;
     THOR_THROW_IF_FALSE(this->offsets.getDescriptor() == descriptor.getOffsetsDescriptor());
-    // The offsets allocation remains the transitional storage anchor for the
-    // authoritative host publication, but it is no longer the semantic row-
-    // partition identity. Views are rejected so one execution representation
-    // still has exactly one host publication during this migration.
+    // When an offsets representation exists it also serves as a host-state carrier,
+    // but it is not the semantic row-partition identity. HOST_EXTENT-only runtimes
+    // instead carry the same publication on another tensor. Views are rejected so
+    // one offsets representation still has exactly one host publication.
     THOR_THROW_IF_FALSE(this->offsets.isDenseContiguous());
     THOR_THROW_IF_FALSE(this->offsets.getStorageElementOffset() == 0);
     THOR_THROW_IF_FALSE(!this->offsets.hasCustomStrides());
@@ -68,9 +68,9 @@ void RowPartitionRuntime::propagateHostState(Tensor sourceCarrier, Tensor destin
     const bool hasAnyHostPublication = rowPartitionId.has_value() || hostOffsets.has_value() ||
                                        activeValueCount.has_value() || maxActiveRowLength.has_value();
     if (!hasAnyHostPublication) {
-        // Transitional compatibility for direct implementation tests and legacy
-        // internally-produced device-offset carriers.  External RP6B managed
-        // inputs always publish authoritative host state before notification.
+        // Low-level implementation fixtures may connect structural carriers
+        // before publishing a logical partition. Supported network execution
+        // always publishes authoritative host state before notification.
         return;
     }
     if (!rowPartitionId.has_value() || !hostOffsets.has_value() || !activeValueCount.has_value() ||
@@ -128,6 +128,18 @@ RowPartitionRuntime RowPartitionRuntime::fromHostStateCarrier(
     }
     return fromHostStateCarrier(
         std::move(carrier), hostOffsets->size() - 1, maxTotalValues);
+}
+
+RowPartitionRuntime RowPartitionRuntime::fromOffsetsAndHostState(
+    Tensor offsets,
+    RowPartitionDescriptor descriptor,
+    RowPartitionId rowPartitionId,
+    std::vector<uint64_t> hostOffsets) {
+    THOR_THROW_IF_FALSE(rowPartitionId != 0);
+    RowPartitionRuntime runtime(std::move(offsets), descriptor);
+    runtime.rowPartitionId = rowPartitionId;
+    runtime.setHostOffsets(std::move(hostOffsets));
+    return runtime;
 }
 
 Tensor RowPartitionRuntime::getOffsets() const {
@@ -265,7 +277,8 @@ RaggedRuntimeExtent RowPartitionRuntime::getRuntimeExtent(uint64_t elementsPerVa
     // A device-side active-count view is an execution representation, not a
     // substitute for the semantic row partition. RP2 requires the authoritative
     // host partition to be bound before an executing RaggedTensor exposes a
-    // runtime extent, even though the eventual CUDA consumer reads offsets[B].
+    // runtime extent, even though the eventual CUDA consumer reads only the
+    // explicitly selected device execution representation.
     (void)requireHostOffsets();
     if (!offsets.isInitialized()) {
         throw std::runtime_error(

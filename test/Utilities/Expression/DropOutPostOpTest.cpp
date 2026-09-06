@@ -25,7 +25,7 @@ TEST(DropOutPostOp, RaggedManagedActiveCountUsesScalarCarrierInForwardAndBackwar
                                                                 DataType::UINT32,
                                                                 3,
                                                                 5,
-                                                                "RP6B9 active count",
+                                                                "managed active count",
                                                                 RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
 
     EXPECT_TRUE(hasTensorInputNamed(kernel, "active_count"));
@@ -42,7 +42,7 @@ TEST(DropOutPostOp, RaggedManagedActiveCountUsesScalarCarrierInForwardAndBackwar
     EXPECT_EQ(backward.source().find("offsets[batch]"), std::string::npos);
 }
 
-TEST(DropOutPostOp, RaggedLegacyOffsetsModeRemainsAvailableForRowIndexedCallers) {
+TEST(DropOutPostOp, RaggedFullOffsetsModeRemainsAvailableForRowIndexedCallers) {
     const CudaKernelExpression kernel = makeDropOutPostOpKernel(DataType::FP16,
                                                                 0.1f,
                                                                 false,
@@ -50,7 +50,7 @@ TEST(DropOutPostOp, RaggedLegacyOffsetsModeRemainsAvailableForRowIndexedCallers)
                                                                 DataType::UINT64,
                                                                 4,
                                                                 7,
-                                                                "legacy offsets");
+                                                                "full offsets");
 
     EXPECT_TRUE(hasTensorInputNamed(kernel, "offsets"));
     EXPECT_FALSE(hasTensorInputNamed(kernel, "active_count"));

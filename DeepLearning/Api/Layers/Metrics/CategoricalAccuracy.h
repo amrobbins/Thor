@@ -23,6 +23,13 @@ class CategoricalAccuracy : public Metric {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<CategoricalAccuracy>(*this); }
 
     std::string getLayerType() const override { return "CategoricalAccuracy"; }
+
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedPredictions.has_value() && inputTensor == raggedPredictions->getOffsets())
+            return ThorImplementation::kRaggedAccuracyPartitionRequirement;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
     MetricAggregation getAggregation() const override {
         return raggedPredictions.has_value() ? MetricAggregation::RATIO : MetricAggregation::MEAN_BY_EXAMPLE;
     }

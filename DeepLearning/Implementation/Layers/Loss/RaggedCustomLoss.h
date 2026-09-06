@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/Layers/Loss.h"
 #include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/TensorOperations/Ragged/RowPartition.h"
 
 #include <cstdint>
 #include <functional>
@@ -14,14 +15,17 @@
 
 namespace ThorImplementation {
 
+inline constexpr RaggedPartitionRequirement kRaggedCustomLossPartitionRequirement =
+    RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
+
 // Internal valuewise loss execution primitive for rank-1 ragged sequences.
 //
 // Predictions and labels are packed values with physical shape
 //   [max_total_values, ...trailing value dimensions...]
-// and offsets is the canonical structural tensor [batch_size + 1].  The
-// offsets tensor, not packed capacity, controls the device-side execution
-// extent: only [0, offsets[batch_size]) is read or written.  Inactive packed
-// capacity is deliberately left untouched.
+// and the structural input is Thor's managed [1] DEVICE_ACTIVE_COUNT carrier.
+// That scalar, not packed capacity, controls the device-side execution extent:
+// only [0, active_value_count) is read or written. Inactive packed capacity is
+// deliberately left untouched.
 //
 // The logical batch cardinality is carried independently from
 // max_total_values.  This is important for Thor's optimizer semantics: valid

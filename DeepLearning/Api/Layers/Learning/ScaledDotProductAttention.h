@@ -127,6 +127,15 @@ class ScaledDotProductAttention : public CustomLayer {
 
     std::string getLayerType() const override { return "ScaledDotProductAttention"; }
 
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        const bool queryOffsets = queryRaggedInput.has_value() && inputTensor == queryRaggedInput->getOffsets();
+        const bool keyValueOffsets = keyRaggedInput.has_value() && inputTensor == keyRaggedInput->getOffsets();
+        if (queryOffsets || keyValueOffsets)
+            return ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+        return CustomLayer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
+
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
                              Stream stream,
                              bool saveOptimizerState,

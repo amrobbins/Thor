@@ -24,6 +24,13 @@ class UnaryReductionMetric : public Metric {
             return {raggedValues->getValues(), raggedValues->getOffsets()};
         return {getValues()};
     }
+
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedValues.has_value() && inputTensor == raggedValues->getOffsets())
+            return ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
     int getConnectionType(Tensor connectingTensor) const override {
         if (connectingTensor == getValues())
             return static_cast<int>(ThorImplementation::Metric::ConnectionType::FORWARD);
@@ -253,6 +260,13 @@ class WeightedMean : public Metric {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<WeightedMean>(*this); }
     std::string getLayerType() const override { return "WeightedMean"; }
     MetricAggregation getAggregation() const override { return MetricAggregation::RATIO; }
+
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedValues.has_value() && inputTensor == raggedValues->getOffsets())
+            return ThorImplementation::kRaggedWeightedReductionPartitionRequirement;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
 
     Tensor getValues() const { return getFeatureInput().value(); }
     Tensor getWeights() const { return labelsTensor; }

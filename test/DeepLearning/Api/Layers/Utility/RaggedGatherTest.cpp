@@ -191,19 +191,21 @@ TEST(UtilityApiLayers, RaggedGatherSubgraphCloneRemapsBothPartitionsAndPreserves
 
     ApiTensorRemap remap;
     remap.map(source.getValues(), destinationSource.getValues());
-    remap.map(source.getOffsets(), destinationSource.getOffsets());
+    remap.map(source.getRowPartitionToken(), destinationSource.getRowPartitionToken());
     remap.map(indices.getValues(), destinationIndices.getValues());
-    remap.map(indices.getOffsets(), destinationIndices.getOffsets());
+    remap.map(indices.getRowPartitionToken(), destinationIndices.getRowPartitionToken());
     ApiSubgraphCloneOptions options;
     options.inferenceOnly = true;
     ApiSubgraphCloneResult clone = destination.cloneSubgraphInto(
         sourceNetwork,
-        {"__thor_ragged_output.gathered.values", "__thor_ragged_output.gathered.offsets"},
+        {"__thor_ragged_output.gathered.values"},
         remap,
         options);
 
-    ASSERT_EQ(clone.outputTensorsByName.size(), 2u);
+    ASSERT_EQ(clone.outputTensorsByName.size(), 1u);
     EXPECT_EQ(clone.outputTensorsByName.at("__thor_ragged_output.gathered.values").getDimensions(),
               (vector<uint64_t>{7, 2}));
-    EXPECT_EQ(clone.outputTensorsByName.at("__thor_ragged_output.gathered.offsets"), destinationIndices.getOffsets());
+    const Tensor clonedPartitionToken = clone.clonedTensorBySourceOriginalId.at(
+        gather.getRaggedFeatureOutput().getRowPartitionToken().getOriginalId());
+    EXPECT_EQ(clonedPartitionToken, destinationIndices.getRowPartitionToken());
 }

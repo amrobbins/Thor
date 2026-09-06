@@ -206,10 +206,9 @@ optional<Tensor> RaggedCustomLoss::connectToPreviousLayer(Layer* previousLayer,
             const Tensor& offsets = connectedInput.value();
             const DataType dtype = offsets.getDataType();
             if (!RowPartitionDescriptor::isValidOffsetsDataType(dtype))
-                throw invalid_argument("RaggedCustomLoss offsets dtype must be UINT32 or UINT64.");
-            const RowPartitionDescriptor descriptor(batchSize, maxTotalValues, dtype);
-            if (offsets.getDescriptor() != descriptor.getOffsetsDescriptor())
-                throw invalid_argument("RaggedCustomLoss offsets must have canonical shape [batch_size + 1].");
+                throw invalid_argument("RaggedCustomLoss active-count carrier dtype must be UINT32 or UINT64.");
+            if (offsets.getDimensions() != vector<uint64_t>{1})
+                throw invalid_argument("RaggedCustomLoss structural input must be the managed [1] active-count carrier.");
             offsetsInput = offsets;
             offsetsStream = connectedStream;
             return nullopt;
@@ -304,7 +303,7 @@ DynamicExpression RaggedCustomLoss::withRaggedExtent(const DynamicExpression& ex
                      Stream& stream) -> DynamicExpressionBuild {
             auto offsetsIt = inputs.find(RAGGED_OFFSETS_INPUT_NAME);
             if (offsetsIt == inputs.end())
-                throw invalid_argument(whatString + " requires the structural offsets input.");
+                throw invalid_argument(whatString + " requires the managed structural active-count input.");
 
             DynamicExpression::TensorMap valueInputs = inputs;
             valueInputs.erase(RAGGED_OFFSETS_INPUT_NAME);
@@ -326,7 +325,8 @@ DynamicExpression RaggedCustomLoss::withRaggedExtent(const DynamicExpression& ex
                         .withRaggedRuntimeExtent(offsets,
                                                  runtimeBatchSize,
                                                  runtimeMaxTotalValues,
-                                                 runtimeElementsPerValue);
+                                                 runtimeElementsPerValue,
+                                                 RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
                 },
                 whatString);
 
@@ -523,7 +523,7 @@ void RaggedCustomLoss::forward(optional<Tensor> inputTensor, bool validationPass
         labelsReceived = true;
     } else if (offsetsInput.has_value() && input == offsetsInput.value()) {
         if (offsetsReceived)
-            throw logic_error("RaggedCustomLoss offsets arrived twice in one batch.");
+            throw logic_error("RaggedCustomLoss structural active-count input arrived twice in one batch.");
         offsetsReceived = true;
     } else if (exampleWeightsInput.has_value() && input == exampleWeightsInput.value()) {
         if (exampleWeightsReceived)
@@ -680,20 +680,20 @@ void RaggedCustomLoss::ensureNoDeviceCrossing() {
         return;
     const TensorPlacement offsetsPlacement = offsetsInput.value().getPlacement();
     if (featureInput.has_value() && featureInput.value().getPlacement() != offsetsPlacement)
-        throw invalid_argument("RaggedCustomLoss predictions and offsets must share placement.");
+        throw invalid_argument("RaggedCustomLoss predictions and structural active-count input must share placement.");
     if (labelsInput.has_value() && labelsInput.value().getPlacement() != offsetsPlacement)
-        throw invalid_argument("RaggedCustomLoss labels and offsets must share placement.");
+        throw invalid_argument("RaggedCustomLoss labels and structural active-count input must share placement.");
     if (featureOutput.has_value() && featureOutput.value().getPlacement() != offsetsPlacement)
-        throw invalid_argument("RaggedCustomLoss raw loss and offsets must share placement.");
+        throw invalid_argument("RaggedCustomLoss raw loss and structural active-count input must share placement.");
     if (errorOutput.has_value() && errorOutput.value().getPlacement() != offsetsPlacement)
-        throw invalid_argument("RaggedCustomLoss prediction gradient and offsets must share placement.");
+        throw invalid_argument("RaggedCustomLoss prediction gradient and structural active-count input must share placement.");
     if (exampleWeightsInput.has_value() && exampleWeightsInput.value().getPlacement() != offsetsPlacement)
-        throw invalid_argument("RaggedCustomLoss example_weights and offsets must share placement.");
+        throw invalid_argument("RaggedCustomLoss example_weights and structural active-count input must share placement.");
     for (const SecondaryInputState& secondary : secondaryInputs) {
         if (secondary.input.has_value() && secondary.input.value().getPlacement() != offsetsPlacement)
-            throw invalid_argument("RaggedCustomLoss secondary input and offsets must share placement.");
+            throw invalid_argument("RaggedCustomLoss secondary input and structural active-count input must share placement.");
         if (secondary.errorOutput.has_value() && secondary.errorOutput.value().getPlacement() != offsetsPlacement)
-            throw invalid_argument("RaggedCustomLoss secondary gradient and offsets must share placement.");
+            throw invalid_argument("RaggedCustomLoss secondary gradient and structural active-count input must share placement.");
     }
 }
 

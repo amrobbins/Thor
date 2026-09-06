@@ -97,14 +97,14 @@ class Layer {
     }
 
     // Placement-facing contract for a logical row-partition input. Network only
-    // calls this for tensors known to be row-partition routing tokens. The
-    // conservative default preserves legacy behavior for layers not yet migrated:
-    // they receive full device offsets. RP5-classified layers override this to
-    // request host extent or the one-element device active count instead.
+    // calls this for tensors known to be row-partition routing tokens. RP7 removes
+    // the old "unknown means full offsets" fallback: an ordinary Layer has no
+    // structural requirement unless it declares one explicitly. This makes a new
+    // ragged consumer fail closed instead of silently materializing [B+1].
     [[nodiscard]] virtual ThorImplementation::RaggedPartitionRequirement
     getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const {
         (void)inputTensor;
-        return ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+        return ThorImplementation::RaggedPartitionRequirement::NONE;
     }
 
     // Placement may need a stronger representation in training than inference

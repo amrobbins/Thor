@@ -2,12 +2,10 @@
 
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
-#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/Common/HostFunctionArgs.h"
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Ragged/RaggedSequenceConcatenate.h"
-#include "Utilities/TensorOperations/Ragged/RowPartition.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -27,8 +25,10 @@ namespace ThorImplementation {
 // structural offset ports, allowing distinct sequence values to share an exact
 // canonical row partition without requiring duplicate graph edges.
 //
-// Output connection type 0 is packed values and 1 is the host-derived offsets
-// tensor materialized for GPU consumers. Only output 0 participates in autodiff.
+// The physical layer produces packed values only. A newly created logical
+// partition is physicalized by StampedNetwork: authoritative host offsets are
+// published on this values output, while any requested [1] active-count or
+// [B+1] offsets representation is a separate Thor-managed NetworkInput.
 class RaggedSequenceConcatenate : public MultiConnectionLayer {
    public:
     RaggedSequenceConcatenate(uint32_t valueInputCount,
@@ -57,9 +57,9 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         streams.resize(inputPortCount);
         forwardInputReadyEvents.resize(inputPortCount);
 
-        featureOutputs.resize(2);
-        errorInputs.resize(2);
-        nextLayers.resize(2);
+        featureOutputs.resize(1);
+        errorInputs.resize(1);
+        nextLayers.resize(1);
     }
 
     ~RaggedSequenceConcatenate() override = default;
@@ -75,8 +75,7 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(featureInputs[0]->getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
         validateConnectedInputs();
-        ensureOutputAllocated(/*outputIndex=*/0);
-        ensureOutputAllocated(/*outputIndex=*/1);
+        ensureOutputAllocated();
 
         ScopedGpu scopedGpu(featureInputs[0]->getPlacement().getDeviceNum());
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&valueInputPointers_d), valueInputCount * sizeof(void *)));
@@ -144,9 +143,6 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         const std::vector<uint64_t> &dimensions = valuesDescriptor.getDimensions();
         for (uint32_t d = 1; d < dimensions.size(); ++d) elementsPerValue *= dimensions[d];
 
-        RowPartitionRuntime outputPartition(featureOutputs[1].value(), outputDescriptor.getRowPartition());
-        publishAndUploadOutputHostPartition(outputPartition, streams[0]);
-
         launchRaggedSequenceConcatenate(featureOutputs[0]->getMemPtr(),
                                         valueInputPointers_d,
                                         sequenceOffsetPointers_d,
@@ -158,10 +154,8 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
                                         streams[0]);
 
         streams[0].putEvent(outputsReadyEvent);
-        for (uint32_t outputIndex = 0; outputIndex < 2; ++outputIndex) {
-            if (!nextLayers[outputIndex].has_value()) continue;
-            nextLayers[outputIndex].value()->forward(featureOutputs[outputIndex], validationPass, currentValidExampleCount);
-        }
+        if (nextLayers[0].has_value())
+            nextLayers[0].value()->forward(featureOutputs[0], validationPass, currentValidExampleCount);
         currentValidExampleCount = 0;
         batchCardinalitySet = false;
     }
@@ -170,7 +164,7 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(running);
         if (!errorInput.has_value()) return;
         if (!errorInputs[0].has_value() || errorInput.value() != errorInputs[0].value()) {
-            throw std::logic_error("RaggedSequenceConcatenate received a gradient for its structural offsets output.");
+            throw std::logic_error("RaggedSequenceConcatenate received an unknown output gradient.");
         }
 
         const uint64_t batchSize = outputDescriptor.getBatchSize();
@@ -208,23 +202,19 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
 
     void connectToNextLayer(Layer *nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
         THOR_THROW_IF_FALSE(!compiled);
-        if (driverConnectionType < 0 || driverConnectionType > 1) {
-            throw std::logic_error("RaggedSequenceConcatenate output connection type must be 0 (values) or 1 (offsets).");
+        if (driverConnectionType != 0) {
+            throw std::logic_error("RaggedSequenceConcatenate has only one physical output: packed values.");
         }
-        const uint32_t outputIndex = static_cast<uint32_t>(driverConnectionType);
-        if (nextLayers[outputIndex].has_value()) {
-            throw std::logic_error("RaggedSequenceConcatenate output port was connected more than once without a fanout.");
+        if (nextLayers[0].has_value()) {
+            throw std::logic_error("RaggedSequenceConcatenate values output was connected more than once without a fanout.");
         }
-        ensureOutputAllocated(outputIndex);
-        nextLayers[outputIndex] = nextLayer;
+        ensureOutputAllocated();
+        nextLayers[0] = nextLayer;
 
-        const bool backPropagate = outputIndex == 0 && shouldConnectToBackPropErrorIn() && !isBackPropStub();
-        errorInputs[outputIndex] = nextLayer->connectToPreviousLayer(
-            this, featureOutputs[outputIndex], streams[0], backPropagate, loaderConnectionType);
-        if (outputIndex == 1 && errorInputs[outputIndex].has_value()) {
-            throw std::logic_error("RaggedSequenceConcatenate structural offsets output cannot participate in autodiff.");
-        }
-        if (outputIndex == 0 && !errorInputs[0].has_value()) pruneUpstreamValueGradients();
+        const bool backPropagate = shouldConnectToBackPropErrorIn() && !isBackPropStub();
+        errorInputs[0] = nextLayer->connectToPreviousLayer(
+            this, featureOutputs[0], streams[0], backPropagate, loaderConnectionType);
+        if (!errorInputs[0].has_value()) pruneUpstreamValueGradients();
         ensureNoDeviceCrossing();
     }
 
@@ -271,14 +261,11 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
     };
     static void releasePointerRefresh(void *) {}
 
-    void ensureOutputAllocated(uint32_t outputIndex) {
-        THOR_THROW_IF_FALSE(outputIndex < 2);
-        if (featureOutputs[outputIndex].has_value()) return;
+    void ensureOutputAllocated() {
+        if (featureOutputs[0].has_value()) return;
         std::optional<Tensor> firstInput = getFirstPresentTensor(featureInputs);
         THOR_THROW_IF_FALSE(firstInput.has_value());
-        const TensorPlacement placement = firstInput->getPlacement();
-        const TensorDescriptor descriptor = outputIndex == 0 ? outputDescriptor.getValuesDescriptor() : outputDescriptor.getOffsetsDescriptor();
-        featureOutputs[outputIndex] = Tensor(placement, descriptor);
+        featureOutputs[0] = Tensor(firstInput->getPlacement(), outputDescriptor.getValuesDescriptor());
     }
 
     void validateConnectedInputs() const {
@@ -357,34 +344,6 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
                                    cudaMemcpyHostToDevice,
                                    stream.getStream()));
         stream.enqueueHostFunction(&releasePointerRefresh, std::move(args));
-    }
-
-    void publishAndUploadOutputHostPartition(RowPartitionRuntime& outputPartition, Stream& stream) {
-        const uint64_t batchSize = outputDescriptor.getBatchSize();
-        std::vector<std::vector<uint64_t>> inputHostOffsets;
-        inputHostOffsets.reserve(valueInputCount);
-        for (uint32_t i = 0; i < valueInputCount; ++i) {
-            const std::vector<uint64_t> dimensions = featureInputs[i]->getDimensions();
-            THOR_THROW_IF_FALSE(!dimensions.empty());
-            RowPartitionRuntime inputPartition(
-                featureInputs[valueInputCount + offsetPortForInput[i]].value(),
-                RowPartitionDescriptor(batchSize, dimensions[0], outputDescriptor.getOffsetsDataType()));
-            inputHostOffsets.push_back(inputPartition.requireHostOffsets());
-        }
-
-        std::vector<uint64_t> outputHostOffsets(batchSize + 1, 0);
-        for (uint64_t boundary = 0; boundary <= batchSize; ++boundary) {
-            uint64_t sum = 0;
-            for (const std::vector<uint64_t>& offsets : inputHostOffsets) {
-                THOR_THROW_IF_FALSE(boundary < offsets.size());
-                THOR_THROW_IF_FALSE(sum <= std::numeric_limits<uint64_t>::max() - offsets[boundary]);
-                sum += offsets[boundary];
-            }
-            outputHostOffsets[boundary] = sum;
-        }
-        THOR_THROW_IF_FALSE(outputHostOffsets.back() <= outputDescriptor.getMaxTotalValues());
-        outputPartition.setHostOffsets(outputHostOffsets);
-        rowPartitionUploadHostOffsets(outputHostOffsets, featureOutputs[1].value(), batchSize, stream);
     }
 
     void pruneUpstreamValueGradients() {

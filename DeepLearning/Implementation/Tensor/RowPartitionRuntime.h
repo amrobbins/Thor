@@ -19,10 +19,11 @@ using RowPartitionId = uint64_t;
 // are hostOffsets[i:i+2]. activeValueCount and maxActiveRowLength are derived from
 // that one publication and can never be updated independently.
 //
-// The offsets Tensor is an execution representation only. RP1 intentionally keeps
-// that representation present everywhere for compatibility; later migration steps
-// may materialize it only for consumers that need row boundaries on device. Generic
-// Tensor payload mutations do not redefine or invalidate the host partition.
+// The offsets Tensor is an optional execution representation only. RP7 permits a
+// runtime partition to be carried solely by authoritative host metadata on another
+// tensor; [B+1] offsets are materialized only where an execution or compatibility
+// boundary explicitly needs them. Generic Tensor payload mutations do not redefine
+// or invalidate the host partition.
 class RowPartitionRuntime {
    public:
     RowPartitionRuntime() = default;
@@ -37,6 +38,15 @@ class RowPartitionRuntime {
         Tensor carrier, uint64_t expectedBatchSize, uint64_t maxTotalValues);
     [[nodiscard]] static RowPartitionRuntime fromHostStateCarrier(
         Tensor carrier, uint64_t maxTotalValues);
+
+    // Reconstitute the compatibility offsets view at a public logical boundary
+    // without changing logical partition identity. The caller is responsible for
+    // materializing offsets payload bytes from the same authoritative hostOffsets.
+    [[nodiscard]] static RowPartitionRuntime fromOffsetsAndHostState(
+        Tensor offsets,
+        RowPartitionDescriptor descriptor,
+        RowPartitionId rowPartitionId,
+        std::vector<uint64_t> hostOffsets);
 
     // Placement-time diagnostics may probe whether a batch has published its
     // authoritative host partition yet. This does not validate or interpret

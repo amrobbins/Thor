@@ -31,6 +31,14 @@ class RaggedGather : public MultiConnectionLayer {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<RaggedGather>(*this); }
     std::string getLayerType() const override { return "RaggedGather"; }
 
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if ((raggedSourceInput.isInitialized() && inputTensor == raggedSourceInput.getOffsets()) ||
+            (raggedIndicesInput.isInitialized() && inputTensor == raggedIndicesInput.getOffsets()))
+            return ThorImplementation::kRaggedGatherPartitionRequirement;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
+
     [[nodiscard]] RaggedTensor getRaggedSourceInput() const { return raggedSourceInput; }
     [[nodiscard]] RaggedTensor getRaggedIndicesInput() const { return raggedIndicesInput; }
     [[nodiscard]] RaggedTensor getRaggedFeatureOutput() const { return raggedFeatureOutput; }

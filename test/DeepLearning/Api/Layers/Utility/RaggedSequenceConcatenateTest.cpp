@@ -175,25 +175,26 @@ TEST(UtilityApiLayers, RaggedSequenceConcatenateSubgraphCloneRemapsInputsAndAllo
 
     ApiTensorRemap remap;
     remap.map(sourceLeft.getValues(), destinationLeft.getValues());
-    remap.map(sourceLeft.getOffsets(), destinationLeft.getOffsets());
+    remap.map(sourceLeft.getRowPartitionToken(), destinationLeft.getRowPartitionToken());
     remap.map(sourceRight.getValues(), destinationRight.getValues());
-    remap.map(sourceRight.getOffsets(), destinationRight.getOffsets());
+    remap.map(sourceRight.getRowPartitionToken(), destinationRight.getRowPartitionToken());
 
     ApiSubgraphCloneOptions options;
     options.inferenceOnly = true;
     ApiSubgraphCloneResult clone = destination.cloneSubgraphInto(
         source,
-        {"__thor_ragged_output.joined.values", "__thor_ragged_output.joined.offsets"},
+        {"__thor_ragged_output.joined.values"},
         remap,
         options);
 
-    ASSERT_EQ(clone.outputTensorsByName.size(), 2u);
+    ASSERT_EQ(clone.outputTensorsByName.size(), 1u);
     Tensor clonedValues = clone.outputTensorsByName.at("__thor_ragged_output.joined.values");
-    Tensor clonedOffsets = clone.outputTensorsByName.at("__thor_ragged_output.joined.offsets");
+    Tensor clonedPartitionToken = clone.clonedTensorBySourceOriginalId.at(
+        sourceConcatenate.getRaggedFeatureOutput().getRowPartitionToken().getOriginalId());
     EXPECT_EQ(clonedValues.getDimensions(), (vector<uint64_t>{12, 2}));
-    EXPECT_EQ(clonedOffsets.getDimensions(), (vector<uint64_t>{4}));
-    EXPECT_NE(clonedOffsets, destinationLeft.getOffsets());
-    EXPECT_NE(clonedOffsets, destinationRight.getOffsets());
+    EXPECT_EQ(clonedPartitionToken.getDimensions(), (vector<uint64_t>{4}));
+    EXPECT_NE(clonedPartitionToken, destinationLeft.getRowPartitionToken());
+    EXPECT_NE(clonedPartitionToken, destinationRight.getRowPartitionToken());
 }
 
 TEST(UtilityApiLayers, RaggedSequenceConcatenateRejectsIncompatibleDescriptorsAndDuplicateValues) {

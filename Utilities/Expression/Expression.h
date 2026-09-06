@@ -191,8 +191,8 @@ enum class MatmulPackedRowBinding : uint8_t {
 // Physical source used by a RAGGED_VALUEWISE_EXTENT marker. HOST_EXTENT keeps
 // logical packed-row metadata attached to host-dispatched stages without
 // authorizing a CUDA kernel to interpret carrier payload bytes. Device sources
-// are explicit so a kernel compiled for offsets[B] cannot be reused when
-// placement supplies the RP6B managed [1] active-count representation.
+// are explicit so a kernel compiled for full row offsets cannot be reused when
+// placement supplies the managed [1] active-count representation.
 enum class RaggedRuntimeExtentSource : uint8_t {
     DEVICE_OFFSETS = 0,
     DEVICE_ACTIVE_COUNT = 1,
@@ -378,8 +378,8 @@ struct ExprNode {
 
     // Ragged runtime-extent metadata. RAGGED_VALUEWISE_EXTENT uses rhs as the
     // physical row-partition carrier. The device payload source is explicit so
-    // fused kernels can distinguish legacy offsets[B] from RP6B managed [1]
-    // active-count inputs. Explicit segmented stages still use full offsets.
+    // fused kernels distinguish full [B+1] offsets from managed [1] active-count
+    // inputs. Explicit segmented stages still use full offsets.
     RaggedRuntimeExtentSource ragged_runtime_extent_source = RaggedRuntimeExtentSource::DEVICE_OFFSETS;
     // ragged_runtime_offsets_input_slot is compiler-lowered stage metadata for packed
     // MATMUL/RMSNORM/LAYERNORM and is UINT32_MAX on ordinary user-authored expression nodes.

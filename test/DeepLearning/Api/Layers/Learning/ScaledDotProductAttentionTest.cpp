@@ -246,6 +246,8 @@ TEST(AttentionApi, SdpaBuildsCanonicalRaggedOffsetsWithoutSequenceLengths) {
     EXPECT_FALSE(attention.getUseSequenceLengths());
     ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
     EXPECT_EQ(attention.getRaggedFeatureOutput()->getOffsets(), q.getOffsets());
+    EXPECT_EQ(attention.getRaggedPartitionRequirementForInput(q.getOffsets()),
+              Impl::RaggedPartitionRequirement::DEVICE_OFFSETS);
 }
 
 TEST(AttentionApi, SdpaAllowsRaggedOffsetsWhenValueDimDiffersFromQkDim) {

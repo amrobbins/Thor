@@ -5,6 +5,7 @@
 #include "DeepLearning/Api/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkInput.h"
 #include "DeepLearning/Api/Layers/Utility/RaggedNetworkOutput.h"
+#include "DeepLearning/Api/Layers/Utility/RaggedRowLengths.h"
 #include "DeepLearning/Api/Network/Network.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Api/Optimizers/Sgd.h"
@@ -294,9 +295,10 @@ TEST(TrainingPhaseApi, RaggedBoundaryReferencesRoundTripByCanonicalTensorId) {
     EXPECT_FALSE(inputJson.contains("ragged_tensor"));
     EXPECT_FALSE(outputJson.contains("ragged_tensor"));
     EXPECT_EQ(inputJson.at("values_tensor_id").get<uint64_t>(), tokens.getValues().getId());
-    EXPECT_EQ(inputJson.at("offsets_tensor_id").get<uint64_t>(), tokens.getOffsets().getId());
+    EXPECT_EQ(inputJson.at("row_partition_token_tensor_id").get<uint64_t>(), tokens.getRowPartitionToken().getId());
     EXPECT_EQ(outputJson.at("values_tensor_id").get<uint64_t>(), tokensOut.getFeatureOutput().getValues().getId());
-    EXPECT_EQ(outputJson.at("offsets_tensor_id").get<uint64_t>(), tokensOut.getFeatureOutput().getOffsets().getId());
+    EXPECT_EQ(outputJson.at("row_partition_token_tensor_id").get<uint64_t>(),
+              tokensOut.getFeatureOutput().getRowPartitionToken().getId());
 
     TrainingPhase restored = TrainingPhase::deserialize(phaseJson);
     ASSERT_NE(restored.getNetwork(), nullptr);
@@ -481,11 +483,15 @@ TEST(TrainingProgramApi, TrainingStepAndPhaseCompositionPreserveLogicalRaggedInp
         .inputTensor(labels.getValues())
         .dataType(DataType::INT32)
         .build();
+    RaggedRowLengths rowLengths = RaggedRowLengths::Builder()
+                                      .network(*network)
+                                      .featureInput(labels)
+                                      .build();
     NetworkOutput::Builder()
         .network(*network)
-        .name("label_offsets")
-        .inputTensor(labels.getOffsets())
-        .dataType(DataType::UINT64)
+        .name("row_lengths")
+        .inputTensor(rowLengths.getFeatureOutput().value())
+        .dataType(DataType::INT32)
         .build();
 
     auto phase = std::make_shared<TrainingPhase>("ragged_phase", network, true);
@@ -505,8 +511,19 @@ TEST(TrainingProgramApi, TrainingStepAndPhaseCompositionPreserveLogicalRaggedInp
               labels.getDescriptor());
     EXPECT_EQ(graph.externalInputTensorsByName.at("labels.values"),
               graph.network->getExternalRaggedNetworkInputs().front().raggedTensor.getValues());
-    EXPECT_EQ(graph.externalInputTensorsByName.at("labels.offsets"),
-              graph.network->getExternalRaggedNetworkInputs().front().raggedTensor.getOffsets());
+    EXPECT_FALSE(graph.externalInputTensorsByName.contains("labels.offsets"));
+
+    // A cloned structural consumer must reuse the composed graph's hidden token
+    // rather than cloning a second token-producing NetworkInput.
+    size_t hiddenPartitionInputs = 0;
+    for (uint32_t i = 0; i < graph.network->getNumLayers(); ++i) {
+        auto input = std::dynamic_pointer_cast<NetworkInput>(graph.network->getLayer(i));
+        if (input != nullptr && input->getName() == "__thor_row_partition.labels") {
+            ++hiddenPartitionInputs;
+            EXPECT_FALSE(input->isExternal());
+        }
+    }
+    EXPECT_EQ(hiddenPartitionInputs, 1u);
 }
 
 TEST(TrainingProgramApi, PhaseGraphDependencyErrorsAreSpecificAndSearchable) {

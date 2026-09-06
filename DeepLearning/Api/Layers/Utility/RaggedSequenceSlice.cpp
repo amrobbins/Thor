@@ -91,7 +91,7 @@ RaggedSequenceSlice RaggedSequenceSlice::makeLayer(const RaggedTensor& input,
         throw std::runtime_error("RaggedSequenceSlice serialized output descriptor does not match its input and slice window.");
     }
     if (output.sharesPartitionWith(input)) {
-        throw std::runtime_error("RaggedSequenceSlice must own a newly produced offsets tensor.");
+        throw std::runtime_error("RaggedSequenceSlice must own a newly created logical row partition.");
     }
 
     RaggedSequenceSlice layer;
@@ -162,23 +162,13 @@ bool RaggedSequenceSlice::outputTensorDimensionsIncludeBatch(const Tensor& outpu
 
 uint64_t RaggedSequenceSlice::getOutputTensorBytes(uint32_t batchSize) const {
     (void)batchSize;
-    return raggedFeatureOutput.getValues().getTotalSizeInBytes() + raggedFeatureOutput.getOffsets().getTotalSizeInBytes();
+    return raggedFeatureOutput.getValues().getTotalSizeInBytes();
 }
 
 uint64_t RaggedSequenceSlice::getFirstInstanceMemRequirementInBytes(
     uint32_t batchSize, ThorImplementation::TensorPlacement tensorPlacement) const {
     (void)tensorPlacement;
-    const uint64_t outputBytes = getOutputTensorBytes(batchSize);
-    const uint64_t rowLengthsBytes = raggedFeatureInput.getBatchSize() *
-        ThorImplementation::TensorDescriptor::getElementSizeInBytes(raggedFeatureInput.getDescriptor().getOffsetsDataType());
-    if (outputBytes > std::numeric_limits<uint64_t>::max() - rowLengthsBytes) {
-        throw std::overflow_error("RaggedSequenceSlice memory requirement overflow.");
-    }
-    // CUB scan workspace is execution-local and allocated by the stamped layer.
-    // The public scheduler accounting includes the deterministic row-length
-    // tensor here; CUB's implementation-specific scratch is intentionally not
-    // encoded into the serialized API contract.
-    return outputBytes + rowLengthsBytes;
+    return getOutputTensorBytes(batchSize);
 }
 
 std::shared_ptr<ThorImplementation::Layer> RaggedSequenceSlice::stamp(

@@ -13,6 +13,7 @@
 #include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
 
 #include "cuda_runtime.h"
@@ -380,11 +381,18 @@ vector<float> runRaggedForward(Api::PlacedNetwork& placed,
 vector<uint32_t> readRaggedOutputOffsets(Api::PlacedNetwork& placed,
                                          const Api::RaggedNetworkOutputReference& outputReference) {
     Impl::StampedNetwork& stamped = placed.getStampedNetwork(0);
-    auto physicalOffsetsOutput = stamped.getNamedOutput(outputReference.offsetsOutputName);
-    EXPECT_NE(physicalOffsetsOutput, nullptr);
-    if (physicalOffsetsOutput == nullptr) return {};
-    physicalOffsetsOutput->getOutputReadyEvent().synchronize();
-    return readCpuUint32(physicalOffsetsOutput->getFeatureOutput().value());
+    auto physicalValuesOutput = stamped.getNamedOutput(outputReference.valuesOutputName);
+    EXPECT_NE(physicalValuesOutput, nullptr);
+    if (physicalValuesOutput == nullptr) return {};
+    physicalValuesOutput->getOutputReadyEvent().synchronize();
+    Impl::RowPartitionRuntime partition = Impl::RowPartitionRuntime::fromHostStateCarrier(
+        physicalValuesOutput->getFeatureOutput().value(),
+        outputReference.raggedTensor.getDescriptor().getRowPartition());
+    const vector<uint64_t> hostOffsets = partition.requireHostOffsets();
+    vector<uint32_t> result;
+    result.reserve(hostOffsets.size());
+    for (uint64_t value : hostOffsets) result.push_back(static_cast<uint32_t>(value));
+    return result;
 }
 
 void expectActiveFinite(const vector<float>& values, uint64_t channels) {

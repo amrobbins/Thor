@@ -132,7 +132,7 @@ RaggedSequenceConcatenate RaggedSequenceConcatenate::makeLayer(
     }
     for (const RaggedTensor& input : inputs) {
         if (output.sharesPartitionWith(input)) {
-            throw std::runtime_error("RaggedSequenceConcatenate must own a newly produced offsets tensor.");
+            throw std::runtime_error("RaggedSequenceConcatenate must own a newly created logical row partition.");
         }
     }
 
@@ -210,7 +210,7 @@ bool RaggedSequenceConcatenate::outputTensorDimensionsIncludeBatch(const Tensor&
 
 uint64_t RaggedSequenceConcatenate::getOutputTensorBytes(uint32_t batchSize) const {
     (void)batchSize;
-    return raggedFeatureOutput.getValues().getTotalSizeInBytes() + raggedFeatureOutput.getOffsets().getTotalSizeInBytes();
+    return raggedFeatureOutput.getValues().getTotalSizeInBytes();
 }
 
 uint64_t RaggedSequenceConcatenate::getFirstInstanceMemRequirementInBytes(

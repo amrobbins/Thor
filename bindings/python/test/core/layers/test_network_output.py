@@ -95,10 +95,12 @@ def test_ragged_network_output_exposes_one_logical_output():
     logical = arch["ragged_network_outputs"][0]
     assert logical["name"] == "tokens_out"
     assert logical["values_output_name"] == "__thor_ragged_output.tokens_out.values"
-    assert logical["offsets_output_name"] == "__thor_ragged_output.tokens_out.offsets"
+    assert "offsets_output_name" not in logical
+    assert "offsets_tensor_id" not in logical
+    assert logical["row_partition_token_tensor_id"] == tokens.offsets.get_id()
 
     component_outputs = [
         layer for layer in arch["layers"] if layer["layer_type"] == "network_output" and layer["name"].startswith("__thor_ragged_output.")
     ]
-    assert len(component_outputs) == 2
+    assert len(component_outputs) == 1
     assert all(layer["external"] is False for layer in component_outputs)

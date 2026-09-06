@@ -22,6 +22,13 @@ class RaggedLossShaper : public MultiConnectionLayer {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<RaggedLossShaper>(*this); }
     std::string getLayerType() const override { return "RaggedLossShaper"; }
 
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedLossInput.isInitialized() && inputTensor == raggedLossInput.getOffsets())
+            return ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
+
     [[nodiscard]] RaggedTensor getRaggedLossInput() const { return raggedLossInput; }
     [[nodiscard]] Tensor getLossOutput() const { return lossOutput; }
 

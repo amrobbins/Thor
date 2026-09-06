@@ -132,9 +132,8 @@ class Executor;
 struct RaggedNetworkInputReference {
     std::string name;
     std::string valuesInputName;
-    std::string offsetsInputName;
     // Null for a partition-owning boundary. Shared-partition inputs name the
-    // logical RaggedNetworkInput that owns offsetsInputName.
+    // logical RaggedNetworkInput that owns the row partition.
     std::optional<std::string> partitionInputName;
     RaggedTensor raggedTensor;
 
@@ -144,7 +143,6 @@ struct RaggedNetworkInputReference {
 struct RaggedNetworkOutputReference {
     std::string name;
     std::string valuesOutputName;
-    std::string offsetsOutputName;
     RaggedTensor raggedTensor;
 
     bool operator==(const RaggedNetworkOutputReference&) const = default;
@@ -247,9 +245,9 @@ class Network {
         const std::vector<std::string>& outputNames,
         bool inferenceOnly);
     [[nodiscard]] std::vector<std::string> getTrainingOnlyNetworkInputNames();
-    // Physical graph inputs. Ragged logical inputs appear here as their .values/.offsets
-    // NetworkInput pair; graph-internal code that needs the external API boundary should
-    // use getExternalNetworkInputNames() instead.
+    // Physical public graph inputs. RP7 exposes only the packed-values component
+    // of a logical RaggedNetworkInput; row-partition device representations are
+    // hidden requirement-driven inputs owned by the stamp.
     [[nodiscard]] std::vector<std::shared_ptr<NetworkInput>> getExternalNetworkInputs() const;
     // Logical external boundary names. A RaggedNetworkInput contributes exactly one name.
     [[nodiscard]] std::vector<std::string> getExternalNetworkInputNames() const;
@@ -283,14 +281,12 @@ class Network {
     void registerRaggedNetworkInput(const std::string& name,
                                     const RaggedTensor& raggedTensor,
                                     const std::string& valuesInputName,
-                                    const std::string& offsetsInputName,
                                     std::optional<std::string> partitionInputName = std::nullopt);
     [[nodiscard]] bool hasRaggedNetworkInput(const std::string& name) const;
     [[nodiscard]] std::vector<RaggedNetworkInputReference> getExternalRaggedNetworkInputs() const;
     void registerRaggedNetworkOutput(const std::string& name,
                                      const RaggedTensor& raggedTensor,
-                                     const std::string& valuesOutputName,
-                                     const std::string& offsetsOutputName);
+                                     const std::string& valuesOutputName);
     [[nodiscard]] bool hasRaggedNetworkOutput(const std::string& name) const;
     [[nodiscard]] std::vector<RaggedNetworkOutputReference> getExternalRaggedNetworkOutputs() const;
     [[nodiscard]] std::vector<std::string> getExternalNetworkOutputNames() const;
@@ -306,6 +302,7 @@ class Network {
     static const bool DEBUG_STAMP = false;
 
     friend class Trainer;
+    friend class PlacedNetwork;
 
     struct LayerComparator {
         bool operator()(const std::shared_ptr<Layer> &lhs, const std::shared_ptr<Layer> &rhs) const { return *lhs < *rhs; }
@@ -334,7 +331,10 @@ class Network {
     struct RaggedNetworkInputRecord {
         std::string name;
         std::string valuesInputName;
-        std::string offsetsInputName;
+        // API-only graph token source. New RP7 boundaries use a non-external
+        // NetworkInput with this name; loaded legacy models may point at their old
+        // external .offsets NetworkInput. Placement never stamps either form.
+        std::string partitionTokenInputName;
         std::optional<std::string> partitionInputName;
         RaggedTensor raggedTensor;
     };
@@ -343,7 +343,9 @@ class Network {
     struct RaggedNetworkOutputRecord {
         std::string name;
         std::string valuesOutputName;
-        std::string offsetsOutputName;
+        // Old archives may still contain the former internal offsets NetworkOutput.
+        // Keep its name only so logical inference can hide that compatibility output.
+        std::optional<std::string> legacyOffsetsOutputName;
         RaggedTensor raggedTensor;
     };
     std::map<std::string, RaggedNetworkOutputRecord> raggedNetworkOutputs;
@@ -418,6 +420,7 @@ class Network {
     };
 
     [[nodiscard]] std::string logicalExternalInputName(const std::string& physicalInputName) const;
+    [[nodiscard]] bool isRaggedPartitionTokenInputName(const std::string& inputName) const;
     [[nodiscard]] std::vector<std::string> collectRequiredNetworkInputNamesForOutputsFromCurrentGraph(
         const std::vector<std::string>& outputNames,
         ReportDiscoveryTraversalCache* traversalCache = nullptr);

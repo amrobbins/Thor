@@ -248,24 +248,21 @@ TEST(RaggedTransformerCompleteness, ArchitectureOnlySaveLoadPreservesCombinedRag
         EXPECT_EQ(outputs.front().raggedTensor.getOffsets().getDataType(),
                   inputs.front().raggedTensor.getOffsets().getDataType());
 
-        // RaggedNetworkOutput intentionally inserts a NetworkOutput tensor for the
-        // offsets, so the external output tensor has a distinct identity. The
-        // serialization contract we care about is that this output remains wired
-        // to the authoritative history row partition.
+        // RP7 exports no physical offsets NetworkOutput. The logical output keeps
+        // the same row-partition token and the values NetworkOutput carries the
+        // authoritative host partition at execution time.
+        EXPECT_TRUE(outputs.front().raggedTensor.sharesPartitionWith(inputs.front().raggedTensor));
         const nlohmann::json loadedArchitecture = loaded.architectureJson();
-        const nlohmann::json* offsetsOutputLayer = nullptr;
+        const nlohmann::json& logicalOutput = loadedArchitecture.at("ragged_network_outputs").at(0);
+        EXPECT_EQ(logicalOutput.at("row_partition_token_tensor_id").get<uint64_t>(),
+                  inputs.front().raggedTensor.getRowPartitionToken().getId());
+        EXPECT_FALSE(logicalOutput.contains("offsets_output_name"));
+        EXPECT_FALSE(logicalOutput.contains("offsets_tensor_id"));
         for (const nlohmann::json& layer : loadedArchitecture.at("layers")) {
-            if (layer.at("layer_type").get<std::string>() == "network_output" &&
-                layer.at("name").get<std::string>() == outputs.front().offsetsOutputName) {
-                offsetsOutputLayer = &layer;
-                break;
+            if (layer.at("layer_type").get<std::string>() == "network_output") {
+                EXPECT_NE(layer.at("name").get<std::string>(), "__thor_ragged_output.encoded_history.offsets");
             }
         }
-        ASSERT_NE(offsetsOutputLayer, nullptr);
-        EXPECT_EQ(offsetsOutputLayer->at("feature_input").at("id").get<uint64_t>(),
-                  inputs.front().raggedTensor.getOffsets().getId());
-        EXPECT_EQ(offsetsOutputLayer->at("feature_output").at("id").get<uint64_t>(),
-                  outputs.front().raggedTensor.getOffsets().getId());
     } catch (...) {
         std::filesystem::remove_all(archiveDir);
         throw;

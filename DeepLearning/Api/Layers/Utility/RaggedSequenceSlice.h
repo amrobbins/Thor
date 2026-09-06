@@ -17,8 +17,9 @@ namespace Thor {
 
 // Slice every logical row of a canonical rank-1 RaggedTensor along its
 // variable-length sequence axis. The fixed [start, start + length) window is
-// clipped independently to each row, compacted into new packed values, and a
-// new canonical offsets tensor Q is explicitly produced.
+// clipped independently to each row and compacted into new packed values. A
+// new logical row partition Q is created; placement physicalizes Q from
+// authoritative host offsets rather than treating a GPU offsets output as semantic state.
 class RaggedSequenceSlice : public MultiConnectionLayer {
    public:
     class Builder;
@@ -28,6 +29,13 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<RaggedSequenceSlice>(*this); }
     std::string getLayerType() const override { return "RaggedSequenceSlice"; }
+
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedFeatureInput.isInitialized() && inputTensor == raggedFeatureInput.getOffsets())
+            return ThorImplementation::kRaggedSequenceSlicePartitionRequirement;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
 
     [[nodiscard]] RaggedTensor getRaggedFeatureInput() const { return raggedFeatureInput; }
     [[nodiscard]] RaggedTensor getRaggedFeatureOutput() const { return raggedFeatureOutput; }

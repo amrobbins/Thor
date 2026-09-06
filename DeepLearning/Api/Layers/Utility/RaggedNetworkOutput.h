@@ -12,10 +12,11 @@ namespace Thor {
 
 class Network;
 
-// Exposes a ragged tensor without extending its logical extent. The returned
-// row partition is authoritative and values beyond offsets[B] remain undefined
-// capacity; external consumers inherit the same consumer-responsibility rule as
-// internal consumers.
+// Exposes a ragged tensor without extending its logical extent. RP7 emits only a
+// physical values NetworkOutput; the authoritative host row partition is carried
+// as metadata on that values tensor and inferLogical() reconstructs the runtime
+// compatibility offsets view from it. Values beyond hostOffsets[B] remain
+// undefined capacity.
 class RaggedNetworkOutput {
    public:
     class Builder;

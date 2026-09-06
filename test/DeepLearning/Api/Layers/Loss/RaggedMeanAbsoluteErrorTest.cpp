@@ -487,6 +487,19 @@ TEST(RaggedMAEApi, PlacedBatchReportingAndBackwardUseLogicalRowsAndActivePrefix)
         }
         ASSERT_NE(physicalLoss, nullptr);
 
+        // RP6D mixed-consumer closure: the raw valuewise loss takes the managed
+        // [1] active-count carrier while the downstream batch shaper separately
+        // takes full [B+1] row boundaries from the same logical partition.
+        Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+        auto activeCountInput = stamped.getManagedPartitionActiveCountInputForTest(predictions.getRowPartitionId());
+        auto fullOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(predictions.getRowPartitionId());
+        ASSERT_NE(activeCountInput, nullptr);
+        ASSERT_NE(fullOffsetsInput, nullptr);
+        ASSERT_TRUE(physicalLoss->getOffsetsInput().has_value());
+        EXPECT_EQ(physicalLoss->getOffsetsInput()->getDimensions(), (vector<uint64_t>{1}));
+        EXPECT_EQ(activeCountInput->getFeatureOutput()->getDimensions(), (vector<uint64_t>{1}));
+        EXPECT_EQ(fullOffsetsInput->getFeatureOutput()->getDimensions(), (vector<uint64_t>{batchSize + 1}));
+
         const Impl::TensorPlacement cpuPlacement(Impl::TensorPlacement::MemDevices::CPU);
         Impl::Tensor predictionValues(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {maxTotalValues, trailingWidth}));
         Impl::Tensor labelValues(cpuPlacement, Impl::TensorDescriptor(DataType::FP32, {maxTotalValues, trailingWidth}));

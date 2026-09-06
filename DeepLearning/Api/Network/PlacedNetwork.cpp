@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <set>
 #include <iterator>
+#include <limits>
 #include <filesystem>
 #include <optional>
 #include <system_error>
@@ -52,29 +53,36 @@ constexpr uint64_t elapsedMicros(BatchTimingTimePoint, BatchTimingTimePoint) {
 }
 #endif
 
-std::vector<uint64_t> readAuthoritativeHostOffsetsFromCpuTensor(
-    ThorImplementation::Tensor offsets,
-    const ThorImplementation::RowPartitionDescriptor& descriptor) {
-    if (offsets.getPlacement().getMemDevice() != ThorImplementation::TensorPlacement::MemDevices::CPU) {
-        throw std::runtime_error(
-            "PlacedNetwork::inferLogical cannot construct a host-authoritative ragged output from GPU-only offsets metadata.");
-    }
-    if (offsets.getDescriptor() != descriptor.getOffsetsDescriptor()) {
-        throw std::runtime_error(
-            "PlacedNetwork::inferLogical ragged output offsets descriptor does not match its row-partition descriptor.");
-    }
+ThorImplementation::Tensor materializeLogicalRaggedOffsets(
+    const ThorImplementation::TensorPlacement& placement,
+    const ThorImplementation::RowPartitionDescriptor& descriptor,
+    const std::vector<uint64_t>& hostOffsets) {
+    THOR_THROW_IF_FALSE(hostOffsets.size() == descriptor.getBatchSize() + 1);
 
-    std::vector<uint64_t> hostOffsets(descriptor.getBatchSize() + 1, 0);
+    const ThorImplementation::TensorPlacement cpuPlacement(
+        ThorImplementation::TensorPlacement::MemDevices::CPU);
+    ThorImplementation::Tensor hostTensor(cpuPlacement, descriptor.getOffsetsDescriptor());
     if (descriptor.getOffsetsDataType() == ThorImplementation::DataType::UINT32) {
-        const uint32_t* raw = offsets.getMemPtr<uint32_t>();
-        for (uint64_t i = 0; i <= descriptor.getBatchSize(); ++i) hostOffsets[i] = raw[i];
+        uint32_t* raw = hostTensor.getMemPtr<uint32_t>();
+        for (uint64_t i = 0; i < hostOffsets.size(); ++i) {
+            THOR_THROW_IF_FALSE(hostOffsets[i] <= std::numeric_limits<uint32_t>::max());
+            raw[i] = static_cast<uint32_t>(hostOffsets[i]);
+        }
     } else {
         THOR_THROW_IF_FALSE(descriptor.getOffsetsDataType() == ThorImplementation::DataType::UINT64);
-        const uint64_t* raw = offsets.getMemPtr<uint64_t>();
-        for (uint64_t i = 0; i <= descriptor.getBatchSize(); ++i) hostOffsets[i] = raw[i];
+        uint64_t* raw = hostTensor.getMemPtr<uint64_t>();
+        for (uint64_t i = 0; i < hostOffsets.size(); ++i) raw[i] = hostOffsets[i];
     }
-    return hostOffsets;
+
+    if (placement == cpuPlacement) return hostTensor;
+
+    ThorImplementation::Tensor placedTensor(placement, descriptor.getOffsetsDescriptor());
+    Stream uploadStream(placement);
+    placedTensor.copyFromAsync(hostTensor, uploadStream);
+    uploadStream.synchronize();
+    return placedTensor;
 }
+
 
 std::shared_ptr<ThorImplementation::PhysicalParameter> getPhysicalParameter(ThorImplementation::StampedNetwork& stampedNetwork,
                                                                             const ParameterReference& parameterReference) {
@@ -657,7 +665,15 @@ std::map<std::string, InferenceOutputValue> PlacedNetwork::inferLogical(const Ba
     std::set<std::string> raggedComponentNames;
     for (const RaggedNetworkOutputReference& output : raggedOutputs) {
         raggedComponentNames.insert(output.valuesOutputName);
-        raggedComponentNames.insert(output.offsetsOutputName);
+    }
+    // Pre-RP7 archives may still contain the old hidden offsets NetworkOutput.
+    // Keep it out of the logical result without advertising it through the new
+    // public RaggedNetworkOutputReference surface.
+    for (const auto& [name, record] : network.raggedNetworkOutputs) {
+        (void)name;
+        if (record.legacyOffsetsOutputName.has_value()) {
+            raggedComponentNames.insert(record.legacyOffsetsOutputName.value());
+        }
     }
 
     for (const auto& [name, tensor] : physicalOutputs) {
@@ -671,18 +687,8 @@ std::map<std::string, InferenceOutputValue> PlacedNetwork::inferLogical(const Ba
 
     for (const RaggedNetworkOutputReference& output : raggedOutputs) {
         auto valuesIt = physicalOutputs.find(output.valuesOutputName);
-        auto offsetsIt = physicalOutputs.find(output.offsetsOutputName);
-        const bool hasValues = valuesIt != physicalOutputs.end();
-        const bool hasOffsets = offsetsIt != physicalOutputs.end();
-
-        // A ragged output is either live as a complete logical pair or pruned as a
-        // whole.  Seeing only one physical component indicates an internal graph
-        // construction/stamping error.
-        if (hasValues != hasOffsets) {
-            throw std::runtime_error("PlacedNetwork::inferLogical found incomplete physical storage for RaggedNetworkOutput '" +
-                                     output.name + "'.");
-        }
-        if (!hasValues) {
+        if (valuesIt == physicalOutputs.end()) {
+            // Inference placement may prune training-only logical outputs.
             continue;
         }
         if (logicalOutputs.contains(output.name)) {
@@ -690,20 +696,35 @@ std::map<std::string, InferenceOutputValue> PlacedNetwork::inferLogical(const Ba
         }
         const ThorImplementation::RowPartitionDescriptor rowDescriptor =
             output.raggedTensor.getDescriptor().getRowPartition();
-        ThorImplementation::RowPartitionRuntime rowPartition(offsetsIt->second, rowDescriptor);
-        if (offsetsIt->second.getPlacement().getMemDevice() == ThorImplementation::TensorPlacement::MemDevices::CPU) {
-            // inferLogical() reuses physical output allocations across submissions.
-            // The CPU offsets payload has just been materialized for this batch, so
-            // it is authoritative even if that allocation still carries host
-            // partition state from a previous batch.  Re-publish on every call.
-            // This is a logical output-boundary operation, not a device-to-host
-            // extent probe in the execution path.
-            rowPartition.setHostOffsets(
-                readAuthoritativeHostOffsetsFromCpuTensor(offsetsIt->second, rowDescriptor));
-        } else if (!rowPartition.hasHostOffsets()) {
-            throw std::runtime_error(
-                "PlacedNetwork::inferLogical GPU ragged output has no authoritative host row partition bound for this batch.");
+        ThorImplementation::Tensor partitionCarrier = valuesIt->second;
+        if (!ThorImplementation::RowPartitionRuntime::hasPublishedHostState(partitionCarrier)) {
+            auto recordIt = network.raggedNetworkOutputs.find(output.name);
+            if (recordIt != network.raggedNetworkOutputs.end() &&
+                recordIt->second.legacyOffsetsOutputName.has_value()) {
+                auto legacyOffsetsIt = physicalOutputs.find(recordIt->second.legacyOffsetsOutputName.value());
+                if (legacyOffsetsIt != physicalOutputs.end() &&
+                    ThorImplementation::RowPartitionRuntime::hasPublishedHostState(legacyOffsetsIt->second)) {
+                    partitionCarrier = legacyOffsetsIt->second;
+                }
+            }
         }
+        if (!ThorImplementation::RowPartitionRuntime::hasPublishedHostState(partitionCarrier)) {
+            throw std::runtime_error(
+                "PlacedNetwork::inferLogical ragged output has no authoritative host row partition bound for this batch.");
+        }
+        ThorImplementation::RowPartitionRuntime semanticPartition =
+            ThorImplementation::RowPartitionRuntime::fromHostStateCarrier(partitionCarrier, rowDescriptor);
+        const std::vector<uint64_t> hostOffsets = semanticPartition.requireHostOffsets();
+
+        // The graph no longer has an offsets NetworkOutput, but the public runtime
+        // RaggedTensor compatibility surface still exposes .offsets. Materialize
+        // that view from already-authoritative host state (CPU fill / optional H2D),
+        // never by reading structural bytes back from the device.
+        ThorImplementation::Tensor logicalOffsets = materializeLogicalRaggedOffsets(
+            valuesIt->second.getPlacement(), rowDescriptor, hostOffsets);
+        ThorImplementation::RowPartitionRuntime rowPartition =
+            ThorImplementation::RowPartitionRuntime::fromOffsetsAndHostState(
+                logicalOffsets, rowDescriptor, semanticPartition.getRowPartitionId(), hostOffsets);
         logicalOutputs.emplace(output.name, ThorImplementation::RaggedTensor(valuesIt->second, rowPartition));
     }
 
@@ -1307,7 +1328,7 @@ bool PlacedNetwork::hasNetworkInput(const std::string& name) {
     }
     for (const auto& [raggedName, binding] : stampedNetworks[0].raggedInputNamedShared) {
         (void)raggedName;
-        if (name == binding.valuesInputName || name == binding.offsetsInputName) {
+        if (name == binding.valuesInputName) {
             return false;
         }
     }
@@ -1322,7 +1343,6 @@ std::vector<std::string> PlacedNetwork::getNetworkInputNames(uint64_t stampIndex
     for (const auto& [name, binding] : stampedNetworks[stampIndex].raggedInputNamedShared) {
         (void)name;
         raggedPhysicalNames.insert(binding.valuesInputName);
-        raggedPhysicalNames.insert(binding.offsetsInputName);
     }
 
     std::vector<std::string> names;

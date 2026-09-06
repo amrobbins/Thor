@@ -1,5 +1,6 @@
 #include "Utilities/Expression/FusedEquation.h"
 #include "DeepLearning/Implementation/Layers/Loss/CtcLoss.h"
+#include "DeepLearning/Implementation/Layers/Loss/RaggedCustomLoss.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/DropOut.h"
 #include "DeepLearning/Implementation/Layers/Utility/FiniteCheckKernel.h"
 #include "Utilities/TensorOperations/DeepLearning/CudnnRaggedSoftmax.h"
@@ -49,6 +50,7 @@ TEST(RaggedPartitionRequirementRP5, DirectRaggedOperatorsDeclareOnlyThePhysicalI
     EXPECT_EQ(kRaggedEmbeddingPartitionRequirement, RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
     EXPECT_EQ(kRaggedEmbeddingSparseGradientPartitionRequirement, RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
     EXPECT_EQ(kRaggedTrailingConcatenatePartitionRequirement, RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
+    EXPECT_EQ(kRaggedCustomLossPartitionRequirement, RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
     EXPECT_EQ(kRaggedAccuracyPartitionRequirement, RaggedPartitionRequirement::DEVICE_OFFSETS);
     EXPECT_EQ(kRaggedWeightedReductionPartitionRequirement, RaggedPartitionRequirement::DEVICE_OFFSETS);
 

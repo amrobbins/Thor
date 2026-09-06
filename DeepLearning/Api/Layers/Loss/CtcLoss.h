@@ -37,6 +37,13 @@ class CtcLoss : public Loss {
     std::string getLayerType() const override { return "CtcLoss"; }
     std::string getLayerVersion() const override { return "2.0.0"; }
 
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (labelsRaggedTensor.isInitialized() && inputTensor == labelsRaggedTensor.getOffsets())
+            return ThorImplementation::kCtcLossLabelPartitionRequirement;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
+
     RaggedTensor getRaggedLabels() const {
         THOR_THROW_IF_FALSE(labelsRaggedTensor.isInitialized());
         return labelsRaggedTensor;

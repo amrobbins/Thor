@@ -165,6 +165,20 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<Attention>(*this); }
     std::string getLayerType() const override { return "Attention"; }
 
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        const bool queryOffsets = raggedQueryInput.has_value() && inputTensor == raggedQueryInput->getOffsets();
+        const bool keyValueOffsets = raggedKeyInput.has_value() && inputTensor == raggedKeyInput->getOffsets();
+        if (queryOffsets || keyValueOffsets) {
+            // cuDNN attention consumes every row boundary; the surrounding Q/K/V
+            // and output packed matmuls also select capacity from authoritative
+            // host extent metadata.
+            return ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT |
+                   ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+        }
+        return CustomLayer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
+
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
                              Stream stream,
                              bool saveOptimizerState,

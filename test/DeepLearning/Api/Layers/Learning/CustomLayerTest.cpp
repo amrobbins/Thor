@@ -1561,6 +1561,14 @@ TEST(CustomLayerApi, RaggedTrainableParameterStampsIntoRaggedCustomLayer) {
     Api::RaggedTensor output = custom.getRaggedOutput("y");
     (void)Api::RaggedNetworkOutput::Builder().network(network).name("result").inputTensor(output).build();
 
+    // Forward-only placement needs only the managed scalar. Training keeps full
+    // offsets because a trainable broadcast parameter's backward reduction is
+    // row-segmented and therefore genuinely consumes row boundaries.
+    EXPECT_EQ(custom.getRaggedPartitionRequirementForPlacement(input.getOffsets(), /*inferenceOnly=*/true),
+              Impl::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
+    EXPECT_EQ(custom.getRaggedPartitionRequirementForPlacement(input.getOffsets(), /*inferenceOnly=*/false),
+              Impl::RaggedPartitionRequirement::DEVICE_OFFSETS);
+
     vector<Event> initDoneEvents;
     shared_ptr<Api::PlacedNetwork> placed;
     ASSERT_NO_THROW(placed = network.place(batchSize, initDoneEvents, true));
@@ -1574,4 +1582,19 @@ TEST(CustomLayerApi, RaggedTrainableParameterStampsIntoRaggedCustomLayer) {
     ASSERT_NE(physical->getParameter("scale"), nullptr);
     ASSERT_TRUE(physical->getParameter("scale")->getStorage().has_value());
     EXPECT_EQ(physical->getParameter("scale")->getStorage()->getDimensions(), (vector<uint64_t>{width}));
+    ASSERT_EQ(physical->getFeatureInputs().size(), 2u);
+    ASSERT_TRUE(physical->getFeatureInputs()[1].has_value());
+    EXPECT_EQ(physical->getFeatureInputs()[1]->getDimensions(), (vector<uint64_t>{1}));
+
+    vector<Event> trainingInitDoneEvents;
+    shared_ptr<Api::PlacedNetwork> trainingPlaced;
+    ASSERT_NO_THROW(trainingPlaced = network.place(batchSize, trainingInitDoneEvents, /*inferenceOnly=*/false));
+    synchronizeEvents(trainingInitDoneEvents);
+    ASSERT_NE(trainingPlaced, nullptr);
+    auto trainingPhysical = std::dynamic_pointer_cast<Impl::RaggedCustomLayer>(
+        trainingPlaced->getStampedNetwork(0).getPhysicalLayerFromApiLayer(custom.getId()));
+    ASSERT_NE(trainingPhysical, nullptr);
+    ASSERT_EQ(trainingPhysical->getFeatureInputs().size(), 2u);
+    ASSERT_TRUE(trainingPhysical->getFeatureInputs()[1].has_value());
+    EXPECT_EQ(trainingPhysical->getFeatureInputs()[1]->getDimensions(), (vector<uint64_t>{batchSize + 1}));
 }

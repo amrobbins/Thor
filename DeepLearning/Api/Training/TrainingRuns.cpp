@@ -3035,9 +3035,6 @@ RaggedTensor buildMatchingRaggedNetworkInput(
 
     RaggedTensor result = builder.build();
     Stub::Builder().network(destination).inputTensor(result.getValues()).build();
-    if (!source.partitionInputName.has_value()) {
-        Stub::Builder().network(destination).inputTensor(result.getOffsets()).build();
-    }
     return result;
 }
 
@@ -3240,7 +3237,6 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
         }
 
         ApiTensorRemap remap;
-        std::map<uint64_t, Tensor> memberOffsetsPassThroughBySourceOriginalId;
         for (const std::string& inputName : memberCloneInputNames) {
             auto referenceRaggedIt = referenceRaggedInputsByName.find(inputName);
             if (referenceRaggedIt != referenceRaggedInputsByName.end()) {
@@ -3264,25 +3260,14 @@ TrainingRunsComposedEnsembleEvaluator buildTrainingRunsComposedEnsembleEvaluator
                                                                    memberIndex, memberRaggedInput.valuesInputName))
                                                                .passThroughSource(sharedRaggedIt->second.getValues())
                                                                .build();
-                Tensor memberOffsetsPassThroughTensor;
-                const uint64_t sourceOffsetsOriginalId = memberRaggedInput.raggedTensor.getOffsets().getOriginalId();
-                auto existingOffsetsIt = memberOffsetsPassThroughBySourceOriginalId.find(sourceOffsetsOriginalId);
-                if (existingOffsetsIt != memberOffsetsPassThroughBySourceOriginalId.end()) {
-                    memberOffsetsPassThroughTensor = existingOffsetsIt->second;
-                } else {
-                    NetworkInput memberOffsetsPassThrough = NetworkInput::Builder()
-                                                                    .network(*evaluator.network)
-                                                                    .name(trainingRunsMemberScopedName(
-                                                                        memberIndex, memberRaggedInput.offsetsInputName))
-                                                                    .passThroughSource(sharedRaggedIt->second.getOffsets())
-                                                                    .build();
-                    memberOffsetsPassThroughTensor = memberOffsetsPassThrough.getFeatureOutput().value();
-                    memberOffsetsPassThroughBySourceOriginalId.emplace(
-                        sourceOffsetsOriginalId, memberOffsetsPassThroughTensor);
-                }
                 remap.map(memberRaggedInput.raggedTensor.getValues(),
                           memberValuesPassThrough.getFeatureOutput().value());
-                remap.map(memberRaggedInput.raggedTensor.getOffsets(), memberOffsetsPassThroughTensor);
+                // The row partition is logical topology, not another member-scoped
+                // physical input. Reuse the evaluator's canonical partition token
+                // directly; placement later materializes only the representation
+                // each cloned consumer actually requests.
+                remap.map(memberRaggedInput.raggedTensor.getRowPartitionToken(),
+                          sharedRaggedIt->second.getRowPartitionToken());
                 continue;
             }
 
@@ -3408,7 +3393,7 @@ std::shared_ptr<Network> buildSingleMemberEnsembleNetworkArtifact(Network& membe
             RaggedTensor ensembleInput =
                 buildMatchingRaggedNetworkInput(*ensembleNetwork, memberRaggedIt->second, inputName, memberRaggedInputsByName);
             remap.map(memberRaggedIt->second.raggedTensor.getValues(), ensembleInput.getValues());
-            remap.map(memberRaggedIt->second.raggedTensor.getOffsets(), ensembleInput.getOffsets());
+            remap.map(memberRaggedIt->second.raggedTensor.getRowPartitionToken(), ensembleInput.getRowPartitionToken());
             continue;
         }
 
@@ -3554,12 +3539,12 @@ void mapTrainingRunsEvaluatorRequiredGraphInputs(
                 throw std::runtime_error(context + " did not build required ragged graph input '" + inputName + "'.");
             }
             const Tensor sourceValues = referenceRaggedIt->second.raggedTensor.getValues();
-            const Tensor sourceOffsets = referenceRaggedIt->second.raggedTensor.getOffsets();
+            const Tensor sourcePartitionToken = referenceRaggedIt->second.raggedTensor.getRowPartitionToken();
             if (!remap.contains(sourceValues)) {
                 remap.map(sourceValues, evaluatorRaggedIt->second.getValues());
             }
-            if (!remap.contains(sourceOffsets)) {
-                remap.map(sourceOffsets, evaluatorRaggedIt->second.getOffsets());
+            if (!remap.contains(sourcePartitionToken)) {
+                remap.map(sourcePartitionToken, evaluatorRaggedIt->second.getRowPartitionToken());
             }
             continue;
         }

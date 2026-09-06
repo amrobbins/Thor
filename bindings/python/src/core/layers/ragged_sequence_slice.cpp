@@ -39,10 +39,11 @@ Slice every logical row of a rank-1 RaggedTensor along the variable-length seque
 ``start`` is a non-negative row-local token offset and ``length`` must be
 positive. Each row contributes at most ``length`` tokens beginning at ``start``;
 short rows are clipped independently and rows no longer than ``start`` become
-empty. Selected values are compacted and the layer explicitly produces a new
-canonical offsets tensor rather than preserving the input partition. Inactive
-packed capacity is never read, and backward writes exact zero to active input
-positions outside the selected window while leaving inactive gradient capacity
+empty. Selected values are compacted and the layer creates a new logical row
+partition derived on the host from the authoritative input partition. A device
+``[B+1]`` representation is materialized only when an execution consumer needs
+it. Inactive packed capacity is never read, and backward writes exact zero to
+active input positions outside the selected window while leaving inactive gradient capacity
 undefined.
 )nbdoc");
     layer.def("get_feature_output", &RaggedSequenceSlice::getRaggedFeatureOutput);

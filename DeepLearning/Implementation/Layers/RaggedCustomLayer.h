@@ -12,8 +12,10 @@ namespace ThorImplementation {
 // packed ragged values. Input/output trailing value shapes may differ, but the row
 // partition and packed-row capacity are preserved. The expression itself owns all
 // mathematical computation and carries RAGGED_VALUEWISE_EXTENT using an explicit
-// structural partition carrier. RP6B valuewise callers use the managed [1]
-// active-count representation; legacy/specialized callers may still use full offsets.
+// structural partition carrier. Partition-preserving valuewise callers use the
+// managed [1] active-count representation. Training variants whose parameter
+// gradients use row-segmented reductions, and other row-indexed specialized
+// expressions, explicitly use full offsets.
 // The carrier also holds authoritative host partition publication for downstream
 // propagation. Inactive packed capacity is not part
 // of the logical result; active-aware Expression stages neither read nor canonicalize
@@ -54,7 +56,8 @@ class RaggedCustomLayer final : public CustomLayer {
 
     // General physical CustomLayer form. Every packed-values input listed in
     // valuesInputPorts shares the single structural partition input identified by
-    // offsetsInputPort (a transitional port name retained until RP7). Every output
+    // offsetsInputPort (a historical member name for the physical partition-carrier
+    // port; its actual representation is selected by placement). Every output
     // preserves that row partition, while
     // outputElementsPerValue describes each output's physical row width. Inactive
     // capacity remains outside the logical output contract.

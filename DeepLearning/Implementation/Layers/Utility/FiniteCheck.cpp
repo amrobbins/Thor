@@ -176,7 +176,7 @@ std::optional<Tensor> FiniteCheck::connectToPreviousLayer(
     rowPartitionInput = connectedInput.value();
     rowPartitionStream = connectedStream;
     if (featureInput.has_value()) validateRaggedInputs();
-    // Canonical offsets are a structural forward dependency. They never receive gradients.
+    // The managed active-count carrier is a structural forward dependency and never receives gradients.
     return std::nullopt;
 }
 
@@ -222,7 +222,7 @@ void FiniteCheck::forward(std::optional<Tensor> arrivingInput, bool validationPa
     resetRaggedForwardArrivalState();
 
     // Values are executed on Layer::stream. Join the structural producer before
-    // the diagnostic kernel dereferences offsets[B].
+    // the diagnostic kernel reads the managed active-count scalar.
     stream.waitFor(rowPartitionStream, rowPartitionReadyEvent);
     Layer::forward(featureInput, resolvedValidationPass, resolvedBatchSize);
 }
@@ -247,13 +247,11 @@ void FiniteCheck::validateRaggedInputs() const {
     }
     const TensorDescriptor partitionCarrierDescriptor = rowPartitionInput->getDescriptor();
     const std::vector<uint64_t> carrierDimensions = partitionCarrierDescriptor.getDimensions();
-    const bool isManagedActiveCount = carrierDimensions == std::vector<uint64_t>{1};
-    const bool isTransitionalOffsets = carrierDimensions == std::vector<uint64_t>{config.batchSize + 1};
-    if ((!isManagedActiveCount && !isTransitionalOffsets) ||
+    if (carrierDimensions != std::vector<uint64_t>{1} ||
         partitionCarrierDescriptor.getDataType() != config.offsetsDataType ||
         !rowPartitionInput->isDenseContiguous() || rowPartitionInput->getStorageElementOffset() != 0) {
         throw std::runtime_error(
-            "Ragged FiniteCheck partition carrier must be managed active count [1] or transitional offsets [B+1] with the canonical partition dtype.");
+            "Ragged FiniteCheck partition carrier must be the managed [1] active-count tensor with the canonical partition dtype.");
     }
     if (featureInput->getPlacement() != rowPartitionInput->getPlacement()) {
         throw std::runtime_error("Ragged FiniteCheck values and active count must have the same placement.");
@@ -406,10 +404,7 @@ void FiniteCheck::checkRaggedTensor(const Tensor &tensor, const char *direction,
         THOR_THROW_IF_FALSE(gpuResult != nullptr);
         ScopedGpu scopedGpu(tensor.getPlacement().getDeviceNum());
         CUDA_CHECK(cudaMemsetAsync(gpuResult, 0, sizeof(FiniteCheckResult), stream.getStream()));
-        Tensor activeCount = rowPartitionInput.value();
-        if (activeCount.getDimensions() == std::vector<uint64_t>{config.batchSize + 1}) {
-            activeCount = activeCount.aliasView({1}, {1}, config.batchSize);
-        }
+        const Tensor activeCount = rowPartitionInput.value();
         launchRaggedFiniteCheck(tensor.getMemPtr(),
                                 tensor.getDataType(),
                                 activeCount.getMemPtr(),

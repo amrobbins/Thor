@@ -23,6 +23,13 @@ class BinaryAccuracy : public Metric {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<BinaryAccuracy>(*this); }
 
     std::string getLayerType() const override { return "BinaryAccuracy"; }
+
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedPredictions.has_value() && inputTensor == raggedPredictions->getOffsets())
+            return ThorImplementation::kRaggedAccuracyPartitionRequirement;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
     MetricAggregation getAggregation() const override {
         return raggedPredictions.has_value() ? MetricAggregation::RATIO : MetricAggregation::MEAN_BY_EXAMPLE;
     }

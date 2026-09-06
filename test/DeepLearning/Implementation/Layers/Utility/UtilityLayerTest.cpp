@@ -2031,15 +2031,45 @@ TEST(Split, PropagatesPartialBatchCardinalityToEveryOutput) {
     LayerTestHelper::tearDownNetwork(layers);
 }
 
-TEST(FiniteCheck, RaggedForwardAndBackwardIgnoreUndefinedInactiveCapacity) {
+TEST(FiniteCheck, RaggedRejectsFullOffsetsCarrier) {
     TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
     Tensor values(cpuPlacement, TensorDescriptor(DataType::FP32, {6, 2}));
-    Tensor offsets(cpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
-    Tensor gradient(cpuPlacement, TensorDescriptor(DataType::FP32, {6, 2}));
+    Tensor fullOffsets(cpuPlacement, TensorDescriptor(DataType::UINT32, {4}));
     Stream valuesStream(cpuPlacement);
     Stream offsetsStream(cpuPlacement);
     NoOpLayer valuesProducer;
     NoOpLayer offsetsProducer;
+
+    FiniteCheck finiteCheck(
+        "ragged_check",
+        12001,
+        11001,
+        true,
+        false,
+        true,
+        4,
+        true,
+        FiniteCheck::RaggedConfiguration{
+            .batchSize = 3,
+            .maxTotalValues = 6,
+            .elementsPerValue = 2,
+            .offsetsDataType = DataType::UINT32,
+        });
+
+    finiteCheck.connectToPreviousLayer(&valuesProducer, values, valuesStream, false, 0);
+    EXPECT_THROW(
+        finiteCheck.connectToPreviousLayer(&offsetsProducer, fullOffsets, offsetsStream, false, 1), std::runtime_error);
+}
+
+TEST(FiniteCheck, RaggedForwardAndBackwardIgnoreUndefinedInactiveCapacity) {
+    TensorPlacement cpuPlacement(TensorPlacement::MemDevices::CPU);
+    Tensor values(cpuPlacement, TensorDescriptor(DataType::FP32, {6, 2}));
+    Tensor activeCount(cpuPlacement, TensorDescriptor(DataType::UINT32, {1}));
+    Tensor gradient(cpuPlacement, TensorDescriptor(DataType::FP32, {6, 2}));
+    Stream valuesStream(cpuPlacement);
+    Stream activeCountStream(cpuPlacement);
+    NoOpLayer valuesProducer;
+    NoOpLayer activeCountProducer;
 
     auto finiteCheck = make_shared<FiniteCheck>(
         "ragged_check",
@@ -2057,7 +2087,7 @@ TEST(FiniteCheck, RaggedForwardAndBackwardIgnoreUndefinedInactiveCapacity) {
             .offsetsDataType = DataType::UINT32,
         });
     finiteCheck->connectToPreviousLayer(&valuesProducer, values, valuesStream, false, 0);
-    finiteCheck->connectToPreviousLayer(&offsetsProducer, offsets, offsetsStream, false, 1);
+    finiteCheck->connectToPreviousLayer(&activeCountProducer, activeCount, activeCountStream, false, 1);
 
     // This test constructs the implementation-layer chain manually rather than
     // through LayerTestHelper. FiniteCheck still follows the ordinary backward
@@ -2069,13 +2099,11 @@ TEST(FiniteCheck, RaggedForwardAndBackwardIgnoreUndefinedInactiveCapacity) {
     finiteCheck->compile();
     finiteCheck->initialize();
 
-    auto* offsetValues = offsets.getMemPtr<uint32_t>();
-    offsetValues[0] = 0;
-    offsetValues[1] = 1;
-    offsetValues[2] = 1;
-    offsetValues[3] = 3;
-    RowPartitionRuntime(offsets, RowPartitionDescriptor(3, 6, DataType::UINT32))
-        .setHostOffsets({0, 1, 1, 3});
+    activeCount.getMemPtr<uint32_t>()[0] = 3;
+    RowPartitionRuntime::publishHostState(activeCount,
+                                          RowPartitionDescriptor(3, 6, DataType::UINT32),
+                                          activeCount.getTensorId(),
+                                          {0, 1, 1, 3});
 
     auto* packedValues = values.getMemPtr<float>();
     auto* packedGradient = gradient.getMemPtr<float>();
@@ -2083,20 +2111,20 @@ TEST(FiniteCheck, RaggedForwardAndBackwardIgnoreUndefinedInactiveCapacity) {
         packedValues[i] = static_cast<float>(i + 1);
         packedGradient[i] = static_cast<float>(i + 1);
     }
-    // offsets[B] == 3 packed values, so flat elements [6, 12) are undefined tail.
+    // activeCount[0] == 3 packed values, so flat elements [6, 12) are undefined tail.
     packedValues[6] = std::numeric_limits<float>::quiet_NaN();
     packedValues[9] = std::numeric_limits<float>::infinity();
     packedGradient[7] = std::numeric_limits<float>::quiet_NaN();
     packedGradient[10] = -std::numeric_limits<float>::infinity();
 
-    EXPECT_NO_THROW(finiteCheck->forward(offsets, false, 3));
+    EXPECT_NO_THROW(finiteCheck->forward(activeCount, false, 3));
     EXPECT_NO_THROW(finiteCheck->forward(values, false, 3));
     EXPECT_NO_THROW(finiteCheck->backward(gradient, 3));
 
     // Move one NaN into the authoritative active prefix and verify both directions report it.
     packedValues[5] = std::numeric_limits<float>::quiet_NaN();
     EXPECT_NO_THROW(finiteCheck->forward(values, false, 3));
-    EXPECT_THROW(finiteCheck->forward(offsets, false, 3), std::runtime_error);
+    EXPECT_THROW(finiteCheck->forward(activeCount, false, 3), std::runtime_error);
     packedValues[5] = 6.0f;
 
     packedGradient[4] = std::numeric_limits<float>::quiet_NaN();

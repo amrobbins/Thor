@@ -12,10 +12,12 @@ namespace Thor {
 
 class Network;
 
-// Declares a logical ragged network boundary. The default form owns a new
-// external values + offsets pair; Builder::partition(...) declares a values-only
-// boundary that reuses an existing logical input's exact row partition. The row
-// partition remains authoritative: values beyond offsets[B] are inactive,
+// Declares a logical ragged network boundary. RP7 exposes only packed values as
+// a public NetworkInput. The row partition is supplied semantically by the Batch;
+// a hidden API-only partition token preserves graph topology but is never stamped
+// into a GPU offsets input. Builder::partition(...) declares a values-only boundary
+// that reuses an existing logical input's exact row partition. The row partition
+// remains authoritative: values beyond hostOffsets[B] are inactive,
 // undefined capacity. RaggedNetworkInput copies packed values without inspecting
 // or canonicalizing that inactive storage; consumers that over-read own their
 // required sanitation.
@@ -38,7 +40,7 @@ class RaggedNetworkInput::Builder {
     virtual RaggedNetworkInput::Builder& batchSize(uint64_t batchSize);
     // Reuse the exact row partition of an existing logical RaggedNetworkInput.
     // In this mode only <name>.values is declared as a new external boundary;
-    // batch/offset/capacity metadata is inherited from partition and must not be
+    // batch/partition/capacity metadata is inherited from partition and must not be
     // redundantly specified on this builder.
     virtual RaggedNetworkInput::Builder& partition(const RaggedTensor& partition);
 

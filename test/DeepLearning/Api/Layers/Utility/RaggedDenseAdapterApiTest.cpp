@@ -134,17 +134,19 @@ TEST(UtilityApiLayers, RaggedDenseAdaptersSubgraphCloneRemapsPartitionWithoutCre
 
     ApiTensorRemap remap;
     remap.map(source.getValues(), destinationSource.getValues());
-    remap.map(source.getOffsets(), destinationSource.getOffsets());
+    remap.map(source.getRowPartitionToken(), destinationSource.getRowPartitionToken());
     ApiSubgraphCloneOptions options;
     options.inferenceOnly = true;
     ApiSubgraphCloneResult clone = destination.cloneSubgraphInto(
         sourceNetwork,
-        {"__thor_ragged_output.restored.values", "__thor_ragged_output.restored.offsets"},
+        {"__thor_ragged_output.restored.values"},
         remap,
         options);
 
-    ASSERT_EQ(clone.outputTensorsByName.size(), 2u);
+    ASSERT_EQ(clone.outputTensorsByName.size(), 1u);
     EXPECT_EQ(clone.outputTensorsByName.at("__thor_ragged_output.restored.values").getDimensions(),
               (vector<uint64_t>{9, 2}));
-    EXPECT_EQ(clone.outputTensorsByName.at("__thor_ragged_output.restored.offsets"), destinationSource.getOffsets());
+    const Tensor clonedPartitionToken = clone.clonedTensorBySourceOriginalId.at(
+        restored.getRowPartitionToken().getOriginalId());
+    EXPECT_EQ(clonedPartitionToken, destinationSource.getRowPartitionToken());
 }

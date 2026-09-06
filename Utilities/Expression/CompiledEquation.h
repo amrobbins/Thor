@@ -83,8 +83,8 @@ struct CompiledEquation {
     // True only for explicitly marked ragged valuewise kernels. Such kernels
     // compute logical numel from their explicit device partition input and use
     // a grid-stride loop. The source tag is part of the compiled physical
-    // contract: legacy kernels read offsets[B], while RP6B.7 kernels read the
-    // managed active-count scalar at [0].
+    // contract: full-offset kernels read offsets[B], while scalar-extent kernels
+    // read the managed active-count value at [0].
     bool uses_device_runtime_extent = false;
     RaggedRuntimeExtentSource device_runtime_extent_source = RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT;
 

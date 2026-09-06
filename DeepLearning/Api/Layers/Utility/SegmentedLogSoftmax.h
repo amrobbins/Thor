@@ -24,6 +24,13 @@ class SegmentedLogSoftmax : public MultiConnectionLayer {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<SegmentedLogSoftmax>(*this); }
     std::string getLayerType() const override { return "SegmentedLogSoftmax"; }
 
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedFeatureInput.isInitialized() && inputTensor == raggedFeatureInput.getOffsets())
+            return ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
+
     [[nodiscard]] RaggedTensor getRaggedFeatureInput() const { return raggedFeatureInput; }
     [[nodiscard]] RaggedTensor getRaggedFeatureOutput() const { return raggedFeatureOutput; }
 

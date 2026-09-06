@@ -4597,6 +4597,9 @@ TEST(AttentionApi, ForwardWithCanonicalRaggedTensorMatchesPackedReference) {
                                    .attentionScale(c.attentionScale)
                                    .build();
     ASSERT_TRUE(attention.getRaggedFeatureOutput().has_value());
+    EXPECT_EQ(attention.getRaggedPartitionRequirementForInput(input.getOffsets()),
+              Impl::RaggedPartitionRequirement::HOST_EXTENT |
+                  Impl::RaggedPartitionRequirement::DEVICE_OFFSETS);
     Api::NetworkOutput output = Api::NetworkOutput::Builder()
                                     .network(network)
                                     .name("output")
@@ -4616,6 +4619,7 @@ TEST(AttentionApi, ForwardWithCanonicalRaggedTensorMatchesPackedReference) {
     PlacedAttentionFixture fixture = placeSingleAttentionNetwork(network, *valuesApiInput, output, attention, c.batchSize, true);
     auto physicalRaggedOffsetsInput = fixture.stampedNetwork->getManagedPartitionOffsetsInputForTest(input.getRowPartitionId());
     ASSERT_NE(physicalRaggedOffsetsInput, nullptr);
+    EXPECT_EQ(fixture.stampedNetwork->getManagedPartitionActiveCountInputForTest(input.getRowPartitionId()), nullptr);
 
     Stream stream = fixture.physicalAttention->getStreams()[0];
     setAttentionParameters(fixture.physicalAttention, denseInputs, c, stream);

@@ -42,6 +42,13 @@ class RaggedCustomLoss : public Loss {
         return inputs;
     }
 
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedPredictions.isInitialized() && inputTensor == raggedPredictions.getOffsets())
+            return ThorImplementation::kRaggedCustomLossPartitionRequirement;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
+
     int getConnectionType(Tensor connectingTensor) const override;
     [[nodiscard]] std::optional<std::string> getInputPortName(const Tensor& inputTensor) const override;
     [[nodiscard]] std::optional<std::string> getOutputPortName(const Tensor& outputTensor) const override;

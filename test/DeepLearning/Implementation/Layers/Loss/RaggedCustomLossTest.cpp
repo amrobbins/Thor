@@ -156,18 +156,16 @@ std::vector<float> readGpuFloatingTensor(const Tensor& device, Stream& stream) {
     return values;
 }
 
-Tensor makeGpuOffsets(DataType dtype, const std::vector<uint64_t>& values, Stream& stream) {
-    Tensor host(cpuPlacement, TensorDescriptor(dtype, {static_cast<uint64_t>(values.size())}));
+Tensor makeGpuActiveCount(DataType dtype, uint64_t value, Stream& stream) {
+    Tensor host(cpuPlacement, TensorDescriptor(dtype, {1}));
     if (dtype == DataType::UINT32) {
         uint32_t* ptr = host.getMemPtr<uint32_t>();
-        for (size_t i = 0; i < values.size(); ++i)
-            ptr[i] = static_cast<uint32_t>(values[i]);
+        ptr[0] = static_cast<uint32_t>(value);
     } else if (dtype == DataType::UINT64) {
         uint64_t* ptr = host.getMemPtr<uint64_t>();
-        for (size_t i = 0; i < values.size(); ++i)
-            ptr[i] = values[i];
+        ptr[0] = value;
     } else {
-        throw std::invalid_argument("offset dtype must be UINT32 or UINT64");
+        throw std::invalid_argument("active-count dtype must be UINT32 or UINT64");
     }
     Tensor device(gpuPlacement, host.getDescriptor());
     device.copyFromAsync(host, stream);
@@ -175,8 +173,8 @@ Tensor makeGpuOffsets(DataType dtype, const std::vector<uint64_t>& values, Strea
     return device;
 }
 
-void overwriteGpuOffsets(Tensor& device, const std::vector<uint64_t>& values, Stream& stream) {
-    Tensor replacement = makeGpuOffsets(device.getDataType(), values, stream);
+void overwriteGpuActiveCount(Tensor& device, uint64_t value, Stream& stream) {
+    Tensor replacement = makeGpuActiveCount(device.getDataType(), value, stream);
     device.copyFromAsync(replacement, stream);
     stream.synchronize();
 }
@@ -293,7 +291,7 @@ void expectNearPrefix(const std::vector<float>& actual,
         EXPECT_NEAR(actual[i], expected[i], tolerance) << "index " << i;
 }
 
-void runActivePrefixCase(DataType predictionDType, DataType labelDType, DataType offsetsDType) {
+void runActivePrefixCase(DataType predictionDType, DataType labelDType, DataType activeCountDType) {
     constexpr uint64_t batchSize = 4;
     constexpr uint64_t maxTotalValues = 9;
     constexpr uint64_t activeValues = 5;
@@ -311,7 +309,7 @@ void runActivePrefixCase(DataType predictionDType, DataType labelDType, DataType
 
     Tensor predictionsTensor = makeGpuFloatingTensor(predictionDType, {maxTotalValues, width}, predictions, stream);
     Tensor labelsTensor = makeGpuFloatingTensor(labelDType, {maxTotalValues, width}, labels, stream);
-    Tensor offsetsTensor = makeGpuOffsets(offsetsDType, {0, 2, 2, 5, 5}, stream);
+    Tensor activeCountTensor = makeGpuActiveCount(activeCountDType, activeValues, stream);
 
     RaggedCustomLoss loss(makeSquaredErrorLossExpression(DataType::FP32),
                           makeSquaredErrorGradientExpression(),
@@ -319,7 +317,7 @@ void runActivePrefixCase(DataType predictionDType, DataType labelDType, DataType
                           maxTotalValues);
     PassiveEndpoint predictionsSource;
     PassiveEndpoint labelsSource;
-    PassiveEndpoint offsetsSource;
+    PassiveEndpoint activeCountSource;
     PassiveEndpoint lossSink;
 
     ASSERT_TRUE(loss.connectToPreviousLayer(&predictionsSource,
@@ -334,8 +332,8 @@ void runActivePrefixCase(DataType predictionDType, DataType labelDType, DataType
                                              false,
                                              static_cast<int>(RaggedCustomLoss::InputConnection::LABELS))
                      .has_value());
-    ASSERT_FALSE(loss.connectToPreviousLayer(&offsetsSource,
-                                             offsetsTensor,
+    ASSERT_FALSE(loss.connectToPreviousLayer(&activeCountSource,
+                                             activeCountTensor,
                                              stream,
                                              false,
                                              static_cast<int>(RaggedCustomLoss::InputConnection::OFFSETS))
@@ -353,7 +351,7 @@ void runActivePrefixCase(DataType predictionDType, DataType labelDType, DataType
 
     loss.forward(predictionsTensor, false, batchSize);
     loss.forward(labelsTensor, false, batchSize);
-    loss.forward(offsetsTensor, false, batchSize);
+    loss.forward(activeCountTensor, false, batchSize);
 
     ASSERT_TRUE(lossSink.lastForward.has_value());
     ASSERT_TRUE(predictionsSource.lastBackward.has_value());
@@ -387,12 +385,12 @@ void runActivePrefixCase(DataType predictionDType, DataType labelDType, DataType
 
 }  // namespace
 
-TEST(RaggedCustomLoss, ActivePrefixForwardBackwardSupportsDenseRegressionPredictionDTypesAndBothOffsetWidths) {
+TEST(RaggedCustomLoss, ActivePrefixForwardBackwardSupportsDenseRegressionPredictionDTypesAndBothActiveCountWidths) {
     REQUIRE_CUDA_DEVICE();
     for (DataType predictionDType :
          {DataType::FP8_E4M3, DataType::FP8_E5M2, DataType::FP16, DataType::BF16, DataType::FP32}) {
-        for (DataType offsetsDType : {DataType::UINT32, DataType::UINT64})
-            runActivePrefixCase(predictionDType, DataType::FP32, offsetsDType);
+        for (DataType activeCountDType : {DataType::UINT32, DataType::UINT64})
+            runActivePrefixCase(predictionDType, DataType::FP32, activeCountDType);
     }
 }
 
@@ -408,13 +406,13 @@ TEST(RaggedCustomLoss, PackedScalarExampleWeightsScaleLossAndGradientWithoutTouc
     constexpr uint64_t activeValues = 5;
     constexpr uint64_t width = 2;
 
-    for (DataType offsetsDType : {DataType::UINT32, DataType::UINT64}) {
+    for (DataType activeCountDType : {DataType::UINT32, DataType::UINT64}) {
         Stream stream(0);
         Tensor predictions = makeGpuFloatingTensor(
             DataType::FP32, {maxTotalValues, width}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, NAN, NAN, NAN, NAN}, stream);
         Tensor labels = makeGpuFloatingTensor(
             DataType::FP32, {maxTotalValues, width}, std::vector<float>(maxTotalValues * width, 0.0f), stream);
-        Tensor offsets = makeGpuOffsets(offsetsDType, {0, 2, 2, 5}, stream);
+        Tensor activeCount = makeGpuActiveCount(activeCountDType, activeValues, stream);
         Tensor weights = makeGpuFloatingTensor(
             DataType::FP32, {maxTotalValues, 1}, {0.5f, 0.5f, 2.0f, 2.0f, 2.0f, NAN, NAN}, stream);
 
@@ -429,12 +427,12 @@ TEST(RaggedCustomLoss, PackedScalarExampleWeightsScaleLossAndGradientWithoutTouc
                               DataType::FP32,
                               std::nullopt,
                               std::string("example_weights"));
-        PassiveEndpoint predictionsSource, labelsSource, offsetsSource, weightsSource, lossSink;
+        PassiveEndpoint predictionsSource, labelsSource, activeCountSource, weightsSource, lossSink;
         loss.connectToPreviousLayer(&predictionsSource, predictions, stream, true,
                                     static_cast<int>(RaggedCustomLoss::InputConnection::PREDICTIONS));
         loss.connectToPreviousLayer(&labelsSource, labels, stream, false,
                                     static_cast<int>(RaggedCustomLoss::InputConnection::LABELS));
-        loss.connectToPreviousLayer(&offsetsSource, offsets, stream, false,
+        loss.connectToPreviousLayer(&activeCountSource, activeCount, stream, false,
                                     static_cast<int>(RaggedCustomLoss::InputConnection::OFFSETS));
         EXPECT_FALSE(loss.connectToPreviousLayer(&weightsSource, weights, stream, true,
                                                  static_cast<int>(RaggedCustomLoss::InputConnection::EXAMPLE_WEIGHTS))
@@ -446,7 +444,7 @@ TEST(RaggedCustomLoss, PackedScalarExampleWeightsScaleLossAndGradientWithoutTouc
         overwriteGpuFloatingTensor(loss.getFeatureOutput().value(), std::vector<float>(maxTotalValues * width, -77.0f), stream);
         overwriteGpuFloatingTensor(loss.getErrorOutput().value(), std::vector<float>(maxTotalValues * width, -55.0f), stream);
         loss.forward(weights, false, batchSize);
-        loss.forward(offsets, false, batchSize);
+        loss.forward(activeCount, false, batchSize);
         loss.forward(labels, false, batchSize);
         loss.forward(predictions, false, batchSize);
 
@@ -482,18 +480,18 @@ TEST(RaggedCustomLoss, AllEmptyBatchDoesNotReadOrWritePackedCapacity) {
     Tensor predictions = makeGpuFloatingTensor(
         DataType::FP32, {maxTotalValues}, std::vector<float>(maxTotalValues, std::numeric_limits<float>::quiet_NaN()), stream);
     Tensor labels = makeGpuFloatingTensor(DataType::FP32, {maxTotalValues}, std::vector<float>(maxTotalValues, 1234.0f), stream);
-    Tensor offsets = makeGpuOffsets(DataType::UINT64, {0, 0, 0, 0}, stream);
+    Tensor activeCount = makeGpuActiveCount(DataType::UINT64, 0, stream);
 
     RaggedCustomLoss loss(makeSquaredErrorLossExpression(DataType::FP32),
                           makeSquaredErrorGradientExpression(),
                           batchSize,
                           maxTotalValues);
-    PassiveEndpoint predictionsSource, labelsSource, offsetsSource, lossSink;
+    PassiveEndpoint predictionsSource, labelsSource, activeCountSource, lossSink;
     loss.connectToPreviousLayer(&predictionsSource, predictions, stream, true,
                                 static_cast<int>(RaggedCustomLoss::InputConnection::PREDICTIONS));
     loss.connectToPreviousLayer(&labelsSource, labels, stream, false,
                                 static_cast<int>(RaggedCustomLoss::InputConnection::LABELS));
-    loss.connectToPreviousLayer(&offsetsSource, offsets, stream, false,
+    loss.connectToPreviousLayer(&activeCountSource, activeCount, stream, false,
                                 static_cast<int>(RaggedCustomLoss::InputConnection::OFFSETS));
     loss.connectToNextLayer(&lossSink);
     loss.compile();
@@ -504,7 +502,7 @@ TEST(RaggedCustomLoss, AllEmptyBatchDoesNotReadOrWritePackedCapacity) {
 
     loss.forward(predictions, false, batchSize);
     loss.forward(labels, false, batchSize);
-    loss.forward(offsets, false, batchSize);
+    loss.forward(activeCount, false, batchSize);
 
     EXPECT_EQ(readGpuFloatingTensor(lossSink.lastForward.value(), stream), std::vector<float>(maxTotalValues, -77.0f));
     EXPECT_EQ(readGpuFloatingTensor(predictionsSource.lastBackward.value(), stream), std::vector<float>(maxTotalValues, -55.0f));
@@ -519,26 +517,25 @@ TEST(RaggedCustomLoss, ReusesStampedPlansAcrossShortLongShortRuntimeExtents) {
     Stream stream(0);
     Tensor predictions = makeGpuFloatingTensor(DataType::FP32, {maxTotalValues}, std::vector<float>(maxTotalValues, 0.0f), stream);
     Tensor labels = makeGpuFloatingTensor(DataType::FP32, {maxTotalValues}, std::vector<float>(maxTotalValues, 0.0f), stream);
-    Tensor offsets = makeGpuOffsets(DataType::UINT32, {0, 1, 1, 2}, stream);
+    Tensor activeCount = makeGpuActiveCount(DataType::UINT32, 2, stream);
 
     RaggedCustomLoss loss(makeSquaredErrorLossExpression(DataType::FP32),
                           makeSquaredErrorGradientExpression(),
                           batchSize,
                           maxTotalValues);
-    PassiveEndpoint predictionsSource, labelsSource, offsetsSource, lossSink;
+    PassiveEndpoint predictionsSource, labelsSource, activeCountSource, lossSink;
     loss.connectToPreviousLayer(&predictionsSource, predictions, stream, true,
                                 static_cast<int>(RaggedCustomLoss::InputConnection::PREDICTIONS));
     loss.connectToPreviousLayer(&labelsSource, labels, stream, false,
                                 static_cast<int>(RaggedCustomLoss::InputConnection::LABELS));
-    loss.connectToPreviousLayer(&offsetsSource, offsets, stream, false,
+    loss.connectToPreviousLayer(&activeCountSource, activeCount, stream, false,
                                 static_cast<int>(RaggedCustomLoss::InputConnection::OFFSETS));
     loss.connectToNextLayer(&lossSink);
     loss.compile();
     loss.initialize();
 
-    const std::vector<std::vector<uint64_t>> partitions{{0, 1, 1, 2}, {0, 3, 5, 7}, {0, 0, 1, 1}};
     const std::vector<uint64_t> activeCounts{2, 7, 1};
-    for (size_t pass = 0; pass < partitions.size(); ++pass) {
+    for (size_t pass = 0; pass < activeCounts.size(); ++pass) {
         std::vector<float> predictionValues(maxTotalValues, std::numeric_limits<float>::quiet_NaN());
         std::vector<float> labelValues(maxTotalValues, -999.0f);
         for (uint64_t i = 0; i < activeCounts[pass]; ++i) {
@@ -547,12 +544,12 @@ TEST(RaggedCustomLoss, ReusesStampedPlansAcrossShortLongShortRuntimeExtents) {
         }
         overwriteGpuFloatingTensor(predictions, predictionValues, stream);
         overwriteGpuFloatingTensor(labels, labelValues, stream);
-        overwriteGpuOffsets(offsets, partitions[pass], stream);
+        overwriteGpuActiveCount(activeCount, activeCounts[pass], stream);
         overwriteGpuFloatingTensor(loss.getFeatureOutput().value(), std::vector<float>(maxTotalValues, -77.0f), stream);
         overwriteGpuFloatingTensor(loss.getErrorOutput().value(), std::vector<float>(maxTotalValues, -55.0f), stream);
 
         loss.forward(labels, false, batchSize);
-        loss.forward(offsets, false, batchSize);
+        loss.forward(activeCount, false, batchSize);
         loss.forward(predictions, false, batchSize);
 
         const std::vector<float> actualLoss = readGpuFloatingTensor(lossSink.lastForward.value(), stream);
@@ -579,20 +576,20 @@ TEST(RaggedCustomLoss, PartialBatchCardinalityUsesLogicalRowsRatherThanPackedCap
     Stream stream(0);
     Tensor predictions = makeGpuFloatingTensor(DataType::FP32, {maxTotalValues}, std::vector<float>(maxTotalValues, 2.0f), stream);
     Tensor labels = makeGpuFloatingTensor(DataType::FP32, {maxTotalValues}, std::vector<float>(maxTotalValues, 1.0f), stream);
-    // Invalid logical tail rows are empty in a partial batch; active packed data
-    // belongs only to the first two valid examples.
-    Tensor offsets = makeGpuOffsets(DataType::UINT32, {0, 2, 3, 3, 3}, stream);
+    // Physical RaggedCustomLoss receives only total active packed extent;
+    // logical partial-batch cardinality is carried independently by validExamples.
+    Tensor activeCount = makeGpuActiveCount(DataType::UINT32, 3, stream);
 
     RaggedCustomLoss loss(makeSquaredErrorLossExpression(DataType::FP32),
                           makeSquaredErrorGradientExpression(),
                           batchSize,
                           maxTotalValues);
-    PassiveEndpoint predictionsSource, labelsSource, offsetsSource, lossSink;
+    PassiveEndpoint predictionsSource, labelsSource, activeCountSource, lossSink;
     loss.connectToPreviousLayer(&predictionsSource, predictions, stream, true,
                                 static_cast<int>(RaggedCustomLoss::InputConnection::PREDICTIONS));
     loss.connectToPreviousLayer(&labelsSource, labels, stream, false,
                                 static_cast<int>(RaggedCustomLoss::InputConnection::LABELS));
-    loss.connectToPreviousLayer(&offsetsSource, offsets, stream, false,
+    loss.connectToPreviousLayer(&activeCountSource, activeCount, stream, false,
                                 static_cast<int>(RaggedCustomLoss::InputConnection::OFFSETS));
     loss.connectToNextLayer(&lossSink);
     loss.compile();
@@ -600,7 +597,7 @@ TEST(RaggedCustomLoss, PartialBatchCardinalityUsesLogicalRowsRatherThanPackedCap
 
     loss.forward(predictions, false, validExamples);
     loss.forward(labels, false, validExamples);
-    loss.forward(offsets, false, validExamples);
+    loss.forward(activeCount, false, validExamples);
 
     EXPECT_EQ(lossSink.lastForwardBatchSize, validExamples);
     EXPECT_EQ(predictionsSource.lastBackwardBatchSize, validExamples);

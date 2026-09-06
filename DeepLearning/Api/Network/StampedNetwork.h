@@ -135,7 +135,6 @@ class StampedNetwork {
     [[nodiscard]] uint64_t getFloatingPointOperationsCurrentBatchTraining();
     struct RaggedInputBinding {
         std::string valuesInputName;
-        std::string offsetsInputName;
         std::optional<std::string> partitionInputName;
         ThorImplementation::RaggedTensorDescriptor descriptor;
         RowPartitionId rowPartitionId = 0;
@@ -143,24 +142,42 @@ class StampedNetwork {
         [[nodiscard]] bool ownsPartition() const { return !partitionInputName.has_value(); }
     };
 
-    // One external logical partition may have requirement-driven Thor-managed
-    // physical representations. HOST_EXTENT reuses the owning values carrier and
-    // therefore allocates no partition tensor; DEVICE_ACTIVE_COUNT and
-    // DEVICE_OFFSETS materialize hidden [1] and [B+1] NetworkInputs respectively.
-    // None of these inputs are part of the public batch-input surface.
-    struct ExternalRowPartitionPhysicalization {
+    // One logical partition may have requirement-driven Thor-managed physical
+    // representations. HOST_EXTENT reuses a packed-values carrier and therefore
+    // allocates no partition tensor; DEVICE_ACTIVE_COUNT and DEVICE_OFFSETS
+    // materialize hidden [1] and [B+1] NetworkInputs respectively.
+    struct RowPartitionPhysicalization {
         RowPartitionId rowPartitionId = 0;
         RowPartitionDescriptor descriptor;
-        Thor::Tensor logicalOffsetsTensor;
-        std::string valuesInputName;
+        Thor::Tensor logicalPartitionToken;
         ThorImplementation::RaggedPartitionRequirement requirements =
             ThorImplementation::RaggedPartitionRequirement::NONE;
-        std::shared_ptr<ThorImplementation::NetworkInput> ownerValuesInput;
         std::shared_ptr<ThorImplementation::Layer> hostCarrierDrivingLayer;
         std::shared_ptr<ThorImplementation::NetworkInput> activeCountInput;
         std::shared_ptr<ThorImplementation::Layer> activeCountDrivingLayer;
         std::shared_ptr<ThorImplementation::NetworkInput> offsetsInput;
         std::shared_ptr<ThorImplementation::Layer> offsetsDrivingLayer;
+    };
+
+    struct ExternalRowPartitionPhysicalization : RowPartitionPhysicalization {
+        std::string valuesInputName;
+        std::shared_ptr<ThorImplementation::NetworkInput> ownerValuesInput;
+    };
+
+    struct InternalRowPartitionPhysicalization : RowPartitionPhysicalization {
+        enum class DerivationKind { SEQUENCE_SLICE, SEQUENCE_CONCATENATE };
+
+        DerivationKind derivationKind = DerivationKind::SEQUENCE_SLICE;
+        Thor::Tensor logicalValuesTensor;
+        std::vector<RowPartitionId> sourceRowPartitionIds;
+        uint64_t sliceStart = 0;
+        uint64_t sliceLength = 0;
+        std::shared_ptr<ThorImplementation::Layer> producerPhysicalLayer;
+    };
+
+    struct RaggedOutputBinding {
+        RowPartitionDescriptor descriptor;
+        RowPartitionId rowPartitionId = 0;
     };
 
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> getInputs() { return inputsShared; }
@@ -253,23 +270,29 @@ class StampedNetwork {
     std::map<uint64_t, std::shared_ptr<ThorImplementation::Layer>> getApiLayerToPhysicalLayer() { return apiLayerToPhysicalLayerShared; }
     std::shared_ptr<ThorImplementation::NetworkInput> getManagedPartitionOffsetsInputForTest(
         RowPartitionId rowPartitionId) const {
-        auto it = externalRowPartitions.find(rowPartitionId);
-        if (it == externalRowPartitions.end())
-            return nullptr;
-        return it->second.offsetsInput;
+        auto externalIt = externalRowPartitions.find(rowPartitionId);
+        if (externalIt != externalRowPartitions.end()) return externalIt->second.offsetsInput;
+        auto internalIt = internalRowPartitions.find(rowPartitionId);
+        return internalIt == internalRowPartitions.end() ? nullptr : internalIt->second.offsetsInput;
     }
     std::shared_ptr<ThorImplementation::NetworkInput> getManagedPartitionActiveCountInputForTest(
         RowPartitionId rowPartitionId) const {
-        auto it = externalRowPartitions.find(rowPartitionId);
-        if (it == externalRowPartitions.end())
-            return nullptr;
-        return it->second.activeCountInput;
+        auto externalIt = externalRowPartitions.find(rowPartitionId);
+        if (externalIt != externalRowPartitions.end()) return externalIt->second.activeCountInput;
+        auto internalIt = internalRowPartitions.find(rowPartitionId);
+        return internalIt == internalRowPartitions.end() ? nullptr : internalIt->second.activeCountInput;
     }
     std::optional<RaggedPartitionRequirement> getExternalRowPartitionRequirementsForTest(
         RowPartitionId rowPartitionId) const {
         auto it = externalRowPartitions.find(rowPartitionId);
         if (it == externalRowPartitions.end())
             return std::nullopt;
+        return it->second.requirements;
+    }
+    std::optional<RaggedPartitionRequirement> getInternalRowPartitionRequirementsForTest(
+        RowPartitionId rowPartitionId) const {
+        auto it = internalRowPartitions.find(rowPartitionId);
+        if (it == internalRowPartitions.end()) return std::nullopt;
         return it->second.requirements;
     }
 #endif
@@ -345,8 +368,11 @@ class StampedNetwork {
     std::vector<std::shared_ptr<ThorImplementation::NetworkInput>> managedPartitionInputsShared;
     std::vector<ThorImplementation::NetworkInput*> managedPartitionInputs;
     std::map<RowPartitionId, ExternalRowPartitionPhysicalization> externalRowPartitions;
-    std::map<Thor::Tensor, RowPartitionId> externalRowPartitionByLogicalOffsetsTensor;
+    std::map<RowPartitionId, InternalRowPartitionPhysicalization> internalRowPartitions;
+    std::map<Thor::Tensor, RowPartitionId> externalRowPartitionByLogicalPartitionToken;
+    std::map<Thor::Tensor, RowPartitionId> internalRowPartitionByLogicalPartitionToken;
     std::map<std::string, RowPartitionId> externalRowPartitionByValuesInputName;
+    std::map<std::string, RaggedOutputBinding> raggedOutputByValuesOutputName;
 
     // std::map<uint64_t, std::shared_ptr<ThorImplementation::Parameterizable>> apiParameterizableToPhysicalParameterizable;
     // FIXME: get rid of raw pointers
@@ -374,10 +400,10 @@ class StampedNetwork {
    private:
     void initializeProcessingDataStreamJoin();
     void joinProcessingDataStreams(const Stream& processingStream);
-    [[nodiscard]] std::shared_ptr<ThorImplementation::Layer> selectExternalRowPartitionDrivingLayer(
+    [[nodiscard]] std::shared_ptr<ThorImplementation::Layer> selectRowPartitionDrivingLayer(
         RowPartitionId rowPartitionId,
         RaggedPartitionRequirement requirement) const;
-    void auditExternalRowPartitionPhysicalizations() const;
+    void auditRowPartitionPhysicalizations() const;
     void clearImpl(bool propagateCleanupFailure);
     void clearNoThrow() noexcept;
 

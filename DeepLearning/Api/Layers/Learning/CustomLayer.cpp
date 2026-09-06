@@ -85,7 +85,8 @@ ThorImplementation::ExpressionDefinition addRaggedRuntimeExtents(
     uint64_t batchSize,
     uint64_t maxTotalValues,
     const std::vector<std::string>& outputNames,
-    const std::vector<uint64_t>& outputElementsPerValue) {
+    const std::vector<uint64_t>& outputElementsPerValue,
+    ThorImplementation::RaggedRuntimeExtentSource runtimeExtentSource) {
     if (definition.outputs.conditional) {
         throw std::invalid_argument("Ragged CustomLayer does not yet support conditional expression outputs.");
     }
@@ -115,7 +116,7 @@ ThorImplementation::ExpressionDefinition addRaggedRuntimeExtents(
                                  batchSize,
                                  maxTotalValues,
                                  outputElementsPerValue[outputIndex],
-                                 ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT));
+                                 runtimeExtentSource));
     }
     return ThorImplementation::ExpressionDefinition::fromOutputs(ThorImplementation::Expression::outputs(outputs));
 }
@@ -1162,6 +1163,53 @@ ThorImplementation::RaggedPartitionRequirement CustomLayer::getRaggedPartitionRe
     return Layer::getRaggedPartitionRequirementForInput(inputTensor);
 }
 
+bool CustomLayer::raggedTrainingMayNeedFullOffsets(bool inferenceOnly) const {
+    if (!raggedInterfacesEnabled || inferenceOnly) {
+        return false;
+    }
+
+    // A trainable parameter may be broadcast across the packed-row dimension.
+    // Its backward gradient must reduce only logical active rows; the current
+    // autodiff implementation does that with SEGMENTED_REDUCE_SUM, which is a
+    // genuine row-boundary consumer. Reserve full offsets for training even if
+    // the parameter starts frozen so a post-placement unfreeze remains valid.
+    return std::any_of(parameters.begin(), parameters.end(), [](const auto& parameter) {
+        return parameter != nullptr && parameter->isTrainable();
+    });
+}
+
+ThorImplementation::RaggedPartitionRequirement CustomLayer::getRaggedPartitionRequirementForPlacement(
+    const Tensor& inputTensor, bool inferenceOnly) const {
+    if (raggedInterfacesEnabled) {
+        for (const RaggedTensorMap& inputInterface : raggedInputInterfaces) {
+            if (inputInterface.empty()) continue;
+            const RaggedTensor& partition = inputInterface.at(inputNames.front());
+            if (inputTensor != partition.getOffsets()) continue;
+
+            // Preserve stronger declarations made by specialized CustomLayer
+            // subclasses (for example Attention's HOST_EXTENT | DEVICE_OFFSETS).
+            // Generic ragged CustomLayer normally requests only [1], but training
+            // with a trainable parameter strengthens that one device representation
+            // to [B+1] for row-segmented parameter-gradient reductions.
+            ThorImplementation::RaggedPartitionRequirement requirement =
+                getRaggedPartitionRequirementForInput(inputTensor);
+            if (raggedTrainingMayNeedFullOffsets(inferenceOnly) &&
+                ThorImplementation::hasRaggedPartitionRequirement(
+                    requirement, ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT) &&
+                !ThorImplementation::hasRaggedPartitionRequirement(
+                    requirement, ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS)) {
+                const uint8_t withoutActiveCount =
+                    static_cast<uint8_t>(requirement) &
+                    ~static_cast<uint8_t>(ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
+                requirement = static_cast<ThorImplementation::RaggedPartitionRequirement>(withoutActiveCount) |
+                              ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+            }
+            return requirement;
+        }
+    }
+    return Layer::getRaggedPartitionRequirementForPlacement(inputTensor, inferenceOnly);
+}
+
 int CustomLayer::getConnectionType(Tensor connectingTensor) const {
     const uint64_t originalId = connectingTensor.getOriginalId();
     auto inputIt = inputBindingsByTensorOriginalId.find(originalId);
@@ -1313,13 +1361,27 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
                 elementsPerValue(raggedOutputInterfaces.front().at(outputName).getTrailingDimensions()));
         }
 
+        const ThorImplementation::RaggedPartitionRequirement placementRequirement =
+            getRaggedPartitionRequirementForPlacement(referenceInput.getOffsets(), inferenceOnly);
+        const bool usesDeviceOffsets = ThorImplementation::hasRaggedPartitionRequirement(
+            placementRequirement, ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS);
+        const bool usesDeviceActiveCount = ThorImplementation::hasRaggedPartitionRequirement(
+            placementRequirement, ThorImplementation::RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
+        if (usesDeviceOffsets == usesDeviceActiveCount) {
+            throw std::runtime_error(
+                "Ragged CustomLayer placement must select exactly one device runtime-extent representation.");
+        }
+        const ThorImplementation::RaggedRuntimeExtentSource runtimeExtentSource =
+            usesDeviceOffsets ? ThorImplementation::RaggedRuntimeExtentSource::DEVICE_OFFSETS
+                              : ThorImplementation::RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT;
         ThorImplementation::ExpressionDefinition raggedDefinition =
             addRaggedRuntimeExtents(*serializableExpressionDefinition,
                                     kRaggedOffsetsInputName,
                                     referenceInput.getBatchSize(),
                                     referenceInput.getMaxTotalValues(),
                                     outputNames,
-                                    outputElementsPerValue);
+                                    outputElementsPerValue,
+                                    runtimeExtentSource);
         std::vector<std::string> physicalInputNames = inputNames;
         physicalInputNames.push_back(kRaggedOffsetsInputName);
         const uint32_t offsetsInputPort = static_cast<uint32_t>(physicalInputNames.size() - 1);

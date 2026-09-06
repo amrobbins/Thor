@@ -40,7 +40,8 @@ std::shared_ptr<Network> deserializePhaseNetwork(const json& networkJson, std::s
         }
         auto loadRaggedInput = [&network](const json& raggedInputJson, bool sharedPartition) {
             const std::string raggedInputVersion = raggedInputJson.at("version").get<std::string>();
-            if (raggedInputVersion != "1.0.0" && raggedInputVersion != "1.1.0" && raggedInputVersion != "1.2.0") {
+            if (raggedInputVersion != "1.0.0" && raggedInputVersion != "1.1.0" &&
+                raggedInputVersion != "1.2.0" && raggedInputVersion != "1.3.0") {
                 throw std::runtime_error("Unsupported TrainingPhase network ragged_network_inputs version: " +
                                          raggedInputVersion);
             }
@@ -63,17 +64,16 @@ std::shared_ptr<Network> deserializePhaseNetwork(const json& networkJson, std::s
                     throw std::runtime_error("TrainingPhase shared ragged input '" + name +
                                              "' references missing partition input '" + partitionInputName + "'.");
                 }
-                RaggedTensor raggedTensor = source->raggedTensor.withValues(values);
-                network->registerRaggedNetworkInput(
-                    name, raggedTensor, valuesInputName, source->offsetsInputName, partitionInputName);
+                network->registerRaggedNetworkInput(name, source->raggedTensor.withValues(values), valuesInputName, partitionInputName);
             } else {
-                const std::string offsetsInputName = raggedInputJson.at("offsets_input_name").get<std::string>();
-                const uint64_t offsetsTensorId = raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
-                Tensor offsets = network->getApiTensorByOriginalId(offsetsTensorId);
+                const uint64_t partitionTokenTensorId = raggedInputVersion == "1.3.0"
+                    ? raggedInputJson.at("row_partition_token_tensor_id").get<uint64_t>()
+                    : raggedInputJson.at("offsets_tensor_id").get<uint64_t>();
+                Tensor partitionToken = network->getApiTensorByOriginalId(partitionTokenTensorId);
                 RaggedTensor raggedTensor = raggedInputJson.contains("max_values_per_row")
-                    ? RaggedTensor(values, offsets, raggedInputJson.at("max_values_per_row").get<uint64_t>())
-                    : RaggedTensor(values, offsets);
-                network->registerRaggedNetworkInput(name, raggedTensor, valuesInputName, offsetsInputName);
+                    ? RaggedTensor(values, partitionToken, raggedInputJson.at("max_values_per_row").get<uint64_t>())
+                    : RaggedTensor(values, partitionToken);
+                network->registerRaggedNetworkInput(name, raggedTensor, valuesInputName);
             }
         };
         for (const json& raggedInputJson : raggedInputs) loadRaggedInput(raggedInputJson, /*sharedPartition=*/false);
@@ -87,21 +87,22 @@ std::shared_ptr<Network> deserializePhaseNetwork(const json& networkJson, std::s
         }
         for (const json& raggedOutputJson : raggedOutputs) {
             const std::string raggedOutputVersion = raggedOutputJson.at("version").get<std::string>();
-            if (raggedOutputVersion != "1.0.0" && raggedOutputVersion != "1.1.0") {
+            if (raggedOutputVersion != "1.0.0" && raggedOutputVersion != "1.1.0" && raggedOutputVersion != "1.2.0") {
                 throw std::runtime_error("Unsupported TrainingPhase network ragged_network_outputs version: " +
                                          raggedOutputVersion);
             }
             const std::string name = raggedOutputJson.at("name").get<std::string>();
             const std::string valuesOutputName = raggedOutputJson.at("values_output_name").get<std::string>();
-            const std::string offsetsOutputName = raggedOutputJson.at("offsets_output_name").get<std::string>();
             const uint64_t valuesTensorId = raggedOutputJson.at("values_tensor_id").get<uint64_t>();
-            const uint64_t offsetsTensorId = raggedOutputJson.at("offsets_tensor_id").get<uint64_t>();
             Tensor values = network->getApiTensorByOriginalId(valuesTensorId);
-            Tensor offsets = network->getApiTensorByOriginalId(offsetsTensorId);
+            const uint64_t partitionTokenTensorId = raggedOutputVersion == "1.2.0"
+                ? raggedOutputJson.at("row_partition_token_tensor_id").get<uint64_t>()
+                : raggedOutputJson.at("offsets_tensor_id").get<uint64_t>();
+            Tensor partitionToken = network->getApiTensorByOriginalId(partitionTokenTensorId);
             RaggedTensor raggedTensor = raggedOutputJson.contains("max_values_per_row")
-                ? RaggedTensor(values, offsets, raggedOutputJson.at("max_values_per_row").get<uint64_t>())
-                : RaggedTensor(values, offsets);
-            network->registerRaggedNetworkOutput(name, raggedTensor, valuesOutputName, offsetsOutputName);
+                ? RaggedTensor(values, partitionToken, raggedOutputJson.at("max_values_per_row").get<uint64_t>())
+                : RaggedTensor(values, partitionToken);
+            network->registerRaggedNetworkOutput(name, raggedTensor, valuesOutputName);
         }
     }
 

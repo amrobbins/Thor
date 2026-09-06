@@ -5,7 +5,6 @@
 #include "DeepLearning/Implementation/Layers/Optimizers/Sgd.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
-#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/RaggedExpression.h"
@@ -166,8 +165,10 @@ class FixedTrainableVectorParameter final : public PhysicalParameter {
 DynamicExpression buildTrainableScaleRaggedExpression(uint64_t batchSize, uint64_t fullCapacityRows, uint64_t width) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
     const Expression scale = Expression::input("scale", DataType::FP32, DataType::FP32);
-    const Expression offsets = Expression::input(RaggedCustomLayer::RAGGED_OFFSETS_INPUT_NAME, std::nullopt, DataType::UINT32);
-    const Expression y = (x * scale).withRaggedRuntimeExtent(offsets, batchSize, fullCapacityRows, width);
+    const Expression partitionCarrier =
+        Expression::input(RaggedCustomLayer::RAGGED_OFFSETS_INPUT_NAME, std::nullopt, DataType::UINT32);
+    const Expression y = (x * scale).withRaggedRuntimeExtent(
+        partitionCarrier, batchSize, fullCapacityRows, width, RaggedRuntimeExtentSource::DEVICE_OFFSETS);
     return DynamicExpression::fromExpressionDefinition(
         ExpressionDefinition::fromOutputs(Expression::outputs({{"y", y}})));
 }
@@ -178,10 +179,14 @@ DynamicExpression buildAffineRaggedExpression(uint64_t batchSize,
                                               float scale,
                                               float bias) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
-    const Expression offsets =
+    const Expression partitionCarrier =
         Expression::input(RaggedCustomLayer::RAGGED_OFFSETS_INPUT_NAME, std::nullopt, DataType::UINT32);
     const Expression y = ((x * Expression(scale)) + Expression(bias))
-                             .withRaggedRuntimeExtent(offsets, batchSize, fullCapacityRows, width);
+                             .withRaggedRuntimeExtent(partitionCarrier,
+                                                      batchSize,
+                                                      fullCapacityRows,
+                                                      width,
+                                                      RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
     return DynamicExpression::fromExpressionDefinition(
         ExpressionDefinition::fromOutputs(Expression::outputs({{"y", y}})));
 }
@@ -191,19 +196,29 @@ DynamicExpression buildSquareShiftRaggedExpression(uint64_t batchSize,
                                                    uint64_t width,
                                                    float shift) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
-    const Expression offsets =
+    const Expression partitionCarrier =
         Expression::input(RaggedCustomLayer::RAGGED_OFFSETS_INPUT_NAME, std::nullopt, DataType::UINT32);
     const Expression y = ((x * x) + Expression(shift))
-                             .withRaggedRuntimeExtent(offsets, batchSize, fullCapacityRows, width);
+                             .withRaggedRuntimeExtent(partitionCarrier,
+                                                      batchSize,
+                                                      fullCapacityRows,
+                                                      width,
+                                                      RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
     return DynamicExpression::fromExpressionDefinition(
         ExpressionDefinition::fromOutputs(Expression::outputs({{"y", y}})));
 }
 
 DynamicExpression buildTwoInputTwoOutputRaggedExpression(uint64_t batchSize, uint64_t fullCapacityRows) {
     const RaggedTensorDescriptor descriptor(DataType::FP32, {4}, batchSize, fullCapacityRows, DataType::UINT32);
-    const Expression offsets = Expression::input("offsets", std::nullopt, DataType::UINT32);
-    const RaggedExpression lhs(Expression::input("lhs", std::nullopt, DataType::FP32), offsets, descriptor);
-    const RaggedExpression rhs(Expression::input("rhs", std::nullopt, DataType::FP32), offsets, descriptor);
+    const Expression partitionCarrier = Expression::input("active_count", std::nullopt, DataType::UINT32);
+    const RaggedExpression lhs(Expression::input("lhs", std::nullopt, DataType::FP32),
+                               partitionCarrier,
+                               descriptor,
+                               RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
+    const RaggedExpression rhs(Expression::input("rhs", std::nullopt, DataType::FP32),
+                               partitionCarrier,
+                               descriptor,
+                               RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT);
     const RaggedExpression wide = lhs + rhs;
     const RaggedExpression narrow = wide.sliceLastDimension(1, 2);
 
@@ -242,10 +257,10 @@ TEST(RaggedCustomLayer, MultiInputMultiOutputPreservesActivePrefixWithPoisonedIn
 
     Tensor lhs = makeGpuFp32Tensor({fullCapacityRows, inputWidth}, lhsValues, stream);
     Tensor rhs = makeGpuFp32Tensor({fullCapacityRows, inputWidth}, rhsValues, stream);
-    Tensor offsets = makeGpuU32Tensor({batchSize + 1}, {0, 3, 3, 5}, stream);
+    Tensor activeCount = makeGpuU32Tensor({1}, {activeRows}, stream);
 
     RaggedCustomLayer layer(buildTwoInputTwoOutputRaggedExpression(batchSize, fullCapacityRows),
-                            {"lhs", "rhs", "offsets"},
+                            {"lhs", "rhs", "active_count"},
                             {"wide", "narrow"},
                             gpuPlacement,
                             std::vector<std::shared_ptr<PhysicalParameter>>{},
@@ -260,13 +275,13 @@ TEST(RaggedCustomLayer, MultiInputMultiOutputPreservesActivePrefixWithPoisonedIn
 
     PassiveEndpoint lhsSource;
     PassiveEndpoint rhsSource;
-    PassiveEndpoint offsetsSource;
+    PassiveEndpoint activeCountSource;
     PassiveEndpoint wideSink;
     PassiveEndpoint narrowSink;
 
     ASSERT_TRUE(layer.connectToPreviousLayer(&lhsSource, lhs, stream, true, 0).has_value());
     ASSERT_TRUE(layer.connectToPreviousLayer(&rhsSource, rhs, stream, true, 1).has_value());
-    ASSERT_FALSE(layer.connectToPreviousLayer(&offsetsSource, offsets, stream, false, 2).has_value());
+    ASSERT_FALSE(layer.connectToPreviousLayer(&activeCountSource, activeCount, stream, false, 2).has_value());
     layer.connectToNextLayer(&wideSink, 0, 0);
     layer.connectToNextLayer(&narrowSink, 1, 0);
 
@@ -275,7 +290,7 @@ TEST(RaggedCustomLayer, MultiInputMultiOutputPreservesActivePrefixWithPoisonedIn
 
     layer.forward(lhs, false, batchSize);
     layer.forward(rhs, false, batchSize);
-    layer.forward(offsets, false, batchSize);
+    layer.forward(activeCount, false, batchSize);
     ASSERT_TRUE(wideSink.lastForward.has_value());
     ASSERT_TRUE(narrowSink.lastForward.has_value());
 
@@ -331,7 +346,7 @@ TEST(RaggedCustomLayer, MultiInputMultiOutputPreservesActivePrefixWithPoisonedIn
     layer.cleanup();
 }
 
-TEST(RaggedCustomLayer, GpuOffsetsDirectlyDriveRuntimeExtentWithoutHostActiveValueCount) {
+TEST(RaggedCustomLayer, ManagedActiveCountDirectlyDrivesRuntimeExtent) {
     REQUIRE_CUDA_DEVICE();
 
     constexpr uint64_t batchSize = 3;
@@ -347,13 +362,9 @@ TEST(RaggedCustomLayer, GpuOffsetsDirectlyDriveRuntimeExtentWithoutHostActiveVal
     ThorTest::poisonInactiveRows(rhsValues, activeRows, inputWidth, ThorTest::RaggedInactivePoison::NaN);
     Tensor lhs = makeGpuFp32Tensor({fullCapacityRows, inputWidth}, lhsValues, stream);
     Tensor rhs = makeGpuFp32Tensor({fullCapacityRows, inputWidth}, rhsValues, stream);
-    Tensor offsets = makeGpuU32Tensor({batchSize + 1}, {0, 3, 3, 5}, stream);
-    ASSERT_FALSE(RowPartitionRuntime(offsets, RowPartitionDescriptor(batchSize, fullCapacityRows, DataType::UINT32))
-                     .getHostActiveValueCountIfAvailable()
-                     .has_value());
-
+    Tensor activeCount = makeGpuU32Tensor({1}, {activeRows}, stream);
     RaggedCustomLayer layer(buildTwoInputTwoOutputRaggedExpression(batchSize, fullCapacityRows),
-                            {"lhs", "rhs", "offsets"},
+                            {"lhs", "rhs", "active_count"},
                             {"wide", "narrow"},
                             gpuPlacement,
                             std::vector<std::shared_ptr<PhysicalParameter>>{},
@@ -366,13 +377,13 @@ TEST(RaggedCustomLayer, GpuOffsetsDirectlyDriveRuntimeExtentWithoutHostActiveVal
 
     PassiveEndpoint lhsSource;
     PassiveEndpoint rhsSource;
-    PassiveEndpoint offsetsSource;
+    PassiveEndpoint activeCountSource;
     PassiveEndpoint wideSink;
     PassiveEndpoint narrowSink;
 
     layer.connectToPreviousLayer(&lhsSource, lhs, stream, false, 0);
     layer.connectToPreviousLayer(&rhsSource, rhs, stream, false, 1);
-    layer.connectToPreviousLayer(&offsetsSource, offsets, stream, false, 2);
+    layer.connectToPreviousLayer(&activeCountSource, activeCount, stream, false, 2);
     layer.connectToNextLayer(&wideSink, 0, 0);
     layer.connectToNextLayer(&narrowSink, 1, 0);
     layer.compile();
@@ -380,7 +391,7 @@ TEST(RaggedCustomLayer, GpuOffsetsDirectlyDriveRuntimeExtentWithoutHostActiveVal
 
     layer.forward(lhs, false, batchSize);
     layer.forward(rhs, false, batchSize);
-    EXPECT_NO_THROW(layer.forward(offsets, false, batchSize));
+    EXPECT_NO_THROW(layer.forward(activeCount, false, batchSize));
     ASSERT_TRUE(wideSink.lastForward.has_value());
     ASSERT_TRUE(narrowSink.lastForward.has_value());
 
@@ -392,6 +403,53 @@ TEST(RaggedCustomLayer, GpuOffsetsDirectlyDriveRuntimeExtentWithoutHostActiveVal
                expectedNarrow);
 
     layer.cleanup();
+}
+
+TEST(RaggedCustomLayer, ManagedActiveCountRejectsFullOffsetsCarrier) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batchSize = 3;
+    constexpr uint64_t fullCapacityRows = 8;
+    constexpr uint64_t activeRows = 5;
+    constexpr uint64_t inputWidth = 4;
+
+    Stream stream(0);
+    Tensor lhs = makeGpuFp32Tensor({fullCapacityRows, inputWidth},
+                                  std::vector<float>(fullCapacityRows * inputWidth, 1.0f),
+                                  stream);
+    Tensor rhs = makeGpuFp32Tensor({fullCapacityRows, inputWidth},
+                                  std::vector<float>(fullCapacityRows * inputWidth, 2.0f),
+                                  stream);
+    Tensor fullOffsets = makeGpuU32Tensor({batchSize + 1}, {0, 3, 3, activeRows}, stream);
+
+    RaggedCustomLayer layer(buildTwoInputTwoOutputRaggedExpression(batchSize, fullCapacityRows),
+                            {"lhs", "rhs", "active_count"},
+                            {"wide", "narrow"},
+                            gpuPlacement,
+                            std::vector<std::shared_ptr<PhysicalParameter>>{},
+                            true,
+                            fullCapacityRows,
+                            {inputWidth, inputWidth},
+                            {inputWidth, 2},
+                            {0, 1},
+                            2);
+
+    PassiveEndpoint lhsSource;
+    PassiveEndpoint rhsSource;
+    PassiveEndpoint partitionSource;
+    PassiveEndpoint wideSink;
+    PassiveEndpoint narrowSink;
+    layer.connectToPreviousLayer(&lhsSource, lhs, stream, false, 0);
+    layer.connectToPreviousLayer(&rhsSource, rhs, stream, false, 1);
+    layer.connectToPreviousLayer(&partitionSource, fullOffsets, stream, false, 2);
+    layer.connectToNextLayer(&wideSink, 0, 0);
+    layer.connectToNextLayer(&narrowSink, 1, 0);
+
+    // The physical-source contract is shape-checked while stamping the fused
+    // execution plan, so a [B+1] carrier for DEVICE_ACTIVE_COUNT is rejected
+    // before execution rather than being tolerated until forward().
+    EXPECT_THROW(layer.compile(), std::runtime_error);
+    EXPECT_NO_THROW(layer.cleanup());
 }
 
 TEST(RaggedCustomLayer, ChainedActiveAwareExpressionsIgnorePoisonedInactiveStorageForwardAndBackward) {
@@ -411,11 +469,7 @@ TEST(RaggedCustomLayer, ChainedActiveAwareExpressionsIgnorePoisonedInactiveStora
     }
     ThorTest::poisonInactiveRows(xValues, activeRows, width, ThorTest::RaggedInactivePoison::NaN);
     Tensor x = makeGpuFp32Tensor({fullCapacityRows, width}, xValues, stream);
-    Tensor offsets = makeGpuU32Tensor({batchSize + 1}, {0, 2, 2, 5}, stream);
-    ASSERT_FALSE(RowPartitionRuntime(offsets, RowPartitionDescriptor(batchSize, fullCapacityRows, DataType::UINT32))
-                     .getHostActiveValueCountIfAvailable()
-                     .has_value());
-
+    Tensor activeCount = makeGpuU32Tensor({1}, {activeRows}, stream);
     RaggedCustomLayer first(buildAffineRaggedExpression(batchSize, fullCapacityRows, width, 2.0f, 1.0f),
                             {"x", RaggedCustomLayer::RAGGED_OFFSETS_INPUT_NAME},
                             {"y"},
@@ -438,16 +492,16 @@ TEST(RaggedCustomLayer, ChainedActiveAwareExpressionsIgnorePoisonedInactiveStora
                              1);
 
     PassiveEndpoint firstInputSource;
-    PassiveEndpoint firstOffsetsSource;
+    PassiveEndpoint firstActiveCountSource;
     PassiveEndpoint firstSink;
     ASSERT_TRUE(first.connectToPreviousLayer(&firstInputSource, x, stream, true, 0).has_value());
-    ASSERT_FALSE(first.connectToPreviousLayer(&firstOffsetsSource, offsets, stream, false, 1).has_value());
+    ASSERT_FALSE(first.connectToPreviousLayer(&firstActiveCountSource, activeCount, stream, false, 1).has_value());
     first.connectToNextLayer(&firstSink, 0, 0);
     first.compile();
     first.initialize();
 
     first.forward(x, false, batchSize);
-    first.forward(offsets, false, batchSize);
+    first.forward(activeCount, false, batchSize);
     ASSERT_TRUE(firstSink.lastForward.has_value());
     Tensor middle = firstSink.lastForward.value();
     std::vector<float> middleValues = readGpuFp32Tensor(middle, stream);
@@ -460,21 +514,21 @@ TEST(RaggedCustomLayer, ChainedActiveAwareExpressionsIgnorePoisonedInactiveStora
 
     // The first producer makes no promise about its inactive storage. Force that
     // storage dirty before the next active-aware consumer to prove the consumer
-    // really is bounded by offsets[B], not by physical capacity.
+    // really is bounded by the managed active count, not by physical capacity.
     ThorTest::poisonInactiveRows(middleValues, activeRows, width, ThorTest::RaggedInactivePoison::NegativeFinite);
     overwriteGpuFp32Tensor(middle, middleValues, stream);
 
     PassiveEndpoint secondInputSource;
-    PassiveEndpoint secondOffsetsSource;
+    PassiveEndpoint secondActiveCountSource;
     PassiveEndpoint secondSink;
     ASSERT_TRUE(second.connectToPreviousLayer(&secondInputSource, middle, stream, true, 0).has_value());
-    ASSERT_FALSE(second.connectToPreviousLayer(&secondOffsetsSource, offsets, stream, false, 1).has_value());
+    ASSERT_FALSE(second.connectToPreviousLayer(&secondActiveCountSource, activeCount, stream, false, 1).has_value());
     second.connectToNextLayer(&secondSink, 0, 0);
     second.compile();
     second.initialize();
 
     second.forward(middle, false, batchSize);
-    second.forward(offsets, false, batchSize);
+    second.forward(activeCount, false, batchSize);
     ASSERT_TRUE(secondSink.lastForward.has_value());
     const std::vector<float> actualOutput = readGpuFp32Tensor(secondSink.lastForward.value(), stream);
     std::vector<float> expectedOutput(activeRows * width, 0.0f);
@@ -551,7 +605,7 @@ TEST(RaggedCustomLayer, TrainableParameterGradientAndSgdUpdateIgnoreInactivePack
     ThorTest::poisonInactiveRows(
         xValues, activeRows, width, ThorTest::RaggedInactivePoison::PositiveFinite);
     Tensor x = makeGpuFp32Tensor({fullCapacityRows, width}, xValues, stream);
-    Tensor offsets = makeGpuU32Tensor({batchSize + 1}, {0, 3, 3, 5}, stream);
+    Tensor fullOffsets = makeGpuU32Tensor({batchSize + 1}, {0, 3, 3, activeRows}, stream);
 
     const std::vector<float> initialScale{2.0f, -1.0f, 0.5f, 3.0f};
     auto scale = std::make_shared<FixedTrainableVectorParameter>("scale", initialScale);
@@ -576,13 +630,13 @@ TEST(RaggedCustomLayer, TrainableParameterGradientAndSgdUpdateIgnoreInactivePack
     PassiveEndpoint offsetsSource;
     PassiveEndpoint sink;
     ASSERT_TRUE(layer.connectToPreviousLayer(&xSource, x, stream, true, 0).has_value());
-    ASSERT_FALSE(layer.connectToPreviousLayer(&offsetsSource, offsets, stream, false, 1).has_value());
+    ASSERT_FALSE(layer.connectToPreviousLayer(&offsetsSource, fullOffsets, stream, false, 1).has_value());
     layer.connectToNextLayer(&sink, 0, 0);
     layer.compile();
     layer.initialize();
 
     layer.forward(x, false, batchSize);
-    layer.forward(offsets, false, batchSize);
+    layer.forward(fullOffsets, false, batchSize);
     ASSERT_TRUE(sink.lastForward.has_value());
     const std::vector<float> actualY = readGpuFp32Tensor(sink.lastForward.value(), stream);
     for (uint64_t row = 0; row < activeRows; ++row) {

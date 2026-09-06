@@ -1220,10 +1220,10 @@ static std::vector<uint64_t> inferRaggedValuewiseExtentDims(const ExprNode& node
         throw std::runtime_error("ragged valuewise extent metadata must be non-zero.");
     }
     // RAGGED_VALUEWISE_EXTENT is also the structural carrier into packed host
-    // stages. That carrier may be the values tensor itself, the managed [1]
-    // active-count tensor, or legacy [B+1] offsets. Its shape does not affect
-    // the marker's logical value shape. Fused GPU stages validate the selected
-    // device payload representation separately.
+    // stages. Its physical representation is selected explicitly by
+    // ragged_runtime_extent_source; its shape does not affect the marker's
+    // logical value shape. Fused GPU stages validate that representation
+    // separately.
     uint64_t expected_numel = node.ragged_runtime_max_active_values;
     if (node.ragged_runtime_elements_per_value > std::numeric_limits<uint64_t>::max() / expected_numel) {
         throw std::runtime_error("ragged valuewise extent maximum element count overflows uint64_t.");
@@ -4628,61 +4628,6 @@ static std::optional<RaggedFusedStageFlopModelSpec> computeActiveExtentFusedStag
         .flops_per_active_value = flops_per_active_value,
         .fixed_flops_when_nonempty = fixed_flops_when_nonempty,
     };
-}
-
-static void adaptTransitionalOffsetsCarrierForDeviceActiveCount(
-    const PhysicalExpression& expr, std::vector<RuntimeInputValue>& stage_inputs) {
-    std::optional<uint32_t> active_count_input_slot;
-    std::optional<uint64_t> batch_size;
-    for (const ExprNode& node : expr.nodes) {
-        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT ||
-            node.ragged_runtime_extent_source != RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT) {
-            continue;
-        }
-        if (node.rhs >= expr.nodes.size()) {
-            throw std::runtime_error("Ragged active-count carrier adaptation encountered an invalid runtime-extent marker.");
-        }
-        const ExprNode& partition_node = expr.nodes[node.rhs];
-        if (partition_node.op != ExprOp::INPUT || partition_node.input_slot >= stage_inputs.size()) {
-            throw std::runtime_error("Ragged active-count carrier adaptation requires a direct physical partition input.");
-        }
-        if (node.ragged_runtime_batch_size == 0) {
-            throw std::runtime_error("Ragged active-count carrier adaptation requires non-zero batch size metadata.");
-        }
-        if (!active_count_input_slot.has_value()) {
-            active_count_input_slot = partition_node.input_slot;
-            batch_size = node.ragged_runtime_batch_size;
-        } else if (active_count_input_slot.value() != partition_node.input_slot ||
-                   batch_size.value() != node.ragged_runtime_batch_size) {
-            throw std::runtime_error(
-                "One fused stage cannot adapt multiple logical row partitions to one managed active-count input.");
-        }
-    }
-
-    if (!active_count_input_slot.has_value()) {
-        return;
-    }
-    RuntimeInputValue& input = stage_inputs.at(active_count_input_slot.value());
-    if (!runtimeInputIsTensor(input)) {
-        throw std::runtime_error("Ragged active-count carrier adaptation requires a tensor physical input.");
-    }
-    Tensor carrier = runtimeInputTensor(input);
-    if (carrier.getDimensions() == std::vector<uint64_t>{1}) {
-        return;
-    }
-    if (carrier.getDimensions() != std::vector<uint64_t>{batch_size.value() + 1} ||
-        !isCanonicalRowPartitionOffsetDataType(carrier.getDataType()) || !carrier.isDenseContiguous() ||
-        carrier.getStorageElementOffset() != 0) {
-        throw std::runtime_error(
-            "Ragged DEVICE_ACTIVE_COUNT consumer received neither managed [1] active count nor transitional [B+1] offsets.");
-    }
-
-    // RP6C will physicalize internally-created partitions through the same
-    // hidden managed inputs as external partitions. Until then, preserve
-    // composition by presenting the legacy offsets[B] cell as an ordinary [1]
-    // tensor input to the already-migrated fused kernel. The alias shares the
-    // backing allocation and therefore the authoritative host publication.
-    input = carrier.aliasView({1}, {1}, batch_size.value());
 }
 
 static std::optional<RaggedFusedStageFlopModelSpec> computeRaggedFusedStageFlopModel(
@@ -10572,10 +10517,6 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     dependency_stage_indices.push_back(dep_stage_idx);
                 }
             }
-        }
-
-        if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
-            adaptTransitionalOffsetsCarrierForDeviceActiveCount(stage.expr, stageInputs);
         }
 
         std::vector<std::vector<uint64_t>> stage_input_dims;

@@ -42,8 +42,8 @@ class DropOutRuntimeState {
 // Backward regenerates the Philox mask, producing the masked/scaled gradient
 // for projected and an identity gradient for residual. Ragged mode limits all
 // reads/writes to activeValueCount * featuresPerValue, leaving packed tail
-// storage untouched. The structural carrier may be legacy offsets[B] or the
-// RP6B managed [1] active-count tensor.
+// storage untouched. Partition-preserving ragged dropout uses the managed [1]
+// active-count tensor as its structural carrier.
 CudaKernelExpression makeDropOutPostOpKernel(
     DataType dataType,
     float probability,

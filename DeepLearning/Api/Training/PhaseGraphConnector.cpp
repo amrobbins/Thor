@@ -29,12 +29,24 @@ string phaseContext(const PhaseGraphNetworkSpec& spec) {
 
 vector<shared_ptr<NetworkInput>> apiNetworkInputs(const Network& networkConst, bool includePassThroughInputs) {
     Network& network = const_cast<Network&>(networkConst);
+    set<uint64_t> logicalPartitionTokenIds;
+    for (const RaggedNetworkInputReference& ragged : network.getExternalRaggedNetworkInputs()) {
+        logicalPartitionTokenIds.insert(ragged.raggedTensor.getRowPartitionToken().getOriginalId());
+    }
+
     vector<shared_ptr<NetworkInput>> inputs;
     const uint32_t numLayers = network.getNumLayers();
     inputs.reserve(numLayers);
     for (uint32_t layerIndex = 0; layerIndex < numLayers; ++layerIndex) {
         shared_ptr<NetworkInput> input = dynamic_pointer_cast<NetworkInput>(network.getLayer(layerIndex));
         if (input == nullptr) {
+            continue;
+        }
+        if (input->getFeatureOutput().has_value() &&
+            logicalPartitionTokenIds.count(input->getFeatureOutput()->getOriginalId()) != 0) {
+            // RP7 row-partition tokens are graph topology, not phase-graph
+            // external data boundaries. Their remap is installed alongside the
+            // owning logical ragged values input below.
             continue;
         }
         if (!includePassThroughInputs && input->hasPassThroughSource()) {
@@ -91,8 +103,7 @@ void validateProducerConsumerDescriptors(const string& tensorName,
 
 optional<RaggedNetworkInputReference> raggedInputForPhysicalName(const Network& network, const string& physicalInputName) {
     for (const RaggedNetworkInputReference& ragged : network.getExternalRaggedNetworkInputs()) {
-        if (physicalInputName == ragged.valuesInputName ||
-            (!ragged.partitionInputName.has_value() && physicalInputName == ragged.offsetsInputName)) {
+        if (physicalInputName == ragged.valuesInputName) {
             return ragged;
         }
     }
@@ -153,13 +164,13 @@ Tensor ensureExternalInput(ComposedPhaseGraph& graph, const Network& sourceNetwo
                     }
                     shared_ptr<NetworkInput> sourcePartitionInput;
                     for (const shared_ptr<NetworkInput>& candidate : sourceNetwork.getExternalNetworkInputs()) {
-                        if (candidate->getName() == sourcePartition->offsetsInputName) {
+                        if (candidate->getName() == sourcePartition->valuesInputName) {
                             sourcePartitionInput = candidate;
                             break;
                         }
                     }
                     if (sourcePartitionInput == nullptr) {
-                        throw runtime_error("Phase graph cannot locate physical offsets boundary for shared ragged partition source '" +
+                        throw runtime_error("Phase graph cannot locate values boundary for shared ragged partition source '" +
                                             sourcePartition->name + "'.");
                     }
                     (void)ensureExternalInput(graph, sourceNetwork, *sourcePartitionInput);
@@ -182,12 +193,8 @@ Tensor ensureExternalInput(ComposedPhaseGraph& graph, const Network& sourceNetwo
         }
 
         graph.externalInputTensorsByName[sourceRagged->valuesInputName] = destinationRagged.getValues();
-        graph.externalInputTensorsByName[sourceRagged->offsetsInputName] = destinationRagged.getOffsets();
-        if (inputName == sourceRagged->valuesInputName) {
-            return destinationRagged.getValues();
-        }
-        THOR_THROW_IF_FALSE(inputName == sourceRagged->offsetsInputName);
-        return destinationRagged.getOffsets();
+        THOR_THROW_IF_FALSE(inputName == sourceRagged->valuesInputName);
+        return destinationRagged.getValues();
     }
 
     auto existingIt = graph.externalInputTensorsByName.find(inputName);
@@ -386,6 +393,27 @@ ComposedPhaseGraph buildComposedPhaseGraphByName(const vector<PhaseGraphNetworkS
                 destinationTensor = ensureExternalInput(graph, *phase.spec.network, *input);
             }
             remap.map(input->getFeatureOutput().value(), destinationTensor);
+        }
+
+        // A logical ragged boundary has one public values input. Map its hidden
+        // row-partition topology token at the same time so cloneSubgraphInto()
+        // never needs to clone or expose the token-producing NetworkInput.
+        for (const RaggedNetworkInputReference& sourceRagged : phase.spec.network->getExternalRaggedNetworkInputs()) {
+            if (!remap.contains(sourceRagged.raggedTensor.getValues())) {
+                continue;
+            }
+            optional<RaggedNetworkInputReference> destinationRagged;
+            for (const RaggedNetworkInputReference& candidate : graph.network->getExternalRaggedNetworkInputs()) {
+                if (candidate.name == sourceRagged.name) {
+                    destinationRagged = candidate;
+                    break;
+                }
+            }
+            if (!destinationRagged.has_value()) {
+                continue;
+            }
+            remap.map(sourceRagged.raggedTensor.getRowPartitionToken(),
+                      destinationRagged->raggedTensor.getRowPartitionToken());
         }
 
         vector<string> phaseOutputNames;

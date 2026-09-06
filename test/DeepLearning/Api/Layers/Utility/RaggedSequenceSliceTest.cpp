@@ -133,21 +133,22 @@ TEST(UtilityApiLayers, RaggedSequenceSliceSubgraphCloneRemapsInputAndAllocatesNe
 
     ApiTensorRemap remap;
     remap.map(sourceInput.getValues(), destinationInput.getValues());
-    remap.map(sourceInput.getOffsets(), destinationInput.getOffsets());
+    remap.map(sourceInput.getRowPartitionToken(), destinationInput.getRowPartitionToken());
     ApiSubgraphCloneOptions options;
     options.inferenceOnly = true;
     ApiSubgraphCloneResult clone = destination.cloneSubgraphInto(
         source,
-        {"__thor_ragged_output.sliced.values", "__thor_ragged_output.sliced.offsets"},
+        {"__thor_ragged_output.sliced.values"},
         remap,
         options);
 
-    ASSERT_EQ(clone.outputTensorsByName.size(), 2u);
+    ASSERT_EQ(clone.outputTensorsByName.size(), 1u);
     Tensor clonedValues = clone.outputTensorsByName.at("__thor_ragged_output.sliced.values");
-    Tensor clonedOffsets = clone.outputTensorsByName.at("__thor_ragged_output.sliced.offsets");
+    Tensor clonedPartitionToken = clone.clonedTensorBySourceOriginalId.at(
+        sourceSlice.getRaggedFeatureOutput().getRowPartitionToken().getOriginalId());
     EXPECT_EQ(clonedValues.getDimensions(), (vector<uint64_t>{6, 2}));
-    EXPECT_EQ(clonedOffsets.getDimensions(), (vector<uint64_t>{4}));
-    EXPECT_NE(clonedOffsets, destinationInput.getOffsets());
+    EXPECT_EQ(clonedPartitionToken.getDimensions(), (vector<uint64_t>{4}));
+    EXPECT_NE(clonedPartitionToken, destinationInput.getRowPartitionToken());
 }
 
 TEST(UtilityApiLayers, RaggedSequenceSliceRejectsMissingOrZeroLengthConfiguration) {

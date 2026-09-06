@@ -64,11 +64,8 @@ RaggedTensor RaggedNetworkInput::Builder::build() {
                                        .build();
 
         RaggedTensor raggedTensor = partition.withValues(valuesInput.getFeatureOutput().value());
-        network_.value()->registerRaggedNetworkInput(name_.value(),
-                                                     raggedTensor,
-                                                     valuesInputName,
-                                                     partitionSource->offsetsInputName,
-                                                     canonicalPartitionInputName);
+        network_.value()->registerRaggedNetworkInput(
+            name_.value(), raggedTensor, valuesInputName, canonicalPartitionInputName);
         return raggedTensor;
     }
 
@@ -83,7 +80,7 @@ RaggedTensor RaggedNetworkInput::Builder::build() {
     const DataType offsetsDataType = offsetsDataType_.value_or(DataType::UINT32);
     THOR_THROW_IF_FALSE(ThorImplementation::RowPartitionDescriptor::isValidOffsetsDataType(offsetsDataType));
 
-    const std::string offsetsInputName = name_.value() + ".offsets";
+    const std::string partitionTokenInputName = "__thor_row_partition." + name_.value();
 
     NetworkInput valuesInput = NetworkInput::Builder()
                                    .network(*network_.value())
@@ -93,18 +90,22 @@ RaggedTensor RaggedNetworkInput::Builder::build() {
                                    .dimensionsIncludeBatch(true)
                                    .build();
 
-    NetworkInput offsetsInput = NetworkInput::Builder()
-                                    .network(*network_.value())
-                                    .name(offsetsInputName)
-                                    .dimensions({batchSize_.value() + 1})
-                                    .dataType(offsetsDataType)
-                                    .dimensionsIncludeBatch(true)
-                                    .build();
+    // This token is graph topology only. It is deliberately non-external and
+    // Network::place() never stamps it. Requirement-driven managed inputs are the
+    // only device partition allocations for this logical boundary.
+    NetworkInput partitionTokenInput = NetworkInput::Builder()
+                                           .network(*network_.value())
+                                           .name(partitionTokenInputName)
+                                           .dimensions({batchSize_.value() + 1})
+                                           .dataType(offsetsDataType)
+                                           .dimensionsIncludeBatch(true)
+                                           .external(false)
+                                           .build();
 
     RaggedTensor raggedTensor = maxValuesPerRow_.has_value()
-        ? RaggedTensor(valuesInput.getFeatureOutput().value(), offsetsInput.getFeatureOutput().value(), maxValuesPerRow_.value())
-        : RaggedTensor(valuesInput.getFeatureOutput().value(), offsetsInput.getFeatureOutput().value());
-    network_.value()->registerRaggedNetworkInput(name_.value(), raggedTensor, valuesInputName, offsetsInputName);
+        ? RaggedTensor(valuesInput.getFeatureOutput().value(), partitionTokenInput.getFeatureOutput().value(), maxValuesPerRow_.value())
+        : RaggedTensor(valuesInput.getFeatureOutput().value(), partitionTokenInput.getFeatureOutput().value());
+    network_.value()->registerRaggedNetworkInput(name_.value(), raggedTensor, valuesInputName);
     return raggedTensor;
 }
 

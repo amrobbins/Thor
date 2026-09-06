@@ -67,7 +67,6 @@ struct ReductionFixture {
     Api::SegmentedReduction reduction;
     Api::NetworkOutput output;
     shared_ptr<Api::NetworkInput> valuesInput;
-    shared_ptr<Api::NetworkInput> offsetsInput;
     Impl::RowPartitionId rowPartitionId = 0;
 };
 
@@ -101,7 +100,6 @@ ReductionFixture makeReductionFixture(Api::SegmentedReduction::Type type) {
             reduction,
             output,
             findInput(*network, "history.values"),
-            findInput(*network, "history.offsets"),
             input.getRowPartitionId()};
 }
 
@@ -141,7 +139,6 @@ void runForwardBackwardCase(Api::SegmentedReduction::Type type) {
     constexpr uint32_t batchSize = 3;
     ReductionFixture fixture = makeReductionFixture(type);
     ASSERT_NE(fixture.valuesInput, nullptr);
-    ASSERT_NE(fixture.offsetsInput, nullptr);
     EXPECT_EQ(fixture.reduction.getFeatureOutput()->getDimensions(), (vector<uint64_t>{2}));
 
     vector<Event> initDoneEvents;

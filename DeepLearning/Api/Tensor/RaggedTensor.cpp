@@ -10,12 +10,12 @@ using json = nlohmann::json;
 std::atomic<uint64_t> RaggedTensor::nextId(20000);
 
 RaggedTensor::RaggedTensor(Tensor values, Tensor offsets)
-    : id(nextId.fetch_add(1)), originalId(id), values(values), offsets(offsets) {
+    : id(nextId.fetch_add(1)), originalId(id), values(values), rowPartitionToken(offsets) {
     constructFromValuesAndOffsets();
 }
 
 RaggedTensor::RaggedTensor(Tensor values, Tensor offsets, uint64_t maxValuesPerRow)
-    : id(nextId.fetch_add(1)), originalId(id), values(values), offsets(offsets), maxValuesPerRow(maxValuesPerRow) {
+    : id(nextId.fetch_add(1)), originalId(id), values(values), rowPartitionToken(offsets), maxValuesPerRow(maxValuesPerRow) {
     constructFromValuesAndOffsets();
     THOR_THROW_IF_FALSE(maxValuesPerRow > 0 && maxValuesPerRow <= maxTotalValues);
 }
@@ -52,18 +52,18 @@ std::vector<uint64_t> RaggedTensor::makeValuesDimensions(uint64_t maxTotalValues
 
 void RaggedTensor::constructFromValuesAndOffsets() {
     THOR_THROW_IF_FALSE(values.isInitialized());
-    THOR_THROW_IF_FALSE(offsets.isInitialized());
-    THOR_THROW_IF_FALSE(offsetsDataTypeValid(offsets.getDataType()));
+    THOR_THROW_IF_FALSE(rowPartitionToken.isInitialized());
+    THOR_THROW_IF_FALSE(offsetsDataTypeValid(rowPartitionToken.getDataType()));
 
     const std::vector<uint64_t> valuesDimensions = values.getDimensions();
-    const std::vector<uint64_t> offsetsDimensions = offsets.getDimensions();
+    const std::vector<uint64_t> offsetsDimensions = rowPartitionToken.getDimensions();
     THOR_THROW_IF_FALSE(!valuesDimensions.empty());
     THOR_THROW_IF_FALSE(offsetsDimensions.size() == 1);
     THOR_THROW_IF_FALSE(offsetsDimensions[0] >= 1);
 
     maxTotalValues = valuesDimensions[0];
     batchSize = offsetsDimensions[0] - 1;
-    rowPartitionId = offsets.getId();
+    rowPartitionId = rowPartitionToken.getId();
     THOR_THROW_IF_FALSE(rowPartitionId != 0);
     THOR_THROW_IF_FALSE(maxTotalValues > 0);
     initialized = true;
@@ -75,8 +75,8 @@ RaggedTensor RaggedTensor::withValues(Tensor newValues) const {
     const std::vector<uint64_t> dimensions = newValues.getDimensions();
     THOR_THROW_IF_FALSE(!dimensions.empty());
     THOR_THROW_IF_FALSE(dimensions.front() == maxTotalValues);
-    RaggedTensor result = hasMaxValuesPerRow() ? RaggedTensor(std::move(newValues), offsets, maxValuesPerRow)
-                                                : RaggedTensor(std::move(newValues), offsets);
+    RaggedTensor result = hasMaxValuesPerRow() ? RaggedTensor(std::move(newValues), rowPartitionToken, maxValuesPerRow)
+                                                : RaggedTensor(std::move(newValues), rowPartitionToken);
     result.rowPartitionId = rowPartitionId;
     return result;
 }
@@ -96,10 +96,10 @@ ThorImplementation::RaggedTensorDescriptor RaggedTensor::getDescriptor() const {
                                                           batchSize,
                                                           maxTotalValues,
                                                           maxValuesPerRow,
-                                                          offsets.getDataType());
+                                                          rowPartitionToken.getDataType());
     }
     return ThorImplementation::RaggedTensorDescriptor(
-        values.getDataType(), getTrailingDimensions(), batchSize, maxTotalValues, offsets.getDataType());
+        values.getDataType(), getTrailingDimensions(), batchSize, maxTotalValues, rowPartitionToken.getDataType());
 }
 
 json RaggedTensor::architectureJson() const {
@@ -110,7 +110,7 @@ json RaggedTensor::architectureJson() const {
              {"batch_size", getBatchSize()},
              {"max_total_values", getMaxTotalValues()},
              {"values", values.architectureJson()},
-             {"offsets", offsets.architectureJson()}};
+             {"offsets", rowPartitionToken.architectureJson()}};
     if (hasMaxValuesPerRow()) out["max_values_per_row"] = getMaxValuesPerRow();
     return out;
 }
@@ -123,7 +123,7 @@ json RaggedTensor::serialize(thor_file::TarWriter &archiveWriter) const {
              {"batch_size", getBatchSize()},
              {"max_total_values", getMaxTotalValues()},
              {"values", values.serialize(archiveWriter)},
-             {"offsets", offsets.serialize(archiveWriter)}};
+             {"offsets", rowPartitionToken.serialize(archiveWriter)}};
     if (hasMaxValuesPerRow()) out["max_values_per_row"] = getMaxValuesPerRow();
     return out;
 }

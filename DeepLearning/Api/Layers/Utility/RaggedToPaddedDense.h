@@ -29,6 +29,13 @@ class RaggedToPaddedDense : public MultiConnectionLayer {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<RaggedToPaddedDense>(*this); }
     std::string getLayerType() const override { return "RaggedToPaddedDense"; }
 
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedFeatureInput.isInitialized() && inputTensor == raggedFeatureInput.getOffsets())
+            return ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
+
     [[nodiscard]] RaggedTensor getRaggedFeatureInput() const { return raggedFeatureInput; }
     [[nodiscard]] Tensor getPaddedFeatureOutput() const { return featureOutputs.front(); }
     [[nodiscard]] double getPaddingValue() const { return paddingValue; }

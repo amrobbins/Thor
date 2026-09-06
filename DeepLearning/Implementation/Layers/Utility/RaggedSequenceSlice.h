@@ -2,9 +2,7 @@
 
 #include "DeepLearning/Implementation/Layers/MultiConnectionLayer.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
-#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/TensorOperations/Ragged/RaggedSequenceSlice.h"
-#include "Utilities/TensorOperations/Ragged/RowPartition.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -17,10 +15,11 @@
 
 namespace ThorImplementation {
 
-// Physical R9B sequence-axis slice. Input connection type 0 is packed values
-// and 1 is canonical offsets. Output connection type 0 is compacted values and
-// 1 is the host-derived output offsets tensor materialized for GPU consumers.
-// Only the values ports participate in autodiff.
+// Physical sequence-axis slice. Input connection type 0 is packed values,
+// 1 is the source partition's device offsets, and 2 is the newly-created
+// partition's Thor-managed device offsets. The physical layer produces packed
+// values only; authoritative host state for the new partition is published by
+// StampedNetwork before physical batch submission.
 class RaggedSequenceSlice : public MultiConnectionLayer {
    public:
     RaggedSequenceSlice(uint64_t start,
@@ -42,15 +41,15 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
             throw std::invalid_argument("RaggedSequenceSlice input/output descriptors are incompatible.");
         }
 
-        previousLayers.resize(2);
-        featureInputs.resize(2);
-        errorOutputs.resize(2);
-        streams.resize(2);
-        forwardInputReadyEvents.resize(2);
+        previousLayers.resize(3);
+        featureInputs.resize(3);
+        errorOutputs.resize(3);
+        streams.resize(3);
+        forwardInputReadyEvents.resize(3);
 
-        featureOutputs.resize(2);
-        errorInputs.resize(2);
-        nextLayers.resize(2);
+        featureOutputs.resize(1);
+        errorInputs.resize(1);
+        nextLayers.resize(1);
     }
 
     ~RaggedSequenceSlice() override = default;
@@ -61,15 +60,14 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
 
     void compileImpl() override {
         MultiConnectionLayer::compileImpl();
-        THOR_THROW_IF_FALSE(featureInputs.size() == 2);
-        THOR_THROW_IF_FALSE(featureInputs[0].has_value() && featureInputs[1].has_value());
+        THOR_THROW_IF_FALSE(featureInputs.size() == 3);
+        THOR_THROW_IF_FALSE(featureInputs[0].has_value() && featureInputs[1].has_value() && featureInputs[2].has_value());
         THOR_THROW_IF_FALSE(featureInputs[0]->getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
 
         validateConnectedInputs();
-        ensureOutputAllocated(/*outputIndex=*/0);
-        ensureOutputAllocated(/*outputIndex=*/1);
+        ensureOutputAllocated();
 
-        allFeatureInputTensorIds = {featureInputs[0]->getTensorId(), featureInputs[1]->getTensorId()};
+        allFeatureInputTensorIds = {featureInputs[0]->getTensorId(), featureInputs[1]->getTensorId(), featureInputs[2]->getTensorId()};
     }
 
     void initialize() override {
@@ -111,12 +109,11 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
         stillWaitingForFeatureInputTensors = allFeatureInputTensorIds;
 
         streams[0].waitFor(streams[1], forwardInputReadyEvents[1]);
+        streams[0].waitFor(streams[2], forwardInputReadyEvents[2]);
 
-        RowPartitionRuntime outputPartition(featureOutputs[1].value(), outputDescriptor.getRowPartition());
-        publishAndUploadOutputHostPartition(outputPartition, streams[0]);
         launchRaggedSequenceSliceValues(featureInputs[0].value(),
                                         featureInputs[1].value(),
-                                        featureOutputs[1].value(),
+                                        featureInputs[2].value(),
                                         featureOutputs[0].value(),
                                         start,
                                         length,
@@ -124,10 +121,8 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
                                         streams[0]);
 
         streams[0].putEvent(outputsReadyEvent);
-        for (uint32_t outputIndex = 0; outputIndex < 2; ++outputIndex) {
-            if (!nextLayers[outputIndex].has_value()) continue;
-            nextLayers[outputIndex].value()->forward(featureOutputs[outputIndex], validationPass, currentValidExampleCount);
-        }
+        if (nextLayers[0].has_value())
+            nextLayers[0].value()->forward(featureOutputs[0], validationPass, currentValidExampleCount);
         currentValidExampleCount = 0;
         batchCardinalitySet = false;
     }
@@ -136,7 +131,7 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(running);
         if (!errorInput.has_value()) return;
         if (!errorInputs[0].has_value() || errorInput.value() != errorInputs[0].value()) {
-            throw std::logic_error("RaggedSequenceSlice received a gradient for its structural offsets output.");
+            throw std::logic_error("RaggedSequenceSlice received an unknown output gradient.");
         }
         if (!errorOutputs[0].has_value() || !previousLayers[0].has_value()) return;
 
@@ -147,7 +142,7 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(resolvedValidExampleCount >= 1 && resolvedValidExampleCount <= physicalBatchCapacity);
 
         launchRaggedSequenceSliceBackward(featureInputs[1].value(),
-                                          featureOutputs[1].value(),
+                                          featureInputs[2].value(),
                                           errorInput.value(),
                                           errorOutputs[0].value(),
                                           start,
@@ -159,23 +154,19 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
 
     void connectToNextLayer(Layer* nextLayer, int driverConnectionType = 0, int loaderConnectionType = 0) override {
         THOR_THROW_IF_FALSE(!compiled);
-        if (driverConnectionType < 0 || driverConnectionType > 1) {
-            throw std::logic_error("RaggedSequenceSlice output connection type must be 0 (values) or 1 (offsets).");
+        if (driverConnectionType != 0) {
+            throw std::logic_error("RaggedSequenceSlice has only one physical output: packed values.");
         }
-        const uint32_t outputIndex = static_cast<uint32_t>(driverConnectionType);
-        if (nextLayers[outputIndex].has_value()) {
-            throw std::logic_error("RaggedSequenceSlice output port was connected more than once without a fanout.");
+        if (nextLayers[0].has_value()) {
+            throw std::logic_error("RaggedSequenceSlice values output was connected more than once without a fanout.");
         }
-        ensureOutputAllocated(outputIndex);
-        nextLayers[outputIndex] = nextLayer;
+        ensureOutputAllocated();
+        nextLayers[0] = nextLayer;
 
-        const bool backPropagate = outputIndex == 0 && shouldConnectToBackPropErrorIn() && !isBackPropStub();
-        errorInputs[outputIndex] = nextLayer->connectToPreviousLayer(
-            this, featureOutputs[outputIndex], streams[0], backPropagate, loaderConnectionType);
-        if (outputIndex == 1 && errorInputs[outputIndex].has_value()) {
-            throw std::logic_error("RaggedSequenceSlice structural offsets output cannot participate in autodiff.");
-        }
-        if (outputIndex == 0 && !errorInputs[0].has_value()) pruneUpstreamValueGradient();
+        const bool backPropagate = shouldConnectToBackPropErrorIn() && !isBackPropStub();
+        errorInputs[0] = nextLayer->connectToPreviousLayer(
+            this, featureOutputs[0], streams[0], backPropagate, loaderConnectionType);
+        if (!errorInputs[0].has_value()) pruneUpstreamValueGradient();
         ensureNoDeviceCrossing();
     }
 
@@ -185,8 +176,9 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
                                                   bool backPropagateError,
                                                   int connectionType = 0) override {
         THOR_THROW_IF_FALSE(!compiled && featureInput.has_value() && previousLayer != nullptr);
-        if (connectionType < 0 || connectionType > 1) {
-            throw std::logic_error("RaggedSequenceSlice input connection type must be 0 (values) or 1 (offsets).");
+        if (connectionType < 0 || connectionType > 2) {
+            throw std::logic_error(
+                "RaggedSequenceSlice physical input connection type must be 0 (values), 1 (source offsets), or 2 (output offsets).");
         }
         const uint32_t inputIndex = static_cast<uint32_t>(connectionType);
         if (featureInputs[inputIndex].has_value() || previousLayers[inputIndex].has_value()) {
@@ -215,49 +207,28 @@ class RaggedSequenceSlice : public MultiConnectionLayer {
     }
 
    private:
-    void ensureOutputAllocated(uint32_t outputIndex) {
-        THOR_THROW_IF_FALSE(outputIndex < 2);
-        if (featureOutputs[outputIndex].has_value()) return;
+    void ensureOutputAllocated() {
+        if (featureOutputs[0].has_value()) return;
         std::optional<Tensor> firstInput = getFirstPresentTensor(featureInputs);
         THOR_THROW_IF_FALSE(firstInput.has_value());
-        const TensorPlacement placement = firstInput->getPlacement();
-        const TensorDescriptor descriptor = outputIndex == 0 ? outputDescriptor.getValuesDescriptor()
-                                                             : outputDescriptor.getOffsetsDescriptor();
-        featureOutputs[outputIndex] = Tensor(placement, descriptor);
+        featureOutputs[0] = Tensor(firstInput->getPlacement(), outputDescriptor.getValuesDescriptor());
     }
 
     void validateConnectedInputs() const {
-        THOR_THROW_IF_FALSE(featureInputs[0].has_value() && featureInputs[1].has_value());
-        if (featureInputs[0]->getPlacement() != featureInputs[1]->getPlacement()) {
+        THOR_THROW_IF_FALSE(featureInputs[0].has_value() && featureInputs[1].has_value() && featureInputs[2].has_value());
+        if (featureInputs[0]->getPlacement() != featureInputs[1]->getPlacement() ||
+            featureInputs[0]->getPlacement() != featureInputs[2]->getPlacement()) {
             throw std::invalid_argument("RaggedSequenceSlice values and offsets must reside on one device.");
         }
         if (featureInputs[0]->getDescriptor() != inputDescriptor.getValuesDescriptor()) {
             throw std::invalid_argument("RaggedSequenceSlice values input does not match its declared descriptor.");
         }
         if (featureInputs[1]->getDescriptor() != inputDescriptor.getOffsetsDescriptor()) {
-            throw std::invalid_argument("RaggedSequenceSlice offsets input does not match its declared descriptor.");
+            throw std::invalid_argument("RaggedSequenceSlice source offsets input does not match its declared descriptor.");
         }
-    }
-
-    void publishAndUploadOutputHostPartition(RowPartitionRuntime& outputPartition, Stream& stream) {
-        RowPartitionRuntime inputPartition(featureInputs[1].value(), inputDescriptor.getRowPartition());
-        const std::vector<uint64_t> inputHostOffsets = inputPartition.requireHostOffsets();
-
-        std::vector<uint64_t> outputHostOffsets(inputDescriptor.getBatchSize() + 1, 0);
-        for (uint64_t row = 0; row < inputDescriptor.getBatchSize(); ++row) {
-            const uint64_t rowBegin = inputHostOffsets.at(row);
-            const uint64_t rowEnd = inputHostOffsets.at(row + 1);
-            THOR_THROW_IF_FALSE(rowEnd >= rowBegin);
-            const uint64_t rowLength = rowEnd - rowBegin;
-            const uint64_t slicedLength = rowLength <= start ? 0 : std::min<uint64_t>(length, rowLength - start);
-            THOR_THROW_IF_FALSE(outputHostOffsets[row] <=
-                                std::numeric_limits<uint64_t>::max() - slicedLength);
-            outputHostOffsets[row + 1] = outputHostOffsets[row] + slicedLength;
+        if (featureInputs[2]->getDescriptor() != outputDescriptor.getOffsetsDescriptor()) {
+            throw std::invalid_argument("RaggedSequenceSlice output offsets input does not match its declared descriptor.");
         }
-        THOR_THROW_IF_FALSE(outputHostOffsets.back() <= outputDescriptor.getMaxTotalValues());
-        outputPartition.setHostOffsets(outputHostOffsets);
-        rowPartitionUploadHostOffsets(
-            outputHostOffsets, featureOutputs[1].value(), inputDescriptor.getBatchSize(), stream);
     }
 
     void pruneUpstreamValueGradient() {

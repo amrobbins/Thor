@@ -47,8 +47,10 @@ Concatenate rank-1 ragged inputs along their variable-length sequence axis.
 Every input must have the same logical batch size, values dtype, offsets dtype,
 and trailing value shape. Row partitions may differ. For each logical row, the
 output contains row 0 from every input in argument order, then row 1 from every
-input, and so on. The layer explicitly produces a new canonical offsets tensor;
-it does not reuse any input partition. Inactive packed capacity is never read.
+input, and so on. The layer creates a new logical row partition derived on the
+host from the authoritative input partitions; a device ``[B+1]`` representation
+is materialized only when an execution consumer needs it. Inactive packed
+capacity is never read.
 )nbdoc");
     layer.def("get_feature_output", &RaggedSequenceConcatenate::getRaggedFeatureOutput);
 }

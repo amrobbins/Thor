@@ -18,7 +18,9 @@ namespace Thor {
 // Concatenate canonical rank-1 RaggedTensor inputs along the variable-length
 // sequence axis. Unlike Concatenate(RaggedTensor), which joins trailing feature
 // dimensions and preserves one exact partition, this layer explicitly produces
-// a new canonical row partition Q from independently partitioned inputs.
+// a new canonical row partition Q from independently partitioned inputs. Q is
+// host-derived and requirement-physicalized by placement; the physical concatenate
+// layer itself produces values only.
 class RaggedSequenceConcatenate : public MultiConnectionLayer {
    public:
     class Builder;
@@ -28,6 +30,14 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
 
     std::shared_ptr<Layer> clone() const override { return std::make_shared<RaggedSequenceConcatenate>(*this); }
     std::string getLayerType() const override { return "RaggedSequenceConcatenate"; }
+
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        for (const RaggedTensor& input : raggedFeatureInputs)
+            if (inputTensor == input.getOffsets())
+                return ThorImplementation::kRaggedSequenceConcatenatePartitionRequirement;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
 
     [[nodiscard]] const std::vector<RaggedTensor>& getRaggedFeatureInputs() const { return raggedFeatureInputs; }
     [[nodiscard]] RaggedTensor getRaggedFeatureOutput() const { return raggedFeatureOutput; }

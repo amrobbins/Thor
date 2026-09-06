@@ -160,7 +160,7 @@ def test_ragged_network_input_can_share_existing_partition_without_repeating_str
 
     architecture = json.loads(n.get_architecture_json())
     physical_inputs = [layer["name"] for layer in architecture["layers"] if layer["layer_type"] == "network_input"]
-    assert sorted(physical_inputs) == ["feature.offsets", "feature.values", "mask.values"]
+    assert sorted(physical_inputs) == ["__thor_row_partition.feature", "feature.values", "mask.values"]
     mask_boundary = next(item for item in architecture["ragged_network_inputs"] if item["name"] == "mask")
     assert mask_boundary["partition_input_name"] == "feature"
     assert "offsets_input_name" not in mask_boundary

@@ -29,10 +29,10 @@ void bind_ragged_network_output(nb::module_& m) {
         R"nbdoc(
 Expose one logical ragged result from a Network.
 
-The packed values and row-partition offsets are materialized internally as a
-paired output, but inference returns one
-``thor.physical.PhysicalRaggedTensor`` under ``name`` rather than exposing the
-component output names.
+Only packed values are materialized as a network output. The logical row
+partition remains host-authoritative metadata and inference reconstructs the
+returned ``thor.physical.PhysicalRaggedTensor`` offsets view from that same host
+partition; no separate offsets output is exposed.
         )nbdoc");
 
     output.def("get_name", &RaggedNetworkOutput::getName);

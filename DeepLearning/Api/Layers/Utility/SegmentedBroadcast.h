@@ -26,6 +26,13 @@ class SegmentedBroadcast : public MultiConnectionLayer {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<SegmentedBroadcast>(*this); }
     std::string getLayerType() const override { return "SegmentedBroadcast"; }
 
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (partitionInput.isInitialized() && inputTensor == partitionInput.getOffsets())
+            return ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
+
     [[nodiscard]] Tensor getDenseFeatureInput() const { return denseFeatureInput; }
     [[nodiscard]] RaggedTensor getPartitionInput() const { return partitionInput; }
     [[nodiscard]] RaggedTensor getRaggedFeatureOutput() const { return raggedFeatureOutput; }

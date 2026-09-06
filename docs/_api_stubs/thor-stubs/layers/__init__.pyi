@@ -1419,8 +1419,10 @@ class RaggedSequenceConcatenate(MultiConnectionLayer):
         Every input must have the same logical batch size, values dtype, offsets dtype,
         and trailing value shape. Row partitions may differ. For each logical row, the
         output contains row 0 from every input in argument order, then row 1 from every
-        input, and so on. The layer explicitly produces a new canonical offsets tensor;
-        it does not reuse any input partition. Inactive packed capacity is never read.
+        input, and so on. The layer creates a new logical row partition derived on the
+        host from the authoritative input partitions; a device ``[B+1]`` representation
+        is materialized only when an execution consumer needs it. Inactive packed
+        capacity is never read.
         """
 
     def get_feature_output(self) -> thor.RaggedTensor: ...
@@ -1433,10 +1435,11 @@ class RaggedSequenceSlice(MultiConnectionLayer):
         ``start`` is a non-negative row-local token offset and ``length`` must be
         positive. Each row contributes at most ``length`` tokens beginning at ``start``;
         short rows are clipped independently and rows no longer than ``start`` become
-        empty. Selected values are compacted and the layer explicitly produces a new
-        canonical offsets tensor rather than preserving the input partition. Inactive
-        packed capacity is never read, and backward writes exact zero to active input
-        positions outside the selected window while leaving inactive gradient capacity
+        empty. Selected values are compacted and the layer creates a new logical row
+        partition derived on the host from the authoritative input partition. A device
+        ``[B+1]`` representation is materialized only when an execution consumer needs
+        it. Inactive packed capacity is never read, and backward writes exact zero to
+        active input positions outside the selected window while leaving inactive gradient capacity
         undefined.
         """
 
@@ -1489,10 +1492,10 @@ class RaggedNetworkOutput:
         """
         Expose one logical ragged result from a Network.
 
-        The packed values and row-partition offsets are materialized internally as a
-        paired output, but inference returns one
-        ``thor.physical.PhysicalRaggedTensor`` under ``name`` rather than exposing the
-        component output names.
+        Only packed values are materialized as a network output. The logical row
+        partition remains host-authoritative metadata and inference reconstructs the
+        returned ``thor.physical.PhysicalRaggedTensor`` offsets view from that same host
+        partition; no separate offsets output is exposed.
         """
 
     def get_name(self) -> str: ...

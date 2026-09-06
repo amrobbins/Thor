@@ -85,6 +85,8 @@ class CustomLayer : public TrainableLayer {
     int getConnectionType(Tensor connectingTensor) const override;
     [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
     getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override;
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForPlacement(const Tensor& inputTensor, bool inferenceOnly) const override;
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;
     bool mustConnectAllInputsToDriveOutput() const override { return true; }
     void informThatInputConnectionMade(Tensor inputTensor) override;
@@ -185,6 +187,7 @@ class CustomLayer : public TrainableLayer {
     void analyzeSerializableExpression(const SerializationProbe& batchOne, const SerializationProbe& batchTwo) const;
     uint32_t encodeInputConnection(uint32_t interfaceIndex, uint32_t inputPortIndex) const;
     uint32_t encodeOutputConnection(uint32_t interfaceIndex, uint32_t outputPortIndex) const;
+    [[nodiscard]] bool raggedTrainingMayNeedFullOffsets(bool inferenceOnly) const;
 
     ThorImplementation::DynamicExpression expr;
     bool batchValidityMaskEnabled = false;

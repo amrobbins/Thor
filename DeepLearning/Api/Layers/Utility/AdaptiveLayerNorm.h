@@ -51,6 +51,12 @@ class AdaptiveLayerNorm : public MultiConnectionLayer {
     DataType getScaleBiasDataType() const { return scaleBiasDataType; }
 
     int getConnectionType(Tensor connectingTensor) const override;
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedFeatureInput.has_value() && inputTensor == raggedFeatureInput->getOffsets())
+            return ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
     std::vector<Tensor> getFeatureInputs() const override;
     bool mustConnectAllInputsToDriveOutput() const override { return true; }
     [[nodiscard]] bool outputTensorDimensionsIncludeBatch(const Tensor& outputTensor) const override {

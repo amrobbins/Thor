@@ -5,6 +5,7 @@
 #include "DeepLearning/Implementation/ThorError.h"
 
 #include "DeepLearning/Implementation/Layers/Layer.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 
 namespace ThorImplementation {
 
@@ -156,6 +157,11 @@ class NetworkOutput : public Layer {
                 outputStream.value().putEvent(slot.outputReadyEvent, false, true);
                 slot.outputWritableEvent = slot.outputReadyEvent;
             }
+
+            // Logical ragged outputs carry their authoritative host row-partition
+            // state on the values allocation. Preserve that metadata across both
+            // same-device aliases/copies and device-to-host output materialization.
+            RowPartitionRuntime::propagateHostState(inputTensor.value(), outputTensor.value());
         }
     }
 

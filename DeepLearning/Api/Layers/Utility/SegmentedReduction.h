@@ -25,6 +25,13 @@ class SegmentedReduction : public MultiConnectionLayer {
     std::shared_ptr<Layer> clone() const override { return std::make_shared<SegmentedReduction>(*this); }
     std::string getLayerType() const override { return "SegmentedReduction"; }
 
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedFeatureInput.isInitialized() && inputTensor == raggedFeatureInput.getOffsets())
+            return ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
+
     [[nodiscard]] Type getReductionType() const { return reductionType; }
     [[nodiscard]] RaggedTensor getRaggedFeatureInput() const { return raggedFeatureInput; }
 

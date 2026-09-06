@@ -118,6 +118,13 @@ class Convolution1d : public TrainableLayer {
 
     using MultiConnectionLayer::getFeatureOutput;
     int getConnectionType(Tensor connectingTensor) const override;
+    [[nodiscard]] ThorImplementation::RaggedPartitionRequirement
+    getRaggedPartitionRequirementForInput(const Tensor& inputTensor) const override {
+        if (raggedFeatureInput.has_value() && inputTensor == raggedFeatureInput->getOffsets())
+            return ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT |
+                   ThorImplementation::RaggedPartitionRequirement::DEVICE_OFFSETS;
+        return Layer::getRaggedPartitionRequirementForInput(inputTensor);
+    }
     std::vector<Tensor> getFeatureInputs() const override;
     Tensor getFeatureOutput(Tensor inputTensor) const override;
     std::vector<Tensor> getOutputsFromInput(Tensor inputTensor) override;

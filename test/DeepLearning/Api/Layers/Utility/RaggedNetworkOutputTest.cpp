@@ -25,7 +25,7 @@
 using namespace Thor;
 using json = nlohmann::json;
 
-TEST(RaggedNetworkOutputApi, RegistersOneLogicalOutputBackedByInternalComponents) {
+TEST(RaggedNetworkOutputApi, RegistersOneLogicalOutputBackedByValuesCarrier) {
     Network network("ragged_network_output_api");
     RaggedTensor input = RaggedNetworkInput::Builder()
                              .network(network)
@@ -48,7 +48,6 @@ TEST(RaggedNetworkOutputApi, RegistersOneLogicalOutputBackedByInternalComponents
     ASSERT_EQ(logicalOutputs.size(), 1u);
     EXPECT_EQ(logicalOutputs[0].name, "tokens_out");
     EXPECT_EQ(logicalOutputs[0].valuesOutputName, "__thor_ragged_output.tokens_out.values");
-    EXPECT_EQ(logicalOutputs[0].offsetsOutputName, "__thor_ragged_output.tokens_out.offsets");
     EXPECT_EQ(logicalOutputs[0].raggedTensor, output.getFeatureOutput());
     EXPECT_EQ(network.getRequiredNetworkInputNamesForOutputs({"tokens_out"}, /*inferenceOnly=*/true),
               (std::vector<std::string>{"tokens"}));
@@ -58,8 +57,12 @@ TEST(RaggedNetworkOutputApi, RegistersOneLogicalOutputBackedByInternalComponents
     ASSERT_EQ(architecture.at("ragged_network_outputs").size(), 1u);
     const json& logicalOutput = architecture.at("ragged_network_outputs").at(0);
     EXPECT_EQ(logicalOutput.at("name").get<std::string>(), "tokens_out");
+    EXPECT_EQ(logicalOutput.at("version").get<std::string>(), "1.2.0");
     EXPECT_EQ(logicalOutput.at("values_tensor_id").get<uint64_t>(), output.getFeatureOutput().getValues().getId());
-    EXPECT_EQ(logicalOutput.at("offsets_tensor_id").get<uint64_t>(), output.getFeatureOutput().getOffsets().getId());
+    EXPECT_EQ(logicalOutput.at("row_partition_token_tensor_id").get<uint64_t>(),
+              output.getFeatureOutput().getRowPartitionToken().getId());
+    EXPECT_FALSE(logicalOutput.contains("offsets_output_name"));
+    EXPECT_FALSE(logicalOutput.contains("offsets_tensor_id"));
     EXPECT_FALSE(logicalOutput.contains("ragged_tensor"));
 
     std::set<std::string> internalNames;
@@ -70,7 +73,7 @@ TEST(RaggedNetworkOutputApi, RegistersOneLogicalOutputBackedByInternalComponents
         internalNames.insert(layer.at("name").get<std::string>());
     }
     EXPECT_EQ(internalNames,
-              (std::set<std::string>{"__thor_ragged_output.tokens_out.values", "__thor_ragged_output.tokens_out.offsets"}));
+              (std::set<std::string>{"__thor_ragged_output.tokens_out.values"}));
 }
 
 TEST(RaggedNetworkOutputApi, RejectsDuplicateLogicalNames) {
@@ -110,7 +113,8 @@ TEST(RaggedNetworkOutputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTenso
     const json& logicalOutput = architecture.at("ragged_network_outputs").at(0);
     EXPECT_FALSE(logicalOutput.contains("ragged_tensor"));
     EXPECT_EQ(logicalOutput.at("values_tensor_id").get<uint64_t>(), output.getFeatureOutput().getValues().getId());
-    EXPECT_EQ(logicalOutput.at("offsets_tensor_id").get<uint64_t>(), output.getFeatureOutput().getOffsets().getId());
+    EXPECT_EQ(logicalOutput.at("row_partition_token_tensor_id").get<uint64_t>(),
+              output.getFeatureOutput().getRowPartitionToken().getId());
 
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     const std::filesystem::path archiveDir =
@@ -126,7 +130,6 @@ TEST(RaggedNetworkOutputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTenso
     ASSERT_EQ(loadedOutputs.size(), 1u);
     EXPECT_EQ(loadedOutputs[0].name, "tokens_out");
     EXPECT_EQ(loadedOutputs[0].valuesOutputName, "__thor_ragged_output.tokens_out.values");
-    EXPECT_EQ(loadedOutputs[0].offsetsOutputName, "__thor_ragged_output.tokens_out.offsets");
     EXPECT_EQ(loadedOutputs[0].raggedTensor.getValues().getDimensions(), (std::vector<uint64_t>{6, 2}));
     EXPECT_EQ(loadedOutputs[0].raggedTensor.getOffsets().getDimensions(), (std::vector<uint64_t>{3}));
 
@@ -134,13 +137,14 @@ TEST(RaggedNetworkOutputApi, ArchitectureOnlySaveLoadRoundTripUsesCanonicalTenso
     const json& loadedLogicalOutput = loadedArchitecture.at("ragged_network_outputs").at(0);
     EXPECT_FALSE(loadedLogicalOutput.contains("ragged_tensor"));
     EXPECT_EQ(loadedLogicalOutput.at("values_tensor_id").get<uint64_t>(), loadedOutputs[0].raggedTensor.getValues().getId());
-    EXPECT_EQ(loadedLogicalOutput.at("offsets_tensor_id").get<uint64_t>(), loadedOutputs[0].raggedTensor.getOffsets().getId());
+    EXPECT_EQ(loadedLogicalOutput.at("row_partition_token_tensor_id").get<uint64_t>(),
+              loadedOutputs[0].raggedTensor.getRowPartitionToken().getId());
 
     std::filesystem::remove_all(archiveDir);
 }
 
 
-TEST(RaggedNetworkOutputApi, IdentityOutputPreservesLogicalValuesAndOffsetsWithPoisonedInactiveCapacity) {
+TEST(RaggedNetworkOutputApi, IdentityOutputPreservesLogicalValuesAndHostPartitionWithPoisonedInactiveCapacity) {
     constexpr uint32_t batchSize = 2;
     constexpr uint64_t maxTotalValues = 6;
     Network network("ragged_network_output_identity_logical_extent");
@@ -160,6 +164,19 @@ TEST(RaggedNetworkOutputApi, IdentityOutputPreservesLogicalValuesAndOffsetsWithP
         network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
     ASSERT_NE(placed, nullptr);
     for (Event& event : initDoneEvents) event.synchronize();
+
+    // The logical output itself requests only HOST_EXTENT. There is no public or
+    // hidden [B+1] output path; inferLogical reconstructs its compatibility
+    // offsets view later from authoritative host state.
+    EXPECT_EQ(placed->getStampedNetwork(0).getNamedOutput(
+                  "__thor_ragged_output.tokens_out.offsets"),
+              nullptr);
+    EXPECT_EQ(placed->getStampedNetwork(0).getManagedPartitionOffsetsInputForTest(
+                  input.getRowPartitionId()),
+              nullptr);
+    EXPECT_EQ(placed->getStampedNetwork(0).getManagedPartitionActiveCountInputForTest(
+                  input.getRowPartitionId()),
+              nullptr);
 
     const ThorImplementation::TensorPlacement cpuPlacement(ThorImplementation::TensorPlacement::MemDevices::CPU);
     ThorImplementation::Tensor values(
