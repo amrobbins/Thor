@@ -664,7 +664,13 @@ class Convolution3d(TrainableLayer):
     Omitted activation defaults to ``thor.activations.Gelu()``; pass
     ``None`` to keep the layer linear.
     The API tensor layout is CDHW; the physical implementation adds the
-    batch dimension and uses NCDHW. ``groups`` partitions input and output
+    batch dimension and uses NCDHW. ``padding`` accepts ``"valid"``,
+    ``"same"``/``"same_upper"`` (SAME_UPPER), or explicit
+    ``(front, back, top, bottom, left, right)`` padding. ``dilation`` accepts
+    either one positive integer or ``(depth, height, width)``. The legacy
+    ``depth_padding``, ``vertical_padding``, and ``horizontal_padding``
+    arguments remain compatibility aliases for symmetric explicit padding
+    when ``padding`` is omitted. ``groups`` partitions input and output
     channels using standard grouped-convolution semantics. Activations are stitched into the
     expression before the implementation CustomLayer is constructed.
     ``epilogue`` may be a ``thor.physical.Expression`` built from
@@ -674,7 +680,7 @@ class Convolution3d(TrainableLayer):
     for FP32 input, weight, and output storage.
     """
 
-    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_channels: int, filter_depth: int, filter_height: int, filter_width: int, depth_stride: int = 1, vertical_stride: int = 1, horizontal_stride: int = 1, depth_padding: int = 0, vertical_padding: int = 0, horizontal_padding: int = 0, has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, groups: int = 1, compute_data_type: thor.DataType = thor.DataType.fp32) -> None: ...
+    def __init__(self, network: thor.Network, feature_input: thor.Tensor, num_output_channels: int, filter_depth: int, filter_height: int, filter_width: int, depth_stride: int = 1, vertical_stride: int = 1, horizontal_stride: int = 1, depth_padding: int = 0, vertical_padding: int = 0, horizontal_padding: int = 0, has_bias: bool = True, activation: object | None = '__thor_default_activation__', weights_initializer: thor.initializers.Initializer | None = None, biases_initializer: thor.initializers.Initializer | None = None, epilogue: object | None = None, epilogue_inputs: object | None = None, groups: int = 1, compute_data_type: thor.DataType = thor.DataType.fp32, padding: object = 'valid', dilation: object = 1) -> None: ...
 
     @staticmethod
     def epilogue_input(output_dtype: object | None = None, compute_dtype: object | None = None) -> thor.physical.Expression:

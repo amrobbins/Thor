@@ -10,6 +10,7 @@
 #include "DeepLearning/Api/Layers/Utility/TypeConverter.h"
 #include "DeepLearning/Implementation/Layers/NeuralNetwork/Convolution3d.h"
 #include "Utilities/Exceptions.h"
+#include "Utilities/Expression/ConvolutionSpatial.h"
 #include <optional>
 #include <set>
 #include <string>
@@ -18,6 +19,12 @@
 #include <vector>
 
 namespace Thor {
+
+enum class Convolution3dPaddingMode {
+    VALID,
+    SAME_UPPER,
+    EXPLICIT,
+};
 
 class Convolution3d : public TrainableLayer {
    public:
@@ -34,16 +41,30 @@ class Convolution3d : public TrainableLayer {
     virtual uint32_t getFilterDepth() { return filterDepth; }
     virtual uint32_t getFilterHeight() { return filterHeight; }
     virtual uint32_t getFilterWidth() { return filterWidth; }
-    virtual uint32_t getDepthStride() { return depthStride; }
-    virtual uint32_t getVerticalStride() { return verticalStride; }
-    virtual uint32_t getHorizontalStride() { return horizontalStride; }
-    virtual uint32_t getDepthPadding() { return depthPadding; }
-    virtual uint32_t getVerticalPadding() { return verticalPadding; }
-    virtual uint32_t getHorizontalPadding() { return horizontalPadding; }
+    virtual uint32_t getDepthStride() { return static_cast<uint32_t>(spatial.stride_d); }
+    virtual uint32_t getVerticalStride() { return static_cast<uint32_t>(spatial.stride_h); }
+    virtual uint32_t getHorizontalStride() { return static_cast<uint32_t>(spatial.stride_w); }
+    virtual uint32_t getDepthDilation() { return static_cast<uint32_t>(spatial.dilation_d); }
+    virtual uint32_t getVerticalDilation() { return static_cast<uint32_t>(spatial.dilation_h); }
+    virtual uint32_t getHorizontalDilation() { return static_cast<uint32_t>(spatial.dilation_w); }
+    virtual uint32_t getPaddingFront() { return static_cast<uint32_t>(spatial.pre_padding_d); }
+    virtual uint32_t getPaddingBack() { return static_cast<uint32_t>(spatial.post_padding_d); }
+    virtual uint32_t getPaddingTop() { return static_cast<uint32_t>(spatial.pre_padding_h); }
+    virtual uint32_t getPaddingBottom() { return static_cast<uint32_t>(spatial.post_padding_h); }
+    virtual uint32_t getPaddingLeft() { return static_cast<uint32_t>(spatial.pre_padding_w); }
+    virtual uint32_t getPaddingRight() { return static_cast<uint32_t>(spatial.post_padding_w); }
+    // Compatibility getters for the legacy symmetric-padding surface. For
+    // asymmetric padding these return the pre/front/top/left side; use the
+    // six side-specific getters above to inspect the complete geometry.
+    virtual uint32_t getDepthPadding() { return getPaddingFront(); }
+    virtual uint32_t getVerticalPadding() { return getPaddingTop(); }
+    virtual uint32_t getHorizontalPadding() { return getPaddingLeft(); }
+    virtual Convolution3dPaddingMode getPaddingMode() const { return paddingMode; }
     virtual uint32_t getGroups() const { return groups; }
     DataType getComputeDataType() const { return computeDataType; }
 
     std::string getLayerType() const override { return "Convolution3d"; }
+    std::string getLayerVersion() const override { return "1.0.0"; }
 
     nlohmann::json serialize(thor_file::TarWriter& archiveWriter,
                              Stream stream,
@@ -138,13 +159,9 @@ class Convolution3d : public TrainableLayer {
     uint32_t filterDepth;
     uint32_t filterHeight;
     uint32_t filterWidth;
-    uint32_t depthStride;
-    uint32_t verticalStride;
-    uint32_t horizontalStride;
-    uint32_t depthPadding;
-    uint32_t verticalPadding;
-    uint32_t horizontalPadding;
     uint32_t groups = 1;
+    ThorImplementation::ConvolutionSpatial3d spatial;
+    Convolution3dPaddingMode paddingMode = Convolution3dPaddingMode::VALID;
     bool hasBias;
     DataType computeDataType = DataType::FP32;
     std::shared_ptr<Initializer> weightsInitializer;
@@ -185,12 +202,16 @@ class Convolution3d::Builder {
             _verticalStride = 1;
         if (!_horizontalStride.has_value())
             _horizontalStride = 1;
-        if (!_depthPadding.has_value())
-            _depthPadding = 0;
-        if (!_verticalPadding.has_value())
-            _verticalPadding = 0;
-        if (!_horizontalPadding.has_value())
-            _horizontalPadding = 0;
+        if (!_depthDilation.has_value())
+            _depthDilation = 1;
+        if (!_verticalDilation.has_value())
+            _verticalDilation = 1;
+        if (!_horizontalDilation.has_value())
+            _horizontalDilation = 1;
+        // Unspecified padding is VALID/no padding. SAME_UPPER and EXPLICIT
+        // must be requested explicitly.
+        if (!_paddingMode.has_value())
+            _paddingMode = Convolution3dPaddingMode::VALID;
         if (!_groups.has_value())
             _groups = 1;
         if (!_hasBias.has_value())
@@ -219,30 +240,67 @@ class Convolution3d::Builder {
         convolution3d.filterDepth = _filterDepth.value();
         convolution3d.filterHeight = _filterHeight.value();
         convolution3d.filterWidth = _filterWidth.value();
-        convolution3d.depthStride = _depthStride.value();
-        convolution3d.verticalStride = _verticalStride.value();
-        convolution3d.horizontalStride = _horizontalStride.value();
-        convolution3d.depthPadding = _depthPadding.value();
-        convolution3d.verticalPadding = _verticalPadding.value();
-        convolution3d.horizontalPadding = _horizontalPadding.value();
         convolution3d.groups = _groups.value();
+        convolution3d.spatial.stride_d = static_cast<int32_t>(_depthStride.value());
+        convolution3d.spatial.stride_h = static_cast<int32_t>(_verticalStride.value());
+        convolution3d.spatial.stride_w = static_cast<int32_t>(_horizontalStride.value());
+        convolution3d.spatial.dilation_d = static_cast<int32_t>(_depthDilation.value());
+        convolution3d.spatial.dilation_h = static_cast<int32_t>(_verticalDilation.value());
+        convolution3d.spatial.dilation_w = static_cast<int32_t>(_horizontalDilation.value());
+        convolution3d.paddingMode = _paddingMode.value();
 
-        THOR_THROW_IF_FALSE(convolution3d.depthPadding < convolution3d.filterDepth);
-        THOR_THROW_IF_FALSE(convolution3d.verticalPadding < convolution3d.filterHeight);
-        THOR_THROW_IF_FALSE(convolution3d.horizontalPadding < convolution3d.filterWidth);
+        switch (convolution3d.paddingMode) {
+            case Convolution3dPaddingMode::VALID:
+                break;
+            case Convolution3dPaddingMode::SAME_UPPER: {
+                const auto [front, back] = computeSamePadding(convolution3d.featureInputs[0].getDimensions()[1],
+                                                              convolution3d.spatial.stride_d,
+                                                              convolution3d.filterDepth,
+                                                              convolution3d.spatial.dilation_d);
+                const auto [top, bottom] = computeSamePadding(convolution3d.featureInputs[0].getDimensions()[2],
+                                                              convolution3d.spatial.stride_h,
+                                                              convolution3d.filterHeight,
+                                                              convolution3d.spatial.dilation_h);
+                const auto [left, right] = computeSamePadding(convolution3d.featureInputs[0].getDimensions()[3],
+                                                              convolution3d.spatial.stride_w,
+                                                              convolution3d.filterWidth,
+                                                              convolution3d.spatial.dilation_w);
+                convolution3d.spatial.pre_padding_d = static_cast<int32_t>(front);
+                convolution3d.spatial.post_padding_d = static_cast<int32_t>(back);
+                convolution3d.spatial.pre_padding_h = static_cast<int32_t>(top);
+                convolution3d.spatial.post_padding_h = static_cast<int32_t>(bottom);
+                convolution3d.spatial.pre_padding_w = static_cast<int32_t>(left);
+                convolution3d.spatial.post_padding_w = static_cast<int32_t>(right);
+                break;
+            }
+            case Convolution3dPaddingMode::EXPLICIT:
+                convolution3d.spatial.pre_padding_d = static_cast<int32_t>(_paddingFront.value_or(0));
+                convolution3d.spatial.post_padding_d = static_cast<int32_t>(_paddingBack.value_or(0));
+                convolution3d.spatial.pre_padding_h = static_cast<int32_t>(_paddingTop.value_or(0));
+                convolution3d.spatial.post_padding_h = static_cast<int32_t>(_paddingBottom.value_or(0));
+                convolution3d.spatial.pre_padding_w = static_cast<int32_t>(_paddingLeft.value_or(0));
+                convolution3d.spatial.post_padding_w = static_cast<int32_t>(_paddingRight.value_or(0));
+                break;
+        }
 
         uint32_t outputDepth = computeOutputDimension(convolution3d.featureInputs[0].getDimensions()[1],
-                                                      convolution3d.depthStride,
+                                                      convolution3d.spatial.stride_d,
                                                       convolution3d.filterDepth,
-                                                      convolution3d.depthPadding);
+                                                      convolution3d.spatial.pre_padding_d,
+                                                      convolution3d.spatial.post_padding_d,
+                                                      convolution3d.spatial.dilation_d);
         uint32_t outputHeight = computeOutputDimension(convolution3d.featureInputs[0].getDimensions()[2],
-                                                       convolution3d.verticalStride,
+                                                       convolution3d.spatial.stride_h,
                                                        convolution3d.filterHeight,
-                                                       convolution3d.verticalPadding);
+                                                       convolution3d.spatial.pre_padding_h,
+                                                       convolution3d.spatial.post_padding_h,
+                                                       convolution3d.spatial.dilation_h);
         uint32_t outputWidth = computeOutputDimension(convolution3d.featureInputs[0].getDimensions()[3],
-                                                      convolution3d.horizontalStride,
+                                                      convolution3d.spatial.stride_w,
                                                       convolution3d.filterWidth,
-                                                      convolution3d.horizontalPadding);
+                                                      convolution3d.spatial.pre_padding_w,
+                                                      convolution3d.spatial.post_padding_w,
+                                                      convolution3d.spatial.dilation_w);
 
         convolution3d.hasBias = _hasBias.value();
         convolution3d.computeDataType = _computeDataType.value();
@@ -322,6 +380,10 @@ class Convolution3d::Builder {
     virtual Convolution3d::Builder& featureInput(Tensor _featureInput) {
         THOR_THROW_IF_FALSE(_featureInput.getDimensions().size() == 4);
         this->_featureInputs.push_back(_featureInput);
+        if (_featureInputs.size() > 1) {
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDataType() == _featureInputs.front().getDataType());
+            THOR_THROW_IF_FALSE(_featureInputs.back().getDimensions() == _featureInputs.front().getDimensions());
+        }
         return *this;
     }
 
@@ -370,19 +432,83 @@ class Convolution3d::Builder {
         this->_horizontalStride = value;
         return *this;
     }
+    virtual Convolution3d::Builder& depthDilation(uint32_t value) {
+        THOR_THROW_IF_FALSE(value != 0);
+        THOR_THROW_IF_FALSE(!this->_depthDilation.has_value());
+        this->_depthDilation = value;
+        return *this;
+    }
+    virtual Convolution3d::Builder& verticalDilation(uint32_t value) {
+        THOR_THROW_IF_FALSE(value != 0);
+        THOR_THROW_IF_FALSE(!this->_verticalDilation.has_value());
+        this->_verticalDilation = value;
+        return *this;
+    }
+    virtual Convolution3d::Builder& horizontalDilation(uint32_t value) {
+        THOR_THROW_IF_FALSE(value != 0);
+        THOR_THROW_IF_FALSE(!this->_horizontalDilation.has_value());
+        this->_horizontalDilation = value;
+        return *this;
+    }
+    virtual Convolution3d::Builder& dilation(uint32_t value) {
+        THOR_THROW_IF_FALSE(value != 0);
+        THOR_THROW_IF_FALSE(!this->_depthDilation.has_value());
+        THOR_THROW_IF_FALSE(!this->_verticalDilation.has_value());
+        THOR_THROW_IF_FALSE(!this->_horizontalDilation.has_value());
+        this->_depthDilation = value;
+        this->_verticalDilation = value;
+        this->_horizontalDilation = value;
+        return *this;
+    }
+    virtual Convolution3d::Builder& validPadding() {
+        THOR_THROW_IF_FALSE(!_paddingMode.has_value());
+        _paddingMode = Convolution3dPaddingMode::VALID;
+        return *this;
+    }
+    virtual Convolution3d::Builder& samePadding() {
+        THOR_THROW_IF_FALSE(!_paddingMode.has_value());
+        _paddingMode = Convolution3dPaddingMode::SAME_UPPER;
+        return *this;
+    }
+    virtual Convolution3d::Builder& padding(
+        uint32_t front, uint32_t back, uint32_t top, uint32_t bottom, uint32_t left, uint32_t right) {
+        THOR_THROW_IF_FALSE(!_paddingMode.has_value());
+        THOR_THROW_IF_FALSE(!_paddingFront.has_value() && !_paddingBack.has_value());
+        THOR_THROW_IF_FALSE(!_paddingTop.has_value() && !_paddingBottom.has_value());
+        THOR_THROW_IF_FALSE(!_paddingLeft.has_value() && !_paddingRight.has_value());
+        _paddingMode = Convolution3dPaddingMode::EXPLICIT;
+        _paddingFront = front;
+        _paddingBack = back;
+        _paddingTop = top;
+        _paddingBottom = bottom;
+        _paddingLeft = left;
+        _paddingRight = right;
+        return *this;
+    }
+    // Legacy symmetric per-axis padding aliases. They compose with one another,
+    // but cannot be mixed with VALID/SAME_UPPER or the six-sided padding() call.
     virtual Convolution3d::Builder& depthPadding(uint32_t value) {
-        THOR_THROW_IF_FALSE(!this->_depthPadding.has_value());
-        this->_depthPadding = value;
+        THOR_THROW_IF_FALSE(!_paddingMode.has_value() || _paddingMode.value() == Convolution3dPaddingMode::EXPLICIT);
+        THOR_THROW_IF_FALSE(!_paddingFront.has_value() && !_paddingBack.has_value());
+        _paddingMode = Convolution3dPaddingMode::EXPLICIT;
+        _paddingFront = value;
+        _paddingBack = value;
         return *this;
     }
     virtual Convolution3d::Builder& verticalPadding(uint32_t value) {
-        THOR_THROW_IF_FALSE(!this->_verticalPadding.has_value());
-        this->_verticalPadding = value;
+        THOR_THROW_IF_FALSE(!_paddingMode.has_value() || _paddingMode.value() == Convolution3dPaddingMode::EXPLICIT);
+        THOR_THROW_IF_FALSE(!_paddingTop.has_value() && !_paddingBottom.has_value());
+        _paddingMode = Convolution3dPaddingMode::EXPLICIT;
+        _paddingTop = value;
+        _paddingBottom = value;
         return *this;
     }
     virtual Convolution3d::Builder& horizontalPadding(uint32_t value) {
-        THOR_THROW_IF_FALSE(!this->_horizontalPadding.has_value());
-        this->_horizontalPadding = value;
+        THOR_THROW_IF_FALSE(!_paddingMode.has_value() || _paddingMode.value() == Convolution3dPaddingMode::EXPLICIT);
+        THOR_THROW_IF_FALSE(!_paddingLeft.has_value() && !_paddingRight.has_value());
+        _paddingMode = Convolution3dPaddingMode::EXPLICIT;
+        _paddingLeft = value;
+        _paddingRight = value;
         return *this;
     }
     virtual Convolution3d::Builder& hasBias(bool value) {
@@ -453,10 +579,43 @@ class Convolution3d::Builder {
         return *this;
     }
 
-    static uint32_t computeOutputDimension(uint32_t inputSize, uint32_t stride, uint32_t filterSize, uint32_t padding) {
-        THOR_THROW_IF_FALSE(filterSize <= inputSize + 2 * padding);
+    static uint32_t computeOutputDimension(uint32_t inputSize,
+                                           int32_t stride,
+                                           uint32_t filterSize,
+                                           int32_t prePadding,
+                                           int32_t postPadding,
+                                           int32_t dilation = 1) {
+        THOR_THROW_IF_FALSE(inputSize > 0);
+        THOR_THROW_IF_FALSE(filterSize > 0);
         THOR_THROW_IF_FALSE(stride > 0);
-        return 1 + (((inputSize + 2 * padding) - filterSize) / stride);
+        THOR_THROW_IF_FALSE(dilation > 0);
+        THOR_THROW_IF_FALSE(prePadding >= 0);
+        THOR_THROW_IF_FALSE(postPadding >= 0);
+        const uint64_t effectiveFilter =
+            static_cast<uint64_t>(dilation) * (static_cast<uint64_t>(filterSize) - 1ULL) + 1ULL;
+        const uint64_t paddedInput =
+            static_cast<uint64_t>(inputSize) + static_cast<uint64_t>(prePadding) + static_cast<uint64_t>(postPadding);
+        THOR_THROW_IF_FALSE(effectiveFilter <= paddedInput);
+        return static_cast<uint32_t>(1ULL + (paddedInput - effectiveFilter) / static_cast<uint64_t>(stride));
+    }
+
+    static std::pair<uint32_t, uint32_t> computeSamePadding(
+        uint32_t inputSize, int32_t stride, uint32_t filterSize, int32_t dilation = 1) {
+        THOR_THROW_IF_FALSE(inputSize > 0);
+        THOR_THROW_IF_FALSE(filterSize > 0);
+        THOR_THROW_IF_FALSE(stride > 0);
+        THOR_THROW_IF_FALSE(dilation > 0);
+        const uint64_t outputSize =
+            (static_cast<uint64_t>(inputSize) + static_cast<uint64_t>(stride) - 1ULL) / static_cast<uint64_t>(stride);
+        const uint64_t effectiveFilter =
+            static_cast<uint64_t>(dilation) * (static_cast<uint64_t>(filterSize) - 1ULL) + 1ULL;
+        const uint64_t coveredInput =
+            (outputSize - 1ULL) * static_cast<uint64_t>(stride) + effectiveFilter;
+        const uint64_t totalPadding =
+            coveredInput > static_cast<uint64_t>(inputSize) ? coveredInput - static_cast<uint64_t>(inputSize) : 0ULL;
+        const uint32_t prePadding = static_cast<uint32_t>(totalPadding / 2ULL);
+        const uint32_t postPadding = static_cast<uint32_t>(totalPadding - prePadding);
+        return {prePadding, postPadding};
     }
 
    private:
@@ -469,9 +628,16 @@ class Convolution3d::Builder {
     std::optional<uint32_t> _depthStride;
     std::optional<uint32_t> _verticalStride;
     std::optional<uint32_t> _horizontalStride;
-    std::optional<uint32_t> _depthPadding;
-    std::optional<uint32_t> _verticalPadding;
-    std::optional<uint32_t> _horizontalPadding;
+    std::optional<uint32_t> _depthDilation;
+    std::optional<uint32_t> _verticalDilation;
+    std::optional<uint32_t> _horizontalDilation;
+    std::optional<Convolution3dPaddingMode> _paddingMode;
+    std::optional<uint32_t> _paddingFront;
+    std::optional<uint32_t> _paddingBack;
+    std::optional<uint32_t> _paddingTop;
+    std::optional<uint32_t> _paddingBottom;
+    std::optional<uint32_t> _paddingLeft;
+    std::optional<uint32_t> _paddingRight;
     std::optional<uint32_t> _groups;
     std::optional<bool> _hasBias;
     std::optional<DataType> _computeDataType;

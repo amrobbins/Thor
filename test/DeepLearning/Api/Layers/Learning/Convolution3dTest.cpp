@@ -590,6 +590,170 @@ TEST(Convolution3dApi, DefaultsToGeluAndExplicitNoActivationShape) {
     EXPECT_TRUE(explicitJson.at("has_bias").get<bool>());
 }
 
+TEST(Convolution3dApi, ExplicitAsymmetricPaddingStrideAndDilationResolveGeometryAndOutputShape) {
+    Api::Network network("conv3dGeneralExplicitGeometry");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({4, 7, 8, 9})
+                                  .dataType(DataType::FP16)
+                                  .build();
+
+    Api::Convolution3d conv = Api::Convolution3d::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .numOutputChannels(6)
+                                  .filterDepth(3)
+                                  .filterHeight(2)
+                                  .filterWidth(4)
+                                  .depthStride(2)
+                                  .verticalStride(1)
+                                  .horizontalStride(2)
+                                  .depthDilation(2)
+                                  .verticalDilation(3)
+                                  .horizontalDilation(1)
+                                  .padding(1, 3, 2, 0, 0, 2)
+                                  .noActivation()
+                                  .build();
+
+    EXPECT_EQ(conv.getPaddingMode(), Api::Convolution3dPaddingMode::EXPLICIT);
+    EXPECT_EQ(conv.getDepthStride(), 2u);
+    EXPECT_EQ(conv.getVerticalStride(), 1u);
+    EXPECT_EQ(conv.getHorizontalStride(), 2u);
+    EXPECT_EQ(conv.getDepthDilation(), 2u);
+    EXPECT_EQ(conv.getVerticalDilation(), 3u);
+    EXPECT_EQ(conv.getHorizontalDilation(), 1u);
+    EXPECT_EQ(conv.getPaddingFront(), 1u);
+    EXPECT_EQ(conv.getPaddingBack(), 3u);
+    EXPECT_EQ(conv.getPaddingTop(), 2u);
+    EXPECT_EQ(conv.getPaddingBottom(), 0u);
+    EXPECT_EQ(conv.getPaddingLeft(), 0u);
+    EXPECT_EQ(conv.getPaddingRight(), 2u);
+    EXPECT_EQ(conv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{6, 4, 7, 4}));
+
+    const json j = conv.architectureJson();
+    EXPECT_EQ(j.at("version").get<string>(), "1.0.0");
+    EXPECT_FALSE(j.contains("depth_padding"));
+    EXPECT_FALSE(j.contains("vertical_padding"));
+    EXPECT_FALSE(j.contains("horizontal_padding"));
+    EXPECT_EQ(j.at("depth_dilation").get<int32_t>(), 2);
+    EXPECT_EQ(j.at("vertical_dilation").get<int32_t>(), 3);
+    EXPECT_EQ(j.at("horizontal_dilation").get<int32_t>(), 1);
+    EXPECT_EQ(j.at("padding_mode").get<string>(), "explicit");
+    EXPECT_EQ(j.at("padding_front").get<int32_t>(), 1);
+    EXPECT_EQ(j.at("padding_back").get<int32_t>(), 3);
+    EXPECT_EQ(j.at("padding_top").get<int32_t>(), 2);
+    EXPECT_EQ(j.at("padding_bottom").get<int32_t>(), 0);
+    EXPECT_EQ(j.at("padding_left").get<int32_t>(), 0);
+    EXPECT_EQ(j.at("padding_right").get<int32_t>(), 2);
+}
+
+TEST(Convolution3dApi, SameUpperUsesCeilOutputAndPlacesOddPaddingOnPostSide) {
+    Api::Network network("conv3dSameUpperGeometry");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({2, 6, 7, 8})
+                                  .dataType(DataType::FP16)
+                                  .build();
+
+    Api::Convolution3d conv = Api::Convolution3d::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .numOutputChannels(3)
+                                  .filterDepth(3)
+                                  .filterHeight(3)
+                                  .filterWidth(3)
+                                  .depthStride(2)
+                                  .verticalStride(3)
+                                  .horizontalStride(2)
+                                  .depthDilation(2)
+                                  .verticalDilation(1)
+                                  .horizontalDilation(2)
+                                  .samePadding()
+                                  .noActivation()
+                                  .build();
+
+    EXPECT_EQ(conv.getPaddingMode(), Api::Convolution3dPaddingMode::SAME_UPPER);
+    EXPECT_EQ(conv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{3, 3, 3, 4}));
+    EXPECT_EQ(conv.getPaddingFront(), 1u);
+    EXPECT_EQ(conv.getPaddingBack(), 2u);
+    EXPECT_EQ(conv.getPaddingTop(), 1u);
+    EXPECT_EQ(conv.getPaddingBottom(), 1u);
+    EXPECT_EQ(conv.getPaddingLeft(), 1u);
+    EXPECT_EQ(conv.getPaddingRight(), 2u);
+}
+
+TEST(Convolution3dApi, LegacySymmetricPaddingAliasesComposeAndAllowPaddingLargerThanKernel) {
+    Api::Network network("conv3dLegacyPaddingAliases");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({2, 2, 2, 2})
+                                  .dataType(DataType::FP16)
+                                  .build();
+
+    Api::Convolution3d conv = Api::Convolution3d::Builder()
+                                  .network(network)
+                                  .featureInput(input.getFeatureOutput().value())
+                                  .numOutputChannels(2)
+                                  .filterDepth(1)
+                                  .filterHeight(1)
+                                  .filterWidth(1)
+                                  .depthPadding(5)
+                                  .verticalPadding(3)
+                                  .horizontalPadding(4)
+                                  .dilation(2)
+                                  .noActivation()
+                                  .build();
+
+    EXPECT_EQ(conv.getPaddingMode(), Api::Convolution3dPaddingMode::EXPLICIT);
+    EXPECT_EQ(conv.getDepthPadding(), 5u);
+    EXPECT_EQ(conv.getVerticalPadding(), 3u);
+    EXPECT_EQ(conv.getHorizontalPadding(), 4u);
+    EXPECT_EQ(conv.getPaddingFront(), 5u);
+    EXPECT_EQ(conv.getPaddingBack(), 5u);
+    EXPECT_EQ(conv.getPaddingTop(), 3u);
+    EXPECT_EQ(conv.getPaddingBottom(), 3u);
+    EXPECT_EQ(conv.getPaddingLeft(), 4u);
+    EXPECT_EQ(conv.getPaddingRight(), 4u);
+    EXPECT_EQ(conv.getDepthDilation(), 2u);
+    EXPECT_EQ(conv.getVerticalDilation(), 2u);
+    EXPECT_EQ(conv.getHorizontalDilation(), 2u);
+    EXPECT_EQ(conv.getFeatureOutput().value().getDimensions(), (vector<uint64_t>{2, 12, 8, 10}));
+}
+
+TEST(Convolution3dApi, RejectsInvalidEffectiveFilterAndConflictingPaddingModes) {
+    Api::Network network("conv3dInvalidEffectiveFilter");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({2, 3, 3, 3})
+                                  .dataType(DataType::FP16)
+                                  .build();
+
+    EXPECT_THROW((void)Api::Convolution3d::Builder()
+                     .network(network)
+                     .featureInput(input.getFeatureOutput().value())
+                     .numOutputChannels(2)
+                     .filterDepth(3)
+                     .filterHeight(1)
+                     .filterWidth(1)
+                     .depthDilation(2)
+                     .validPadding()
+                     .noActivation()
+                     .build(),
+                 std::logic_error);
+
+    Api::Convolution3d::Builder paddingBuilder;
+    paddingBuilder.samePadding();
+    EXPECT_THROW(paddingBuilder.depthPadding(1), std::logic_error);
+
+    Api::Convolution3d::Builder explicitPaddingBuilder;
+    explicitPaddingBuilder.padding(1, 2, 3, 4, 5, 6);
+    EXPECT_THROW(explicitPaddingBuilder.horizontalPadding(1), std::logic_error);
+}
+
 TEST(Convolution3dApi, ExplicitTf32ComputeIsUserSelectableAndRequiresFp32Storage) {
     Api::Network network("conv3dTf32");
     Api::NetworkInput input =
@@ -872,7 +1036,21 @@ TEST(Convolution3dApi, ArchitectureSaveLoadRoundTripPreservesConfigurationAndDes
         ASSERT_NE(loadedOutput, nullptr);
 
         const json j = loadedConv->architectureJson();
+        EXPECT_EQ(j.at("version").get<string>(), "1.0.0");
         EXPECT_EQ(j.at("layer_type").get<string>(), "convolution_3d");
+        EXPECT_EQ(j.at("padding_mode").get<string>(), "explicit");
+        EXPECT_EQ(j.at("depth_dilation").get<int32_t>(), 1);
+        EXPECT_EQ(j.at("vertical_dilation").get<int32_t>(), 1);
+        EXPECT_EQ(j.at("horizontal_dilation").get<int32_t>(), 1);
+        EXPECT_EQ(j.at("padding_front").get<int32_t>(), 0);
+        EXPECT_EQ(j.at("padding_back").get<int32_t>(), 0);
+        EXPECT_EQ(j.at("padding_top").get<int32_t>(), 0);
+        EXPECT_EQ(j.at("padding_bottom").get<int32_t>(), 0);
+        EXPECT_EQ(j.at("padding_left").get<int32_t>(), 0);
+        EXPECT_EQ(j.at("padding_right").get<int32_t>(), 0);
+        EXPECT_FALSE(j.contains("depth_padding"));
+        EXPECT_FALSE(j.contains("vertical_padding"));
+        EXPECT_FALSE(j.contains("horizontal_padding"));
         EXPECT_EQ(j.at("filter_depth").get<uint32_t>(), Z);
         EXPECT_EQ(j.at("filter_height").get<uint32_t>(), R);
         EXPECT_EQ(j.at("filter_width").get<uint32_t>(), S);
@@ -903,6 +1081,189 @@ TEST(Convolution3dApi, ArchitectureSaveLoadRoundTripPreservesConfigurationAndDes
         throw;
     }
     filesystem::remove_all(archiveDir);
+}
+
+TEST(Convolution3dApi, ArchitectureSaveLoadRoundTripPreservesGeneralExplicitSpatialGeometry) {
+    const string networkName = "conv3d_general_spatial_arch_round_trip";
+    filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("input")
+                                      .dimensions({4, 7, 8, 9})
+                                      .dataType(DataType::FP16)
+                                      .build();
+        Api::Convolution3d conv = Api::Convolution3d::Builder()
+                                      .network(network)
+                                      .featureInput(input.getFeatureOutput().value())
+                                      .numOutputChannels(6)
+                                      .filterDepth(3)
+                                      .filterHeight(2)
+                                      .filterWidth(4)
+                                      .depthStride(2)
+                                      .verticalStride(1)
+                                      .horizontalStride(2)
+                                      .depthDilation(2)
+                                      .verticalDilation(3)
+                                      .horizontalDilation(1)
+                                      .padding(1, 3, 2, 0, 0, 2)
+                                      .groups(2)
+                                      .noActivation()
+                                      .build();
+        Api::NetworkOutput::Builder()
+            .network(network)
+            .name("output")
+            .inputTensor(conv.getFeatureOutput().value())
+            .dataType(DataType::FP16)
+            .build();
+
+        network.save(archiveDir.string(), true);
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+        shared_ptr<Api::Convolution3d> loadedConv = findOnlyLayerOfType<Api::Convolution3d>(loadedNetwork);
+        ASSERT_NE(loadedConv, nullptr);
+
+        const json j = loadedConv->architectureJson();
+        EXPECT_EQ(j.at("version").get<string>(), "1.0.0");
+        EXPECT_EQ(j.at("padding_mode").get<string>(), "explicit");
+        EXPECT_EQ(j.at("depth_stride").get<int32_t>(), 2);
+        EXPECT_EQ(j.at("vertical_stride").get<int32_t>(), 1);
+        EXPECT_EQ(j.at("horizontal_stride").get<int32_t>(), 2);
+        EXPECT_EQ(j.at("depth_dilation").get<int32_t>(), 2);
+        EXPECT_EQ(j.at("vertical_dilation").get<int32_t>(), 3);
+        EXPECT_EQ(j.at("horizontal_dilation").get<int32_t>(), 1);
+        EXPECT_EQ(j.at("padding_front").get<int32_t>(), 1);
+        EXPECT_EQ(j.at("padding_back").get<int32_t>(), 3);
+        EXPECT_EQ(j.at("padding_top").get<int32_t>(), 2);
+        EXPECT_EQ(j.at("padding_bottom").get<int32_t>(), 0);
+        EXPECT_EQ(j.at("padding_left").get<int32_t>(), 0);
+        EXPECT_EQ(j.at("padding_right").get<int32_t>(), 2);
+        EXPECT_EQ(j.at("groups").get<uint32_t>(), 2u);
+        EXPECT_EQ(loadedConv->getPaddingMode(), Api::Convolution3dPaddingMode::EXPLICIT);
+        EXPECT_EQ(loadedConv->getDepthDilation(), 2u);
+        EXPECT_EQ(loadedConv->getVerticalDilation(), 3u);
+        EXPECT_EQ(loadedConv->getHorizontalDilation(), 1u);
+        EXPECT_EQ(loadedConv->getPaddingFront(), 1u);
+        EXPECT_EQ(loadedConv->getPaddingBack(), 3u);
+        EXPECT_EQ(loadedConv->getPaddingTop(), 2u);
+        EXPECT_EQ(loadedConv->getPaddingBottom(), 0u);
+        EXPECT_EQ(loadedConv->getPaddingLeft(), 0u);
+        EXPECT_EQ(loadedConv->getPaddingRight(), 2u);
+    } catch (...) {
+        filesystem::remove_all(archiveDir);
+        throw;
+    }
+    filesystem::remove_all(archiveDir);
+}
+
+TEST(Convolution3dApi, ArchitectureSaveLoadRoundTripPreservesSameUpperModeAndResolvedPadding) {
+    const string networkName = "conv3d_same_upper_arch_round_trip";
+    filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("input")
+                                      .dimensions({2, 6, 7, 8})
+                                      .dataType(DataType::FP16)
+                                      .build();
+        Api::Convolution3d conv = Api::Convolution3d::Builder()
+                                      .network(network)
+                                      .featureInput(input.getFeatureOutput().value())
+                                      .numOutputChannels(3)
+                                      .filterDepth(3)
+                                      .filterHeight(3)
+                                      .filterWidth(3)
+                                      .depthStride(2)
+                                      .verticalStride(3)
+                                      .horizontalStride(2)
+                                      .depthDilation(2)
+                                      .verticalDilation(1)
+                                      .horizontalDilation(2)
+                                      .samePadding()
+                                      .noActivation()
+                                      .build();
+        Api::NetworkOutput::Builder()
+            .network(network)
+            .name("output")
+            .inputTensor(conv.getFeatureOutput().value())
+            .dataType(DataType::FP16)
+            .build();
+
+        network.save(archiveDir.string(), true);
+
+        Api::Network loadedNetwork(networkName);
+        loadedNetwork.load(archiveDir.string());
+        shared_ptr<Api::Convolution3d> loadedConv = findOnlyLayerOfType<Api::Convolution3d>(loadedNetwork);
+        ASSERT_NE(loadedConv, nullptr);
+
+        const json j = loadedConv->architectureJson();
+        EXPECT_EQ(j.at("version").get<string>(), "1.0.0");
+        EXPECT_EQ(j.at("padding_mode").get<string>(), "same_upper");
+        EXPECT_EQ(j.at("depth_dilation").get<int32_t>(), 2);
+        EXPECT_EQ(j.at("vertical_dilation").get<int32_t>(), 1);
+        EXPECT_EQ(j.at("horizontal_dilation").get<int32_t>(), 2);
+        EXPECT_EQ(j.at("padding_front").get<int32_t>(), 1);
+        EXPECT_EQ(j.at("padding_back").get<int32_t>(), 2);
+        EXPECT_EQ(j.at("padding_top").get<int32_t>(), 1);
+        EXPECT_EQ(j.at("padding_bottom").get<int32_t>(), 1);
+        EXPECT_EQ(j.at("padding_left").get<int32_t>(), 1);
+        EXPECT_EQ(j.at("padding_right").get<int32_t>(), 2);
+        EXPECT_EQ(loadedConv->getPaddingMode(), Api::Convolution3dPaddingMode::SAME_UPPER);
+    } catch (...) {
+        filesystem::remove_all(archiveDir);
+        throw;
+    }
+    filesystem::remove_all(archiveDir);
+}
+
+TEST(Convolution3dApi, DeserializeRejectsPaddingModeGeometryMismatch) {
+    Api::Network network("conv3d_reject_serialized_padding_mismatch");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({2, 6, 7, 8})
+                                  .dataType(DataType::FP16)
+                                  .build();
+
+    Api::Convolution3d validConv = Api::Convolution3d::Builder()
+                                       .network(network)
+                                       .featureInput(input.getFeatureOutput().value())
+                                       .numOutputChannels(3)
+                                       .filterDepth(3)
+                                       .filterHeight(3)
+                                       .filterWidth(3)
+                                       .validPadding()
+                                       .noActivation()
+                                       .build();
+    json invalidValid = validConv.architectureJson();
+    invalidValid["padding_front"] = 1;
+    shared_ptr<thor_file::TarReader> archiveReader;
+    EXPECT_THROW(Api::Convolution3d::deserialize(archiveReader, invalidValid, &network), runtime_error);
+
+    Api::Convolution3d sameConv = Api::Convolution3d::Builder()
+                                      .network(network)
+                                      .featureInput(input.getFeatureOutput().value())
+                                      .numOutputChannels(3)
+                                      .filterDepth(3)
+                                      .filterHeight(3)
+                                      .filterWidth(3)
+                                      .depthStride(2)
+                                      .verticalStride(3)
+                                      .horizontalStride(2)
+                                      .depthDilation(2)
+                                      .verticalDilation(1)
+                                      .horizontalDilation(2)
+                                      .samePadding()
+                                      .noActivation()
+                                      .build();
+    json invalidSame = sameConv.architectureJson();
+    invalidSame["padding_right"] = invalidSame.at("padding_right").get<int32_t>() + 1;
+    EXPECT_THROW(Api::Convolution3d::deserialize(archiveReader, invalidSame, &network), runtime_error);
 }
 
 TEST(Convolution3dApi, MultiInputEpilogueRunsForwardBackwardResidualAddAndUpdatesWeights) {

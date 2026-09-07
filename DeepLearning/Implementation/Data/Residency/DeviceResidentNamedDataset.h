@@ -103,6 +103,8 @@ class DeviceResidentNamedDataset {
         uint64_t maxTotalValues,
         uint64_t maxValuesPerRow = 0) const;
 
+    // destination offsets must already contain the device representation of the
+    // authoritative host partition for this selected batch.
     void enqueueCompactRaggedFieldMaterialization(
         const std::string &fieldName,
         const ThorImplementation::Tensor &rowIndicesDevice,
@@ -117,6 +119,8 @@ class DeviceResidentNamedDataset {
         uint64_t maxTotalValues,
         uint64_t maxValuesPerRow = 0) const;
 
+    // destination offsets must already contain the device representation of the
+    // authoritative host partition for this selected batch.
     void enqueueSnapshotRaggedFieldMaterialization(
         const std::string &fieldName,
         const ThorImplementation::Tensor &rowIndicesDevice,

@@ -7,8 +7,9 @@
 
 /**
  * Materialize one direct field from compact indexed records into a device batch
- * tensor. Records are byte-packed, so the implementation intentionally copies
- * bytes rather than assuming field alignment.
+ * tensor. Records are byte-packed, so the implementation selects aligned vector
+ * copies only when the complete record/field layout proves them safe and otherwise
+ * falls back to byte transactions.
  */
 void launchDeviceResidentDirectMaterializationKernel(
     const ThorImplementation::Tensor &recordStorage,

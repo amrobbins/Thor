@@ -4,6 +4,8 @@
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedGatherKernel.h"
 
+#include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -67,6 +69,34 @@ std::vector<BatchTensorSpec> batchTensorSpecsFor(const DatasetLayout &layout) {
         }
     }
     return specs;
+}
+
+void stageRaggedOffsets(const std::vector<uint64_t> &hostOffsets, Tensor &staging) {
+    THOR_THROW_IF_FALSE(staging.isInitialized());
+    THOR_THROW_IF_FALSE(
+        staging.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(staging.getDimensions().size() == 1);
+    THOR_THROW_IF_FALSE(staging.getDimensions().front() == hostOffsets.size());
+
+    switch (staging.getDataType()) {
+        case DataType::UINT32: {
+            uint32_t *destination = staging.getMemPtr<uint32_t>();
+            for (size_t i = 0; i < hostOffsets.size(); ++i) {
+                THOR_THROW_IF_FALSE(hostOffsets[i] <= std::numeric_limits<uint32_t>::max());
+                destination[i] = static_cast<uint32_t>(hostOffsets[i]);
+            }
+            return;
+        }
+        case DataType::UINT64: {
+            uint64_t *destination = staging.getMemPtr<uint64_t>();
+            std::copy(hostOffsets.begin(), hostOffsets.end(), destination);
+            return;
+        }
+        default:
+            break;
+    }
+    throw std::runtime_error(
+        "Device-resident ragged offsets staging requires UINT32 or UINT64 dtype.");
 }
 
 }  // namespace
@@ -316,8 +346,11 @@ DeviceResidentNamedBatchSession::allocateBatchStorage() const {
         const RaggedTensorDescriptor &descriptor = requirement.raggedTensorDescriptor.value();
         Tensor values(dataset->getPlacement(), descriptor.getValuesDescriptor());
         Tensor offsets(dataset->getPlacement(), descriptor.getOffsetsDescriptor());
+        Tensor offsetsHost(
+            TensorPlacement(TensorPlacement::MemDevices::CPU), descriptor.getOffsetsDescriptor());
         RowPartitionRuntime rowPartition(offsets, descriptor.getRowPartition());
         storage.raggedTensors.emplace(field.name, RaggedTensor(values, rowPartition));
+        storage.raggedOffsetsHostStaging.emplace(field.name, std::move(offsetsHost));
     }
     return storage;
 }
@@ -436,13 +469,21 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
             validExampleCount,
             requirement.raggedTensorDescriptor->getMaxTotalValues(),
             requirement.raggedTensorDescriptor->getMaxValuesPerRowOrZero());
-        RowPartitionRuntime& rowPartition = storage.raggedTensors.at(field.name).getRowPartitionRuntime();
+        RowPartitionRuntime& rowPartition =
+            storage.raggedTensors.at(field.name).getRowPartitionRuntime();
         rowPartition.setHostOffsets(extent.hostOffsets);
+        stageRaggedOffsets(
+            extent.hostOffsets, storage.raggedOffsetsHostStaging.at(field.name));
     }
 
     runtime.rowIndicesDevice.copyFromAsync(
         runtime.rowIndicesHost,
         runtime.gatherStream);
+    for (auto &[fieldName, ragged] : storage.raggedTensors) {
+        Tensor deviceOffsets = ragged.getOffsets();
+        deviceOffsets.copyFromAsync(
+            storage.raggedOffsetsHostStaging.at(fieldName), runtime.gatherStream);
+    }
 
     for (const BatchTensorSpec &spec : batchTensorSpecsFor(dataset->getLayout())) {
         Tensor &destination = storage.tensors.at(spec.name);

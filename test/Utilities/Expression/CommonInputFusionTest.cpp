@@ -942,6 +942,53 @@ TEST(ExpressionDTypeResolution, MixedFp8PromotesToBf16InCanonicalExpressionPolic
     EXPECT_EQ(promoteTensorValueDTypes(DataType::FP16, DataType::BF16), DataType::FP32);
 }
 
+TEST(ExpressionDTypeResolution, Fp8MixedWithFp16PreservesFp16StorageAndComputePrecision) {
+    // FP16 is the intentional common type when an FP16 tensor participates:
+    // every finite E4M3/E5M2 value is exactly representable in FP16, while
+    // BF16 has only 7 fraction bits versus FP16's 10.  Promoting this case to
+    // BF16 would therefore throw away low-magnitude precision the caller
+    // explicitly selected by using FP16.  BF16 is the preferred 16-bit common
+    // type only when the two FP8 formats meet without an FP16 operand.
+    for (const DataType fp8_dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        for (const bool fp8_is_lhs : {false, true}) {
+            const Expression fp8 = Expression::input("fp8", fp8_dtype, fp8_dtype);
+            const Expression fp16 = Expression::input("fp16", DataType::FP16, DataType::FP16);
+            const Expression lhs = fp8_is_lhs ? fp8 : fp16;
+            const Expression rhs = fp8_is_lhs ? fp16 : fp8;
+
+            PhysicalOutputs outputs = Expression::outputs({
+                {"sum", lhs + rhs},
+                {"product", lhs * rhs},
+            }).physicalOutputs();
+            // Root dtypes follow input creation order (fp8, fp16), independently
+            // of which input is the lhs of the binary operation.
+            resolveOutputsDTypesInPlace(outputs, {fp8_dtype, DataType::FP16});
+
+            for (const NamedOutput& output : outputs.outputs) {
+                const ExprNode& node = outputs.expr->nodes.at(output.node_idx);
+                ASSERT_TRUE(node.output_dtype.has_value()) << output.name;
+                ASSERT_TRUE(node.compute_dtype.has_value()) << output.name;
+                ASSERT_TRUE(node.backward_compute_dtype.has_value()) << output.name;
+                EXPECT_EQ(node.output_dtype.value(), DataType::FP16) << output.name;
+                EXPECT_EQ(node.compute_dtype.value(), DataType::FP16) << output.name;
+                EXPECT_EQ(node.backward_compute_dtype.value(), DataType::FP16) << output.name;
+            }
+        }
+    }
+
+    // Contrast the rule above with the mixed-FP8-only case.
+    const Expression e4 = Expression::input("e4", DataType::FP8_E4M3, DataType::FP8_E4M3);
+    const Expression e5 = Expression::input("e5", DataType::FP8_E5M2, DataType::FP8_E5M2);
+    PhysicalOutputs mixed_fp8 = Expression::outputs({{"sum", e4 + e5}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(mixed_fp8, {DataType::FP8_E4M3, DataType::FP8_E5M2});
+
+    const ExprNode& mixed_node = mixed_fp8.expr->nodes.at(mixed_fp8.outputs.front().node_idx);
+    ASSERT_TRUE(mixed_node.output_dtype.has_value());
+    ASSERT_TRUE(mixed_node.compute_dtype.has_value());
+    EXPECT_EQ(mixed_node.output_dtype.value(), DataType::BF16);
+    EXPECT_EQ(mixed_node.compute_dtype.value(), DataType::BF16);
+}
+
 TEST(ExpressionDTypeResolution, HomogeneousExactTensorPromotionPreservesPassthroughDType) {
     EXPECT_EQ(promoteTensorValueDTypes({DataType::UINT32, DataType::UINT32}), DataType::UINT32);
     EXPECT_EQ(promoteTensorValueDTypes({DataType::UINT64, DataType::UINT64}), DataType::UINT64);

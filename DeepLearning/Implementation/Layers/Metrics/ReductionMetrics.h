@@ -368,6 +368,9 @@ inline DynamicExpression makeRaggedWeightedMeanExpression(
             // full packed capacity before segmented reduction and therefore
             // read undefined inactive storage. These scalars are produced by an
             // active-prefix kernel instead.
+            Tensor partialStatistics(
+                valuesTensor.getPlacement(),
+                raggedWeightedMeanStatisticsWorkspaceDescriptor(maxTotalValues, elementsPerValue));
             Tensor numeratorStatistic(valuesTensor.getPlacement(), TensorDescriptor(DataType::FP32, {1}));
             Tensor denominatorStatistic(valuesTensor.getPlacement(), TensorDescriptor(DataType::FP32, {1}));
             const Expression numerator = Expression::input(
@@ -392,6 +395,7 @@ inline DynamicExpression makeRaggedWeightedMeanExpression(
                 .pre_forward_hook = [valuesTensor,
                                      weightsTensor,
                                      offsetsTensor,
+                                     partialStatistics,
                                      numeratorStatistic,
                                      denominatorStatistic,
                                      batchSize,
@@ -403,6 +407,7 @@ inline DynamicExpression makeRaggedWeightedMeanExpression(
                     raggedWeightedMeanStatistics(valuesTensor,
                                                  weightsTensor,
                                                  offsetsTensor,
+                                                 partialStatistics,
                                                  numeratorStatistic,
                                                  denominatorStatistic,
                                                  runtimeState->validRowCount,

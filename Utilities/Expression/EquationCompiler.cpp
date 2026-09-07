@@ -262,13 +262,8 @@ struct StageNodeKey {
     bool transpose_rhs = false;
     bool transpose_aux = false;
     ConvolutionSpatial2d conv_spatial_2d{};
+    ConvolutionSpatial3d conv_spatial_3d{};
     uint64_t conv_groups = 1;
-    int32_t conv_stride_d = 1;
-    int32_t conv_stride_h = 1;
-    int32_t conv_stride_w = 1;
-    int32_t conv_pad_d = 0;
-    int32_t conv_pad_h = 0;
-    int32_t conv_pad_w = 0;
     uint32_t rope_sequence_axis = 2;
     uint32_t rope_head_dim_axis = 3;
     uint64_t rope_rotary_dim = 0;
@@ -344,13 +339,19 @@ struct StageNodeKeyHash {
         hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_2d.post_padding_h));
         hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_2d.pre_padding_w));
         hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_2d.post_padding_w));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_3d.stride_d));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_3d.stride_h));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_3d.stride_w));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_3d.dilation_d));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_3d.dilation_h));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_3d.dilation_w));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_3d.pre_padding_d));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_3d.post_padding_d));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_3d.pre_padding_h));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_3d.post_padding_h));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_3d.pre_padding_w));
+        hashCombine(h, std::hash<int32_t>{}(k.conv_spatial_3d.post_padding_w));
         hashCombine(h, std::hash<uint64_t>{}(k.conv_groups));
-        hashCombine(h, std::hash<int32_t>{}(k.conv_stride_d));
-        hashCombine(h, std::hash<int32_t>{}(k.conv_stride_h));
-        hashCombine(h, std::hash<int32_t>{}(k.conv_stride_w));
-        hashCombine(h, std::hash<int32_t>{}(k.conv_pad_d));
-        hashCombine(h, std::hash<int32_t>{}(k.conv_pad_h));
-        hashCombine(h, std::hash<int32_t>{}(k.conv_pad_w));
         hashCombine(h, std::hash<uint32_t>{}(k.rope_sequence_axis));
         hashCombine(h, std::hash<uint32_t>{}(k.rope_head_dim_axis));
         hashCombine(h, std::hash<uint64_t>{}(k.rope_rotary_dim));
@@ -459,13 +460,8 @@ static StageNodeKey makeStageNodeKey(const ExprNode& n) {
     key.transpose_rhs = n.transpose_rhs;
     key.transpose_aux = n.transpose_aux;
     key.conv_spatial_2d = n.conv_spatial_2d;
+    key.conv_spatial_3d = n.conv_spatial_3d;
     key.conv_groups = n.conv_groups;
-    key.conv_stride_d = n.conv_stride_d;
-    key.conv_stride_h = n.conv_stride_h;
-    key.conv_stride_w = n.conv_stride_w;
-    key.conv_pad_d = n.conv_pad_d;
-    key.conv_pad_h = n.conv_pad_h;
-    key.conv_pad_w = n.conv_pad_w;
     key.alpha_bits = scalarBits(n.alpha_fp);
     key.beta_bits = scalarBits(n.beta_fp);
     key.alpha_node = n.alpha_node;
@@ -1926,9 +1922,20 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                     ",dw=" + std::to_string(node.conv_spatial_2d.dilation_w) +
                     ",groups=" + std::to_string(node.conv_groups) + ")";
             } else {
-                s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",sh=" + std::to_string(node.conv_stride_h) +
-                    ",sw=" + std::to_string(node.conv_stride_w) + ",ph=" + std::to_string(node.conv_pad_h) +
-                    ",pw=" + std::to_string(node.conv_pad_w) + ")";
+                s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs +
+                    ",sd=" + std::to_string(node.conv_spatial_3d.stride_d) +
+                    ",sh=" + std::to_string(node.conv_spatial_3d.stride_h) +
+                    ",sw=" + std::to_string(node.conv_spatial_3d.stride_w) +
+                    ",preD=" + std::to_string(node.conv_spatial_3d.pre_padding_d) +
+                    ",postD=" + std::to_string(node.conv_spatial_3d.post_padding_d) +
+                    ",preH=" + std::to_string(node.conv_spatial_3d.pre_padding_h) +
+                    ",postH=" + std::to_string(node.conv_spatial_3d.post_padding_h) +
+                    ",preW=" + std::to_string(node.conv_spatial_3d.pre_padding_w) +
+                    ",postW=" + std::to_string(node.conv_spatial_3d.post_padding_w) +
+                    ",dd=" + std::to_string(node.conv_spatial_3d.dilation_d) +
+                    ",dh=" + std::to_string(node.conv_spatial_3d.dilation_h) +
+                    ",dw=" + std::to_string(node.conv_spatial_3d.dilation_w) +
+                    ",groups=" + std::to_string(node.conv_groups) + ")";
             }
         } else {
             s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",axes=" + uintVecSignature(node.reduction_axes) +
@@ -4089,17 +4096,8 @@ shared_ptr<CompiledConvolution> EquationCompiler::compileConvolution(const Physi
         return make_shared<CompiledConvolution>(
             node.conv_spatial_2d, supported_input_dtype, supported_filter_dtype, output_dtype, compute_dtype, node.conv_groups);
     }
-    return make_shared<CompiledConvolution>(node.conv_stride_d,
-                                            node.conv_stride_h,
-                                            node.conv_stride_w,
-                                            node.conv_pad_d,
-                                            node.conv_pad_h,
-                                            node.conv_pad_w,
-                                            supported_input_dtype,
-                                            supported_filter_dtype,
-                                            output_dtype,
-                                            compute_dtype,
-                                            node.conv_groups);
+    return make_shared<CompiledConvolution>(
+        node.conv_spatial_3d, supported_input_dtype, supported_filter_dtype, output_dtype, compute_dtype, node.conv_groups);
 }
 
 shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBackward(const PhysicalExpression& expr) {
@@ -4175,12 +4173,7 @@ shared_ptr<CompiledConvolutionBackward> EquationCompiler::compileConvolutionBack
                                                         node.conv_groups);
     }
     return make_shared<CompiledConvolutionBackward>(node.op,
-                                                    node.conv_stride_d,
-                                                    node.conv_stride_h,
-                                                    node.conv_stride_w,
-                                                    node.conv_pad_d,
-                                                    node.conv_pad_h,
-                                                    node.conv_pad_w,
+                                                    node.conv_spatial_3d,
                                                     supported_input_dtype,
                                                     supported_grad_output_dtype,
                                                     output_dtype,

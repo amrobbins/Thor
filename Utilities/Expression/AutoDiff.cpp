@@ -1592,12 +1592,7 @@ class BackwardGraphBuilder {
 
     uint32_t conv3dBackwardData(uint32_t filter,
                                 uint32_t grad_output,
-                                int32_t stride_d,
-                                int32_t stride_h,
-                                int32_t stride_w,
-                                int32_t pad_d,
-                                int32_t pad_h,
-                                int32_t pad_w,
+                                ConvolutionSpatial3d spatial,
                                 uint64_t groups,
                                 const std::vector<uint64_t>& target_output_dims = {},
                                 std::optional<DataType> output_dtype = std::nullopt,
@@ -1606,12 +1601,7 @@ class BackwardGraphBuilder {
         node.op = ExprOp::CONV3D_BACKWARD_DATA;
         node.lhs = filter;
         node.rhs = grad_output;
-        node.conv_stride_d = stride_d;
-        node.conv_stride_h = stride_h;
-        node.conv_stride_w = stride_w;
-        node.conv_pad_d = pad_d;
-        node.conv_pad_h = pad_h;
-        node.conv_pad_w = pad_w;
+        node.conv_spatial_3d = spatial;
         node.conv_groups = groups;
         node.fill_dims = target_output_dims;
         if (output_dtype.has_value()) {
@@ -1625,12 +1615,7 @@ class BackwardGraphBuilder {
 
     uint32_t conv3dBackwardFilter(uint32_t input,
                                   uint32_t grad_output,
-                                  int32_t stride_d,
-                                  int32_t stride_h,
-                                  int32_t stride_w,
-                                  int32_t pad_d,
-                                  int32_t pad_h,
-                                  int32_t pad_w,
+                                  ConvolutionSpatial3d spatial,
                                   uint64_t groups,
                                   const std::vector<uint64_t>& target_output_dims = {},
                                   std::optional<DataType> output_dtype = std::nullopt,
@@ -1639,12 +1624,7 @@ class BackwardGraphBuilder {
         node.op = ExprOp::CONV3D_BACKWARD_FILTER;
         node.lhs = input;
         node.rhs = grad_output;
-        node.conv_stride_d = stride_d;
-        node.conv_stride_h = stride_h;
-        node.conv_stride_w = stride_w;
-        node.conv_pad_d = pad_d;
-        node.conv_pad_h = pad_h;
-        node.conv_pad_w = pad_w;
+        node.conv_spatial_3d = spatial;
         node.conv_groups = groups;
         node.fill_dims = target_output_dims;
         if (output_dtype.has_value()) {
@@ -2891,15 +2871,20 @@ static std::vector<uint64_t> inferConvolutionOutputDims(const ExprNode& node,
 
     std::vector<uint64_t> out_dims{input_dims[0], filter_dims[0]};
     const std::vector<int32_t> strides =
-        is_3d ? std::vector<int32_t>{node.conv_stride_d, node.conv_stride_h, node.conv_stride_w}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.stride_d, node.conv_spatial_3d.stride_h, node.conv_spatial_3d.stride_w}
               : std::vector<int32_t>{node.conv_spatial_2d.stride_h, node.conv_spatial_2d.stride_w};
     const std::vector<int32_t> pre_pads =
-        is_3d ? std::vector<int32_t>{node.conv_pad_d, node.conv_pad_h, node.conv_pad_w}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.pre_padding_d, node.conv_spatial_3d.pre_padding_h, node.conv_spatial_3d.pre_padding_w}
               : std::vector<int32_t>{node.conv_spatial_2d.pre_padding_h, node.conv_spatial_2d.pre_padding_w};
     const std::vector<int32_t> post_pads =
-        is_3d ? pre_pads : std::vector<int32_t>{node.conv_spatial_2d.post_padding_h, node.conv_spatial_2d.post_padding_w};
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.post_padding_d,
+                                     node.conv_spatial_3d.post_padding_h,
+                                     node.conv_spatial_3d.post_padding_w}
+              : std::vector<int32_t>{node.conv_spatial_2d.post_padding_h, node.conv_spatial_2d.post_padding_w};
     const std::vector<int32_t> dilations =
-        is_3d ? std::vector<int32_t>{1, 1, 1}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.dilation_d,
+                                     node.conv_spatial_3d.dilation_h,
+                                     node.conv_spatial_3d.dilation_w}
               : std::vector<int32_t>{node.conv_spatial_2d.dilation_h, node.conv_spatial_2d.dilation_w};
     for (size_t i = 0; i < strides.size(); ++i) {
         const size_t dim_idx = 2 + i;
@@ -2945,15 +2930,20 @@ static std::vector<uint64_t> inferConvolutionBackwardDataOutputDims(const ExprNo
 
     std::vector<uint64_t> out_dims{n, c};
     const std::vector<int32_t> strides =
-        is_3d ? std::vector<int32_t>{node.conv_stride_d, node.conv_stride_h, node.conv_stride_w}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.stride_d, node.conv_spatial_3d.stride_h, node.conv_spatial_3d.stride_w}
               : std::vector<int32_t>{node.conv_spatial_2d.stride_h, node.conv_spatial_2d.stride_w};
     const std::vector<int32_t> pre_pads =
-        is_3d ? std::vector<int32_t>{node.conv_pad_d, node.conv_pad_h, node.conv_pad_w}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.pre_padding_d, node.conv_spatial_3d.pre_padding_h, node.conv_spatial_3d.pre_padding_w}
               : std::vector<int32_t>{node.conv_spatial_2d.pre_padding_h, node.conv_spatial_2d.pre_padding_w};
     const std::vector<int32_t> post_pads =
-        is_3d ? pre_pads : std::vector<int32_t>{node.conv_spatial_2d.post_padding_h, node.conv_spatial_2d.post_padding_w};
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.post_padding_d,
+                                     node.conv_spatial_3d.post_padding_h,
+                                     node.conv_spatial_3d.post_padding_w}
+              : std::vector<int32_t>{node.conv_spatial_2d.post_padding_h, node.conv_spatial_2d.post_padding_w};
     const std::vector<int32_t> dilations =
-        is_3d ? std::vector<int32_t>{1, 1, 1}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.dilation_d,
+                                     node.conv_spatial_3d.dilation_h,
+                                     node.conv_spatial_3d.dilation_w}
               : std::vector<int32_t>{node.conv_spatial_2d.dilation_h, node.conv_spatial_2d.dilation_w};
     for (size_t i = 0; i < strides.size(); ++i) {
         const size_t dim_idx = 2 + i;
@@ -2999,15 +2989,20 @@ static std::vector<uint64_t> inferConvolutionBackwardFilterOutputDims(const Expr
 
     std::vector<uint64_t> out_dims{k, filter_c};
     const std::vector<int32_t> strides =
-        is_3d ? std::vector<int32_t>{node.conv_stride_d, node.conv_stride_h, node.conv_stride_w}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.stride_d, node.conv_spatial_3d.stride_h, node.conv_spatial_3d.stride_w}
               : std::vector<int32_t>{node.conv_spatial_2d.stride_h, node.conv_spatial_2d.stride_w};
     const std::vector<int32_t> pre_pads =
-        is_3d ? std::vector<int32_t>{node.conv_pad_d, node.conv_pad_h, node.conv_pad_w}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.pre_padding_d, node.conv_spatial_3d.pre_padding_h, node.conv_spatial_3d.pre_padding_w}
               : std::vector<int32_t>{node.conv_spatial_2d.pre_padding_h, node.conv_spatial_2d.pre_padding_w};
     const std::vector<int32_t> post_pads =
-        is_3d ? pre_pads : std::vector<int32_t>{node.conv_spatial_2d.post_padding_h, node.conv_spatial_2d.post_padding_w};
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.post_padding_d,
+                                     node.conv_spatial_3d.post_padding_h,
+                                     node.conv_spatial_3d.post_padding_w}
+              : std::vector<int32_t>{node.conv_spatial_2d.post_padding_h, node.conv_spatial_2d.post_padding_w};
     const std::vector<int32_t> dilations =
-        is_3d ? std::vector<int32_t>{1, 1, 1}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.dilation_d,
+                                     node.conv_spatial_3d.dilation_h,
+                                     node.conv_spatial_3d.dilation_w}
               : std::vector<int32_t>{node.conv_spatial_2d.dilation_h, node.conv_spatial_2d.dilation_w};
     for (size_t i = 0; i < strides.size(); ++i) {
         const size_t dim_idx = 2 + i;
@@ -5418,12 +5413,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     if (node.op == ExprOp::CONV3D) {
                         lhs_grad = builder.conv3dBackwardData(filter,
                                                               grad_like_output,
-                                                              node.conv_stride_d,
-                                                              node.conv_stride_h,
-                                                              node.conv_stride_w,
-                                                              node.conv_pad_d,
-                                                              node.conv_pad_h,
-                                                              node.conv_pad_w,
+                                                              node.conv_spatial_3d,
                                                               node.conv_groups,
                                                               lhs_dims,
                                                               lhs_grad_dtype,
@@ -5446,12 +5436,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     if (node.op == ExprOp::CONV3D) {
                         rhs_grad = builder.conv3dBackwardFilter(input,
                                                                 grad_like_output,
-                                                                node.conv_stride_d,
-                                                                node.conv_stride_h,
-                                                                node.conv_stride_w,
-                                                                node.conv_pad_d,
-                                                                node.conv_pad_h,
-                                                                node.conv_pad_w,
+                                                                node.conv_spatial_3d,
                                                                 node.conv_groups,
                                                                 rhs_dims,
                                                                 rhs_grad_dtype,

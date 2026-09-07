@@ -61,12 +61,16 @@ TEST(RaggedWeightedReduction, ActivePrefixHonorsValidRowsPoisonedCapacityAndOffs
             }
             Tensor values = makeGpuTensor(hostValues, {maxTotalValues, elementsPerValue}, stream, dtypes.values);
             Tensor weights = makeGpuTensor(hostWeights, {maxTotalValues, elementsPerValue}, stream, dtypes.weights);
+            Tensor partialStatistics(
+                gpuPlacement,
+                raggedWeightedMeanStatisticsWorkspaceDescriptor(maxTotalValues, elementsPerValue));
             Tensor numerator(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
             Tensor denominator(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
 
             raggedWeightedMeanStatistics(values,
                                          weights,
                                          offsets,
+                                         partialStatistics,
                                          numerator,
                                          denominator,
                                          validRows,
@@ -115,14 +119,84 @@ TEST(RaggedWeightedReduction, ZeroWeightCanonicalizesNumeratorEvenWhenIgnoredVal
     Tensor weights =
         makeGpuTensor({0.0f, 0.0f, 0.0f, 0.0f, 9.0f, 9.0f}, {3, 2}, stream, DataType::FP32);
     Tensor offsets = makeGpuUnsignedTensor({0, 2, 3}, {3}, stream, DataType::UINT32);
+    Tensor partialStatistics(
+        gpuPlacement, raggedWeightedMeanStatisticsWorkspaceDescriptor(3, 2));
     Tensor numerator(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
     Tensor denominator(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
 
     // Only row 0 is valid: its active weights are all zero and its values may
     // contain NaN because the batch has no WeightedMean contribution.
-    raggedWeightedMeanStatistics(values, weights, offsets, numerator, denominator, 1, 3, 2, stream);
+    raggedWeightedMeanStatistics(
+        values, weights, offsets, partialStatistics, numerator, denominator, 1, 3, 2, stream);
     stream.synchronize();
 
     EXPECT_FLOAT_EQ(copyGpuTensorAsFloat(numerator, stream).front(), 0.0f);
     EXPECT_FLOAT_EQ(copyGpuTensorAsFloat(denominator, stream).front(), 0.0f);
+}
+
+
+TEST(RaggedWeightedReduction, MultiplePartialBlocksReduceActivePrefixWithoutAtomics) {
+    REQUIRE_CUDA_DEVICE();
+    Stream stream(0);
+
+    constexpr uint64_t batchSize = 4;
+    constexpr uint64_t validRows = 2;
+    constexpr uint64_t maxTotalValues = 8192;
+    constexpr uint64_t elementsPerValue = 2;
+    constexpr uint64_t activeValues = 5000;
+    constexpr uint64_t activeScalars = activeValues * elementsPerValue;
+
+    const TensorDescriptor workspaceDescriptor =
+        raggedWeightedMeanStatisticsWorkspaceDescriptor(maxTotalValues, elementsPerValue);
+    ASSERT_EQ(workspaceDescriptor.getDimensions().size(), 2U);
+    EXPECT_GT(workspaceDescriptor.getDimensions().front(), 1U);
+    EXPECT_EQ(workspaceDescriptor.getDimensions()[1], 2U);
+
+    std::vector<float> hostValues(maxTotalValues * elementsPerValue,
+                                  std::numeric_limits<float>::quiet_NaN());
+    std::vector<float> hostWeights(maxTotalValues * elementsPerValue,
+                                   std::numeric_limits<float>::quiet_NaN());
+    for (uint64_t i = 0; i < activeScalars; ++i) {
+        hostValues[i] = static_cast<float>((i % 7) + 1);
+        hostWeights[i] = static_cast<float>((i % 3) + 1);
+    }
+
+    for (DataType offsetsDType : {DataType::UINT32, DataType::UINT64}) {
+        Tensor values = makeGpuTensor(
+            hostValues, {maxTotalValues, elementsPerValue}, stream, DataType::FP32);
+        Tensor weights = makeGpuTensor(
+            hostWeights, {maxTotalValues, elementsPerValue}, stream, DataType::FP32);
+        // Rows after validRows deliberately describe additional values. The
+        // reduction must stop at offsets[validRows] and never read their NaN
+        // storage or the remainder of packed capacity.
+        Tensor offsets = makeGpuUnsignedTensor(
+            {0, 2500, activeValues, 7000, 7500}, {batchSize + 1}, stream, offsetsDType);
+        Tensor partialStatistics(gpuPlacement, workspaceDescriptor);
+        Tensor numerator(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
+        Tensor denominator(gpuPlacement, TensorDescriptor(DataType::FP32, {1}));
+
+        raggedWeightedMeanStatistics(values,
+                                     weights,
+                                     offsets,
+                                     partialStatistics,
+                                     numerator,
+                                     denominator,
+                                     validRows,
+                                     maxTotalValues,
+                                     elementsPerValue,
+                                     stream);
+        stream.synchronize();
+
+        float expectedNumerator = 0.0f;
+        float expectedDenominator = 0.0f;
+        for (uint64_t i = 0; i < activeScalars; ++i) {
+            expectedNumerator += hostValues[i] * hostWeights[i];
+            expectedDenominator += hostWeights[i];
+        }
+
+        EXPECT_NEAR(copyGpuTensorAsFloat(numerator, stream).front(), expectedNumerator, 1.0e-2f);
+        EXPECT_NEAR(copyGpuTensorAsFloat(denominator, stream).front(), expectedDenominator, 1.0e-2f);
+        EXPECT_TRUE(std::isfinite(copyGpuTensorAsFloat(numerator, stream).front()));
+        EXPECT_TRUE(std::isfinite(copyGpuTensorAsFloat(denominator, stream).front()));
+    }
 }

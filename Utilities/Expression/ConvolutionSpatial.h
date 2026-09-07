@@ -94,6 +94,26 @@ struct ConvolutionSpatial1d {
     }
 };
 
+// Canonical spatial metadata for a 3D convolution. The physical expression
+// surface accepts the full descriptor; the high-level Convolution3d layer may
+// resolve a narrower semantic padding API into these concrete values.
+struct ConvolutionSpatial3d {
+    int32_t stride_d = 1;
+    int32_t stride_h = 1;
+    int32_t stride_w = 1;
+    int32_t dilation_d = 1;
+    int32_t dilation_h = 1;
+    int32_t dilation_w = 1;
+    int32_t pre_padding_d = 0;
+    int32_t post_padding_d = 0;
+    int32_t pre_padding_h = 0;
+    int32_t post_padding_h = 0;
+    int32_t pre_padding_w = 0;
+    int32_t post_padding_w = 0;
+
+    bool operator==(const ConvolutionSpatial3d& other) const = default;
+};
+
 // Canonical spatial metadata for a 2D convolution. Padding is represented
 // explicitly as independent pre/post values in each spatial dimension.
 struct ConvolutionSpatial2d {

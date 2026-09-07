@@ -277,18 +277,13 @@ struct ExprNode {
     MatmulPackedRowBinding matmul_packed_row_binding = MatmulPackedRowBinding::None;
     uint64_t matmul_packed_row_capacity = 0;
     ConvolutionSpatial2d conv_spatial_2d{};
+    ConvolutionSpatial3d conv_spatial_3d{};
     uint64_t conv_groups = 1;
     ConvolutionSpatial1d ragged_conv_spatial_1d{};
     uint64_t ragged_conv1d_input_channels = 0;
     uint64_t ragged_conv1d_output_channels = 0;
     uint64_t ragged_conv1d_kernel_width = 0;
     uint64_t ragged_conv1d_groups = 1;
-    int32_t conv_stride_d = 1;
-    int32_t conv_stride_h = 1;
-    int32_t conv_stride_w = 1;
-    int32_t conv_pad_d = 0;
-    int32_t conv_pad_h = 0;
-    int32_t conv_pad_w = 0;
     cudnnSoftmaxAlgorithm_t softmax_algorithm = CUDNN_SOFTMAX_ACCURATE;
     cudnnSoftmaxMode_t softmax_mode = CUDNN_SOFTMAX_MODE_CHANNEL;
 
@@ -1032,6 +1027,12 @@ class Expression {
     [[nodiscard]] static Expression conv2d(const Expression& input,
                                            const Expression& filter,
                                            ConvolutionSpatial2d spatial,
+                                           std::optional<DataType> compute_dtype = std::nullopt,
+                                           std::optional<DataType> output_dtype = std::nullopt,
+                                           uint64_t groups = 1);
+    [[nodiscard]] static Expression conv3d(const Expression& input,
+                                           const Expression& filter,
+                                           ConvolutionSpatial3d spatial,
                                            std::optional<DataType> compute_dtype = std::nullopt,
                                            std::optional<DataType> output_dtype = std::nullopt,
                                            uint64_t groups = 1);

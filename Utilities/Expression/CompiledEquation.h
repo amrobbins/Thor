@@ -582,15 +582,8 @@ struct CompiledReduceMinMaxBackward {
 struct CompiledConvolution {
     const bool is_3d;
     const ConvolutionSpatial2d spatial_2d;
+    const ConvolutionSpatial3d spatial_3d;
     const uint64_t groups;
-    // Conv3D retains its legacy depth/height/width representation. Conv2D uses
-    // spatial_2d exclusively.
-    const int32_t stride_d;
-    const int32_t stride_h;
-    const int32_t stride_w;
-    const int32_t pad_d;
-    const int32_t pad_h;
-    const int32_t pad_w;
     const DataType input_dtype;
     const DataType filter_dtype;
     const DataType output_dtype;
@@ -606,24 +599,14 @@ struct CompiledConvolution {
                         uint64_t groups = 1)
         : is_3d(false),
           spatial_2d(spatial_2d),
+          spatial_3d(),
           groups(groups),
-          stride_d(1),
-          stride_h(1),
-          stride_w(1),
-          pad_d(0),
-          pad_h(0),
-          pad_w(0),
           input_dtype(input_dtype),
           filter_dtype(filter_dtype),
           output_dtype(output_dtype),
           compute_dtype(compute_dtype.has_value() ? compute_dtype.value() : DataType::FP32) {}
 
-    CompiledConvolution(int32_t stride_d,
-                        int32_t stride_h,
-                        int32_t stride_w,
-                        int32_t pad_d,
-                        int32_t pad_h,
-                        int32_t pad_w,
+    CompiledConvolution(ConvolutionSpatial3d spatial_3d,
                         DataType input_dtype,
                         DataType filter_dtype,
                         DataType output_dtype,
@@ -631,13 +614,8 @@ struct CompiledConvolution {
                         uint64_t groups = 1)
         : is_3d(true),
           spatial_2d(),
+          spatial_3d(spatial_3d),
           groups(groups),
-          stride_d(stride_d),
-          stride_h(stride_h),
-          stride_w(stride_w),
-          pad_d(pad_d),
-          pad_h(pad_h),
-          pad_w(pad_w),
           input_dtype(input_dtype),
           filter_dtype(filter_dtype),
           output_dtype(output_dtype),
@@ -647,15 +625,8 @@ struct CompiledConvolution {
 struct CompiledConvolutionBackward {
     const ExprOp op;
     const ConvolutionSpatial2d spatial_2d;
+    const ConvolutionSpatial3d spatial_3d;
     const uint64_t groups;
-    // Conv3D retains its legacy depth/height/width representation. Conv2D uses
-    // spatial_2d exclusively.
-    const int32_t stride_d;
-    const int32_t stride_h;
-    const int32_t stride_w;
-    const int32_t pad_d;
-    const int32_t pad_h;
-    const int32_t pad_w;
     const DataType input_dtype;
     const DataType grad_output_dtype;
     const DataType output_dtype;
@@ -674,13 +645,8 @@ struct CompiledConvolutionBackward {
                                 uint64_t groups = 1)
         : op(op),
           spatial_2d(spatial_2d),
+          spatial_3d(),
           groups(groups),
-          stride_d(1),
-          stride_h(1),
-          stride_w(1),
-          pad_d(0),
-          pad_h(0),
-          pad_w(0),
           input_dtype(input_dtype),
           grad_output_dtype(grad_output_dtype),
           output_dtype(output_dtype),
@@ -688,12 +654,7 @@ struct CompiledConvolutionBackward {
           explicit_output_dims(std::move(explicit_output_dims)) {}
 
     CompiledConvolutionBackward(ExprOp op,
-                                int32_t stride_d,
-                                int32_t stride_h,
-                                int32_t stride_w,
-                                int32_t pad_d,
-                                int32_t pad_h,
-                                int32_t pad_w,
+                                ConvolutionSpatial3d spatial_3d,
                                 DataType input_dtype,
                                 DataType grad_output_dtype,
                                 DataType output_dtype,
@@ -702,13 +663,8 @@ struct CompiledConvolutionBackward {
                                 uint64_t groups = 1)
         : op(op),
           spatial_2d(),
+          spatial_3d(spatial_3d),
           groups(groups),
-          stride_d(stride_d),
-          stride_h(stride_h),
-          stride_w(stride_w),
-          pad_d(pad_d),
-          pad_h(pad_h),
-          pad_w(pad_w),
           input_dtype(input_dtype),
           grad_output_dtype(grad_output_dtype),
           output_dtype(output_dtype),

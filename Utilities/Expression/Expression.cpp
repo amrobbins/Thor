@@ -640,6 +640,16 @@ bool isConv2dExpressionOp(ExprOp op) {
     return op == ExprOp::CONV2D || op == ExprOp::CONV2D_BACKWARD_DATA || op == ExprOp::CONV2D_BACKWARD_FILTER;
 }
 
+bool isConv3dExpressionOp(ExprOp op) {
+    return op == ExprOp::CONV3D || op == ExprOp::CONV3D_BACKWARD_DATA || op == ExprOp::CONV3D_BACKWARD_FILTER;
+}
+
+bool hasLegacyConv3dSpatialSemantics(const ConvolutionSpatial3d& spatial) {
+    return spatial.dilation_d == 1 && spatial.dilation_h == 1 && spatial.dilation_w == 1 &&
+           spatial.pre_padding_d == spatial.post_padding_d && spatial.pre_padding_h == spatial.post_padding_h &&
+           spatial.pre_padding_w == spatial.post_padding_w;
+}
+
 std::string hex64(uint64_t value) {
     std::ostringstream ss;
     ss << std::hex << std::setw(16) << std::setfill('0') << value;
@@ -666,10 +676,12 @@ json exprNodeToJson(const ExprNode& node) {
     j["matmul_epilogue_aux"] = node.matmul_epilogue_aux;
     j["matmul_packed_row_binding"] = static_cast<int>(node.matmul_packed_row_binding);
     j["matmul_packed_row_capacity"] = node.matmul_packed_row_capacity;
-    j["conv_stride_d"] = node.conv_stride_d;
-    j["conv_stride_h"] = isConv2dExpressionOp(node.op) ? node.conv_spatial_2d.stride_h : node.conv_stride_h;
-    j["conv_stride_w"] = isConv2dExpressionOp(node.op) ? node.conv_spatial_2d.stride_w : node.conv_stride_w;
-    j["conv_pad_d"] = node.conv_pad_d;
+    j["conv_stride_d"] = node.conv_spatial_3d.stride_d;
+    j["conv_stride_h"] = isConv2dExpressionOp(node.op) ? node.conv_spatial_2d.stride_h : node.conv_spatial_3d.stride_h;
+    j["conv_stride_w"] = isConv2dExpressionOp(node.op) ? node.conv_spatial_2d.stride_w : node.conv_spatial_3d.stride_w;
+    if (!isConv3dExpressionOp(node.op)) {
+        j["conv_pad_d"] = node.conv_spatial_3d.pre_padding_d;
+    }
     j["conv_groups"] = node.conv_groups;
     j["ragged_conv_stride"] = node.ragged_conv_spatial_1d.stride;
     j["ragged_conv_dilation"] = node.ragged_conv_spatial_1d.dilation;
@@ -686,9 +698,19 @@ json exprNodeToJson(const ExprNode& node) {
         j["conv_post_padding_w"] = node.conv_spatial_2d.post_padding_w;
         j["conv_dilation_h"] = node.conv_spatial_2d.dilation_h;
         j["conv_dilation_w"] = node.conv_spatial_2d.dilation_w;
+    } else if (isConv3dExpressionOp(node.op)) {
+        j["conv_pre_padding_d"] = node.conv_spatial_3d.pre_padding_d;
+        j["conv_post_padding_d"] = node.conv_spatial_3d.post_padding_d;
+        j["conv_pre_padding_h"] = node.conv_spatial_3d.pre_padding_h;
+        j["conv_post_padding_h"] = node.conv_spatial_3d.post_padding_h;
+        j["conv_pre_padding_w"] = node.conv_spatial_3d.pre_padding_w;
+        j["conv_post_padding_w"] = node.conv_spatial_3d.post_padding_w;
+        j["conv_dilation_d"] = node.conv_spatial_3d.dilation_d;
+        j["conv_dilation_h"] = node.conv_spatial_3d.dilation_h;
+        j["conv_dilation_w"] = node.conv_spatial_3d.dilation_w;
     } else {
-        j["conv_pad_h"] = node.conv_pad_h;
-        j["conv_pad_w"] = node.conv_pad_w;
+        j["conv_pad_h"] = node.conv_spatial_3d.pre_padding_h;
+        j["conv_pad_w"] = node.conv_spatial_3d.pre_padding_w;
     }
     j["softmax_algorithm"] = static_cast<int>(node.softmax_algorithm);
     j["softmax_mode"] = static_cast<int>(node.softmax_mode);
@@ -832,8 +854,6 @@ ExprNode exprNodeFromJson(const json& j) {
     node.matmul_epilogue_aux = j.value("matmul_epilogue_aux", UINT32_MAX);
     node.matmul_packed_row_binding = static_cast<MatmulPackedRowBinding>(j.value("matmul_packed_row_binding", 0));
     node.matmul_packed_row_capacity = j.value("matmul_packed_row_capacity", uint64_t{0});
-    node.conv_stride_d = j.value("conv_stride_d", 1);
-    node.conv_pad_d = j.value("conv_pad_d", 0);
     node.ragged_conv_spatial_1d.stride = j.value("ragged_conv_stride", 1);
     node.ragged_conv_spatial_1d.dilation = j.value("ragged_conv_dilation", 1);
     node.ragged_conv_spatial_1d.pre_padding = j.value("ragged_conv_pre_padding", 0);
@@ -885,20 +905,75 @@ ExprNode exprNodeFromJson(const json& j) {
             node.conv_spatial_2d.pre_padding_w < 0 || node.conv_spatial_2d.post_padding_w < 0) {
             throw std::runtime_error("Serialized Conv2D expression padding must be non-negative.");
         }
-    } else {
-        node.conv_stride_h = j.value("conv_stride_h", 1);
-        node.conv_stride_w = j.value("conv_stride_w", 1);
-        node.conv_pad_h = j.value("conv_pad_h", 0);
-        node.conv_pad_w = j.value("conv_pad_w", 0);
-        if (node.op == ExprOp::CONV3D || node.op == ExprOp::CONV3D_BACKWARD_DATA || node.op == ExprOp::CONV3D_BACKWARD_FILTER) {
-            if (!j.contains("conv_groups")) {
-                throw std::runtime_error("Serialized Conv3D expression requires current groups field.");
-            }
-            node.conv_groups = j.at("conv_groups").get<uint64_t>();
-            if (node.conv_groups == 0) {
-                throw std::runtime_error("Serialized Conv3D expression groups must be positive.");
-            }
+    } else if (isConv3dExpressionOp(node.op)) {
+        if (!j.contains("conv_groups")) {
+            throw std::runtime_error("Serialized Conv3D expression requires current groups field.");
         }
+        node.conv_groups = j.at("conv_groups").get<uint64_t>();
+        if (node.conv_groups == 0) {
+            throw std::runtime_error("Serialized Conv3D expression groups must be positive.");
+        }
+
+        constexpr const char* current_spatial_fields[] = {
+            "conv_pre_padding_d",  "conv_post_padding_d", "conv_pre_padding_h",
+            "conv_post_padding_h", "conv_pre_padding_w",  "conv_post_padding_w",
+            "conv_dilation_d",     "conv_dilation_h",     "conv_dilation_w",
+        };
+        bool has_any_current_spatial_field = false;
+        bool has_all_current_spatial_fields = true;
+        for (const char* field : current_spatial_fields) {
+            has_any_current_spatial_field = has_any_current_spatial_field || j.contains(field);
+            has_all_current_spatial_fields = has_all_current_spatial_fields && j.contains(field);
+        }
+        if (has_any_current_spatial_field && !has_all_current_spatial_fields) {
+            throw std::runtime_error("Serialized Conv3D expression has an incomplete spatial descriptor.");
+        }
+
+        node.conv_spatial_3d.stride_d = j.value("conv_stride_d", 1);
+        node.conv_spatial_3d.stride_h = j.value("conv_stride_h", 1);
+        node.conv_spatial_3d.stride_w = j.value("conv_stride_w", 1);
+        if (has_all_current_spatial_fields) {
+            node.conv_spatial_3d.dilation_d = j.at("conv_dilation_d").get<int32_t>();
+            node.conv_spatial_3d.dilation_h = j.at("conv_dilation_h").get<int32_t>();
+            node.conv_spatial_3d.dilation_w = j.at("conv_dilation_w").get<int32_t>();
+            node.conv_spatial_3d.pre_padding_d = j.at("conv_pre_padding_d").get<int32_t>();
+            node.conv_spatial_3d.post_padding_d = j.at("conv_post_padding_d").get<int32_t>();
+            node.conv_spatial_3d.pre_padding_h = j.at("conv_pre_padding_h").get<int32_t>();
+            node.conv_spatial_3d.post_padding_h = j.at("conv_post_padding_h").get<int32_t>();
+            node.conv_spatial_3d.pre_padding_w = j.at("conv_pre_padding_w").get<int32_t>();
+            node.conv_spatial_3d.post_padding_w = j.at("conv_post_padding_w").get<int32_t>();
+        } else {
+            // Accept the pre-CR1.1 physical expression schema. It represented only
+            // unit dilation and symmetric padding, so the translation is exact.
+            node.conv_spatial_3d.dilation_d = 1;
+            node.conv_spatial_3d.dilation_h = 1;
+            node.conv_spatial_3d.dilation_w = 1;
+            node.conv_spatial_3d.pre_padding_d = node.conv_spatial_3d.post_padding_d = j.value("conv_pad_d", 0);
+            node.conv_spatial_3d.pre_padding_h = node.conv_spatial_3d.post_padding_h = j.value("conv_pad_h", 0);
+            node.conv_spatial_3d.pre_padding_w = node.conv_spatial_3d.post_padding_w = j.value("conv_pad_w", 0);
+        }
+
+        if (node.conv_spatial_3d.stride_d <= 0 || node.conv_spatial_3d.stride_h <= 0 || node.conv_spatial_3d.stride_w <= 0) {
+            throw std::runtime_error("Serialized Conv3D expression stride must be positive.");
+        }
+        if (node.conv_spatial_3d.dilation_d <= 0 || node.conv_spatial_3d.dilation_h <= 0 || node.conv_spatial_3d.dilation_w <= 0) {
+            throw std::runtime_error("Serialized Conv3D expression dilation must be positive.");
+        }
+        if (node.conv_spatial_3d.pre_padding_d < 0 || node.conv_spatial_3d.post_padding_d < 0 ||
+            node.conv_spatial_3d.pre_padding_h < 0 || node.conv_spatial_3d.post_padding_h < 0 ||
+            node.conv_spatial_3d.pre_padding_w < 0 || node.conv_spatial_3d.post_padding_w < 0) {
+            throw std::runtime_error("Serialized Conv3D expression padding must be non-negative.");
+        }
+    } else {
+        // Preserve the legacy generic fields in non-convolution expression JSON.
+        // They have no semantic effect for these nodes but keeping the defaults
+        // avoids unrelated architecture-json churn in this representation patch.
+        node.conv_spatial_3d.stride_d = j.value("conv_stride_d", 1);
+        node.conv_spatial_3d.stride_h = j.value("conv_stride_h", 1);
+        node.conv_spatial_3d.stride_w = j.value("conv_stride_w", 1);
+        node.conv_spatial_3d.pre_padding_d = node.conv_spatial_3d.post_padding_d = j.value("conv_pad_d", 0);
+        node.conv_spatial_3d.pre_padding_h = node.conv_spatial_3d.post_padding_h = j.value("conv_pad_h", 0);
+        node.conv_spatial_3d.pre_padding_w = node.conv_spatial_3d.post_padding_w = j.value("conv_pad_w", 0);
     }
     node.softmax_algorithm = static_cast<cudnnSoftmaxAlgorithm_t>(j.value("softmax_algorithm", static_cast<int>(CUDNN_SOFTMAX_ACCURATE)));
     node.softmax_mode = static_cast<cudnnSoftmaxMode_t>(j.value("softmax_mode", static_cast<int>(CUDNN_SOFTMAX_MODE_CHANNEL)));
@@ -1679,12 +1754,29 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
             } else if (n.op == ExprOp::CONV2D || n.op == ExprOp::CONV2D_BACKWARD_DATA || n.op == ExprOp::CONV2D_BACKWARD_FILTER ||
                        n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
                 if (n.op == ExprOp::CONV3D || n.op == ExprOp::CONV3D_BACKWARD_DATA || n.op == ExprOp::CONV3D_BACKWARD_FILTER) {
-                    out += ";sD=" + std::to_string(n.conv_stride_d);
-                    out += ";pD=" + std::to_string(n.conv_pad_d);
-                    out += ";sH=" + std::to_string(n.conv_stride_h);
-                    out += ";sW=" + std::to_string(n.conv_stride_w);
-                    out += ";pH=" + std::to_string(n.conv_pad_h);
-                    out += ";pW=" + std::to_string(n.conv_pad_w);
+                    if (hasLegacyConv3dSpatialSemantics(n.conv_spatial_3d)) {
+                        // Preserve the exact pre-CR1.1 canonical representation for
+                        // existing unit-dilation, symmetric-padding Conv3D graphs.
+                        out += ";sD=" + std::to_string(n.conv_spatial_3d.stride_d);
+                        out += ";pD=" + std::to_string(n.conv_spatial_3d.pre_padding_d);
+                        out += ";sH=" + std::to_string(n.conv_spatial_3d.stride_h);
+                        out += ";sW=" + std::to_string(n.conv_spatial_3d.stride_w);
+                        out += ";pH=" + std::to_string(n.conv_spatial_3d.pre_padding_h);
+                        out += ";pW=" + std::to_string(n.conv_spatial_3d.pre_padding_w);
+                    } else {
+                        out += ";sD=" + std::to_string(n.conv_spatial_3d.stride_d);
+                        out += ";sH=" + std::to_string(n.conv_spatial_3d.stride_h);
+                        out += ";sW=" + std::to_string(n.conv_spatial_3d.stride_w);
+                        out += ";preD=" + std::to_string(n.conv_spatial_3d.pre_padding_d);
+                        out += ";postD=" + std::to_string(n.conv_spatial_3d.post_padding_d);
+                        out += ";preH=" + std::to_string(n.conv_spatial_3d.pre_padding_h);
+                        out += ";postH=" + std::to_string(n.conv_spatial_3d.post_padding_h);
+                        out += ";preW=" + std::to_string(n.conv_spatial_3d.pre_padding_w);
+                        out += ";postW=" + std::to_string(n.conv_spatial_3d.post_padding_w);
+                        out += ";dD=" + std::to_string(n.conv_spatial_3d.dilation_d);
+                        out += ";dH=" + std::to_string(n.conv_spatial_3d.dilation_h);
+                        out += ";dW=" + std::to_string(n.conv_spatial_3d.dilation_w);
+                    }
                 } else {
                     out += ";sH=" + std::to_string(n.conv_spatial_2d.stride_h);
                     out += ";sW=" + std::to_string(n.conv_spatial_2d.stride_w);
@@ -5511,6 +5603,39 @@ Expression Expression::conv2d(const Expression& input,
 
 Expression Expression::conv3d(const Expression& input,
                               const Expression& filter,
+                              ConvolutionSpatial3d spatial,
+                              std::optional<DataType> compute_dtype,
+                              std::optional<DataType> output_dtype,
+                              uint64_t groups) {
+    if (spatial.stride_d <= 0 || spatial.stride_h <= 0 || spatial.stride_w <= 0) {
+        throw std::runtime_error("conv3d stride must be positive.");
+    }
+    if (spatial.dilation_d <= 0 || spatial.dilation_h <= 0 || spatial.dilation_w <= 0) {
+        throw std::runtime_error("conv3d dilation must be positive.");
+    }
+    if (spatial.pre_padding_d < 0 || spatial.post_padding_d < 0 || spatial.pre_padding_h < 0 ||
+        spatial.post_padding_h < 0 || spatial.pre_padding_w < 0 || spatial.post_padding_w < 0) {
+        throw std::runtime_error("conv3d padding must be non-negative.");
+    }
+    if (groups == 0) {
+        throw std::runtime_error("conv3d groups must be positive.");
+    }
+
+    Expression out = binaryOp(input, filter, ExprOp::CONV3D);
+    ExprNode& node = out.expr->nodes[out.nodeIndex];
+    node.conv_spatial_3d = spatial;
+    node.conv_groups = groups;
+    if (compute_dtype.has_value()) {
+        node.compute_dtype = compute_dtype.value();
+    }
+    if (output_dtype.has_value()) {
+        node.output_dtype = output_dtype.value();
+    }
+    return out;
+}
+
+Expression Expression::conv3d(const Expression& input,
+                              const Expression& filter,
                               int32_t stride_d,
                               int32_t stride_h,
                               int32_t stride_w,
@@ -5520,32 +5645,14 @@ Expression Expression::conv3d(const Expression& input,
                               std::optional<DataType> compute_dtype,
                               std::optional<DataType> output_dtype,
                               uint64_t groups) {
-    if (stride_d <= 0 || stride_h <= 0 || stride_w <= 0) {
-        throw std::runtime_error("conv3d stride must be positive.");
-    }
-    if (pad_d < 0 || pad_h < 0 || pad_w < 0) {
-        throw std::runtime_error("conv3d padding must be non-negative.");
-    }
-    if (groups == 0) {
-        throw std::runtime_error("conv3d groups must be positive.");
-    }
-
-    Expression out = binaryOp(input, filter, ExprOp::CONV3D);
-    ExprNode& node = out.expr->nodes[out.nodeIndex];
-    node.conv_stride_d = stride_d;
-    node.conv_stride_h = stride_h;
-    node.conv_stride_w = stride_w;
-    node.conv_pad_d = pad_d;
-    node.conv_pad_h = pad_h;
-    node.conv_pad_w = pad_w;
-    node.conv_groups = groups;
-    if (compute_dtype.has_value()) {
-        node.compute_dtype = compute_dtype.value();
-    }
-    if (output_dtype.has_value()) {
-        node.output_dtype = output_dtype.value();
-    }
-    return out;
+    ConvolutionSpatial3d spatial;
+    spatial.stride_d = stride_d;
+    spatial.stride_h = stride_h;
+    spatial.stride_w = stride_w;
+    spatial.pre_padding_d = spatial.post_padding_d = pad_d;
+    spatial.pre_padding_h = spatial.post_padding_h = pad_h;
+    spatial.pre_padding_w = spatial.post_padding_w = pad_w;
+    return conv3d(input, filter, spatial, compute_dtype, output_dtype, groups);
 }
 
 // Reductions

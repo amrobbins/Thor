@@ -3,9 +3,13 @@
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 
+#include <algorithm>
+#include <array>
+#include <cctype>
 #include <memory>
 #include <exception>
 #include <optional>
+#include <tuple>
 
 #include "DeepLearning/Api/Initializers/Initializer.h"
 #include "DeepLearning/Api/Layers/Activations/Activation.h"
@@ -104,6 +108,112 @@ void applyPythonEpilogue(Convolution3d::Builder &builder, const nb::object &epil
     builder.epilogue(pybind::castArgument<ThorImplementation::Expression>(
         epilogue, "Convolution3d", "epilogue", "thor.physical.Expression or None", false));
 }
+
+struct PythonPaddingSpec {
+    Convolution3dPaddingMode mode = Convolution3dPaddingMode::VALID;
+    std::array<uint32_t, 6> explicitPadding = {0, 0, 0, 0, 0, 0};
+};
+
+PythonPaddingSpec paddingFromPython(const nb::object &padding,
+                                    uint32_t legacyDepthPadding,
+                                    uint32_t legacyVerticalPadding,
+                                    uint32_t legacyHorizontalPadding) {
+    const bool hasLegacyPadding = legacyDepthPadding != 0 || legacyVerticalPadding != 0 || legacyHorizontalPadding != 0;
+    auto legacyPaddingSpec = [&]() {
+        return PythonPaddingSpec{Convolution3dPaddingMode::EXPLICIT,
+                                 {legacyDepthPadding,
+                                  legacyDepthPadding,
+                                  legacyVerticalPadding,
+                                  legacyVerticalPadding,
+                                  legacyHorizontalPadding,
+                                  legacyHorizontalPadding}};
+    };
+
+    if (padding.is_none())
+        return hasLegacyPadding ? legacyPaddingSpec()
+                                : PythonPaddingSpec{Convolution3dPaddingMode::VALID, {0, 0, 0, 0, 0, 0}};
+
+    if (hasLegacyPadding) {
+        // ``padding`` defaults to "valid" so legacy callers can keep using the
+        // old symmetric padding keywords without having to opt out of the new
+        // argument. Any non-default modern policy is ambiguous and rejected.
+        if (nb::isinstance<nb::str>(padding)) {
+            std::string mode = pybind::castOrTypeError<std::string>(
+                padding, "Convolution3d() argument 'padding'", "'valid', 'same', or length-6 sequence[int]", false);
+            std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (mode == "valid")
+                return legacyPaddingSpec();
+        }
+        throw nb::value_error(
+            "Convolution3d instance: padding cannot be combined with depth_padding, vertical_padding, or horizontal_padding; "
+            "use padding=(front, back, top, bottom, left, right) instead.");
+    }
+
+    if (nb::isinstance<nb::str>(padding)) {
+        std::string mode = pybind::castOrTypeError<std::string>(
+            padding, "Convolution3d() argument 'padding'", "'valid', 'same', or length-6 sequence[int]", false);
+        std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (mode == "valid")
+            return {Convolution3dPaddingMode::VALID, {0, 0, 0, 0, 0, 0}};
+        if (mode == "same" || mode == "same_upper")
+            return {Convolution3dPaddingMode::SAME_UPPER, {0, 0, 0, 0, 0, 0}};
+        if (mode == "explicit") {
+            throw nb::value_error(
+                "Convolution3d() padding='explicit' requires concrete padding; pass "
+                "(front, back, top, bottom, left, right) instead.");
+        }
+        throw nb::value_error(
+            "Convolution3d() argument 'padding' must be 'valid', 'same', or a length-6 sequence[int].");
+    }
+
+    if (!nb::isinstance<nb::sequence>(padding)) {
+        throw nb::type_error(
+            "Convolution3d() argument 'padding': expected 'valid', 'same', or a length-6 sequence[int] "
+            "ordered as (front, back, top, bottom, left, right).");
+    }
+    nb::sequence seq = pybind::castOrTypeError<nb::sequence>(
+        padding, "Convolution3d() argument 'padding'", "'valid', 'same', or length-6 sequence[int]", false);
+    if (nb::len(seq) != 6) {
+        throw nb::value_error(
+            "Convolution3d instance: explicit padding must contain exactly six values ordered as "
+            "(front, back, top, bottom, left, right).");
+    }
+    return {Convolution3dPaddingMode::EXPLICIT,
+            {pybind::castOrTypeError<uint32_t>(seq[0], "Convolution3d() argument 'padding'[0]", "non-negative int", false),
+             pybind::castOrTypeError<uint32_t>(seq[1], "Convolution3d() argument 'padding'[1]", "non-negative int", false),
+             pybind::castOrTypeError<uint32_t>(seq[2], "Convolution3d() argument 'padding'[2]", "non-negative int", false),
+             pybind::castOrTypeError<uint32_t>(seq[3], "Convolution3d() argument 'padding'[3]", "non-negative int", false),
+             pybind::castOrTypeError<uint32_t>(seq[4], "Convolution3d() argument 'padding'[4]", "non-negative int", false),
+             pybind::castOrTypeError<uint32_t>(seq[5], "Convolution3d() argument 'padding'[5]", "non-negative int", false)}};
+}
+
+std::tuple<uint32_t, uint32_t, uint32_t> dilationFromPython(const nb::object &dilation) {
+    if (nb::isinstance<nb::int_>(dilation)) {
+        const uint32_t value = pybind::castOrTypeError<uint32_t>(
+            dilation, "Convolution3d() argument 'dilation'", "positive int or length-3 sequence[int]", false);
+        if (value == 0)
+            throw nb::value_error("Convolution3d instance: dilation must be >= 1.");
+        return {value, value, value};
+    }
+
+    if (!nb::isinstance<nb::sequence>(dilation) || nb::isinstance<nb::str>(dilation)) {
+        throw nb::type_error("Convolution3d() argument 'dilation': expected positive int or length-3 sequence[int].");
+    }
+    nb::sequence seq = pybind::castOrTypeError<nb::sequence>(
+        dilation, "Convolution3d() argument 'dilation'", "positive int or length-3 sequence[int]", false);
+    if (nb::len(seq) != 3)
+        throw nb::value_error(
+            "Convolution3d instance: dilation sequence must contain exactly three values (depth, height, width).");
+    const uint32_t dilationD = pybind::castOrTypeError<uint32_t>(
+        seq[0], "Convolution3d() argument 'dilation'[0]", "positive int", false);
+    const uint32_t dilationH = pybind::castOrTypeError<uint32_t>(
+        seq[1], "Convolution3d() argument 'dilation'[1]", "positive int", false);
+    const uint32_t dilationW = pybind::castOrTypeError<uint32_t>(
+        seq[2], "Convolution3d() argument 'dilation'[2]", "positive int", false);
+    if (dilationD == 0 || dilationH == 0 || dilationW == 0)
+        throw nb::value_error("Convolution3d instance: dilation values must be >= 1.");
+    return {dilationD, dilationH, dilationW};
+}
 }  // namespace
 
 void bind_convolution_3d(nb::module_ &m) {
@@ -132,7 +242,9 @@ void bind_convolution_3d(nb::module_ &m) {
            nb::object epilogue,
            nb::object epilogue_inputs,
            uint32_t groups,
-           DataType computeDataType) {
+           DataType computeDataType,
+           nb::object padding,
+           nb::object dilation) {
             const auto &dims = featureInput.getDimensions();
             if (dims.size() != 4) {
                 string msg = "Convolution3d instance: feature_input must be a 4D CDHW tensor (no batch) but tensor format is " +
@@ -166,13 +278,35 @@ void bind_convolution_3d(nb::module_ &m) {
                 throw nb::value_error("Convolution3d instance: depth_stride, vertical_stride, and horizontal_stride must be >= 1.");
             }
 
-            const uint64_t effD = D + 2ULL * uint64_t(depthPadding);
-            const uint64_t effH = H + 2ULL * uint64_t(verticalPadding);
-            const uint64_t effW = W + 2ULL * uint64_t(horizontalPadding);
-            if (uint64_t(filterDepth) > effD || uint64_t(filterHeight) > effH || uint64_t(filterWidth) > effW) {
-                string msg = "Convolution3d instance: filter is larger than padded input. Input tensor is " +
-                             featureInput.getDescriptorString();
-                throw nb::value_error(msg.c_str());
+            const auto [dilationD, dilationH, dilationW] = dilationFromPython(dilation);
+            const PythonPaddingSpec paddingSpec =
+                paddingFromPython(padding, depthPadding, verticalPadding, horizontalPadding);
+
+            const uint64_t effectiveFilterD = uint64_t(dilationD) * (uint64_t(filterDepth) - 1ULL) + 1ULL;
+            const uint64_t effectiveFilterH = uint64_t(dilationH) * (uint64_t(filterHeight) - 1ULL) + 1ULL;
+            const uint64_t effectiveFilterW = uint64_t(dilationW) * (uint64_t(filterWidth) - 1ULL) + 1ULL;
+            if (paddingSpec.mode != Convolution3dPaddingMode::SAME_UPPER) {
+                const uint64_t paddedD = D + uint64_t(paddingSpec.explicitPadding[0]) + paddingSpec.explicitPadding[1];
+                const uint64_t paddedH = H + uint64_t(paddingSpec.explicitPadding[2]) + paddingSpec.explicitPadding[3];
+                const uint64_t paddedW = W + uint64_t(paddingSpec.explicitPadding[4]) + paddingSpec.explicitPadding[5];
+                if (effectiveFilterD > paddedD) {
+                    string msg = "Convolution3d instance: filter_depth effective size " + to_string(effectiveFilterD) +
+                                 " is larger than padded input depth " + to_string(paddedD) +
+                                 ". Input tensor is " + featureInput.getDescriptorString();
+                    throw nb::value_error(msg.c_str());
+                }
+                if (effectiveFilterH > paddedH) {
+                    string msg = "Convolution3d instance: filter_height effective size " + to_string(effectiveFilterH) +
+                                 " is larger than padded input height " + to_string(paddedH) +
+                                 ". Input tensor is " + featureInput.getDescriptorString();
+                    throw nb::value_error(msg.c_str());
+                }
+                if (effectiveFilterW > paddedW) {
+                    string msg = "Convolution3d instance: filter_width effective size " + to_string(effectiveFilterW) +
+                                 " is larger than padded input width " + to_string(paddedW) +
+                                 ". Input tensor is " + featureInput.getDescriptorString();
+                    throw nb::value_error(msg.c_str());
+                }
             }
 
             Convolution3d::Builder builder;
@@ -182,15 +316,31 @@ void bind_convolution_3d(nb::module_ &m) {
                 .filterDepth(filterDepth)
                 .filterHeight(filterHeight)
                 .filterWidth(filterWidth)
-                .depthPadding(depthPadding)
-                .verticalPadding(verticalPadding)
-                .horizontalPadding(horizontalPadding)
                 .depthStride(depthStride)
                 .verticalStride(verticalStride)
                 .horizontalStride(horizontalStride)
+                .depthDilation(dilationD)
+                .verticalDilation(dilationH)
+                .horizontalDilation(dilationW)
                 .groups(groups)
                 .computeDataType(computeDataType)
                 .hasBias(hasBias);
+            switch (paddingSpec.mode) {
+                case Convolution3dPaddingMode::VALID:
+                    builder.validPadding();
+                    break;
+                case Convolution3dPaddingMode::SAME_UPPER:
+                    builder.samePadding();
+                    break;
+                case Convolution3dPaddingMode::EXPLICIT:
+                    builder.padding(paddingSpec.explicitPadding[0],
+                                    paddingSpec.explicitPadding[1],
+                                    paddingSpec.explicitPadding[2],
+                                    paddingSpec.explicitPadding[3],
+                                    paddingSpec.explicitPadding[4],
+                                    paddingSpec.explicitPadding[5]);
+                    break;
+            }
 
             applyPythonActivation(builder, activation);
             applyPythonEpilogueInputs(builder, epilogue_inputs);
@@ -223,7 +373,9 @@ void bind_convolution_3d(nb::module_ &m) {
         "epilogue"_a.none() = nb::none(),
         "epilogue_inputs"_a.none() = nb::none(),
         "groups"_a = 1,
-        "compute_data_type"_a = DataType::FP32);
+        "compute_data_type"_a = DataType::FP32,
+        "padding"_a = nb::str("valid"),
+        "dilation"_a = nb::int_(1));
 
     convolution_3d.def_static(
         "epilogue_input",
@@ -264,7 +416,13 @@ void bind_convolution_3d(nb::module_ &m) {
         Omitted activation defaults to ``thor.activations.Gelu()``; pass
         ``None`` to keep the layer linear.
         The API tensor layout is CDHW; the physical implementation adds the
-        batch dimension and uses NCDHW. ``groups`` partitions input and output
+        batch dimension and uses NCDHW. ``padding`` accepts ``"valid"``,
+        ``"same"``/``"same_upper"`` (SAME_UPPER), or explicit
+        ``(front, back, top, bottom, left, right)`` padding. ``dilation`` accepts
+        either one positive integer or ``(depth, height, width)``. The legacy
+        ``depth_padding``, ``vertical_padding``, and ``horizontal_padding``
+        arguments remain compatibility aliases for symmetric explicit padding
+        when ``padding`` is omitted. ``groups`` partitions input and output
         channels using standard grouped-convolution semantics. Activations are stitched into the
         expression before the implementation CustomLayer is constructed.
         ``epilogue`` may be a ``thor.physical.Expression`` built from

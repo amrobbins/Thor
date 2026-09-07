@@ -93,9 +93,7 @@ class RaggedConcatenate : public MultiConnectionLayer {
         ScopedGpu scopedGpu(featureInputs[0]->getPlacement().getDeviceNum());
         splitTensorFeatureInputMemoriesArray_d = nullptr;
         splitTensorErrorOutputMemoriesArray_d = nullptr;
-        axisElementsPerSplitTensor_d = nullptr;
-        stridePerPackedTensorDimension_d = nullptr;
-        stridePerSplitTensorDimension_d = nullptr;
+        axisOffsetsPerSplitTensor_d = nullptr;
 
         std::vector<void*> valuePointers(valueInputCount);
         for (uint32_t i = 0; i < valueInputCount; ++i) valuePointers[i] = featureInputs[i]->getMemPtr();
@@ -119,35 +117,12 @@ class RaggedConcatenate : public MultiConnectionLayer {
                                        cudaMemcpyHostToDevice, streams[0].getStream()));
         }
 
-        std::vector<long> axisElements(valueInputCount);
+        std::vector<uint64_t> axisOffsets(valueInputCount + 1, 0);
         for (uint32_t i = 0; i < valueInputCount; ++i) {
-            axisElements[i] = static_cast<long>(featureInputs[i]->getDescriptor().getDimensions()[axis]);
+            axisOffsets[i + 1] = axisOffsets[i] + featureInputs[i]->getDescriptor().getDimensions()[axis];
         }
-        CUDA_CHECK(cudaMalloc(&axisElementsPerSplitTensor_d, valueInputCount * sizeof(long)));
-        CUDA_CHECK(cudaMemcpyAsync(axisElementsPerSplitTensor_d, axisElements.data(), valueInputCount * sizeof(long),
-                                   cudaMemcpyHostToDevice, streams[0].getStream()));
-
-        const unsigned int numDimensions = featureInputs[0]->getDescriptor().getDimensions().size();
-        std::vector<long> splitStrides(numDimensions * valueInputCount);
-        for (uint32_t t = 0; t < valueInputCount; ++t) {
-            splitStrides[t * numDimensions + (numDimensions - 1)] = 1;
-            for (int d = static_cast<int>(numDimensions) - 2; d >= 0; --d) {
-                splitStrides[t * numDimensions + d] = splitStrides[t * numDimensions + d + 1] *
-                    static_cast<long>(featureInputs[t]->getDescriptor().getDimensions()[d + 1]);
-            }
-        }
-        CUDA_CHECK(cudaMalloc(&stridePerSplitTensorDimension_d, splitStrides.size() * sizeof(long)));
-        CUDA_CHECK(cudaMemcpyAsync(stridePerSplitTensorDimension_d, splitStrides.data(), splitStrides.size() * sizeof(long),
-                                   cudaMemcpyHostToDevice, streams[0].getStream()));
-
-        const auto outputDimensions = featureOutputs[0]->getDescriptor().getDimensions();
-        std::vector<long> packedStrides(outputDimensions.size());
-        packedStrides.back() = 1;
-        for (int d = static_cast<int>(outputDimensions.size()) - 2; d >= 0; --d) {
-            packedStrides[d] = static_cast<long>(outputDimensions[d + 1]) * packedStrides[d + 1];
-        }
-        CUDA_CHECK(cudaMalloc(&stridePerPackedTensorDimension_d, packedStrides.size() * sizeof(long)));
-        CUDA_CHECK(cudaMemcpyAsync(stridePerPackedTensorDimension_d, packedStrides.data(), packedStrides.size() * sizeof(long),
+        CUDA_CHECK(cudaMalloc(&axisOffsetsPerSplitTensor_d, axisOffsets.size() * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMemcpyAsync(axisOffsetsPerSplitTensor_d, axisOffsets.data(), axisOffsets.size() * sizeof(uint64_t),
                                    cudaMemcpyHostToDevice, streams[0].getStream()));
         streams[0].synchronize();
 
@@ -197,20 +172,21 @@ class RaggedConcatenate : public MultiConnectionLayer {
         const auto& outputDimensions = outputDescriptor.getDimensions();
         THOR_THROW_IF_FALSE(!outputDimensions.empty() && outputDimensions[0] > 0);
         const uint64_t elementsPerOutputValue = outputDescriptor.getTotalNumElements() / outputDimensions[0];
-        THOR_THROW_IF_FALSE(outputDescriptor.getTotalNumElements() <= static_cast<uint64_t>(std::numeric_limits<long>::max()));
+        uint64_t outerSlicesPerValue = 1;
+        for (uint32_t d = 1; d < axis; ++d) outerSlicesPerValue *= outputDimensions[d];
+        uint64_t innerElements = 1;
+        for (uint32_t d = axis + 1; d < outputDimensions.size(); ++d) innerElements *= outputDimensions[d];
         const TensorDescriptor& activeCountDescriptor = featureInputs[activeCountInputIndex]->getDescriptor();
         launchRaggedConcatenate(
             featureOutputs[0]->getMemPtr(),
             splitTensorFeatureInputMemoriesArray_d,
             TensorDescriptor::getElementSizeInBytes(outputDescriptor.getDataType()),
-            static_cast<long>(outputDescriptor.getTotalNumElements()),
+            outputDimensions[0],
             elementsPerOutputValue,
-            outputDimensions.size(),
+            outerSlicesPerValue,
+            innerElements,
             valueInputCount,
-            axis,
-            axisElementsPerSplitTensor_d,
-            stridePerPackedTensorDimension_d,
-            stridePerSplitTensorDimension_d,
+            axisOffsetsPerSplitTensor_d,
             featureInputs[activeCountInputIndex]->getMemPtr(),
             TensorDescriptor::getElementSizeInBytes(activeCountDescriptor.getDataType()),
             streams[0]);
@@ -234,19 +210,21 @@ class RaggedConcatenate : public MultiConnectionLayer {
             const TensorDescriptor& errorDescriptor = errorInput->getDescriptor();
             const auto& dimensions = errorDescriptor.getDimensions();
             const uint64_t elementsPerSourceValue = errorDescriptor.getTotalNumElements() / dimensions[0];
+            uint64_t outerSlicesPerValue = 1;
+            for (uint32_t d = 1; d < axis; ++d) outerSlicesPerValue *= dimensions[d];
+            uint64_t innerElements = 1;
+            for (uint32_t d = axis + 1; d < dimensions.size(); ++d) innerElements *= dimensions[d];
             const TensorDescriptor& activeCountDescriptor = featureInputs[activeCountInputIndex]->getDescriptor();
             launchRaggedSplit(
                 splitTensorErrorOutputMemoriesArray_d,
                 errorInput->getMemPtr(),
                 TensorDescriptor::getElementSizeInBytes(errorDescriptor.getDataType()),
-                static_cast<long>(errorDescriptor.getTotalNumElements()),
+                dimensions[0],
                 elementsPerSourceValue,
-                dimensions.size(),
+                outerSlicesPerValue,
+                innerElements,
                 valueInputCount,
-                axis,
-                axisElementsPerSplitTensor_d,
-                stridePerPackedTensorDimension_d,
-                stridePerSplitTensorDimension_d,
+                axisOffsetsPerSplitTensor_d,
                 featureInputs[activeCountInputIndex]->getMemPtr(),
                 TensorDescriptor::getElementSizeInBytes(activeCountDescriptor.getDataType()),
                 streams[0]);
@@ -265,14 +243,10 @@ class RaggedConcatenate : public MultiConnectionLayer {
         ScopedGpu scopedGpu(featureInputs[0]->getPlacement().getDeviceNum());
         if (splitTensorFeatureInputMemoriesArray_d != nullptr) CUDA_CHECK(cudaFree(splitTensorFeatureInputMemoriesArray_d));
         if (splitTensorErrorOutputMemoriesArray_d != nullptr) CUDA_CHECK(cudaFree(splitTensorErrorOutputMemoriesArray_d));
-        if (axisElementsPerSplitTensor_d != nullptr) CUDA_CHECK(cudaFree(axisElementsPerSplitTensor_d));
-        if (stridePerPackedTensorDimension_d != nullptr) CUDA_CHECK(cudaFree(stridePerPackedTensorDimension_d));
-        if (stridePerSplitTensorDimension_d != nullptr) CUDA_CHECK(cudaFree(stridePerSplitTensorDimension_d));
+        if (axisOffsetsPerSplitTensor_d != nullptr) CUDA_CHECK(cudaFree(axisOffsetsPerSplitTensor_d));
         splitTensorFeatureInputMemoriesArray_d = nullptr;
         splitTensorErrorOutputMemoriesArray_d = nullptr;
-        axisElementsPerSplitTensor_d = nullptr;
-        stridePerPackedTensorDimension_d = nullptr;
-        stridePerSplitTensorDimension_d = nullptr;
+        axisOffsetsPerSplitTensor_d = nullptr;
         discardedErrorOutputs.clear();
         for (Event& event : forwardInputReadyEvents)
             event = Event();
@@ -337,9 +311,7 @@ class RaggedConcatenate : public MultiConnectionLayer {
     uint64_t batchSize;
     void **splitTensorFeatureInputMemoriesArray_d = nullptr;
     void **splitTensorErrorOutputMemoriesArray_d = nullptr;
-    long *axisElementsPerSplitTensor_d = nullptr;
-    long *stridePerPackedTensorDimension_d = nullptr;
-    long *stridePerSplitTensorDimension_d = nullptr;
+    uint64_t *axisOffsetsPerSplitTensor_d = nullptr;
     std::vector<std::optional<Tensor>> discardedErrorOutputs;
     std::set<uint64_t> allFeatureInputTensorIds;
     std::set<uint64_t> stillWaitingForFeatureInputTensors;

@@ -35,6 +35,7 @@ struct DeviceResidentFileDirectSlot {
 struct DeviceResidentFileRaggedSlot {
     uint64_t slotIndex = 0;
     std::map<std::string, RaggedTensor> raggedTensors;
+    std::map<std::string, Tensor> offsetsHostStaging;
     Event valuesReadyEvent;
 };
 
@@ -168,6 +169,34 @@ std::optional<BatchFieldSpec> findBatchFieldSpec(
         if (spec.name == name) return spec;
     }
     return std::nullopt;
+}
+
+void stageRaggedOffsets(const std::vector<uint64_t> &hostOffsets, Tensor &staging) {
+    THOR_THROW_IF_FALSE(staging.isInitialized());
+    THOR_THROW_IF_FALSE(
+        staging.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(staging.getDimensions().size() == 1);
+    THOR_THROW_IF_FALSE(staging.getDimensions().front() == hostOffsets.size());
+
+    switch (staging.getDataType()) {
+        case DataType::UINT32: {
+            uint32_t *destination = staging.getMemPtr<uint32_t>();
+            for (size_t i = 0; i < hostOffsets.size(); ++i) {
+                THOR_THROW_IF_FALSE(hostOffsets[i] <= std::numeric_limits<uint32_t>::max());
+                destination[i] = static_cast<uint32_t>(hostOffsets[i]);
+            }
+            return;
+        }
+        case DataType::UINT64: {
+            uint64_t *destination = staging.getMemPtr<uint64_t>();
+            std::copy(hostOffsets.begin(), hostOffsets.end(), destination);
+            return;
+        }
+        default:
+            break;
+    }
+    throw std::runtime_error(
+        "Device-resident ragged offsets staging requires UINT32 or UINT64 dtype.");
 }
 
 
@@ -575,8 +604,11 @@ DeviceResidentFileNamedBatchSession::allocateRaggedSlot(uint64_t slotIndex) cons
         const RaggedTensorDescriptor &descriptor = requirement.raggedTensorDescriptor.value();
         Tensor values(residentDataset->getPlacement(), descriptor.getValuesDescriptor());
         Tensor offsets(residentDataset->getPlacement(), descriptor.getOffsetsDescriptor());
+        Tensor offsetsHost(
+            TensorPlacement(TensorPlacement::MemDevices::CPU), descriptor.getOffsetsDescriptor());
         RowPartitionRuntime rowPartition(offsets, descriptor.getRowPartition());
         slot->raggedTensors.emplace(field.name, RaggedTensor(values, rowPartition));
+        slot->offsetsHostStaging.emplace(field.name, std::move(offsetsHost));
     }
     return slot;
 }
@@ -751,14 +783,25 @@ Batch DeviceResidentFileNamedBatchSession::acquireBatch(
                     validExampleCount,
                     descriptor.getMaxTotalValues(),
                     descriptor.getMaxValuesPerRowOrZero());
-                RowPartitionRuntime& rowPartition = raggedSlot->raggedTensors.at(fieldName).getRowPartitionRuntime();
+                RowPartitionRuntime& rowPartition =
+                    raggedSlot->raggedTensors.at(fieldName).getRowPartitionRuntime();
                 rowPartition.setHostOffsets(extent.hostOffsets);
+                stageRaggedOffsets(
+                    extent.hostOffsets, raggedSlot->offsetsHostStaging.at(fieldName));
             }
         }
 
         selectionSlot->state->rowIndicesDevice.copyFromAsync(
             selectionSlot->state->rowIndicesHost,
             runtime.selectionUploadStream);
+        if (raggedSlot != nullptr) {
+            for (const std::string &fieldName : raggedFieldNames) {
+                Tensor deviceOffsets = raggedSlot->raggedTensors.at(fieldName).getOffsets();
+                deviceOffsets.copyFromAsync(
+                    raggedSlot->offsetsHostStaging.at(fieldName),
+                    runtime.selectionUploadStream);
+            }
+        }
         runtime.selectionUploadStream.putEvent(selectionSlot->state->rowsReadyEvent);
 
         if (raggedSlot != nullptr) {

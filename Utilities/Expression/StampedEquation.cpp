@@ -6632,8 +6632,29 @@ static void setFrontendConvolutionOutputTensor(std::shared_ptr<fe::graph::Tensor
         .set_data_type(toFrontendDataType(dtype));
 }
 
-static std::vector<int64_t> convolutionFrontend3dPadding(int32_t pad_d, int32_t pad_h, int32_t pad_w) {
-    return {static_cast<int64_t>(pad_d), static_cast<int64_t>(pad_h), static_cast<int64_t>(pad_w)};
+static void validateConv3dSpatial(const ConvolutionSpatial3d& spatial) {
+    if (spatial.stride_d <= 0 || spatial.stride_h <= 0 || spatial.stride_w <= 0) {
+        throw std::runtime_error("Conv3D spatial descriptor stride must be positive.");
+    }
+    if (spatial.dilation_d <= 0 || spatial.dilation_h <= 0 || spatial.dilation_w <= 0) {
+        throw std::runtime_error("Conv3D spatial descriptor dilation must be positive.");
+    }
+    if (spatial.pre_padding_d < 0 || spatial.pre_padding_h < 0 || spatial.pre_padding_w < 0 ||
+        spatial.post_padding_d < 0 || spatial.post_padding_h < 0 || spatial.post_padding_w < 0) {
+        throw std::runtime_error("Conv3D spatial descriptor padding must be non-negative.");
+    }
+}
+
+static std::vector<int64_t> convolutionFrontendPrePadding(const ConvolutionSpatial3d& spatial) {
+    return {static_cast<int64_t>(spatial.pre_padding_d),
+            static_cast<int64_t>(spatial.pre_padding_h),
+            static_cast<int64_t>(spatial.pre_padding_w)};
+}
+
+static std::vector<int64_t> convolutionFrontendPostPadding(const ConvolutionSpatial3d& spatial) {
+    return {static_cast<int64_t>(spatial.post_padding_d),
+            static_cast<int64_t>(spatial.post_padding_h),
+            static_cast<int64_t>(spatial.post_padding_w)};
 }
 
 static std::vector<int64_t> convolutionFrontendPrePadding(const ConvolutionSpatial2d& spatial) {
@@ -6644,22 +6665,20 @@ static std::vector<int64_t> convolutionFrontendPostPadding(const ConvolutionSpat
     return {static_cast<int64_t>(spatial.post_padding_h), static_cast<int64_t>(spatial.post_padding_w)};
 }
 
-static std::vector<int64_t> convolutionFrontendStrides(bool is_3d, int32_t stride_d, int32_t stride_h, int32_t stride_w) {
-    if (is_3d) {
-        return {static_cast<int64_t>(stride_d), static_cast<int64_t>(stride_h), static_cast<int64_t>(stride_w)};
-    }
-    return {static_cast<int64_t>(stride_h), static_cast<int64_t>(stride_w)};
+static std::vector<int64_t> convolutionFrontendStrides(const ConvolutionSpatial3d& spatial) {
+    return {static_cast<int64_t>(spatial.stride_d),
+            static_cast<int64_t>(spatial.stride_h),
+            static_cast<int64_t>(spatial.stride_w)};
 }
 
 static std::vector<int64_t> convolutionFrontendStrides(const ConvolutionSpatial2d& spatial) {
     return {static_cast<int64_t>(spatial.stride_h), static_cast<int64_t>(spatial.stride_w)};
 }
 
-static std::vector<int64_t> convolutionFrontendDilations(bool is_3d) {
-    if (is_3d) {
-        return {1, 1, 1};
-    }
-    return {1, 1};
+static std::vector<int64_t> convolutionFrontendDilations(const ConvolutionSpatial3d& spatial) {
+    return {static_cast<int64_t>(spatial.dilation_d),
+            static_cast<int64_t>(spatial.dilation_h),
+            static_cast<int64_t>(spatial.dilation_w)};
 }
 
 static std::vector<int64_t> convolutionFrontendDilations(const ConvolutionSpatial2d& spatial) {
@@ -8116,16 +8135,17 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
     built->use_cudnn_frontend = true;
 
     const char* prefix = is_3d ? "conv3d" : "conv2d";
-    const auto padding =
-        convolutionFrontend3dPadding(compiled_convolution->pad_d, compiled_convolution->pad_h, compiled_convolution->pad_w);
-    const auto strides = is_3d
-                             ? convolutionFrontendStrides(
-                                   true, compiled_convolution->stride_d, compiled_convolution->stride_h, compiled_convolution->stride_w)
-                             : convolutionFrontendStrides(compiled_convolution->spatial_2d);
-    const auto dilations =
-        is_3d ? convolutionFrontendDilations(true) : convolutionFrontendDilations(compiled_convolution->spatial_2d);
-    const auto pre_padding = is_3d ? padding : convolutionFrontendPrePadding(compiled_convolution->spatial_2d);
-    const auto post_padding = is_3d ? padding : convolutionFrontendPostPadding(compiled_convolution->spatial_2d);
+    if (is_3d) {
+        validateConv3dSpatial(compiled_convolution->spatial_3d);
+    }
+    const auto strides = is_3d ? convolutionFrontendStrides(compiled_convolution->spatial_3d)
+                               : convolutionFrontendStrides(compiled_convolution->spatial_2d);
+    const auto dilations = is_3d ? convolutionFrontendDilations(compiled_convolution->spatial_3d)
+                                 : convolutionFrontendDilations(compiled_convolution->spatial_2d);
+    const auto pre_padding = is_3d ? convolutionFrontendPrePadding(compiled_convolution->spatial_3d)
+                                   : convolutionFrontendPrePadding(compiled_convolution->spatial_2d);
+    const auto post_padding = is_3d ? convolutionFrontendPostPadding(compiled_convolution->spatial_3d)
+                                    : convolutionFrontendPostPadding(compiled_convolution->spatial_2d);
 
     const auto graph_factory = [&]() {
         auto graph = std::make_shared<fe::graph::Graph>();
@@ -8150,12 +8170,8 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
                               .set_dilation(dilations)
                               .set_compute_data_type(toFrontendDataType(compiled_convolution->compute_dtype))
                               .set_convolution_mode(fe::ConvolutionMode_t::CROSS_CORRELATION);
-        if (is_3d) {
-            conv_attrs.set_padding(padding);
-        } else {
-            conv_attrs.set_pre_padding(pre_padding);
-            conv_attrs.set_post_padding(post_padding);
-        }
+        conv_attrs.set_pre_padding(pre_padding);
+        conv_attrs.set_post_padding(post_padding);
 
         auto y = graph->conv_fprop(x, w, conv_attrs);
         setFrontendConvolutionOutputTensor(
@@ -8172,15 +8188,17 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolution(const std::s
     correctness_validation.spec.kind = ConvolutionKernelValidationKind::Forward;
     correctness_validation.spec.is_3d = is_3d;
     correctness_validation.spec.groups = groups;
-    correctness_validation.spec.stride_d = is_3d ? compiled_convolution->stride_d : 1;
-    correctness_validation.spec.stride_h = is_3d ? compiled_convolution->stride_h : compiled_convolution->spatial_2d.stride_h;
-    correctness_validation.spec.stride_w = is_3d ? compiled_convolution->stride_w : compiled_convolution->spatial_2d.stride_w;
-    correctness_validation.spec.pre_padding_d = is_3d ? compiled_convolution->pad_d : 0;
-    correctness_validation.spec.pre_padding_h = is_3d ? compiled_convolution->pad_h : compiled_convolution->spatial_2d.pre_padding_h;
-    correctness_validation.spec.pre_padding_w = is_3d ? compiled_convolution->pad_w : compiled_convolution->spatial_2d.pre_padding_w;
-    correctness_validation.spec.dilation_d = 1;
-    correctness_validation.spec.dilation_h = is_3d ? 1 : compiled_convolution->spatial_2d.dilation_h;
-    correctness_validation.spec.dilation_w = is_3d ? 1 : compiled_convolution->spatial_2d.dilation_w;
+    correctness_validation.spec.stride_d = is_3d ? compiled_convolution->spatial_3d.stride_d : 1;
+    correctness_validation.spec.stride_h = is_3d ? compiled_convolution->spatial_3d.stride_h : compiled_convolution->spatial_2d.stride_h;
+    correctness_validation.spec.stride_w = is_3d ? compiled_convolution->spatial_3d.stride_w : compiled_convolution->spatial_2d.stride_w;
+    correctness_validation.spec.pre_padding_d = is_3d ? compiled_convolution->spatial_3d.pre_padding_d : 0;
+    correctness_validation.spec.pre_padding_h = is_3d ? compiled_convolution->spatial_3d.pre_padding_h : compiled_convolution->spatial_2d.pre_padding_h;
+    correctness_validation.spec.pre_padding_w = is_3d ? compiled_convolution->spatial_3d.pre_padding_w : compiled_convolution->spatial_2d.pre_padding_w;
+    correctness_validation.spec.dilation_d = is_3d ? compiled_convolution->spatial_3d.dilation_d : 1;
+    correctness_validation.spec.dilation_h =
+        is_3d ? compiled_convolution->spatial_3d.dilation_h : compiled_convolution->spatial_2d.dilation_h;
+    correctness_validation.spec.dilation_w =
+        is_3d ? compiled_convolution->spatial_3d.dilation_w : compiled_convolution->spatial_2d.dilation_w;
     correctness_validation.spec.compute_dtype = compiled_convolution->compute_dtype;
     const std::string selection_cache_key = frontendConvolutionSelectionCacheKey(stream,
                                                                                   ConvolutionKernelValidationKind::Forward,
@@ -8254,21 +8272,17 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
     built->use_cudnn_frontend = true;
 
     const char* prefix = is_3d ? "conv3d" : "conv2d";
-    const auto padding = convolutionFrontend3dPadding(compiled_convolution_backward->pad_d,
-                                                      compiled_convolution_backward->pad_h,
-                                                      compiled_convolution_backward->pad_w);
-    const auto strides = is_3d
-                             ? convolutionFrontendStrides(true,
-                                                          compiled_convolution_backward->stride_d,
-                                                          compiled_convolution_backward->stride_h,
-                                                          compiled_convolution_backward->stride_w)
-                             : convolutionFrontendStrides(compiled_convolution_backward->spatial_2d);
-    const auto dilations = is_3d ? convolutionFrontendDilations(true)
+    if (is_3d) {
+        validateConv3dSpatial(compiled_convolution_backward->spatial_3d);
+    }
+    const auto strides = is_3d ? convolutionFrontendStrides(compiled_convolution_backward->spatial_3d)
+                               : convolutionFrontendStrides(compiled_convolution_backward->spatial_2d);
+    const auto dilations = is_3d ? convolutionFrontendDilations(compiled_convolution_backward->spatial_3d)
                                  : convolutionFrontendDilations(compiled_convolution_backward->spatial_2d);
-    const auto pre_padding =
-        is_3d ? padding : convolutionFrontendPrePadding(compiled_convolution_backward->spatial_2d);
-    const auto post_padding =
-        is_3d ? padding : convolutionFrontendPostPadding(compiled_convolution_backward->spatial_2d);
+    const auto pre_padding = is_3d ? convolutionFrontendPrePadding(compiled_convolution_backward->spatial_3d)
+                                   : convolutionFrontendPrePadding(compiled_convolution_backward->spatial_2d);
+    const auto post_padding = is_3d ? convolutionFrontendPostPadding(compiled_convolution_backward->spatial_3d)
+                                    : convolutionFrontendPostPadding(compiled_convolution_backward->spatial_2d);
     const fe::DataType_t compute_dtype = toFrontendDataType(compiled_convolution_backward->compute_dtype);
 
     if (is_backward_data) {
@@ -8294,12 +8308,8 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
                                   .set_dilation(dilations)
                                   .set_compute_data_type(compute_dtype)
                                   .set_convolution_mode(fe::ConvolutionMode_t::CROSS_CORRELATION);
-            if (is_3d) {
-                conv_attrs.set_padding(padding);
-            } else {
-                conv_attrs.set_pre_padding(pre_padding);
-                conv_attrs.set_post_padding(post_padding);
-            }
+            conv_attrs.set_pre_padding(pre_padding);
+            conv_attrs.set_post_padding(post_padding);
 
             auto dx = graph->conv_dgrad(dy, w, conv_attrs);
             setFrontendConvolutionOutputTensor(dx,
@@ -8320,19 +8330,21 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
         correctness_validation.spec.kind = ConvolutionKernelValidationKind::BackwardData;
         correctness_validation.spec.is_3d = is_3d;
         correctness_validation.spec.groups = groups;
-        correctness_validation.spec.stride_d = is_3d ? compiled_convolution_backward->stride_d : 1;
+        correctness_validation.spec.stride_d = is_3d ? compiled_convolution_backward->spatial_3d.stride_d : 1;
         correctness_validation.spec.stride_h =
-            is_3d ? compiled_convolution_backward->stride_h : compiled_convolution_backward->spatial_2d.stride_h;
+            is_3d ? compiled_convolution_backward->spatial_3d.stride_h : compiled_convolution_backward->spatial_2d.stride_h;
         correctness_validation.spec.stride_w =
-            is_3d ? compiled_convolution_backward->stride_w : compiled_convolution_backward->spatial_2d.stride_w;
-        correctness_validation.spec.pre_padding_d = is_3d ? compiled_convolution_backward->pad_d : 0;
+            is_3d ? compiled_convolution_backward->spatial_3d.stride_w : compiled_convolution_backward->spatial_2d.stride_w;
+        correctness_validation.spec.pre_padding_d = is_3d ? compiled_convolution_backward->spatial_3d.pre_padding_d : 0;
         correctness_validation.spec.pre_padding_h =
-            is_3d ? compiled_convolution_backward->pad_h : compiled_convolution_backward->spatial_2d.pre_padding_h;
+            is_3d ? compiled_convolution_backward->spatial_3d.pre_padding_h : compiled_convolution_backward->spatial_2d.pre_padding_h;
         correctness_validation.spec.pre_padding_w =
-            is_3d ? compiled_convolution_backward->pad_w : compiled_convolution_backward->spatial_2d.pre_padding_w;
-        correctness_validation.spec.dilation_d = 1;
-        correctness_validation.spec.dilation_h = is_3d ? 1 : compiled_convolution_backward->spatial_2d.dilation_h;
-        correctness_validation.spec.dilation_w = is_3d ? 1 : compiled_convolution_backward->spatial_2d.dilation_w;
+            is_3d ? compiled_convolution_backward->spatial_3d.pre_padding_w : compiled_convolution_backward->spatial_2d.pre_padding_w;
+        correctness_validation.spec.dilation_d = is_3d ? compiled_convolution_backward->spatial_3d.dilation_d : 1;
+        correctness_validation.spec.dilation_h =
+            is_3d ? compiled_convolution_backward->spatial_3d.dilation_h : compiled_convolution_backward->spatial_2d.dilation_h;
+        correctness_validation.spec.dilation_w =
+            is_3d ? compiled_convolution_backward->spatial_3d.dilation_w : compiled_convolution_backward->spatial_2d.dilation_w;
         correctness_validation.spec.compute_dtype = compiled_convolution_backward->compute_dtype;
         const std::string selection_cache_key = frontendConvolutionSelectionCacheKey(stream,
                                                                                       ConvolutionKernelValidationKind::BackwardData,
@@ -8382,12 +8394,8 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
                               .set_dilation(dilations)
                               .set_compute_data_type(compute_dtype)
                               .set_convolution_mode(fe::ConvolutionMode_t::CROSS_CORRELATION);
-        if (is_3d) {
-            conv_attrs.set_padding(padding);
-        } else {
-            conv_attrs.set_pre_padding(pre_padding);
-            conv_attrs.set_post_padding(post_padding);
-        }
+        conv_attrs.set_pre_padding(pre_padding);
+        conv_attrs.set_post_padding(post_padding);
 
         auto dw = graph->conv_wgrad(dy, x, conv_attrs);
         setFrontendConvolutionOutputTensor(dw,
@@ -8408,19 +8416,21 @@ std::shared_ptr<BuiltConvolution> StampedEquation::buildConvolutionBackward(
     correctness_validation.spec.kind = ConvolutionKernelValidationKind::BackwardFilter;
     correctness_validation.spec.is_3d = is_3d;
     correctness_validation.spec.groups = groups;
-    correctness_validation.spec.stride_d = is_3d ? compiled_convolution_backward->stride_d : 1;
+    correctness_validation.spec.stride_d = is_3d ? compiled_convolution_backward->spatial_3d.stride_d : 1;
     correctness_validation.spec.stride_h =
-        is_3d ? compiled_convolution_backward->stride_h : compiled_convolution_backward->spatial_2d.stride_h;
+        is_3d ? compiled_convolution_backward->spatial_3d.stride_h : compiled_convolution_backward->spatial_2d.stride_h;
     correctness_validation.spec.stride_w =
-        is_3d ? compiled_convolution_backward->stride_w : compiled_convolution_backward->spatial_2d.stride_w;
-    correctness_validation.spec.pre_padding_d = is_3d ? compiled_convolution_backward->pad_d : 0;
+        is_3d ? compiled_convolution_backward->spatial_3d.stride_w : compiled_convolution_backward->spatial_2d.stride_w;
+    correctness_validation.spec.pre_padding_d = is_3d ? compiled_convolution_backward->spatial_3d.pre_padding_d : 0;
     correctness_validation.spec.pre_padding_h =
-        is_3d ? compiled_convolution_backward->pad_h : compiled_convolution_backward->spatial_2d.pre_padding_h;
+        is_3d ? compiled_convolution_backward->spatial_3d.pre_padding_h : compiled_convolution_backward->spatial_2d.pre_padding_h;
     correctness_validation.spec.pre_padding_w =
-        is_3d ? compiled_convolution_backward->pad_w : compiled_convolution_backward->spatial_2d.pre_padding_w;
-    correctness_validation.spec.dilation_d = 1;
-    correctness_validation.spec.dilation_h = is_3d ? 1 : compiled_convolution_backward->spatial_2d.dilation_h;
-    correctness_validation.spec.dilation_w = is_3d ? 1 : compiled_convolution_backward->spatial_2d.dilation_w;
+        is_3d ? compiled_convolution_backward->spatial_3d.pre_padding_w : compiled_convolution_backward->spatial_2d.pre_padding_w;
+    correctness_validation.spec.dilation_d = is_3d ? compiled_convolution_backward->spatial_3d.dilation_d : 1;
+    correctness_validation.spec.dilation_h =
+        is_3d ? compiled_convolution_backward->spatial_3d.dilation_h : compiled_convolution_backward->spatial_2d.dilation_h;
+    correctness_validation.spec.dilation_w =
+        is_3d ? compiled_convolution_backward->spatial_3d.dilation_w : compiled_convolution_backward->spatial_2d.dilation_w;
     correctness_validation.spec.compute_dtype = compiled_convolution_backward->compute_dtype;
     const std::string selection_cache_key = frontendConvolutionSelectionCacheKey(stream,
                                                                                   ConvolutionKernelValidationKind::BackwardFilter,

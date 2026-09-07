@@ -23,46 +23,88 @@ using CubReductionInternal::dispatchReductionInputDType;
 using CubReductionInternal::ToFp32;
 
 constexpr uint32_t kBlockSize = 256;
-constexpr uint32_t kMaxBlocks = 4096;
+constexpr uint32_t kTargetItemsPerThread = 8;
+constexpr uint32_t kMaxPartialBlocks = 4096;
 
-template <typename ValueT, typename WeightT, typename OffsetT>
-__global__ void weightedStatisticsKernel(const ValueT* values,
-                                         const WeightT* weights,
-                                         const OffsetT* offsets,
-                                         float* numerator,
-                                         float* denominator,
-                                         uint64_t valid_row_count,
-                                         uint64_t elements_per_value) {
-    using BlockReduce = cub::BlockReduce<float, kBlockSize>;
-    __shared__ typename BlockReduce::TempStorage numerator_storage;
-    __shared__ typename BlockReduce::TempStorage denominator_storage;
+struct WeightedStatistics {
+    float numerator;
+    float denominator;
+};
+static_assert(sizeof(WeightedStatistics) == 2 * sizeof(float));
 
-    for (uint64_t row = blockIdx.x; row < valid_row_count; row += gridDim.x) {
-        const uint64_t scalar_begin = static_cast<uint64_t>(offsets[row]) * elements_per_value;
-        const uint64_t scalar_end = static_cast<uint64_t>(offsets[row + 1]) * elements_per_value;
+struct AddWeightedStatistics {
+    __host__ __device__ __forceinline__ WeightedStatistics operator()(WeightedStatistics lhs,
+                                                                      WeightedStatistics rhs) const {
+        return {lhs.numerator + rhs.numerator, lhs.denominator + rhs.denominator};
+    }
+};
 
-        float local_num = 0.0f;
-        float local_den = 0.0f;
-        for (uint64_t i = scalar_begin + threadIdx.x; i < scalar_end; i += blockDim.x) {
-            const float w = ToFp32<WeightT>{}(weights[i]);
-            local_num += ToFp32<ValueT>{}(values[i]) * w;
-            local_den += w;
-        }
+uint32_t partialBlockCount(uint64_t max_scalars) {
+    const uint64_t target_scalars_per_block =
+        static_cast<uint64_t>(kBlockSize) * kTargetItemsPerThread;
+    const uint64_t requested_blocks = 1 + (max_scalars - 1) / target_scalars_per_block;
+    return static_cast<uint32_t>(std::min<uint64_t>(requested_blocks, kMaxPartialBlocks));
+}
 
-        const float block_num = BlockReduce(numerator_storage).Sum(local_num);
-        __syncthreads();
-        const float block_den = BlockReduce(denominator_storage).Sum(local_den);
-        if (threadIdx.x == 0) {
-            atomicAdd(numerator, block_num);
-            atomicAdd(denominator, block_den);
-        }
-        __syncthreads();
+template <typename ValueT, typename WeightT, typename OffsetT, typename IndexT>
+__global__ void weightedStatisticsPartialsKernel(const ValueT* values,
+                                                 const WeightT* weights,
+                                                 const OffsetT* active_value_count,
+                                                 WeightedStatistics* partials,
+                                                 IndexT elements_per_value) {
+    using BlockReduce = cub::BlockReduce<WeightedStatistics, kBlockSize>;
+    __shared__ typename BlockReduce::TempStorage reduction_storage;
+    __shared__ IndexT active_scalar_count;
+
+    if (threadIdx.x == 0) {
+        active_scalar_count = static_cast<IndexT>(*active_value_count) * elements_per_value;
+    }
+    __syncthreads();
+
+    WeightedStatistics local{0.0f, 0.0f};
+    const IndexT first = static_cast<IndexT>(blockIdx.x * kBlockSize + threadIdx.x);
+    const IndexT stride = static_cast<IndexT>(gridDim.x * kBlockSize);
+    IndexT i = first;
+    while (i < active_scalar_count) {
+        const float weight = ToFp32<WeightT>{}(weights[i]);
+        local.numerator += ToFp32<ValueT>{}(values[i]) * weight;
+        local.denominator += weight;
+        if (stride >= active_scalar_count - i) break;
+        i += stride;
+    }
+
+    const WeightedStatistics block_statistics =
+        BlockReduce(reduction_storage).Reduce(local, AddWeightedStatistics{});
+    if (threadIdx.x == 0) partials[blockIdx.x] = block_statistics;
+}
+
+__global__ void finalizeWeightedStatisticsKernel(const WeightedStatistics* partials,
+                                                 uint32_t partial_count,
+                                                 float* numerator,
+                                                 float* denominator) {
+    using BlockReduce = cub::BlockReduce<WeightedStatistics, kBlockSize>;
+    __shared__ typename BlockReduce::TempStorage reduction_storage;
+
+    WeightedStatistics local{0.0f, 0.0f};
+    for (uint32_t i = threadIdx.x; i < partial_count; i += kBlockSize) {
+        local.numerator += partials[i].numerator;
+        local.denominator += partials[i].denominator;
+    }
+
+    const WeightedStatistics total = BlockReduce(reduction_storage).Reduce(local, AddWeightedStatistics{});
+    if (threadIdx.x == 0) {
+        *denominator = total.denominator;
+        // WeightedMean defines zero total weight as no contribution. Preserve
+        // that contract even when ignored values contain NaN and 0 * NaN made
+        // one or more numerator partials non-finite.
+        *numerator = total.denominator == 0.0f ? 0.0f : total.numerator;
     }
 }
 
 void validate(const Tensor& values,
               const Tensor& weights,
               const Tensor& offsets,
+              const Tensor& partial_statistics,
               const Tensor& numerator,
               const Tensor& denominator,
               uint64_t valid_row_count,
@@ -71,10 +113,15 @@ void validate(const Tensor& values,
     requireDenseContiguousGpuTensor(values, "ragged WeightedMean values");
     requireDenseContiguousGpuTensor(weights, "ragged WeightedMean weights");
     requireDenseContiguousGpuTensor(offsets, "ragged WeightedMean offsets");
+    requireDenseContiguousGpuTensor(partial_statistics, "ragged WeightedMean partial statistics");
     requireDenseContiguousGpuTensor(numerator, "ragged WeightedMean numerator");
     requireDenseContiguousGpuTensor(denominator, "ragged WeightedMean denominator");
     requireSameGpuPlacement(values, weights, "ragged WeightedMean values", "ragged WeightedMean weights");
     requireSameGpuPlacement(values, offsets, "ragged WeightedMean values", "ragged WeightedMean offsets");
+    requireSameGpuPlacement(values,
+                            partial_statistics,
+                            "ragged WeightedMean values",
+                            "ragged WeightedMean partial statistics");
     requireSameGpuPlacement(values, numerator, "ragged WeightedMean values", "ragged WeightedMean numerator");
     requireSameGpuPlacement(values, denominator, "ragged WeightedMean values", "ragged WeightedMean denominator");
     if (!CubSegmentedReduction::isInputDataTypeSupported(values.getDataType()) ||
@@ -117,69 +164,110 @@ void validate(const Tensor& values,
     requireStorageForNumItems(values, "ragged WeightedMean values", max_scalars);
     requireStorageForNumItems(weights, "ragged WeightedMean weights", max_scalars);
     requireStorageForNumItems(offsets, "ragged WeightedMean offsets", valid_row_count + 1);
+
+    const TensorDescriptor expected_workspace =
+        raggedWeightedMeanStatisticsWorkspaceDescriptor(max_total_values, elements_per_value);
+    if (partial_statistics.getDescriptor() != expected_workspace) {
+        throw std::invalid_argument("ragged WeightedMean partial-statistics workspace has the wrong descriptor.");
+    }
 }
 
-
-__global__ void canonicalizeZeroWeightStatisticsKernel(float* numerator, const float* denominator) {
-    if (blockIdx.x == 0 && threadIdx.x == 0 && *denominator == 0.0f)
-        *numerator = 0.0f;
-}
-
-template <typename ValueT, typename OffsetT>
+template <typename ValueT, typename OffsetT, typename IndexT>
 void dispatchWeightAndLaunch(const Tensor& values,
                              const Tensor& weights,
                              const Tensor& offsets,
-                             Tensor& numerator,
-                             Tensor& denominator,
+                             Tensor& partial_statistics,
                              uint64_t valid_row_count,
-                             uint64_t elements_per_value,
+                             IndexT elements_per_value,
+                             uint32_t partial_count,
                              Stream& stream) {
     const ValueT* values_ptr = values.getMemPtr<ValueT>();
-    const OffsetT* offsets_ptr = offsets.getMemPtr<OffsetT>();
+    const OffsetT* active_value_count = offsets.getMemPtr<OffsetT>() + valid_row_count;
     auto launch = [&]<typename WeightT>() {
         const WeightT* weights_ptr = weights.getMemPtr<WeightT>();
-        const uint32_t blocks =
-            static_cast<uint32_t>(std::min<uint64_t>(valid_row_count, kMaxBlocks));
-        weightedStatisticsKernel<ValueT, WeightT, OffsetT><<<blocks, kBlockSize, 0, stream.getStream()>>>(
-            values_ptr,
-            weights_ptr,
-            offsets_ptr,
-            numerator.getMemPtr<float>(),
-            denominator.getMemPtr<float>(),
-            valid_row_count,
-            elements_per_value);
+        weightedStatisticsPartialsKernel<ValueT, WeightT, OffsetT, IndexT>
+            <<<partial_count, kBlockSize, 0, stream.getStream()>>>(
+                values_ptr,
+                weights_ptr,
+                active_value_count,
+                reinterpret_cast<WeightedStatistics*>(partial_statistics.getMemPtr<float>()),
+                elements_per_value);
         CUDA_CHECK(cudaPeekAtLastError());
     };
     dispatchReductionInputDType(weights.getDataType(), launch);
 }
 
-template <typename OffsetT>
+template <typename OffsetT, typename IndexT>
 void dispatchValueAndLaunch(const Tensor& values,
                             const Tensor& weights,
                             const Tensor& offsets,
-                            Tensor& numerator,
-                            Tensor& denominator,
+                            Tensor& partial_statistics,
                             uint64_t valid_row_count,
-                            uint64_t elements_per_value,
+                            IndexT elements_per_value,
+                            uint32_t partial_count,
                             Stream& stream) {
     auto launch = [&]<typename ValueT>() {
-        dispatchWeightAndLaunch<ValueT, OffsetT>(values,
-                                                  weights,
-                                                  offsets,
-                                                  numerator,
-                                                  denominator,
-                                                  valid_row_count,
-                                                  elements_per_value,
-                                                  stream);
+        dispatchWeightAndLaunch<ValueT, OffsetT, IndexT>(values,
+                                                         weights,
+                                                         offsets,
+                                                         partial_statistics,
+                                                         valid_row_count,
+                                                         elements_per_value,
+                                                         partial_count,
+                                                         stream);
     };
     dispatchReductionInputDType(values.getDataType(), launch);
 }
 
+template <typename OffsetT>
+void dispatchIndexAndLaunch(const Tensor& values,
+                            const Tensor& weights,
+                            const Tensor& offsets,
+                            Tensor& partial_statistics,
+                            uint64_t valid_row_count,
+                            uint64_t max_scalars,
+                            uint64_t elements_per_value,
+                            uint32_t partial_count,
+                            Stream& stream) {
+    if (max_scalars <= std::numeric_limits<uint32_t>::max()) {
+        dispatchValueAndLaunch<OffsetT, uint32_t>(values,
+                                                  weights,
+                                                  offsets,
+                                                  partial_statistics,
+                                                  valid_row_count,
+                                                  static_cast<uint32_t>(elements_per_value),
+                                                  partial_count,
+                                                  stream);
+    } else {
+        dispatchValueAndLaunch<OffsetT, uint64_t>(values,
+                                                  weights,
+                                                  offsets,
+                                                  partial_statistics,
+                                                  valid_row_count,
+                                                  elements_per_value,
+                                                  partial_count,
+                                                  stream);
+    }
+}
+
 }  // namespace
+
+TensorDescriptor raggedWeightedMeanStatisticsWorkspaceDescriptor(uint64_t max_total_values,
+                                                                  uint64_t elements_per_value) {
+    if (max_total_values == 0)
+        throw std::invalid_argument("ragged WeightedMean max_total_values must be non-zero.");
+    if (elements_per_value == 0)
+        throw std::invalid_argument("ragged WeightedMean elements_per_value must be non-zero.");
+    if (max_total_values > std::numeric_limits<uint64_t>::max() / elements_per_value)
+        throw std::overflow_error("ragged WeightedMean packed scalar capacity overflows uint64_t.");
+    const uint64_t max_scalars = max_total_values * elements_per_value;
+    return TensorDescriptor(DataType::FP32, {partialBlockCount(max_scalars), 2});
+}
 
 void raggedWeightedMeanStatistics(const Tensor& values,
                                   const Tensor& weights,
                                   const Tensor& offsets,
+                                  Tensor& partial_statistics,
                                   Tensor& numerator,
                                   Tensor& denominator,
                                   uint64_t valid_row_count,
@@ -189,36 +277,45 @@ void raggedWeightedMeanStatistics(const Tensor& values,
     validate(values,
              weights,
              offsets,
+             partial_statistics,
              numerator,
              denominator,
              valid_row_count,
              max_total_values,
              elements_per_value);
-    CUDA_CHECK(cudaMemsetAsync(numerator.getMemPtr<void>(), 0, sizeof(float), stream.getStream()));
-    CUDA_CHECK(cudaMemsetAsync(denominator.getMemPtr<void>(), 0, sizeof(float), stream.getStream()));
+
+    const uint64_t max_scalars = max_total_values * elements_per_value;
+    const uint32_t partial_count =
+        static_cast<uint32_t>(partial_statistics.getDimensions().front());
     if (offsets.getDataType() == DataType::UINT32) {
-        dispatchValueAndLaunch<uint32_t>(values,
+        dispatchIndexAndLaunch<uint32_t>(values,
                                          weights,
                                          offsets,
-                                         numerator,
-                                         denominator,
+                                         partial_statistics,
                                          valid_row_count,
+                                         max_scalars,
                                          elements_per_value,
+                                         partial_count,
                                          stream);
     } else if (offsets.getDataType() == DataType::UINT64) {
-        dispatchValueAndLaunch<uint64_t>(values,
+        dispatchIndexAndLaunch<uint64_t>(values,
                                          weights,
                                          offsets,
-                                         numerator,
-                                         denominator,
+                                         partial_statistics,
                                          valid_row_count,
+                                         max_scalars,
                                          elements_per_value,
+                                         partial_count,
                                          stream);
     } else {
         throw std::invalid_argument("ragged WeightedMean offsets must be UINT32 or UINT64.");
     }
-    canonicalizeZeroWeightStatisticsKernel<<<1, 1, 0, stream.getStream()>>>(
-        numerator.getMemPtr<float>(), denominator.getMemPtr<float>());
+
+    finalizeWeightedStatisticsKernel<<<1, kBlockSize, 0, stream.getStream()>>>(
+        reinterpret_cast<const WeightedStatistics*>(partial_statistics.getMemPtr<float>()),
+        partial_count,
+        numerator.getMemPtr<float>(),
+        denominator.getMemPtr<float>());
     CUDA_CHECK(cudaPeekAtLastError());
 }
 

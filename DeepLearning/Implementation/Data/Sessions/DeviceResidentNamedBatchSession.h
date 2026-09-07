@@ -92,6 +92,7 @@ class DeviceResidentNamedBatchSession : public Thor::BatchSession {
         struct BatchStorage {
             std::map<std::string, ThorImplementation::Tensor> tensors;
             std::map<std::string, ThorImplementation::RaggedTensor> raggedTensors;
+            std::map<std::string, ThorImplementation::Tensor> raggedOffsetsHostStaging;
         };
         struct PendingBatch {
             BatchStorage storage;

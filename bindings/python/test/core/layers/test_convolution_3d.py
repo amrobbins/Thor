@@ -71,9 +71,19 @@ def test_conv3d_constructs_defaults_architecture_parameters_and_output_shape_dty
     assert arch["depth_stride"] == 1
     assert arch["vertical_stride"] == 1
     assert arch["horizontal_stride"] == 1
-    assert arch["depth_padding"] == 0
-    assert arch["vertical_padding"] == 0
-    assert arch["horizontal_padding"] == 0
+    assert arch["depth_dilation"] == 1
+    assert arch["vertical_dilation"] == 1
+    assert arch["horizontal_dilation"] == 1
+    assert arch["padding_mode"] == "valid"
+    assert arch["padding_front"] == 0
+    assert arch["padding_back"] == 0
+    assert arch["padding_top"] == 0
+    assert arch["padding_bottom"] == 0
+    assert arch["padding_left"] == 0
+    assert arch["padding_right"] == 0
+    assert "depth_padding" not in arch
+    assert "vertical_padding" not in arch
+    assert "horizontal_padding" not in arch
     assert arch["num_output_channels"] == 6
     assert arch["groups"] == 1
     assert arch["has_bias"] is True
@@ -174,9 +184,180 @@ def test_conv3d_output_shape_matches_convolution_formula(input_shape, num_output
     assert arch["depth_stride"] == sd
     assert arch["vertical_stride"] == sh
     assert arch["horizontal_stride"] == sw
-    assert arch["depth_padding"] == pd
-    assert arch["vertical_padding"] == ph
-    assert arch["horizontal_padding"] == pw
+    assert arch["depth_dilation"] == 1
+    assert arch["vertical_dilation"] == 1
+    assert arch["horizontal_dilation"] == 1
+    # Legacy symmetric padding arguments have numeric zero defaults, so the
+    # binding cannot distinguish an explicitly supplied all-zero triplet from
+    # omitted padding. Normalize that geometry to semantic VALID; any nonzero
+    # legacy padding remains semantic EXPLICIT.
+    assert arch["padding_mode"] == ("explicit" if any((pd, ph, pw)) else "valid")
+    assert arch["padding_front"] == pd
+    assert arch["padding_back"] == pd
+    assert arch["padding_top"] == ph
+    assert arch["padding_bottom"] == ph
+    assert arch["padding_left"] == pw
+    assert arch["padding_right"] == pw
+    assert "depth_padding" not in arch
+    assert "vertical_padding" not in arch
+    assert "horizontal_padding" not in arch
+
+
+def test_conv3d_modern_explicit_padding_and_tuple_dilation():
+    n = _net("test_net_conv3d_modern_explicit")
+    x = _cdhw_input(n, 4, 9, 10, 11, thor.DataType.fp16)
+
+    conv = thor.layers.Convolution3d(
+        n,
+        x,
+        num_output_channels=8,
+        filter_depth=3,
+        filter_height=2,
+        filter_width=4,
+        depth_stride=2,
+        vertical_stride=3,
+        horizontal_stride=2,
+        padding=(1, 3, 2, 0, 4, 1),
+        dilation=(2, 3, 1),
+        activation=None,
+    )
+
+    assert conv.get_feature_output().get_dimensions() == [8, 5, 3, 7]
+    arch = _only_layer_architecture(n, "convolution_3d")
+    assert arch["padding_mode"] == "explicit"
+    assert [
+        arch["padding_front"],
+        arch["padding_back"],
+        arch["padding_top"],
+        arch["padding_bottom"],
+        arch["padding_left"],
+        arch["padding_right"],
+    ] == [1, 3, 2, 0, 4, 1]
+    assert [arch["depth_dilation"], arch["vertical_dilation"], arch["horizontal_dilation"]] == [2, 3, 1]
+
+
+def test_conv3d_same_padding_uses_same_upper_with_stride_and_dilation():
+    n = _net("test_net_conv3d_same")
+    x = _cdhw_input(n, 4, 8, 9, 10, thor.DataType.fp16)
+
+    conv = thor.layers.Convolution3d(
+        n,
+        x,
+        num_output_channels=8,
+        filter_depth=3,
+        filter_height=4,
+        filter_width=2,
+        depth_stride=2,
+        vertical_stride=3,
+        horizontal_stride=4,
+        padding="same",
+        dilation=(2, 1, 3),
+        activation=None,
+    )
+
+    assert conv.get_feature_output().get_dimensions() == [8, 4, 3, 3]
+    arch = _only_layer_architecture(n, "convolution_3d")
+    assert arch["padding_mode"] == "same_upper"
+    assert [
+        arch["padding_front"],
+        arch["padding_back"],
+        arch["padding_top"],
+        arch["padding_bottom"],
+        arch["padding_left"],
+        arch["padding_right"],
+    ] == [1, 2, 0, 1, 1, 1]
+    assert [arch["depth_dilation"], arch["vertical_dilation"], arch["horizontal_dilation"]] == [2, 1, 3]
+
+
+def test_conv3d_same_upper_alias_and_scalar_dilation():
+    n = _net("test_net_conv3d_same_upper_alias")
+    x = _cdhw_input(n, 2, 9, 9, 9, thor.DataType.fp16)
+
+    conv = thor.layers.Convolution3d(
+        n,
+        x,
+        4,
+        3,
+        3,
+        3,
+        padding="same_upper",
+        dilation=2,
+        activation=None,
+    )
+
+    assert conv.get_feature_output().get_dimensions() == [4, 9, 9, 9]
+    arch = _only_layer_architecture(n, "convolution_3d")
+    assert arch["padding_mode"] == "same_upper"
+    assert [arch["depth_dilation"], arch["vertical_dilation"], arch["horizontal_dilation"]] == [2, 2, 2]
+
+
+def test_conv3d_valid_padding_with_scalar_dilation_uses_effective_kernel():
+    n = _net("test_net_conv3d_valid_dilated")
+    x = _cdhw_input(n, 2, 9, 9, 9, thor.DataType.fp16)
+
+    conv = thor.layers.Convolution3d(
+        n,
+        x,
+        4,
+        3,
+        3,
+        3,
+        padding="valid",
+        dilation=2,
+        activation=None,
+    )
+
+    assert conv.get_feature_output().get_dimensions() == [4, 5, 5, 5]
+    arch = _only_layer_architecture(n, "convolution_3d")
+    assert arch["padding_mode"] == "valid"
+    assert [arch["depth_dilation"], arch["vertical_dilation"], arch["horizontal_dilation"]] == [2, 2, 2]
+
+
+def test_conv3d_rejects_mixing_modern_padding_with_legacy_padding_aliases():
+    n = _net("test_net_conv3d_mixed_padding")
+    x = _cdhw_input(n, 2, 7, 7, 7)
+
+    with pytest.raises(ValueError, match=r"padding cannot be combined with depth_padding"):
+        thor.layers.Convolution3d(n, x, 4, 3, 3, 3, depth_padding=1, padding="same")
+
+
+@pytest.mark.parametrize("padding", ["bogus", "explicit", (1, 2, 3), 7])
+def test_conv3d_rejects_invalid_modern_padding(padding):
+    n = _net("test_net_conv3d_bad_padding")
+    x = _cdhw_input(n, 2, 7, 7, 7)
+
+    with pytest.raises((TypeError, ValueError)):
+        thor.layers.Convolution3d(n, x, 4, 3, 3, 3, padding=padding)
+
+
+@pytest.mark.parametrize("dilation", [0, (1, 2), (1, 0, 1), "2"])
+def test_conv3d_rejects_invalid_dilation(dilation):
+    n = _net("test_net_conv3d_bad_dilation")
+    x = _cdhw_input(n, 2, 7, 7, 7)
+
+    with pytest.raises((TypeError, ValueError)):
+        thor.layers.Convolution3d(n, x, 4, 3, 3, 3, dilation=dilation)
+
+
+def test_conv3d_dilation_participates_in_filter_fit_validation():
+    n = _net("test_net_conv3d_dilated_filter_fit")
+    x = _cdhw_input(n, 2, 4, 8, 8)
+
+    with pytest.raises(ValueError, match=r"filter_depth effective size 5 is larger than padded input depth 4"):
+        thor.layers.Convolution3d(n, x, 4, 3, 3, 3, dilation=(2, 1, 1), padding="valid")
+
+    conv = thor.layers.Convolution3d(
+        n,
+        x,
+        4,
+        3,
+        3,
+        3,
+        dilation=(2, 1, 1),
+        padding=(1, 0, 0, 0, 0, 0),
+        activation=None,
+    )
+    assert conv.get_feature_output().get_dimensions() == [4, 1, 6, 6]
 
 
 @pytest.mark.parametrize(("dtype_name", "dtype"), _floating_convolution_dtypes())
@@ -382,13 +563,13 @@ def test_conv3d_rejects_filter_larger_than_padded_input_and_accepts_when_padding
     n = _net("test_net_conv3d_filter_fit")
     x = _cdhw_input(n, 3, 4, 4, 4)
 
-    with pytest.raises(ValueError, match=r"filter is larger than padded input"):
+    with pytest.raises(ValueError, match=r"effective size .* larger than padded input"):
         thor.layers.Convolution3d(n, x, 8, 5, 3, 3)
 
-    with pytest.raises(ValueError, match=r"filter is larger than padded input"):
+    with pytest.raises(ValueError, match=r"effective size .* larger than padded input"):
         thor.layers.Convolution3d(n, x, 8, 3, 5, 3)
 
-    with pytest.raises(ValueError, match=r"filter is larger than padded input"):
+    with pytest.raises(ValueError, match=r"effective size .* larger than padded input"):
         thor.layers.Convolution3d(n, x, 8, 3, 3, 5)
 
     conv = thor.layers.Convolution3d(

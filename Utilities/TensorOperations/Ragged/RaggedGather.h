@@ -22,11 +22,11 @@ void launchRaggedGather(const Tensor& source_values,
                         uint64_t batch_size,
                         Stream& stream);
 
-// Backward for row-local gather. Active source-gradient positions are first
-// initialized to exact zero, then every active output gradient is accumulated
-// into its selected source token. Duplicate row-local indices therefore sum.
-// Inactive source-gradient capacity is untouched. Backward supports FP16,
-// BF16, and FP32 feature gradients.
+// Backward for row-local gather. Each source row is zeroed cooperatively, then
+// its active output gradients scatter-add across the trailing value width. A
+// single-index row writes directly; rows with multiple indices use atomics
+// because row-local indices may repeat. Inactive source-gradient capacity is
+// untouched. Backward supports FP16, BF16, and FP32 gradients.
 void launchRaggedGatherBackward(const Tensor& source_offsets,
                                 const Tensor& indices_values,
                                 const Tensor& indices_offsets,

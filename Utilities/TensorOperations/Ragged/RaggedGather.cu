@@ -13,6 +13,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace ThorImplementation {
@@ -94,93 +95,366 @@ void validateForward(const Tensor& sourceValues,
     }
 }
 
-template <typename SourceOffsetT, typename IndexOffsetT, typename IndexT>
-__global__ void gatherKernel(const unsigned char* sourceValues,
+uint32_t laneShiftForItems(uint64_t items) {
+    if (items <= 1) return 0;
+    if (items <= 2) return 1;
+    if (items <= 4) return 2;
+    if (items <= 8) return 3;
+    if (items <= 16) return 4;
+    return 5;
+}
+
+uint32_t widestAlignedCopyWidth(const Tensor& sourceValues, const Tensor& outputValues, uint64_t valueBytes) {
+    const uintptr_t sourceAddress = reinterpret_cast<uintptr_t>(sourceValues.getMemPtr());
+    const uintptr_t outputAddress = reinterpret_cast<uintptr_t>(outputValues.getMemPtr());
+    for (uint32_t width : {16U, 8U, 4U, 2U}) {
+        if (valueBytes % width == 0 && sourceAddress % width == 0 && outputAddress % width == 0) return width;
+    }
+    return 1;
+}
+
+template <typename SourceOffsetT,
+          typename IndexOffsetT,
+          typename IndexT,
+          typename CopyT,
+          typename PackedIndexT,
+          typename RowT,
+          typename CopyIndexT>
+__device__ __forceinline__ void gatherForwardRow(RowT row,
+                                                 const CopyT* sourceValues,
+                                                 const SourceOffsetT* sourceOffsets,
+                                                 const IndexT* indicesValues,
+                                                 const IndexOffsetT* indicesOffsets,
+                                                 CopyT* outputValues,
+                                                 CopyIndexT copyItemsPerValue,
+                                                 uint32_t lanesPerToken,
+                                                 uint32_t tokensPerBlock,
+                                                 uint32_t tokenSlot,
+                                                 uint32_t lane) {
+    const SourceOffsetT sourceBegin = sourceOffsets[row];
+    const SourceOffsetT sourceEnd = sourceOffsets[row + 1];
+    const SourceOffsetT sourceLength = sourceEnd - sourceBegin;
+    const IndexOffsetT indicesBegin = indicesOffsets[row];
+    const IndexOffsetT indicesEnd = indicesOffsets[row + 1];
+    const IndexOffsetT indexCount = indicesEnd - indicesBegin;
+    if (static_cast<IndexOffsetT>(tokenSlot) >= indexCount) return;
+
+    IndexOffsetT outputToken = indicesBegin + static_cast<IndexOffsetT>(tokenSlot);
+    while (outputToken < indicesEnd) {
+        const IndexT localIndex = indicesValues[outputToken];
+        using CompareT = std::conditional_t<(sizeof(IndexT) > sizeof(SourceOffsetT)), IndexT, SourceOffsetT>;
+        const bool valid = static_cast<CompareT>(localIndex) < static_cast<CompareT>(sourceLength);
+        const PackedIndexT outputItemBegin =
+            static_cast<PackedIndexT>(outputToken) * static_cast<PackedIndexT>(copyItemsPerValue);
+        CopyT* destination = outputValues + outputItemBegin;
+
+        if (valid) {
+            const SourceOffsetT sourceToken = sourceBegin + static_cast<SourceOffsetT>(localIndex);
+            const PackedIndexT sourceItemBegin =
+                static_cast<PackedIndexT>(sourceToken) * static_cast<PackedIndexT>(copyItemsPerValue);
+            const CopyT* source = sourceValues + sourceItemBegin;
+            CopyIndexT item = static_cast<CopyIndexT>(lane);
+            while (item < copyItemsPerValue) {
+                destination[item] = source[item];
+                const CopyIndexT remainingItems = copyItemsPerValue - item;
+                if (static_cast<CopyIndexT>(lanesPerToken) >= remainingItems) break;
+                item += static_cast<CopyIndexT>(lanesPerToken);
+            }
+        } else {
+            const CopyT zero{};
+            CopyIndexT item = static_cast<CopyIndexT>(lane);
+            while (item < copyItemsPerValue) {
+                destination[item] = zero;
+                const CopyIndexT remainingItems = copyItemsPerValue - item;
+                if (static_cast<CopyIndexT>(lanesPerToken) >= remainingItems) break;
+                item += static_cast<CopyIndexT>(lanesPerToken);
+            }
+        }
+
+        const IndexOffsetT remainingTokens = indicesEnd - outputToken;
+        if (static_cast<IndexOffsetT>(tokensPerBlock) >= remainingTokens) break;
+        outputToken += static_cast<IndexOffsetT>(tokensPerBlock);
+    }
+}
+
+template <typename SourceOffsetT,
+          typename IndexOffsetT,
+          typename IndexT,
+          typename CopyT,
+          typename PackedIndexT,
+          typename RowT,
+          typename CopyIndexT>
+__device__ __forceinline__ void gatherForwardRows(const CopyT* sourceValues,
+                                                  const SourceOffsetT* sourceOffsets,
+                                                  const IndexT* indicesValues,
+                                                  const IndexOffsetT* indicesOffsets,
+                                                  CopyT* outputValues,
+                                                  CopyIndexT copyItemsPerValue,
+                                                  uint32_t lanesPerToken,
+                                                  uint32_t tokensPerBlock,
+                                                  uint32_t tokenSlot,
+                                                  uint32_t lane,
+                                                  RowT batchSize) {
+    RowT row = static_cast<RowT>(blockIdx.x);
+    const RowT rowStride = static_cast<RowT>(gridDim.x);
+    while (row < batchSize) {
+        gatherForwardRow<SourceOffsetT, IndexOffsetT, IndexT, CopyT, PackedIndexT, RowT, CopyIndexT>(row,
+                                                                                      sourceValues,
+                                                                                      sourceOffsets,
+                                                                                      indicesValues,
+                                                                                      indicesOffsets,
+                                                                                      outputValues,
+                                                                                      copyItemsPerValue,
+                                                                                      lanesPerToken,
+                                                                                      tokensPerBlock,
+                                                                                      tokenSlot,
+                                                                                      lane);
+        const RowT remainingRows = batchSize - row;
+        if (rowStride >= remainingRows) break;
+        row += rowStride;
+    }
+}
+
+template <typename SourceOffsetT,
+          typename IndexOffsetT,
+          typename IndexT,
+          typename CopyT,
+          typename PackedIndexT,
+          typename CopyIndexT,
+          typename RowT>
+__global__ void gatherKernel(const CopyT* sourceValues,
                              const SourceOffsetT* sourceOffsets,
                              const IndexT* indicesValues,
                              const IndexOffsetT* indicesOffsets,
-                             unsigned char* outputValues,
-                             unsigned long valueElementSizeBytes,
-                             uint64_t elementsPerValue,
-                             uint64_t batchSize) {
-    for (uint64_t row = blockIdx.x; row < batchSize; row += gridDim.x) {
-        const uint64_t sourceBegin = static_cast<uint64_t>(sourceOffsets[row]);
-        const uint64_t sourceEnd = static_cast<uint64_t>(sourceOffsets[row + 1]);
-        const uint64_t sourceLength = sourceEnd - sourceBegin;
-        const uint64_t indicesBegin = static_cast<uint64_t>(indicesOffsets[row]);
-        const uint64_t indicesEnd = static_cast<uint64_t>(indicesOffsets[row + 1]);
+                             CopyT* outputValues,
+                             CopyIndexT copyItemsPerValue,
+                             uint32_t laneShift,
+                             RowT batchSize) {
+    const uint32_t lanesPerToken = 1U << laneShift;
+    const uint32_t tokensPerBlock = kThreads >> laneShift;
+    const uint32_t tokenSlot = threadIdx.x >> laneShift;
+    const uint32_t lane = threadIdx.x & (lanesPerToken - 1U);
 
-        for (uint64_t outputToken = indicesBegin + threadIdx.x; outputToken < indicesEnd; outputToken += blockDim.x) {
-            const uint64_t localIndex = static_cast<uint64_t>(indicesValues[outputToken]);
-            const uint64_t outputScalarBegin = outputToken * elementsPerValue;
-            if (localIndex >= sourceLength) {
-                // Guard invalid runtime data from crossing row boundaries. Valid
-                // RaggedGather inputs must never exercise this branch.
-                for (uint64_t scalar = 0; scalar < elementsPerValue; ++scalar) {
-                    unsigned char* destination =
-                        outputValues + (outputScalarBegin + scalar) * static_cast<uint64_t>(valueElementSizeBytes);
-                    for (unsigned long byte = 0; byte < valueElementSizeBytes; ++byte) destination[byte] = 0;
+    gatherForwardRows<SourceOffsetT, IndexOffsetT, IndexT, CopyT, PackedIndexT, RowT, CopyIndexT>(sourceValues,
+                                                                                                 sourceOffsets,
+                                                                                                 indicesValues,
+                                                                                                 indicesOffsets,
+                                                                                                 outputValues,
+                                                                                                 copyItemsPerValue,
+                                                                                                 lanesPerToken,
+                                                                                                 tokensPerBlock,
+                                                                                                 tokenSlot,
+                                                                                                 lane,
+                                                                                                 batchSize);
+}
+
+template <typename SourceOffsetT,
+          typename IndexOffsetT,
+          typename IndexT,
+          typename ValueT,
+          typename PackedIndexT,
+          typename FeatureIndexT,
+          typename RowT>
+__device__ __forceinline__ void gatherBackwardRows(const SourceOffsetT* sourceOffsets,
+                                                   const IndexT* indicesValues,
+                                                   const IndexOffsetT* indicesOffsets,
+                                                   const ValueT* outputGradient,
+                                                   ValueT* sourceGradient,
+                                                   FeatureIndexT elementsPerValue,
+                                                   uint32_t lanesPerToken,
+                                                   uint32_t tokensPerBlock,
+                                                   uint32_t tokenSlot,
+                                                   uint32_t lane,
+                                                   RowT batchSize) {
+    RowT row = static_cast<RowT>(blockIdx.x);
+    const RowT rowStride = static_cast<RowT>(gridDim.x);
+    while (row < batchSize) {
+        const SourceOffsetT sourceBegin = sourceOffsets[row];
+        const SourceOffsetT sourceEnd = sourceOffsets[row + 1];
+        const SourceOffsetT sourceLength = sourceEnd - sourceBegin;
+        const IndexOffsetT indicesBegin = indicesOffsets[row];
+        const IndexOffsetT indicesEnd = indicesOffsets[row + 1];
+        const IndexOffsetT indexCount = indicesEnd - indicesBegin;
+
+        // The packed source row is contiguous. Zero it cooperatively in this
+        // CTA, then use the same CTA for the row-local scatter-add. This removes
+        // the old byte-oriented zero kernel and its extra launch.
+        const PackedIndexT rowScalarBegin =
+            static_cast<PackedIndexT>(sourceBegin) * static_cast<PackedIndexT>(elementsPerValue);
+        const PackedIndexT rowScalarCount =
+            static_cast<PackedIndexT>(sourceLength) * static_cast<PackedIndexT>(elementsPerValue);
+        PackedIndexT scalar = static_cast<PackedIndexT>(threadIdx.x);
+        while (scalar < rowScalarCount) {
+            sourceGradient[rowScalarBegin + scalar] = ValueT{};
+            const PackedIndexT remainingScalars = rowScalarCount - scalar;
+            if (static_cast<PackedIndexT>(blockDim.x) >= remainingScalars) break;
+            scalar += static_cast<PackedIndexT>(blockDim.x);
+        }
+        __syncthreads();
+
+        if (static_cast<IndexOffsetT>(tokenSlot) < indexCount) {
+            IndexOffsetT outputToken = indicesBegin + static_cast<IndexOffsetT>(tokenSlot);
+            while (outputToken < indicesEnd) {
+                const IndexT localIndex = indicesValues[outputToken];
+                using CompareT = std::conditional_t<(sizeof(IndexT) > sizeof(SourceOffsetT)), IndexT, SourceOffsetT>;
+                if (static_cast<CompareT>(localIndex) < static_cast<CompareT>(sourceLength)) {
+                    const SourceOffsetT sourceToken = sourceBegin + static_cast<SourceOffsetT>(localIndex);
+                    const PackedIndexT sourceScalarBegin =
+                        static_cast<PackedIndexT>(sourceToken) * static_cast<PackedIndexT>(elementsPerValue);
+                    const PackedIndexT outputScalarBegin =
+                        static_cast<PackedIndexT>(outputToken) * static_cast<PackedIndexT>(elementsPerValue);
+                    FeatureIndexT feature = static_cast<FeatureIndexT>(lane);
+                    if (indexCount == static_cast<IndexOffsetT>(1)) {
+                        // This row has only one scatter destination, so no other
+                        // token can alias it and the atomic is unnecessary.
+                        while (feature < elementsPerValue) {
+                            sourceGradient[sourceScalarBegin + static_cast<PackedIndexT>(feature)] =
+                                outputGradient[outputScalarBegin + static_cast<PackedIndexT>(feature)];
+                            const FeatureIndexT remainingFeatures = elementsPerValue - feature;
+                            if (static_cast<FeatureIndexT>(lanesPerToken) >= remainingFeatures) break;
+                            feature += static_cast<FeatureIndexT>(lanesPerToken);
+                        }
+                    } else {
+                        // Arbitrary row-local gather indices may repeat. This is
+                        // a true scatter-add dependency: unlike a global
+                        // reduction, distinct output tokens can target the same
+                        // source scalar, so atomics are required unless indices
+                        // are first grouped/sorted.
+                        while (feature < elementsPerValue) {
+                            atomicAdd(&sourceGradient[sourceScalarBegin + static_cast<PackedIndexT>(feature)],
+                                      outputGradient[outputScalarBegin + static_cast<PackedIndexT>(feature)]);
+                            const FeatureIndexT remainingFeatures = elementsPerValue - feature;
+                            if (static_cast<FeatureIndexT>(lanesPerToken) >= remainingFeatures) break;
+                            feature += static_cast<FeatureIndexT>(lanesPerToken);
+                        }
+                    }
                 }
-                continue;
-            }
 
-            const uint64_t sourceToken = sourceBegin + localIndex;
-            const uint64_t sourceScalarBegin = sourceToken * elementsPerValue;
-            for (uint64_t scalar = 0; scalar < elementsPerValue; ++scalar) {
-                const unsigned char* source =
-                    sourceValues + (sourceScalarBegin + scalar) * static_cast<uint64_t>(valueElementSizeBytes);
-                unsigned char* destination =
-                    outputValues + (outputScalarBegin + scalar) * static_cast<uint64_t>(valueElementSizeBytes);
-                for (unsigned long byte = 0; byte < valueElementSizeBytes; ++byte) destination[byte] = source[byte];
+                const IndexOffsetT remainingTokens = indicesEnd - outputToken;
+                if (static_cast<IndexOffsetT>(tokensPerBlock) >= remainingTokens) break;
+                outputToken += static_cast<IndexOffsetT>(tokensPerBlock);
             }
         }
+
+        const RowT remainingRows = batchSize - row;
+        if (rowStride >= remainingRows) break;
+        row += rowStride;
     }
 }
 
-template <typename SourceOffsetT>
-__global__ void zeroActiveSourceGradientKernel(const SourceOffsetT* sourceOffsets,
-                                               unsigned char* sourceGradient,
-                                               unsigned long valueElementSizeBytes,
-                                               uint64_t elementsPerValue,
-                                               uint64_t batchSize) {
-    for (uint64_t row = blockIdx.x; row < batchSize; row += gridDim.x) {
-        const uint64_t rowBegin = static_cast<uint64_t>(sourceOffsets[row]);
-        const uint64_t rowEnd = static_cast<uint64_t>(sourceOffsets[row + 1]);
-        const uint64_t scalarBegin = rowBegin * elementsPerValue;
-        const uint64_t scalarCount = (rowEnd - rowBegin) * elementsPerValue;
-        for (uint64_t scalar = threadIdx.x; scalar < scalarCount; scalar += blockDim.x) {
-            unsigned char* destination =
-                sourceGradient + (scalarBegin + scalar) * static_cast<uint64_t>(valueElementSizeBytes);
-            for (unsigned long byte = 0; byte < valueElementSizeBytes; ++byte) destination[byte] = 0;
-        }
-    }
-}
-
-template <typename SourceOffsetT, typename IndexOffsetT, typename IndexT, typename ValueT>
+template <typename SourceOffsetT,
+          typename IndexOffsetT,
+          typename IndexT,
+          typename ValueT,
+          typename PackedIndexT,
+          typename FeatureIndexT,
+          typename RowT>
 __global__ void gatherBackwardKernel(const SourceOffsetT* sourceOffsets,
                                      const IndexT* indicesValues,
                                      const IndexOffsetT* indicesOffsets,
                                      const ValueT* outputGradient,
                                      ValueT* sourceGradient,
-                                     uint64_t elementsPerValue,
-                                     uint64_t batchSize) {
-    for (uint64_t row = blockIdx.x; row < batchSize; row += gridDim.x) {
-        const uint64_t sourceBegin = static_cast<uint64_t>(sourceOffsets[row]);
-        const uint64_t sourceEnd = static_cast<uint64_t>(sourceOffsets[row + 1]);
-        const uint64_t sourceLength = sourceEnd - sourceBegin;
-        const uint64_t indicesBegin = static_cast<uint64_t>(indicesOffsets[row]);
-        const uint64_t indicesEnd = static_cast<uint64_t>(indicesOffsets[row + 1]);
+                                     FeatureIndexT elementsPerValue,
+                                     uint32_t laneShift,
+                                     RowT batchSize) {
+    const uint32_t lanesPerToken = 1U << laneShift;
+    const uint32_t tokensPerBlock = kThreads >> laneShift;
+    const uint32_t tokenSlot = threadIdx.x >> laneShift;
+    const uint32_t lane = threadIdx.x & (lanesPerToken - 1U);
 
-        for (uint64_t outputToken = indicesBegin + threadIdx.x; outputToken < indicesEnd; outputToken += blockDim.x) {
-            const uint64_t localIndex = static_cast<uint64_t>(indicesValues[outputToken]);
-            if (localIndex >= sourceLength) continue;
-            const uint64_t sourceToken = sourceBegin + localIndex;
-            const uint64_t sourceScalarBegin = sourceToken * elementsPerValue;
-            const uint64_t outputScalarBegin = outputToken * elementsPerValue;
-            for (uint64_t scalar = 0; scalar < elementsPerValue; ++scalar) {
-                atomicAdd(&sourceGradient[sourceScalarBegin + scalar], outputGradient[outputScalarBegin + scalar]);
-            }
-        }
+    gatherBackwardRows<SourceOffsetT, IndexOffsetT, IndexT, ValueT, PackedIndexT, FeatureIndexT, RowT>(sourceOffsets,
+                                                                                                      indicesValues,
+                                                                                                      indicesOffsets,
+                                                                                                      outputGradient,
+                                                                                                      sourceGradient,
+                                                                                                      elementsPerValue,
+                                                                                                      lanesPerToken,
+                                                                                                      tokensPerBlock,
+                                                                                                      tokenSlot,
+                                                                                                      lane,
+                                                                                                      batchSize);
+}
+
+template <typename SourceOffsetT,
+          typename IndexOffsetT,
+          typename IndexT,
+          typename CopyT,
+          typename PackedIndexT,
+          typename CopyIndexT>
+void launchGatherCopyIndexTyped(const Tensor& sourceValues,
+                                const Tensor& sourceOffsets,
+                                const Tensor& indicesValues,
+                                const Tensor& indicesOffsets,
+                                Tensor& outputValues,
+                                uint64_t copyItemsPerValue,
+                                uint64_t batchSize,
+                                Stream& stream) {
+    const uint32_t blocks = blocksForRows(batchSize);
+    const uint32_t laneShift = laneShiftForItems(copyItemsPerValue);
+    if (batchSize <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        gatherKernel<SourceOffsetT, IndexOffsetT, IndexT, CopyT, PackedIndexT, CopyIndexT, uint32_t>
+            <<<blocks, kThreads, 0, stream.getStream()>>>(reinterpret_cast<const CopyT*>(sourceValues.getMemPtr()),
+                                                         sourceOffsets.getMemPtr<SourceOffsetT>(),
+                                                         indicesValues.getMemPtr<IndexT>(),
+                                                         indicesOffsets.getMemPtr<IndexOffsetT>(),
+                                                         reinterpret_cast<CopyT*>(outputValues.getMemPtr()),
+                                                         static_cast<CopyIndexT>(copyItemsPerValue),
+                                                         laneShift,
+                                                         static_cast<uint32_t>(batchSize));
+    } else {
+        gatherKernel<SourceOffsetT, IndexOffsetT, IndexT, CopyT, PackedIndexT, CopyIndexT, uint64_t>
+            <<<blocks, kThreads, 0, stream.getStream()>>>(reinterpret_cast<const CopyT*>(sourceValues.getMemPtr()),
+                                                         sourceOffsets.getMemPtr<SourceOffsetT>(),
+                                                         indicesValues.getMemPtr<IndexT>(),
+                                                         indicesOffsets.getMemPtr<IndexOffsetT>(),
+                                                         reinterpret_cast<CopyT*>(outputValues.getMemPtr()),
+                                                         static_cast<CopyIndexT>(copyItemsPerValue),
+                                                         laneShift,
+                                                         batchSize);
+    }
+    CUDA_CHECK(cudaGetLastError());
+}
+
+template <typename SourceOffsetT, typename IndexOffsetT, typename IndexT, typename CopyT>
+void launchGatherCopyTyped(const Tensor& sourceValues,
+                           const Tensor& sourceOffsets,
+                           const Tensor& indicesValues,
+                           const Tensor& indicesOffsets,
+                           Tensor& outputValues,
+                           uint64_t copyItemsPerValue,
+                           uint32_t copyWidth,
+                           uint64_t batchSize,
+                           Stream& stream) {
+    const uint64_t sourcePackedItems = sourceValues.getArraySizeInBytes() / copyWidth;
+    const uint64_t outputPackedItems = outputValues.getArraySizeInBytes() / copyWidth;
+    const uint64_t maxPackedItems = std::max({sourcePackedItems, outputPackedItems, copyItemsPerValue});
+    if (maxPackedItems <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        launchGatherCopyIndexTyped<SourceOffsetT, IndexOffsetT, IndexT, CopyT, uint32_t, uint32_t>(sourceValues,
+                                                                                                  sourceOffsets,
+                                                                                                  indicesValues,
+                                                                                                  indicesOffsets,
+                                                                                                  outputValues,
+                                                                                                  copyItemsPerValue,
+                                                                                                  batchSize,
+                                                                                                  stream);
+    } else if (copyItemsPerValue <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        launchGatherCopyIndexTyped<SourceOffsetT, IndexOffsetT, IndexT, CopyT, uint64_t, uint32_t>(sourceValues,
+                                                                                                  sourceOffsets,
+                                                                                                  indicesValues,
+                                                                                                  indicesOffsets,
+                                                                                                  outputValues,
+                                                                                                  copyItemsPerValue,
+                                                                                                  batchSize,
+                                                                                                  stream);
+    } else {
+        launchGatherCopyIndexTyped<SourceOffsetT, IndexOffsetT, IndexT, CopyT, uint64_t, uint64_t>(sourceValues,
+                                                                                                  sourceOffsets,
+                                                                                                  indicesValues,
+                                                                                                  indicesOffsets,
+                                                                                                  outputValues,
+                                                                                                  copyItemsPerValue,
+                                                                                                  batchSize,
+                                                                                                  stream);
     }
 }
 
@@ -192,15 +466,111 @@ void launchGatherTyped(const Tensor& sourceValues,
                        Tensor& outputValues,
                        uint64_t batchSize,
                        Stream& stream) {
-    gatherKernel<SourceOffsetT, IndexOffsetT, IndexT><<<blocksForRows(batchSize), kThreads, 0, stream.getStream()>>>(
-        static_cast<const unsigned char*>(sourceValues.getMemPtr()),
-        sourceOffsets.getMemPtr<SourceOffsetT>(),
-        indicesValues.getMemPtr<IndexT>(),
-        indicesOffsets.getMemPtr<IndexOffsetT>(),
-        static_cast<unsigned char*>(outputValues.getMemPtr()),
-        static_cast<unsigned long>(TensorDescriptor::getElementSizeInBytes(sourceValues.getDataType())),
-        elementsPerValue(sourceValues),
-        batchSize);
+    const uint64_t trailingElements = elementsPerValue(sourceValues);
+    const uint64_t elementBytes = TensorDescriptor::getElementSizeInBytes(sourceValues.getDataType());
+    if (trailingElements > std::numeric_limits<uint64_t>::max() / elementBytes) {
+        throw std::overflow_error("RaggedGather trailing value byte count overflow.");
+    }
+    const uint64_t valueBytes = trailingElements * elementBytes;
+    const uint32_t copyWidth = widestAlignedCopyWidth(sourceValues, outputValues, valueBytes);
+    const uint64_t copyItemsPerValue = valueBytes / copyWidth;
+
+    switch (copyWidth) {
+        case 16:
+            launchGatherCopyTyped<SourceOffsetT, IndexOffsetT, IndexT, uint4>(sourceValues,
+                                                                            sourceOffsets,
+                                                                            indicesValues,
+                                                                            indicesOffsets,
+                                                                            outputValues,
+                                                                            copyItemsPerValue,
+                                                                            copyWidth,
+                                                                            batchSize,
+                                                                            stream);
+            return;
+        case 8:
+            launchGatherCopyTyped<SourceOffsetT, IndexOffsetT, IndexT, uint64_t>(sourceValues,
+                                                                                sourceOffsets,
+                                                                                indicesValues,
+                                                                                indicesOffsets,
+                                                                                outputValues,
+                                                                                copyItemsPerValue,
+                                                                                copyWidth,
+                                                                                batchSize,
+                                                                                stream);
+            return;
+        case 4:
+            launchGatherCopyTyped<SourceOffsetT, IndexOffsetT, IndexT, uint32_t>(sourceValues,
+                                                                                sourceOffsets,
+                                                                                indicesValues,
+                                                                                indicesOffsets,
+                                                                                outputValues,
+                                                                                copyItemsPerValue,
+                                                                                copyWidth,
+                                                                                batchSize,
+                                                                                stream);
+            return;
+        case 2:
+            launchGatherCopyTyped<SourceOffsetT, IndexOffsetT, IndexT, uint16_t>(sourceValues,
+                                                                                sourceOffsets,
+                                                                                indicesValues,
+                                                                                indicesOffsets,
+                                                                                outputValues,
+                                                                                copyItemsPerValue,
+                                                                                copyWidth,
+                                                                                batchSize,
+                                                                                stream);
+            return;
+        default:
+            launchGatherCopyTyped<SourceOffsetT, IndexOffsetT, IndexT, uint8_t>(sourceValues,
+                                                                               sourceOffsets,
+                                                                               indicesValues,
+                                                                               indicesOffsets,
+                                                                               outputValues,
+                                                                               copyItemsPerValue,
+                                                                               copyWidth,
+                                                                               batchSize,
+                                                                               stream);
+            return;
+    }
+}
+
+template <typename SourceOffsetT,
+          typename IndexOffsetT,
+          typename IndexT,
+          typename ValueT,
+          typename PackedIndexT,
+          typename FeatureIndexT>
+void launchBackwardPackedTyped(const Tensor& sourceOffsets,
+                               const Tensor& indicesValues,
+                               const Tensor& indicesOffsets,
+                               const Tensor& outputGradient,
+                               Tensor& sourceGradient,
+                               uint64_t trailingElements,
+                               uint64_t batchSize,
+                               Stream& stream) {
+    const uint32_t laneShift = laneShiftForItems(trailingElements);
+    const uint32_t blocks = blocksForRows(batchSize);
+    if (batchSize <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        gatherBackwardKernel<SourceOffsetT, IndexOffsetT, IndexT, ValueT, PackedIndexT, FeatureIndexT, uint32_t>
+            <<<blocks, kThreads, 0, stream.getStream()>>>(sourceOffsets.getMemPtr<SourceOffsetT>(),
+                                                         indicesValues.getMemPtr<IndexT>(),
+                                                         indicesOffsets.getMemPtr<IndexOffsetT>(),
+                                                         outputGradient.getMemPtr<ValueT>(),
+                                                         sourceGradient.getMemPtr<ValueT>(),
+                                                         static_cast<FeatureIndexT>(trailingElements),
+                                                         laneShift,
+                                                         static_cast<uint32_t>(batchSize));
+    } else {
+        gatherBackwardKernel<SourceOffsetT, IndexOffsetT, IndexT, ValueT, PackedIndexT, FeatureIndexT, uint64_t>
+            <<<blocks, kThreads, 0, stream.getStream()>>>(sourceOffsets.getMemPtr<SourceOffsetT>(),
+                                                         indicesValues.getMemPtr<IndexT>(),
+                                                         indicesOffsets.getMemPtr<IndexOffsetT>(),
+                                                         outputGradient.getMemPtr<ValueT>(),
+                                                         sourceGradient.getMemPtr<ValueT>(),
+                                                         static_cast<FeatureIndexT>(trailingElements),
+                                                         laneShift,
+                                                         batchSize);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -213,22 +583,36 @@ void launchBackwardTyped(const Tensor& sourceOffsets,
                          uint64_t batchSize,
                          Stream& stream) {
     const uint64_t trailingElements = elementsPerValue(sourceGradient);
-    zeroActiveSourceGradientKernel<SourceOffsetT><<<blocksForRows(batchSize), kThreads, 0, stream.getStream()>>>(
-        sourceOffsets.getMemPtr<SourceOffsetT>(),
-        static_cast<unsigned char*>(sourceGradient.getMemPtr()),
-        static_cast<unsigned long>(TensorDescriptor::getElementSizeInBytes(sourceGradient.getDataType())),
-        trailingElements,
-        batchSize);
-    CUDA_CHECK(cudaGetLastError());
-    gatherBackwardKernel<SourceOffsetT, IndexOffsetT, IndexT, ValueT>
-        <<<blocksForRows(batchSize), kThreads, 0, stream.getStream()>>>(sourceOffsets.getMemPtr<SourceOffsetT>(),
-                                                                       indicesValues.getMemPtr<IndexT>(),
-                                                                       indicesOffsets.getMemPtr<IndexOffsetT>(),
-                                                                       outputGradient.getMemPtr<ValueT>(),
-                                                                       sourceGradient.getMemPtr<ValueT>(),
-                                                                       trailingElements,
-                                                                       batchSize);
-    CUDA_CHECK(cudaGetLastError());
+    const uint64_t maxPackedScalars = std::max(sourceGradient.getTotalNumElements(), outputGradient.getTotalNumElements());
+    const uint64_t packedIndexRequirement = std::max(maxPackedScalars, trailingElements);
+    if (packedIndexRequirement <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        launchBackwardPackedTyped<SourceOffsetT, IndexOffsetT, IndexT, ValueT, uint32_t, uint32_t>(sourceOffsets,
+                                                                                                  indicesValues,
+                                                                                                  indicesOffsets,
+                                                                                                  outputGradient,
+                                                                                                  sourceGradient,
+                                                                                                  trailingElements,
+                                                                                                  batchSize,
+                                                                                                  stream);
+    } else if (trailingElements <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+        launchBackwardPackedTyped<SourceOffsetT, IndexOffsetT, IndexT, ValueT, uint64_t, uint32_t>(sourceOffsets,
+                                                                                                  indicesValues,
+                                                                                                  indicesOffsets,
+                                                                                                  outputGradient,
+                                                                                                  sourceGradient,
+                                                                                                  trailingElements,
+                                                                                                  batchSize,
+                                                                                                  stream);
+    } else {
+        launchBackwardPackedTyped<SourceOffsetT, IndexOffsetT, IndexT, ValueT, uint64_t, uint64_t>(sourceOffsets,
+                                                                                                  indicesValues,
+                                                                                                  indicesOffsets,
+                                                                                                  outputGradient,
+                                                                                                  sourceGradient,
+                                                                                                  trailingElements,
+                                                                                                  batchSize,
+                                                                                                  stream);
+    }
 }
 
 template <typename SourceOffsetT, typename IndexOffsetT>

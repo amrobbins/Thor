@@ -890,15 +890,20 @@ static std::vector<uint64_t> inferExpressionConvolutionOutputDims(const ExprNode
 
     std::vector<uint64_t> out_dims{input_dims[0], filter_dims[0]};
     const std::vector<int32_t> strides =
-        is_3d ? std::vector<int32_t>{node.conv_stride_d, node.conv_stride_h, node.conv_stride_w}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.stride_d, node.conv_spatial_3d.stride_h, node.conv_spatial_3d.stride_w}
               : std::vector<int32_t>{node.conv_spatial_2d.stride_h, node.conv_spatial_2d.stride_w};
     const std::vector<int32_t> pre_pads =
-        is_3d ? std::vector<int32_t>{node.conv_pad_d, node.conv_pad_h, node.conv_pad_w}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.pre_padding_d, node.conv_spatial_3d.pre_padding_h, node.conv_spatial_3d.pre_padding_w}
               : std::vector<int32_t>{node.conv_spatial_2d.pre_padding_h, node.conv_spatial_2d.pre_padding_w};
     const std::vector<int32_t> post_pads =
-        is_3d ? pre_pads : std::vector<int32_t>{node.conv_spatial_2d.post_padding_h, node.conv_spatial_2d.post_padding_w};
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.post_padding_d,
+                                     node.conv_spatial_3d.post_padding_h,
+                                     node.conv_spatial_3d.post_padding_w}
+              : std::vector<int32_t>{node.conv_spatial_2d.post_padding_h, node.conv_spatial_2d.post_padding_w};
     const std::vector<int32_t> dilations =
-        is_3d ? std::vector<int32_t>{1, 1, 1}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.dilation_d,
+                                     node.conv_spatial_3d.dilation_h,
+                                     node.conv_spatial_3d.dilation_w}
               : std::vector<int32_t>{node.conv_spatial_2d.dilation_h, node.conv_spatial_2d.dilation_w};
 
     for (size_t i = 0; i < strides.size(); ++i) {
@@ -948,15 +953,20 @@ static std::vector<uint64_t> inferExpressionConvolutionBackwardDataOutputDims(co
 
     std::vector<uint64_t> out_dims{n, c};
     const std::vector<int32_t> strides =
-        is_3d ? std::vector<int32_t>{node.conv_stride_d, node.conv_stride_h, node.conv_stride_w}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.stride_d, node.conv_spatial_3d.stride_h, node.conv_spatial_3d.stride_w}
               : std::vector<int32_t>{node.conv_spatial_2d.stride_h, node.conv_spatial_2d.stride_w};
     const std::vector<int32_t> pre_pads =
-        is_3d ? std::vector<int32_t>{node.conv_pad_d, node.conv_pad_h, node.conv_pad_w}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.pre_padding_d, node.conv_spatial_3d.pre_padding_h, node.conv_spatial_3d.pre_padding_w}
               : std::vector<int32_t>{node.conv_spatial_2d.pre_padding_h, node.conv_spatial_2d.pre_padding_w};
     const std::vector<int32_t> post_pads =
-        is_3d ? pre_pads : std::vector<int32_t>{node.conv_spatial_2d.post_padding_h, node.conv_spatial_2d.post_padding_w};
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.post_padding_d,
+                                     node.conv_spatial_3d.post_padding_h,
+                                     node.conv_spatial_3d.post_padding_w}
+              : std::vector<int32_t>{node.conv_spatial_2d.post_padding_h, node.conv_spatial_2d.post_padding_w};
     const std::vector<int32_t> dilations =
-        is_3d ? std::vector<int32_t>{1, 1, 1}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.dilation_d,
+                                     node.conv_spatial_3d.dilation_h,
+                                     node.conv_spatial_3d.dilation_w}
               : std::vector<int32_t>{node.conv_spatial_2d.dilation_h, node.conv_spatial_2d.dilation_w};
     for (size_t i = 0; i < strides.size(); ++i) {
         const size_t dim_idx = 2 + i;
@@ -1004,15 +1014,20 @@ static std::vector<uint64_t> inferExpressionConvolutionBackwardFilterOutputDims(
 
     std::vector<uint64_t> out_dims{k, filter_c};
     const std::vector<int32_t> strides =
-        is_3d ? std::vector<int32_t>{node.conv_stride_d, node.conv_stride_h, node.conv_stride_w}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.stride_d, node.conv_spatial_3d.stride_h, node.conv_spatial_3d.stride_w}
               : std::vector<int32_t>{node.conv_spatial_2d.stride_h, node.conv_spatial_2d.stride_w};
     const std::vector<int32_t> pre_pads =
-        is_3d ? std::vector<int32_t>{node.conv_pad_d, node.conv_pad_h, node.conv_pad_w}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.pre_padding_d, node.conv_spatial_3d.pre_padding_h, node.conv_spatial_3d.pre_padding_w}
               : std::vector<int32_t>{node.conv_spatial_2d.pre_padding_h, node.conv_spatial_2d.pre_padding_w};
     const std::vector<int32_t> post_pads =
-        is_3d ? pre_pads : std::vector<int32_t>{node.conv_spatial_2d.post_padding_h, node.conv_spatial_2d.post_padding_w};
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.post_padding_d,
+                                     node.conv_spatial_3d.post_padding_h,
+                                     node.conv_spatial_3d.post_padding_w}
+              : std::vector<int32_t>{node.conv_spatial_2d.post_padding_h, node.conv_spatial_2d.post_padding_w};
     const std::vector<int32_t> dilations =
-        is_3d ? std::vector<int32_t>{1, 1, 1}
+        is_3d ? std::vector<int32_t>{node.conv_spatial_3d.dilation_d,
+                                     node.conv_spatial_3d.dilation_h,
+                                     node.conv_spatial_3d.dilation_w}
               : std::vector<int32_t>{node.conv_spatial_2d.dilation_h, node.conv_spatial_2d.dilation_w};
     for (size_t i = 0; i < strides.size(); ++i) {
         const size_t dim_idx = 2 + i;
@@ -2628,12 +2643,7 @@ static std::vector<uint64_t> resolveConvolutionOutputDimsFromInputs(const Compil
     node.op = compiled_stage.is_3d ? ExprOp::CONV3D : ExprOp::CONV2D;
     node.conv_groups = compiled_stage.groups;
     if (compiled_stage.is_3d) {
-        node.conv_stride_d = compiled_stage.stride_d;
-        node.conv_stride_h = compiled_stage.stride_h;
-        node.conv_stride_w = compiled_stage.stride_w;
-        node.conv_pad_d = compiled_stage.pad_d;
-        node.conv_pad_h = compiled_stage.pad_h;
-        node.conv_pad_w = compiled_stage.pad_w;
+        node.conv_spatial_3d = compiled_stage.spatial_3d;
     } else {
         node.conv_spatial_2d = compiled_stage.spatial_2d;
     }
@@ -2652,12 +2662,7 @@ static std::vector<uint64_t> resolveConvolutionBackwardOutputDimsFromInputs(cons
     if (compiled_stage.op == ExprOp::CONV2D_BACKWARD_DATA || compiled_stage.op == ExprOp::CONV2D_BACKWARD_FILTER) {
         node.conv_spatial_2d = compiled_stage.spatial_2d;
     } else {
-        node.conv_stride_d = compiled_stage.stride_d;
-        node.conv_stride_h = compiled_stage.stride_h;
-        node.conv_stride_w = compiled_stage.stride_w;
-        node.conv_pad_d = compiled_stage.pad_d;
-        node.conv_pad_h = compiled_stage.pad_h;
-        node.conv_pad_w = compiled_stage.pad_w;
+        node.conv_spatial_3d = compiled_stage.spatial_3d;
     }
     node.fill_dims = compiled_stage.explicit_output_dims;
     if (compiled_stage.op == ExprOp::CONV2D_BACKWARD_DATA || compiled_stage.op == ExprOp::CONV3D_BACKWARD_DATA) {

@@ -11,21 +11,24 @@ namespace ThorImplementation {
 inline constexpr RaggedPartitionRequirement kRaggedTrailingConcatenatePartitionRequirement = RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
 }  // namespace ThorImplementation
 
-// Concatenate/split packed ragged values along a trailing feature axis while
-// touching only the authoritative active prefix named by the managed [1]
-// active-count carrier. Inactive packed capacity is deliberately neither read
-// nor canonicalized.
+// Concatenate/split contiguous packed ragged values along a trailing feature
+// axis while touching only the authoritative active prefix named by the managed
+// [1] active-count carrier. Inactive packed capacity is deliberately neither
+// read nor canonicalized.
+//
+// axisOffsets is a device array of numArrays + 1 cumulative axis offsets:
+//   {0, axisElements[0], axisElements[0] + axisElements[1], ...}
+// outerSlicesPerValue is the product of packed-value dimensions before the
+// concatenated axis; innerElements is the product of dimensions after it.
 void launchRaggedConcatenate(void *dest,
                              void *source[],
                              std::size_t elementSizeBytes,
-                             long fullCapacityNumElements,
+                             uint64_t capacityRows,
                              uint64_t elementsPerOutputValue,
-                             int numDimensions,
-                             int numSourceArrays,
-                             int axisDimension,
-                             long axisElementsPerSourceArray[],
-                             long stridePerDestDimension[],
-                             long stridePerSourceDimension[],
+                             uint64_t outerSlicesPerValue,
+                             uint64_t innerElements,
+                             uint32_t numSourceArrays,
+                             const uint64_t axisOffsets[],
                              const void *activeCount,
                              std::size_t activeCountElementSizeBytes,
                              Stream stream);
@@ -33,14 +36,12 @@ void launchRaggedConcatenate(void *dest,
 void launchRaggedSplit(void *dest[],
                        void *source,
                        std::size_t elementSizeBytes,
-                       long fullCapacityNumElements,
+                       uint64_t capacityRows,
                        uint64_t elementsPerSourceValue,
-                       int numDimensions,
-                       int numDestArrays,
-                       int axisDimension,
-                       long axisElementsPerDestArray[],
-                       long stridePerSourceDimension[],
-                       long stridePerDestDimension[],
+                       uint64_t outerSlicesPerValue,
+                       uint64_t innerElements,
+                       uint32_t numDestArrays,
+                       const uint64_t axisOffsets[],
                        const void *activeCount,
                        std::size_t activeCountElementSizeBytes,
                        Stream stream);

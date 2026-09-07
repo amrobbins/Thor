@@ -13,12 +13,7 @@ namespace {
 
 ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
                                                                     uint32_t groups,
-                                                                    uint32_t strideD,
-                                                                    uint32_t strideH,
-                                                                    uint32_t strideW,
-                                                                    uint32_t padD,
-                                                                    uint32_t padH,
-                                                                    uint32_t padW,
+                                                                    ThorImplementation::ConvolutionSpatial3d spatial,
                                                                     ThorImplementation::DataType computeDataType,
                                                                     ThorImplementation::TensorPlacement placement,
                                                                     std::shared_ptr<Thor::Activation> activation,
@@ -41,12 +36,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
     return DynamicExpression(std::move(expectedInputNames), {"feature_output"},
                              [hasBias,
                               groups,
-                              strideD,
-                              strideH,
-                              strideW,
-                              padD,
-                              padH,
-                              padW,
+                              spatial,
                               computeDataType,
                               placement,
                               activation = std::move(activation),
@@ -73,12 +63,48 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
         }
         THOR_THROW_IF_FALSE(featureInputTensor.getPlacement() == placement);
 
-        const uint64_t expectedOutputDepth =
-            (featureInputTensor.getDimensions()[2] + 2 * padD - wTensor.getDimensions()[2]) / strideD + 1;
-        const uint64_t expectedOutputRows =
-            (featureInputTensor.getDimensions()[3] + 2 * padH - wTensor.getDimensions()[3]) / strideH + 1;
-        const uint64_t expectedOutputCols =
-            (featureInputTensor.getDimensions()[4] + 2 * padW - wTensor.getDimensions()[4]) / strideW + 1;
+        auto outputDimension = [](uint64_t inputSize,
+                                  uint64_t filterSize,
+                                  int32_t stride,
+                                  int32_t dilation,
+                                  int32_t prePadding,
+                                  int32_t postPadding,
+                                  const char *axis) -> uint64_t {
+            if (filterSize == 0 || stride <= 0 || dilation <= 0 || prePadding < 0 || postPadding < 0) {
+                throw std::runtime_error(std::string("Convolution3d has invalid ") + axis + " spatial geometry.");
+            }
+            const uint64_t effectiveFilter =
+                static_cast<uint64_t>(dilation) * (filterSize - 1ULL) + 1ULL;
+            const uint64_t paddedInput =
+                inputSize + static_cast<uint64_t>(prePadding) + static_cast<uint64_t>(postPadding);
+            if (effectiveFilter > paddedInput) {
+                throw std::runtime_error(std::string("Convolution3d effective ") + axis +
+                                         " filter is larger than the padded input.");
+            }
+            return 1ULL + (paddedInput - effectiveFilter) / static_cast<uint64_t>(stride);
+        };
+
+        const uint64_t expectedOutputDepth = outputDimension(featureInputTensor.getDimensions()[2],
+                                                             wTensor.getDimensions()[2],
+                                                             spatial.stride_d,
+                                                             spatial.dilation_d,
+                                                             spatial.pre_padding_d,
+                                                             spatial.post_padding_d,
+                                                             "depth");
+        const uint64_t expectedOutputRows = outputDimension(featureInputTensor.getDimensions()[3],
+                                                            wTensor.getDimensions()[3],
+                                                            spatial.stride_h,
+                                                            spatial.dilation_h,
+                                                            spatial.pre_padding_h,
+                                                            spatial.post_padding_h,
+                                                            "height");
+        const uint64_t expectedOutputCols = outputDimension(featureInputTensor.getDimensions()[4],
+                                                            wTensor.getDimensions()[4],
+                                                            spatial.stride_w,
+                                                            spatial.dilation_w,
+                                                            spatial.pre_padding_w,
+                                                            spatial.post_padding_w,
+                                                            "width");
         std::optional<ImplDataType> featureOutputDType = std::nullopt;
 
         if (outputs.contains("feature_output")) {
@@ -102,8 +128,7 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
         auto fin = Expression::input("feature_input");
         auto w = Expression::input("weights", weightsDType, weightsDType);
 
-        Expression fout =
-            Expression::conv3d(fin, w, strideD, strideH, strideW, padD, padH, padW, computeDataType, featureOutputDType, groups);
+        Expression fout = Expression::conv3d(fin, w, spatial, computeDataType, featureOutputDType, groups);
 
         if (hasBias) {
             const Tensor& bTensor = inputs.at("biases");
@@ -153,6 +178,28 @@ ThorImplementation::DynamicExpression buildConvolution3dExpression(bool hasBias,
             {},
         };
     });
+}
+
+const char *paddingModeName(Convolution3dPaddingMode mode) {
+    switch (mode) {
+        case Convolution3dPaddingMode::VALID:
+            return "valid";
+        case Convolution3dPaddingMode::SAME_UPPER:
+            return "same_upper";
+        case Convolution3dPaddingMode::EXPLICIT:
+            return "explicit";
+    }
+    throw std::runtime_error("Unknown Convolution3d padding mode.");
+}
+
+Convolution3dPaddingMode paddingModeFromName(const std::string &name) {
+    if (name == "valid")
+        return Convolution3dPaddingMode::VALID;
+    if (name == "same_upper")
+        return Convolution3dPaddingMode::SAME_UPPER;
+    if (name == "explicit")
+        return Convolution3dPaddingMode::EXPLICIT;
+    throw std::runtime_error("Unknown Convolution3d padding_mode: " + name);
 }
 
 }  // namespace
@@ -298,12 +345,7 @@ std::shared_ptr<ThorImplementation::Layer> Convolution3d::stamp(ThorImplementati
     std::shared_ptr<ThorImplementation::CustomLayer> physicalConvolution3d = std::make_shared<ThorImplementation::CustomLayer>(
         buildConvolution3dExpression(hasBias,
                                      groups,
-                                     depthStride,
-                                     verticalStride,
-                                     horizontalStride,
-                                     depthPadding,
-                                     verticalPadding,
-                                     horizontalPadding,
+                                     spatial,
                                      computeDataType,
                                      placement,
                                      activation,
@@ -336,18 +378,34 @@ void Convolution3d::buildSupportLayersAndAddToNetwork(Network* network) {
         .filterDepth(filterDepth)
         .filterHeight(filterHeight)
         .filterWidth(filterWidth)
-        .depthStride(depthStride)
-        .verticalStride(verticalStride)
-        .horizontalStride(horizontalStride)
-        .depthPadding(depthPadding)
-        .verticalPadding(verticalPadding)
-        .horizontalPadding(horizontalPadding)
+        .depthStride(static_cast<uint32_t>(spatial.stride_d))
+        .verticalStride(static_cast<uint32_t>(spatial.stride_h))
+        .horizontalStride(static_cast<uint32_t>(spatial.stride_w))
+        .depthDilation(static_cast<uint32_t>(spatial.dilation_d))
+        .verticalDilation(static_cast<uint32_t>(spatial.dilation_h))
+        .horizontalDilation(static_cast<uint32_t>(spatial.dilation_w))
         .groups(groups)
         .hasBias(hasBias)
         .weightsInitializer(weightsInitializer)
         .biasInitializer(biasInitializer)
         .weightsOptimizer(weightsOptimizer)
         .biasesOptimizer(biasesOptimizer);
+    switch (paddingMode) {
+        case Convolution3dPaddingMode::VALID:
+            convolution3dBuilder.validPadding();
+            break;
+        case Convolution3dPaddingMode::SAME_UPPER:
+            convolution3dBuilder.samePadding();
+            break;
+        case Convolution3dPaddingMode::EXPLICIT:
+            convolution3dBuilder.padding(static_cast<uint32_t>(spatial.pre_padding_d),
+                                         static_cast<uint32_t>(spatial.post_padding_d),
+                                         static_cast<uint32_t>(spatial.pre_padding_h),
+                                         static_cast<uint32_t>(spatial.post_padding_h),
+                                         static_cast<uint32_t>(spatial.pre_padding_w),
+                                         static_cast<uint32_t>(spatial.post_padding_w));
+            break;
+    }
     if (activation != nullptr) {
         convolution3dBuilder.activation(dynamic_pointer_cast<Activation>(activation->clone()));
     } else {
@@ -393,12 +451,19 @@ json Convolution3d::architectureJson() const {
     j["filter_width"] = filterWidth;
     j["filter_height"] = filterHeight;
     j["filter_depth"] = filterDepth;
-    j["horizontal_stride"] = horizontalStride;
-    j["vertical_stride"] = verticalStride;
-    j["depth_stride"] = depthStride;
-    j["horizontal_padding"] = horizontalPadding;
-    j["vertical_padding"] = verticalPadding;
-    j["depth_padding"] = depthPadding;
+    j["horizontal_stride"] = spatial.stride_w;
+    j["vertical_stride"] = spatial.stride_h;
+    j["depth_stride"] = spatial.stride_d;
+    j["depth_dilation"] = spatial.dilation_d;
+    j["vertical_dilation"] = spatial.dilation_h;
+    j["horizontal_dilation"] = spatial.dilation_w;
+    j["padding_mode"] = paddingModeName(paddingMode);
+    j["padding_front"] = spatial.pre_padding_d;
+    j["padding_back"] = spatial.post_padding_d;
+    j["padding_top"] = spatial.pre_padding_h;
+    j["padding_bottom"] = spatial.post_padding_h;
+    j["padding_left"] = spatial.pre_padding_w;
+    j["padding_right"] = spatial.post_padding_w;
     j["num_output_channels"] = numOutputChannels;
     j["groups"] = groups;
     j["has_bias"] = hasBias;
@@ -485,20 +550,44 @@ void Convolution3d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
     convolution3d.filterWidth = j.at("filter_width").get<uint32_t>();
     convolution3d.filterHeight = j.at("filter_height").get<uint32_t>();
     convolution3d.filterDepth = j.at("filter_depth").get<uint32_t>();
-    convolution3d.horizontalStride = j.at("horizontal_stride").get<uint32_t>();
-    convolution3d.verticalStride = j.at("vertical_stride").get<uint32_t>();
-    convolution3d.depthStride = j.at("depth_stride").get<uint32_t>();
-    convolution3d.horizontalPadding = j.at("horizontal_padding").get<uint32_t>();
-    convolution3d.verticalPadding = j.at("vertical_padding").get<uint32_t>();
-    convolution3d.depthPadding = j.at("depth_padding").get<uint32_t>();
+    convolution3d.spatial.stride_w = j.at("horizontal_stride").get<int32_t>();
+    convolution3d.spatial.stride_h = j.at("vertical_stride").get<int32_t>();
+    convolution3d.spatial.stride_d = j.at("depth_stride").get<int32_t>();
+    convolution3d.spatial.dilation_d = j.at("depth_dilation").get<int32_t>();
+    convolution3d.spatial.dilation_h = j.at("vertical_dilation").get<int32_t>();
+    convolution3d.spatial.dilation_w = j.at("horizontal_dilation").get<int32_t>();
+    convolution3d.paddingMode = paddingModeFromName(j.at("padding_mode").get<std::string>());
+    convolution3d.spatial.pre_padding_d = j.at("padding_front").get<int32_t>();
+    convolution3d.spatial.post_padding_d = j.at("padding_back").get<int32_t>();
+    convolution3d.spatial.pre_padding_h = j.at("padding_top").get<int32_t>();
+    convolution3d.spatial.post_padding_h = j.at("padding_bottom").get<int32_t>();
+    convolution3d.spatial.pre_padding_w = j.at("padding_left").get<int32_t>();
+    convolution3d.spatial.post_padding_w = j.at("padding_right").get<int32_t>();
+    if (convolution3d.spatial.stride_d <= 0 || convolution3d.spatial.stride_h <= 0 || convolution3d.spatial.stride_w <= 0) {
+        throw runtime_error("Convolution3d serialized stride must be positive.");
+    }
+    if (convolution3d.spatial.dilation_d <= 0 || convolution3d.spatial.dilation_h <= 0 || convolution3d.spatial.dilation_w <= 0) {
+        throw runtime_error("Convolution3d serialized dilation must be positive.");
+    }
+    if (convolution3d.spatial.pre_padding_d < 0 || convolution3d.spatial.post_padding_d < 0 ||
+        convolution3d.spatial.pre_padding_h < 0 || convolution3d.spatial.post_padding_h < 0 ||
+        convolution3d.spatial.pre_padding_w < 0 || convolution3d.spatial.post_padding_w < 0) {
+        throw runtime_error("Convolution3d serialized padding must be non-negative.");
+    }
+    if (convolution3d.paddingMode == Convolution3dPaddingMode::VALID &&
+        (convolution3d.spatial.pre_padding_d != 0 || convolution3d.spatial.post_padding_d != 0 ||
+         convolution3d.spatial.pre_padding_h != 0 || convolution3d.spatial.post_padding_h != 0 ||
+         convolution3d.spatial.pre_padding_w != 0 || convolution3d.spatial.post_padding_w != 0)) {
+        throw runtime_error("Convolution3d serialized VALID padding must resolve to zero padding.");
+    }
     convolution3d.numOutputChannels = j.at("num_output_channels").get<uint32_t>();
-    convolution3d.groups = j.value("groups", uint32_t{1});
-    if (convolution3d.groups == 0)
-        throw runtime_error("Convolution3d serialized groups must be positive.");
+    convolution3d.groups = j.at("groups").get<uint32_t>();
+    if (convolution3d.filterDepth == 0 || convolution3d.filterHeight == 0 || convolution3d.filterWidth == 0 ||
+        convolution3d.numOutputChannels == 0 || convolution3d.groups == 0) {
+        throw runtime_error("Convolution3d serialized filter dimensions, num_output_channels, and groups must be positive.");
+    }
     convolution3d.hasBias = j.at("has_bias").get<bool>();
-    // Archives written before compute_data_type existed used FLOAT cuDNN compute without
-    // filtering tensor-core plans, which is the permissive policy now named TF32.
-    convolution3d.computeDataType = j.value("compute_data_type", DataType::TF32);
+    convolution3d.computeDataType = j.at("compute_data_type").get<DataType>();
     if (convolution3d.computeDataType != DataType::FP32 && convolution3d.computeDataType != DataType::TF32)
         throw runtime_error("Convolution3d serialized compute_data_type must be fp32 or tf32.");
 
@@ -511,6 +600,68 @@ void Convolution3d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
         convolution3d.featureInputs.push_back(network->getApiTensorByOriginalId(originalTensorId));
         convolution3d.standaloneLayerFeatureInputs.push_back(convolution3d.featureInputs.back());
     }
+    if (convolution3d.featureInputs.empty()) {
+        throw runtime_error("Convolution3d serialized layer requires at least one feature input.");
+    }
+    const vector<uint64_t>& referenceInputDimensions = convolution3d.featureInputs.front().getDimensions();
+    if (referenceInputDimensions.size() != 4 || referenceInputDimensions[0] == 0 || referenceInputDimensions[1] == 0 ||
+        referenceInputDimensions[2] == 0 || referenceInputDimensions[3] == 0) {
+        throw runtime_error("Convolution3d serialized feature input must be a non-empty CDHW tensor.");
+    }
+    for (const Tensor& input : convolution3d.featureInputs) {
+        if (input.getDimensions() != referenceInputDimensions) {
+            throw runtime_error("Convolution3d serialized feature inputs must have identical CDHW dimensions.");
+        }
+        if (input.getDimensions()[0] % convolution3d.groups != 0 || convolution3d.numOutputChannels % convolution3d.groups != 0) {
+            throw runtime_error("Convolution3d serialized groups must divide input and output channels.");
+        }
+    }
+    if (convolution3d.paddingMode == Convolution3dPaddingMode::SAME_UPPER) {
+        const auto [expectedFront, expectedBack] = Convolution3d::Builder::computeSamePadding(
+            static_cast<uint32_t>(referenceInputDimensions[1]),
+            convolution3d.spatial.stride_d,
+            convolution3d.filterDepth,
+            convolution3d.spatial.dilation_d);
+        const auto [expectedTop, expectedBottom] = Convolution3d::Builder::computeSamePadding(
+            static_cast<uint32_t>(referenceInputDimensions[2]),
+            convolution3d.spatial.stride_h,
+            convolution3d.filterHeight,
+            convolution3d.spatial.dilation_h);
+        const auto [expectedLeft, expectedRight] = Convolution3d::Builder::computeSamePadding(
+            static_cast<uint32_t>(referenceInputDimensions[3]),
+            convolution3d.spatial.stride_w,
+            convolution3d.filterWidth,
+            convolution3d.spatial.dilation_w);
+        if (convolution3d.spatial.pre_padding_d != static_cast<int32_t>(expectedFront) ||
+            convolution3d.spatial.post_padding_d != static_cast<int32_t>(expectedBack) ||
+            convolution3d.spatial.pre_padding_h != static_cast<int32_t>(expectedTop) ||
+            convolution3d.spatial.post_padding_h != static_cast<int32_t>(expectedBottom) ||
+            convolution3d.spatial.pre_padding_w != static_cast<int32_t>(expectedLeft) ||
+            convolution3d.spatial.post_padding_w != static_cast<int32_t>(expectedRight)) {
+            throw runtime_error(
+                "Convolution3d serialized SAME_UPPER padding does not match its input shape, stride, dilation, and filter.");
+        }
+    }
+    const vector<uint64_t> expectedOutputDimensions = {
+        convolution3d.numOutputChannels,
+        Convolution3d::Builder::computeOutputDimension(static_cast<uint32_t>(referenceInputDimensions[1]),
+                                                       convolution3d.spatial.stride_d,
+                                                       convolution3d.filterDepth,
+                                                       convolution3d.spatial.pre_padding_d,
+                                                       convolution3d.spatial.post_padding_d,
+                                                       convolution3d.spatial.dilation_d),
+        Convolution3d::Builder::computeOutputDimension(static_cast<uint32_t>(referenceInputDimensions[2]),
+                                                       convolution3d.spatial.stride_h,
+                                                       convolution3d.filterHeight,
+                                                       convolution3d.spatial.pre_padding_h,
+                                                       convolution3d.spatial.post_padding_h,
+                                                       convolution3d.spatial.dilation_h),
+        Convolution3d::Builder::computeOutputDimension(static_cast<uint32_t>(referenceInputDimensions[3]),
+                                                       convolution3d.spatial.stride_w,
+                                                       convolution3d.filterWidth,
+                                                       convolution3d.spatial.pre_padding_w,
+                                                       convolution3d.spatial.post_padding_w,
+                                                       convolution3d.spatial.dilation_w)};
     for (const json& outputJson : j.at("outputs")) {
         Tensor output = Tensor::deserialize(outputJson, archiveReader.get());
         convolution3d.featureOutputs.push_back(output);
@@ -519,15 +670,16 @@ void Convolution3d::deserialize(shared_ptr<thor_file::TarReader>& archiveReader,
     if (convolution3d.featureInputs.size() != convolution3d.featureOutputs.size()) {
         throw runtime_error("Convolution3d deserialize expected equal numbers of inputs and outputs.");
     }
-    if (convolution3d.computeDataType == DataType::TF32 &&
-        (!convolution3d.featureInputs.empty() && convolution3d.featureInputs.front().getDataType() != DataType::FP32)) {
-        throw runtime_error("Convolution3d serialized TF32 compute requires FP32 input/weights/output storage.");
-    }
-    for (const Tensor& input : convolution3d.featureInputs) {
-        if (input.getDimensions().empty() || input.getDimensions()[0] % convolution3d.groups != 0 ||
-            convolution3d.numOutputChannels % convolution3d.groups != 0) {
-            throw runtime_error("Convolution3d serialized groups must divide input and output channels.");
+    for (const Tensor& output : convolution3d.featureOutputs) {
+        if (output.getDimensions() != expectedOutputDimensions) {
+            throw runtime_error("Convolution3d serialized feature output shape does not match its spatial geometry.");
         }
+        if (output.getDataType() != convolution3d.featureInputs.front().getDataType()) {
+            throw runtime_error("Convolution3d serialized feature output dtype must match its feature input dtype.");
+        }
+    }
+    if (convolution3d.computeDataType == DataType::TF32 && convolution3d.featureInputs.front().getDataType() != DataType::FP32) {
+        throw runtime_error("Convolution3d serialized TF32 compute requires FP32 input/weights/output storage.");
     }
     for (uint32_t i = 0; i < convolution3d.featureInputs.size(); ++i) {
         convolution3d.outputTensorFromInputTensor[convolution3d.featureInputs[i]] = convolution3d.featureOutputs[i];

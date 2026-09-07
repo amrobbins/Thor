@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -142,25 +143,17 @@ void runForwardAndSplitCase(DataType offsetsDataType) {
                                          stream);
 
     DeviceAllocation sourceTable = makePointerTable({left.getMemPtr(), right.getMemPtr()}, stream);
-    DeviceAllocation axisElements = uploadArray<long>({static_cast<long>(leftAxis), static_cast<long>(rightAxis)}, stream);
-    DeviceAllocation joinedStrides =
-        uploadArray<long>({static_cast<long>(joinedAxis * inner), static_cast<long>(inner), 1L}, stream);
-    DeviceAllocation sourceStrides = uploadArray<long>(
-        {static_cast<long>(leftAxis * inner), static_cast<long>(inner), 1L,
-         static_cast<long>(rightAxis * inner), static_cast<long>(inner), 1L},
-        stream);
+    DeviceAllocation axisOffsets = uploadArray<uint64_t>({0, leftAxis, joinedAxis}, stream);
 
     launchRaggedConcatenate(joined.getMemPtr(),
                             reinterpret_cast<void **>(sourceTable.get()),
                             sizeof(float),
-                            static_cast<long>(rows * joinedAxis * inner),
+                            rows,
                             joinedAxis * inner,
-                            3,
-                            2,
                             1,
-                            static_cast<long *>(axisElements.get()),
-                            static_cast<long *>(joinedStrides.get()),
-                            static_cast<long *>(sourceStrides.get()),
+                            inner,
+                            2,
+                            static_cast<uint64_t *>(axisOffsets.get()),
                             activeCountGpu.getMemPtr(),
                             sizeof(OffsetT),
                             stream);
@@ -195,14 +188,12 @@ void runForwardAndSplitCase(DataType offsetsDataType) {
     launchRaggedSplit(reinterpret_cast<void **>(destinationTable.get()),
                       upstreamGpu.getMemPtr(),
                       sizeof(float),
-                      static_cast<long>(rows * joinedAxis * inner),
+                      rows,
                       joinedAxis * inner,
-                      3,
-                      2,
                       1,
-                      static_cast<long *>(axisElements.get()),
-                      static_cast<long *>(joinedStrides.get()),
-                      static_cast<long *>(sourceStrides.get()),
+                      inner,
+                      2,
+                      static_cast<uint64_t *>(axisOffsets.get()),
                       activeCountGpu.getMemPtr(),
                       sizeof(OffsetT),
                       stream);
@@ -244,21 +235,17 @@ void runAllEmptyCase(DataType offsetsDataType) {
     Tensor joined = makeGpuTensor<float>({rows, joinedAxis}, std::vector<float>(rows * joinedAxis, sentinel), stream);
 
     DeviceAllocation sourceTable = makePointerTable({left.getMemPtr(), right.getMemPtr()}, stream);
-    DeviceAllocation axisElements = uploadArray<long>({1L, 2L}, stream);
-    DeviceAllocation joinedStrides = uploadArray<long>({3L, 1L}, stream);
-    DeviceAllocation sourceStrides = uploadArray<long>({1L, 1L, 2L, 1L}, stream);
+    DeviceAllocation axisOffsets = uploadArray<uint64_t>({0, leftAxis, joinedAxis}, stream);
 
     launchRaggedConcatenate(joined.getMemPtr(),
                             reinterpret_cast<void **>(sourceTable.get()),
                             sizeof(float),
-                            static_cast<long>(rows * joinedAxis),
+                            rows,
                             joinedAxis,
-                            2,
-                            2,
                             1,
-                            static_cast<long *>(axisElements.get()),
-                            static_cast<long *>(joinedStrides.get()),
-                            static_cast<long *>(sourceStrides.get()),
+                            1,
+                            2,
+                            static_cast<uint64_t *>(axisOffsets.get()),
                             activeCount.getMemPtr(),
                             sizeof(OffsetT),
                             stream);
@@ -271,20 +258,146 @@ void runAllEmptyCase(DataType offsetsDataType) {
     launchRaggedSplit(reinterpret_cast<void **>(destinationTable.get()),
                       joined.getMemPtr(),
                       sizeof(float),
-                      static_cast<long>(rows * joinedAxis),
+                      rows,
                       joinedAxis,
-                      2,
-                      2,
                       1,
-                      static_cast<long *>(axisElements.get()),
-                      static_cast<long *>(joinedStrides.get()),
-                      static_cast<long *>(sourceStrides.get()),
+                      1,
+                      2,
+                      static_cast<uint64_t *>(axisOffsets.get()),
                       activeCount.getMemPtr(),
                       sizeof(OffsetT),
                       stream);
     stream.synchronize();
     for (float value : copyGpuTensor<float>(leftGradient, stream)) EXPECT_EQ(value, sentinel);
     for (float value : copyGpuTensor<float>(rightGradient, stream)) EXPECT_EQ(value, sentinel);
+}
+
+template <typename OffsetT>
+void runOuterSliceGroupingCase(uint64_t rows, uint64_t outer, uint64_t activeRows, DataType offsetsDataType) {
+    constexpr uint64_t inner = 3;
+    constexpr uint64_t leftAxis = 1;
+    constexpr uint64_t rightAxis = 2;
+    constexpr uint64_t joinedAxis = leftAxis + rightAxis;
+    constexpr float inputPoison = -12345.0F;
+    constexpr float outputSentinel = -23456.0F;
+    constexpr float splitSentinel = -34567.0F;
+
+    ASSERT_GE(rows, activeRows);
+    ASSERT_GT(activeRows, 0U);
+
+    Stream stream(0);
+    Tensor activeCount = makeGpuTensor<OffsetT>({1}, {static_cast<OffsetT>(activeRows)}, stream);
+    ASSERT_EQ(activeCount.getDataType(), offsetsDataType);
+
+    std::vector<float> leftValues(rows * outer * leftAxis * inner, inputPoison);
+    std::vector<float> rightValues(rows * outer * rightAxis * inner, inputPoison);
+    for (uint64_t row = 0; row < activeRows; ++row) {
+        for (uint64_t outerIndex = 0; outerIndex < outer; ++outerIndex) {
+            for (uint64_t innerIndex = 0; innerIndex < inner; ++innerIndex) {
+                leftValues[((row * outer + outerIndex) * leftAxis) * inner + innerIndex] =
+                    1000.0F + static_cast<float>(100 * row + 10 * outerIndex + innerIndex);
+            }
+            for (uint64_t axisIndex = 0; axisIndex < rightAxis; ++axisIndex) {
+                for (uint64_t innerIndex = 0; innerIndex < inner; ++innerIndex) {
+                    rightValues[((row * outer + outerIndex) * rightAxis + axisIndex) * inner + innerIndex] =
+                        2000.0F + static_cast<float>(100 * row + 10 * outerIndex + 3 * axisIndex + innerIndex);
+                }
+            }
+        }
+    }
+
+    Tensor left = makeGpuTensor<float>({rows, outer, leftAxis, inner}, leftValues, stream);
+    Tensor right = makeGpuTensor<float>({rows, outer, rightAxis, inner}, rightValues, stream);
+    Tensor joined = makeGpuTensor<float>({rows, outer, joinedAxis, inner},
+                                         std::vector<float>(rows * outer * joinedAxis * inner, outputSentinel),
+                                         stream);
+    DeviceAllocation sourceTable = makePointerTable({left.getMemPtr(), right.getMemPtr()}, stream);
+    DeviceAllocation axisOffsets = uploadArray<uint64_t>({0, leftAxis, joinedAxis}, stream);
+
+    launchRaggedConcatenate(joined.getMemPtr(),
+                            reinterpret_cast<void **>(sourceTable.get()),
+                            sizeof(float),
+                            rows,
+                            outer * joinedAxis * inner,
+                            outer,
+                            inner,
+                            2,
+                            static_cast<uint64_t *>(axisOffsets.get()),
+                            activeCount.getMemPtr(),
+                            sizeof(OffsetT),
+                            stream);
+    stream.synchronize();
+
+    const std::vector<float> actualJoined = copyGpuTensor<float>(joined, stream);
+    for (uint64_t row = 0; row < activeRows; ++row) {
+        for (uint64_t outerIndex = 0; outerIndex < outer; ++outerIndex) {
+            for (uint64_t axisIndex = 0; axisIndex < joinedAxis; ++axisIndex) {
+                for (uint64_t innerIndex = 0; innerIndex < inner; ++innerIndex) {
+                    const uint64_t joinedIndex =
+                        ((row * outer + outerIndex) * joinedAxis + axisIndex) * inner + innerIndex;
+                    const float expected = axisIndex < leftAxis
+                        ? leftValues[((row * outer + outerIndex) * leftAxis + axisIndex) * inner + innerIndex]
+                        : rightValues[((row * outer + outerIndex) * rightAxis + (axisIndex - leftAxis)) * inner + innerIndex];
+                    EXPECT_EQ(actualJoined[joinedIndex], expected)
+                        << "row=" << row << " outer=" << outerIndex << " axis=" << axisIndex
+                        << " inner=" << innerIndex;
+                }
+            }
+        }
+    }
+    for (uint64_t i = activeRows * outer * joinedAxis * inner; i < actualJoined.size(); ++i)
+        EXPECT_EQ(actualJoined[i], outputSentinel) << "inactive joined element " << i;
+
+    std::vector<float> upstream(rows * outer * joinedAxis * inner, 4444.0F);
+    for (uint64_t i = 0; i < activeRows * outer * joinedAxis * inner; ++i)
+        upstream[i] = static_cast<float>(i + 1);
+    Tensor upstreamGpu = makeGpuTensor<float>({rows, outer, joinedAxis, inner}, upstream, stream);
+    Tensor leftGradient = makeGpuTensor<float>({rows, outer, leftAxis, inner},
+                                               std::vector<float>(rows * outer * leftAxis * inner, splitSentinel),
+                                               stream);
+    Tensor rightGradient = makeGpuTensor<float>({rows, outer, rightAxis, inner},
+                                                std::vector<float>(rows * outer * rightAxis * inner, splitSentinel),
+                                                stream);
+    DeviceAllocation destinationTable = makePointerTable({leftGradient.getMemPtr(), rightGradient.getMemPtr()}, stream);
+
+    launchRaggedSplit(reinterpret_cast<void **>(destinationTable.get()),
+                      upstreamGpu.getMemPtr(),
+                      sizeof(float),
+                      rows,
+                      outer * joinedAxis * inner,
+                      outer,
+                      inner,
+                      2,
+                      static_cast<uint64_t *>(axisOffsets.get()),
+                      activeCount.getMemPtr(),
+                      sizeof(OffsetT),
+                      stream);
+    stream.synchronize();
+
+    const std::vector<float> actualLeft = copyGpuTensor<float>(leftGradient, stream);
+    const std::vector<float> actualRight = copyGpuTensor<float>(rightGradient, stream);
+    for (uint64_t row = 0; row < activeRows; ++row) {
+        for (uint64_t outerIndex = 0; outerIndex < outer; ++outerIndex) {
+            for (uint64_t axisIndex = 0; axisIndex < joinedAxis; ++axisIndex) {
+                for (uint64_t innerIndex = 0; innerIndex < inner; ++innerIndex) {
+                    const float expected = upstream[
+                        ((row * outer + outerIndex) * joinedAxis + axisIndex) * inner + innerIndex];
+                    if (axisIndex < leftAxis) {
+                        EXPECT_EQ(actualLeft[
+                            ((row * outer + outerIndex) * leftAxis + axisIndex) * inner + innerIndex], expected);
+                    } else {
+                        EXPECT_EQ(actualRight[
+                            ((row * outer + outerIndex) * rightAxis + (axisIndex - leftAxis)) * inner + innerIndex],
+                            expected);
+                    }
+                }
+            }
+        }
+    }
+    for (uint64_t i = activeRows * outer * leftAxis * inner; i < actualLeft.size(); ++i)
+        EXPECT_EQ(actualLeft[i], splitSentinel) << "inactive left gradient element " << i;
+    for (uint64_t i = activeRows * outer * rightAxis * inner; i < actualRight.size(); ++i)
+        EXPECT_EQ(actualRight[i], splitSentinel) << "inactive right gradient element " << i;
 }
 
 }  // namespace
@@ -303,4 +416,22 @@ TEST(RaggedConcatenate, AllEmptyPartitionLeavesForwardAndBackwardCapacityUntouch
     REQUIRE_CUDA_DEVICE();
     runAllEmptyCase<uint32_t>(DataType::UINT32);
     runAllEmptyCase<uint64_t>(DataType::UINT64);
+}
+
+
+TEST(RaggedConcatenate, OuterSlicesAndAdaptiveSpanGroupingCoverEverySpecializationForBothActiveCountWidths) {
+    REQUIRE_CUDA_DEVICE();
+
+    // total spans = rows * outerSlices * 2 inputs. Exercise the launch
+    // thresholds selecting 1, 2, 4, and 8 spans per CTA.
+    for (const auto &[rows, outer] : std::vector<std::pair<uint64_t, uint64_t>>{
+             {8, 2},    // 32 spans:  1 span / CTA
+             {16, 4},   // 128 spans: 2 spans / CTA
+             {32, 4},   // 256 spans: 4 spans / CTA
+             {64, 4},   // 512 spans: 8 spans / CTA
+         }) {
+        const uint64_t activeRows = rows - 1;
+        runOuterSliceGroupingCase<uint32_t>(rows, outer, activeRows, DataType::UINT32);
+        runOuterSliceGroupingCase<uint64_t>(rows, outer, activeRows, DataType::UINT64);
+    }
 }
