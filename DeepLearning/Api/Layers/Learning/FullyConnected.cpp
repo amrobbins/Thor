@@ -50,6 +50,10 @@ bool isFullyConnectedFloatingDataType(DataType dataType) {
     }
 }
 
+bool isFullyConnectedFp8DataType(DataType dataType) {
+    return dataType == DataType::FP8_E4M3 || dataType == DataType::FP8_E5M2;
+}
+
 std::string fullyConnectedDataTypeName(DataType dataType) {
     return ThorImplementation::TensorDescriptor::getElementTypeName(dataType);
 }
@@ -115,6 +119,14 @@ ThorImplementation::CublasMatrixMultiply::MatmulDataTypes cublasLtMatmulDataType
     DataType computeDataType,
     DataType outputDataType) {
     using MatmulDataTypes = ThorImplementation::CublasMatrixMultiply::MatmulDataTypes;
+
+    const bool usesFp8Storage = isFullyConnectedFp8DataType(inputDataType) || isFullyConnectedFp8DataType(weightsDataType) ||
+                                isFullyConnectedFp8DataType(outputDataType);
+    if (usesFp8Storage && computeDataType != DataType::FP32) {
+        throw std::invalid_argument(
+            "FullyConnected FP8 storage requires computeDataType fp32 for Thor's cuBLASLt GEMM path. Got " +
+            fullyConnectedDataTypeName(computeDataType) + ".");
+    }
 
     const MatmulDataTypes directDataTypes{inputDataType, weightsDataType, outputDataType, outputDataType, computeDataType};
     if (isSupportedCublasLtMatmulDataTypesForFullyConnected(directDataTypes)) {
@@ -753,10 +765,14 @@ void FullyConnected::verifyFullyConnectedDataType(DataType dataType, const std::
 }
 
 DataType FullyConnected::defaultFullyConnectedComputeDataType(DataType inputDataType, DataType weightsDataType, DataType outputDataType) {
-    // Compute follows the feature-input storage type by default. In particular, FP32 inputs use strict
-    // FP32 compute; callers may explicitly request TF32 Tensor Core compute with computeDataType(DataType::TF32).
-    (void)weightsDataType;
-    (void)outputDataType;
+    // cuBLASLt exposes FP8 GEMM operation types only with strict FP32 compute.
+    // Treat FP8 appearing anywhere in the storage plan as an FP32-compute plan;
+    // non-FP8 FullyConnected keeps the historical feature-input default (with
+    // explicit TF32 still available for FP32 storage).
+    if (isFullyConnectedFp8DataType(inputDataType) || isFullyConnectedFp8DataType(weightsDataType) ||
+        isFullyConnectedFp8DataType(outputDataType)) {
+        return DataType::FP32;
+    }
     return inputDataType;
 }
 

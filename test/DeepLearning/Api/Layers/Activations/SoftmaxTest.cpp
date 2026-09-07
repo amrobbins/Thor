@@ -69,6 +69,25 @@ TEST(Activations, SoftmaxBuilds) {
 }
 
 
+TEST(Activations, SoftmaxRejectsFp8StandaloneDenseAndRaggedInputs) {
+    for (DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        {
+            Network network("denseFp8SoftmaxReject");
+            Tensor input(dtype, {4, 7});
+            Softmax::Builder builder;
+            builder.network(network);
+            EXPECT_THROW(builder.featureInput(input), std::invalid_argument);
+        }
+        {
+            Network network("raggedFp8SoftmaxReject");
+            RaggedTensor input(dtype, {7}, 3, 12, DataType::UINT64);
+            Softmax::Builder builder;
+            builder.network(network);
+            EXPECT_THROW(builder.featureInput(input), std::invalid_argument);
+        }
+    }
+}
+
 TEST(Activations, RaggedSoftmaxBuildCloneAndExpressionPreservePartitionWithOrdinaryFinalAxisSemantics) {
     Network network("raggedSoftmaxBuildCloneAndExpression");
     RaggedTensor featureInput(DataType::FP32, {2, 3}, 2, 8, DataType::UINT64);

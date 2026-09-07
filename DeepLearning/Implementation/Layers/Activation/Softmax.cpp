@@ -9,6 +9,21 @@ using namespace ThorImplementation;
 
 namespace {
 
+void validateSoftmaxInputDataType(DataType dataType) {
+    switch (dataType) {
+        case DataType::FP16:
+        case DataType::BF16:
+        case DataType::FP32:
+            return;
+        case DataType::FP8_E4M3:
+        case DataType::FP8_E5M2:
+            throw std::invalid_argument(
+                "Softmax does not accept FP8 input tensors. Cast to FP16, BF16, or FP32 before Softmax.");
+        default:
+            throw std::invalid_argument("Softmax supports FP16, BF16, and FP32 input tensors.");
+    }
+}
+
 std::vector<unsigned long> flattenLastDimensionForSoftmax(const std::vector<unsigned long>& dims) {
     THOR_THROW_IF_FALSE(dims.size() >= 2);
     const unsigned long classes = dims.back();
@@ -34,10 +49,12 @@ std::optional<Tensor> Softmax::createFeatureOutputTensor() {
     THOR_THROW_IF_FALSE(featureInput.has_value());
     THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().size() >= 2);
     THOR_THROW_IF_FALSE(featureInput.value().getDescriptor().getDimensions().back() > 0);
+    validateSoftmaxInputDataType(featureInput.value().getDataType());
     return featureInput.value().clone();
 }
 
 void Softmax::postCompile() {
+    validateSoftmaxInputDataType(featureInput.value().getDataType());
     std::vector<unsigned long> softmaxDimensions =
         flattenLastDimensionForSoftmax(featureInput.value().getDescriptor().getDimensions());
     cudnnTensorDescriptor = createCudnnTensorDescriptor(softmaxDimensions, featureInput.value().getDescriptor().getDataType());

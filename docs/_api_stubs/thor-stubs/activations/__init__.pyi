@@ -314,8 +314,10 @@ class Softmax(Activation):
     For ragged input, every active packed value is normalized independently over
     that final trailing dimension and the logical row partition is preserved
     exactly; this is distinct from ``thor.layers.SegmentedSoftmax``, which
-    normalizes across values within each ragged row. Ragged Softmax supports FP16,
-    BF16, and FP32 values; FP64 is intentionally unsupported. For an input vector x,
+    normalizes across values within each ragged row. Dense and ragged Softmax accept
+    FP16, BF16, and FP32 inputs. FP8 logits must be explicitly cast to one of those
+    dtypes before Softmax; Thor does not insert an implicit FP8 compatibility cast.
+    For an input vector x,
     softmax is defined as
 
         softmax(x_i) = exp(x_i) / Σ_j exp(x_j)

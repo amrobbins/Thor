@@ -7,12 +7,13 @@
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Common/LowPrecisionFloat.h"
 using namespace ThorImplementation;
 using namespace std;
 
 template <typename DATA_TYPE, typename VALUE_TYPE>
 __device__ inline DATA_TYPE castGpuFillValue(VALUE_TYPE value) {
-    return DATA_TYPE(value);
+    return ThorLowPrecision::castToStorage<DATA_TYPE>(value);
 }
 
 template <>

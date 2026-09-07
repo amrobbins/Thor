@@ -2,6 +2,9 @@
 
 #include <stdio.h>
 
+#include <cmath>
+#include <limits>
+
 #include "gtest/gtest.h"
 
 using namespace ThorImplementation;
@@ -762,4 +765,61 @@ TEST(RandomTestConversions, GpuAllConversionsInPlace) {
             assert(cudaStatus == cudaSuccess);
         }
     }
+}
+
+TEST(TypeConverter, CpuFp32ToE5M2UsesNativeInfinityOverflowSemantics) {
+    Stream stream(0);
+    constexpr int numElements = 6;
+    float source[numElements] = {57344.0f,
+                                 60000.0f,
+                                 100000.0f,
+                                 -100000.0f,
+                                 std::numeric_limits<float>::infinity(),
+                                 -std::numeric_limits<float>::infinity()};
+    __nv_fp8_e5m2 dest[numElements]{};
+
+    TypeConverter::convertType(source, dest, DataType::FP32, DataType::FP8_E5M2, numElements, stream, -1);
+    ASSERT_EQ(cudaStreamSynchronize(stream.getStream()), cudaSuccess);
+
+    EXPECT_FLOAT_EQ(static_cast<float>(dest[0]), 57344.0f);
+    EXPECT_FLOAT_EQ(static_cast<float>(dest[1]), 57344.0f);
+    EXPECT_TRUE(std::isinf(static_cast<float>(dest[2])));
+    EXPECT_FALSE(std::signbit(static_cast<float>(dest[2])));
+    EXPECT_TRUE(std::isinf(static_cast<float>(dest[3])));
+    EXPECT_TRUE(std::signbit(static_cast<float>(dest[3])));
+    EXPECT_TRUE(std::isinf(static_cast<float>(dest[4])));
+    EXPECT_FALSE(std::signbit(static_cast<float>(dest[4])));
+    EXPECT_TRUE(std::isinf(static_cast<float>(dest[5])));
+    EXPECT_TRUE(std::signbit(static_cast<float>(dest[5])));
+}
+
+TEST(TypeConverter, GpuFp32ToE5M2UsesNativeInfinityOverflowSemantics) {
+    int deviceCount = 0;
+    if (cudaGetDeviceCount(&deviceCount) != cudaSuccess || deviceCount == 0) {
+        GTEST_SKIP() << "CUDA device is required for GPU TypeConverter semantics test.";
+    }
+
+    Stream stream(0);
+    constexpr int numElements = 4;
+    float source[numElements] = {60000.0f, 100000.0f, -100000.0f, -60000.0f};
+    __nv_fp8_e5m2 dest[numElements]{};
+    float* sourceGpu = nullptr;
+    __nv_fp8_e5m2* destGpu = nullptr;
+    ASSERT_EQ(cudaMalloc(reinterpret_cast<void**>(&sourceGpu), sizeof(source)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(reinterpret_cast<void**>(&destGpu), sizeof(dest)), cudaSuccess);
+    ASSERT_EQ(cudaMemcpyAsync(sourceGpu, source, sizeof(source), cudaMemcpyHostToDevice, stream.getStream()), cudaSuccess);
+
+    TypeConverter::convertType(sourceGpu, destGpu, DataType::FP32, DataType::FP8_E5M2, numElements, stream, 0);
+    ASSERT_EQ(cudaMemcpyAsync(dest, destGpu, sizeof(dest), cudaMemcpyDeviceToHost, stream.getStream()), cudaSuccess);
+    ASSERT_EQ(cudaStreamSynchronize(stream.getStream()), cudaSuccess);
+
+    EXPECT_FLOAT_EQ(static_cast<float>(dest[0]), 57344.0f);
+    EXPECT_TRUE(std::isinf(static_cast<float>(dest[1])));
+    EXPECT_FALSE(std::signbit(static_cast<float>(dest[1])));
+    EXPECT_TRUE(std::isinf(static_cast<float>(dest[2])));
+    EXPECT_TRUE(std::signbit(static_cast<float>(dest[2])));
+    EXPECT_FLOAT_EQ(static_cast<float>(dest[3]), -57344.0f);
+
+    EXPECT_EQ(cudaFree(sourceGpu), cudaSuccess);
+    EXPECT_EQ(cudaFree(destGpu), cudaSuccess);
 }

@@ -61,7 +61,7 @@ __device__ double scalarValue<__nv_fp8_e5m2>(__nv_fp8_e5m2 value) {
 
 template <>
 __device__ __nv_fp8_e5m2 scalarToStorage<__nv_fp8_e5m2>(double value) {
-    return __nv_fp8_e5m2(static_cast<float>(value));
+    return ThorLowPrecision::toFp8E5M2Nosat(value);
 }
 
 template <typename T>

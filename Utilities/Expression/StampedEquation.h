@@ -943,7 +943,6 @@ class StampedSoftmax {
 
     StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
                    std::unique_ptr<BuiltSoftmax> built,
-                   const Tensor& source_input,
                    const Tensor& input,
                    const Tensor& output,
                    const Stream& stream);
@@ -965,7 +964,6 @@ class StampedSoftmax {
     const std::shared_ptr<CompiledSoftmax> compiled_softmax;
     const std::unique_ptr<BuiltSoftmax> built_softmax;
     mutable std::optional<CudnnRaggedSoftmaxExecutionState> ragged_state;
-    const Tensor source_input;
     mutable Tensor input;
     std::optional<Tensor> grad_output;
     std::optional<Tensor> row_partition_offsets;

@@ -1679,6 +1679,21 @@ target_compile_options(thor_embedding_sparse_backward_profile PRIVATE
         $<$<CONFIG:Debug>:-O0 -ggdb>
 )
 
+add_executable(thor_softmax_benchmark EXCLUDE_FROM_ALL
+        benchmarks/SoftmaxBenchmark.cpp
+)
+thor_apply_linker_settings(thor_softmax_benchmark)
+thor_enable_release_host_lto(thor_softmax_benchmark)
+thor_enable_release_no_semantic_interposition(thor_softmax_benchmark)
+target_link_libraries(thor_softmax_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_softmax_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_softmax_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_softmax_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0 -ggdb>
+)
+
 add_executable(thor_type_converter_benchmark EXCLUDE_FROM_ALL
         benchmarks/TypeConverterBenchmark.cu
 )

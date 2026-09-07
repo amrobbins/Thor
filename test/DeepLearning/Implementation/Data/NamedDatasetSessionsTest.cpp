@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <functional>
 #include <future>
 #include <cstdint>
@@ -1346,7 +1347,7 @@ TEST(IndexedDatasetReaderTest, ExposesLayoutOrdinalsAndUsesAsyncReadvIntoOrdinal
 }
 
 
-TEST(LowPrecisionFloatEncodingTest, ConvertsFloatUsingRoundToNearestEvenAndCudaFiniteFp8Saturation) {
+TEST(LowPrecisionFloatEncodingTest, ConvertsFloatUsingDestinationFp8OverflowSemantics) {
     EXPECT_EQ(ThorLowPrecision::floatToFp16Bits(1.5f), 0x3e00u);
     EXPECT_EQ(ThorLowPrecision::floatToFp16Bits(65519.0f), 0x7bffu);
     EXPECT_EQ(ThorLowPrecision::floatToFp16Bits(65520.0f), 0x7c00u);
@@ -1359,9 +1360,14 @@ TEST(LowPrecisionFloatEncodingTest, ConvertsFloatUsingRoundToNearestEvenAndCudaF
     EXPECT_EQ(ThorLowPrecision::floatToFp8E4M3Bits(-std::numeric_limits<float>::infinity()), 0xfeu);
     EXPECT_EQ(ThorLowPrecision::floatToFp8E5M2Bits(-2.25f), 0xc0u);
     EXPECT_EQ(ThorLowPrecision::floatToFp8E5M2Bits(60000.0f), 0x7bu);
+    EXPECT_EQ(ThorLowPrecision::floatToFp8E5M2Bits(100000.0f), 0x7cu);
+    EXPECT_EQ(ThorLowPrecision::floatToFp8E5M2Bits(-100000.0f), 0xfcu);
+    EXPECT_EQ(ThorLowPrecision::floatToFp8E5M2Bits(std::numeric_limits<float>::infinity()), 0x7cu);
+    EXPECT_EQ(ThorLowPrecision::floatToFp8E5M2Bits(-std::numeric_limits<float>::infinity()), 0xfcu);
+    EXPECT_TRUE(std::isnan(static_cast<float>(ThorLowPrecision::toFp8E5M2Nosat(std::numeric_limits<float>::quiet_NaN()))));
 }
 
-TEST(LowPrecisionFloatEncodingTest, ConvertsDoubleUsingRoundToNearestEvenAndCudaFiniteFp8Saturation) {
+TEST(LowPrecisionFloatEncodingTest, ConvertsDoubleUsingDestinationFp8OverflowSemantics) {
     EXPECT_EQ(ThorLowPrecision::doubleToFp16Bits(1.5), 0x3e00u);
     EXPECT_EQ(ThorLowPrecision::doubleToFp16Bits(65519.0), 0x7bffu);
     EXPECT_EQ(ThorLowPrecision::doubleToFp16Bits(65520.0), 0x7c00u);
@@ -1374,6 +1380,11 @@ TEST(LowPrecisionFloatEncodingTest, ConvertsDoubleUsingRoundToNearestEvenAndCuda
     EXPECT_EQ(ThorLowPrecision::doubleToFp8E4M3Bits(-std::numeric_limits<double>::infinity()), 0xfeu);
     EXPECT_EQ(ThorLowPrecision::doubleToFp8E5M2Bits(-2.25), 0xc0u);
     EXPECT_EQ(ThorLowPrecision::doubleToFp8E5M2Bits(60000.0), 0x7bu);
+    EXPECT_EQ(ThorLowPrecision::doubleToFp8E5M2Bits(100000.0), 0x7cu);
+    EXPECT_EQ(ThorLowPrecision::doubleToFp8E5M2Bits(-100000.0), 0xfcu);
+    EXPECT_EQ(ThorLowPrecision::doubleToFp8E5M2Bits(std::numeric_limits<double>::infinity()), 0x7cu);
+    EXPECT_EQ(ThorLowPrecision::doubleToFp8E5M2Bits(-std::numeric_limits<double>::infinity()), 0xfcu);
+    EXPECT_TRUE(std::isnan(static_cast<float>(ThorLowPrecision::toFp8E5M2Nosat(std::numeric_limits<double>::quiet_NaN()))));
 }
 
 TEST(IndexedDatasetReaderTest, SupportsNonZeroLowPrecisionWindowPadding) {

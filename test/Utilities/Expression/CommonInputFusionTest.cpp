@@ -930,6 +930,244 @@ TEST(ExpressionDTypeResolution, Tf32IsComputeOnlyForMatmulAndConvolution) {
     EXPECT_THROW((void)toSupportedComputeDType(ExprOp::ADD, DataType::TF32), std::runtime_error);
 }
 
+TEST(ExpressionDTypeResolution, MixedFp8PromotesToBf16InCanonicalExpressionPolicy) {
+    EXPECT_EQ(promoteTensorValueDTypes(DataType::FP8_E4M3, DataType::FP8_E5M2), DataType::BF16);
+    EXPECT_EQ(promoteTensorValueDTypes(DataType::FP8_E5M2, DataType::FP8_E4M3), DataType::BF16);
+    // D4 is intentionally specific to the two FP8 formats meeting. Existing
+    // FP8 + FP16/BF16 and FP16 + BF16 promotion rules remain unchanged.
+    EXPECT_EQ(promoteTensorValueDTypes(DataType::FP8_E4M3, DataType::FP16), DataType::FP16);
+    EXPECT_EQ(promoteTensorValueDTypes(DataType::FP8_E5M2, DataType::FP16), DataType::FP16);
+    EXPECT_EQ(promoteTensorValueDTypes(DataType::FP8_E4M3, DataType::BF16), DataType::BF16);
+    EXPECT_EQ(promoteTensorValueDTypes(DataType::FP8_E5M2, DataType::BF16), DataType::BF16);
+    EXPECT_EQ(promoteTensorValueDTypes(DataType::FP16, DataType::BF16), DataType::FP32);
+}
+
+TEST(ExpressionDTypeResolution, HomogeneousExactTensorPromotionPreservesPassthroughDType) {
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::UINT32, DataType::UINT32}), DataType::UINT32);
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::UINT64, DataType::UINT64}), DataType::UINT64);
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::INT64, DataType::INT64}), DataType::INT64);
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::BOOLEAN, DataType::BOOLEAN}), DataType::BOOLEAN);
+}
+
+TEST(ExpressionDTypeResolution, MixedFp8MultiInputPromotionIsOrderIndependent) {
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::FP8_E4M3, DataType::FP8_E5M2}), DataType::BF16);
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::FP8_E5M2, DataType::FP8_E4M3}), DataType::BF16);
+
+    // A naive left fold becomes order-dependent after mixed FP8 promotes to
+    // BF16. Resolve the complete set so an explicitly present FP16 remains the
+    // common supertype unless an actual BF16 tensor is also present.
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::FP8_E4M3, DataType::FP8_E5M2, DataType::FP16}), DataType::FP16);
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::FP16, DataType::FP8_E4M3, DataType::FP8_E5M2}), DataType::FP16);
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::FP8_E5M2, DataType::FP16, DataType::FP8_E4M3}), DataType::FP16);
+
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::FP8_E4M3, DataType::FP8_E5M2, DataType::BF16}), DataType::BF16);
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::BF16, DataType::FP8_E5M2, DataType::FP8_E4M3}), DataType::BF16);
+
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::FP8_E4M3, DataType::FP8_E5M2, DataType::FP16, DataType::BF16}),
+              DataType::FP32);
+    EXPECT_EQ(promoteTensorValueDTypes({DataType::BF16, DataType::FP8_E4M3, DataType::FP16, DataType::FP8_E5M2}),
+              DataType::FP32);
+}
+
+TEST(ExpressionDTypeResolution, MixedFp8PointwiseAndWhereDefaultToBf16StorageAndCompute) {
+    const Expression x = Expression::input("x", DataType::FP8_E4M3, DataType::FP8_E4M3);
+    const Expression y = Expression::input("y", DataType::FP8_E5M2, DataType::FP8_E5M2);
+    const Expression condition = x.greaterThan(Expression::constantScalar(0.0));
+
+    PhysicalOutputs outputs = Expression::outputs({
+        {"sum", x + y},
+        {"product", x * y},
+        {"selected", Expression::where(condition, x, y)},
+    }).physicalOutputs();
+    resolveOutputsDTypesInPlace(outputs, {DataType::FP8_E4M3, DataType::FP8_E5M2});
+
+    for (const NamedOutput& output : outputs.outputs) {
+        const ExprNode& node = outputs.expr->nodes.at(output.node_idx);
+        ASSERT_TRUE(node.output_dtype.has_value()) << output.name;
+        ASSERT_TRUE(node.compute_dtype.has_value()) << output.name;
+        EXPECT_EQ(node.output_dtype.value(), DataType::BF16) << output.name;
+        EXPECT_EQ(node.compute_dtype.value(), DataType::BF16) << output.name;
+    }
+}
+
+TEST(ExpressionDTypeResolution, Fp8PointwiseDefaultsToBf16ComputeAndBackwardCompute) {
+    for (const DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        EXPECT_EQ(defaultComputeDType(dtype), DataType::BF16);
+        EXPECT_EQ(toSupportedComputeDType(ExprOp::ADD, dtype), DataType::BF16);
+        EXPECT_EQ(toSupportedComputeDType(ExprOp::MUL, dtype), DataType::BF16);
+        EXPECT_THROW(toSupportedComputeDType(ExprOp::SOFTMAX, dtype), std::invalid_argument);
+
+        const Expression x = Expression::input("x", dtype, dtype);
+        PhysicalOutputs forward = Expression::outputs({{"y", x * x}}).physicalOutputs();
+        resolveOutputsDTypesInPlace(forward, {dtype});
+
+        bool found_mul = false;
+        for (const ExprNode& node : forward.expr->nodes) {
+            if (node.op != ExprOp::MUL) {
+                continue;
+            }
+            found_mul = true;
+            ASSERT_TRUE(node.compute_dtype.has_value());
+            ASSERT_TRUE(node.backward_compute_dtype.has_value());
+            EXPECT_EQ(node.compute_dtype.value(), DataType::BF16);
+            EXPECT_EQ(node.backward_compute_dtype.value(), DataType::BF16);
+        }
+        EXPECT_TRUE(found_mul);
+    }
+}
+
+TEST(ExpressionDTypeResolution, Fp8MatmulAndGemmDefaultToFp32Compute) {
+    for (const DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        EXPECT_EQ(toSupportedComputeDType(ExprOp::MATMUL, dtype), DataType::FP32);
+        EXPECT_EQ(toSupportedComputeDType(ExprOp::GEMM, dtype), DataType::FP32);
+
+        const Expression lhs = Expression::input("lhs", dtype, dtype);
+        const Expression rhs = Expression::input("rhs", dtype, dtype);
+
+        // Deliberately request FP16 result storage. The ordinary two-dtype
+        // default would otherwise choose FP16, so this proves the FP8 matrix
+        // storage rule overrides that and selects FP32 compute.
+        PhysicalOutputs matmul =
+            Expression::outputs({{"y", Expression::matmul(lhs, rhs, false, false, std::nullopt, DataType::FP16)}})
+                .physicalOutputs();
+        resolveOutputsDTypesInPlace(matmul, {dtype, dtype});
+        const ExprNode& matmul_node = matmul.expr->nodes.at(matmul.outputs.front().node_idx);
+        ASSERT_EQ(matmul_node.op, ExprOp::MATMUL);
+        ASSERT_TRUE(matmul_node.compute_dtype.has_value());
+        ASSERT_TRUE(matmul_node.backward_compute_dtype.has_value());
+        EXPECT_EQ(matmul_node.compute_dtype.value(), DataType::FP32);
+        EXPECT_EQ(matmul_node.backward_compute_dtype.value(), DataType::FP32);
+        ASSERT_TRUE(matmul_node.output_dtype.has_value());
+        EXPECT_EQ(matmul_node.output_dtype.value(), DataType::FP16);
+
+        if (dtype == DataType::FP8_E4M3) {
+            const auto stages = EquationCompiler::splitAtReductionBoundaries(matmul);
+            ASSERT_EQ(stages.size(), 1u);
+            ASSERT_EQ(stages.front().kind, PhysicalExecutionStage::Kind::Matmul);
+            const auto compiled = EquationCompiler::compileMatmul(stages.front().expr, stages.front().outputs);
+            ASSERT_NE(compiled, nullptr);
+            EXPECT_EQ(compiled->lhs_dtype, DataType::FP8_E4M3);
+            EXPECT_EQ(compiled->rhs_dtype, DataType::FP8_E4M3);
+            EXPECT_EQ(compiled->output_dtype, DataType::FP16);
+            EXPECT_EQ(compiled->compute_dtype, DataType::FP32);
+        }
+
+        const Expression addend = Expression::input("addend", DataType::FP16, DataType::FP16);
+        PhysicalOutputs gemm =
+            Expression::outputs({{"y", Expression::gemm(lhs,
+                                                          rhs,
+                                                          addend,
+                                                          1.0,
+                                                          1.0,
+                                                          false,
+                                                          false,
+                                                          false,
+                                                          std::nullopt,
+                                                          DataType::FP16)}})
+                .physicalOutputs();
+        resolveOutputsDTypesInPlace(gemm, {dtype, dtype, DataType::FP16});
+        const ExprNode& gemm_node = gemm.expr->nodes.at(gemm.outputs.front().node_idx);
+        ASSERT_EQ(gemm_node.op, ExprOp::GEMM);
+        ASSERT_TRUE(gemm_node.compute_dtype.has_value());
+        ASSERT_TRUE(gemm_node.backward_compute_dtype.has_value());
+        EXPECT_EQ(gemm_node.compute_dtype.value(), DataType::FP32);
+        EXPECT_EQ(gemm_node.backward_compute_dtype.value(), DataType::FP32);
+    }
+}
+
+TEST(ExpressionDTypeResolution, Fp8MatmulUsesActualRootStorageWhenInputLogicalDtypeIsWider) {
+    const Expression lhs = Expression::input("lhs", DataType::BF16, DataType::BF16);
+    const Expression rhs = Expression::input("rhs", DataType::BF16, DataType::BF16);
+    PhysicalOutputs outputs =
+        Expression::outputs({{"y", Expression::matmul(lhs, rhs, false, false, std::nullopt, DataType::BF16)}})
+            .physicalOutputs();
+
+    resolveOutputsDTypesInPlace(outputs, {DataType::FP8_E4M3, DataType::FP8_E4M3});
+    const ExprNode& matmul_node = outputs.expr->nodes.at(outputs.outputs.front().node_idx);
+    ASSERT_EQ(matmul_node.op, ExprOp::MATMUL);
+    ASSERT_TRUE(matmul_node.compute_dtype.has_value());
+    EXPECT_EQ(matmul_node.compute_dtype.value(), DataType::FP32);
+}
+
+TEST(ExpressionDTypeResolution, Fp8MatmulRejectsExplicitNonFp32Compute) {
+    for (const DataType storage_dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        for (const DataType compute_dtype : {DataType::FP16, DataType::BF16, DataType::TF32}) {
+            const Expression lhs = Expression::input("lhs", storage_dtype, storage_dtype);
+            const Expression rhs = Expression::input("rhs", storage_dtype, storage_dtype);
+            PhysicalOutputs outputs =
+                Expression::outputs({{"y", Expression::matmul(lhs,
+                                                                 rhs,
+                                                                 false,
+                                                                 false,
+                                                                 compute_dtype,
+                                                                 DataType::FP16)}})
+                    .physicalOutputs();
+
+            try {
+                resolveOutputsDTypesInPlace(outputs, {storage_dtype, storage_dtype});
+                FAIL() << "Expected FP8 MATMUL with non-FP32 compute to be rejected.";
+            } catch (const std::runtime_error& error) {
+                const std::string message = error.what();
+                EXPECT_NE(message.find("FP8 MATMUL/GEMM storage requires FP32 compute"), std::string::npos) << message;
+            }
+        }
+    }
+}
+
+TEST(ExpressionDTypeResolution, Fp8PointwiseExplicitFp16ComputeOverrideRemainsAvailable) {
+    for (const DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        const Expression x = Expression::input("x", dtype, dtype);
+        const Expression y = (x * x).withComputeDType(DataType::FP16);
+        PhysicalOutputs forward = Expression::outputs({{"y", y}}).physicalOutputs();
+        resolveOutputsDTypesInPlace(forward, {dtype});
+
+        bool found_mul = false;
+        for (const ExprNode& node : forward.expr->nodes) {
+            if (node.op != ExprOp::MUL) {
+                continue;
+            }
+            found_mul = true;
+            ASSERT_TRUE(node.compute_dtype.has_value());
+            ASSERT_TRUE(node.backward_compute_dtype.has_value());
+            EXPECT_EQ(node.compute_dtype.value(), DataType::FP16);
+            EXPECT_EQ(node.backward_compute_dtype.value(), DataType::FP16);
+        }
+        EXPECT_TRUE(found_mul);
+    }
+}
+
+TEST(ExpressionDTypeResolution, Fp8PointwiseAutodiffDefaultsToBf16Compute) {
+    for (const DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        const Expression x = Expression::input("x", dtype, dtype);
+        PhysicalOutputs forward = Expression::outputs({{"y", x * x}}).physicalOutputs();
+        resolveOutputsDTypesInPlace(forward, {dtype});
+
+        PhysicalOutputs backward = buildBackwardOutputs(
+            forward,
+            {"x"},
+            std::optional<std::string>{"dy"},
+            std::unordered_map<std::string, std::vector<uint64_t>>{{"x", {33}}});
+
+        std::vector<DataType> backward_input_dtypes(backward.expr->inputs.size(), dtype);
+        for (const NamedInput& input : backward.expr->inputs) {
+            ASSERT_TRUE(input.name == "x" || input.name == "dy") << input.name;
+            backward_input_dtypes.at(input.slot) = dtype;
+        }
+        resolveOutputsDTypesInPlace(backward, backward_input_dtypes);
+
+        size_t multiply_count = 0;
+        for (const ExprNode& node : backward.expr->nodes) {
+            if (node.op != ExprOp::MUL) {
+                continue;
+            }
+            ++multiply_count;
+            ASSERT_TRUE(node.compute_dtype.has_value());
+            EXPECT_EQ(node.compute_dtype.value(), DataType::BF16);
+        }
+        EXPECT_GT(multiply_count, 0u);
+    }
+}
+
 TEST(ExpressionDTypeResolution, DenseValueAndArgReductionsPreserveInputStorageDtypes) {
     EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_SUM, DataType::BF16), DataType::BF16);
     EXPECT_EQ(toSupportedInputDType(ExprOp::REDUCE_MAX, DataType::BF16), DataType::BF16);
@@ -960,12 +1198,21 @@ TEST(EquationCompiler, Bf16AndFp8ArgReductionsPreserveCompiledInputStorageDtype)
     }
 }
 
-TEST(ExpressionDTypeResolution, CudnnSoftmaxPreservesBf16AndOnlyPromotesFp8) {
+TEST(ExpressionDTypeResolution, SoftmaxAcceptsQualifiedStorageDtypesAndRejectsFp8InsteadOfAdapting) {
     EXPECT_EQ(toSupportedInputDType(ExprOp::SOFTMAX, DataType::BF16), DataType::BF16);
     EXPECT_EQ(toSupportedInputDType(ExprOp::SOFTMAX, DataType::FP16), DataType::FP16);
     EXPECT_EQ(toSupportedInputDType(ExprOp::SOFTMAX, DataType::FP32), DataType::FP32);
-    EXPECT_EQ(toSupportedInputDType(ExprOp::SOFTMAX, DataType::FP8_E4M3), DataType::FP16);
-    EXPECT_EQ(toSupportedInputDType(ExprOp::SOFTMAX, DataType::FP8_E5M2), DataType::FP16);
+    EXPECT_THROW(toSupportedInputDType(ExprOp::SOFTMAX, DataType::FP8_E4M3), std::invalid_argument);
+    EXPECT_THROW(toSupportedInputDType(ExprOp::SOFTMAX, DataType::FP8_E5M2), std::invalid_argument);
+}
+
+TEST(ExpressionDTypeResolution, SoftmaxRejectsFp8InputEvenWhenCallerRequestsWiderOutputStorage) {
+    for (const DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        const Expression x = Expression::input("x", dtype, dtype);
+        const Expression y = x.softmax().withOutputDType(DataType::BF16);
+        PhysicalOutputs outputs = Expression::outputs({{"y", y}}).physicalOutputs();
+        EXPECT_THROW(resolveOutputsDTypesInPlace(outputs, {dtype}), std::invalid_argument);
+    }
 }
 
 TEST(EquationCompiler, Bf16ReductionPreservesProducerAndReductionInputStorageDtype) {
@@ -1089,6 +1336,24 @@ TEST(CudaSourceEmitter, Fp8E4M3CastsUseExplicitSatfiniteIntrinsics) {
 
     EXPECT_NE(source.find("__nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E4M3)"), std::string::npos);
     EXPECT_NE(source.find("thor_to_fp8_e4m3_satfinite("), std::string::npos);
+}
+
+TEST(CudaSourceEmitter, Fp8E5M2CastsUseExplicitNosatIntrinsicsWithoutFp16Staging) {
+    auto x = Expression::input("x", DataType::FP32, DataType::FP32);
+    auto y = x.cast(DataType::FP8_E5M2);
+
+    auto physical = Expression::outputs({{"y", y}}).physicalOutputs();
+    resolveOutputsDTypesInPlace(physical, {DataType::FP32});
+    auto stages = EquationCompiler::splitAtReductionBoundaries(physical);
+
+    ASSERT_EQ(stages.size(), 1);
+    ASSERT_EQ(stages[0].kind, PhysicalExecutionStage::Kind::FusedKernel);
+    const std::string source = CudaSourceEmitter::emitFlat(stages[0], "fp8_e5m2_nosat_cast");
+
+    EXPECT_NE(source.find("__nv_cvt_float_to_fp8(value, __NV_NOSAT, __NV_E5M2)"), std::string::npos);
+    EXPECT_NE(source.find("thor_to_fp8_e5m2_nosat("), std::string::npos);
+    EXPECT_EQ(source.find("__NV_SATFINITE, __NV_E5M2"), std::string::npos);
+    EXPECT_EQ(source.find("__nv_fp8_e5m2("), std::string::npos);
 }
 
 

@@ -137,12 +137,9 @@ inline __host__ __device__ void storeFp32AsRuntimeDType(void* output,
         case DataType::FP8_E4M3:
             static_cast<__nv_fp8_e4m3*>(output)[index] = ThorLowPrecision::toFp8E4M3Satfinite(value);
             return;
-        case DataType::FP8_E5M2: {
-            __nv_fp8_e5m2 converted;
-            converted.__x = __nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E5M2);
-            static_cast<__nv_fp8_e5m2*>(output)[index] = converted;
+        case DataType::FP8_E5M2:
+            static_cast<__nv_fp8_e5m2*>(output)[index] = ThorLowPrecision::toFp8E5M2Nosat(value);
             return;
-        }
 #endif
         case DataType::FP16:
             static_cast<__half*>(output)[index] = __float2half_rn(value);

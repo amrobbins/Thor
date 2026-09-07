@@ -1,5 +1,6 @@
 #include "Sum.h"
 #include "Utilities/Common/ScopedGpu.h"
+#include "Utilities/Common/LowPrecisionFloat.h"
 #include "DeepLearning/Implementation/ThorError.h"
 
 template <typename DATA_TYPE>
@@ -19,7 +20,7 @@ __global__ void sum(DATA_TYPE *dest, DATA_TYPE *source[], uint32_t numInstances,
         }
 
         // write back
-        dest[element] = (DATA_TYPE)accum;
+        dest[element] = ThorLowPrecision::castToStorage<DATA_TYPE>(accum);
 
         element += 256;
     }

@@ -11,14 +11,14 @@ template <typename FROM_TYPE, typename TO_TYPE>
 struct Converter {
     inline TO_TYPE operator()(FROM_TYPE x) const { return static_cast<TO_TYPE>(x); }
 };
-template <>
-struct Converter<__nv_fp8_e4m3, __nv_fp8_e5m2> {
-    inline __nv_fp8_e5m2 operator()(__nv_fp8_e4m3 x) const { return __nv_fp8_e5m2(static_cast<float>(x)); }
-};
-
 template <typename FROM_TYPE>
 struct Converter<FROM_TYPE, __nv_fp8_e4m3> {
     inline __nv_fp8_e4m3 operator()(FROM_TYPE x) const { return ThorLowPrecision::toFp8E4M3Satfinite(x); }
+};
+
+template <typename FROM_TYPE>
+struct Converter<FROM_TYPE, __nv_fp8_e5m2> {
+    inline __nv_fp8_e5m2 operator()(FROM_TYPE x) const { return ThorLowPrecision::toFp8E5M2Nosat(x); }
 };
 
 struct TypeConverter::Args : HostFunctionArgsBase {

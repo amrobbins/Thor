@@ -2219,25 +2219,6 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::makeSingle
     return requested;
 }
 
-static Tensor allocateCudnnSoftmaxInputAdapterIfNeeded(const Tensor& input,
-                                                        DataType expected_input_dtype,
-                                                        ExprOp op) {
-    if (input.getDataType() == expected_input_dtype) {
-        return input;
-    }
-
-    if (toSupportedInputDType(op, input.getDataType()) != expected_input_dtype) {
-        throw std::runtime_error("Runtime input dtype does not match the compiled cuDNN softmax dtype policy.");
-    }
-
-    // Do not enqueue the conversion while stamping. A staged input may be produced by an
-    // earlier execution stage and therefore does not contain its runtime value yet. The
-    // stamped cuDNN softmax operation owns this adapter tensor and refreshes it immediately before
-    // each execution on the caller's run stream.
-    TensorDescriptor castDescriptor(expected_input_dtype, input.getDimensions());
-    return Tensor(input.getPlacement(), castDescriptor);
-}
-
 static bool dimsResolveToSingleElement(const std::vector<uint64_t>& dims) {
     if (dims.empty()) {
         return true;
@@ -8106,14 +8087,12 @@ std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_pt
     }
 
     Tensor primaryInput = inputs[0];
-    Tensor adaptedInput = primaryInput;
-    if (!compiledStage->isRagged()) {
-        adaptedInput = allocateCudnnSoftmaxInputAdapterIfNeeded(primaryInput, compiledStage->input_dtype, ExprOp::SOFTMAX);
-    } else if (primaryInput.getDataType() != compiledStage->input_dtype) {
-        throw std::runtime_error("Ragged Softmax does not permit a runtime dtype adapter at the exact-prefix boundary.");
+    if (primaryInput.getDataType() != compiledStage->input_dtype) {
+        throw std::runtime_error(
+            "Softmax input dtype does not match the compiled input dtype; implicit dtype adapters are not supported.");
     }
 
-    const std::vector<uint64_t> resolved_output_dimensions = adaptedInput.getDimensions();
+    const std::vector<uint64_t> resolved_output_dimensions = primaryInput.getDimensions();
     std::vector<uint64_t> output_dimensions = resolved_output_dimensions;
     if (!requested_output_shape.empty()) {
         verifyRequestedOutputLayout(requested_output_shape, resolved_output_dimensions);
@@ -8123,7 +8102,7 @@ std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_pt
     Tensor output;
     if (preallocatedOutput.has_value()) {
         output = preallocatedOutput.value();
-        if (output.getPlacement() != adaptedInput.getPlacement()) {
+        if (output.getPlacement() != primaryInput.getPlacement()) {
             throw std::runtime_error("Preallocated softmax output tensor placement does not match the softmax input placement.");
         }
         if (output.getDescriptor().getDataType() != compiledStage->output_dtype) {
@@ -8135,15 +8114,15 @@ std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_pt
         }
     } else {
         TensorDescriptor outputDescriptor(compiledStage->output_dtype, output_dimensions);
-        output = Tensor(adaptedInput.getPlacement(), outputDescriptor);
+        output = Tensor(primaryInput.getPlacement(), outputDescriptor);
     }
 
     if (!compiledStage->isRagged()) {
-        std::unique_ptr<BuiltSoftmax> built = StampedEquation::buildSoftmax(compiledStage, adaptedInput, output);
-        return make_shared<StampedSoftmax>(compiledStage, std::move(built), primaryInput, adaptedInput, output, stream);
+        std::unique_ptr<BuiltSoftmax> built = StampedEquation::buildSoftmax(compiledStage, primaryInput, output);
+        return make_shared<StampedSoftmax>(compiledStage, std::move(built), primaryInput, output, stream);
     }
 
-    const std::vector<uint64_t>& packed_dims = adaptedInput.getDimensions();
+    const std::vector<uint64_t>& packed_dims = primaryInput.getDimensions();
     if (packed_dims.size() < 2 || packed_dims.front() != compiledStage->ragged_max_active_values) {
         throw std::runtime_error("Ragged Softmax packed input shape does not match max_active_values or lacks a trailing axis.");
     }
@@ -8166,10 +8145,10 @@ std::shared_ptr<StampedSoftmax> FusedEquation::stampSoftmax(const std::shared_pt
         if (dy.getDimensions() != packed_dims || dy.getDataType() != compiledStage->input_dtype) {
             throw std::runtime_error("Ragged Softmax backward dY must match Y shape and dtype.");
         }
-        return make_shared<StampedSoftmax>(compiledStage, std::move(state), adaptedInput, dy, output, offsets, stream);
+        return make_shared<StampedSoftmax>(compiledStage, std::move(state), primaryInput, dy, output, offsets, stream);
     }
 
-    return make_shared<StampedSoftmax>(compiledStage, std::move(state), adaptedInput, output, inputs[1], stream);
+    return make_shared<StampedSoftmax>(compiledStage, std::move(state), primaryInput, output, inputs[1], stream);
 }
 
 std::shared_ptr<StampedRmsNorm> FusedEquation::stampRmsNorm(const std::shared_ptr<CompiledRmsNorm>& compiledStage,

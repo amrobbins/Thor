@@ -1,6 +1,7 @@
 #include "Map.h"
 #include "DataTypeDispatch.h"
 #include "DeepLearning/Implementation/ThorError.h"
+#include "Utilities/Common/LowPrecisionFloat.h"
 
 #include <type_traits>
 
@@ -24,7 +25,7 @@ __device__ T fromAccum(double value) {
     } else if constexpr (std::is_integral<T>::value || std::is_same<T, bool>::value) {
         return static_cast<T>(value);
     } else {
-        return T(static_cast<float>(value));
+        return ThorLowPrecision::castToStorage<T>(static_cast<float>(value));
     }
 }
 

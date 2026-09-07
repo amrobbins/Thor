@@ -1,5 +1,7 @@
 #include "test/Utilities/TensorOperations/CubReductionTestSupport.h"
 
+#include "Utilities/Common/LowPrecisionFloat.h"
+
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -41,14 +43,14 @@ void storeCpuValues(Tensor& cpu, DataType dtype, const std::vector<float>& value
         case DataType::FP8_E4M3: {
             __nv_fp8_e4m3* typed = static_cast<__nv_fp8_e4m3*>(storage);
             for (size_t i = 0; i < values.size(); ++i) {
-                typed[i].__x = __nv_cvt_float_to_fp8(values[i], __NV_SATFINITE, __NV_E4M3);
+                typed[i] = ThorLowPrecision::toFp8E4M3Satfinite(values[i]);
             }
             return;
         }
         case DataType::FP8_E5M2: {
             __nv_fp8_e5m2* typed = static_cast<__nv_fp8_e5m2*>(storage);
             for (size_t i = 0; i < values.size(); ++i) {
-                typed[i].__x = __nv_cvt_float_to_fp8(values[i], __NV_SATFINITE, __NV_E5M2);
+                typed[i] = ThorLowPrecision::toFp8E5M2Nosat(values[i]);
             }
             return;
         }

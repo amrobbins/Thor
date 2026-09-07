@@ -2,6 +2,7 @@
 
 #include "DeepLearning/Implementation/ThorError.h"
 #include "Utilities/Common/ScopedGpu.h"
+#include "Utilities/Common/LowPrecisionFloat.h"
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -16,7 +17,7 @@ template <typename T>
 __global__ void scaleGradientKernel(const T *source, T *destination, float scale, uint64_t numElements) {
     uint64_t element = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (element < numElements)
-        destination[element] = T(static_cast<float>(source[element]) * scale);
+        destination[element] = ThorLowPrecision::castToStorage<T>(static_cast<float>(source[element]) * scale);
 }
 
 template <>

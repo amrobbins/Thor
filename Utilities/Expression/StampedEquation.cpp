@@ -1603,21 +1603,6 @@ void StampedEquation::runOn(Stream& run_stream, const std::unordered_map<std::st
     EquationRunner::run(compiledEquation, overridden_inputs, outputs, run_stream);
 }
 
-static void refreshCudnnSoftmaxInputAdapter(const Tensor& source_input, Tensor& input, Stream& run_stream) {
-    if (source_input.getPlacement() != input.getPlacement() || source_input.getDimensions() != input.getDimensions()) {
-        throw std::runtime_error("cuDNN softmax input adapter must preserve the source tensor placement and dimensions.");
-    }
-
-    if (source_input.getTensorId() == input.getTensorId()) {
-        if (source_input.getDataType() != input.getDataType()) {
-            throw std::runtime_error("Aliased cuDNN softmax input cannot have mismatched source and operation dtypes.");
-        }
-        return;
-    }
-
-    input.copyFromAsync(source_input, run_stream);
-}
-
 StampedReduction::StampedReduction(std::shared_ptr<BuiltReduction> built,
                                    const Tensor& input,
                                    const Tensor& output,
@@ -3248,16 +3233,10 @@ void StampedScan::runOn(Stream& run_stream) const {
 
 StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
                                std::unique_ptr<BuiltSoftmax> built,
-                               const Tensor& source_input,
                                const Tensor& input,
                                const Tensor& output,
                                const Stream& stream)
-    : compiled_softmax(std::move(compiled)),
-      built_softmax(std::move(built)),
-      source_input(source_input),
-      input(input),
-      output(output),
-      stream(stream) {
+    : compiled_softmax(std::move(compiled)), built_softmax(std::move(built)), input(input), output(output), stream(stream) {
     if (!compiled_softmax || !built_softmax || compiled_softmax->isRagged() || compiled_softmax->backward) {
         throw std::runtime_error("Dense StampedSoftmax requires a dense forward compiled/built payload.");
     }
@@ -3274,7 +3253,6 @@ StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
     : compiled_softmax(std::move(compiled)),
       built_softmax(nullptr),
       ragged_state(std::move(prepared_ragged_state)),
-      source_input(input),
       input(input),
       row_partition_offsets(offsets),
       output(output),
@@ -3296,7 +3274,6 @@ StampedSoftmax::StampedSoftmax(std::shared_ptr<CompiledSoftmax> compiled,
     : compiled_softmax(std::move(compiled)),
       built_softmax(nullptr),
       ragged_state(std::move(prepared_ragged_state)),
-      source_input(y),
       input(y),
       grad_output(dy),
       row_partition_offsets(offsets),
@@ -3340,7 +3317,6 @@ void StampedSoftmax::runOn(Stream& run_stream) const {
         return;
     }
 
-    refreshCudnnSoftmaxInputAdapter(source_input, input, run_stream);
     CUDNN_CHECK(cudnnSoftmaxForward(run_stream.getCudnnHandle(),
                                     compiled_softmax->algorithm,
                                     compiled_softmax->mode,

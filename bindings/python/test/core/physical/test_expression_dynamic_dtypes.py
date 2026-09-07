@@ -181,7 +181,7 @@ def test_dynamic_dtype_single_input_defaults_follow_tensor_storage_policy(dtype:
     ("lhs_dtype", "rhs_dtype", "expected_output_dtype"),
     [
         (thor.DataType.fp8_e4m3, thor.DataType.fp8_e4m3, thor.DataType.fp8_e4m3),
-        (thor.DataType.fp8_e4m3, thor.DataType.fp8_e5m2, thor.DataType.fp16),
+        (thor.DataType.fp8_e4m3, thor.DataType.fp8_e5m2, thor.DataType.bf16),
         (thor.DataType.fp8_e4m3, thor.DataType.fp16, thor.DataType.fp16),
         (thor.DataType.fp8_e5m2, thor.DataType.bf16, thor.DataType.bf16),
         (thor.DataType.fp16, thor.DataType.bf16, thor.DataType.fp32),

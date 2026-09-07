@@ -38,6 +38,24 @@ def _cast_reference_to_storage_dtype_with_saturation(values: np.ndarray, dtype: 
     return values32.astype(storage_dtype)
 
 
+def _pointwise_compute_numpy_dtype(storage_dtype: thor.DataType) -> np.dtype:
+    # Keep this reference aligned with Thor's default pointwise compute policy.
+    # FP8D2 widened both FP8 formats to BF16 compute. Fused pointwise kernels
+    # may contract arithmetic across expression nodes, so tests must not invent
+    # a rounding boundary at every AST node; round at materialized outputs.
+    if storage_dtype == thor.DataType.fp16:
+        return _numpy_storage_dtype(thor.DataType.fp16)
+    if storage_dtype in (thor.DataType.bf16, thor.DataType.fp8_e4m3, thor.DataType.fp8_e5m2):
+        return _numpy_storage_dtype(thor.DataType.bf16)
+    if storage_dtype == thor.DataType.fp32:
+        return _numpy_storage_dtype(thor.DataType.fp32)
+    raise AssertionError(f"Unhandled pointwise floating dtype: {storage_dtype}")
+
+
+def _round_fused_pointwise_output_reference(values: np.ndarray, compute_dtype: np.dtype) -> np.ndarray:
+    return np.asarray(values).astype(compute_dtype)
+
+
 def _assert_close(got: np.ndarray, expected: np.ndarray, dtype: thor.DataType):
     got32 = got.astype(np.float32)
     expected32 = expected.astype(np.float32)
@@ -2861,12 +2879,24 @@ def test_runtime_scalar_specialized_broadcast_multi_output_numerical(dtype: thor
 
     step_value = -0.75
 
+    compute_dtype = _pointwise_compute_numpy_dtype(dtype)
+
+    # Start from the values actually represented by storage, but evaluate the
+    # fused arithmetic in FP32 before rounding the materialized root to Thor's
+    # compute dtype. CUDA may contract MUL+ADD inside a fused expression, so a
+    # reference that rounds the MUL to BF16/FP16 first imposes semantics that
+    # the fused kernel does not promise. Runtime scalars are still quantized to
+    # the selected compute dtype before participating in the expression.
     x_ref = x_np.astype(np.float32)
     y_ref = y_np.astype(np.float32)
+    step_ref = np.asarray(step_value, dtype=compute_dtype).astype(np.float32)
+
+    sum_scaled_ref = _round_fused_pointwise_output_reference(x_ref + (y_ref * step_ref), compute_dtype)
+    prod_shifted_ref = _round_fused_pointwise_output_reference((x_ref * y_ref) + step_ref, compute_dtype)
 
     expected = {
-        "sum_scaled": _cast_reference_to_storage_dtype_with_saturation(x_ref + (y_ref * step_value), dtype),
-        "prod_shifted": _cast_reference_to_storage_dtype_with_saturation((x_ref * y_ref) + step_value, dtype),
+        "sum_scaled": _cast_reference_to_storage_dtype_with_saturation(sum_scaled_ref, dtype),
+        "prod_shifted": _cast_reference_to_storage_dtype_with_saturation(prod_shifted_ref, dtype),
     }
 
     stream = Stream(gpu_num=0)

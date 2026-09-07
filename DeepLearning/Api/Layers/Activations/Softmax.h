@@ -22,6 +22,21 @@ class Softmax : public Activation {
         return myClone;
     }
 
+    static void validateFeatureInputDataType(DataType dataType) {
+        switch (dataType) {
+            case DataType::FP16:
+            case DataType::BF16:
+            case DataType::FP32:
+                return;
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+                throw std::invalid_argument(
+                    "Softmax does not accept FP8 input tensors. Cast to FP16, BF16, or FP32 before Softmax.");
+            default:
+                throw std::invalid_argument("Softmax supports FP16, BF16, and FP32 input tensors.");
+        }
+    }
+
     bool supportsRaggedStandalone() const override { return true; }
     bool supportsRaggedLearningLayerFusion() const override { return false; }
 
@@ -51,6 +66,8 @@ class Softmax : public Activation {
             Softmax softmax;
             softmax.initialized = true;
             softmax.deserializeStandaloneFields(j, network);
+            THOR_THROW_IF_FALSE(softmax.getFeatureInput().has_value());
+            validateFeatureInputDataType(softmax.getFeatureInput().value().getDataType());
             softmax.addToNetwork(network);
             return;
         }
@@ -58,6 +75,7 @@ class Softmax : public Activation {
         nlohmann::json input = j["feature_input"].get<nlohmann::json>();
         uint64_t originalTensorId = input.at("id").get<uint64_t>();
         Tensor featureInput = network->getApiTensorByOriginalId(originalTensorId);
+        validateFeatureInputDataType(featureInput.getDataType());
 
         Tensor featureOutput = Tensor::deserialize(j.at("feature_output").get<nlohmann::json>());
 
@@ -77,6 +95,9 @@ class Softmax : public Activation {
         (void)drivingLayer;
         (void)drivingApiLayer;
         THOR_THROW_IF_FALSE(initialized);
+        if (featureInput.has_value() && connectingApiTensor == featureInput.value()) {
+            validateFeatureInputDataType(connectingApiTensor.getDataType());
+        }
 
         if (backwardComputedExternally) {
             // Loss-owned softmax keeps the legacy dense external-backward physical-layer contract.
@@ -125,11 +146,13 @@ class Softmax::Builder : public Activation::Builder {
     }
 
     Softmax::Builder &featureInput(Tensor _featureInput) override {
+        Softmax::validateFeatureInputDataType(_featureInput.getDataType());
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }
 
     Softmax::Builder &featureInput(RaggedTensor _featureInput) override {
+        Softmax::validateFeatureInputDataType(_featureInput.getValuesDataType());
         Activation::Builder::featureInput(_featureInput);
         return *this;
     }

@@ -147,6 +147,50 @@ void expectSharedLowPrecisionOutputGradientCast(DataType operand_dtype) {
 
 }  // namespace
 
+TEST(MatmulAutoDiffDType, Fp8DefaultComputePropagatesFp32IntoGradientMatmuls) {
+    for (const DataType dtype : {DataType::FP8_E4M3, DataType::FP8_E5M2}) {
+        const Expression lhs = Expression::input("lhs", dtype, dtype);
+        const Expression rhs = Expression::input("rhs", dtype, dtype);
+        PhysicalOutputs forward =
+            Expression::outputs({{"out", Expression::matmul(lhs, rhs, false, false, std::nullopt, dtype)}})
+                .physicalOutputs();
+        resolveOutputsDTypesInPlace(forward, {dtype, dtype});
+
+        const ExprNode& forward_matmul = forward.expr->nodes.at(namedOutput(forward, "out").node_idx);
+        ASSERT_EQ(forward_matmul.op, ExprOp::MATMUL);
+        ASSERT_TRUE(forward_matmul.compute_dtype.has_value());
+        EXPECT_EQ(forward_matmul.compute_dtype.value(), DataType::FP32);
+
+        PhysicalOutputs backward = buildBackwardOutputs(
+            forward,
+            {"lhs", "rhs"},
+            std::unordered_map<std::string, std::string>{{"out", "dout"}},
+            std::unordered_map<std::string, DataType>{{"out", dtype}},
+            std::unordered_map<std::string, std::vector<uint64_t>>{
+                {"lhs", {2, 3}},
+                {"rhs", {3, 4}},
+            });
+        resolveOutputsDTypesInPlace(backward,
+                                    inputDTypes(backward,
+                                                {
+                                                    {"lhs", dtype},
+                                                    {"rhs", dtype},
+                                                    {"dout", dtype},
+                                                }));
+
+        size_t gradient_matmul_count = 0;
+        for (const ExprNode& node : backward.expr->nodes) {
+            if (node.op != ExprOp::MATMUL && node.op != ExprOp::GEMM) {
+                continue;
+            }
+            ++gradient_matmul_count;
+            ASSERT_TRUE(node.compute_dtype.has_value());
+            EXPECT_EQ(node.compute_dtype.value(), DataType::FP32);
+        }
+        EXPECT_GE(gradient_matmul_count, 2u);
+    }
+}
+
 TEST(MatmulAutoDiffDType, Bf16InputsFp32OutputShareOneConvertedOutputGradient) {
     expectSharedLowPrecisionOutputGradientCast(DataType::BF16);
 }

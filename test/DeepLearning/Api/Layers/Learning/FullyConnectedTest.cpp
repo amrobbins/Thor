@@ -1171,6 +1171,108 @@ TEST(FullyConnectedApi, Fp32StorageDefaultsToFp32ComputeAndAllowsExplicitTf32) {
     EXPECT_EQ(tf32Fc.architectureJson().at("compute_data_type").get<DataType>(), DataType::TF32);
 }
 
+TEST(FullyConnectedApi, SupportedFp8StoragePlansDefaultToFp32Compute) {
+    struct Case {
+        DataType input;
+        DataType weights;
+        DataType output;
+    };
+
+    for (const Case testCase : {
+             Case{DataType::FP8_E4M3, DataType::FP8_E4M3, DataType::FP16},
+             Case{DataType::FP8_E5M2, DataType::FP8_E4M3, DataType::BF16},
+         }) {
+        Api::Network network("fp8_fc_default_compute");
+        Api::Tensor featureInput(testCase.input, {16});
+
+        Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                     .network(network)
+                                     .featureInput(featureInput)
+                                     .numOutputFeatures(8)
+                                     .hasBias(false)
+                                     .weightsDataType(testCase.weights)
+                                     .outputDataType(testCase.output)
+                                     .noActivation()
+                                     .build();
+
+        EXPECT_EQ(fc.getWeightsDataType(), testCase.weights);
+        EXPECT_EQ(fc.getComputeDataType(), DataType::FP32);
+        EXPECT_EQ(fc.getOutputDataType(), testCase.output);
+        EXPECT_EQ(fc.architectureJson().at("compute_data_type").get<DataType>(), DataType::FP32);
+    }
+}
+
+TEST(FullyConnectedApi, Fp8DefaultFp32ComputeSurvivesArchitectureSaveLoad) {
+    const std::string networkName = "fp8_fc_compute_round_trip";
+    std::filesystem::path archiveDir = makeUniqueTestArchiveDir(networkName);
+
+    try {
+        Api::Network network(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(network)
+                                      .name("input")
+                                      .dimensions({16})
+                                      .dataType(DataType::FP8_E4M3)
+                                      .build();
+        Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                     .network(network)
+                                     .featureInput(input.getFeatureOutput().value())
+                                     .numOutputFeatures(8)
+                                     .hasBias(false)
+                                     .weightsDataType(DataType::FP8_E4M3)
+                                     .outputDataType(DataType::FP16)
+                                     .noActivation()
+                                     .build();
+        Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                        .network(network)
+                                        .name("output")
+                                        .inputTensor(fc.getFeatureOutput().value())
+                                        .dataType(DataType::FP16)
+                                        .build();
+        (void)output;
+
+        ASSERT_EQ(fc.getComputeDataType(), DataType::FP32);
+        network.save(archiveDir.string(), true);
+
+        Api::Network loaded(networkName);
+        loaded.load(archiveDir.string());
+        std::shared_ptr<Api::FullyConnected> loadedFc = findOnlyLayerOfType<Api::FullyConnected>(loaded);
+        ASSERT_NE(loadedFc, nullptr);
+        EXPECT_EQ(loadedFc->getWeightsDataType(), DataType::FP8_E4M3);
+        EXPECT_EQ(loadedFc->getComputeDataType(), DataType::FP32);
+        EXPECT_EQ(loadedFc->getOutputDataType(), DataType::FP16);
+        EXPECT_EQ(loadedFc->architectureJson().at("compute_data_type").get<DataType>(), DataType::FP32);
+    } catch (...) {
+        std::filesystem::remove_all(archiveDir);
+        throw;
+    }
+    std::filesystem::remove_all(archiveDir);
+}
+
+TEST(FullyConnectedApi, Fp8StorageRejectsExplicitNonFp32ComputeEarly) {
+    for (const DataType computeDataType : {DataType::FP16, DataType::BF16, DataType::TF32}) {
+        Api::Network network("fp8_fc_reject_non_fp32_compute");
+        Api::Tensor featureInput(DataType::FP8_E4M3, {16});
+
+        try {
+            (void)Api::FullyConnected::Builder()
+                .network(network)
+                .featureInput(featureInput)
+                .numOutputFeatures(8)
+                .hasBias(false)
+                .weightsDataType(DataType::FP8_E4M3)
+                .computeDataType(computeDataType)
+                .outputDataType(DataType::FP16)
+                .noActivation()
+                .build();
+            FAIL() << "Expected FP8 FullyConnected with non-FP32 compute to be rejected.";
+        } catch (const std::invalid_argument& error) {
+            const std::string message = error.what();
+            EXPECT_NE(message.find("FullyConnected FP8 storage requires computeDataType fp32"), std::string::npos) << message;
+        }
+    }
+}
+
 TEST(FullyConnectedApi, ArchitectureSaveLoadRoundTripPreservesGeluActivationEpilogueParametersAndRuns) {
     constexpr uint32_t batchSize = 2;
     constexpr uint32_t numInputFeatures = 3;

@@ -216,9 +216,52 @@ DataType toSupportedComputeDType(ExprOp op, DataType requested_compute_dtype) {
         }
     }
 
+    if (isMatmulOp(op)) {
+        // cuBLASLt FP8 operation types require strict FP32 compute.  Mapping an
+        // FP8-derived default request here keeps MATMUL/GEMM independent from
+        // the ordinary pointwise FP8 -> BF16 policy.  Context-aware validation
+        // below rejects explicit non-FP32 compute when any matrix/GEMM storage
+        // operand (or the result storage) is FP8.
+        switch (requested_compute_dtype) {
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+                return DataType::FP32;
+            case DataType::FP16:
+                return DataType::FP16;
+            case DataType::BF16:
+                return DataType::BF16;
+            case DataType::FP32:
+                return DataType::FP32;
+            default:
+                throw std::runtime_error("Unhandled matmul dtype in toSupportedComputeDType.");
+        }
+    }
+
+    if (isSoftmaxOp(op)) {
+        switch (requested_compute_dtype) {
+            case DataType::FP16:
+                return DataType::FP16;
+            case DataType::BF16:
+                return DataType::BF16;
+            case DataType::FP32:
+                return DataType::FP32;
+            case DataType::FP8_E4M3:
+            case DataType::FP8_E5M2:
+                throw std::invalid_argument(
+                    "Softmax does not support FP8 compute. Cast FP8 values to FP16, BF16, or FP32 before Softmax.");
+            default:
+                throw std::runtime_error("Unhandled Softmax dtype in toSupportedComputeDType.");
+        }
+    }
+
     switch (requested_compute_dtype) {
         case DataType::FP8_E4M3:
         case DataType::FP8_E5M2:
+            // FP8 values are exactly representable in BF16, while BF16 avoids
+            // introducing FP16's much narrower exponent range into otherwise
+            // ordinary pointwise arithmetic.  Callers that explicitly request
+            // FP16 compute still retain the FP16 path below.
+            return DataType::BF16;
         case DataType::FP16:
             return DataType::FP16;
         case DataType::BF16:
@@ -234,7 +277,7 @@ DataType defaultComputeDType(DataType value_dtype) {
     switch (value_dtype) {
         case DataType::FP8_E4M3:
         case DataType::FP8_E5M2:
-            return DataType::FP16;
+            return DataType::BF16;
         case DataType::FP16:
         case DataType::BF16:
         case DataType::FP32:
@@ -278,10 +321,10 @@ DataType toSupportedInputDType(ExprOp op, DataType dtype) {
                 return dtype;
             case DataType::FP8_E4M3:
             case DataType::FP8_E5M2:
-                return DataType::FP16;
+                throw std::invalid_argument(
+                    "Softmax does not accept FP8 input storage. Cast to FP16, BF16, or FP32 before Softmax.");
             default:
-                throw std::runtime_error("Unhandled cuDNN softmax input dtype conversion, from: " +
-                                         TensorDescriptor::getElementTypeName(dtype));
+                throw std::runtime_error("Unhandled Softmax input dtype: " + TensorDescriptor::getElementTypeName(dtype));
         }
     }
 
@@ -314,7 +357,10 @@ DataType promoteTensorValueDTypes(DataType a, DataType b) {
     }
 
     if (isFp8Type(a) && isFp8Type(b)) {
-        return DataType::FP16;
+        // E4M3 and E5M2 have complementary range/precision tradeoffs. BF16
+        // exactly represents every finite value from either FP8 format while
+        // avoiding FP16's narrow exponent range as their common storage type.
+        return DataType::BF16;
     }
 
     throw std::runtime_error("Unhandled dtype pair in promoteTensorValueDTypes.");
@@ -324,12 +370,77 @@ DataType promoteTensorValueDTypes(const std::vector<DataType>& dtypes) {
     if (dtypes.empty()) {
         throw std::runtime_error("promoteTensorValueDTypes requires at least one dtype.");
     }
-
-    DataType out = dtypes.front();
-    for (size_t i = 1; i < dtypes.size(); ++i) {
-        out = promoteTensorValueDTypes(out, dtypes[i]);
+    // Preserve the historical passthrough behavior for homogeneous tensor
+    // dtypes, including exact integral/boolean types used by row-partition
+    // expressions. Only heterogeneous inputs require floating promotion.
+    const DataType first_dtype = dtypes.front();
+    bool all_same = true;
+    for (DataType dtype : dtypes) {
+        if (dtype != first_dtype) {
+            all_same = false;
+            break;
+        }
     }
-    return out;
+    if (all_same) {
+        return first_dtype;
+    }
+
+    bool has_fp8_e4m3 = false;
+    bool has_fp8_e5m2 = false;
+    bool has_fp16 = false;
+    bool has_bf16 = false;
+    bool has_fp32 = false;
+
+    for (DataType dtype : dtypes) {
+        if (!isSupportedFusionFloatingType(dtype)) {
+            throw std::runtime_error("Unsupported dtype in promoteTensorValueDTypes.");
+        }
+        switch (dtype) {
+            case DataType::FP8_E4M3:
+                has_fp8_e4m3 = true;
+                break;
+            case DataType::FP8_E5M2:
+                has_fp8_e5m2 = true;
+                break;
+            case DataType::FP16:
+                has_fp16 = true;
+                break;
+            case DataType::BF16:
+                has_bf16 = true;
+                break;
+            case DataType::FP32:
+                has_fp32 = true;
+                break;
+            default:
+                throw std::runtime_error("Unhandled dtype in promoteTensorValueDTypes.");
+        }
+    }
+
+    // Resolve the complete input set rather than left-folding the binary
+    // promotion rule. Mixed E4M3/E5M2 now promotes to BF16, which would make
+    // a left fold order-dependent in the presence of FP16. An actual BF16 +
+    // FP16 mixture still requires FP32; FP16 otherwise remains the common
+    // storage supertype when it is explicitly present alongside only FP8.
+    if (has_fp32 || (has_fp16 && has_bf16)) {
+        return DataType::FP32;
+    }
+    if (has_bf16) {
+        return DataType::BF16;
+    }
+    if (has_fp16) {
+        return DataType::FP16;
+    }
+    if (has_fp8_e4m3 && has_fp8_e5m2) {
+        return DataType::BF16;
+    }
+    if (has_fp8_e4m3) {
+        return DataType::FP8_E4M3;
+    }
+    if (has_fp8_e5m2) {
+        return DataType::FP8_E5M2;
+    }
+
+    throw std::runtime_error("Unhandled dtype set in promoteTensorValueDTypes.");
 }
 
 static DataType promoteWhereBranchDTypes(const std::vector<DataType>& dtypes) {
@@ -1134,6 +1245,40 @@ static void propagateMaterializedOutputComputeDTypes(PhysicalExpression& expr,
     }
 }
 
+static bool matmulNodeUsesFp8Storage(const ExprNode& node,
+                                      const std::vector<ExprNode>& nodes,
+                                      const std::vector<DataType>& resolved_output_dtypes,
+                                      DataType output_dtype) {
+    if (!isMatmulOp(node.op)) {
+        return false;
+    }
+
+    auto parent_is_fp8 = [&](uint32_t parent_idx) {
+        if (parent_idx >= resolved_output_dtypes.size() || parent_idx >= nodes.size()) {
+            throw std::runtime_error("MATMUL/GEMM parent node index out of range while resolving FP8 compute policy.");
+        }
+        const ExprNode& parent = nodes[parent_idx];
+        return isFp8Type(resolved_output_dtypes[parent_idx]) ||
+               (parent.input_tensor_dtype.has_value() && isFp8Type(parent.input_tensor_dtype.value()));
+    };
+
+    if (parent_is_fp8(node.lhs) || parent_is_fp8(node.rhs) || isFp8Type(output_dtype)) {
+        return true;
+    }
+    return node.op == ExprOp::GEMM && parent_is_fp8(node.aux);
+}
+
+static void validateFp8MatmulComputeRequest(bool uses_fp8_storage,
+                                            const std::optional<DataType>& requested_compute_dtype,
+                                            const char* which) {
+    if (!uses_fp8_storage || !requested_compute_dtype.has_value() || requested_compute_dtype.value() == DataType::FP32) {
+        return;
+    }
+
+    throw std::runtime_error(std::string("FP8 MATMUL/GEMM storage requires FP32 ") + which +
+                             "; requested " + TensorDescriptor::getElementTypeName(requested_compute_dtype.value()) + ".");
+}
+
 static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
                                            const std::vector<DataType>& root_input_dtypes,
                                            const std::vector<uint32_t>& materialized_output_nodes) {
@@ -1202,6 +1347,19 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
         const DataType output_dtype = resolveNodeOutputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
         const DataType logical_input_dtype = resolveNodeLogicalInputDType(node, expr.nodes, resolved_output_dtypes, root_input_dtypes);
 
+        // Softmax is an explicit numerical boundary.  The legacy cuDNN implementation
+        // supports FP16/BF16/FP32 storage directly; Thor must not silently insert an
+        // FP8 compatibility cast.  Callers that store logits in FP8 must make the
+        // widening conversion explicit in their graph.
+        if (isSoftmaxOp(node.op) && isFp8Type(logical_input_dtype)) {
+            throw std::invalid_argument(
+                "Softmax does not accept FP8 input storage. Cast to FP16, BF16, or FP32 before Softmax.");
+        }
+
+        const bool fp8_matmul_storage = matmulNodeUsesFp8Storage(node, expr.nodes, resolved_output_dtypes, output_dtype);
+        validateFp8MatmulComputeRequest(fp8_matmul_storage, node.compute_dtype, "compute");
+        validateFp8MatmulComputeRequest(fp8_matmul_storage, node.backward_compute_dtype, "backward compute");
+
         DataType requested_compute_dtype;
         if (node.op == ExprOp::EMBEDDING_LOOKUP || node.op == ExprOp::CAST || isPassthroughViewOp(node.op) ||
             isBroadcastToOp(node.op)) {
@@ -1230,6 +1388,9 @@ static void resolveExpressionDTypesInPlace(PhysicalExpression& expr,
         } else {
             requested_compute_dtype =
                 node.compute_dtype.has_value() ? node.compute_dtype.value() : defaultComputeDType(logical_input_dtype, output_dtype);
+        }
+        if (fp8_matmul_storage && !node.compute_dtype.has_value()) {
+            requested_compute_dtype = DataType::FP32;
         }
         if (isConvolutionOp(node.op) && !node.compute_dtype.has_value() &&
             (isFp8Type(logical_input_dtype) || isFp8Type(output_dtype))) {

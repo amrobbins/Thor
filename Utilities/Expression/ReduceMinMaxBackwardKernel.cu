@@ -90,7 +90,7 @@ __device__ inline __nv_fp8_e4m3 reduceBwFromFloat<__nv_fp8_e4m3>(float v) {
 
 template <>
 __device__ inline __nv_fp8_e5m2 reduceBwFromFloat<__nv_fp8_e5m2>(float v) {
-    return __nv_fp8_e5m2(__float2half_rn(v));
+    return ThorLowPrecision::toFp8E5M2Nosat(v);
 }
 
 static std::vector<uint64_t> computeVisibleOutputDims(const std::vector<uint64_t>& input_dims,

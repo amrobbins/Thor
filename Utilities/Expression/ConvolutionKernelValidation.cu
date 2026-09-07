@@ -99,7 +99,7 @@ __device__ __forceinline__ void storeValidationValue(void* ptr, int32_t dtype, u
             static_cast<__nv_fp8_e4m3*>(ptr)[index] = ThorLowPrecision::toFp8E4M3Satfinite(value);
             return;
         case DataType::FP8_E5M2:
-            static_cast<__nv_fp8_e5m2*>(ptr)[index] = __nv_fp8_e5m2(value);
+            static_cast<__nv_fp8_e5m2*>(ptr)[index] = ThorLowPrecision::toFp8E5M2Nosat(value);
             return;
         default:
             return;
@@ -117,7 +117,7 @@ __device__ __forceinline__ float quantizeValidationExpected(float value, int32_t
         case DataType::FP8_E4M3:
             return static_cast<float>(ThorLowPrecision::toFp8E4M3Satfinite(value));
         case DataType::FP8_E5M2:
-            return static_cast<float>(__nv_fp8_e5m2(value));
+            return static_cast<float>(ThorLowPrecision::toFp8E5M2Nosat(value));
         default:
             return CUDART_NAN_F;
     }

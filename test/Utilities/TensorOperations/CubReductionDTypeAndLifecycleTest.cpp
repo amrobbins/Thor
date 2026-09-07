@@ -202,7 +202,7 @@ TEST(CubReduction, ValidatesPreallocatedOutputContract) {
 }
 
 #if THOR_CUB_ENABLE_FP8_TYPES
-TEST(CubReduction, Fp8OutputsUseExplicitSaturatingFp32Conversion) {
+TEST(CubReduction, Fp8OutputsUseDestinationFormatOverflowSemantics) {
     REQUIRE_CUDA_DEVICE();
     Stream stream(0);
 
@@ -218,7 +218,8 @@ TEST(CubReduction, Fp8OutputsUseExplicitSaturatingFp32Conversion) {
     stream.synchronize();
 
     expectFloatVectorNear(copyGpuTensorAsFloat(e4m3->getOutputTensor(), stream), {448.0f, -448.0f});
-    expectFloatVectorNear(copyGpuTensorAsFloat(e5m2->getOutputTensor(), stream), {57344.0f, -57344.0f});
+    expectFloatVectorNear(copyGpuTensorAsFloat(e5m2->getOutputTensor(), stream),
+                          {std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity()});
 }
 #endif
 
