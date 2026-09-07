@@ -126,7 +126,12 @@ void runMultiTileMaterializationCase() {
     Tensor rowIndicesDevice = makeGpuTensor<uint64_t>({batchSize}, rowIndices, stream);
     Tensor destinationValues = makeGpuTensor<uint32_t>(
         {destinationCapacity}, std::vector<uint32_t>(destinationCapacity, destinationSentinel), stream);
-    Tensor destinationOffsets(gpuPlacement, TensorDescriptor(dtypeFor<OffsetT>(), {batchSize + 1}));
+    std::vector<OffsetT> publishedOffsets(expectedOffsets.size());
+    for (size_t i = 0; i < expectedOffsets.size(); ++i) {
+        publishedOffsets[i] = static_cast<OffsetT>(expectedOffsets[i]);
+    }
+    Tensor destinationOffsets =
+        makeGpuTensor<OffsetT>({batchSize + 1}, publishedOffsets, stream);
 
     launchDeviceResidentRaggedMaterializationKernel(
         recordStorage,
@@ -203,7 +208,12 @@ void runPayloadAwareRowGroupingCase(uint64_t expectedResidentRowBytes,
         {destinationCapacityValues},
         std::vector<uint8_t>(destinationCapacityValues, destinationSentinel),
         stream);
-    Tensor destinationOffsets(gpuPlacement, TensorDescriptor(dtypeFor<OffsetT>(), {batchSize + 1}));
+    std::vector<OffsetT> expectedOffsets(batchSize + 1, static_cast<OffsetT>(logicalRows));
+    for (uint64_t row = 0; row <= logicalRows; ++row) {
+        expectedOffsets[row] = static_cast<OffsetT>(row);
+    }
+    Tensor destinationOffsets =
+        makeGpuTensor<OffsetT>({batchSize + 1}, expectedOffsets, stream);
 
     launchDeviceResidentRaggedMaterializationKernel(
         recordStorage,
@@ -221,10 +231,6 @@ void runPayloadAwareRowGroupingCase(uint64_t expectedResidentRowBytes,
     stream.synchronize();
 
     const std::vector<OffsetT> actualOffsets = copyGpuTensor<OffsetT>(destinationOffsets, stream);
-    std::vector<OffsetT> expectedOffsets(batchSize + 1, static_cast<OffsetT>(logicalRows));
-    for (uint64_t row = 0; row <= logicalRows; ++row) {
-        expectedOffsets[row] = static_cast<OffsetT>(row);
-    }
     EXPECT_EQ(actualOffsets, expectedOffsets)
         << "expectedResidentRowBytes=" << expectedResidentRowBytes
         << " logicalRows=" << logicalRows;
@@ -274,7 +280,12 @@ void runReferenceLoadAlignmentCase(uint64_t recordSizeBytes, uint64_t referenceO
         {destinationCapacityValues, valueBytes},
         std::vector<uint8_t>(destinationBytes, destinationSentinel),
         stream);
-    Tensor destinationOffsets(gpuPlacement, TensorDescriptor(dtypeFor<OffsetT>(), {batchSize + 1}));
+    std::vector<OffsetT> expectedOffsets(batchSize + 1, static_cast<OffsetT>(logicalRows));
+    for (uint64_t row = 0; row <= logicalRows; ++row) {
+        expectedOffsets[row] = static_cast<OffsetT>(row);
+    }
+    Tensor destinationOffsets =
+        makeGpuTensor<OffsetT>({batchSize + 1}, expectedOffsets, stream);
 
     launchDeviceResidentRaggedMaterializationKernel(
         recordStorage,
@@ -292,11 +303,8 @@ void runReferenceLoadAlignmentCase(uint64_t recordSizeBytes, uint64_t referenceO
     stream.synchronize();
 
     const std::vector<OffsetT> actualOffsets = copyGpuTensor<OffsetT>(destinationOffsets, stream);
-    for (uint64_t row = 0; row <= batchSize; ++row) {
-        EXPECT_EQ(static_cast<uint64_t>(actualOffsets[row]), std::min<uint64_t>(row, logicalRows))
-            << "recordSize=" << recordSizeBytes << " referenceOffset=" << referenceOffsetBytes
-            << " offset=" << row;
-    }
+    EXPECT_EQ(actualOffsets, expectedOffsets)
+        << "recordSize=" << recordSizeBytes << " referenceOffset=" << referenceOffsetBytes;
 
     const std::vector<uint8_t> actualValues = copyGpuTensor<uint8_t>(destinationValues, stream);
     for (uint64_t row = 0; row < logicalRows; ++row) {
@@ -322,7 +330,6 @@ void runAllEmptyFastPathCase() {
     constexpr uint64_t referenceOffsetBytes = 3;
     constexpr uint64_t valueBytes = 3;
     constexpr uint8_t destinationSentinel = 0xb9U;
-    constexpr OffsetT offsetSentinel = static_cast<OffsetT>(17);
 
     std::vector<uint8_t> records(numExamples * recordSizeBytes, 0xa5U);
     for (uint64_t sourceRow = 0; sourceRow < numExamples; ++sourceRow) {
@@ -341,8 +348,9 @@ void runAllEmptyFastPathCase() {
     Tensor rowIndicesDevice = makeGpuTensor<uint64_t>({batchSize}, rowIndices, stream);
     Tensor destinationValues = makeGpuTensor<uint8_t>(
         {31, valueBytes}, std::vector<uint8_t>(31 * valueBytes, destinationSentinel), stream);
-    Tensor destinationOffsets = makeGpuTensor<OffsetT>(
-        {batchSize + 1}, std::vector<OffsetT>(batchSize + 1, offsetSentinel), stream);
+    const std::vector<OffsetT> publishedOffsets(batchSize + 1, static_cast<OffsetT>(0));
+    Tensor destinationOffsets =
+        makeGpuTensor<OffsetT>({batchSize + 1}, publishedOffsets, stream);
 
     launchDeviceResidentRaggedMaterializationKernel(
         recordStorage,
@@ -370,7 +378,7 @@ void runAllEmptyFastPathCase() {
 }
 
 template <typename OffsetT>
-void runPublishedOffsetsValuesOnlyCase() {
+void runPublishedOffsetsCase() {
     constexpr uint64_t numExamples = 3;
     constexpr uint64_t logicalRows = 3;
     constexpr uint64_t batchSize = 4;
@@ -381,7 +389,7 @@ void runPublishedOffsetsValuesOnlyCase() {
     constexpr uint8_t destinationSentinel = 0xc7U;
 
     // True resident row lengths are {2,1,3}, but value_count is deliberately
-    // poisoned. The values-only path must derive selected row lengths solely
+    // poisoned. Materialization must derive selected row lengths solely
     // from the already-published destination offsets and read only start_value
     // from resident metadata.
     const std::vector<uint64_t> starts{0, 2, 3};
@@ -422,7 +430,7 @@ void runPublishedOffsetsValuesOnlyCase() {
     Tensor destinationOffsets =
         makeGpuTensor<OffsetT>({batchSize + 1}, expectedOffsets, stream);
 
-    launchDeviceResidentRaggedValuesMaterializationKernel(
+    launchDeviceResidentRaggedMaterializationKernel(
         recordStorage,
         packedValuesStorage,
         numExamples,
@@ -457,12 +465,12 @@ void runPublishedOffsetsValuesOnlyCase() {
     EXPECT_EQ(actualValues, expectedValues);
 }
 
-TEST(DeviceResidentRaggedMaterializationKernelTest, MultiTileScanAndGatherPreserveUint32Offsets) {
+TEST(DeviceResidentRaggedMaterializationKernelTest, LargeBatchGatherPreservesPublishedUint32Offsets) {
     REQUIRE_CUDA_DEVICE();
     runMultiTileMaterializationCase<uint32_t>();
 }
 
-TEST(DeviceResidentRaggedMaterializationKernelTest, MultiTileScanAndGatherPreserveUint64Offsets) {
+TEST(DeviceResidentRaggedMaterializationKernelTest, LargeBatchGatherPreservesPublishedUint64Offsets) {
     REQUIRE_CUDA_DEVICE();
     runMultiTileMaterializationCase<uint64_t>();
 }
@@ -505,13 +513,14 @@ TEST(DeviceResidentRaggedMaterializationKernelTest, ReferenceMetadataUsesEveryAl
 }
 
 TEST(DeviceResidentRaggedMaterializationKernelTest,
-     PublishedOffsetsValuesOnlyPathIgnoresPoisonedCountsAndUsesWideCopies) {
+     PublishedOffsetsIgnorePoisonedCountsAndUseWideCopies) {
     REQUIRE_CUDA_DEVICE();
-    runPublishedOffsetsValuesOnlyCase<uint32_t>();
-    runPublishedOffsetsValuesOnlyCase<uint64_t>();
+    runPublishedOffsetsCase<uint32_t>();
+    runPublishedOffsetsCase<uint64_t>();
 }
 
-TEST(DeviceResidentRaggedMaterializationKernelTest, AllEmptyStoredFieldZerosOffsetsWithoutLaunchingValueGather) {
+TEST(DeviceResidentRaggedMaterializationKernelTest,
+     AllEmptyStoredFieldPreservesPublishedOffsetsWithoutLaunchingValueGather) {
     REQUIRE_CUDA_DEVICE();
     runAllEmptyFastPathCase<uint32_t>();
     runAllEmptyFastPathCase<uint64_t>();

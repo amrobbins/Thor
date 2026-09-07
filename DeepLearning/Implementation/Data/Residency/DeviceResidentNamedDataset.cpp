@@ -1241,7 +1241,7 @@ void DeviceResidentNamedDataset::enqueueCompactRaggedFieldMaterialization(
 
     Tensor values = destination.getValues();
     Tensor offsets = destination.getOffsets();
-    launchDeviceResidentRaggedValuesMaterializationKernel(
+    launchDeviceResidentRaggedMaterializationKernel(
         compactRecords,
         *sourceValues,
         numExamples,
@@ -1325,7 +1325,7 @@ void DeviceResidentNamedDataset::enqueueSnapshotRaggedFieldMaterialization(
     THOR_THROW_IF_FALSE(descriptor.getBatchSize() == rowIndicesDevice.getDimensions().front());
     Tensor values = destination.getValues();
     Tensor offsets = destination.getOffsets();
-    launchDeviceResidentRaggedValuesMaterializationKernel(
+    launchDeviceResidentRaggedMaterializationKernel(
         storage.references,
         storage.values,
         numExamples,

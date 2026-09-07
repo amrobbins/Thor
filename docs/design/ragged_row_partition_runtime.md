@@ -52,7 +52,9 @@ A supported executing partition must have authoritative host offsets. CPU offset
 supplied at an external logical boundary can establish them immediately because
 the bytes are already host-resident. A GPU-only offsets payload without matching
 host partition state is rejected; Thor does not perform a D2H synchronization to
-make device bytes authoritative.
+make device bytes authoritative. Once structural metadata has an authoritative
+producer, physical consumers must reuse that state rather than independently
+reconstructing the same partition from payload or source metadata.
 
 ## Requirement-driven physical representations
 

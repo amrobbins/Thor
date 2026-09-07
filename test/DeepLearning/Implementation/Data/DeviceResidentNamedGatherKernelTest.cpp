@@ -6,6 +6,7 @@
 
 #include <cuda_runtime.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -106,21 +107,105 @@ void runByteGatherCase(uint64_t sourceRows, uint64_t batchSize, uint64_t rowByte
     }
 }
 
-TEST(DeviceResidentNamedGatherKernelTest, AlignedWideRowsUseVectorizedRowChunkMapping) {
+TEST(DeviceResidentNamedGatherKernelTest, AlignedRowsUseThirtyTwoByteTransactions) {
     REQUIRE_CUDA_DEVICE();
-    // CUDA tensor bases and 48-byte row strides are 16-byte aligned, permitting
-    // uint4 transactions. Three uint4 chunks per row exercises subgroup copying.
-    runByteGatherCase(/*sourceRows=*/701, /*batchSize=*/513, /*rowBytes=*/48);
+    // CUDA tensor allocations are naturally wide-aligned and a 32-byte row
+    // stride preserves that alignment for every source/destination row. This
+    // exercises the ulonglong4_32a path.
+    runByteGatherCase(/*sourceRows=*/97, /*batchSize=*/16384, /*rowBytes=*/32);
 }
 
-TEST(DeviceResidentNamedGatherKernelTest, OddWidthRowsPreserveEveryByte) {
+TEST(DeviceResidentNamedGatherKernelTest, SixteenByteFallbackRemainsContiguousAcrossLanes) {
     REQUIRE_CUDA_DEVICE();
-    // A 37-byte row makes successive row starts unaligned for every wider copy
-    // type, forcing the exact byte fallback and an incomplete final row subgroup.
-    runByteGatherCase(/*sourceRows=*/607, /*batchSize=*/517, /*rowBytes=*/37);
+    // A 48-byte row stride prevents a globally safe 32-byte transaction but
+    // preserves 16-byte alignment. Launch geometry still follows the 48-byte
+    // row payload, so fallback width does not reduce lane-level parallelism.
+    runByteGatherCase(/*sourceRows=*/101, /*batchSize=*/8192, /*rowBytes=*/48);
 }
 
-TEST(DeviceResidentNamedGatherKernelTest, ScalarRowsKeepManyIndependentRowsPerBlock) {
+TEST(DeviceResidentNamedGatherKernelTest, EveryNarrowerTransactionWidthAndByteFallbackPreserveRows) {
+    REQUIRE_CUDA_DEVICE();
+
+    // Each row width deliberately defeats the next-wider transaction while
+    // preserving the requested width: 8, 4, 2, then exact byte fallback.
+    runByteGatherCase(/*sourceRows=*/607, /*batchSize=*/517, /*rowBytes=*/24);
+    runByteGatherCase(/*sourceRows=*/607, /*batchSize=*/517, /*rowBytes=*/12);
+    runByteGatherCase(/*sourceRows=*/607, /*batchSize=*/517, /*rowBytes=*/6);
+    runByteGatherCase(/*sourceRows=*/607, /*batchSize=*/517, /*rowBytes=*/5);
+}
+
+TEST(DeviceResidentNamedGatherKernelTest, PayloadAwareGroupingCoversFullLaneLadder) {
+    REQUIRE_CUDA_DEVICE();
+
+    struct LaunchCase {
+        uint64_t rowBytes;
+        uint64_t batchSize;
+    };
+
+    // These exact payload thresholds select 1/2/4/8/16/32/64/128/256 rows per
+    // CTA respectively once the matching batch-size parallelism floor permits
+    // them. Each destination remains about 512 KiB or smaller.
+    constexpr std::array<LaunchCase, 9> cases{{
+        {4097, 64},
+        {4096, 128},
+        {2048, 256},
+        {1024, 512},
+        {512, 1024},
+        {256, 2048},
+        {128, 4096},
+        {64, 8192},
+        {32, 16384},
+    }};
+
+    for (const LaunchCase launchCase : cases) {
+        runByteGatherCase(/*sourceRows=*/17,
+                          launchCase.batchSize,
+                          launchCase.rowBytes);
+    }
+}
+
+TEST(DeviceResidentNamedGatherKernelTest, PayloadThresholdTransitionsUseNextWiderRowGrouping) {
+    REQUIRE_CUDA_DEVICE();
+
+    struct LaunchCase {
+        uint64_t rowBytes;
+        uint64_t batchSize;
+    };
+
+    // Exercise the first byte immediately above every 32-bytes/lane boundary.
+    // Each transition halves rows/CTA and doubles lanes/row independently of
+    // the transaction width selected for the tensor row.
+    constexpr std::array<LaunchCase, 8> cases{{
+        {33, 16384},
+        {65, 8192},
+        {129, 4096},
+        {257, 2048},
+        {513, 1024},
+        {1025, 512},
+        {2049, 256},
+        {4097, 128},
+    }};
+
+    for (const LaunchCase launchCase : cases) {
+        runByteGatherCase(/*sourceRows=*/17,
+                          launchCase.batchSize,
+                          launchCase.rowBytes);
+    }
+}
+
+TEST(DeviceResidentNamedGatherKernelTest, SmallRowsRetainBlockParallelismFloor) {
+    REQUIRE_CUDA_DEVICE();
+
+    // A one-byte row always prefers 256 rows/CTA by payload. The batch-size
+    // guard intentionally walks the full 1/2/4/8/16/32/64/128/256 rows/CTA
+    // ladder so small batches still expose roughly 64 CTAs of parallelism.
+    for (const uint64_t batchSize :
+         {64ULL, 128ULL, 256ULL, 512ULL, 1024ULL, 2048ULL, 4096ULL, 8192ULL, 16384ULL}) {
+        runByteGatherCase(/*sourceRows=*/31, batchSize, /*rowBytes=*/1);
+    }
+}
+
+TEST(DeviceResidentNamedGatherKernelTest, ScalarTypedRowsKeepManyIndependentRowsPerBlock) {
     REQUIRE_CUDA_DEVICE();
 
     constexpr uint64_t sourceRows = 1031;

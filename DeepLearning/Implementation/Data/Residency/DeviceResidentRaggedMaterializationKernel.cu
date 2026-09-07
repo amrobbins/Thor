@@ -4,7 +4,6 @@
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime.h>
-#include <cub/block/block_scan.cuh>
 
 #include <algorithm>
 #include <cstdint>
@@ -47,82 +46,6 @@ bool canUseReferenceLoadType(const uint8_t *records,
     return (reinterpret_cast<uintptr_t>(records) % alignment) == 0 &&
            recordSizeBytes % alignment == 0 &&
            referenceOffsetBytes % alignment == 0;
-}
-
-template <typename OffsetT, typename ReferenceLoadT, typename RowIndexT>
-__global__ void buildRaggedOffsetsKernel(
-    const uint8_t *__restrict__ records,
-    const uint64_t *__restrict__ rowIndices,
-    uint64_t recordSizeBytes,
-    uint64_t referenceOffsetBytes,
-    RowIndexT logicalRows,
-    RowIndexT batchSize,
-    OffsetT *__restrict__ offsets) {
-    using BlockScan = cub::BlockScan<OffsetT, kThreadsPerBlock>;
-    __shared__ typename BlockScan::TempStorage scanStorage;
-    __shared__ OffsetT tileBase;
-
-    if (threadIdx.x == 0) {
-        offsets[0] = static_cast<OffsetT>(0);
-        tileBase = static_cast<OffsetT>(0);
-    }
-    __syncthreads();
-
-    // The caller has already validated the selected cumulative value count
-    // against the destination offsets dtype. Keep UINT32 partitions entirely
-    // in 32-bit scan arithmetic; UINT64 partitions retain their full range.
-    RowIndexT tile = 0;
-    while (tile < logicalRows) {
-        const RowIndexT remaining = logicalRows - tile;
-        const uint32_t lane = threadIdx.x;
-        const bool active = static_cast<RowIndexT>(lane) < remaining;
-
-        RowIndexT row = 0;
-        OffsetT count = 0;
-        if (active) {
-            row = tile + static_cast<RowIndexT>(lane);
-            const uint64_t sourceRow = rowIndices[row];
-            const uint8_t *reference =
-                records + sourceRow * recordSizeBytes + referenceOffsetBytes;
-            count = static_cast<OffsetT>(
-                readReferenceUint64<ReferenceLoadT>(reference + sizeof(uint64_t)));
-        }
-
-        OffsetT exclusive = 0;
-        OffsetT tileTotal = 0;
-        BlockScan(scanStorage).ExclusiveSum(count, exclusive, tileTotal);
-
-        const OffsetT base = tileBase;
-        if (active) {
-            offsets[row + 1] = base + exclusive + count;
-        }
-
-        // BlockScan reuses shared storage on the next tile. Synchronize both to
-        // protect that storage and to publish the next tile's prefix base.
-        __syncthreads();
-        if (threadIdx.x == 0) {
-            tileBase = base + tileTotal;
-        }
-        __syncthreads();
-
-        if (remaining <= static_cast<RowIndexT>(kThreadsPerBlock)) break;
-        tile += static_cast<RowIndexT>(kThreadsPerBlock);
-    }
-
-    const OffsetT finalOffset = tileBase;
-    if (logicalRows < batchSize) {
-        const RowIndexT trailingOffsets = batchSize - logicalRows;
-        const uint32_t lane = threadIdx.x;
-        if (static_cast<RowIndexT>(lane) < trailingOffsets) {
-            RowIndexT row = logicalRows + static_cast<RowIndexT>(1 + lane);
-            while (row <= batchSize) {
-                offsets[row] = finalOffset;
-                const RowIndexT remaining = batchSize - row;
-                if (remaining < static_cast<RowIndexT>(kThreadsPerBlock)) break;
-                row += static_cast<RowIndexT>(kThreadsPerBlock);
-            }
-        }
-    }
 }
 
 struct RowCopyMetadata {
@@ -405,7 +328,7 @@ void launchGatherGrouped(const uint8_t *records,
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <bool BuildOffsets, typename OffsetT, typename ReferenceLoadT, typename RowIndexT>
+template <typename OffsetT, typename ReferenceLoadT, typename RowIndexT>
 void launchForConfiguration(
     const Tensor &recordStorage,
     const Tensor &packedValuesStorage,
@@ -414,30 +337,14 @@ void launchForConfiguration(
     uint64_t valueBytes,
     uint64_t expectedRowBytes,
     RowIndexT logicalRows,
-    RowIndexT batchSize,
     Tensor &destinationValues,
-    Tensor &destinationOffsets,
+    const Tensor &destinationOffsets,
     const Tensor &rowIndicesDevice,
     Stream &stream) {
     const uint8_t *records = recordStorage.getMemPtr<uint8_t>();
     const uint64_t *rowIndices = rowIndicesDevice.getMemPtr<uint64_t>();
-    OffsetT *offsets = destinationOffsets.getMemPtr<OffsetT>();
+    const OffsetT *offsets = destinationOffsets.getMemPtr<OffsetT>();
     const cudaStream_t cudaStream = stream.getStream();
-
-    if constexpr (BuildOffsets) {
-        buildRaggedOffsetsKernel<OffsetT, ReferenceLoadT, RowIndexT>
-            <<<1, kThreadsPerBlock, 0, cudaStream>>>(
-                records,
-                rowIndices,
-                recordSizeBytes,
-                referenceOffsetBytes,
-                logicalRows,
-                batchSize,
-                offsets);
-        CUDA_CHECK(cudaGetLastError());
-    } else {
-        (void)batchSize;
-    }
 
     const uint8_t *packedValues =
         static_cast<const uint8_t *>(packedValuesStorage.getMemPtr<void>());
@@ -494,7 +401,7 @@ void launchForConfiguration(
     throw std::logic_error("Invalid device-resident ragged rows-per-CTA selection.");
 }
 
-template <bool BuildOffsets, typename OffsetT, typename RowIndexT>
+template <typename OffsetT, typename RowIndexT>
 void launchForRowIndexType(
     const Tensor &recordStorage,
     const Tensor &packedValuesStorage,
@@ -503,9 +410,8 @@ void launchForRowIndexType(
     uint64_t valueBytes,
     uint64_t expectedRowBytes,
     RowIndexT logicalRows,
-    RowIndexT batchSize,
     Tensor &destinationValues,
-    Tensor &destinationOffsets,
+    const Tensor &destinationOffsets,
     const Tensor &rowIndicesDevice,
     Stream &stream) {
     const uint8_t *records = recordStorage.getMemPtr<uint8_t>();
@@ -513,29 +419,29 @@ void launchForRowIndexType(
     // Compact records are byte-packed. Select the widest metadata load that is
     // aligned for every record; UINT8 is the exact unaligned fallback.
     if (canUseReferenceLoadType<uint64_t>(records, recordSizeBytes, referenceOffsetBytes)) {
-        launchForConfiguration<BuildOffsets, OffsetT, uint64_t, RowIndexT>(
+        launchForConfiguration<OffsetT, uint64_t, RowIndexT>(
             recordStorage, packedValuesStorage, recordSizeBytes, referenceOffsetBytes,
-            valueBytes, expectedRowBytes, logicalRows, batchSize, destinationValues,
+            valueBytes, expectedRowBytes, logicalRows, destinationValues,
             destinationOffsets, rowIndicesDevice, stream);
     } else if (canUseReferenceLoadType<uint32_t>(records, recordSizeBytes, referenceOffsetBytes)) {
-        launchForConfiguration<BuildOffsets, OffsetT, uint32_t, RowIndexT>(
+        launchForConfiguration<OffsetT, uint32_t, RowIndexT>(
             recordStorage, packedValuesStorage, recordSizeBytes, referenceOffsetBytes,
-            valueBytes, expectedRowBytes, logicalRows, batchSize, destinationValues,
+            valueBytes, expectedRowBytes, logicalRows, destinationValues,
             destinationOffsets, rowIndicesDevice, stream);
     } else if (canUseReferenceLoadType<uint16_t>(records, recordSizeBytes, referenceOffsetBytes)) {
-        launchForConfiguration<BuildOffsets, OffsetT, uint16_t, RowIndexT>(
+        launchForConfiguration<OffsetT, uint16_t, RowIndexT>(
             recordStorage, packedValuesStorage, recordSizeBytes, referenceOffsetBytes,
-            valueBytes, expectedRowBytes, logicalRows, batchSize, destinationValues,
+            valueBytes, expectedRowBytes, logicalRows, destinationValues,
             destinationOffsets, rowIndicesDevice, stream);
     } else {
-        launchForConfiguration<BuildOffsets, OffsetT, uint8_t, RowIndexT>(
+        launchForConfiguration<OffsetT, uint8_t, RowIndexT>(
             recordStorage, packedValuesStorage, recordSizeBytes, referenceOffsetBytes,
-            valueBytes, expectedRowBytes, logicalRows, batchSize, destinationValues,
+            valueBytes, expectedRowBytes, logicalRows, destinationValues,
             destinationOffsets, rowIndicesDevice, stream);
     }
 }
 
-template <bool BuildOffsets, typename OffsetT>
+template <typename OffsetT>
 void launchTyped(
     const Tensor &recordStorage,
     const Tensor &packedValuesStorage,
@@ -545,7 +451,7 @@ void launchTyped(
     uint64_t expectedRowBytes,
     uint64_t logicalRows,
     Tensor &destinationValues,
-    Tensor &destinationOffsets,
+    const Tensor &destinationOffsets,
     const Tensor &rowIndicesDevice,
     Stream &stream) {
     const uint64_t batchSize = rowIndicesDevice.getDimensions().front();
@@ -554,7 +460,7 @@ void launchTyped(
     // preserves the existing API range without imposing 64-bit arithmetic on
     // every CUDA thread.
     if (batchSize <= std::numeric_limits<uint32_t>::max()) {
-        launchForRowIndexType<BuildOffsets, OffsetT, uint32_t>(
+        launchForRowIndexType<OffsetT, uint32_t>(
             recordStorage,
             packedValuesStorage,
             recordSizeBytes,
@@ -562,13 +468,12 @@ void launchTyped(
             valueBytes,
             expectedRowBytes,
             static_cast<uint32_t>(logicalRows),
-            static_cast<uint32_t>(batchSize),
             destinationValues,
             destinationOffsets,
             rowIndicesDevice,
             stream);
     } else {
-        launchForRowIndexType<BuildOffsets, OffsetT, uint64_t>(
+        launchForRowIndexType<OffsetT, uint64_t>(
             recordStorage,
             packedValuesStorage,
             recordSizeBytes,
@@ -576,7 +481,6 @@ void launchTyped(
             valueBytes,
             expectedRowBytes,
             logicalRows,
-            batchSize,
             destinationValues,
             destinationOffsets,
             rowIndicesDevice,
@@ -592,7 +496,6 @@ uint64_t expectedResidentRowBytes(uint64_t storedValueCount,
            (totalValueBytes % numExamples != 0 ? 1 : 0);
 }
 
-template <bool BuildOffsets>
 void launchValidated(
     const Tensor &recordStorage,
     const Tensor &packedValuesStorage,
@@ -603,7 +506,7 @@ void launchValidated(
     uint64_t valueBytes,
     uint64_t logicalRows,
     Tensor &destinationValues,
-    Tensor &destinationOffsets,
+    const Tensor &destinationOffsets,
     const Tensor &rowIndicesDevice,
     Stream &stream) {
     THOR_THROW_IF_FALSE(recordStorage.isInitialized());
@@ -649,33 +552,15 @@ void launchValidated(
         case DataType::UINT32:
             THOR_THROW_IF_FALSE(destinationValues.getDimensions().front() <=
                                 std::numeric_limits<uint32_t>::max());
-            if (storedValueCount == 0) {
-                if constexpr (BuildOffsets) {
-                    CUDA_CHECK(cudaMemsetAsync(
-                        destinationOffsets.getMemPtr<void>(),
-                        0,
-                        destinationOffsets.getArraySizeInBytes(),
-                        stream.getStream()));
-                }
-                return;
-            }
-            launchTyped<BuildOffsets, uint32_t>(
+            if (storedValueCount == 0) return;
+            launchTyped<uint32_t>(
                 recordStorage, packedValuesStorage, recordSizeBytes, referenceOffsetBytes,
                 valueBytes, expectedRowBytes, logicalRows, destinationValues,
                 destinationOffsets, rowIndicesDevice, stream);
             return;
         case DataType::UINT64:
-            if (storedValueCount == 0) {
-                if constexpr (BuildOffsets) {
-                    CUDA_CHECK(cudaMemsetAsync(
-                        destinationOffsets.getMemPtr<void>(),
-                        0,
-                        destinationOffsets.getArraySizeInBytes(),
-                        stream.getStream()));
-                }
-                return;
-            }
-            launchTyped<BuildOffsets, uint64_t>(
+            if (storedValueCount == 0) return;
+            launchTyped<uint64_t>(
                 recordStorage, packedValuesStorage, recordSizeBytes, referenceOffsetBytes,
                 valueBytes, expectedRowBytes, logicalRows, destinationValues,
                 destinationOffsets, rowIndicesDevice, stream);
@@ -699,38 +584,10 @@ void launchDeviceResidentRaggedMaterializationKernel(
     uint64_t valueBytes,
     uint64_t logicalRows,
     Tensor &destinationValues,
-    Tensor &destinationOffsets,
+    const Tensor &destinationOffsets,
     const Tensor &rowIndicesDevice,
     Stream &stream) {
-    launchValidated<true>(
-        recordStorage,
-        packedValuesStorage,
-        numExamples,
-        recordSizeBytes,
-        referenceOffsetBytes,
-        storedValueCount,
-        valueBytes,
-        logicalRows,
-        destinationValues,
-        destinationOffsets,
-        rowIndicesDevice,
-        stream);
-}
-
-void launchDeviceResidentRaggedValuesMaterializationKernel(
-    const Tensor &recordStorage,
-    const Tensor &packedValuesStorage,
-    uint64_t numExamples,
-    uint64_t recordSizeBytes,
-    uint64_t referenceOffsetBytes,
-    uint64_t storedValueCount,
-    uint64_t valueBytes,
-    uint64_t logicalRows,
-    Tensor &destinationValues,
-    Tensor &destinationOffsets,
-    const Tensor &rowIndicesDevice,
-    Stream &stream) {
-    launchValidated<false>(
+    launchValidated(
         recordStorage,
         packedValuesStorage,
         numExamples,

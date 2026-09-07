@@ -6,6 +6,7 @@
 
 #include <cuda_runtime.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -119,37 +120,135 @@ void runMaterializationCase(
     }
 }
 
-TEST(DeviceResidentDirectMaterializationKernelTest, AlignedWideFieldsUseRowChunkMapping) {
+TEST(DeviceResidentDirectMaterializationKernelTest, AlignedWideFieldsUseThirtyTwoByteTransactions) {
     REQUIRE_CUDA_DEVICE();
-    // All row starts are 16-byte aligned, permitting uint4 copies. Three uint4
-    // chunks per row also exercises the multi-lane small-subgroup path.
-    runMaterializationCase(/*numExamples=*/701,
-                           /*batchSize=*/513,
+    // CUDA allocations are naturally wide-aligned and every compact-record row,
+    // field start, and destination row is 32-byte aligned. This exercises the
+    // ulonglong4_32a path added by the production optimization pass.
+    runMaterializationCase(/*numExamples=*/97,
+                           /*batchSize=*/16384,
                            /*recordSizeBytes=*/64,
-                           /*fieldOffsetBytes=*/16,
-                           /*fieldBytes=*/48);
+                           /*fieldOffsetBytes=*/32,
+                           /*fieldBytes=*/32);
 }
 
-TEST(DeviceResidentDirectMaterializationKernelTest, PackedUnalignedOddFieldsPreserveEveryByte) {
+TEST(DeviceResidentDirectMaterializationKernelTest, SixteenByteFallbackRemainsContiguousAcrossLanes) {
     REQUIRE_CUDA_DEVICE();
-    // Neither source row starts nor the field size have useful typed alignment.
-    // This forces the byte fallback and an incomplete final row subgroup.
+    // A 48-byte record stride prevents a globally safe 32-byte transaction but
+    // preserves 16-byte alignment. The launch policy still follows the 32-byte
+    // field payload, so the narrower transaction width does not reduce the lane
+    // group selected for a row.
+    runMaterializationCase(/*numExamples=*/101,
+                           /*batchSize=*/8192,
+                           /*recordSizeBytes=*/48,
+                           /*fieldOffsetBytes=*/16,
+                           /*fieldBytes=*/32);
+}
+
+TEST(DeviceResidentDirectMaterializationKernelTest, EveryNarrowerTransactionWidthAndByteFallbackPreserveFields) {
+    REQUIRE_CUDA_DEVICE();
+
+    // Each record stride deliberately defeats the next-wider alignment while
+    // preserving the requested width: 8, 4, 2, then the exact byte fallback.
     runMaterializationCase(/*numExamples=*/607,
                            /*batchSize=*/517,
-                           /*recordSizeBytes=*/53,
-                           /*fieldOffsetBytes=*/3,
-                           /*fieldBytes=*/37);
-}
-
-TEST(DeviceResidentDirectMaterializationKernelTest, ScalarFieldsKeepManyRowsResidentPerBlock) {
-    REQUIRE_CUDA_DEVICE();
-    // A single aligned uint32 per row selects one thread per row, so one CTA can
-    // service 256 independent rows instead of launching a mostly-idle CTA/row.
-    runMaterializationCase(/*numExamples=*/1031,
-                           /*batchSize=*/1025,
-                           /*recordSizeBytes=*/16,
+                           /*recordSizeBytes=*/24,
+                           /*fieldOffsetBytes=*/8,
+                           /*fieldBytes=*/8);
+    runMaterializationCase(/*numExamples=*/607,
+                           /*batchSize=*/517,
+                           /*recordSizeBytes=*/12,
                            /*fieldOffsetBytes=*/4,
                            /*fieldBytes=*/4);
+    runMaterializationCase(/*numExamples=*/607,
+                           /*batchSize=*/517,
+                           /*recordSizeBytes=*/6,
+                           /*fieldOffsetBytes=*/2,
+                           /*fieldBytes=*/2);
+    runMaterializationCase(/*numExamples=*/607,
+                           /*batchSize=*/517,
+                           /*recordSizeBytes=*/5,
+                           /*fieldOffsetBytes=*/1,
+                           /*fieldBytes=*/3);
+}
+
+TEST(DeviceResidentDirectMaterializationKernelTest, PayloadAwareGroupingCoversFullLaneLadder) {
+    REQUIRE_CUDA_DEVICE();
+
+    struct LaunchCase {
+        uint64_t fieldBytes;
+        uint64_t batchSize;
+    };
+
+    // These exact payload thresholds select 1/2/4/8/16/32/64/128/256 rows per
+    // CTA respectively once the matching batch-size parallelism floor permits
+    // them. The largest destination is only about 512 KiB.
+    constexpr std::array<LaunchCase, 9> cases{{
+        {4097, 64},
+        {4096, 128},
+        {2048, 256},
+        {1024, 512},
+        {512, 1024},
+        {256, 2048},
+        {128, 4096},
+        {64, 8192},
+        {32, 16384},
+    }};
+
+    for (const LaunchCase launchCase : cases) {
+        runMaterializationCase(/*numExamples=*/17,
+                               launchCase.batchSize,
+                               /*recordSizeBytes=*/launchCase.fieldBytes,
+                               /*fieldOffsetBytes=*/0,
+                               launchCase.fieldBytes);
+    }
+}
+
+TEST(DeviceResidentDirectMaterializationKernelTest, PayloadThresholdTransitionsUseNextWiderRowGrouping) {
+    REQUIRE_CUDA_DEVICE();
+
+    struct LaunchCase {
+        uint64_t fieldBytes;
+        uint64_t batchSize;
+    };
+
+    // Exercise the first byte immediately above every 32-bytes/lane boundary.
+    // Each transition halves rows/CTA and doubles lanes/row without depending on
+    // the transaction width selected for the compact record.
+    constexpr std::array<LaunchCase, 8> cases{{
+        {33, 16384},
+        {65, 8192},
+        {129, 4096},
+        {257, 2048},
+        {513, 1024},
+        {1025, 512},
+        {2049, 256},
+        {4097, 128},
+    }};
+
+    for (const LaunchCase launchCase : cases) {
+        runMaterializationCase(/*numExamples=*/17,
+                               launchCase.batchSize,
+                               /*recordSizeBytes=*/launchCase.fieldBytes,
+                               /*fieldOffsetBytes=*/0,
+                               launchCase.fieldBytes);
+    }
+}
+
+TEST(DeviceResidentDirectMaterializationKernelTest, SmallFieldsRetainBlockParallelismFloor) {
+    REQUIRE_CUDA_DEVICE();
+
+    // A one-byte field always prefers 256 rows/CTA by payload. The batch-size
+    // guard intentionally walks the entire 1/2/4/8/16/32/64/128/256 rows/CTA
+    // ladder so small batches still expose roughly 64 CTAs of parallelism.
+    for (const uint64_t batchSize :
+         {64ULL, 128ULL, 256ULL, 512ULL, 1024ULL, 2048ULL, 4096ULL, 8192ULL, 16384ULL}) {
+        runMaterializationCase(/*numExamples=*/31,
+                               batchSize,
+                               /*recordSizeBytes=*/1,
+                               /*fieldOffsetBytes=*/0,
+                               /*fieldBytes=*/1);
+    }
 }
 
 }  // namespace

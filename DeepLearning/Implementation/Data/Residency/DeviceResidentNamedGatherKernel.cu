@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 
 using ThorImplementation::Tensor;
@@ -14,86 +16,267 @@ using ThorImplementation::TensorPlacement;
 
 namespace {
 
-constexpr int kThreadsPerBlock = 256;
+constexpr uint32_t kThreadsPerBlock = 256;
+constexpr uint32_t kMaxRowsPerBlock = kThreadsPerBlock;
+constexpr uint64_t kTargetBytesPerLane = 32;
+constexpr uint32_t kMaxPortableBlocks = 65535;
 
-/**
- * Gather independent tensor rows with a power-of-two number of CUDA threads per
- * destination row. Small rows therefore keep many independent gathers resident
- * in one CTA, while wider rows expose their contiguous trailing bytes to more
- * lanes.
- *
- * CopyT is selected on the host only when every source and destination row start
- * is aligned for that type. UINT8 is the alignment-safe fallback for rows whose
- * byte width prevents a wider transaction.
- */
-template <typename CopyT>
-__global__ void gatherRowsKernel(const uint8_t *__restrict__ sourceBytes,
-                                 uint8_t *__restrict__ destinationBytes,
-                                 const uint64_t *__restrict__ rowIndices,
-                                 uint64_t batchSize,
-                                 uint64_t rowBytes,
-                                 uint64_t sourceRows,
-                                 uint32_t threadsPerRow,
-                                 uint32_t threadsPerRowShift) {
-    const uint64_t rowsPerBlock =
-        static_cast<uint64_t>(kThreadsPerBlock >> threadsPerRowShift);
-    const uint64_t rowSlot =
-        static_cast<uint64_t>(threadIdx.x >> threadsPerRowShift);
-    const uint64_t lane =
-        static_cast<uint64_t>(threadIdx.x & (threadsPerRow - 1));
-    const uint64_t rowStride = static_cast<uint64_t>(gridDim.x) * rowsPerBlock;
-    const uint64_t itemsPerRow = rowBytes / sizeof(CopyT);
+static_assert(sizeof(ulonglong4_32a) == 32);
+static_assert(alignof(ulonglong4_32a) == 32);
 
-    for (uint64_t rowBase = static_cast<uint64_t>(blockIdx.x) * rowsPerBlock;
-         rowBase < batchSize;
-         rowBase += rowStride) {
-        const uint64_t batchRow = rowBase + rowSlot;
-        if (batchRow >= batchSize) {
-            continue;
-        }
+template <typename CopyT, typename ItemIndexT, uint32_t LanesPerRow>
+__device__ __forceinline__ void copyNamedRow(const uint8_t *sourceBytes,
+                                             uint8_t *destinationBytes,
+                                             ItemIndexT rowItems,
+                                             uint32_t lane) {
+    const CopyT *__restrict__ source = reinterpret_cast<const CopyT *>(sourceBytes);
+    CopyT *__restrict__ destination = reinterpret_cast<CopyT *>(destinationBytes);
 
-        // Lanes assigned to the same row read the same index. CUDA coalesces the
-        // duplicate addresses, while neighboring row groups read neighboring
-        // index entries. This avoids a CTA barrier solely to publish sourceRow.
-        const uint64_t sourceRow = rowIndices[batchRow];
-        if (sourceRow >= sourceRows) {
-            // Preserve the historical contract: invalid resident row indices do
-            // not overwrite the corresponding destination row.
-            continue;
-        }
+    ItemIndexT item = static_cast<ItemIndexT>(lane);
+    while (item < rowItems) {
+        destination[item] = source[item];
 
-        const CopyT *__restrict__ source = reinterpret_cast<const CopyT *>(
-            sourceBytes + sourceRow * rowBytes);
-        CopyT *__restrict__ destination = reinterpret_cast<CopyT *>(
-            destinationBytes + batchRow * rowBytes);
-
-        for (uint64_t item = lane; item < itemsPerRow; item += threadsPerRow) {
-            destination[item] = source[item];
-        }
+        // Break before the increment when this was the final item owned by the
+        // lane. Besides avoiding one unnecessary add, this keeps the 32-bit
+        // fast path correct even when rowItems is close to UINT32_MAX.
+        const ItemIndexT laneStride = static_cast<ItemIndexT>(LanesPerRow);
+        if (rowItems - item <= laneStride) break;
+        item += laneStride;
     }
 }
 
-void chooseThreadsPerRow(uint64_t itemsPerRow,
-                         uint32_t &threadsPerRow,
-                         uint32_t &threadsPerRowShift) {
-    if (itemsPerRow <= 1) {
-        threadsPerRow = 1;
-        threadsPerRowShift = 0;
-    } else if (itemsPerRow <= 2) {
-        threadsPerRow = 2;
-        threadsPerRowShift = 1;
-    } else if (itemsPerRow <= 4) {
-        threadsPerRow = 4;
-        threadsPerRowShift = 2;
-    } else if (itemsPerRow <= 8) {
-        threadsPerRow = 8;
-        threadsPerRowShift = 3;
-    } else if (itemsPerRow <= 16) {
-        threadsPerRow = 16;
-        threadsPerRowShift = 4;
+/**
+ * Gather independent tensor rows with a compile-time CUDA lane group per
+ * destination row. The row grouping follows payload bytes rather than the
+ * selected transaction width, so narrower alignment does not also reduce the
+ * amount of lane-level parallelism assigned to a row.
+ *
+ * CopyT is selected on the host only when every source and destination row
+ * start is aligned for that type. UINT8 is the exact fallback for odd row
+ * widths.
+ */
+template <typename CopyT,
+          typename RowIndexT,
+          typename ItemIndexT,
+          uint32_t RowsPerBlock>
+__global__ void gatherRowsKernel(const uint8_t *__restrict__ sourceBytes,
+                                 uint8_t *__restrict__ destinationBytes,
+                                 const uint64_t *__restrict__ rowIndices,
+                                 RowIndexT batchSize,
+                                 uint64_t rowBytes,
+                                 uint64_t sourceRows,
+                                 ItemIndexT rowItems) {
+    static_assert(RowsPerBlock >= 1 && RowsPerBlock <= kMaxRowsPerBlock,
+                  "Device-resident named gather rows per CTA are out of range.");
+    static_assert(kThreadsPerBlock % RowsPerBlock == 0,
+                  "Device-resident named gather row groups must tile a CTA.");
+    constexpr uint32_t kLanesPerRow = kThreadsPerBlock / RowsPerBlock;
+
+    const uint32_t rowSlot = threadIdx.x / kLanesPerRow;
+    const uint32_t lane = threadIdx.x - rowSlot * kLanesPerRow;
+    const uint32_t rowStride = gridDim.x * RowsPerBlock;
+
+    RowIndexT rowBase = static_cast<RowIndexT>(blockIdx.x) * RowsPerBlock;
+    while (rowBase < batchSize) {
+        if (static_cast<RowIndexT>(rowSlot) < batchSize - rowBase) {
+            const RowIndexT batchRow = rowBase + static_cast<RowIndexT>(rowSlot);
+
+            // Lanes assigned to the same row read the same index. CUDA can
+            // broadcast/cache this uniform address efficiently, so publishing
+            // sourceRow through shared memory would add synchronization without
+            // removing meaningful global-memory traffic.
+            const uint64_t sourceRow = rowIndices[batchRow];
+            if (sourceRow < sourceRows) {
+                const uint8_t *source = sourceBytes + sourceRow * rowBytes;
+                uint8_t *destination =
+                    destinationBytes + static_cast<uint64_t>(batchRow) * rowBytes;
+                copyNamedRow<CopyT, ItemIndexT, kLanesPerRow>(
+                    source, destination, rowItems, lane);
+            }
+            // Preserve the historical contract: an invalid resident row index
+            // leaves the corresponding destination row untouched.
+        }
+
+        // Use subtraction and break-before-increment so the normal UINT32 row
+        // specialization cannot wrap on its terminal grid-stride iteration.
+        if (static_cast<RowIndexT>(rowStride) >= batchSize - rowBase) break;
+        rowBase += static_cast<RowIndexT>(rowStride);
+    }
+}
+
+uint32_t rowsPerBlockFor(uint64_t rowBytes, uint64_t batchSize) {
+    // Target about 32 bytes of useful row payload per lane. Transaction width
+    // is deliberately not part of this policy: a 16/8/4/2/1-byte fallback may
+    // require multiple transactions per lane, but consecutive lanes continue
+    // to operate on adjacent contiguous items.
+    uint32_t rowsByPayload = 1;
+    if (rowBytes <= kTargetBytesPerLane) {
+        rowsByPayload = 256;
+    } else if (rowBytes <= 2 * kTargetBytesPerLane) {
+        rowsByPayload = 128;
+    } else if (rowBytes <= 4 * kTargetBytesPerLane) {
+        rowsByPayload = 64;
+    } else if (rowBytes <= 8 * kTargetBytesPerLane) {
+        rowsByPayload = 32;
+    } else if (rowBytes <= 16 * kTargetBytesPerLane) {
+        rowsByPayload = 16;
+    } else if (rowBytes <= 32 * kTargetBytesPerLane) {
+        rowsByPayload = 8;
+    } else if (rowBytes <= 64 * kTargetBytesPerLane) {
+        rowsByPayload = 4;
+    } else if (rowBytes <= 128 * kTargetBytesPerLane) {
+        rowsByPayload = 2;
+    }
+
+    // Keep roughly 64 CTAs available for small rows instead of packing a small
+    // batch into only one or two blocks. Once the batch is large enough,
+    // payload geometry alone determines the row grouping.
+    uint32_t rowsByParallelism = 1;
+    if (batchSize >= 16384) {
+        rowsByParallelism = 256;
+    } else if (batchSize >= 8192) {
+        rowsByParallelism = 128;
+    } else if (batchSize >= 4096) {
+        rowsByParallelism = 64;
+    } else if (batchSize >= 2048) {
+        rowsByParallelism = 32;
+    } else if (batchSize >= 1024) {
+        rowsByParallelism = 16;
+    } else if (batchSize >= 512) {
+        rowsByParallelism = 8;
+    } else if (batchSize >= 256) {
+        rowsByParallelism = 4;
+    } else if (batchSize >= 128) {
+        rowsByParallelism = 2;
+    }
+
+    return std::min(rowsByPayload, rowsByParallelism);
+}
+
+template <uint32_t RowsPerBlock>
+uint32_t blocksForRows(uint64_t batchSize) {
+    const uint64_t blocks =
+        batchSize / RowsPerBlock + (batchSize % RowsPerBlock != 0 ? 1 : 0);
+    return static_cast<uint32_t>(
+        std::min<uint64_t>(std::max<uint64_t>(blocks, 1), kMaxPortableBlocks));
+}
+
+template <typename CopyT,
+          typename RowIndexT,
+          typename ItemIndexT,
+          uint32_t RowsPerBlock>
+void launchGrouped(const uint8_t *source,
+                   uint8_t *destination,
+                   const uint64_t *rowIndices,
+                   RowIndexT batchSize,
+                   uint64_t rowBytes,
+                   uint64_t sourceRows,
+                   ItemIndexT rowItems,
+                   cudaStream_t stream) {
+    const uint32_t blocks =
+        blocksForRows<RowsPerBlock>(static_cast<uint64_t>(batchSize));
+    gatherRowsKernel<CopyT, RowIndexT, ItemIndexT, RowsPerBlock>
+        <<<blocks, kThreadsPerBlock, 0, stream>>>(
+            source,
+            destination,
+            rowIndices,
+            batchSize,
+            rowBytes,
+            sourceRows,
+            rowItems);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+template <typename CopyT, typename RowIndexT, typename ItemIndexT>
+void launchForGrouping(const uint8_t *source,
+                       uint8_t *destination,
+                       const uint64_t *rowIndices,
+                       RowIndexT batchSize,
+                       uint64_t rowBytes,
+                       uint64_t sourceRows,
+                       ItemIndexT rowItems,
+                       cudaStream_t stream) {
+    switch (rowsPerBlockFor(rowBytes, static_cast<uint64_t>(batchSize))) {
+        case 1:
+            launchGrouped<CopyT, RowIndexT, ItemIndexT, 1>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
+                rowItems, stream);
+            return;
+        case 2:
+            launchGrouped<CopyT, RowIndexT, ItemIndexT, 2>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
+                rowItems, stream);
+            return;
+        case 4:
+            launchGrouped<CopyT, RowIndexT, ItemIndexT, 4>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
+                rowItems, stream);
+            return;
+        case 8:
+            launchGrouped<CopyT, RowIndexT, ItemIndexT, 8>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
+                rowItems, stream);
+            return;
+        case 16:
+            launchGrouped<CopyT, RowIndexT, ItemIndexT, 16>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
+                rowItems, stream);
+            return;
+        case 32:
+            launchGrouped<CopyT, RowIndexT, ItemIndexT, 32>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
+                rowItems, stream);
+            return;
+        case 64:
+            launchGrouped<CopyT, RowIndexT, ItemIndexT, 64>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
+                rowItems, stream);
+            return;
+        case 128:
+            launchGrouped<CopyT, RowIndexT, ItemIndexT, 128>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
+                rowItems, stream);
+            return;
+        case 256:
+            launchGrouped<CopyT, RowIndexT, ItemIndexT, 256>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
+                rowItems, stream);
+            return;
+        default:
+            break;
+    }
+    throw std::logic_error("Invalid device-resident named gather rows-per-CTA selection.");
+}
+
+template <typename CopyT, typename RowIndexT>
+void launchForItemIndexType(const uint8_t *source,
+                            uint8_t *destination,
+                            const uint64_t *rowIndices,
+                            RowIndexT batchSize,
+                            uint64_t rowBytes,
+                            uint64_t sourceRows,
+                            cudaStream_t stream) {
+    const uint64_t rowItems = rowBytes / sizeof(CopyT);
+    if (rowItems <= std::numeric_limits<uint32_t>::max()) {
+        launchForGrouping<CopyT, RowIndexT, uint32_t>(
+            source,
+            destination,
+            rowIndices,
+            batchSize,
+            rowBytes,
+            sourceRows,
+            static_cast<uint32_t>(rowItems),
+            stream);
     } else {
-        threadsPerRow = 32;
-        threadsPerRowShift = 5;
+        launchForGrouping<CopyT, RowIndexT, uint64_t>(
+            source,
+            destination,
+            rowIndices,
+            batchSize,
+            rowBytes,
+            sourceRows,
+            rowItems,
+            stream);
     }
 }
 
@@ -105,27 +288,28 @@ void launchForCopyType(const uint8_t *source,
                        uint64_t rowBytes,
                        uint64_t sourceRows,
                        cudaStream_t stream) {
-    const uint64_t itemsPerRow = rowBytes / sizeof(CopyT);
-    uint32_t threadsPerRow = 0;
-    uint32_t threadsPerRowShift = 0;
-    chooseThreadsPerRow(itemsPerRow, threadsPerRow, threadsPerRowShift);
-
-    const uint64_t rowsPerBlock =
-        static_cast<uint64_t>(kThreadsPerBlock >> threadsPerRowShift);
-    uint64_t blocks64 = (batchSize + rowsPerBlock - 1) / rowsPerBlock;
-    blocks64 = std::max<uint64_t>(1, std::min<uint64_t>(blocks64, 65535));
-    const int blocks = static_cast<int>(blocks64);
-
-    gatherRowsKernel<CopyT><<<blocks, kThreadsPerBlock, 0, stream>>>(
-        source,
-        destination,
-        rowIndices,
-        batchSize,
-        rowBytes,
-        sourceRows,
-        threadsPerRow,
-        threadsPerRowShift);
-    CUDA_CHECK(cudaGetLastError());
+    // Batch-row arithmetic is 32-bit for the overwhelmingly common case.
+    // Source/destination byte addresses remain 64-bit because valid tensors may
+    // exceed 4 GiB even when their row counts fit comfortably in UINT32.
+    if (batchSize <= std::numeric_limits<uint32_t>::max()) {
+        launchForItemIndexType<CopyT, uint32_t>(
+            source,
+            destination,
+            rowIndices,
+            static_cast<uint32_t>(batchSize),
+            rowBytes,
+            sourceRows,
+            stream);
+    } else {
+        launchForItemIndexType<CopyT, uint64_t>(
+            source,
+            destination,
+            rowIndices,
+            batchSize,
+            rowBytes,
+            sourceRows,
+            stream);
+    }
 }
 
 template <typename CopyT>
@@ -185,17 +369,32 @@ void launchDeviceResidentNamedGatherKernel(const Tensor &source, Tensor &destina
     const cudaStream_t cudaStream = stream.getStream();
 
     // Named tensors have identical contiguous row geometry on source and
-    // destination. Pick the widest transaction that is aligned for every row;
-    // UINT8 remains the exact fallback for byte-width rows.
-    if (canUseCopyType<uint4>(sourceBytes, destinationBytes, rowBytes)) {
-        launchForCopyType<uint4>(sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes, sourceRows, cudaStream);
+    // destination. Pick the widest transaction that is aligned for every row.
+    // Launch geometry is selected independently from rowBytes, so falling back
+    // to a narrower transaction does not also reduce row-level parallelism.
+    if (canUseCopyType<ulonglong4_32a>(sourceBytes, destinationBytes, rowBytes)) {
+        launchForCopyType<ulonglong4_32a>(
+            sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes,
+            sourceRows, cudaStream);
+    } else if (canUseCopyType<uint4>(sourceBytes, destinationBytes, rowBytes)) {
+        launchForCopyType<uint4>(
+            sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes,
+            sourceRows, cudaStream);
     } else if (canUseCopyType<uint64_t>(sourceBytes, destinationBytes, rowBytes)) {
-        launchForCopyType<uint64_t>(sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes, sourceRows, cudaStream);
+        launchForCopyType<uint64_t>(
+            sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes,
+            sourceRows, cudaStream);
     } else if (canUseCopyType<uint32_t>(sourceBytes, destinationBytes, rowBytes)) {
-        launchForCopyType<uint32_t>(sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes, sourceRows, cudaStream);
+        launchForCopyType<uint32_t>(
+            sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes,
+            sourceRows, cudaStream);
     } else if (canUseCopyType<uint16_t>(sourceBytes, destinationBytes, rowBytes)) {
-        launchForCopyType<uint16_t>(sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes, sourceRows, cudaStream);
+        launchForCopyType<uint16_t>(
+            sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes,
+            sourceRows, cudaStream);
     } else {
-        launchForCopyType<uint8_t>(sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes, sourceRows, cudaStream);
+        launchForCopyType<uint8_t>(
+            sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes,
+            sourceRows, cudaStream);
     }
 }
