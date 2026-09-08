@@ -83,7 +83,12 @@ class CategoricalAccuracy : public Metric {
             return Metric::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
         (void)batchSize;
         (void)tensorPlacement;
-        return metricTensor.getTotalSizeInBytes() + 4 * sizeof(float);
+        const uint64_t classes = raggedPredictions->getTrailingDimensions().at(0);
+        const uint64_t workspaceBytes =
+            ThorImplementation::raggedAccuracyStatisticsWorkspaceDescriptor(
+                raggedPredictions->getMaxTotalValues(), classes)
+                .getArraySizeInBytes();
+        return metricTensor.getTotalSizeInBytes() + 4 * sizeof(float) + workspaceBytes;
     }
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,

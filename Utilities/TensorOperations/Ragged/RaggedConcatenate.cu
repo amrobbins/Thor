@@ -4,6 +4,7 @@
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime.h>
+#include <cuda/std/bit>
 
 #include <algorithm>
 #include <cstdint>
@@ -13,9 +14,13 @@
 namespace {
 
 constexpr uint32_t kThreads = 256;
-constexpr uint32_t kMaxSpansPerBlock = 8;
+constexpr uint32_t kMaxSpansPerBlock = kThreads;
+constexpr uint64_t kTargetBytesPerLane = 32;
 constexpr uint32_t kMaxPortableBlocks = 65535;
 constexpr uint64_t kMaxUint32 = 0xFFFFFFFFULL;
+
+static_assert(sizeof(ulonglong4_32a) == 32);
+static_assert(alignof(ulonglong4_32a) == 32);
 
 struct SpanCopyMetadata {
     const unsigned char *source;
@@ -24,21 +29,14 @@ struct SpanCopyMetadata {
     uint32_t copyWidthBytes;
 };
 
-template <typename ActiveCountT, typename SpanIndexT>
-__device__ __forceinline__ bool rowIsActive(SpanIndexT row, ActiveCountT activeRows) {
-    if constexpr (sizeof(ActiveCountT) <= sizeof(SpanIndexT)) {
-        return row < static_cast<SpanIndexT>(activeRows);
-    } else {
-        return static_cast<ActiveCountT>(row) < activeRows;
-    }
-}
-
 __device__ __forceinline__ uint32_t widestAlignedCopyWidth(const unsigned char *source,
-                                                            const unsigned char *destination,
-                                                            uint64_t byteCount) {
+                                                            const unsigned char *destination) {
+    // Logical span length does not constrain bulk width. A final source packet
+    // may extend into the next source span or Thor's 128-byte tensor padding;
+    // the destination remainder is always stored at its exact logical size.
     const uintptr_t combined = reinterpret_cast<uintptr_t>(source) |
-                               reinterpret_cast<uintptr_t>(destination) |
-                               static_cast<uintptr_t>(byteCount);
+                               reinterpret_cast<uintptr_t>(destination);
+    if ((combined & 31U) == 0) return 32;
     if ((combined & 15U) == 0) return 16;
     if ((combined & 7U) == 0) return 8;
     if ((combined & 3U) == 0) return 4;
@@ -46,16 +44,107 @@ __device__ __forceinline__ uint32_t widestAlignedCopyWidth(const unsigned char *
     return 1;
 }
 
+template <uint32_t NumBytes>
+struct ExactTailBytes {
+    uint8_t bytes[NumBytes];
+};
+
+template <uint32_t NumBytes>
+struct RawPacketBytes {
+    uint8_t bytes[NumBytes];
+};
+
+template <uint32_t TailBytes, typename CopyT>
+__device__ __forceinline__ void storeExactTailFromPacket(CopyT packet, CopyT *destination) {
+    static_assert(TailBytes > 0);
+    static_assert(TailBytes < sizeof(CopyT));
+    static_assert(sizeof(RawPacketBytes<sizeof(CopyT)>) == sizeof(CopyT));
+    static_assert(sizeof(ExactTailBytes<TailBytes>) == TailBytes);
+
+    const RawPacketBytes<sizeof(CopyT)> packetBytes =
+        cuda::std::bit_cast<RawPacketBytes<sizeof(CopyT)>>(packet);
+    ExactTailBytes<TailBytes> tail;
+#pragma unroll
+    for (uint32_t byte = 0; byte < TailBytes; ++byte) tail.bytes[byte] = packetBytes.bytes[byte];
+    *reinterpret_cast<ExactTailBytes<TailBytes> *>(destination) = tail;
+}
+
+template <typename CopyT>
+__device__ __attribute__((noinline)) void copyExactTailPacket(const CopyT *source,
+                                                              CopyT *destination,
+                                                              uint32_t tailBytes) {
+    static_assert(sizeof(CopyT) == 2 || sizeof(CopyT) == 4 || sizeof(CopyT) == 8 ||
+                  sizeof(CopyT) == 16 || sizeof(CopyT) == 32);
+    if (tailBytes == 0 || tailBytes >= sizeof(CopyT)) return;
+
+    const CopyT packet = *source;
+#define THOR_RAGGED_CONCAT_TAIL_CASE(N)                      \
+    case N:                                                   \
+        if constexpr (N < sizeof(CopyT)) {                    \
+            storeExactTailFromPacket<N>(packet, destination); \
+        }                                                     \
+        return
+    switch (tailBytes) {
+        THOR_RAGGED_CONCAT_TAIL_CASE(1);
+        THOR_RAGGED_CONCAT_TAIL_CASE(2);
+        THOR_RAGGED_CONCAT_TAIL_CASE(3);
+        THOR_RAGGED_CONCAT_TAIL_CASE(4);
+        THOR_RAGGED_CONCAT_TAIL_CASE(5);
+        THOR_RAGGED_CONCAT_TAIL_CASE(6);
+        THOR_RAGGED_CONCAT_TAIL_CASE(7);
+        THOR_RAGGED_CONCAT_TAIL_CASE(8);
+        THOR_RAGGED_CONCAT_TAIL_CASE(9);
+        THOR_RAGGED_CONCAT_TAIL_CASE(10);
+        THOR_RAGGED_CONCAT_TAIL_CASE(11);
+        THOR_RAGGED_CONCAT_TAIL_CASE(12);
+        THOR_RAGGED_CONCAT_TAIL_CASE(13);
+        THOR_RAGGED_CONCAT_TAIL_CASE(14);
+        THOR_RAGGED_CONCAT_TAIL_CASE(15);
+        THOR_RAGGED_CONCAT_TAIL_CASE(16);
+        THOR_RAGGED_CONCAT_TAIL_CASE(17);
+        THOR_RAGGED_CONCAT_TAIL_CASE(18);
+        THOR_RAGGED_CONCAT_TAIL_CASE(19);
+        THOR_RAGGED_CONCAT_TAIL_CASE(20);
+        THOR_RAGGED_CONCAT_TAIL_CASE(21);
+        THOR_RAGGED_CONCAT_TAIL_CASE(22);
+        THOR_RAGGED_CONCAT_TAIL_CASE(23);
+        THOR_RAGGED_CONCAT_TAIL_CASE(24);
+        THOR_RAGGED_CONCAT_TAIL_CASE(25);
+        THOR_RAGGED_CONCAT_TAIL_CASE(26);
+        THOR_RAGGED_CONCAT_TAIL_CASE(27);
+        THOR_RAGGED_CONCAT_TAIL_CASE(28);
+        THOR_RAGGED_CONCAT_TAIL_CASE(29);
+        THOR_RAGGED_CONCAT_TAIL_CASE(30);
+        THOR_RAGGED_CONCAT_TAIL_CASE(31);
+        default:
+            return;
+    }
+#undef THOR_RAGGED_CONCAT_TAIL_CASE
+}
+
 template <typename CopyT, typename ItemIndexT, uint32_t LanesPerSpan>
-__device__ __forceinline__ void copyAligned(const unsigned char *source,
-                                            unsigned char *destination,
+__device__ __forceinline__ void copyAligned(const unsigned char *sourceBytes,
+                                            unsigned char *destinationBytes,
                                             ItemIndexT byteCount,
                                             uint32_t lane) {
-    const auto *typedSource = reinterpret_cast<const CopyT *>(source);
-    auto *typedDestination = reinterpret_cast<CopyT *>(destination);
-    const ItemIndexT items = byteCount / sizeof(CopyT);
-    for (ItemIndexT item = static_cast<ItemIndexT>(lane); item < items; item += LanesPerSpan) {
-        typedDestination[item] = typedSource[item];
+    const CopyT *__restrict__ source = reinterpret_cast<const CopyT *>(sourceBytes);
+    CopyT *__restrict__ destination = reinterpret_cast<CopyT *>(destinationBytes);
+    const ItemIndexT items = byteCount / static_cast<ItemIndexT>(sizeof(CopyT));
+
+    ItemIndexT item = static_cast<ItemIndexT>(lane);
+    while (item < items) {
+        destination[item] = source[item];
+        const ItemIndexT laneStride = static_cast<ItemIndexT>(LanesPerSpan);
+        if (items - item <= laneStride) break;
+        item += laneStride;
+    }
+
+    if constexpr (sizeof(CopyT) > 1) {
+        if (lane == 0) {
+            const uint32_t tailBytes = static_cast<uint32_t>(
+                byteCount % static_cast<ItemIndexT>(sizeof(CopyT)));
+            if (tailBytes != 0) copyExactTailPacket(source + items, destination + items, tailBytes);
+        }
     }
 }
 
@@ -63,6 +152,9 @@ template <typename ItemIndexT, uint32_t LanesPerSpan>
 __device__ __forceinline__ void copySpanIndexed(const SpanCopyMetadata &metadata, uint32_t lane) {
     const ItemIndexT byteCount = static_cast<ItemIndexT>(metadata.byteCount);
     switch (metadata.copyWidthBytes) {
+        case 32:
+            copyAligned<ulonglong4_32a, ItemIndexT, LanesPerSpan>(metadata.source, metadata.destination, byteCount, lane);
+            break;
         case 16:
             copyAligned<uint4, ItemIndexT, LanesPerSpan>(metadata.source, metadata.destination, byteCount, lane);
             break;
@@ -83,9 +175,6 @@ __device__ __forceinline__ void copySpanIndexed(const SpanCopyMetadata &metadata
 
 template <uint32_t LanesPerSpan>
 __device__ __forceinline__ void copySpan(const SpanCopyMetadata &metadata, uint32_t lane) {
-    // Keep the ordinary copy loop 32-bit. Only a genuinely enormous contiguous
-    // slice needs 64-bit iteration; byte-address arithmetic remains 64-bit so
-    // buffers larger than 4 GiB are still addressable.
     if (metadata.byteCount <= kMaxUint32 - LanesPerSpan) {
         copySpanIndexed<uint32_t, LanesPerSpan>(metadata, lane);
     } else {
@@ -93,217 +182,239 @@ __device__ __forceinline__ void copySpan(const SpanCopyMetadata &metadata, uint3
     }
 }
 
-template <typename ActiveCountT, typename SpanIndexT, uint32_t SpansPerBlock>
+template <typename SpanIndexT>
+__device__ __forceinline__ SpanCopyMetadata resolveForwardSpan(
+    unsigned char *destination,
+    unsigned char *const *sources,
+    SpanIndexT span,
+    SpanIndexT outerSlicesPerValue,
+    uint32_t numSources,
+    uint64_t outputValueBytes,
+    uint64_t outputSliceBytes,
+    const RaggedConcatenateSpanGeometry *geometry) {
+    SpanCopyMetadata metadata{nullptr, nullptr, 0, 1};
+    const SpanIndexT spansPerRow = outerSlicesPerValue * static_cast<SpanIndexT>(numSources);
+    const SpanIndexT row = span / spansPerRow;
+    const SpanIndexT rowRemainder = span - row * spansPerRow;
+    const SpanIndexT outerSlice = rowRemainder / static_cast<SpanIndexT>(numSources);
+    const uint32_t sourceIndex = static_cast<uint32_t>(
+        rowRemainder - outerSlice * static_cast<SpanIndexT>(numSources));
+    const RaggedConcatenateSpanGeometry sourceGeometry = geometry[sourceIndex];
+    if (sourceGeometry.spanBytes == 0) return metadata;
+
+    metadata.source = sources[sourceIndex] +
+                      static_cast<uint64_t>(row) * sourceGeometry.valueBytes +
+                      static_cast<uint64_t>(outerSlice) * sourceGeometry.spanBytes;
+    metadata.destination = destination +
+                           static_cast<uint64_t>(row) * outputValueBytes +
+                           static_cast<uint64_t>(outerSlice) * outputSliceBytes +
+                           sourceGeometry.outputOffsetBytes;
+    metadata.byteCount = sourceGeometry.spanBytes;
+    metadata.copyWidthBytes = widestAlignedCopyWidth(metadata.source, metadata.destination);
+    return metadata;
+}
+
+template <typename SpanIndexT>
+__device__ __forceinline__ SpanCopyMetadata resolveBackwardSpan(
+    unsigned char *const *destinations,
+    const unsigned char *source,
+    SpanIndexT span,
+    SpanIndexT outerSlicesPerValue,
+    uint32_t numDestinations,
+    uint64_t sourceValueBytes,
+    uint64_t sourceSliceBytes,
+    const RaggedConcatenateSpanGeometry *geometry) {
+    SpanCopyMetadata metadata{nullptr, nullptr, 0, 1};
+    const SpanIndexT spansPerRow = outerSlicesPerValue * static_cast<SpanIndexT>(numDestinations);
+    const SpanIndexT row = span / spansPerRow;
+    const SpanIndexT rowRemainder = span - row * spansPerRow;
+    const SpanIndexT outerSlice = rowRemainder / static_cast<SpanIndexT>(numDestinations);
+    const uint32_t destinationIndex = static_cast<uint32_t>(
+        rowRemainder - outerSlice * static_cast<SpanIndexT>(numDestinations));
+    unsigned char *destination = destinations[destinationIndex];
+    if (destination == nullptr) return metadata;
+    const RaggedConcatenateSpanGeometry destinationGeometry = geometry[destinationIndex];
+    if (destinationGeometry.spanBytes == 0) return metadata;
+
+    metadata.source = source +
+                      static_cast<uint64_t>(row) * sourceValueBytes +
+                      static_cast<uint64_t>(outerSlice) * sourceSliceBytes +
+                      destinationGeometry.outputOffsetBytes;
+    metadata.destination = destination +
+                           static_cast<uint64_t>(row) * destinationGeometry.valueBytes +
+                           static_cast<uint64_t>(outerSlice) * destinationGeometry.spanBytes;
+    metadata.byteCount = destinationGeometry.spanBytes;
+    metadata.copyWidthBytes = widestAlignedCopyWidth(metadata.source, metadata.destination);
+    return metadata;
+}
+
+template <typename SpanIndexT, uint32_t SpansPerBlock>
 __global__ void raggedConcatenateSpans(unsigned char *destination,
                                        unsigned char *const *sources,
-                                       uint32_t elementSizeBytes,
-                                       SpanIndexT capacityRows,
-                                       SpanIndexT elementsPerOutputValue,
+                                       SpanIndexT totalSpans,
                                        SpanIndexT outerSlicesPerValue,
-                                       SpanIndexT innerElements,
                                        uint32_t numSources,
-                                       const uint64_t *axisOffsets,
-                                       const void *activeCount) {
-    static_assert(SpansPerBlock >= 1 && SpansPerBlock <= kMaxSpansPerBlock,
-                  "RaggedConcatenate spans per CTA are out of range.");
-    static_assert(kThreads % SpansPerBlock == 0,
-                  "RaggedConcatenate span groups must tile a CTA.");
+                                       uint64_t outputValueBytes,
+                                       uint64_t outputSliceBytes,
+                                       const RaggedConcatenateSpanGeometry *geometry) {
+    static_assert(SpansPerBlock >= 1 && SpansPerBlock <= kMaxSpansPerBlock);
+    static_assert(kThreads % SpansPerBlock == 0);
     constexpr uint32_t kLanesPerSpan = kThreads / SpansPerBlock;
-
-    __shared__ SpanCopyMetadata spanMetadata[SpansPerBlock];
 
     const uint32_t spanSlot = threadIdx.x / kLanesPerSpan;
     const uint32_t lane = threadIdx.x - spanSlot * kLanesPerSpan;
-    const SpanIndexT spansPerRow = outerSlicesPerValue * static_cast<SpanIndexT>(numSources);
-    const SpanIndexT totalSpans = capacityRows * spansPerRow;
     const uint32_t spanStride = gridDim.x * SpansPerBlock;
-
     SpanIndexT spanBase = static_cast<SpanIndexT>(blockIdx.x) * SpansPerBlock;
-    while (spanBase < totalSpans) {
-        if (lane == 0) {
-            SpanCopyMetadata metadata{nullptr, nullptr, 0, 1};
+
+    if constexpr (kLanesPerSpan == 1) {
+        while (spanBase < totalSpans) {
             if (spanSlot < totalSpans - spanBase) {
-                const SpanIndexT span = spanBase + static_cast<SpanIndexT>(spanSlot);
-                const SpanIndexT row = span / spansPerRow;
-                const ActiveCountT activeRows = reinterpret_cast<const ActiveCountT *>(activeCount)[0];
-                if (rowIsActive(row, activeRows)) {
-                    const SpanIndexT rowRemainder = span - row * spansPerRow;
-                    const SpanIndexT outerSlice = rowRemainder / static_cast<SpanIndexT>(numSources);
-                    const uint32_t sourceIndex = static_cast<uint32_t>(
-                        rowRemainder - outerSlice * static_cast<SpanIndexT>(numSources));
-
-                    const SpanIndexT axisBegin = static_cast<SpanIndexT>(axisOffsets[sourceIndex]);
-                    const SpanIndexT axisEnd = static_cast<SpanIndexT>(axisOffsets[sourceIndex + 1]);
-                    const SpanIndexT sourceSliceElements = (axisEnd - axisBegin) * innerElements;
-                    if (sourceSliceElements != 0) {
-                        const SpanIndexT sourceValueElements = outerSlicesPerValue * sourceSliceElements;
-                        const SpanIndexT sourceBegin =
-                            row * sourceValueElements + outerSlice * sourceSliceElements;
-                        const SpanIndexT outputSliceElements = elementsPerOutputValue / outerSlicesPerValue;
-                        const SpanIndexT destinationBegin =
-                            row * elementsPerOutputValue + outerSlice * outputSliceElements + axisBegin * innerElements;
-
-                        metadata.source = sources[sourceIndex] +
-                                          static_cast<uint64_t>(sourceBegin) * elementSizeBytes;
-                        metadata.destination = destination +
-                                               static_cast<uint64_t>(destinationBegin) * elementSizeBytes;
-                        metadata.byteCount = static_cast<uint64_t>(sourceSliceElements) * elementSizeBytes;
-                        metadata.copyWidthBytes =
-                            widestAlignedCopyWidth(metadata.source, metadata.destination, metadata.byteCount);
-                    }
+                const SpanCopyMetadata metadata = resolveForwardSpan(
+                    destination, sources, spanBase + static_cast<SpanIndexT>(spanSlot),
+                    outerSlicesPerValue, numSources, outputValueBytes, outputSliceBytes, geometry);
+                if (metadata.byteCount != 0) copySpan<1>(metadata, 0);
+            }
+            if (static_cast<SpanIndexT>(spanStride) >= totalSpans - spanBase) break;
+            spanBase += static_cast<SpanIndexT>(spanStride);
+        }
+    } else {
+        __shared__ SpanCopyMetadata spanMetadata[SpansPerBlock];
+        while (spanBase < totalSpans) {
+            if (lane == 0) {
+                SpanCopyMetadata metadata{nullptr, nullptr, 0, 1};
+                if (spanSlot < totalSpans - spanBase) {
+                    metadata = resolveForwardSpan(
+                        destination, sources, spanBase + static_cast<SpanIndexT>(spanSlot),
+                        outerSlicesPerValue, numSources, outputValueBytes, outputSliceBytes, geometry);
                 }
+                spanMetadata[spanSlot] = metadata;
             }
-            spanMetadata[spanSlot] = metadata;
-        }
 
-        if constexpr (kLanesPerSpan == 32) {
-            __syncwarp();
-        } else {
-            __syncthreads();
-        }
-        const SpanCopyMetadata metadata = spanMetadata[spanSlot];
+            if constexpr (kLanesPerSpan <= 32) __syncwarp();
+            else __syncthreads();
+            const SpanCopyMetadata metadata = spanMetadata[spanSlot];
 
-        const bool hasNextSpanBase = static_cast<SpanIndexT>(spanStride) < totalSpans - spanBase;
-        if (hasNextSpanBase) {
-            if constexpr (kLanesPerSpan == 32) {
-                __syncwarp();
-            } else {
-                __syncthreads();
+            const bool hasNext = static_cast<SpanIndexT>(spanStride) < totalSpans - spanBase;
+            if (hasNext) {
+                if constexpr (kLanesPerSpan <= 32) __syncwarp();
+                else __syncthreads();
             }
+            if (metadata.byteCount != 0) copySpan<kLanesPerSpan>(metadata, lane);
+            if (!hasNext) break;
+            spanBase += static_cast<SpanIndexT>(spanStride);
         }
-
-        if (metadata.byteCount != 0) copySpan<kLanesPerSpan>(metadata, lane);
-        if (!hasNextSpanBase) break;
-        spanBase += static_cast<SpanIndexT>(spanStride);
     }
 }
 
-template <typename ActiveCountT, typename SpanIndexT, uint32_t SpansPerBlock>
+template <typename SpanIndexT, uint32_t SpansPerBlock>
 __global__ void raggedSplitSpans(unsigned char *const *destinations,
                                  const unsigned char *source,
-                                 uint32_t elementSizeBytes,
-                                 SpanIndexT capacityRows,
-                                 SpanIndexT elementsPerSourceValue,
+                                 SpanIndexT totalSpans,
                                  SpanIndexT outerSlicesPerValue,
-                                 SpanIndexT innerElements,
                                  uint32_t numDestinations,
-                                 const uint64_t *axisOffsets,
-                                 const void *activeCount) {
-    static_assert(SpansPerBlock >= 1 && SpansPerBlock <= kMaxSpansPerBlock,
-                  "RaggedConcatenate split spans per CTA are out of range.");
-    static_assert(kThreads % SpansPerBlock == 0,
-                  "RaggedConcatenate split span groups must tile a CTA.");
+                                 uint64_t sourceValueBytes,
+                                 uint64_t sourceSliceBytes,
+                                 const RaggedConcatenateSpanGeometry *geometry) {
+    static_assert(SpansPerBlock >= 1 && SpansPerBlock <= kMaxSpansPerBlock);
+    static_assert(kThreads % SpansPerBlock == 0);
     constexpr uint32_t kLanesPerSpan = kThreads / SpansPerBlock;
-
-    __shared__ SpanCopyMetadata spanMetadata[SpansPerBlock];
 
     const uint32_t spanSlot = threadIdx.x / kLanesPerSpan;
     const uint32_t lane = threadIdx.x - spanSlot * kLanesPerSpan;
-    const SpanIndexT spansPerRow = outerSlicesPerValue * static_cast<SpanIndexT>(numDestinations);
-    const SpanIndexT totalSpans = capacityRows * spansPerRow;
     const uint32_t spanStride = gridDim.x * SpansPerBlock;
-
     SpanIndexT spanBase = static_cast<SpanIndexT>(blockIdx.x) * SpansPerBlock;
-    while (spanBase < totalSpans) {
-        if (lane == 0) {
-            SpanCopyMetadata metadata{nullptr, nullptr, 0, 1};
+
+    if constexpr (kLanesPerSpan == 1) {
+        while (spanBase < totalSpans) {
             if (spanSlot < totalSpans - spanBase) {
-                const SpanIndexT span = spanBase + static_cast<SpanIndexT>(spanSlot);
-                const SpanIndexT row = span / spansPerRow;
-                const ActiveCountT activeRows = reinterpret_cast<const ActiveCountT *>(activeCount)[0];
-                if (rowIsActive(row, activeRows)) {
-                    const SpanIndexT rowRemainder = span - row * spansPerRow;
-                    const SpanIndexT outerSlice = rowRemainder / static_cast<SpanIndexT>(numDestinations);
-                    const uint32_t destinationIndex = static_cast<uint32_t>(
-                        rowRemainder - outerSlice * static_cast<SpanIndexT>(numDestinations));
-                    unsigned char *destination = destinations[destinationIndex];
-                    if (destination != nullptr) {
-                        const SpanIndexT axisBegin = static_cast<SpanIndexT>(axisOffsets[destinationIndex]);
-                        const SpanIndexT axisEnd = static_cast<SpanIndexT>(axisOffsets[destinationIndex + 1]);
-                        const SpanIndexT destinationSliceElements = (axisEnd - axisBegin) * innerElements;
-                        if (destinationSliceElements != 0) {
-                            const SpanIndexT destinationValueElements =
-                                outerSlicesPerValue * destinationSliceElements;
-                            const SpanIndexT destinationBegin =
-                                row * destinationValueElements + outerSlice * destinationSliceElements;
-                            const SpanIndexT sourceSliceElements = elementsPerSourceValue / outerSlicesPerValue;
-                            const SpanIndexT sourceBegin =
-                                row * elementsPerSourceValue + outerSlice * sourceSliceElements + axisBegin * innerElements;
-
-                            metadata.source = source + static_cast<uint64_t>(sourceBegin) * elementSizeBytes;
-                            metadata.destination = destination +
-                                                   static_cast<uint64_t>(destinationBegin) * elementSizeBytes;
-                            metadata.byteCount =
-                                static_cast<uint64_t>(destinationSliceElements) * elementSizeBytes;
-                            metadata.copyWidthBytes =
-                                widestAlignedCopyWidth(metadata.source, metadata.destination, metadata.byteCount);
-                        }
-                    }
+                const SpanCopyMetadata metadata = resolveBackwardSpan(
+                    destinations, source, spanBase + static_cast<SpanIndexT>(spanSlot),
+                    outerSlicesPerValue, numDestinations, sourceValueBytes, sourceSliceBytes, geometry);
+                if (metadata.byteCount != 0) copySpan<1>(metadata, 0);
+            }
+            if (static_cast<SpanIndexT>(spanStride) >= totalSpans - spanBase) break;
+            spanBase += static_cast<SpanIndexT>(spanStride);
+        }
+    } else {
+        __shared__ SpanCopyMetadata spanMetadata[SpansPerBlock];
+        while (spanBase < totalSpans) {
+            if (lane == 0) {
+                SpanCopyMetadata metadata{nullptr, nullptr, 0, 1};
+                if (spanSlot < totalSpans - spanBase) {
+                    metadata = resolveBackwardSpan(
+                        destinations, source, spanBase + static_cast<SpanIndexT>(spanSlot),
+                        outerSlicesPerValue, numDestinations, sourceValueBytes, sourceSliceBytes, geometry);
                 }
+                spanMetadata[spanSlot] = metadata;
             }
-            spanMetadata[spanSlot] = metadata;
-        }
 
-        if constexpr (kLanesPerSpan == 32) {
-            __syncwarp();
-        } else {
-            __syncthreads();
-        }
-        const SpanCopyMetadata metadata = spanMetadata[spanSlot];
+            if constexpr (kLanesPerSpan <= 32) __syncwarp();
+            else __syncthreads();
+            const SpanCopyMetadata metadata = spanMetadata[spanSlot];
 
-        const bool hasNextSpanBase = static_cast<SpanIndexT>(spanStride) < totalSpans - spanBase;
-        if (hasNextSpanBase) {
-            if constexpr (kLanesPerSpan == 32) {
-                __syncwarp();
-            } else {
-                __syncthreads();
+            const bool hasNext = static_cast<SpanIndexT>(spanStride) < totalSpans - spanBase;
+            if (hasNext) {
+                if constexpr (kLanesPerSpan <= 32) __syncwarp();
+                else __syncthreads();
             }
+            if (metadata.byteCount != 0) copySpan<kLanesPerSpan>(metadata, lane);
+            if (!hasNext) break;
+            spanBase += static_cast<SpanIndexT>(spanStride);
         }
-
-        if (metadata.byteCount != 0) copySpan<kLanesPerSpan>(metadata, lane);
-        if (!hasNextSpanBase) break;
-        spanBase += static_cast<SpanIndexT>(spanStride);
     }
 }
 
-void validateActiveCountElementSize(std::size_t activeCountElementSizeBytes) {
-    if (activeCountElementSizeBytes != sizeof(uint32_t) && activeCountElementSizeBytes != sizeof(uint64_t)) {
-        throw std::invalid_argument("Ragged concatenate requires UINT32 or UINT64 active-count storage.");
-    }
+uint64_t checkedMultiply(uint64_t lhs, uint64_t rhs, const char *what) {
+    if (lhs != 0 && rhs > std::numeric_limits<uint64_t>::max() / lhs)
+        throw std::invalid_argument(what);
+    return lhs * rhs;
 }
 
-uint64_t spanCount(uint64_t capacityRows, uint64_t outerSlicesPerValue, uint32_t numArrays) {
-    if (capacityRows == 0 || outerSlicesPerValue == 0) {
-        throw std::invalid_argument("Ragged concatenate requires non-zero packed geometry.");
-    }
+uint64_t spanCount(uint64_t activeRows, uint64_t outerSlicesPerValue, uint32_t numArrays) {
+    if (outerSlicesPerValue == 0) throw std::invalid_argument("Ragged concatenate requires non-zero outer-slice geometry.");
     if (numArrays < 2) throw std::invalid_argument("Ragged concatenate requires at least two arrays.");
-    if (outerSlicesPerValue > std::numeric_limits<uint64_t>::max() / numArrays) {
-        throw std::invalid_argument("Ragged concatenate span geometry overflow.");
-    }
-    const uint64_t spansPerRow = outerSlicesPerValue * static_cast<uint64_t>(numArrays);
-    if (capacityRows > std::numeric_limits<uint64_t>::max() / spansPerRow) {
-        throw std::invalid_argument("Ragged concatenate span count overflow.");
-    }
-    return capacityRows * spansPerRow;
+    return checkedMultiply(activeRows,
+                           checkedMultiply(outerSlicesPerValue, static_cast<uint64_t>(numArrays),
+                                           "Ragged concatenate spans-per-row overflow."),
+                           "Ragged concatenate active span count overflow.");
 }
 
-void validateGeometry(std::size_t elementSizeBytes,
-                      uint64_t elementsPerValue,
-                      uint64_t outerSlicesPerValue,
-                      uint64_t innerElements) {
-    if (elementSizeBytes == 0 || elementsPerValue == 0 || outerSlicesPerValue == 0 || innerElements == 0) {
-        throw std::invalid_argument("Ragged concatenate requires non-zero element geometry.");
-    }
-    if (elementSizeBytes > std::numeric_limits<uint32_t>::max()) {
-        throw std::invalid_argument("Ragged concatenate element size exceeds the CUDA 32-bit fast-path contract.");
-    }
-    if (elementsPerValue % outerSlicesPerValue != 0) {
+void validateLaunchGeometry(uint64_t capacityRows,
+                            uint64_t valueBytes,
+                            uint64_t outerSlicesPerValue,
+                            uint32_t numArrays,
+                            const RaggedConcatenateSpanGeometry *geometry,
+                            uint64_t activeRows) {
+    if (capacityRows == 0 || valueBytes == 0 || outerSlicesPerValue == 0)
+        throw std::invalid_argument("Ragged concatenate requires non-zero packed geometry.");
+    if (numArrays < 2) throw std::invalid_argument("Ragged concatenate requires at least two arrays.");
+    if (geometry == nullptr) throw std::invalid_argument("Ragged concatenate span geometry is null.");
+    if (activeRows > capacityRows) throw std::invalid_argument("Ragged concatenate active prefix exceeds packed capacity.");
+    if (valueBytes % outerSlicesPerValue != 0)
         throw std::invalid_argument("Ragged concatenate outer-slice geometry does not divide the packed value.");
-    }
-    const uint64_t elementsPerOuterSlice = elementsPerValue / outerSlicesPerValue;
-    if (elementsPerOuterSlice % innerElements != 0) {
-        throw std::invalid_argument("Ragged concatenate inner geometry does not divide an outer slice.");
-    }
+}
+
+uint32_t spansPerBlockFor(uint64_t expectedSpanBytes, uint64_t spans) {
+    uint32_t spansByPayload = 1;
+    if (expectedSpanBytes <= kTargetBytesPerLane) spansByPayload = 256;
+    else if (expectedSpanBytes <= 2 * kTargetBytesPerLane) spansByPayload = 128;
+    else if (expectedSpanBytes <= 4 * kTargetBytesPerLane) spansByPayload = 64;
+    else if (expectedSpanBytes <= 8 * kTargetBytesPerLane) spansByPayload = 32;
+    else if (expectedSpanBytes <= 16 * kTargetBytesPerLane) spansByPayload = 16;
+    else if (expectedSpanBytes <= 32 * kTargetBytesPerLane) spansByPayload = 8;
+    else if (expectedSpanBytes <= 64 * kTargetBytesPerLane) spansByPayload = 4;
+    else if (expectedSpanBytes <= 128 * kTargetBytesPerLane) spansByPayload = 2;
+
+    uint32_t spansByParallelism = 1;
+    if (spans >= 16384) spansByParallelism = 256;
+    else if (spans >= 8192) spansByParallelism = 128;
+    else if (spans >= 4096) spansByParallelism = 64;
+    else if (spans >= 2048) spansByParallelism = 32;
+    else if (spans >= 1024) spansByParallelism = 16;
+    else if (spans >= 512) spansByParallelism = 8;
+    else if (spans >= 256) spansByParallelism = 4;
+    else if (spans >= 128) spansByParallelism = 2;
+    return std::min(spansByPayload, spansByParallelism);
 }
 
 template <uint32_t SpansPerBlock>
@@ -312,222 +423,169 @@ uint32_t blocksForSpans(uint64_t spans) {
     return static_cast<uint32_t>(std::min<uint64_t>(std::max<uint64_t>(blocks, 1), kMaxPortableBlocks));
 }
 
-template <typename ActiveCountT, typename SpanIndexT, uint32_t SpansPerBlock>
+template <typename SpanIndexT, uint32_t SpansPerBlock>
 void launchForwardGrouped(void *dest,
                           void *source[],
-                          std::size_t elementSizeBytes,
-                          SpanIndexT capacityRows,
-                          SpanIndexT elementsPerOutputValue,
+                          SpanIndexT spans,
                           SpanIndexT outerSlicesPerValue,
-                          SpanIndexT innerElements,
                           uint32_t numSourceArrays,
-                          const uint64_t axisOffsets[],
-                          const void *activeCount,
-                          uint64_t spans,
+                          uint64_t outputValueBytes,
+                          uint64_t outputSliceBytes,
+                          const RaggedConcatenateSpanGeometry *geometry,
                           Stream stream) {
-    raggedConcatenateSpans<ActiveCountT, SpanIndexT, SpansPerBlock>
-        <<<blocksForSpans<SpansPerBlock>(spans), kThreads, 0, stream.getStream()>>>(
-            static_cast<unsigned char *>(dest),
-            reinterpret_cast<unsigned char **>(source),
-            static_cast<uint32_t>(elementSizeBytes),
-            capacityRows,
-            elementsPerOutputValue,
-            outerSlicesPerValue,
-            innerElements,
-            numSourceArrays,
-            axisOffsets,
-            activeCount);
+    raggedConcatenateSpans<SpanIndexT, SpansPerBlock>
+        <<<blocksForSpans<SpansPerBlock>(static_cast<uint64_t>(spans)), kThreads, 0, stream.getStream()>>>(
+            static_cast<unsigned char *>(dest), reinterpret_cast<unsigned char **>(source), spans,
+            outerSlicesPerValue, numSourceArrays, outputValueBytes, outputSliceBytes, geometry);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <typename ActiveCountT, typename SpanIndexT>
-void launchForwardIndexed(void *dest,
-                          void *source[],
-                          std::size_t elementSizeBytes,
-                          SpanIndexT capacityRows,
-                          SpanIndexT elementsPerOutputValue,
-                          SpanIndexT outerSlicesPerValue,
-                          SpanIndexT innerElements,
-                          uint32_t numSourceArrays,
-                          const uint64_t axisOffsets[],
-                          const void *activeCount,
-                          uint64_t spans,
-                          Stream stream) {
-    if (spans < 128) {
-        launchForwardGrouped<ActiveCountT, SpanIndexT, 1>(dest, source, elementSizeBytes, capacityRows,
-            elementsPerOutputValue, outerSlicesPerValue, innerElements, numSourceArrays, axisOffsets, activeCount, spans, stream);
-    } else if (spans < 256) {
-        launchForwardGrouped<ActiveCountT, SpanIndexT, 2>(dest, source, elementSizeBytes, capacityRows,
-            elementsPerOutputValue, outerSlicesPerValue, innerElements, numSourceArrays, axisOffsets, activeCount, spans, stream);
-    } else if (spans < 512) {
-        launchForwardGrouped<ActiveCountT, SpanIndexT, 4>(dest, source, elementSizeBytes, capacityRows,
-            elementsPerOutputValue, outerSlicesPerValue, innerElements, numSourceArrays, axisOffsets, activeCount, spans, stream);
-    } else {
-        launchForwardGrouped<ActiveCountT, SpanIndexT, 8>(dest, source, elementSizeBytes, capacityRows,
-            elementsPerOutputValue, outerSlicesPerValue, innerElements, numSourceArrays, axisOffsets, activeCount, spans, stream);
-    }
-}
-
-template <typename ActiveCountT>
-void launchForwardTyped(void *dest,
-                        void *source[],
-                        std::size_t elementSizeBytes,
-                        uint64_t capacityRows,
-                        uint64_t elementsPerOutputValue,
-                        uint64_t outerSlicesPerValue,
-                        uint64_t innerElements,
-                        uint32_t numSourceArrays,
-                        const uint64_t axisOffsets[],
-                        const void *activeCount,
-                        uint64_t spans,
-                        Stream stream) {
-    const bool elementsFitUint32 =
-        elementsPerOutputValue <= kMaxUint32 && capacityRows <= kMaxUint32 / elementsPerOutputValue;
-    if (spans <= kMaxUint32 && capacityRows <= kMaxUint32 && elementsFitUint32 &&
-        outerSlicesPerValue <= kMaxUint32 && innerElements <= kMaxUint32) {
-        launchForwardIndexed<ActiveCountT, uint32_t>(dest, source, elementSizeBytes,
-            static_cast<uint32_t>(capacityRows), static_cast<uint32_t>(elementsPerOutputValue),
-            static_cast<uint32_t>(outerSlicesPerValue), static_cast<uint32_t>(innerElements),
-            numSourceArrays, axisOffsets, activeCount, spans, stream);
-    } else {
-        launchForwardIndexed<ActiveCountT, uint64_t>(dest, source, elementSizeBytes,
-            capacityRows, elementsPerOutputValue, outerSlicesPerValue, innerElements,
-            numSourceArrays, axisOffsets, activeCount, spans, stream);
-    }
-}
-
-template <typename ActiveCountT, typename SpanIndexT, uint32_t SpansPerBlock>
+template <typename SpanIndexT, uint32_t SpansPerBlock>
 void launchBackwardGrouped(void *dest[],
                            void *source,
-                           std::size_t elementSizeBytes,
-                           SpanIndexT capacityRows,
-                           SpanIndexT elementsPerSourceValue,
+                           SpanIndexT spans,
                            SpanIndexT outerSlicesPerValue,
-                           SpanIndexT innerElements,
                            uint32_t numDestArrays,
-                           const uint64_t axisOffsets[],
-                           const void *activeCount,
-                           uint64_t spans,
+                           uint64_t sourceValueBytes,
+                           uint64_t sourceSliceBytes,
+                           const RaggedConcatenateSpanGeometry *geometry,
                            Stream stream) {
-    raggedSplitSpans<ActiveCountT, SpanIndexT, SpansPerBlock>
-        <<<blocksForSpans<SpansPerBlock>(spans), kThreads, 0, stream.getStream()>>>(
-            reinterpret_cast<unsigned char **>(dest),
-            static_cast<const unsigned char *>(source),
-            static_cast<uint32_t>(elementSizeBytes),
-            capacityRows,
-            elementsPerSourceValue,
-            outerSlicesPerValue,
-            innerElements,
-            numDestArrays,
-            axisOffsets,
-            activeCount);
+    raggedSplitSpans<SpanIndexT, SpansPerBlock>
+        <<<blocksForSpans<SpansPerBlock>(static_cast<uint64_t>(spans)), kThreads, 0, stream.getStream()>>>(
+            reinterpret_cast<unsigned char **>(dest), static_cast<const unsigned char *>(source), spans,
+            outerSlicesPerValue, numDestArrays, sourceValueBytes, sourceSliceBytes, geometry);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <typename ActiveCountT, typename SpanIndexT>
-void launchBackwardIndexed(void *dest[],
-                           void *source,
-                           std::size_t elementSizeBytes,
-                           SpanIndexT capacityRows,
-                           SpanIndexT elementsPerSourceValue,
-                           SpanIndexT outerSlicesPerValue,
-                           SpanIndexT innerElements,
-                           uint32_t numDestArrays,
-                           const uint64_t axisOffsets[],
-                           const void *activeCount,
-                           uint64_t spans,
-                           Stream stream) {
-    if (spans < 128) {
-        launchBackwardGrouped<ActiveCountT, SpanIndexT, 1>(dest, source, elementSizeBytes, capacityRows,
-            elementsPerSourceValue, outerSlicesPerValue, innerElements, numDestArrays, axisOffsets, activeCount, spans, stream);
-    } else if (spans < 256) {
-        launchBackwardGrouped<ActiveCountT, SpanIndexT, 2>(dest, source, elementSizeBytes, capacityRows,
-            elementsPerSourceValue, outerSlicesPerValue, innerElements, numDestArrays, axisOffsets, activeCount, spans, stream);
-    } else if (spans < 512) {
-        launchBackwardGrouped<ActiveCountT, SpanIndexT, 4>(dest, source, elementSizeBytes, capacityRows,
-            elementsPerSourceValue, outerSlicesPerValue, innerElements, numDestArrays, axisOffsets, activeCount, spans, stream);
-    } else {
-        launchBackwardGrouped<ActiveCountT, SpanIndexT, 8>(dest, source, elementSizeBytes, capacityRows,
-            elementsPerSourceValue, outerSlicesPerValue, innerElements, numDestArrays, axisOffsets, activeCount, spans, stream);
+template <typename SpanIndexT>
+void launchForwardIndexed(void *dest,
+                          void *source[],
+                          SpanIndexT spans,
+                          SpanIndexT outerSlicesPerValue,
+                          uint32_t numSourceArrays,
+                          uint64_t outputValueBytes,
+                          uint64_t outputSliceBytes,
+                          const RaggedConcatenateSpanGeometry *geometry,
+                          uint32_t spansPerBlock,
+                          Stream stream) {
+#define THOR_FORWARD_GROUP(N) case N: launchForwardGrouped<SpanIndexT, N>(dest, source, spans, outerSlicesPerValue, numSourceArrays, outputValueBytes, outputSliceBytes, geometry, stream); return
+    switch (spansPerBlock) {
+        THOR_FORWARD_GROUP(1); THOR_FORWARD_GROUP(2); THOR_FORWARD_GROUP(4); THOR_FORWARD_GROUP(8);
+        THOR_FORWARD_GROUP(16); THOR_FORWARD_GROUP(32); THOR_FORWARD_GROUP(64); THOR_FORWARD_GROUP(128); THOR_FORWARD_GROUP(256);
+        default: break;
     }
+#undef THOR_FORWARD_GROUP
+    throw std::logic_error("Invalid RaggedConcatenate spans-per-CTA selection.");
 }
 
-template <typename ActiveCountT>
-void launchBackwardTyped(void *dest[],
-                         void *source,
-                         std::size_t elementSizeBytes,
-                         uint64_t capacityRows,
-                         uint64_t elementsPerSourceValue,
-                         uint64_t outerSlicesPerValue,
-                         uint64_t innerElements,
-                         uint32_t numDestArrays,
-                         const uint64_t axisOffsets[],
-                         const void *activeCount,
-                         uint64_t spans,
-                         Stream stream) {
-    const bool elementsFitUint32 =
-        elementsPerSourceValue <= kMaxUint32 && capacityRows <= kMaxUint32 / elementsPerSourceValue;
-    if (spans <= kMaxUint32 && capacityRows <= kMaxUint32 && elementsFitUint32 &&
-        outerSlicesPerValue <= kMaxUint32 && innerElements <= kMaxUint32) {
-        launchBackwardIndexed<ActiveCountT, uint32_t>(dest, source, elementSizeBytes,
-            static_cast<uint32_t>(capacityRows), static_cast<uint32_t>(elementsPerSourceValue),
-            static_cast<uint32_t>(outerSlicesPerValue), static_cast<uint32_t>(innerElements),
-            numDestArrays, axisOffsets, activeCount, spans, stream);
-    } else {
-        launchBackwardIndexed<ActiveCountT, uint64_t>(dest, source, elementSizeBytes,
-            capacityRows, elementsPerSourceValue, outerSlicesPerValue, innerElements,
-            numDestArrays, axisOffsets, activeCount, spans, stream);
+template <typename SpanIndexT>
+void launchBackwardIndexed(void *dest[],
+                           void *source,
+                           SpanIndexT spans,
+                           SpanIndexT outerSlicesPerValue,
+                           uint32_t numDestArrays,
+                           uint64_t sourceValueBytes,
+                           uint64_t sourceSliceBytes,
+                           const RaggedConcatenateSpanGeometry *geometry,
+                           uint32_t spansPerBlock,
+                           Stream stream) {
+#define THOR_BACKWARD_GROUP(N) case N: launchBackwardGrouped<SpanIndexT, N>(dest, source, spans, outerSlicesPerValue, numDestArrays, sourceValueBytes, sourceSliceBytes, geometry, stream); return
+    switch (spansPerBlock) {
+        THOR_BACKWARD_GROUP(1); THOR_BACKWARD_GROUP(2); THOR_BACKWARD_GROUP(4); THOR_BACKWARD_GROUP(8);
+        THOR_BACKWARD_GROUP(16); THOR_BACKWARD_GROUP(32); THOR_BACKWARD_GROUP(64); THOR_BACKWARD_GROUP(128); THOR_BACKWARD_GROUP(256);
+        default: break;
     }
+#undef THOR_BACKWARD_GROUP
+    throw std::logic_error("Invalid RaggedSplit spans-per-CTA selection.");
 }
 
 }  // namespace
 
+std::vector<RaggedConcatenateSpanGeometry> buildRaggedConcatenateSpanGeometry(
+    std::size_t elementSizeBytes,
+    uint64_t outerSlicesPerValue,
+    uint64_t innerElements,
+    const std::vector<uint64_t>& axisOffsets) {
+    if (elementSizeBytes == 0 || outerSlicesPerValue == 0 || innerElements == 0)
+        throw std::invalid_argument("Ragged concatenate requires non-zero static span geometry.");
+    if (axisOffsets.size() < 3 || axisOffsets.front() != 0)
+        throw std::invalid_argument("Ragged concatenate requires at least two monotonic axis spans starting at zero.");
+
+    std::vector<RaggedConcatenateSpanGeometry> geometry(axisOffsets.size() - 1);
+    for (size_t i = 0; i < geometry.size(); ++i) {
+        if (axisOffsets[i + 1] < axisOffsets[i])
+            throw std::invalid_argument("Ragged concatenate axis offsets must be monotonic.");
+        const uint64_t axisElements = axisOffsets[i + 1] - axisOffsets[i];
+        const uint64_t spanElements = checkedMultiply(axisElements, innerElements,
+                                                      "Ragged concatenate span element count overflow.");
+        const uint64_t spanBytes = checkedMultiply(spanElements, static_cast<uint64_t>(elementSizeBytes),
+                                                   "Ragged concatenate span byte count overflow.");
+        geometry[i] = RaggedConcatenateSpanGeometry{
+            spanBytes,
+            checkedMultiply(spanBytes, outerSlicesPerValue,
+                            "Ragged concatenate value byte count overflow."),
+            checkedMultiply(checkedMultiply(axisOffsets[i], innerElements,
+                                            "Ragged concatenate output offset element overflow."),
+                            static_cast<uint64_t>(elementSizeBytes),
+                            "Ragged concatenate output offset byte overflow.")};
+    }
+    return geometry;
+}
+
 void launchRaggedConcatenate(void *dest,
                              void *source[],
-                             std::size_t elementSizeBytes,
                              uint64_t capacityRows,
-                             uint64_t elementsPerOutputValue,
+                             uint64_t outputValueBytes,
                              uint64_t outerSlicesPerValue,
-                             uint64_t innerElements,
                              uint32_t numSourceArrays,
-                             const uint64_t axisOffsets[],
-                             const void *activeCount,
-                             std::size_t activeCountElementSizeBytes,
+                             const RaggedConcatenateSpanGeometry spanGeometry[],
+                             uint64_t activeRows,
                              Stream stream) {
-    validateActiveCountElementSize(activeCountElementSizeBytes);
-    validateGeometry(elementSizeBytes, elementsPerOutputValue, outerSlicesPerValue, innerElements);
-    const uint64_t spans = spanCount(capacityRows, outerSlicesPerValue, numSourceArrays);
+    validateLaunchGeometry(capacityRows, outputValueBytes, outerSlicesPerValue,
+                           numSourceArrays, spanGeometry, activeRows);
+    if (activeRows == 0) return;
+    const uint64_t spans = spanCount(activeRows, outerSlicesPerValue, numSourceArrays);
+    const uint64_t outputSliceBytes = outputValueBytes / outerSlicesPerValue;
+    const uint64_t expectedSpanBytes = outputSliceBytes / numSourceArrays +
+                                       (outputSliceBytes % numSourceArrays != 0 ? 1 : 0);
+    const uint32_t spansPerBlock = spansPerBlockFor(expectedSpanBytes, spans);
+
     ScopedGpu scopedGpu(stream.getGpuNum());
-    if (activeCountElementSizeBytes == sizeof(uint32_t)) {
-        launchForwardTyped<uint32_t>(dest, source, elementSizeBytes, capacityRows, elementsPerOutputValue,
-            outerSlicesPerValue, innerElements, numSourceArrays, axisOffsets, activeCount, spans, stream);
+    if (spans <= kMaxUint32 && outerSlicesPerValue <= kMaxUint32) {
+        launchForwardIndexed<uint32_t>(dest, source, static_cast<uint32_t>(spans),
+            static_cast<uint32_t>(outerSlicesPerValue), numSourceArrays,
+            outputValueBytes, outputSliceBytes, spanGeometry, spansPerBlock, stream);
     } else {
-        launchForwardTyped<uint64_t>(dest, source, elementSizeBytes, capacityRows, elementsPerOutputValue,
-            outerSlicesPerValue, innerElements, numSourceArrays, axisOffsets, activeCount, spans, stream);
+        launchForwardIndexed<uint64_t>(dest, source, spans, outerSlicesPerValue, numSourceArrays,
+            outputValueBytes, outputSliceBytes, spanGeometry, spansPerBlock, stream);
     }
 }
 
 void launchRaggedSplit(void *dest[],
                        void *source,
-                       std::size_t elementSizeBytes,
                        uint64_t capacityRows,
-                       uint64_t elementsPerSourceValue,
+                       uint64_t sourceValueBytes,
                        uint64_t outerSlicesPerValue,
-                       uint64_t innerElements,
                        uint32_t numDestArrays,
-                       const uint64_t axisOffsets[],
-                       const void *activeCount,
-                       std::size_t activeCountElementSizeBytes,
+                       const RaggedConcatenateSpanGeometry spanGeometry[],
+                       uint64_t activeRows,
                        Stream stream) {
-    validateActiveCountElementSize(activeCountElementSizeBytes);
-    validateGeometry(elementSizeBytes, elementsPerSourceValue, outerSlicesPerValue, innerElements);
-    const uint64_t spans = spanCount(capacityRows, outerSlicesPerValue, numDestArrays);
+    validateLaunchGeometry(capacityRows, sourceValueBytes, outerSlicesPerValue,
+                           numDestArrays, spanGeometry, activeRows);
+    if (activeRows == 0) return;
+    const uint64_t spans = spanCount(activeRows, outerSlicesPerValue, numDestArrays);
+    const uint64_t sourceSliceBytes = sourceValueBytes / outerSlicesPerValue;
+    const uint64_t expectedSpanBytes = sourceSliceBytes / numDestArrays +
+                                       (sourceSliceBytes % numDestArrays != 0 ? 1 : 0);
+    const uint32_t spansPerBlock = spansPerBlockFor(expectedSpanBytes, spans);
+
     ScopedGpu scopedGpu(stream.getGpuNum());
-    if (activeCountElementSizeBytes == sizeof(uint32_t)) {
-        launchBackwardTyped<uint32_t>(dest, source, elementSizeBytes, capacityRows, elementsPerSourceValue,
-            outerSlicesPerValue, innerElements, numDestArrays, axisOffsets, activeCount, spans, stream);
+    if (spans <= kMaxUint32 && outerSlicesPerValue <= kMaxUint32) {
+        launchBackwardIndexed<uint32_t>(dest, source, static_cast<uint32_t>(spans),
+            static_cast<uint32_t>(outerSlicesPerValue), numDestArrays,
+            sourceValueBytes, sourceSliceBytes, spanGeometry, spansPerBlock, stream);
     } else {
-        launchBackwardTyped<uint64_t>(dest, source, elementSizeBytes, capacityRows, elementsPerSourceValue,
-            outerSlicesPerValue, innerElements, numDestArrays, axisOffsets, activeCount, spans, stream);
+        launchBackwardIndexed<uint64_t>(dest, source, spans, outerSlicesPerValue, numDestArrays,
+            sourceValueBytes, sourceSliceBytes, spanGeometry, spansPerBlock, stream);
     }
 }

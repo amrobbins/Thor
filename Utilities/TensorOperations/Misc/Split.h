@@ -1,19 +1,14 @@
 #pragma once
 
 #include "Utilities/Common/Stream.h"
+#include "Utilities/TensorOperations/Misc/Concatenate.h"
 
-#include <cuda.h>
-#include <cstddef>
 #include <cstdint>
 
 void launchSplit(void *dest[],
                  void *source,
-                 std::size_t elementSizeBytes,
-                 long numElements,
-                 int numDimensions,
-                 int numDestArrays,
-                 int axisDimension,
-                 long axisElementsPerDestArray[],
-                 long stridePerSourceDimension[],
-                 long stridePerDestDimension[],
+                 uint64_t outerSlices,
+                 uint32_t numDestArrays,
+                 uint64_t packedSliceBytes,
+                 const ConcatenateSpanGeometry spanGeometry[],
                  Stream stream);

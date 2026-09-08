@@ -1,119 +1,53 @@
 #include "Concatenate.h"
 
 #include "Utilities/Common/ScopedGpu.h"
-#include "Utilities/Expression/CudaHelpers.h"
+#include "Utilities/TensorOperations/Misc/ConcatenateSpanCopy.cuh"
 
-__device__ __forceinline__ void computeDestIndex(long destFlatIndex, long destIndex[], int numDimensions, long stridePerDestDimension[]) {
-    for (int i = 0; i < numDimensions - 1; ++i) {
-        int dimensionIndex = destFlatIndex / stridePerDestDimension[i];
-        destFlatIndex -= dimensionIndex * stridePerDestDimension[i];
-        destIndex[i] = dimensionIndex;
-    }
-    destIndex[numDimensions - 1] = destFlatIndex;
+#include <limits>
+#include <stdexcept>
+
+namespace {
+
+uint64_t checkedMultiply(uint64_t lhs, uint64_t rhs, const char *what) {
+    if (lhs != 0 && rhs > std::numeric_limits<uint64_t>::max() / lhs)
+        throw std::invalid_argument(what);
+    return lhs * rhs;
 }
 
-__device__ __forceinline__ void computeSourceArray(
-    long axisElementIndex, long axisElementsPerSourceArray[], int numSourceArrays, int &sourceArray, long &sourceAxisElementIndex) {
-    for (int i = 0; i < numSourceArrays; ++i) {
-        if (axisElementIndex < axisElementsPerSourceArray[i]) {
-            sourceArray = i;
-            sourceAxisElementIndex = axisElementIndex;
-            return;
-        }
-        axisElementIndex -= axisElementsPerSourceArray[i];
+}  // namespace
+
+std::vector<ConcatenateSpanGeometry> buildConcatenateSpanGeometry(
+    std::size_t elementSizeBytes,
+    uint64_t innerElements,
+    const std::vector<uint64_t>& axisElementsPerArray) {
+    if (elementSizeBytes == 0 || innerElements == 0)
+        throw std::invalid_argument("Dense concatenate requires non-zero static span geometry.");
+    if (axisElementsPerArray.empty())
+        throw std::invalid_argument("Dense concatenate requires at least one array.");
+
+    std::vector<ConcatenateSpanGeometry> geometry(axisElementsPerArray.size());
+    uint64_t packedOffsetBytes = 0;
+    for (size_t i = 0; i < axisElementsPerArray.size(); ++i) {
+        const uint64_t spanElements = checkedMultiply(axisElementsPerArray[i], innerElements,
+                                                      "Dense concatenate span element count overflow.");
+        const uint64_t spanBytes = checkedMultiply(spanElements, static_cast<uint64_t>(elementSizeBytes),
+                                                   "Dense concatenate span byte count overflow.");
+        geometry[i] = ConcatenateSpanGeometry{spanBytes, packedOffsetBytes};
+        if (spanBytes > std::numeric_limits<uint64_t>::max() - packedOffsetBytes)
+            throw std::invalid_argument("Dense concatenate packed slice byte count overflow.");
+        packedOffsetBytes += spanBytes;
     }
-}
-
-__device__ __forceinline__ long computeFlatIndexFromIndex(long index[], long stridePerDimension[], int numDimensions) {
-    long flatIndex = 0;
-    for (int i = 0; i < numDimensions; ++i)
-        flatIndex += index[i] * stridePerDimension[i];
-    return flatIndex;
-}
-
-__global__ void concatenate(unsigned char *dest,
-                            unsigned char *source[],
-                            unsigned long elementSizeBytes,
-                            long numElements,
-                            int numDimensions,
-                            int numSourceArrays,
-                            int axisDimension,
-                            long axisElementsPerSourceArray[],
-                            long stridePerDestDimension[],
-                            long stridePerSourceDimension[]) {
-    extern __shared__ long indexShared[];
-    long *destIndex = &(indexShared[threadIdx.x * numDimensions]);
-    long *axisElementsPerSourceArrayShared = &(indexShared[256 * numDimensions]);
-    long *stridePerDestDimensionShared = &(indexShared[256 * numDimensions + numSourceArrays]);
-    long *stridePerSourceDimensionShared = &(indexShared[256 * numDimensions + numSourceArrays + numDimensions]);
-
-    if (threadIdx.x < 32) {
-        for (int sourceArray = threadIdx.x; sourceArray < numSourceArrays; sourceArray += 32)
-            axisElementsPerSourceArrayShared[sourceArray] = axisElementsPerSourceArray[sourceArray];
-    } else if (threadIdx.x < 64) {
-        for (int dimension = threadIdx.x % 32; dimension < numDimensions; dimension += 32)
-            stridePerDestDimensionShared[dimension] = stridePerDestDimension[dimension];
-    } else if (threadIdx.x < 96) {
-        for (int sourceArray = 0; sourceArray < numSourceArrays; ++sourceArray) {
-            for (int dimension = threadIdx.x % 32; dimension < numDimensions; dimension += 32) {
-                stridePerSourceDimensionShared[sourceArray * numDimensions + dimension] =
-                    stridePerSourceDimension[sourceArray * numDimensions + dimension];
-            }
-        }
-    }
-    __syncthreads();
-
-    long destFlatIndex = blockIdx.x * (256 * 16) + threadIdx.x;
-
-#pragma unroll 16
-    for (int i = 0; i < 16; ++i) {
-        if (destFlatIndex >= numElements)
-            return;
-
-        computeDestIndex(destFlatIndex, destIndex, numDimensions, stridePerDestDimensionShared);
-        int sourceArray;
-        long sourceAxisElementIndex;
-        computeSourceArray(
-            destIndex[axisDimension], axisElementsPerSourceArrayShared, numSourceArrays, sourceArray, sourceAxisElementIndex);
-
-        destIndex[axisDimension] = sourceAxisElementIndex;
-        long sourceFlatIndex =
-            computeFlatIndexFromIndex(destIndex, &(stridePerSourceDimensionShared[sourceArray * numDimensions]), numDimensions);
-
-        unsigned char *destElement = dest + static_cast<unsigned long>(destFlatIndex) * elementSizeBytes;
-        unsigned char *sourceElement = source[sourceArray] + static_cast<unsigned long>(sourceFlatIndex) * elementSizeBytes;
-        for (unsigned long byte = 0; byte < elementSizeBytes; ++byte)
-            destElement[byte] = sourceElement[byte];
-
-        destFlatIndex += 256;
-    }
+    return geometry;
 }
 
 void launchConcatenate(void *dest,
                        void *source[],
-                       std::size_t elementSizeBytes,
-                       long numElements,
-                       int numDimensions,
-                       int numSourceArrays,
-                       int axisDimension,
-                       long axisElementsPerSourceArray[],
-                       long stridePerDestDimension[],
-                       long stridePerSourceDimension[],
+                       uint64_t outerSlices,
+                       uint32_t numSourceArrays,
+                       uint64_t packedSliceBytes,
+                       const ConcatenateSpanGeometry spanGeometry[],
                        Stream stream) {
     ScopedGpu scopedGpu(stream.getGpuNum());
-
-    dim3 blockSize(256);
-    dim3 gridSize((numElements + 4095) / 4096);
-    int sharedRequirement = (256 * numDimensions + numSourceArrays + numDimensions + numSourceArrays * numDimensions) * sizeof(long);
-    concatenate<<<gridSize, blockSize, sharedRequirement, stream.getStream()>>>(static_cast<unsigned char *>(dest),
-                                                                                reinterpret_cast<unsigned char **>(source),
-                                                                                static_cast<unsigned long>(elementSizeBytes),
-                                                                                numElements,
-                                                                                numDimensions,
-                                                                                numSourceArrays,
-                                                                                axisDimension,
-                                                                                axisElementsPerSourceArray,
-                                                                                stridePerDestDimension,
-                                                                                stridePerSourceDimension);
-    CUDA_CHECK(cudaGetLastError());
+    ThorConcatenateSpanCopy::launch<true>(
+        dest, source, outerSlices, numSourceArrays, packedSliceBytes, spanGeometry, stream);
 }

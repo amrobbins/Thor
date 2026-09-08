@@ -107,6 +107,79 @@ void runByteGatherCase(uint64_t sourceRows, uint64_t batchSize, uint64_t rowByte
     }
 }
 
+uint64_t exactAlignedLastSourceRow(uint32_t copyWidth, uint64_t rowBytes) {
+    if (copyWidth == 32) return 0;
+
+    const uint64_t alignmentPeriod = static_cast<uint64_t>(copyWidth) * 2;
+    for (uint64_t sourceRow = 1; sourceRow <= alignmentPeriod; ++sourceRow) {
+        if ((sourceRow * rowBytes) % alignmentPeriod == copyWidth) return sourceRow;
+    }
+    throw std::logic_error("Unable to construct exact named-gather row alignment.");
+}
+
+void runExactTailCase(uint32_t copyWidth, uint32_t tailBytes) {
+    ASSERT_TRUE(copyWidth == 32 || copyWidth == 16 || copyWidth == 8 ||
+                copyWidth == 4 || copyWidth == 2);
+    ASSERT_GT(tailBytes, 0U);
+    ASSERT_LT(tailBytes, copyWidth);
+
+    constexpr uint64_t batchSize = 2;
+    constexpr uint8_t sourceSentinel = 0x5aU;
+    constexpr uint8_t destinationSentinel = 0xcdU;
+
+    const uint64_t rowBytes = copyWidth + tailBytes;
+
+    // Thor CUDA tensor allocations are at least 32-byte aligned. Choose the
+    // final physical source row so its start is aligned to exactly copyWidth
+    // (or 32 for the widest case). Because this is the last source row, its
+    // final full-width tail load crosses the tensor's logical end and relies on
+    // Thor's 128-byte trailing allocation padding.
+    const uint64_t sourceRow = exactAlignedLastSourceRow(copyWidth, rowBytes);
+    const uint64_t sourceRows = sourceRow + 1;
+
+    std::vector<uint8_t> source(sourceRows * rowBytes, sourceSentinel);
+    for (uint64_t byte = 0; byte < rowBytes; ++byte) {
+        source[sourceRow * rowBytes + byte] =
+            static_cast<uint8_t>((byte * 37 + copyWidth * 11 + tailBytes) & 0xffU);
+    }
+
+    // Destination row 1 is intentionally invalid. It must remain sentinel
+    // filled, making any over-wide destination tail store from row 0 visible.
+    const std::vector<uint64_t> rowIndices{sourceRow, sourceRows};
+    std::vector<uint8_t> expected(batchSize * rowBytes, destinationSentinel);
+    for (uint64_t byte = 0; byte < rowBytes; ++byte) {
+        expected[byte] = source[sourceRow * rowBytes + byte];
+    }
+
+    Stream stream(0);
+    Tensor sourceDevice = makeGpuTensor<uint8_t>({sourceRows, rowBytes}, source, stream);
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(sourceDevice.getMemPtr()) & 31U, 0U);
+    Tensor rowIndicesDevice = makeGpuTensor<uint64_t>({batchSize}, rowIndices, stream);
+    Tensor destination = makeGpuTensor<uint8_t>(
+        {batchSize, rowBytes},
+        std::vector<uint8_t>(batchSize * rowBytes, destinationSentinel),
+        stream);
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(destination.getMemPtr()) & 31U, 0U);
+    const uintptr_t selectedSourceAddress =
+        reinterpret_cast<uintptr_t>(sourceDevice.getMemPtr()) + sourceRow * rowBytes;
+    ASSERT_EQ(selectedSourceAddress % copyWidth, 0U);
+    if (copyWidth < 32) {
+        ASSERT_EQ(selectedSourceAddress % (2U * copyWidth), copyWidth);
+    }
+
+    launchDeviceResidentNamedGatherKernel(
+        sourceDevice, destination, rowIndicesDevice, stream);
+    stream.synchronize();
+
+    const std::vector<uint8_t> actual = copyGpuTensor<uint8_t>(destination, stream);
+    ASSERT_EQ(actual.size(), expected.size());
+    for (uint64_t offset = 0; offset < expected.size(); ++offset) {
+        EXPECT_EQ(actual[offset], expected[offset])
+            << "copyWidth=" << copyWidth << " tailBytes=" << tailBytes
+            << " byte offset=" << offset;
+    }
+}
+
 TEST(DeviceResidentNamedGatherKernelTest, AlignedRowsUseThirtyTwoByteTransactions) {
     REQUIRE_CUDA_DEVICE();
     // CUDA tensor allocations are naturally wide-aligned and a 32-byte row
@@ -117,9 +190,9 @@ TEST(DeviceResidentNamedGatherKernelTest, AlignedRowsUseThirtyTwoByteTransaction
 
 TEST(DeviceResidentNamedGatherKernelTest, SixteenByteFallbackRemainsContiguousAcrossLanes) {
     REQUIRE_CUDA_DEVICE();
-    // A 48-byte row stride prevents a globally safe 32-byte transaction but
-    // preserves 16-byte alignment. Launch geometry still follows the 48-byte
-    // row payload, so fallback width does not reduce lane-level parallelism.
+    // A 48-byte row stride makes alternating source/destination row starts
+    // 16- versus 32-byte aligned. Row-local width selection therefore
+    // exercises the 16-byte path without changing payload-based grouping.
     runByteGatherCase(/*sourceRows=*/101, /*batchSize=*/8192, /*rowBytes=*/48);
 }
 
@@ -132,6 +205,22 @@ TEST(DeviceResidentNamedGatherKernelTest, EveryNarrowerTransactionWidthAndByteFa
     runByteGatherCase(/*sourceRows=*/607, /*batchSize=*/517, /*rowBytes=*/12);
     runByteGatherCase(/*sourceRows=*/607, /*batchSize=*/517, /*rowBytes=*/6);
     runByteGatherCase(/*sourceRows=*/607, /*batchSize=*/517, /*rowBytes=*/5);
+}
+
+TEST(DeviceResidentNamedGatherKernelTest,
+     AlignedBulkCopiesExerciseEveryExactTailSizeAndPreserveFollowingRow) {
+    REQUIRE_CUDA_DEVICE();
+
+    // For every vector width, exercise every legal nonzero Tail<N>. Each case
+    // places the selected source at the final physical row so the full-width
+    // source tail load crosses into Thor's 128-byte tensor padding, while the
+    // following destination row is an invalid gather target that must remain
+    // untouched.
+    for (const uint32_t copyWidth : {32U, 16U, 8U, 4U, 2U}) {
+        for (uint32_t tailBytes = 1; tailBytes < copyWidth; ++tailBytes) {
+            runExactTailCase(copyWidth, tailBytes);
+        }
+    }
 }
 
 TEST(DeviceResidentNamedGatherKernelTest, PayloadAwareGroupingCoversFullLaneLadder) {

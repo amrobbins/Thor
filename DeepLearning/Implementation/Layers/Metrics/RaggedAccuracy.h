@@ -1,11 +1,11 @@
 #pragma once
 
 #include "DeepLearning/Implementation/Layers/Metrics/CustomMetric.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/Expression/DynamicExpression.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/TensorOperations/Ragged/RaggedAccuracy.h"
-#include "Utilities/TensorOperations/Ragged/RowPartition.h"
 
 #include <limits>
 #include <memory>
@@ -46,7 +46,7 @@ inline DynamicExpression makeExpression(Kind kind,
                                         RaggedCategoricalLabelFormat categoricalLabelFormat,
                                         std::shared_ptr<RuntimeState> runtimeState) {
     return DynamicExpression(
-        {"predictions", "labels", "offsets"},
+        {"predictions", "labels", "partition_carrier"},
         {"metric", Thor::METRIC_AGGREGATION_NUMERATOR_NAME, Thor::METRIC_AGGREGATION_DENOMINATOR_NAME},
         [kind,
          batchSize,
@@ -58,12 +58,11 @@ inline DynamicExpression makeExpression(Kind kind,
                        Stream& stream) -> DynamicExpressionBuild {
             const Tensor& predictions = inputs.at("predictions");
             const Tensor& labels = inputs.at("labels");
-            const Tensor& offsets = inputs.at("offsets");
+            const Tensor& partitionCarrier = inputs.at("partition_carrier");
             if (!isPredictionDTypeSupported(predictions.getDataType()))
                 throw std::invalid_argument("Ragged accuracy predictions must be FP16 or FP32.");
-            const RowPartitionDescriptor partition(batchSize, maxTotalValues, offsets.getDataType());
-            if (offsets.getDescriptor() != partition.getOffsetsDescriptor())
-                throw std::invalid_argument("Ragged accuracy offsets must have canonical shape [batch_size + 1].");
+            if (predictions.getPlacement() != partitionCarrier.getPlacement())
+                throw std::invalid_argument("Ragged accuracy predictions and partition carrier must share placement.");
             if (predictions.getDimensions().empty() || predictions.getDimensions().front() != maxTotalValues ||
                 labels.getDimensions().empty() || labels.getDimensions().front() != maxTotalValues) {
                 throw std::invalid_argument("Ragged accuracy packed tensors must use max_total_values as the leading dimension.");
@@ -99,6 +98,10 @@ inline DynamicExpression makeExpression(Kind kind,
                 }
             }
 
+            const uint64_t workspaceClasses = kind == Kind::BINARY ? 1 : numClasses;
+            Tensor partialCorrectCounts(
+                predictions.getPlacement(),
+                raggedAccuracyStatisticsWorkspaceDescriptor(maxTotalValues, workspaceClasses));
             Tensor correctStatistic(predictions.getPlacement(), TensorDescriptor(DataType::FP32, {1}));
             Tensor tokenStatistic(predictions.getPlacement(), TensorDescriptor(DataType::FP32, {1}));
             const Expression correct =
@@ -122,7 +125,8 @@ inline DynamicExpression makeExpression(Kind kind,
                 .pre_forward_hook = [kind,
                                      predictions,
                                      labels,
-                                     offsets,
+                                     partitionCarrier,
+                                     partialCorrectCounts,
                                      correctStatistic,
                                      tokenStatistic,
                                      batchSize,
@@ -132,22 +136,26 @@ inline DynamicExpression makeExpression(Kind kind,
                                      runtimeState](Stream& runStream) mutable {
                     if (!runtimeState || runtimeState->validRowCount == 0 || runtimeState->validRowCount > batchSize)
                         throw std::logic_error("Ragged accuracy has invalid runtime valid-row count.");
+                    RowPartitionRuntime rowPartition = RowPartitionRuntime::fromHostStateCarrier(
+                        partitionCarrier, batchSize, maxTotalValues);
+                    const uint64_t activeValueCount =
+                        rowPartition.requireHostOffset(runtimeState->validRowCount);
                     if (kind == Kind::BINARY) {
                         raggedBinaryAccuracyStatistics(predictions,
                                                        labels,
-                                                       offsets,
+                                                       partialCorrectCounts,
                                                        correctStatistic,
                                                        tokenStatistic,
-                                                       runtimeState->validRowCount,
+                                                       activeValueCount,
                                                        maxTotalValues,
                                                        runStream);
                     } else {
                         raggedCategoricalAccuracyStatistics(predictions,
                                                             labels,
-                                                            offsets,
+                                                            partialCorrectCounts,
                                                             correctStatistic,
                                                             tokenStatistic,
-                                                            runtimeState->validRowCount,
+                                                            activeValueCount,
                                                             maxTotalValues,
                                                             numClasses,
                                                             categoricalLabelFormat,
@@ -157,7 +165,7 @@ inline DynamicExpression makeExpression(Kind kind,
             };
             build.pre_forward_only_inputs.emplace("predictions", predictions);
             build.pre_forward_only_inputs.emplace("labels", labels);
-            build.pre_forward_only_inputs.emplace("offsets", offsets);
+            build.pre_forward_only_inputs.emplace("partition_carrier", partitionCarrier);
             return build;
         });
 }
@@ -190,33 +198,13 @@ class RaggedAccuracyMetric : public CustomMetric {
         if (connectionType == static_cast<int>(ConnectionType::LABELS))
             return connectLabels(previousLayer, input, inputStream);
         if (connectionType == static_cast<int>(ConnectionType::STRUCTURAL))
-            return connectOffsets(previousLayer, input, inputStream);
+            return connectPartitionCarrier(previousLayer, input, inputStream);
         throw std::invalid_argument("Ragged accuracy received an unsupported connection type.");
-    }
-
-    std::vector<Stream> getProcessingStreams() override {
-        std::vector<Stream> streams = CustomMetric::getProcessingStreams();
-        if (offsetsStream.isInitialized())
-            streams.push_back(offsetsStream);
-        return streams;
-    }
-
-    std::vector<Event> getSynchronizeEvents() override {
-        std::vector<Event> events = CustomMetric::getSynchronizeEvents();
-        if (offsetsStream.isInitialized())
-            events.emplace_back(offsetsStream.putEvent(false, true));
-        return events;
     }
 
     void initialize() override {
         CustomMetric::initialize();
-        offsetsReceived = false;
-    }
-
-    void cleanup() override {
-        offsetsReadyEvent = Event();
-        offsetsReusableEvent = Event();
-        CustomMetric::cleanup();
+        partitionCarrierReceived = false;
     }
 
     void forward(std::optional<Tensor> inputTensor,
@@ -235,17 +223,27 @@ class RaggedAccuracyMetric : public CustomMetric {
         batchCardinalitySet = true;
         runtimeState->validRowCount = resolved;
 
-        if (featureInput.has_value() && inputTensor.value() == featureInput.value()) {
-            forwardFeatures(inputTensor.value(), validationPass);
-        } else if (labelsInput.has_value() && inputTensor.value() == labelsInput.value()) {
-            forwardLabels(inputTensor.value(), validationPass);
-        } else if (offsetsInput.has_value() && inputTensor.value() == offsetsInput.value()) {
-            if (offsetsReceived)
-                throw std::logic_error("Ragged accuracy structural offsets were delivered twice for one batch.");
-            offsetsReceived = true;
-            advanceDataIfReady(validationPass);
-        } else {
+        const bool predictionsArrival = featureInput.has_value() && inputTensor.value() == featureInput.value();
+        const bool labelsArrival = labelsInput.has_value() && inputTensor.value() == labelsInput.value();
+        const bool partitionArrival =
+            partitionCarrierInput.has_value() && inputTensor.value() == partitionCarrierInput.value();
+        if (!(predictionsArrival || labelsArrival || partitionArrival))
             throw std::invalid_argument("Ragged accuracy received an unconnected input tensor.");
+
+        // HOST_EXTENT routing may bind the structural port to the same physical
+        // tensor as predictions (or labels). Treat one such delivery as satisfying
+        // both logical inputs, just as other HOST_EXTENT consumers do.
+        if (partitionArrival) {
+            if (partitionCarrierReceived)
+                throw std::logic_error("Ragged accuracy partition carrier was delivered twice for one batch.");
+            partitionCarrierReceived = true;
+        }
+        if (predictionsArrival) {
+            forwardFeatures(inputTensor.value(), validationPass);
+        } else if (labelsArrival) {
+            forwardLabels(inputTensor.value(), validationPass);
+        } else {
+            advanceDataIfReady(validationPass);
         }
     }
 
@@ -269,9 +267,9 @@ class RaggedAccuracyMetric : public CustomMetric {
    protected:
     TensorMap buildMetricInputs() const override {
         TensorMap inputs = CustomMetric::buildMetricInputs();
-        if (!offsetsInput.has_value())
-            throw std::logic_error("Ragged accuracy structural offsets are not connected.");
-        inputs.emplace("offsets", offsetsInput.value());
+        if (!partitionCarrierInput.has_value())
+            throw std::logic_error("Ragged accuracy partition carrier is not connected.");
+        inputs.emplace("partition_carrier", partitionCarrierInput.value());
         return inputs;
     }
 
@@ -281,21 +279,19 @@ class RaggedAccuracyMetric : public CustomMetric {
     }
 
     void advanceDataIfReady(bool validationPass) override {
-        if (!(featureInputReceived && labelsReceived && offsetsReceived))
+        if (!(featureInputReceived && labelsReceived && partitionCarrierReceived))
             return;
         THOR_THROW_IF_FALSE(batchCardinalitySet);
         THOR_THROW_IF_FALSE(labelsInput.has_value());
-        THOR_THROW_IF_FALSE(offsetsInput.has_value());
+        THOR_THROW_IF_FALSE(partitionCarrierInput.has_value());
 
         waitForLabelsReady();
-        stream.waitFor(offsetsStream, offsetsReadyEvent);
         computeMetric(labelsInput.value(), featureInput.value(), featureOutput.value(), stream, currentValidExampleCount);
         markLabelsReusableAfterCompute();
-        offsetsStream.waitFor(stream, offsetsReusableEvent);
 
         featureInputReceived = false;
         labelsReceived = false;
-        offsetsReceived = false;
+        partitionCarrierReceived = false;
         batchCardinalitySet = false;
 
         if (nextLayer.has_value())
@@ -343,8 +339,8 @@ class RaggedAccuracyMetric : public CustomMetric {
         validatePredictions(input.value());
         if (labelsInput.has_value() && labelsInput->getPlacement() != input->getPlacement())
             throw std::invalid_argument("Ragged accuracy predictions and labels must share placement.");
-        if (offsetsInput.has_value() && offsetsInput->getPlacement() != input->getPlacement())
-            throw std::invalid_argument("Ragged accuracy predictions and offsets must share placement.");
+        if (partitionCarrierInput.has_value() && partitionCarrierInput->getPlacement() != input->getPlacement())
+            throw std::invalid_argument("Ragged accuracy predictions and partition carrier must share placement.");
         Layer::connectToPreviousLayer(previousLayer, input, inputStream, false);
         return std::nullopt;
     }
@@ -360,30 +356,27 @@ class RaggedAccuracyMetric : public CustomMetric {
         validateLabels(input.value());
         if (featureInput.has_value() && featureInput->getPlacement() != input->getPlacement())
             throw std::invalid_argument("Ragged accuracy predictions and labels must share placement.");
-        if (offsetsInput.has_value() && offsetsInput->getPlacement() != input->getPlacement())
-            throw std::invalid_argument("Ragged accuracy labels and offsets must share placement.");
+        if (partitionCarrierInput.has_value() && partitionCarrierInput->getPlacement() != input->getPlacement())
+            throw std::invalid_argument("Ragged accuracy labels and partition carrier must share placement.");
         labelsInput = input;
         labelsStream = inputStream;
         return std::nullopt;
     }
 
-    std::optional<Tensor> connectOffsets(Layer* previousLayer,
-                                         std::optional<Tensor> input,
-                                         Stream inputStream) {
+    std::optional<Tensor> connectPartitionCarrier(Layer* previousLayer,
+                                                    std::optional<Tensor> input,
+                                                    Stream inputStream) {
         (void)previousLayer;
+        (void)inputStream;
         if (!input.has_value())
-            throw std::invalid_argument("Ragged accuracy requires structural offsets.");
-        if (offsetsInput.has_value())
-            throw std::logic_error("Ragged accuracy offsets are already connected.");
-        const RowPartitionDescriptor partition(batchSize, maxTotalValues, input->getDataType());
-        if (input->getDescriptor() != partition.getOffsetsDescriptor())
-            throw std::invalid_argument("Ragged accuracy offsets must have canonical shape [batch_size + 1].");
+            throw std::invalid_argument("Ragged accuracy requires a row-partition host carrier.");
+        if (partitionCarrierInput.has_value())
+            throw std::logic_error("Ragged accuracy partition carrier is already connected.");
         if (featureInput.has_value() && featureInput->getPlacement() != input->getPlacement())
-            throw std::invalid_argument("Ragged accuracy predictions and offsets must share placement.");
+            throw std::invalid_argument("Ragged accuracy predictions and partition carrier must share placement.");
         if (labelsInput.has_value() && labelsInput->getPlacement() != input->getPlacement())
-            throw std::invalid_argument("Ragged accuracy labels and offsets must share placement.");
-        offsetsInput = input;
-        offsetsStream = inputStream;
+            throw std::invalid_argument("Ragged accuracy labels and partition carrier must share placement.");
+        partitionCarrierInput = input;
         return std::nullopt;
     }
 
@@ -421,15 +414,12 @@ class RaggedAccuracyMetric : public CustomMetric {
     }
 
     void validateInputs() const {
-        if (!featureInput.has_value() || !labelsInput.has_value() || !offsetsInput.has_value())
-            throw std::logic_error("Ragged accuracy requires predictions, labels, and structural offsets.");
+        if (!featureInput.has_value() || !labelsInput.has_value() || !partitionCarrierInput.has_value())
+            throw std::logic_error("Ragged accuracy requires predictions, labels, and a partition host carrier.");
         validatePredictions(featureInput.value());
         validateLabels(labelsInput.value());
-        const RowPartitionDescriptor partition(batchSize, maxTotalValues, offsetsInput->getDataType());
-        if (offsetsInput->getDescriptor() != partition.getOffsetsDescriptor())
-            throw std::invalid_argument("Ragged accuracy offsets must have canonical shape [batch_size + 1].");
         if (featureInput->getPlacement() != labelsInput->getPlacement() ||
-            featureInput->getPlacement() != offsetsInput->getPlacement())
+            featureInput->getPlacement() != partitionCarrierInput->getPlacement())
             throw std::invalid_argument("Ragged accuracy inputs must share placement.");
     }
 
@@ -439,11 +429,8 @@ class RaggedAccuracyMetric : public CustomMetric {
     uint64_t numClasses;
     RaggedCategoricalLabelFormat categoricalLabelFormat;
     std::shared_ptr<RaggedAccuracyDetail::RuntimeState> runtimeState;
-    std::optional<Tensor> offsetsInput;
-    Stream offsetsStream;
-    Event offsetsReadyEvent;
-    Event offsetsReusableEvent;
-    bool offsetsReceived = false;
+    std::optional<Tensor> partitionCarrierInput;
+    bool partitionCarrierReceived = false;
 };
 
 }  // namespace ThorImplementation

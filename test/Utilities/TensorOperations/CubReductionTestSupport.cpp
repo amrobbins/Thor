@@ -11,6 +11,7 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
+#include <string>
 
 namespace ThorImplementation::CubReductionTestSupport {
 namespace {
@@ -69,18 +70,28 @@ void storeCpuValues(Tensor& cpu, DataType dtype, const std::vector<float>& value
     }
 }
 
+template <typename T>
+void storeCpuUnsignedValuesAs(Tensor& cpu, const std::vector<uint64_t>& values, const char* dtypeName) {
+    T* typed = cpu.getMemPtr<T>();
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (values[i] > static_cast<uint64_t>(std::numeric_limits<T>::max())) {
+            throw std::invalid_argument(std::string("Test ") + dtypeName + " value is out of range.");
+        }
+        typed[i] = static_cast<T>(values[i]);
+    }
+}
+
 void storeCpuUnsignedValues(Tensor& cpu, const std::vector<uint64_t>& values) {
     switch (cpu.getDataType()) {
-        case DataType::UINT32: {
-            uint32_t* typed = cpu.getMemPtr<uint32_t>();
-            for (size_t i = 0; i < values.size(); ++i) {
-                if (values[i] > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
-                    throw std::invalid_argument("Test UINT32 value is out of range.");
-                }
-                typed[i] = static_cast<uint32_t>(values[i]);
-            }
+        case DataType::UINT8:
+            storeCpuUnsignedValuesAs<uint8_t>(cpu, values, "UINT8");
             return;
-        }
+        case DataType::UINT16:
+            storeCpuUnsignedValuesAs<uint16_t>(cpu, values, "UINT16");
+            return;
+        case DataType::UINT32:
+            storeCpuUnsignedValuesAs<uint32_t>(cpu, values, "UINT32");
+            return;
         case DataType::UINT64: {
             uint64_t* typed = cpu.getMemPtr<uint64_t>();
             for (size_t i = 0; i < values.size(); ++i) {
@@ -89,7 +100,7 @@ void storeCpuUnsignedValues(Tensor& cpu, const std::vector<uint64_t>& values) {
             return;
         }
         default:
-            throw std::invalid_argument("CUB reduction test offsets must use UINT32 or UINT64.");
+            throw std::invalid_argument("Unsigned test tensors must use UINT8, UINT16, UINT32, or UINT64.");
     }
 }
 
@@ -215,6 +226,20 @@ std::vector<uint64_t> copyGpuTensorAsUnsigned(const Tensor& gpu, Stream& stream)
     const size_t num_elements = cpu.getTotalNumElements();
     std::vector<uint64_t> values(num_elements);
     switch (cpu.getDataType()) {
+        case DataType::UINT8: {
+            const uint8_t* typed = cpu.getMemPtr<uint8_t>();
+            for (size_t i = 0; i < num_elements; ++i) {
+                values[i] = typed[i];
+            }
+            return values;
+        }
+        case DataType::UINT16: {
+            const uint16_t* typed = cpu.getMemPtr<uint16_t>();
+            for (size_t i = 0; i < num_elements; ++i) {
+                values[i] = typed[i];
+            }
+            return values;
+        }
         case DataType::UINT32: {
             const uint32_t* typed = cpu.getMemPtr<uint32_t>();
             for (size_t i = 0; i < num_elements; ++i) {
@@ -230,7 +255,7 @@ std::vector<uint64_t> copyGpuTensorAsUnsigned(const Tensor& gpu, Stream& stream)
             return values;
         }
         default:
-            throw std::invalid_argument("CUB reduction test expected UINT32 or UINT64 output.");
+            throw std::invalid_argument("Unsigned test tensors must use UINT8, UINT16, UINT32, or UINT64.");
     }
 }
 

@@ -5,7 +5,6 @@
 
 #include <cstddef>
 #include <limits>
-#include <map>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -58,9 +57,7 @@ RaggedSequenceConcatenate RaggedSequenceConcatenate::makeLayer(
     bool allInputsHaveMaxValuesPerRow = true;
     std::set<Tensor> uniqueValues;
     std::vector<Tensor> uniqueOffsets;
-    std::map<RowPartitionId, uint32_t> offsetPortByPartition;
-    std::vector<uint32_t> offsetPortForInput;
-    offsetPortForInput.reserve(inputs.size());
+    std::set<RowPartitionId> uniquePartitions;
 
     for (uint32_t i = 0; i < inputs.size(); ++i) {
         const RaggedTensor& input = inputs[i];
@@ -93,14 +90,8 @@ RaggedSequenceConcatenate RaggedSequenceConcatenate::makeLayer(
             allInputsHaveMaxValuesPerRow = false;
         }
 
-        auto foundPartition = offsetPortByPartition.find(input.getRowPartitionId());
-        if (foundPartition == offsetPortByPartition.end()) {
-            const uint32_t newPort = static_cast<uint32_t>(uniqueOffsets.size());
+        if (uniquePartitions.insert(input.getRowPartitionId()).second) {
             uniqueOffsets.push_back(input.getOffsets());
-            offsetPortByPartition.emplace(input.getRowPartitionId(), newPort);
-            offsetPortForInput.push_back(newPort);
-        } else {
-            offsetPortForInput.push_back(foundPartition->second);
         }
     }
 
@@ -140,7 +131,6 @@ RaggedSequenceConcatenate RaggedSequenceConcatenate::makeLayer(
     layer.raggedFeatureInputs = inputs;
     layer.raggedFeatureOutput = output;
     layer.uniqueOffsetsInputs = std::move(uniqueOffsets);
-    layer.offsetPortForInput = std::move(offsetPortForInput);
     layer.featureInputs.reserve(inputs.size() + layer.uniqueOffsetsInputs.size());
     for (const RaggedTensor& input : inputs) layer.featureInputs.push_back(input.getValues());
     for (const Tensor& offsets : layer.uniqueOffsetsInputs) layer.featureInputs.push_back(offsets);
@@ -233,7 +223,6 @@ std::shared_ptr<ThorImplementation::Layer> RaggedSequenceConcatenate::stamp(
     auto physical = std::make_shared<ThorImplementation::RaggedSequenceConcatenate>(
         static_cast<uint32_t>(raggedFeatureInputs.size()),
         static_cast<uint32_t>(uniqueOffsetsInputs.size()),
-        offsetPortForInput,
         raggedFeatureOutput.getDescriptor());
     physical->setConstructForInferenceOnly(inferenceOnly);
     physical->setName(getLayerType());

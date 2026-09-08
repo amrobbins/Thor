@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 #include "DeepLearning/Implementation/ThorError.h"
 
@@ -55,9 +58,7 @@ class Split : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(!axisElements.empty());
         splitTensorErrorInputMemoriesArray_d = nullptr;
         splitTensorFeatureOutputMemoriesArray_d = nullptr;
-        stridePerPackedTensorDimension_d = nullptr;
-        stridePerSplitTensorDimension_d = nullptr;
-        axisElementsPerSplitTensor_d = nullptr;
+        spanGeometryPerSplitTensor_d = nullptr;
     }
 
     std::optional<Tensor> createFeatureOutputTensor() override {
@@ -73,13 +74,12 @@ class Split : public MultiConnectionLayer {
 
     void compileImpl() override {
         MultiConnectionLayer::compileImpl();
-        // Ensure that the right amount of axis elements are specified and all output tensors were connected
         unsigned long totalAxisElements = 0;
         for (unsigned int i = 0; i < axisElements.size(); ++i)
             totalAxisElements += axisElements[i];
         THOR_THROW_IF_FALSE(featureInputs.size() == 1);
         THOR_THROW_IF_FALSE(featureInputs[0].has_value());
-        std::vector<unsigned long> inputDimensions = featureInputs[0].value().getDescriptor().getDimensions();
+        const std::vector<unsigned long> inputDimensions = featureInputs[0].value().getDescriptor().getDimensions();
         THOR_THROW_IF_FALSE(inputDimensions.size() > axis);
         THOR_THROW_IF_FALSE(totalAxisElements == inputDimensions[axis]);
         THOR_THROW_IF_FALSE(featureOutputs.size() == axisElements.size());
@@ -95,26 +95,21 @@ class Split : public MultiConnectionLayer {
 
         THOR_THROW_IF_FALSE(featureInputs[0].value().getPlacement().getMemDevice() == TensorPlacement::MemDevices::GPU);
         ScopedGpu scopedGpu(featureInputs[0].value().getPlacement().getDeviceNum());
-        const int numSplitTensors = static_cast<int>(featureOutputs.size());
+        const uint32_t numSplitTensors = static_cast<uint32_t>(featureOutputs.size());
         THOR_THROW_IF_FALSE(errorInputs.size() == featureOutputs.size());
 
         const uint32_t numPresentErrorInputs = numPresentTensors(errorInputs);
         THOR_THROW_IF_FALSE(numPresentErrorInputs == errorInputs.size() || numPresentErrorInputs == 0);
 
-        // All metadata uploads are ordered on the same non-blocking stream that
-        // launches Split/Concatenate. A synchronous cudaMemcpy from pageable host
-        // memory is allowed to return after staging but before the device DMA has
-        // completed, and Thor streams intentionally do not synchronize with the
-        // legacy default stream. Keep the pageable host vectors alive and wait once
-        // after enqueueing every upload so execution can never observe a partially
-        // populated metadata buffer under GPU load.
+        // Pointer tables and static span geometry are uploaded on the same
+        // non-blocking execution stream and synchronized once before compile
+        // returns, keeping pageable host metadata alive until DMA completes.
         std::vector<void *> splitTensorFeatureOutputMemoriesArray(numSplitTensors);
         std::vector<void *> splitTensorErrorInputMemoriesArray;
-        std::vector<long> axisElementsPerSplitTensor(numSplitTensors);
 
         CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorFeatureOutputMemoriesArray_d),
                               numSplitTensors * sizeof(void *)));
-        for (int i = 0; i < numSplitTensors; ++i)
+        for (uint32_t i = 0; i < numSplitTensors; ++i)
             splitTensorFeatureOutputMemoriesArray[i] = featureOutputs[i].value().getMemPtr();
         CUDA_CHECK(cudaMemcpyAsync(splitTensorFeatureOutputMemoriesArray_d,
                                    splitTensorFeatureOutputMemoriesArray.data(),
@@ -126,7 +121,7 @@ class Split : public MultiConnectionLayer {
             splitTensorErrorInputMemoriesArray.resize(numSplitTensors);
             CUDA_CHECK(cudaMalloc(reinterpret_cast<void **>(&splitTensorErrorInputMemoriesArray_d),
                                   numSplitTensors * sizeof(void *)));
-            for (int i = 0; i < numSplitTensors; ++i)
+            for (uint32_t i = 0; i < numSplitTensors; ++i)
                 splitTensorErrorInputMemoriesArray[i] = errorInputs[i].value().getMemPtr();
             CUDA_CHECK(cudaMemcpyAsync(splitTensorErrorInputMemoriesArray_d,
                                        splitTensorErrorInputMemoriesArray.data(),
@@ -141,46 +136,33 @@ class Split : public MultiConnectionLayer {
             }
         }
 
-        for (int i = 0; i < numSplitTensors; ++i)
-            axisElementsPerSplitTensor[i] = static_cast<long>(axisElements[i]);
-        CUDA_CHECK(cudaMalloc(&axisElementsPerSplitTensor_d, numSplitTensors * sizeof(long)));
-        CUDA_CHECK(cudaMemcpyAsync(axisElementsPerSplitTensor_d,
-                                   axisElementsPerSplitTensor.data(),
-                                   numSplitTensors * sizeof(long),
+        const TensorDescriptor &inputDescriptor = featureInputs[0].value().getDescriptor();
+        uint64_t innerElements = 1;
+        for (uint32_t d = axis + 1; d < inputDimensions.size(); ++d)
+            innerElements = checkedMultiply(innerElements, inputDimensions[d],
+                                            "Split inner geometry overflow.");
+
+        std::vector<uint64_t> axisElements64(axisElements.begin(), axisElements.end());
+        const std::vector<ConcatenateSpanGeometry> spanGeometry = buildConcatenateSpanGeometry(
+            TensorDescriptor::getElementSizeInBytes(inputDescriptor.getDataType()),
+            innerElements,
+            axisElements64);
+        THOR_THROW_IF_FALSE(spanGeometry.size() == numSplitTensors);
+        CUDA_CHECK(cudaMalloc(&spanGeometryPerSplitTensor_d,
+                              spanGeometry.size() * sizeof(ConcatenateSpanGeometry)));
+        CUDA_CHECK(cudaMemcpyAsync(spanGeometryPerSplitTensor_d,
+                                   spanGeometry.data(),
+                                   spanGeometry.size() * sizeof(ConcatenateSpanGeometry),
                                    cudaMemcpyHostToDevice,
                                    streams[0].getStream()));
 
-        const unsigned int numDimensions = featureInputs.front().value().getDescriptor().getDimensions().size();
-        std::vector<long> stridePerSplitTensorDimension(numDimensions * numSplitTensors);
-        for (int t = 0; t < numSplitTensors; ++t) {
-            stridePerSplitTensorDimension[t * numDimensions + (numDimensions - 1)] = 1;
-            for (int d = static_cast<int>(numDimensions) - 2; d >= 0; --d) {
-                stridePerSplitTensorDimension[t * numDimensions + d] =
-                    stridePerSplitTensorDimension[t * numDimensions + (d + 1)] *
-                    static_cast<long>(featureOutputs[t].value().getDescriptor().getDimensions()[d + 1]);
-            }
-        }
-        CUDA_CHECK(cudaMalloc(&stridePerSplitTensorDimension_d,
-                              numDimensions * numSplitTensors * sizeof(long)));
-        CUDA_CHECK(cudaMemcpyAsync(stridePerSplitTensorDimension_d,
-                                   stridePerSplitTensorDimension.data(),
-                                   numDimensions * numSplitTensors * sizeof(long),
-                                   cudaMemcpyHostToDevice,
-                                   streams[0].getStream()));
+        packedSliceBytes = spanGeometry.back().packedOffsetBytes + spanGeometry.back().spanBytes;
+        THOR_THROW_IF_FALSE(packedSliceBytes > 0);
 
-        std::vector<long> stridePerPackedTensorDimension(inputDimensions.size());
-        stridePerPackedTensorDimension.back() = 1;
-        for (int i = static_cast<int>(inputDimensions.size()) - 2; i >= 0; --i) {
-            stridePerPackedTensorDimension[i] =
-                static_cast<long>(inputDimensions[i + 1]) * stridePerPackedTensorDimension[i + 1];
-        }
-        CUDA_CHECK(cudaMalloc(&stridePerPackedTensorDimension_d,
-                              inputDimensions.size() * sizeof(long)));
-        CUDA_CHECK(cudaMemcpyAsync(stridePerPackedTensorDimension_d,
-                                   stridePerPackedTensorDimension.data(),
-                                   inputDimensions.size() * sizeof(long),
-                                   cudaMemcpyHostToDevice,
-                                   streams[0].getStream()));
+        outerSlicesPerBatch = 1;
+        for (uint32_t d = 1; d < axis; ++d)
+            outerSlicesPerBatch = checkedMultiply(outerSlicesPerBatch, inputDimensions[d],
+                                                  "Split outer geometry overflow.");
 
         streams[0].synchronize();
     }
@@ -201,16 +183,13 @@ class Split : public MultiConnectionLayer {
         THOR_THROW_IF_FALSE(streams.size() == featureOutputs.size());
         THOR_THROW_IF_FALSE(nextLayers.size() == featureOutputs.size());
 
+        const uint64_t activeOuterSlices = resolveActiveOuterSlices(featureInput.value().getDescriptor(), batchSize);
         launchSplit(splitTensorFeatureOutputMemoriesArray_d,
                     featureInput.value().getMemPtr(),
-                    static_cast<std::size_t>(TensorDescriptor::getElementSizeInBytes(featureInput.value().getDescriptor().getDataType())),
-                    featureInput.value().getDescriptor().getTotalNumElements(),
-                    featureInput.value().getDescriptor().getDimensions().size(),
-                    featureOutputs.size(),
-                    axis,
-                    axisElementsPerSplitTensor_d,
-                    stridePerPackedTensorDimension_d,
-                    stridePerSplitTensorDimension_d,
+                    activeOuterSlices,
+                    static_cast<uint32_t>(featureOutputs.size()),
+                    packedSliceBytes,
+                    spanGeometryPerSplitTensor_d,
                     streams[0]);
 
         streams[0].putEvent(outputsReadyEvent);
@@ -240,17 +219,14 @@ class Split : public MultiConnectionLayer {
         for (unsigned int i = 1; i < errorInputs.size(); ++i)
             streams[0].waitFor(streams[i], backwardInputReadyEvents[i]);
 
+        const uint64_t activeOuterSlices = resolveActiveOuterSlices(errorOutputs[0].value().getDescriptor(), batchSize);
         launchConcatenate(
             errorOutputs[0].value().getMemPtr(),
             splitTensorErrorInputMemoriesArray_d,
-            static_cast<std::size_t>(TensorDescriptor::getElementSizeInBytes(errorOutputs[0].value().getDescriptor().getDataType())),
-            errorOutputs[0].value().getDescriptor().getTotalNumElements(),
-            errorOutputs[0].value().getDescriptor().getDimensions().size(),
-            errorInputs.size(),
-            axis,
-            axisElementsPerSplitTensor_d,
-            stridePerPackedTensorDimension_d,
-            stridePerSplitTensorDimension_d,
+            activeOuterSlices,
+            static_cast<uint32_t>(errorInputs.size()),
+            packedSliceBytes,
+            spanGeometryPerSplitTensor_d,
             streams[0]);
 
         // Expecting to get tail-recursion optimization of -O3 so that stack space does not build up here.
@@ -269,18 +245,12 @@ class Split : public MultiConnectionLayer {
             CUDA_CHECK(cudaFree(splitTensorErrorInputMemoriesArray_d));
             splitTensorErrorInputMemoriesArray_d = nullptr;
         }
-        if (axisElementsPerSplitTensor_d != nullptr) {
-            CUDA_CHECK(cudaFree(axisElementsPerSplitTensor_d));
-            axisElementsPerSplitTensor_d = nullptr;
+        if (spanGeometryPerSplitTensor_d != nullptr) {
+            CUDA_CHECK(cudaFree(spanGeometryPerSplitTensor_d));
+            spanGeometryPerSplitTensor_d = nullptr;
         }
-        if (stridePerPackedTensorDimension_d != nullptr) {
-            CUDA_CHECK(cudaFree(stridePerPackedTensorDimension_d));
-            stridePerPackedTensorDimension_d = nullptr;
-        }
-        if (stridePerSplitTensorDimension_d != nullptr) {
-            CUDA_CHECK(cudaFree(stridePerSplitTensorDimension_d));
-            stridePerSplitTensorDimension_d = nullptr;
-        }
+        packedSliceBytes = 0;
+        outerSlicesPerBatch = 1;
         outputsReadyEvent = Event();
         backwardInputReadyEvents.clear();
     }
@@ -336,14 +306,34 @@ class Split : public MultiConnectionLayer {
     }
 
    private:
+    static uint64_t checkedMultiply(uint64_t lhs, uint64_t rhs, const char *what) {
+        if (lhs != 0 && rhs > std::numeric_limits<uint64_t>::max() / lhs)
+            throw std::invalid_argument(what);
+        return lhs * rhs;
+    }
+
+    uint64_t resolveActiveOuterSlices(const TensorDescriptor &descriptor, uint32_t batchSize) const {
+        if (axis == 0) return 1;
+        const std::vector<uint64_t> &dimensions = descriptor.getDimensions();
+        THOR_THROW_IF_FALSE(!dimensions.empty());
+        THOR_THROW_IF_FALSE(dimensions.front() >= 1);
+        THOR_THROW_IF_FALSE(dimensions.front() <= std::numeric_limits<uint32_t>::max());
+        const uint32_t physicalBatchCapacity = static_cast<uint32_t>(dimensions.front());
+        const uint32_t validExamples = batchSize == 0 ? physicalBatchCapacity : batchSize;
+        THOR_THROW_IF_FALSE(validExamples >= 1);
+        THOR_THROW_IF_FALSE(validExamples <= physicalBatchCapacity);
+        return checkedMultiply(validExamples, outerSlicesPerBatch,
+                               "Split active outer-slice count overflow.");
+    }
+
     unsigned int axis;
     std::vector<unsigned long> axisElements;
 
     void **splitTensorErrorInputMemoriesArray_d;
     void **splitTensorFeatureOutputMemoriesArray_d;
-    long *stridePerPackedTensorDimension_d;
-    long *stridePerSplitTensorDimension_d;
-    long *axisElementsPerSplitTensor_d;
+    ConcatenateSpanGeometry *spanGeometryPerSplitTensor_d;
+    uint64_t packedSliceBytes = 0;
+    uint64_t outerSlicesPerBatch = 1;
 
     Event outputsReadyEvent;
     std::vector<Event> backwardInputReadyEvents;

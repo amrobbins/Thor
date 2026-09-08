@@ -168,7 +168,44 @@ TEST(RaggedAccuracyApi, R10ORejectsDifferentPartitionsAndConfusedClassAxis) {
                  std::invalid_argument);
 }
 
-TEST(RaggedAccuracyApi, R10OBinaryPartialTailUsesOffsetsAtValidLogicalRowCount) {
+
+TEST(RaggedAccuracyApi, HostExtentOnlyDoesNotMaterializeDevicePartitionRepresentations) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Ragged accuracy physicalization inspection requires a GPU";
+
+    constexpr uint32_t batchSize = 4;
+    Network network("ragged_accuracy_host_extent_only");
+    RaggedTensor predictions = buildPredictions(network, "predictions", DataType::UINT32, {1});
+    RaggedTensor labels = RaggedNetworkInput::Builder()
+                              .network(network)
+                              .name("labels")
+                              .valuesDataType(DataType::UINT8)
+                              .trailingDimensions({1})
+                              .partition(predictions)
+                              .build();
+    BinaryAccuracy metric = BinaryAccuracy::Builder().network(network).predictions(predictions).labels(labels).build();
+    NetworkOutput::Builder()
+        .network(network)
+        .name("accuracy")
+        .inputTensor(metric.getMetric())
+        .dataType(DataType::FP32)
+        .build();
+
+    std::vector<Event> initializationDone;
+    std::shared_ptr<PlacedNetwork> placed = network.place(
+        batchSize, initializationDone, /*inferenceOnly=*/true, std::vector<int32_t>{0}, /*forcedNumStampsPerGpu=*/1);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initializationDone) event.synchronize();
+
+    const auto& stamp = placed->getStampedNetwork(0);
+    const auto requirements = stamp.getExternalRowPartitionRequirementsForTest(predictions.getRowPartitionId());
+    ASSERT_TRUE(requirements.has_value());
+    EXPECT_EQ(requirements.value(), ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT);
+    EXPECT_EQ(stamp.getManagedPartitionActiveCountInputForTest(predictions.getRowPartitionId()), nullptr);
+    EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(predictions.getRowPartitionId()), nullptr);
+}
+
+TEST(RaggedAccuracyApi, R10OBinaryPartialTailUsesAuthoritativeHostBoundaryAtValidLogicalRowCount) {
     if (MachineEvaluator::instance().getNumGpus() == 0)
         GTEST_SKIP() << "R10O ragged BinaryAccuracy execution requires a GPU";
 
@@ -205,7 +242,7 @@ TEST(RaggedAccuracyApi, R10OBinaryPartialTailUsesOffsetsAtValidLogicalRowCount) 
         uint8_t* labelData = packedLabels.getMemPtr<uint8_t>();
         fill(predictionData, predictionData + maxTotalValues, numeric_limits<float>::quiet_NaN());
         fill(labelData, labelData + maxTotalValues, static_cast<uint8_t>(255));
-        // Valid rows 0-1 stop at offsets[2] == 2: one correct, one wrong.
+        // Valid rows 0-1 stop at authoritative host boundary 2: one correct, one wrong.
         predictionData[0] = 0.9f; labelData[0] = 1;
         predictionData[1] = 0.1f; labelData[1] = 1;
         // Populated invalid rows would make the answer very different if read.

@@ -4,6 +4,7 @@
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime.h>
+#include <cuda/std/bit>
 
 #include <algorithm>
 #include <cstdint>
@@ -24,13 +25,120 @@ constexpr uint32_t kMaxPortableBlocks = 65535;
 static_assert(sizeof(ulonglong4_32a) == 32);
 static_assert(alignof(ulonglong4_32a) == 32);
 
+__device__ __forceinline__ uint32_t widestAlignedCopyWidth(const uint8_t *source,
+                                                            const uint8_t *destination) {
+    // Field length does not constrain bulk width. A final source packet may
+    // extend beyond the logical compact-record field (and, for the final field
+    // of the final record, into Thor's 128-byte tensor allocation padding).
+    // The destination remainder is always stored with its exact logical size.
+    const uintptr_t combined = reinterpret_cast<uintptr_t>(source) |
+                               reinterpret_cast<uintptr_t>(destination);
+    if ((combined & 31U) == 0) return 32;
+    if ((combined & 15U) == 0) return 16;
+    if ((combined & 7U) == 0) return 8;
+    if ((combined & 3U) == 0) return 4;
+    if ((combined & 1U) == 0) return 2;
+    return 1;
+}
+
+template <uint32_t NumBytes>
+struct ExactTailBytes {
+    uint8_t bytes[NumBytes];
+};
+
+template <uint32_t NumBytes>
+struct RawPacketBytes {
+    uint8_t bytes[NumBytes];
+};
+
+template <uint32_t TailBytes, typename CopyT>
+__device__ __forceinline__ void storeExactTailFromPacket(CopyT packet,
+                                                         CopyT *destination) {
+    static_assert(TailBytes > 0);
+    static_assert(TailBytes < sizeof(CopyT));
+    static_assert(sizeof(RawPacketBytes<sizeof(CopyT)>) == sizeof(CopyT));
+    static_assert(sizeof(ExactTailBytes<TailBytes>) == TailBytes);
+
+    // One complete aligned source packet is intentionally loaded even when the
+    // logical field has fewer bytes left. Reading into the next compact-record
+    // field is harmless; at the end of recordStorage, Thor's 128-byte tensor
+    // padding makes the same load physically safe. Expose exactly TailBytes to
+    // the compiler for the destination aggregate store so the next destination
+    // row is never overwritten.
+    const RawPacketBytes<sizeof(CopyT)> packetBytes =
+        cuda::std::bit_cast<RawPacketBytes<sizeof(CopyT)>>(packet);
+    ExactTailBytes<TailBytes> tail;
+#pragma unroll
+    for (uint32_t byte = 0; byte < TailBytes; ++byte) {
+        tail.bytes[byte] = packetBytes.bytes[byte];
+    }
+    *reinterpret_cast<ExactTailBytes<TailBytes> *>(destination) = tail;
+}
+
+template <typename CopyT>
+__device__ __attribute__((noinline)) void copyExactTailPacket(const CopyT *source,
+                                                              CopyT *destination,
+                                                              uint32_t tailBytes) {
+    static_assert(sizeof(CopyT) == 2 || sizeof(CopyT) == 4 || sizeof(CopyT) == 8 ||
+                  sizeof(CopyT) == 16 || sizeof(CopyT) == 32);
+    if (tailBytes == 0 || tailBytes >= sizeof(CopyT)) return;
+
+    // Keep the exact-size cases out of the heavily specialized row-group
+    // kernels. A single designated lane performs the full-width source load
+    // and one exact logical aggregate copy to the destination.
+    const CopyT packet = *source;
+#define THOR_DIRECT_TAIL_CASE(N)                  \
+    case N:                                       \
+        if constexpr (N < sizeof(CopyT)) {        \
+            storeExactTailFromPacket<N>(packet, destination); \
+        }                                         \
+        return
+    switch (tailBytes) {
+        THOR_DIRECT_TAIL_CASE(1);
+        THOR_DIRECT_TAIL_CASE(2);
+        THOR_DIRECT_TAIL_CASE(3);
+        THOR_DIRECT_TAIL_CASE(4);
+        THOR_DIRECT_TAIL_CASE(5);
+        THOR_DIRECT_TAIL_CASE(6);
+        THOR_DIRECT_TAIL_CASE(7);
+        THOR_DIRECT_TAIL_CASE(8);
+        THOR_DIRECT_TAIL_CASE(9);
+        THOR_DIRECT_TAIL_CASE(10);
+        THOR_DIRECT_TAIL_CASE(11);
+        THOR_DIRECT_TAIL_CASE(12);
+        THOR_DIRECT_TAIL_CASE(13);
+        THOR_DIRECT_TAIL_CASE(14);
+        THOR_DIRECT_TAIL_CASE(15);
+        THOR_DIRECT_TAIL_CASE(16);
+        THOR_DIRECT_TAIL_CASE(17);
+        THOR_DIRECT_TAIL_CASE(18);
+        THOR_DIRECT_TAIL_CASE(19);
+        THOR_DIRECT_TAIL_CASE(20);
+        THOR_DIRECT_TAIL_CASE(21);
+        THOR_DIRECT_TAIL_CASE(22);
+        THOR_DIRECT_TAIL_CASE(23);
+        THOR_DIRECT_TAIL_CASE(24);
+        THOR_DIRECT_TAIL_CASE(25);
+        THOR_DIRECT_TAIL_CASE(26);
+        THOR_DIRECT_TAIL_CASE(27);
+        THOR_DIRECT_TAIL_CASE(28);
+        THOR_DIRECT_TAIL_CASE(29);
+        THOR_DIRECT_TAIL_CASE(30);
+        THOR_DIRECT_TAIL_CASE(31);
+        default:
+            return;
+    }
+#undef THOR_DIRECT_TAIL_CASE
+}
+
 template <typename CopyT, typename ItemIndexT, uint32_t LanesPerRow>
-__device__ __forceinline__ void copyDirectField(const uint8_t *sourceBytes,
-                                                uint8_t *destinationBytes,
-                                                ItemIndexT fieldItems,
-                                                uint32_t lane) {
+__device__ __forceinline__ void copyAlignedDirectField(const uint8_t *sourceBytes,
+                                                       uint8_t *destinationBytes,
+                                                       ItemIndexT fieldBytes,
+                                                       uint32_t lane) {
     const CopyT *__restrict__ source = reinterpret_cast<const CopyT *>(sourceBytes);
     CopyT *__restrict__ destination = reinterpret_cast<CopyT *>(destinationBytes);
+    const ItemIndexT fieldItems = fieldBytes / static_cast<ItemIndexT>(sizeof(CopyT));
 
     ItemIndexT item = static_cast<ItemIndexT>(lane);
     while (item < fieldItems) {
@@ -43,6 +151,54 @@ __device__ __forceinline__ void copyDirectField(const uint8_t *sourceBytes,
         if (fieldItems - item <= laneStride) break;
         item += laneStride;
     }
+
+    if constexpr (sizeof(CopyT) > 1) {
+        if (lane == 0) {
+            const uint32_t tailBytes = static_cast<uint32_t>(
+                fieldBytes % static_cast<ItemIndexT>(sizeof(CopyT)));
+            if (tailBytes != 0) {
+                copyExactTailPacket(source + fieldItems, destination + fieldItems, tailBytes);
+            }
+        }
+    }
+}
+
+template <typename ItemIndexT, uint32_t LanesPerRow>
+__device__ __forceinline__ void copyDirectField(const uint8_t *sourceBytes,
+                                                uint8_t *destinationBytes,
+                                                ItemIndexT fieldBytes,
+                                                uint32_t lane) {
+    // Compact-record and packed destination row strides may be odd, so copy
+    // alignment is a property of this selected row, not of the launch as a
+    // whole. Choose the widest safe packet from the actual addresses. Field
+    // length is intentionally absent from this decision; only the final exact
+    // Tail<N> is narrow.
+    switch (widestAlignedCopyWidth(sourceBytes, destinationBytes)) {
+        case 32:
+            copyAlignedDirectField<ulonglong4_32a, ItemIndexT, LanesPerRow>(
+                sourceBytes, destinationBytes, fieldBytes, lane);
+            break;
+        case 16:
+            copyAlignedDirectField<uint4, ItemIndexT, LanesPerRow>(
+                sourceBytes, destinationBytes, fieldBytes, lane);
+            break;
+        case 8:
+            copyAlignedDirectField<uint64_t, ItemIndexT, LanesPerRow>(
+                sourceBytes, destinationBytes, fieldBytes, lane);
+            break;
+        case 4:
+            copyAlignedDirectField<uint32_t, ItemIndexT, LanesPerRow>(
+                sourceBytes, destinationBytes, fieldBytes, lane);
+            break;
+        case 2:
+            copyAlignedDirectField<uint16_t, ItemIndexT, LanesPerRow>(
+                sourceBytes, destinationBytes, fieldBytes, lane);
+            break;
+        default:
+            copyAlignedDirectField<uint8_t, ItemIndexT, LanesPerRow>(
+                sourceBytes, destinationBytes, fieldBytes, lane);
+            break;
+    }
 }
 
 /**
@@ -51,12 +207,12 @@ __device__ __forceinline__ void copyDirectField(const uint8_t *sourceBytes,
  * selected transaction width, so a 16-byte-aligned field and a 32-byte-aligned
  * field of the same size receive the same amount of lane-level parallelism.
  *
- * CopyT is selected on the host only when every source/destination row start is
- * aligned for that type. UINT8 remains the exact fallback for byte-packed
- * record layouts.
+ * The transaction width is selected independently for each selected row from
+ * its actual source/destination alignment. This matters for compact byte-packed
+ * records and odd destination row strides: aligned rows can still use wide
+ * bulk packets even when neighboring rows cannot.
  */
-template <typename CopyT,
-          typename RowIndexT,
+template <typename RowIndexT,
           typename ItemIndexT,
           uint32_t RowsPerBlock>
 __global__ void materializeDirectFieldKernel(
@@ -67,8 +223,7 @@ __global__ void materializeDirectFieldKernel(
     uint64_t numExamples,
     uint64_t recordSizeBytes,
     uint64_t fieldOffsetBytes,
-    uint64_t fieldBytes,
-    ItemIndexT fieldItems) {
+    ItemIndexT fieldBytes) {
     static_assert(RowsPerBlock >= 1 && RowsPerBlock <= kMaxRowsPerBlock,
                   "Device-resident direct rows per CTA are out of range.");
     static_assert(kThreadsPerBlock % RowsPerBlock == 0,
@@ -94,8 +249,8 @@ __global__ void materializeDirectFieldKernel(
                     records + sourceRow * recordSizeBytes + fieldOffsetBytes;
                 uint8_t *rowDestination =
                     destination + static_cast<uint64_t>(batchRow) * fieldBytes;
-                copyDirectField<CopyT, ItemIndexT, kLanesPerRow>(
-                    source, rowDestination, fieldItems, lane);
+                copyDirectField<ItemIndexT, kLanesPerRow>(
+                    source, rowDestination, fieldBytes, lane);
             }
             // Preserve the historical contract: an invalid resident row index
             // leaves the corresponding destination row untouched.
@@ -165,8 +320,7 @@ uint32_t blocksForRows(uint64_t batchSize) {
         std::min<uint64_t>(std::max<uint64_t>(blocks, 1), kMaxPortableBlocks));
 }
 
-template <typename CopyT,
-          typename RowIndexT,
+template <typename RowIndexT,
           typename ItemIndexT,
           uint32_t RowsPerBlock>
 void launchGrouped(const uint8_t *records,
@@ -176,12 +330,11 @@ void launchGrouped(const uint8_t *records,
                    uint64_t numExamples,
                    uint64_t recordSizeBytes,
                    uint64_t fieldOffsetBytes,
-                   uint64_t fieldBytes,
-                   ItemIndexT fieldItems,
+                   ItemIndexT fieldBytes,
                    cudaStream_t stream) {
     const uint32_t blocks =
         blocksForRows<RowsPerBlock>(static_cast<uint64_t>(batchSize));
-    materializeDirectFieldKernel<CopyT, RowIndexT, ItemIndexT, RowsPerBlock>
+    materializeDirectFieldKernel<RowIndexT, ItemIndexT, RowsPerBlock>
         <<<blocks, kThreadsPerBlock, 0, stream>>>(
             records,
             rowIndices,
@@ -190,12 +343,11 @@ void launchGrouped(const uint8_t *records,
             numExamples,
             recordSizeBytes,
             fieldOffsetBytes,
-            fieldBytes,
-            fieldItems);
+            fieldBytes);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <typename CopyT, typename RowIndexT, typename ItemIndexT>
+template <typename RowIndexT, typename ItemIndexT>
 void launchForGrouping(const uint8_t *records,
                        const uint64_t *rowIndices,
                        uint8_t *destination,
@@ -203,54 +355,54 @@ void launchForGrouping(const uint8_t *records,
                        uint64_t numExamples,
                        uint64_t recordSizeBytes,
                        uint64_t fieldOffsetBytes,
-                       uint64_t fieldBytes,
-                       ItemIndexT fieldItems,
+                       ItemIndexT fieldBytes,
                        cudaStream_t stream) {
-    switch (rowsPerBlockFor(fieldBytes, static_cast<uint64_t>(batchSize))) {
+    switch (rowsPerBlockFor(static_cast<uint64_t>(fieldBytes),
+                            static_cast<uint64_t>(batchSize))) {
         case 1:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 1>(
+            launchGrouped<RowIndexT, ItemIndexT, 1>(
                 records, rowIndices, destination, batchSize, numExamples,
-                recordSizeBytes, fieldOffsetBytes, fieldBytes, fieldItems, stream);
+                recordSizeBytes, fieldOffsetBytes, fieldBytes, stream);
             return;
         case 2:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 2>(
+            launchGrouped<RowIndexT, ItemIndexT, 2>(
                 records, rowIndices, destination, batchSize, numExamples,
-                recordSizeBytes, fieldOffsetBytes, fieldBytes, fieldItems, stream);
+                recordSizeBytes, fieldOffsetBytes, fieldBytes, stream);
             return;
         case 4:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 4>(
+            launchGrouped<RowIndexT, ItemIndexT, 4>(
                 records, rowIndices, destination, batchSize, numExamples,
-                recordSizeBytes, fieldOffsetBytes, fieldBytes, fieldItems, stream);
+                recordSizeBytes, fieldOffsetBytes, fieldBytes, stream);
             return;
         case 8:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 8>(
+            launchGrouped<RowIndexT, ItemIndexT, 8>(
                 records, rowIndices, destination, batchSize, numExamples,
-                recordSizeBytes, fieldOffsetBytes, fieldBytes, fieldItems, stream);
+                recordSizeBytes, fieldOffsetBytes, fieldBytes, stream);
             return;
         case 16:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 16>(
+            launchGrouped<RowIndexT, ItemIndexT, 16>(
                 records, rowIndices, destination, batchSize, numExamples,
-                recordSizeBytes, fieldOffsetBytes, fieldBytes, fieldItems, stream);
+                recordSizeBytes, fieldOffsetBytes, fieldBytes, stream);
             return;
         case 32:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 32>(
+            launchGrouped<RowIndexT, ItemIndexT, 32>(
                 records, rowIndices, destination, batchSize, numExamples,
-                recordSizeBytes, fieldOffsetBytes, fieldBytes, fieldItems, stream);
+                recordSizeBytes, fieldOffsetBytes, fieldBytes, stream);
             return;
         case 64:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 64>(
+            launchGrouped<RowIndexT, ItemIndexT, 64>(
                 records, rowIndices, destination, batchSize, numExamples,
-                recordSizeBytes, fieldOffsetBytes, fieldBytes, fieldItems, stream);
+                recordSizeBytes, fieldOffsetBytes, fieldBytes, stream);
             return;
         case 128:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 128>(
+            launchGrouped<RowIndexT, ItemIndexT, 128>(
                 records, rowIndices, destination, batchSize, numExamples,
-                recordSizeBytes, fieldOffsetBytes, fieldBytes, fieldItems, stream);
+                recordSizeBytes, fieldOffsetBytes, fieldBytes, stream);
             return;
         case 256:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 256>(
+            launchGrouped<RowIndexT, ItemIndexT, 256>(
                 records, rowIndices, destination, batchSize, numExamples,
-                recordSizeBytes, fieldOffsetBytes, fieldBytes, fieldItems, stream);
+                recordSizeBytes, fieldOffsetBytes, fieldBytes, stream);
             return;
         default:
             break;
@@ -258,7 +410,7 @@ void launchForGrouping(const uint8_t *records,
     throw std::logic_error("Invalid device-resident direct rows-per-CTA selection.");
 }
 
-template <typename CopyT, typename RowIndexT>
+template <typename RowIndexT>
 void launchForItemIndexType(const uint8_t *records,
                             const uint64_t *rowIndices,
                             uint8_t *destination,
@@ -268,9 +420,11 @@ void launchForItemIndexType(const uint8_t *records,
                             uint64_t fieldOffsetBytes,
                             uint64_t fieldBytes,
                             cudaStream_t stream) {
-    const uint64_t fieldItems = fieldBytes / sizeof(CopyT);
-    if (fieldItems <= std::numeric_limits<uint32_t>::max()) {
-        launchForGrouping<CopyT, RowIndexT, uint32_t>(
+    // Keep ordinary per-row copy arithmetic 32-bit. Leave headroom for the
+    // largest 256-lane stride so the terminal increment cannot wrap.
+    if (fieldBytes <=
+        static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) - kThreadsPerBlock) {
+        launchForGrouping<RowIndexT, uint32_t>(
             records,
             rowIndices,
             destination,
@@ -278,11 +432,10 @@ void launchForItemIndexType(const uint8_t *records,
             numExamples,
             recordSizeBytes,
             fieldOffsetBytes,
-            fieldBytes,
-            static_cast<uint32_t>(fieldItems),
+            static_cast<uint32_t>(fieldBytes),
             stream);
     } else {
-        launchForGrouping<CopyT, RowIndexT, uint64_t>(
+        launchForGrouping<RowIndexT, uint64_t>(
             records,
             rowIndices,
             destination,
@@ -291,26 +444,24 @@ void launchForItemIndexType(const uint8_t *records,
             recordSizeBytes,
             fieldOffsetBytes,
             fieldBytes,
-            fieldItems,
             stream);
     }
 }
 
-template <typename CopyT>
-void launchForCopyType(const uint8_t *records,
-                       const uint64_t *rowIndices,
-                       uint8_t *destination,
-                       uint64_t batchSize,
-                       uint64_t numExamples,
-                       uint64_t recordSizeBytes,
-                       uint64_t fieldOffsetBytes,
-                       uint64_t fieldBytes,
-                       cudaStream_t stream) {
+void launchForRowIndexType(const uint8_t *records,
+                           const uint64_t *rowIndices,
+                           uint8_t *destination,
+                           uint64_t batchSize,
+                           uint64_t numExamples,
+                           uint64_t recordSizeBytes,
+                           uint64_t fieldOffsetBytes,
+                           uint64_t fieldBytes,
+                           cudaStream_t stream) {
     // Batch-row arithmetic is 32-bit for the overwhelmingly common case.
     // Source byte addresses remain 64-bit because a valid resident dataset may
     // exceed 4 GiB even when its row count is comfortably within UINT32.
     if (batchSize <= std::numeric_limits<uint32_t>::max()) {
-        launchForItemIndexType<CopyT, uint32_t>(
+        launchForItemIndexType<uint32_t>(
             records,
             rowIndices,
             destination,
@@ -321,7 +472,7 @@ void launchForCopyType(const uint8_t *records,
             fieldBytes,
             stream);
     } else {
-        launchForItemIndexType<CopyT, uint64_t>(
+        launchForItemIndexType<uint64_t>(
             records,
             rowIndices,
             destination,
@@ -332,21 +483,6 @@ void launchForCopyType(const uint8_t *records,
             fieldBytes,
             stream);
     }
-}
-
-template <typename CopyT>
-bool canUseCopyType(const uint8_t *records,
-                    const uint8_t *destination,
-                    uint64_t recordSizeBytes,
-                    uint64_t fieldOffsetBytes,
-                    uint64_t fieldBytes) {
-    constexpr uint64_t alignment = alignof(CopyT);
-    return fieldBytes % sizeof(CopyT) == 0 &&
-           recordSizeBytes % alignment == 0 &&
-           fieldOffsetBytes % alignment == 0 &&
-           fieldBytes % alignment == 0 &&
-           (reinterpret_cast<uintptr_t>(records) % alignment) == 0 &&
-           (reinterpret_cast<uintptr_t>(destination) % alignment) == 0;
 }
 
 }  // namespace
@@ -393,39 +529,19 @@ void launchDeviceResidentDirectMaterializationKernel(
     uint8_t *destinationBytes = static_cast<uint8_t *>(destination.getMemPtr());
     const cudaStream_t cudaStream = stream.getStream();
 
-    // Compact records are byte-packed and are not guaranteed to align tensor
-    // fields. Pick the widest type that is provably aligned for every resident
-    // source row and destination row. The launch geometry is chosen separately
-    // from fieldBytes, so falling back to a narrower transaction does not also
-    // reduce the amount of lane-level parallelism assigned to the row.
-    if (canUseCopyType<ulonglong4_32a>(
-            records, destinationBytes, recordSizeBytes, fieldOffsetBytes, fieldBytes)) {
-        launchForCopyType<ulonglong4_32a>(
-            records, rowIndices, destinationBytes, batchSize, numExamples,
-            recordSizeBytes, fieldOffsetBytes, fieldBytes, cudaStream);
-    } else if (canUseCopyType<uint4>(
-                   records, destinationBytes, recordSizeBytes, fieldOffsetBytes, fieldBytes)) {
-        launchForCopyType<uint4>(
-            records, rowIndices, destinationBytes, batchSize, numExamples,
-            recordSizeBytes, fieldOffsetBytes, fieldBytes, cudaStream);
-    } else if (canUseCopyType<uint64_t>(
-                   records, destinationBytes, recordSizeBytes, fieldOffsetBytes, fieldBytes)) {
-        launchForCopyType<uint64_t>(
-            records, rowIndices, destinationBytes, batchSize, numExamples,
-            recordSizeBytes, fieldOffsetBytes, fieldBytes, cudaStream);
-    } else if (canUseCopyType<uint32_t>(
-                   records, destinationBytes, recordSizeBytes, fieldOffsetBytes, fieldBytes)) {
-        launchForCopyType<uint32_t>(
-            records, rowIndices, destinationBytes, batchSize, numExamples,
-            recordSizeBytes, fieldOffsetBytes, fieldBytes, cudaStream);
-    } else if (canUseCopyType<uint16_t>(
-                   records, destinationBytes, recordSizeBytes, fieldOffsetBytes, fieldBytes)) {
-        launchForCopyType<uint16_t>(
-            records, rowIndices, destinationBytes, batchSize, numExamples,
-            recordSizeBytes, fieldOffsetBytes, fieldBytes, cudaStream);
-    } else {
-        launchForCopyType<uint8_t>(
-            records, rowIndices, destinationBytes, batchSize, numExamples,
-            recordSizeBytes, fieldOffsetBytes, fieldBytes, cudaStream);
-    }
+    // Compact records and packed destination rows may have byte strides that
+    // change alignment from one selected row to the next. Select vector width
+    // inside the kernel from each row's actual addresses; fieldBytes affects
+    // launch geometry and exact tail size, but no longer forces a whole-launch
+    // downgrade to a narrow CopyT.
+    launchForRowIndexType(
+        records,
+        rowIndices,
+        destinationBytes,
+        batchSize,
+        numExamples,
+        recordSizeBytes,
+        fieldOffsetBytes,
+        fieldBytes,
+        cudaStream);
 }

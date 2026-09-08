@@ -224,16 +224,6 @@ TEST(Split, SplitsCorrectly) {
             splitTensorMemArray_d, splitTensorMemArray, numSplitTensors * sizeof(half *), cudaMemcpyHostToDevice, stream.getStream());
         assert(cudaStatus == cudaSuccess);
 
-        long *axisElementsPerDestArray_d;
-        cudaStatus = cudaMalloc(&axisElementsPerDestArray_d, numSplitTensors * sizeof(long));
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpyAsync(axisElementsPerDestArray_d,
-                                     axisElementsPerDestArray,
-                                     numSplitTensors * sizeof(unsigned long),
-                                     cudaMemcpyHostToDevice,
-                                     stream.getStream());
-        assert(cudaStatus == cudaSuccess);
-
         stridePerSourceDimension[numDimensions - 1] = 1;
         for (int dest = 0; dest < numSplitTensors; dest++)
             stridePerDestDimension[dest * numDimensions + numDimensions - 1] = 1;
@@ -247,33 +237,33 @@ TEST(Split, SplitsCorrectly) {
                     stridePerDestDimension[dest * numDimensions + i] =
                         stridePerDestDimension[dest * numDimensions + i + 1] * wholeDimensions[i + 1];
         }
-        long *stridePerSourceDimension_d;
-        cudaStatus = cudaMalloc(&stridePerSourceDimension_d, numDimensions * sizeof(long));
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpyAsync(
-            stridePerSourceDimension_d, stridePerSourceDimension, numDimensions * sizeof(long), cudaMemcpyHostToDevice, stream.getStream());
-        assert(cudaStatus == cudaSuccess);
 
-        long *stridePerDestDimension_d;
-        cudaStatus = cudaMalloc(&stridePerDestDimension_d, numDimensions * numSplitTensors * sizeof(long));
+        uint64_t innerElements = 1;
+        for (int d = axis + 1; d < numDimensions; ++d) innerElements *= wholeDimensions[d];
+        uint64_t outerSlices = 1;
+        for (int d = 0; d < axis; ++d) outerSlices *= wholeDimensions[d];
+        std::vector<uint64_t> axisElements(numSplitTensors);
+        for (int i = 0; i < numSplitTensors; ++i) axisElements[i] = axisElementsPerDestArray[i];
+        const std::vector<ConcatenateSpanGeometry> spanGeometry =
+            buildConcatenateSpanGeometry(sizeof(half), innerElements, axisElements);
+        ConcatenateSpanGeometry *spanGeometry_d;
+        cudaStatus = cudaMalloc(&spanGeometry_d, spanGeometry.size() * sizeof(ConcatenateSpanGeometry));
         assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpyAsync(stridePerDestDimension_d,
-                                     stridePerDestDimension,
-                                     numDimensions * numSplitTensors * sizeof(long),
+        cudaStatus = cudaMemcpyAsync(spanGeometry_d,
+                                     spanGeometry.data(),
+                                     spanGeometry.size() * sizeof(ConcatenateSpanGeometry),
                                      cudaMemcpyHostToDevice,
                                      stream.getStream());
         assert(cudaStatus == cudaSuccess);
+        const uint64_t packedSliceBytes =
+            spanGeometry.back().packedOffsetBytes + spanGeometry.back().spanBytes;
 
         launchSplit(reinterpret_cast<void **>(splitTensorMemArray_d),
                     wholeGpu.getMemPtr(),
-                    sizeof(half),
-                    numElements,
-                    numDimensions,
-                    numSplitTensors,
-                    axis,
-                    axisElementsPerDestArray_d,
-                    stridePerSourceDimension_d,
-                    stridePerDestDimension_d,
+                    outerSlices,
+                    static_cast<uint32_t>(numSplitTensors),
+                    packedSliceBytes,
+                    spanGeometry_d,
                     stream);
 
         for (int i = 0; i < numSplitTensors; ++i)
@@ -305,11 +295,7 @@ TEST(Split, SplitsCorrectly) {
             ASSERT_EQ((float)wholeMem[sourceFlatIndex], (float)partsMem[destFlatIndex]);
         }
 
-        cudaStatus = cudaFree(stridePerDestDimension_d);
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaFree(stridePerSourceDimension_d);
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaFree(axisElementsPerDestArray_d);
+        cudaStatus = cudaFree(spanGeometry_d);
         assert(cudaStatus == cudaSuccess);
         cudaStatus = cudaFree(splitTensorMemArray_d);
         assert(cudaStatus == cudaSuccess);
@@ -380,16 +366,6 @@ TEST(Concatenate, ConcatenatesCorrectly) {
             splitTensorMemArray_d, splitTensorMemArray, numSplitTensors * sizeof(half *), cudaMemcpyHostToDevice, stream.getStream());
         assert(cudaStatus == cudaSuccess);
 
-        long *axisElementsPerSourceArray_d;
-        cudaStatus = cudaMalloc(&axisElementsPerSourceArray_d, numSplitTensors * sizeof(long));
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpyAsync(axisElementsPerSourceArray_d,
-                                     axisElementsPerSourceArray,
-                                     numSplitTensors * sizeof(unsigned long),
-                                     cudaMemcpyHostToDevice,
-                                     stream.getStream());
-        assert(cudaStatus == cudaSuccess);
-
         stridePerDestDimension[numDimensions - 1] = 1;
         for (int dest = 0; dest < numSplitTensors; dest++)
             stridePerSourceDimension[dest * numDimensions + numDimensions - 1] = 1;
@@ -403,34 +379,34 @@ TEST(Concatenate, ConcatenatesCorrectly) {
                     stridePerSourceDimension[dest * numDimensions + i] =
                         stridePerSourceDimension[dest * numDimensions + i + 1] * wholeDimensions[i + 1];
         }
-        long *stridePerDestDimension_d;
-        cudaStatus = cudaMalloc(&stridePerDestDimension_d, numDimensions * sizeof(long));
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpyAsync(
-            stridePerDestDimension_d, stridePerDestDimension, numDimensions * sizeof(long), cudaMemcpyHostToDevice, stream.getStream());
-        assert(cudaStatus == cudaSuccess);
 
-        long *stridePerSourceDimension_d;
-        cudaStatus = cudaMalloc(&stridePerSourceDimension_d, numDimensions * numSplitTensors * sizeof(long));
+        uint64_t innerElements = 1;
+        for (int d = axis + 1; d < numDimensions; ++d) innerElements *= wholeDimensions[d];
+        uint64_t outerSlices = 1;
+        for (int d = 0; d < axis; ++d) outerSlices *= wholeDimensions[d];
+        std::vector<uint64_t> axisElements(numSplitTensors);
+        for (int i = 0; i < numSplitTensors; ++i) axisElements[i] = axisElementsPerSourceArray[i];
+        const std::vector<ConcatenateSpanGeometry> spanGeometry =
+            buildConcatenateSpanGeometry(sizeof(half), innerElements, axisElements);
+        ConcatenateSpanGeometry *spanGeometry_d;
+        cudaStatus = cudaMalloc(&spanGeometry_d, spanGeometry.size() * sizeof(ConcatenateSpanGeometry));
         assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaMemcpyAsync(stridePerSourceDimension_d,
-                                     stridePerSourceDimension,
-                                     numDimensions * numSplitTensors * sizeof(long),
+        cudaStatus = cudaMemcpyAsync(spanGeometry_d,
+                                     spanGeometry.data(),
+                                     spanGeometry.size() * sizeof(ConcatenateSpanGeometry),
                                      cudaMemcpyHostToDevice,
                                      stream.getStream());
         assert(cudaStatus == cudaSuccess);
+        const uint64_t packedSliceBytes =
+            spanGeometry.back().packedOffsetBytes + spanGeometry.back().spanBytes;
 
         long numElements = wholeCpu.getDescriptor().getTotalNumElements();
         launchConcatenate(wholeGpu.getMemPtr(),
                           reinterpret_cast<void **>(splitTensorMemArray_d),
-                          static_cast<std::size_t>(TensorDescriptor::getElementSizeInBytes(wholeGpu.getDescriptor().getDataType())),
-                          numElements,
-                          numDimensions,
-                          numSplitTensors,
-                          axis,
-                          axisElementsPerSourceArray_d,
-                          stridePerDestDimension_d,
-                          stridePerSourceDimension_d,
+                          outerSlices,
+                          static_cast<uint32_t>(numSplitTensors),
+                          packedSliceBytes,
+                          spanGeometry_d,
                           stream);
 
         wholeCpu.copyFromAsync(wholeGpu, stream);
@@ -464,11 +440,7 @@ TEST(Concatenate, ConcatenatesCorrectly) {
             ASSERT_EQ((float)wholeMem[destFlatIndex], (float)partsMem[sourceFlatIndex]);
         }
 
-        cudaStatus = cudaFree(stridePerSourceDimension_d);
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaFree(stridePerDestDimension_d);
-        assert(cudaStatus == cudaSuccess);
-        cudaStatus = cudaFree(axisElementsPerSourceArray_d);
+        cudaStatus = cudaFree(spanGeometry_d);
         assert(cudaStatus == cudaSuccess);
         cudaStatus = cudaFree(splitTensorMemArray_d);
         assert(cudaStatus == cudaSuccess);

@@ -120,6 +120,70 @@ void runMaterializationCase(
     }
 }
 
+void runExactTailCase(uint32_t copyWidth, uint32_t tailBytes) {
+    ASSERT_TRUE(copyWidth == 32 || copyWidth == 16 || copyWidth == 8 ||
+                copyWidth == 4 || copyWidth == 2);
+    ASSERT_GT(tailBytes, 0U);
+    ASSERT_LT(tailBytes, copyWidth);
+
+    constexpr uint64_t numExamples = 1;
+    constexpr uint64_t batchSize = 2;
+    constexpr uint8_t prefixSentinel = 0x5aU;
+    constexpr uint8_t destinationSentinel = 0xcdU;
+
+    // CUDA tensor allocations are at least 32-byte aligned. Offset the one
+    // valid source field by exactly the requested width (except for 32 itself)
+    // so source+destination jointly support exactly copyWidth and no wider
+    // transaction. The field reaches the logical end of recordStorage, making
+    // the final full-width source packet rely on Thor's 128-byte allocation
+    // padding for its legal over-read.
+    const uint64_t fieldOffsetBytes = copyWidth == 32 ? 0 : copyWidth;
+    const uint64_t fieldBytes = copyWidth + tailBytes;
+    const uint64_t recordSizeBytes = fieldOffsetBytes + fieldBytes;
+
+    std::vector<uint8_t> records(recordSizeBytes, prefixSentinel);
+    for (uint64_t byte = 0; byte < fieldBytes; ++byte) {
+        records[fieldOffsetBytes + byte] =
+            static_cast<uint8_t>((byte * 37 + copyWidth * 11 + tailBytes) & 0xffU);
+    }
+
+    // Row 1 is intentionally invalid. It must remain sentinel-filled, which
+    // makes any over-wide destination tail store from row 0 immediately visible
+    // instead of allowing a neighboring valid row to overwrite the corruption.
+    const std::vector<uint64_t> rowIndices{0, numExamples};
+    std::vector<uint8_t> expected(batchSize * fieldBytes, destinationSentinel);
+    for (uint64_t byte = 0; byte < fieldBytes; ++byte) {
+        expected[byte] = records[fieldOffsetBytes + byte];
+    }
+
+    Stream stream(0);
+    Tensor recordStorage = makeGpuTensor<uint8_t>({records.size()}, records, stream);
+    Tensor rowIndicesDevice = makeGpuTensor<uint64_t>({batchSize}, rowIndices, stream);
+    Tensor destination = makeGpuTensor<uint8_t>(
+        {batchSize, fieldBytes},
+        std::vector<uint8_t>(batchSize * fieldBytes, destinationSentinel),
+        stream);
+
+    launchDeviceResidentDirectMaterializationKernel(
+        recordStorage,
+        numExamples,
+        recordSizeBytes,
+        fieldOffsetBytes,
+        fieldBytes,
+        destination,
+        rowIndicesDevice,
+        stream);
+    stream.synchronize();
+
+    const std::vector<uint8_t> actual = copyGpuTensor<uint8_t>(destination, stream);
+    ASSERT_EQ(actual.size(), expected.size());
+    for (uint64_t offset = 0; offset < expected.size(); ++offset) {
+        EXPECT_EQ(actual[offset], expected[offset])
+            << "copyWidth=" << copyWidth << " tailBytes=" << tailBytes
+            << " byte offset=" << offset;
+    }
+}
+
 TEST(DeviceResidentDirectMaterializationKernelTest, AlignedWideFieldsUseThirtyTwoByteTransactions) {
     REQUIRE_CUDA_DEVICE();
     // CUDA allocations are naturally wide-aligned and every compact-record row,
@@ -134,10 +198,9 @@ TEST(DeviceResidentDirectMaterializationKernelTest, AlignedWideFieldsUseThirtyTw
 
 TEST(DeviceResidentDirectMaterializationKernelTest, SixteenByteFallbackRemainsContiguousAcrossLanes) {
     REQUIRE_CUDA_DEVICE();
-    // A 48-byte record stride prevents a globally safe 32-byte transaction but
-    // preserves 16-byte alignment. The launch policy still follows the 32-byte
-    // field payload, so the narrower transaction width does not reduce the lane
-    // group selected for a row.
+    // A 48-byte record stride makes alternating source rows 16- versus 32-byte
+    // aligned. Row-local width selection therefore exercises the 16-byte path
+    // without changing the 32-byte payload-based lane grouping.
     runMaterializationCase(/*numExamples=*/101,
                            /*batchSize=*/8192,
                            /*recordSizeBytes=*/48,
@@ -148,8 +211,8 @@ TEST(DeviceResidentDirectMaterializationKernelTest, SixteenByteFallbackRemainsCo
 TEST(DeviceResidentDirectMaterializationKernelTest, EveryNarrowerTransactionWidthAndByteFallbackPreserveFields) {
     REQUIRE_CUDA_DEVICE();
 
-    // Each record stride deliberately defeats the next-wider alignment while
-    // preserving the requested width: 8, 4, 2, then the exact byte fallback.
+    // These compact byte strides force selected rows through the 8/4/2/1-byte
+    // row-local alignment fallbacks while preserving exact field contents.
     runMaterializationCase(/*numExamples=*/607,
                            /*batchSize=*/517,
                            /*recordSizeBytes=*/24,
@@ -170,6 +233,21 @@ TEST(DeviceResidentDirectMaterializationKernelTest, EveryNarrowerTransactionWidt
                            /*recordSizeBytes=*/5,
                            /*fieldOffsetBytes=*/1,
                            /*fieldBytes=*/3);
+}
+
+TEST(DeviceResidentDirectMaterializationKernelTest,
+     AlignedBulkCopiesExerciseEveryExactTailSizeAndPreserveFollowingRow) {
+    REQUIRE_CUDA_DEVICE();
+
+    // For every vector width, exercise every legal nonzero Tail<N>. Each case
+    // also makes the full-width source tail load cross recordStorage's logical
+    // end into Thor's tensor padding, while the following destination row is an
+    // invalid gather target that must remain untouched.
+    for (const uint32_t copyWidth : {32U, 16U, 8U, 4U, 2U}) {
+        for (uint32_t tailBytes = 1; tailBytes < copyWidth; ++tailBytes) {
+            runExactTailCase(copyWidth, tailBytes);
+        }
+    }
 }
 
 TEST(DeviceResidentDirectMaterializationKernelTest, PayloadAwareGroupingCoversFullLaneLadder) {

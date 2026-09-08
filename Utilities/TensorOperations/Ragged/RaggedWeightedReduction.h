@@ -8,29 +8,31 @@
 
 namespace ThorImplementation {
 
-// Partial batches need offsets[valid_row_count], not merely the partition's full
-// active count. The reduction consumes only that terminal offset; it does not
-// traverse row boundaries.
+// Partial batches need the authoritative host boundary at valid_row_count, not
+// merely the partition's full active count. The DynamicExpression retains the
+// canonical offsets carrier for that host publication; the CUDA reduction no
+// longer reads the device offsets payload.
 inline constexpr RaggedPartitionRequirement kRaggedWeightedReductionPartitionRequirement = RaggedPartitionRequirement::DEVICE_OFFSETS;
 
-// Workspace is one FP32 {numerator, denominator} pair per first-pass CTA. The
-// descriptor depends only on packed capacity and can therefore be allocated once
-// when the metric expression is prepared and reused by every batch.
+// Workspace is the maximum one FP32 {numerator, denominator} pair per first-pass
+// CTA required by packed capacity. Runtime launches consume only the prefix
+// required by the authoritative active_value_count and can therefore reuse this
+// allocation across batches with very different active extents.
 TensorDescriptor raggedWeightedMeanStatisticsWorkspaceDescriptor(uint64_t max_total_values,
                                                                   uint64_t elements_per_value);
 
-// Computes WeightedMean sufficient statistics over the active scalar prefix of
-// a same-partition ragged values/weights pair. Only scalars before
-// offsets[valid_row_count] are read; inactive packed capacity remains undefined.
-// The first pass writes non-atomic per-CTA partials into partial_statistics and a
-// final CTA reduces those partials into the FP32 scalar outputs.
+// Computes WeightedMean sufficient statistics over the first active_value_count
+// packed values of a same-partition ragged values/weights pair. Inactive packed
+// capacity is never read. The first pass is sized from the active scalar prefix,
+// not from capacity. A one-CTA reduction writes the final FP32 statistics
+// directly; larger reductions write unique non-atomic CTA partials into the
+// reusable capacity-sized workspace and finish with one final CTA.
 void raggedWeightedMeanStatistics(const Tensor& values,
                                   const Tensor& weights,
-                                  const Tensor& offsets,
                                   Tensor& partial_statistics,
                                   Tensor& numerator,
                                   Tensor& denominator,
-                                  uint64_t valid_row_count,
+                                  uint64_t active_value_count,
                                   uint64_t max_total_values,
                                   uint64_t elements_per_value,
                                   Stream& stream);

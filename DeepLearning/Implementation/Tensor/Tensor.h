@@ -230,6 +230,12 @@ class Tensor {
         if (backingMemory->rowPartitionHostState == nullptr) return std::nullopt;
         return backingMemory->rowPartitionHostState->offsets;
     }
+    [[nodiscard]] std::optional<uint64_t> getRowPartitionHostOffset(uint64_t row) const {
+        THOR_THROW_IF_FALSE(!uninitialized());
+        if (backingMemory->rowPartitionHostState == nullptr) return std::nullopt;
+        THOR_THROW_IF_FALSE(row < backingMemory->rowPartitionHostState->offsets.size());
+        return backingMemory->rowPartitionHostState->offsets[row];
+    }
     [[nodiscard]] std::optional<uint64_t> getRowPartitionHostActiveValueCount() const {
         THOR_THROW_IF_FALSE(!uninitialized());
         if (backingMemory->rowPartitionHostState == nullptr) return std::nullopt;

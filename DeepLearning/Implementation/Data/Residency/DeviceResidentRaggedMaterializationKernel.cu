@@ -4,6 +4,7 @@
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime.h>
+#include <cuda/std/bit>
 
 #include <algorithm>
 #include <cstdint>
@@ -56,17 +57,110 @@ struct RowCopyMetadata {
 };
 
 __device__ __forceinline__ uint32_t widestAlignedCopyWidth(const uint8_t *source,
-                                                            const uint8_t *destination,
-                                                            uint64_t byteCount) {
+                                                            const uint8_t *destination) {
+    // Logical row length does not constrain the bulk transaction width. Thor
+    // tensors carry 128 bytes of trailing allocation padding, so the final
+    // source packet may safely extend past the logical end of packedValues.
+    // The destination tail is stored separately with its exact logical size.
     const uintptr_t combined = reinterpret_cast<uintptr_t>(source) |
-                               reinterpret_cast<uintptr_t>(destination) |
-                               static_cast<uintptr_t>(byteCount);
+                               reinterpret_cast<uintptr_t>(destination);
     if ((combined & 31U) == 0) return 32;
     if ((combined & 15U) == 0) return 16;
     if ((combined & 7U) == 0) return 8;
     if ((combined & 3U) == 0) return 4;
     if ((combined & 1U) == 0) return 2;
     return 1;
+}
+
+template <uint32_t NumBytes>
+struct ExactTailBytes {
+    uint8_t bytes[NumBytes];
+};
+
+template <uint32_t NumBytes>
+struct RawPacketBytes {
+    uint8_t bytes[NumBytes];
+};
+
+template <uint32_t TailBytes, typename CopyT>
+__device__ __forceinline__ void storeExactTailFromPacket(CopyT packet,
+                                                         CopyT *destination) {
+    static_assert(TailBytes > 0);
+    static_assert(TailBytes < sizeof(CopyT));
+    static_assert(sizeof(RawPacketBytes<sizeof(CopyT)>) == sizeof(CopyT));
+    static_assert(sizeof(ExactTailBytes<TailBytes>) == TailBytes);
+
+    // The load is intentionally one complete aligned CopyT packet. It may
+    // over-read the logical source row, including the final tensor row, because
+    // every Thor tensor allocation has 128 bytes of trailing padding. Convert
+    // the packet to bytes in registers and expose exactly TailBytes to the
+    // compiler for the destination aggregate store so adjacent logical rows
+    // and inactive ragged capacity are never overwritten.
+    const RawPacketBytes<sizeof(CopyT)> packetBytes =
+        cuda::std::bit_cast<RawPacketBytes<sizeof(CopyT)>>(packet);
+    ExactTailBytes<TailBytes> tail;
+#pragma unroll
+    for (uint32_t byte = 0; byte < TailBytes; ++byte) {
+        tail.bytes[byte] = packetBytes.bytes[byte];
+    }
+    *reinterpret_cast<ExactTailBytes<TailBytes> *>(destination) = tail;
+}
+
+template <typename CopyT>
+__device__ __attribute__((noinline)) void copyExactTailPacket(const CopyT *source,
+                                                              CopyT *destination,
+                                                              uint32_t tailBytes) {
+    static_assert(sizeof(CopyT) == 2 || sizeof(CopyT) == 4 || sizeof(CopyT) == 8 ||
+                  sizeof(CopyT) == 16 || sizeof(CopyT) == 32);
+    if (tailBytes == 0 || tailBytes >= sizeof(CopyT)) return;
+
+    // One designated lane performs one full-width source load. Keep the exact
+    // tail-size dispatch out of the heavily specialized gather kernels so the
+    // 1..256 rows/CTA ladder does not replicate 31 aggregate-copy cases into
+    // every kernel body.
+    const CopyT packet = *source;
+#define THOR_RAGGED_TAIL_CASE(N)                  \
+    case N:                                        \
+        if constexpr (N < sizeof(CopyT)) {         \
+            storeExactTailFromPacket<N>(packet, destination); \
+        }                                           \
+        return
+    switch (tailBytes) {
+        THOR_RAGGED_TAIL_CASE(1);
+        THOR_RAGGED_TAIL_CASE(2);
+        THOR_RAGGED_TAIL_CASE(3);
+        THOR_RAGGED_TAIL_CASE(4);
+        THOR_RAGGED_TAIL_CASE(5);
+        THOR_RAGGED_TAIL_CASE(6);
+        THOR_RAGGED_TAIL_CASE(7);
+        THOR_RAGGED_TAIL_CASE(8);
+        THOR_RAGGED_TAIL_CASE(9);
+        THOR_RAGGED_TAIL_CASE(10);
+        THOR_RAGGED_TAIL_CASE(11);
+        THOR_RAGGED_TAIL_CASE(12);
+        THOR_RAGGED_TAIL_CASE(13);
+        THOR_RAGGED_TAIL_CASE(14);
+        THOR_RAGGED_TAIL_CASE(15);
+        THOR_RAGGED_TAIL_CASE(16);
+        THOR_RAGGED_TAIL_CASE(17);
+        THOR_RAGGED_TAIL_CASE(18);
+        THOR_RAGGED_TAIL_CASE(19);
+        THOR_RAGGED_TAIL_CASE(20);
+        THOR_RAGGED_TAIL_CASE(21);
+        THOR_RAGGED_TAIL_CASE(22);
+        THOR_RAGGED_TAIL_CASE(23);
+        THOR_RAGGED_TAIL_CASE(24);
+        THOR_RAGGED_TAIL_CASE(25);
+        THOR_RAGGED_TAIL_CASE(26);
+        THOR_RAGGED_TAIL_CASE(27);
+        THOR_RAGGED_TAIL_CASE(28);
+        THOR_RAGGED_TAIL_CASE(29);
+        THOR_RAGGED_TAIL_CASE(30);
+        THOR_RAGGED_TAIL_CASE(31);
+        default:
+            return;
+    }
+#undef THOR_RAGGED_TAIL_CASE
 }
 
 template <typename CopyT, typename ItemIndexT, uint32_t LanesPerRow>
@@ -81,6 +175,16 @@ __device__ __forceinline__ void copyAligned(const uint8_t *source,
          item < items;
          item += static_cast<ItemIndexT>(LanesPerRow)) {
         typedDestination[item] = typedSource[item];
+    }
+
+    if constexpr (sizeof(CopyT) > 1) {
+        if (lane == 0) {
+            const uint32_t tailBytes =
+                static_cast<uint32_t>(byteCount % static_cast<ItemIndexT>(sizeof(CopyT)));
+            if (tailBytes != 0) {
+                copyExactTailPacket(typedSource + items, typedDestination + items, tailBytes);
+            }
+        }
     }
 }
 
@@ -178,7 +282,7 @@ __global__ void gatherRaggedValuesKernel(
                         destination + static_cast<uint64_t>(destinationValue) * valueBytes;
                     metadata.byteCount = static_cast<uint64_t>(count) * valueBytes;
                     metadata.copyWidthBytes = widestAlignedCopyWidth(
-                        metadata.source, metadata.destination, metadata.byteCount);
+                        metadata.source, metadata.destination);
                     copyRow<1>(metadata, 0);
                 }
             }
@@ -201,7 +305,7 @@ __global__ void gatherRaggedValuesKernel(
                             destination + static_cast<uint64_t>(destinationValue) * valueBytes;
                         metadata.byteCount = static_cast<uint64_t>(count) * valueBytes;
                         metadata.copyWidthBytes = widestAlignedCopyWidth(
-                            metadata.source, metadata.destination, metadata.byteCount);
+                            metadata.source, metadata.destination);
                     }
                 }
                 rowMetadata[rowSlot] = metadata;

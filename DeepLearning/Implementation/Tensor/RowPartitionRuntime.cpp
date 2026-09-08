@@ -263,6 +263,19 @@ std::vector<uint64_t> RowPartitionRuntime::requireHostOffsets() const {
     return hostOffsets.value();
 }
 
+uint64_t RowPartitionRuntime::requireHostOffset(uint64_t row) const {
+    THOR_THROW_IF_FALSE(initialized);
+    if (row > getBatchSize())
+        throw std::out_of_range("RowPartitionRuntime host offset row is outside [0, batch_size].");
+
+    const std::optional<uint64_t> hostOffset = hostStateCarrier.getRowPartitionHostOffset(row);
+    if (!hostOffset.has_value()) {
+        throw std::runtime_error(
+            "RowPartitionRuntime has no authoritative host row partition bound for this batch.");
+    }
+    return hostOffset.value();
+}
+
 uint64_t RowPartitionRuntime::requireHostActiveValueCount() const {
     const std::optional<uint64_t> activeValueCount = getHostActiveValueCountIfAvailable();
     if (!activeValueCount.has_value()) {

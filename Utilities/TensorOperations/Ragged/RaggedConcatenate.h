@@ -5,43 +5,54 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace ThorImplementation {
-// Trailing-axis concatenate/split needs only the active packed-value count, not individual row boundaries.
+// Trailing-axis concatenate/split is currently routed a managed active-count
+// carrier. CUDA does not read its payload; the authoritative host publication on
+// that carrier supplies the packed-prefix launch extent.
 inline constexpr RaggedPartitionRequirement kRaggedTrailingConcatenatePartitionRequirement = RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT;
 }  // namespace ThorImplementation
 
+// Static byte geometry for one source/destination participating in a trailing
+// ragged concatenate. This table is built once from tensor shapes and reused by
+// forward and backward CUDA launches.
+struct RaggedConcatenateSpanGeometry {
+    uint64_t spanBytes;
+    uint64_t valueBytes;
+    uint64_t outputOffsetBytes;
+};
+
+std::vector<RaggedConcatenateSpanGeometry> buildRaggedConcatenateSpanGeometry(
+    std::size_t elementSizeBytes,
+    uint64_t outerSlicesPerValue,
+    uint64_t innerElements,
+    const std::vector<uint64_t>& axisOffsets);
+
 // Concatenate/split contiguous packed ragged values along a trailing feature
-// axis while touching only the authoritative active prefix named by the managed
-// [1] active-count carrier. Inactive packed capacity is deliberately neither
-// read nor canonicalized.
+// axis while touching only [0, activeRows). activeRows is the authoritative
+// host-published packed-prefix extent for the current valid-example prefix.
+// Inactive packed capacity is deliberately neither read nor canonicalized.
 //
-// axisOffsets is a device array of numArrays + 1 cumulative axis offsets:
-//   {0, axisElements[0], axisElements[0] + axisElements[1], ...}
-// outerSlicesPerValue is the product of packed-value dimensions before the
-// concatenated axis; innerElements is the product of dimensions after it.
+// spanGeometry is a device array with numArrays entries built once from static
+// tensor shape. output/source value byte strides remain 64-bit so tensors larger
+// than 4 GiB are supported while ordinary span indexing stays 32-bit.
 void launchRaggedConcatenate(void *dest,
                              void *source[],
-                             std::size_t elementSizeBytes,
                              uint64_t capacityRows,
-                             uint64_t elementsPerOutputValue,
+                             uint64_t outputValueBytes,
                              uint64_t outerSlicesPerValue,
-                             uint64_t innerElements,
                              uint32_t numSourceArrays,
-                             const uint64_t axisOffsets[],
-                             const void *activeCount,
-                             std::size_t activeCountElementSizeBytes,
+                             const RaggedConcatenateSpanGeometry spanGeometry[],
+                             uint64_t activeRows,
                              Stream stream);
 
 void launchRaggedSplit(void *dest[],
                        void *source,
-                       std::size_t elementSizeBytes,
                        uint64_t capacityRows,
-                       uint64_t elementsPerSourceValue,
+                       uint64_t sourceValueBytes,
                        uint64_t outerSlicesPerValue,
-                       uint64_t innerElements,
                        uint32_t numDestArrays,
-                       const uint64_t axisOffsets[],
-                       const void *activeCount,
-                       std::size_t activeCountElementSizeBytes,
+                       const RaggedConcatenateSpanGeometry spanGeometry[],
+                       uint64_t activeRows,
                        Stream stream);

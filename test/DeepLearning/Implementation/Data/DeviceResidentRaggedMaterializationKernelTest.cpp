@@ -322,6 +322,114 @@ void runReferenceLoadAlignmentCase(uint64_t recordSizeBytes, uint64_t referenceO
 }
 
 template <typename OffsetT>
+void runAlignedBulkWithEveryExactTailCase(uint32_t expectedCopyWidth) {
+    constexpr uint64_t recordSizeBytes = 32;
+    constexpr uint64_t referenceOffsetBytes = 8;
+    constexpr uint64_t valueBytes = 1;
+    constexpr uint8_t destinationSentinel = 0xd9U;
+
+    ASSERT_TRUE(expectedCopyWidth == 2 || expectedCopyWidth == 4 ||
+                expectedCopyWidth == 8 || expectedCopyWidth == 16 ||
+                expectedCopyWidth == 32);
+
+    // Keep each target row at exactly expectedCopyWidth alignment. For widths
+    // below 32 an initial row shifts both packed source and destination starts
+    // to W modulo 2W. Each target/filler pair then consumes exactly 2W bytes,
+    // preserving that alignment for the next target. Target row W + tail thus
+    // exercises every Tail<1..W-1> specialization while the W - tail filler
+    // restores the next target's alignment.
+    std::vector<uint64_t> rowCounts;
+    if (expectedCopyWidth < 32) rowCounts.push_back(expectedCopyWidth);
+    for (uint32_t tail = 1; tail < expectedCopyWidth; ++tail) {
+        rowCounts.push_back(expectedCopyWidth + tail);
+        rowCounts.push_back(expectedCopyWidth - tail);
+    }
+
+    // End with another aligned odd-sized target rather than its filler. Its
+    // full-width source tail load therefore crosses the logical end of the
+    // packed tensor into Thor's 128-byte backing padding.
+    const uint32_t finalTail = std::min<uint32_t>(13, expectedCopyWidth - 1);
+    rowCounts.push_back(expectedCopyWidth + finalTail);
+
+    const uint64_t numExamples = rowCounts.size();
+    const uint64_t logicalRows = numExamples;
+    const uint64_t batchSize = logicalRows + 2;
+    std::vector<uint64_t> starts(numExamples, 0);
+    uint64_t storedValueCount = 0;
+    for (uint64_t row = 0; row < numExamples; ++row) {
+        starts[row] = storedValueCount;
+        storedValueCount += rowCounts[row];
+    }
+
+    std::vector<uint8_t> records(numExamples * recordSizeBytes, 0xa5U);
+    for (uint64_t row = 0; row < numExamples; ++row) {
+        const uint64_t reference = row * recordSizeBytes + referenceOffsetBytes;
+        writeUnalignedUint64(records, reference, starts[row]);
+        // value_count is not part of the materializer contract. Poison it so
+        // this test also cannot accidentally regress toward resident-count use.
+        writeUnalignedUint64(records,
+                             reference + sizeof(uint64_t),
+                             std::numeric_limits<uint64_t>::max() - row);
+    }
+
+    std::vector<uint8_t> packedValues(storedValueCount);
+    for (uint64_t byte = 0; byte < packedValues.size(); ++byte) {
+        packedValues[byte] =
+            static_cast<uint8_t>((byte * 29 + expectedCopyWidth * 7 + 3) & 0xffU);
+    }
+
+    std::vector<uint64_t> rowIndices(batchSize, 0);
+    for (uint64_t row = 0; row < logicalRows; ++row) rowIndices[row] = row;
+
+    std::vector<OffsetT> expectedOffsets(batchSize + 1,
+                                         static_cast<OffsetT>(storedValueCount));
+    for (uint64_t row = 0; row < logicalRows; ++row) {
+        expectedOffsets[row] = static_cast<OffsetT>(starts[row]);
+    }
+    expectedOffsets[logicalRows] = static_cast<OffsetT>(storedValueCount);
+
+    const uint64_t destinationCapacity = storedValueCount + 64;
+    Stream stream(0);
+    Tensor recordStorage = makeGpuTensor<uint8_t>({records.size()}, records, stream);
+    Tensor packedValuesStorage =
+        makeGpuTensor<uint8_t>({storedValueCount}, packedValues, stream);
+    Tensor rowIndicesDevice = makeGpuTensor<uint64_t>({batchSize}, rowIndices, stream);
+    Tensor destinationValues = makeGpuTensor<uint8_t>(
+        {destinationCapacity},
+        std::vector<uint8_t>(destinationCapacity, destinationSentinel),
+        stream);
+    Tensor destinationOffsets =
+        makeGpuTensor<OffsetT>({batchSize + 1}, expectedOffsets, stream);
+
+    launchDeviceResidentRaggedMaterializationKernel(
+        recordStorage,
+        packedValuesStorage,
+        numExamples,
+        recordSizeBytes,
+        referenceOffsetBytes,
+        storedValueCount,
+        valueBytes,
+        logicalRows,
+        destinationValues,
+        destinationOffsets,
+        rowIndicesDevice,
+        stream);
+    stream.synchronize();
+
+    EXPECT_EQ(copyGpuTensor<OffsetT>(destinationOffsets, stream), expectedOffsets);
+    const std::vector<uint8_t> actualValues = copyGpuTensor<uint8_t>(destinationValues, stream);
+    ASSERT_GE(actualValues.size(), packedValues.size());
+    for (uint64_t byte = 0; byte < packedValues.size(); ++byte) {
+        EXPECT_EQ(actualValues[byte], packedValues[byte])
+            << "copyWidth=" << expectedCopyWidth << " active byte=" << byte;
+    }
+    for (uint64_t byte = packedValues.size(); byte < actualValues.size(); ++byte) {
+        EXPECT_EQ(actualValues[byte], destinationSentinel)
+            << "copyWidth=" << expectedCopyWidth << " inactive byte=" << byte;
+    }
+}
+
+template <typename OffsetT>
 void runAllEmptyFastPathCase() {
     constexpr uint64_t numExamples = 7;
     constexpr uint64_t logicalRows = 5;
@@ -510,6 +618,21 @@ TEST(DeviceResidentRaggedMaterializationKernelTest, ReferenceMetadataUsesEveryAl
     runReferenceLoadAlignmentCase<uint32_t>(20, 4);
     runReferenceLoadAlignmentCase<uint32_t>(18, 2);
     runReferenceLoadAlignmentCase<uint32_t>(19, 3);
+}
+
+TEST(DeviceResidentRaggedMaterializationKernelTest,
+     AlignedBulkCopiesExerciseEveryExactTailSizeWithoutOverwritingFollowingCapacity) {
+    REQUIRE_CUDA_DEVICE();
+
+    // Logical row length no longer participates in copy-width selection. These
+    // batches force every legal nonzero tail for each vector width while keeping
+    // the corresponding target row at exactly that alignment. The final target
+    // also ends at packedValuesStorage's logical end, requiring the full-width
+    // source tail load to rely on Thor's 128-byte allocation padding.
+    for (const uint32_t copyWidth : {32U, 16U, 8U, 4U, 2U}) {
+        runAlignedBulkWithEveryExactTailCase<uint32_t>(copyWidth);
+        runAlignedBulkWithEveryExactTailCase<uint64_t>(copyWidth);
+    }
 }
 
 TEST(DeviceResidentRaggedMaterializationKernelTest,

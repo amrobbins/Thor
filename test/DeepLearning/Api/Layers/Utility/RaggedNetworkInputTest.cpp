@@ -1190,7 +1190,7 @@ TEST(RaggedNetworkInputApi, MixedPartitionConsumersMaterializeAndRouteScalarAndO
 
 
 TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateValuesOnlyDoesNotMaterializeOutputPartition) {
-    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t batchSize = 3;
     Network network("ragged_internal_concat_values_only");
 
     RaggedTensor left = RaggedNetworkInput::Builder()
@@ -1231,6 +1231,14 @@ TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateValuesOnlyDoesNotMateria
     for (Event& event : initDoneEvents) event.synchronize();
 
     auto& stamp = placed->getStampedNetwork(0);
+    for (const ThorImplementation::RowPartitionId sourcePartition : {left.getRowPartitionId(), right.getRowPartitionId()}) {
+        const auto sourceRequirements = stamp.getExternalRowPartitionRequirementsForTest(sourcePartition);
+        ASSERT_TRUE(sourceRequirements.has_value());
+        EXPECT_EQ(sourceRequirements.value(), ThorImplementation::RaggedPartitionRequirement::HOST_EXTENT);
+        EXPECT_EQ(stamp.getManagedPartitionActiveCountInputForTest(sourcePartition), nullptr);
+        EXPECT_EQ(stamp.getManagedPartitionOffsetsInputForTest(sourcePartition), nullptr);
+    }
+
     const auto requirements = stamp.getInternalRowPartitionRequirementsForTest(joined.getRowPartitionId());
     ASSERT_TRUE(requirements.has_value());
     EXPECT_EQ(requirements.value(), ThorImplementation::RaggedPartitionRequirement::NONE);
@@ -1242,17 +1250,76 @@ TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateValuesOnlyDoesNotMateria
     ASSERT_NE(physicalConcatenate, nullptr);
     EXPECT_EQ(physicalConcatenate->getFeatureOutputs().size(), 1u);
 
-    Batch batch = makeFp32RaggedBatch("left", left, {0, 2, 4});
-    Batch rightBatch = makeFp32RaggedBatch("right", right, {0, 1, 5});
+    Batch batch = makeFp32RaggedBatch("left", left, {0, 2, 4, 5});
+    Batch rightBatch = makeFp32RaggedBatch("right", right, {0, 1, 5, 6});
     batch.insert("right", rightBatch.getRaggedTensor("right"));
+    batch.setValidExampleCount(2);
     std::map<std::string, InferenceOutputValue> outputs;
     ASSERT_NO_THROW(outputs = placed->inferLogical(batch));
+    EXPECT_EQ(physicalConcatenate->getStagedCopySpanCountForTest(), 4u);
     ASSERT_TRUE(outputs.contains("joined"));
     ASSERT_TRUE(std::holds_alternative<ThorImplementation::RaggedTensor>(outputs.at("joined")));
     const ThorImplementation::RaggedTensor& output =
         std::get<ThorImplementation::RaggedTensor>(outputs.at("joined"));
     EXPECT_EQ(output.getHostOffsetsIfAvailable(),
-              std::optional<std::vector<uint64_t>>(std::vector<uint64_t>{0, 3, 9}));
+              std::optional<std::vector<uint64_t>>(std::vector<uint64_t>{0, 3, 9, 11}));
+}
+
+TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateReusesSharedAuthoritativeInputPartition) {
+    constexpr uint32_t batchSize = 2;
+    Network network("ragged_internal_concat_shared_input_partition");
+
+    RaggedTensor source = RaggedNetworkInput::Builder()
+                              .network(network)
+                              .name("source")
+                              .valuesDataType(DataType::FP32)
+                              .offsetsDataType(DataType::UINT32)
+                              .trailingDimensions({4})
+                              .batchSize(batchSize)
+                              .maxTotalValues(6)
+                              .maxValuesPerRow(3)
+                              .build();
+    Slice left = Slice::Builder().network(network).featureInput(source).axis(0).start(0).length(2).build();
+    Slice right = Slice::Builder().network(network).featureInput(source).axis(0).start(2).length(2).build();
+    ASSERT_TRUE(left.getRaggedFeatureOutput().has_value());
+    ASSERT_TRUE(right.getRaggedFeatureOutput().has_value());
+    ASSERT_EQ(left.getRaggedFeatureOutput()->getRowPartitionId(), right.getRaggedFeatureOutput()->getRowPartitionId());
+
+    RaggedSequenceConcatenate concatenate = RaggedSequenceConcatenate::Builder()
+                                                  .network(network)
+                                                  .featureInput(left.getRaggedFeatureOutput().value())
+                                                  .featureInput(right.getRaggedFeatureOutput().value())
+                                                  .build();
+    const RaggedTensor joined = concatenate.getRaggedFeatureOutput();
+    (void)RaggedNetworkOutput::Builder()
+        .network(network)
+        .name("joined")
+        .inputTensor(joined)
+        .build();
+
+    std::vector<Event> initDoneEvents;
+    std::shared_ptr<PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initDoneEvents) event.synchronize();
+
+    auto& stamp = placed->getStampedNetwork(0);
+    auto physicalConcatenate = std::dynamic_pointer_cast<ThorImplementation::RaggedSequenceConcatenate>(
+        stamp.getPhysicalLayerFromApiLayer(concatenate.getId()));
+    ASSERT_NE(physicalConcatenate, nullptr);
+    // Two values inputs plus one deduplicated HOST_EXTENT carrier for their
+    // shared RowPartitionId. The span plan still contains separate inputIndex
+    // entries so each sequence input is copied in order.
+    EXPECT_EQ(physicalConcatenate->getFeatureInputs().size(), 3u);
+
+    std::map<std::string, InferenceOutputValue> outputs;
+    ASSERT_NO_THROW(outputs = placed->inferLogical(makeFp32RaggedBatch("source", source, {0, 2, 5})));
+    EXPECT_EQ(physicalConcatenate->getStagedCopySpanCountForTest(), 4u);
+    ASSERT_TRUE(outputs.contains("joined"));
+    ASSERT_TRUE(std::holds_alternative<ThorImplementation::RaggedTensor>(outputs.at("joined")));
+    const ThorImplementation::RaggedTensor& output =
+        std::get<ThorImplementation::RaggedTensor>(outputs.at("joined"));
+    EXPECT_EQ(output.getHostOffsetsIfAvailable(),
+              std::optional<std::vector<uint64_t>>(std::vector<uint64_t>{0, 4, 10}));
 }
 
 TEST(RaggedNetworkInputApi, InternallyCreatedConcatenateActiveCountMaterializesOnlyManagedScalar) {

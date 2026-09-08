@@ -81,8 +81,13 @@ class BinaryAccuracy : public Metric {
             return Metric::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
         (void)batchSize;
         (void)tensorPlacement;
-        // metric + ratio numerator/denominator + one default slot's device buffers.
-        return metricTensor.getTotalSizeInBytes() + 4 * sizeof(float);
+        // metric + ratio numerator/denominator + one default slot's device buffers
+        // + the reusable non-atomic CTA-partial workspace.
+        const uint64_t workspaceBytes =
+            ThorImplementation::raggedAccuracyStatisticsWorkspaceDescriptor(
+                raggedPredictions->getMaxTotalValues())
+                .getArraySizeInBytes();
+        return metricTensor.getTotalSizeInBytes() + 4 * sizeof(float) + workspaceBytes;
     }
 
     std::shared_ptr<ThorImplementation::Layer> stamp(ThorImplementation::TensorPlacement placement,

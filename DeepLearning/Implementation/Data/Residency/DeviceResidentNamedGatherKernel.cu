@@ -4,6 +4,7 @@
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime.h>
+#include <cuda/std/bit>
 
 #include <algorithm>
 #include <cstdint>
@@ -24,13 +25,120 @@ constexpr uint32_t kMaxPortableBlocks = 65535;
 static_assert(sizeof(ulonglong4_32a) == 32);
 static_assert(alignof(ulonglong4_32a) == 32);
 
+__device__ __forceinline__ uint32_t widestAlignedCopyWidth(const uint8_t *source,
+                                                            const uint8_t *destination) {
+    // Row length does not constrain bulk width. A final source packet may
+    // extend beyond the logical row (and, for the final source row, into Thor's
+    // 128-byte tensor allocation padding). The destination remainder is always
+    // stored with its exact logical size.
+    const uintptr_t combined = reinterpret_cast<uintptr_t>(source) |
+                               reinterpret_cast<uintptr_t>(destination);
+    if ((combined & 31U) == 0) return 32;
+    if ((combined & 15U) == 0) return 16;
+    if ((combined & 7U) == 0) return 8;
+    if ((combined & 3U) == 0) return 4;
+    if ((combined & 1U) == 0) return 2;
+    return 1;
+}
+
+template <uint32_t NumBytes>
+struct ExactTailBytes {
+    uint8_t bytes[NumBytes];
+};
+
+template <uint32_t NumBytes>
+struct RawPacketBytes {
+    uint8_t bytes[NumBytes];
+};
+
+template <uint32_t TailBytes, typename CopyT>
+__device__ __forceinline__ void storeExactTailFromPacket(CopyT packet,
+                                                         CopyT *destination) {
+    static_assert(TailBytes > 0);
+    static_assert(TailBytes < sizeof(CopyT));
+    static_assert(sizeof(RawPacketBytes<sizeof(CopyT)>) == sizeof(CopyT));
+    static_assert(sizeof(ExactTailBytes<TailBytes>) == TailBytes);
+
+    // One complete aligned source packet is intentionally loaded even when the
+    // logical row has fewer bytes left. Reading into the next source row is
+    // harmless; at the end of source storage, Thor's 128-byte tensor padding
+    // makes the same load physically safe. Expose exactly TailBytes to the
+    // compiler for the destination aggregate store so the next destination row
+    // is never overwritten.
+    const RawPacketBytes<sizeof(CopyT)> packetBytes =
+        cuda::std::bit_cast<RawPacketBytes<sizeof(CopyT)>>(packet);
+    ExactTailBytes<TailBytes> tail;
+#pragma unroll
+    for (uint32_t byte = 0; byte < TailBytes; ++byte) {
+        tail.bytes[byte] = packetBytes.bytes[byte];
+    }
+    *reinterpret_cast<ExactTailBytes<TailBytes> *>(destination) = tail;
+}
+
+template <typename CopyT>
+__device__ __attribute__((noinline)) void copyExactTailPacket(const CopyT *source,
+                                                              CopyT *destination,
+                                                              uint32_t tailBytes) {
+    static_assert(sizeof(CopyT) == 2 || sizeof(CopyT) == 4 || sizeof(CopyT) == 8 ||
+                  sizeof(CopyT) == 16 || sizeof(CopyT) == 32);
+    if (tailBytes == 0 || tailBytes >= sizeof(CopyT)) return;
+
+    // Keep the exact-size cases out of the heavily specialized row-group
+    // kernels. A single designated lane performs the full-width source load
+    // and one exact logical aggregate copy to the destination.
+    const CopyT packet = *source;
+#define THOR_NAMED_GATHER_TAIL_CASE(N)             \
+    case N:                                         \
+        if constexpr (N < sizeof(CopyT)) {          \
+            storeExactTailFromPacket<N>(packet, destination); \
+        }                                           \
+        return
+    switch (tailBytes) {
+        THOR_NAMED_GATHER_TAIL_CASE(1);
+        THOR_NAMED_GATHER_TAIL_CASE(2);
+        THOR_NAMED_GATHER_TAIL_CASE(3);
+        THOR_NAMED_GATHER_TAIL_CASE(4);
+        THOR_NAMED_GATHER_TAIL_CASE(5);
+        THOR_NAMED_GATHER_TAIL_CASE(6);
+        THOR_NAMED_GATHER_TAIL_CASE(7);
+        THOR_NAMED_GATHER_TAIL_CASE(8);
+        THOR_NAMED_GATHER_TAIL_CASE(9);
+        THOR_NAMED_GATHER_TAIL_CASE(10);
+        THOR_NAMED_GATHER_TAIL_CASE(11);
+        THOR_NAMED_GATHER_TAIL_CASE(12);
+        THOR_NAMED_GATHER_TAIL_CASE(13);
+        THOR_NAMED_GATHER_TAIL_CASE(14);
+        THOR_NAMED_GATHER_TAIL_CASE(15);
+        THOR_NAMED_GATHER_TAIL_CASE(16);
+        THOR_NAMED_GATHER_TAIL_CASE(17);
+        THOR_NAMED_GATHER_TAIL_CASE(18);
+        THOR_NAMED_GATHER_TAIL_CASE(19);
+        THOR_NAMED_GATHER_TAIL_CASE(20);
+        THOR_NAMED_GATHER_TAIL_CASE(21);
+        THOR_NAMED_GATHER_TAIL_CASE(22);
+        THOR_NAMED_GATHER_TAIL_CASE(23);
+        THOR_NAMED_GATHER_TAIL_CASE(24);
+        THOR_NAMED_GATHER_TAIL_CASE(25);
+        THOR_NAMED_GATHER_TAIL_CASE(26);
+        THOR_NAMED_GATHER_TAIL_CASE(27);
+        THOR_NAMED_GATHER_TAIL_CASE(28);
+        THOR_NAMED_GATHER_TAIL_CASE(29);
+        THOR_NAMED_GATHER_TAIL_CASE(30);
+        THOR_NAMED_GATHER_TAIL_CASE(31);
+        default:
+            return;
+    }
+#undef THOR_NAMED_GATHER_TAIL_CASE
+}
+
 template <typename CopyT, typename ItemIndexT, uint32_t LanesPerRow>
-__device__ __forceinline__ void copyNamedRow(const uint8_t *sourceBytes,
-                                             uint8_t *destinationBytes,
-                                             ItemIndexT rowItems,
-                                             uint32_t lane) {
+__device__ __forceinline__ void copyAlignedNamedRow(const uint8_t *sourceBytes,
+                                                    uint8_t *destinationBytes,
+                                                    ItemIndexT rowBytes,
+                                                    uint32_t lane) {
     const CopyT *__restrict__ source = reinterpret_cast<const CopyT *>(sourceBytes);
     CopyT *__restrict__ destination = reinterpret_cast<CopyT *>(destinationBytes);
+    const ItemIndexT rowItems = rowBytes / static_cast<ItemIndexT>(sizeof(CopyT));
 
     ItemIndexT item = static_cast<ItemIndexT>(lane);
     while (item < rowItems) {
@@ -43,6 +151,53 @@ __device__ __forceinline__ void copyNamedRow(const uint8_t *sourceBytes,
         if (rowItems - item <= laneStride) break;
         item += laneStride;
     }
+
+    if constexpr (sizeof(CopyT) > 1) {
+        if (lane == 0) {
+            const uint32_t tailBytes = static_cast<uint32_t>(
+                rowBytes % static_cast<ItemIndexT>(sizeof(CopyT)));
+            if (tailBytes != 0) {
+                copyExactTailPacket(source + rowItems, destination + rowItems, tailBytes);
+            }
+        }
+    }
+}
+
+template <typename ItemIndexT, uint32_t LanesPerRow>
+__device__ __forceinline__ void copyNamedRow(const uint8_t *sourceBytes,
+                                             uint8_t *destinationBytes,
+                                             ItemIndexT rowBytes,
+                                             uint32_t lane) {
+    // An odd row stride means different gathered source/destination row pairs
+    // can have different alignment. Choose the widest bulk packet from the
+    // actual pair of addresses. Row length is intentionally absent from this
+    // decision; only the final exact Tail<N> is narrow.
+    switch (widestAlignedCopyWidth(sourceBytes, destinationBytes)) {
+        case 32:
+            copyAlignedNamedRow<ulonglong4_32a, ItemIndexT, LanesPerRow>(
+                sourceBytes, destinationBytes, rowBytes, lane);
+            break;
+        case 16:
+            copyAlignedNamedRow<uint4, ItemIndexT, LanesPerRow>(
+                sourceBytes, destinationBytes, rowBytes, lane);
+            break;
+        case 8:
+            copyAlignedNamedRow<uint64_t, ItemIndexT, LanesPerRow>(
+                sourceBytes, destinationBytes, rowBytes, lane);
+            break;
+        case 4:
+            copyAlignedNamedRow<uint32_t, ItemIndexT, LanesPerRow>(
+                sourceBytes, destinationBytes, rowBytes, lane);
+            break;
+        case 2:
+            copyAlignedNamedRow<uint16_t, ItemIndexT, LanesPerRow>(
+                sourceBytes, destinationBytes, rowBytes, lane);
+            break;
+        default:
+            copyAlignedNamedRow<uint8_t, ItemIndexT, LanesPerRow>(
+                sourceBytes, destinationBytes, rowBytes, lane);
+            break;
+    }
 }
 
 /**
@@ -51,21 +206,19 @@ __device__ __forceinline__ void copyNamedRow(const uint8_t *sourceBytes,
  * selected transaction width, so narrower alignment does not also reduce the
  * amount of lane-level parallelism assigned to a row.
  *
- * CopyT is selected on the host only when every source and destination row
- * start is aligned for that type. UINT8 is the exact fallback for odd row
- * widths.
+ * Transaction width is selected independently for each gathered row pair from
+ * its actual source/destination alignment. Complete packets are copied in
+ * parallel; one designated lane stores any remainder with an exact Tail<N>.
  */
-template <typename CopyT,
-          typename RowIndexT,
+template <typename RowIndexT,
           typename ItemIndexT,
           uint32_t RowsPerBlock>
 __global__ void gatherRowsKernel(const uint8_t *__restrict__ sourceBytes,
                                  uint8_t *__restrict__ destinationBytes,
                                  const uint64_t *__restrict__ rowIndices,
                                  RowIndexT batchSize,
-                                 uint64_t rowBytes,
-                                 uint64_t sourceRows,
-                                 ItemIndexT rowItems) {
+                                 ItemIndexT rowBytes,
+                                 uint64_t sourceRows) {
     static_assert(RowsPerBlock >= 1 && RowsPerBlock <= kMaxRowsPerBlock,
                   "Device-resident named gather rows per CTA are out of range.");
     static_assert(kThreadsPerBlock % RowsPerBlock == 0,
@@ -87,11 +240,12 @@ __global__ void gatherRowsKernel(const uint8_t *__restrict__ sourceBytes,
             // removing meaningful global-memory traffic.
             const uint64_t sourceRow = rowIndices[batchRow];
             if (sourceRow < sourceRows) {
-                const uint8_t *source = sourceBytes + sourceRow * rowBytes;
+                const uint64_t rowBytes64 = static_cast<uint64_t>(rowBytes);
+                const uint8_t *source = sourceBytes + sourceRow * rowBytes64;
                 uint8_t *destination =
-                    destinationBytes + static_cast<uint64_t>(batchRow) * rowBytes;
-                copyNamedRow<CopyT, ItemIndexT, kLanesPerRow>(
-                    source, destination, rowItems, lane);
+                    destinationBytes + static_cast<uint64_t>(batchRow) * rowBytes64;
+                copyNamedRow<ItemIndexT, kLanesPerRow>(
+                    source, destination, rowBytes, lane);
             }
             // Preserve the historical contract: an invalid resident row index
             // leaves the corresponding destination row untouched.
@@ -161,86 +315,74 @@ uint32_t blocksForRows(uint64_t batchSize) {
         std::min<uint64_t>(std::max<uint64_t>(blocks, 1), kMaxPortableBlocks));
 }
 
-template <typename CopyT,
-          typename RowIndexT,
+template <typename RowIndexT,
           typename ItemIndexT,
           uint32_t RowsPerBlock>
 void launchGrouped(const uint8_t *source,
                    uint8_t *destination,
                    const uint64_t *rowIndices,
                    RowIndexT batchSize,
-                   uint64_t rowBytes,
+                   ItemIndexT rowBytes,
                    uint64_t sourceRows,
-                   ItemIndexT rowItems,
                    cudaStream_t stream) {
     const uint32_t blocks =
         blocksForRows<RowsPerBlock>(static_cast<uint64_t>(batchSize));
-    gatherRowsKernel<CopyT, RowIndexT, ItemIndexT, RowsPerBlock>
+    gatherRowsKernel<RowIndexT, ItemIndexT, RowsPerBlock>
         <<<blocks, kThreadsPerBlock, 0, stream>>>(
             source,
             destination,
             rowIndices,
             batchSize,
             rowBytes,
-            sourceRows,
-            rowItems);
+            sourceRows);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <typename CopyT, typename RowIndexT, typename ItemIndexT>
+template <typename RowIndexT, typename ItemIndexT>
 void launchForGrouping(const uint8_t *source,
                        uint8_t *destination,
                        const uint64_t *rowIndices,
                        RowIndexT batchSize,
-                       uint64_t rowBytes,
+                       ItemIndexT rowBytes,
                        uint64_t sourceRows,
-                       ItemIndexT rowItems,
                        cudaStream_t stream) {
-    switch (rowsPerBlockFor(rowBytes, static_cast<uint64_t>(batchSize))) {
+    switch (rowsPerBlockFor(static_cast<uint64_t>(rowBytes),
+                            static_cast<uint64_t>(batchSize))) {
         case 1:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 1>(
-                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
-                rowItems, stream);
+            launchGrouped<RowIndexT, ItemIndexT, 1>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows, stream);
             return;
         case 2:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 2>(
-                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
-                rowItems, stream);
+            launchGrouped<RowIndexT, ItemIndexT, 2>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows, stream);
             return;
         case 4:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 4>(
-                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
-                rowItems, stream);
+            launchGrouped<RowIndexT, ItemIndexT, 4>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows, stream);
             return;
         case 8:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 8>(
-                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
-                rowItems, stream);
+            launchGrouped<RowIndexT, ItemIndexT, 8>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows, stream);
             return;
         case 16:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 16>(
-                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
-                rowItems, stream);
+            launchGrouped<RowIndexT, ItemIndexT, 16>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows, stream);
             return;
         case 32:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 32>(
-                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
-                rowItems, stream);
+            launchGrouped<RowIndexT, ItemIndexT, 32>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows, stream);
             return;
         case 64:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 64>(
-                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
-                rowItems, stream);
+            launchGrouped<RowIndexT, ItemIndexT, 64>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows, stream);
             return;
         case 128:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 128>(
-                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
-                rowItems, stream);
+            launchGrouped<RowIndexT, ItemIndexT, 128>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows, stream);
             return;
         case 256:
-            launchGrouped<CopyT, RowIndexT, ItemIndexT, 256>(
-                source, destination, rowIndices, batchSize, rowBytes, sourceRows,
-                rowItems, stream);
+            launchGrouped<RowIndexT, ItemIndexT, 256>(
+                source, destination, rowIndices, batchSize, rowBytes, sourceRows, stream);
             return;
         default:
             break;
@@ -248,7 +390,7 @@ void launchForGrouping(const uint8_t *source,
     throw std::logic_error("Invalid device-resident named gather rows-per-CTA selection.");
 }
 
-template <typename CopyT, typename RowIndexT>
+template <typename RowIndexT>
 void launchForItemIndexType(const uint8_t *source,
                             uint8_t *destination,
                             const uint64_t *rowIndices,
@@ -256,43 +398,42 @@ void launchForItemIndexType(const uint8_t *source,
                             uint64_t rowBytes,
                             uint64_t sourceRows,
                             cudaStream_t stream) {
-    const uint64_t rowItems = rowBytes / sizeof(CopyT);
-    if (rowItems <= std::numeric_limits<uint32_t>::max()) {
-        launchForGrouping<CopyT, RowIndexT, uint32_t>(
+    // Keep ordinary per-row copy arithmetic 32-bit. Leave headroom for the
+    // largest 256-lane stride so the terminal increment cannot wrap.
+    if (rowBytes <=
+        static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) - kThreadsPerBlock) {
+        launchForGrouping<RowIndexT, uint32_t>(
             source,
             destination,
             rowIndices,
             batchSize,
-            rowBytes,
+            static_cast<uint32_t>(rowBytes),
             sourceRows,
-            static_cast<uint32_t>(rowItems),
             stream);
     } else {
-        launchForGrouping<CopyT, RowIndexT, uint64_t>(
+        launchForGrouping<RowIndexT, uint64_t>(
             source,
             destination,
             rowIndices,
             batchSize,
             rowBytes,
             sourceRows,
-            rowItems,
             stream);
     }
 }
 
-template <typename CopyT>
-void launchForCopyType(const uint8_t *source,
-                       uint8_t *destination,
-                       const uint64_t *rowIndices,
-                       uint64_t batchSize,
-                       uint64_t rowBytes,
-                       uint64_t sourceRows,
-                       cudaStream_t stream) {
+void launchForRowIndexType(const uint8_t *source,
+                           uint8_t *destination,
+                           const uint64_t *rowIndices,
+                           uint64_t batchSize,
+                           uint64_t rowBytes,
+                           uint64_t sourceRows,
+                           cudaStream_t stream) {
     // Batch-row arithmetic is 32-bit for the overwhelmingly common case.
     // Source/destination byte addresses remain 64-bit because valid tensors may
     // exceed 4 GiB even when their row counts fit comfortably in UINT32.
     if (batchSize <= std::numeric_limits<uint32_t>::max()) {
-        launchForItemIndexType<CopyT, uint32_t>(
+        launchForItemIndexType<uint32_t>(
             source,
             destination,
             rowIndices,
@@ -301,7 +442,7 @@ void launchForCopyType(const uint8_t *source,
             sourceRows,
             stream);
     } else {
-        launchForItemIndexType<CopyT, uint64_t>(
+        launchForItemIndexType<uint64_t>(
             source,
             destination,
             rowIndices,
@@ -310,17 +451,6 @@ void launchForCopyType(const uint8_t *source,
             sourceRows,
             stream);
     }
-}
-
-template <typename CopyT>
-bool canUseCopyType(const uint8_t *source,
-                    const uint8_t *destination,
-                    uint64_t rowBytes) {
-    constexpr uint64_t alignment = alignof(CopyT);
-    return rowBytes % sizeof(CopyT) == 0 &&
-           rowBytes % alignment == 0 &&
-           (reinterpret_cast<uintptr_t>(source) % alignment) == 0 &&
-           (reinterpret_cast<uintptr_t>(destination) % alignment) == 0;
 }
 
 void validateGatherTensorShapes(const Tensor &source, const Tensor &destination, const Tensor &rowIndicesDevice) {
@@ -368,33 +498,16 @@ void launchDeviceResidentNamedGatherKernel(const Tensor &source, Tensor &destina
     const uint64_t *rowIndices = rowIndicesDevice.getMemPtr<uint64_t>();
     const cudaStream_t cudaStream = stream.getStream();
 
-    // Named tensors have identical contiguous row geometry on source and
-    // destination. Pick the widest transaction that is aligned for every row.
-    // Launch geometry is selected independently from rowBytes, so falling back
-    // to a narrower transaction does not also reduce row-level parallelism.
-    if (canUseCopyType<ulonglong4_32a>(sourceBytes, destinationBytes, rowBytes)) {
-        launchForCopyType<ulonglong4_32a>(
-            sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes,
-            sourceRows, cudaStream);
-    } else if (canUseCopyType<uint4>(sourceBytes, destinationBytes, rowBytes)) {
-        launchForCopyType<uint4>(
-            sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes,
-            sourceRows, cudaStream);
-    } else if (canUseCopyType<uint64_t>(sourceBytes, destinationBytes, rowBytes)) {
-        launchForCopyType<uint64_t>(
-            sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes,
-            sourceRows, cudaStream);
-    } else if (canUseCopyType<uint32_t>(sourceBytes, destinationBytes, rowBytes)) {
-        launchForCopyType<uint32_t>(
-            sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes,
-            sourceRows, cudaStream);
-    } else if (canUseCopyType<uint16_t>(sourceBytes, destinationBytes, rowBytes)) {
-        launchForCopyType<uint16_t>(
-            sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes,
-            sourceRows, cudaStream);
-    } else {
-        launchForCopyType<uint8_t>(
-            sourceBytes, destinationBytes, rowIndices, batchSize, rowBytes,
-            sourceRows, cudaStream);
-    }
+    // Copy width is selected independently for each gathered source/destination
+    // row pair from its actual alignment. This lets odd row strides retain wide
+    // bulk transactions on aligned pairs while the final remainder is stored as
+    // one exact Tail<N> by a designated lane.
+    launchForRowIndexType(
+        sourceBytes,
+        destinationBytes,
+        rowIndices,
+        batchSize,
+        rowBytes,
+        sourceRows,
+        cudaStream);
 }

@@ -51,7 +51,7 @@ TEST(RaggedPartitionRequirementRP5, DirectRaggedOperatorsDeclareOnlyThePhysicalI
     EXPECT_EQ(kRaggedEmbeddingSparseGradientPartitionRequirement, RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
     EXPECT_EQ(kRaggedTrailingConcatenatePartitionRequirement, RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
     EXPECT_EQ(kRaggedCustomLossPartitionRequirement, RaggedPartitionRequirement::DEVICE_ACTIVE_COUNT);
-    EXPECT_EQ(kRaggedAccuracyPartitionRequirement, RaggedPartitionRequirement::DEVICE_OFFSETS);
+    EXPECT_EQ(kRaggedAccuracyPartitionRequirement, RaggedPartitionRequirement::HOST_EXTENT);
     EXPECT_EQ(kRaggedWeightedReductionPartitionRequirement, RaggedPartitionRequirement::DEVICE_OFFSETS);
 
     EXPECT_EQ(kCudnnRaggedSoftmaxPartitionRequirement, RaggedPartitionRequirement::HOST_EXTENT);
@@ -65,7 +65,7 @@ TEST(RaggedPartitionRequirementRP5, DirectRaggedOperatorsDeclareOnlyThePhysicalI
     EXPECT_EQ(kCudnnRaggedAttentionPartitionRequirement, RaggedPartitionRequirement::DEVICE_OFFSETS);
     EXPECT_EQ(kCudnnRaggedAttentionMetadataPartitionRequirement, RaggedPartitionRequirement::DEVICE_OFFSETS);
     EXPECT_EQ(kRaggedSequenceSlicePartitionRequirement, RaggedPartitionRequirement::DEVICE_OFFSETS);
-    EXPECT_EQ(kRaggedSequenceConcatenatePartitionRequirement, RaggedPartitionRequirement::DEVICE_OFFSETS);
+    EXPECT_EQ(kRaggedSequenceConcatenatePartitionRequirement, RaggedPartitionRequirement::HOST_EXTENT);
     EXPECT_EQ(kRaggedDenseAdapterPartitionRequirement, RaggedPartitionRequirement::DEVICE_OFFSETS);
     EXPECT_EQ(kPaddedRaggedSequenceKernelPartitionRequirement, RaggedPartitionRequirement::DEVICE_OFFSETS);
     EXPECT_EQ(kRowPartitionOffsetsTransformRequirement, RaggedPartitionRequirement::DEVICE_OFFSETS);

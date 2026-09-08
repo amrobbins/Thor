@@ -3,6 +3,7 @@
 #include "gtest/gtest.h"
 
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 using namespace ThorImplementation;
@@ -56,6 +57,11 @@ TEST(RowPartitionRuntime, HostOffsetsAreSingleAuthoritativePublicationAndDeriveS
     first.setHostOffsets({0, 2, 2, 7});
     EXPECT_TRUE(alias.hasHostOffsets());
     EXPECT_EQ(alias.requireHostOffsets(), (std::vector<uint64_t>{0, 2, 2, 7}));
+    EXPECT_EQ(alias.requireHostOffset(0), 0u);
+    EXPECT_EQ(alias.requireHostOffset(1), 2u);
+    EXPECT_EQ(alias.requireHostOffset(2), 2u);
+    EXPECT_EQ(alias.requireHostOffset(3), 7u);
+    EXPECT_THROW((void)alias.requireHostOffset(4), std::out_of_range);
     EXPECT_EQ(alias.requireHostActiveValueCount(), 7u);
     EXPECT_EQ(alias.requireHostMaxActiveRowLength(), 5u);
 
@@ -115,6 +121,8 @@ TEST(RowPartitionRuntime, GenericOffsetsTensorMutationDoesNotRedefineHostPartiti
     offsets.memset(0);
 
     EXPECT_EQ(partition.requireHostOffsets(), (std::vector<uint64_t>{0, 2, 5}));
+    EXPECT_EQ(partition.requireHostOffset(1), 2u);
+    EXPECT_EQ(partition.requireHostOffset(2), 5u);
     EXPECT_EQ(partition.requireHostActiveValueCount(), 5u);
     EXPECT_EQ(partition.requireHostMaxActiveRowLength(), 3u);
 }

@@ -89,7 +89,6 @@ class RaggedSequenceConcatenate : public MultiConnectionLayer {
     std::vector<RaggedTensor> raggedFeatureInputs;
     RaggedTensor raggedFeatureOutput;
     std::vector<Tensor> uniqueOffsetsInputs;
-    std::vector<uint32_t> offsetPortForInput;
     std::set<uint32_t> connectedInputPortIndices;
     bool emittedOutputsAfterAllInputsConnected = false;
 

@@ -94,6 +94,11 @@ class RowPartitionRuntime {
     [[nodiscard]] std::optional<std::vector<uint64_t>> getHostOffsetsIfAvailable() const;
     [[nodiscard]] std::vector<uint64_t> requireHostOffsets() const;
 
+    // Return one boundary from the authoritative host partition without copying
+    // the complete [B+1] offsets vector. Useful for consumers whose runtime work
+    // is determined by one valid-row prefix boundary.
+    [[nodiscard]] uint64_t requireHostOffset(uint64_t row) const;
+
     [[nodiscard]] std::optional<uint64_t> getHostActiveValueCountIfAvailable() const;
     [[nodiscard]] uint64_t requireHostActiveValueCount() const;
     [[nodiscard]] std::optional<uint64_t> getHostMaxActiveRowLengthIfAvailable() const;

@@ -5,6 +5,7 @@
 #include "DeepLearning/Implementation/Layers/Metrics/ReductionMetricDType.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensorDescriptor.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionDescriptor.h"
+#include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/TensorOperations/Ragged/RowPartition.h"
 #include "Utilities/TensorOperations/Ragged/RaggedWeightedReduction.h"
 #include "Utilities/Expression/DynamicExpression.h"
@@ -361,6 +362,7 @@ inline DynamicExpression makeRaggedWeightedMeanExpression(
             const RowPartitionDescriptor partition(batchSize, maxTotalValues, offsetsDType);
             if (offsetsTensor.getDescriptor() != partition.getOffsetsDescriptor())
                 throw std::invalid_argument("Ragged WeightedMean offsets must have canonical shape [batch_size + 1].");
+            RowPartitionRuntime rowPartition(offsetsTensor, partition);
             const uint64_t elementsPerValue = checkedRaggedElementsPerValue(valueDims);
 
             // Compute sufficient statistics directly from the active prefix. A
@@ -394,7 +396,7 @@ inline DynamicExpression makeRaggedWeightedMeanExpression(
                 .requested_output_shapes = {},
                 .pre_forward_hook = [valuesTensor,
                                      weightsTensor,
-                                     offsetsTensor,
+                                     rowPartition,
                                      partialStatistics,
                                      numeratorStatistic,
                                      denominatorStatistic,
@@ -404,13 +406,14 @@ inline DynamicExpression makeRaggedWeightedMeanExpression(
                                      runtimeState](Stream& runStream) mutable {
                     if (!runtimeState || runtimeState->validRowCount == 0 || runtimeState->validRowCount > batchSize)
                         throw std::logic_error("Ragged WeightedMean has invalid runtime valid-row count.");
+                    const uint64_t activeValueCount =
+                        rowPartition.requireHostOffset(runtimeState->validRowCount);
                     raggedWeightedMeanStatistics(valuesTensor,
                                                  weightsTensor,
-                                                 offsetsTensor,
                                                  partialStatistics,
                                                  numeratorStatistic,
                                                  denominatorStatistic,
-                                                 runtimeState->validRowCount,
+                                                 activeValueCount,
                                                  maxTotalValues,
                                                  elementsPerValue,
                                                  runStream);

@@ -7,39 +7,61 @@
 #include <cstdint>
 
 namespace ThorImplementation {
-inline constexpr RaggedPartitionRequirement kRaggedSequenceConcatenatePartitionRequirement = RaggedPartitionRequirement::DEVICE_OFFSETS;
+
+// Sequence concatenate consumes authoritative host partition structure but no
+// device offsets representation. StampedNetwork derives a compact copy plan
+// from that host state before physical execution.
+inline constexpr RaggedPartitionRequirement kRaggedSequenceConcatenatePartitionRequirement =
+    RaggedPartitionRequirement::HOST_EXTENT;
+
+struct RaggedSequenceCopySpan32 {
+    uint32_t inputIndex;
+    uint32_t sourceBegin;
+    uint32_t destinationBegin;
+    uint32_t valueCount;
+};
+static_assert(sizeof(RaggedSequenceCopySpan32) == 16);
+
+struct RaggedSequenceCopySpan64 {
+    uint32_t inputIndex;
+    uint32_t padding;
+    uint64_t sourceBegin;
+    uint64_t destinationBegin;
+    uint64_t valueCount;
+};
+static_assert(sizeof(RaggedSequenceCopySpan64) == 32);
+
 }  // namespace ThorImplementation
 
 // Sequence-axis concatenate for canonical rank-1 ragged tensors.
 //
-// Every input has the same logical batch size and trailing value shape, but may
-// have a different row partition and packed capacity. The authoritative output
-// partition is derived on the host by the layer and materialized separately as
-// an explicit offsets tensor when needed by downstream GPU consumers. This
-// kernel only moves packed values row-by-row in input order. Only logical active
-// values are read/written; inactive source and destination capacity is left
-// untouched. `input_values` and `input_offsets` are device arrays containing one
-// pointer per logical sequence input. Repeated offsets pointers are allowed.
+// StampedNetwork derives the authoritative output partition and the non-empty
+// copy spans from authoritative host input partitions in one O(batch * inputs)
+// pass. CUDA consumes only packed-value pointers plus that compact span table;
+// it never reads or reconstructs row offsets. `copy_spans` points to either
+// RaggedSequenceCopySpan32 or RaggedSequenceCopySpan64 according to
+// `offsets_element_size_bytes`. `active_output_values` is used only to size the
+// payload-aware launch.
 void launchRaggedSequenceConcatenate(void *output_values,
                                      void *input_values[],
-                                     void *input_offsets[],
-                                     uint32_t num_inputs,
+                                     const void *copy_spans,
+                                     uint64_t span_count,
                                      std::size_t value_element_size_bytes,
                                      uint64_t elements_per_value,
                                      std::size_t offsets_element_size_bytes,
-                                     uint64_t batch_size,
+                                     uint64_t active_output_values,
                                      Stream stream);
 
-// Backward split for sequence-axis concatenate. `input_gradients` is a device
-// pointer table parallel to the logical inputs; null entries are skipped. The
-// authoritative input partitions determine exactly which gradient elements are
-// written, so inactive gradient capacity remains undefined/untouched.
+// Backward split reuses the exact same copy-span table. `input_gradients` is a
+// device pointer table parallel to logical inputs; null entries are skipped.
+// Only values named by non-empty spans are written, so inactive gradient
+// capacity remains untouched.
 void launchRaggedSequenceConcatenateBackward(void *input_gradients[],
                                              const void *output_gradient,
-                                             void *input_offsets[],
-                                             uint32_t num_inputs,
+                                             const void *copy_spans,
+                                             uint64_t span_count,
                                              std::size_t value_element_size_bytes,
                                              uint64_t elements_per_value,
                                              std::size_t offsets_element_size_bytes,
-                                             uint64_t batch_size,
+                                             uint64_t active_output_values,
                                              Stream stream);
