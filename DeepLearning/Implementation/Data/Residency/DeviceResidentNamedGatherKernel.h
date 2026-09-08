@@ -8,10 +8,12 @@
  *
  * source has shape [num_examples, *example_shape]
  * destination has shape [batch_size, *example_shape]
- * rowIndicesDevice is a UINT64 device tensor with shape [batch_size] whose
- * values are row positions in source's first dimension.
+ * rowIndicesDevice is a UINT64 device tensor with capacity [batch_size] whose
+ * values are row positions in source's first dimension. Only the leading
+ * logicalRows entries are consumed and inactive destination capacity is untouched.
  */
 void launchDeviceResidentNamedGatherKernel(const ThorImplementation::Tensor &source,
                                            ThorImplementation::Tensor &destination,
                                            const ThorImplementation::Tensor &rowIndicesDevice,
+                                           uint64_t logicalRows,
                                            Stream &stream);

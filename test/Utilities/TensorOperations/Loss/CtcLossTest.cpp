@@ -135,7 +135,7 @@ CapturableCtcBuffers makeCapturableCtcBuffers(const CudnnCtcLossPlan& plan,
     return buffers;
 }
 
-void runCapturableCtcPipeline(const CudnnCtcLossPlan& plan,
+void runCapturableCtcPipeline(CudnnCtcLossPlan& plan,
                               CapturableCtcBuffers& buffers,
                               uint64_t maxTotalLabelValues,
                               float lossScale,
@@ -158,6 +158,7 @@ void runCapturableCtcPipeline(const CudnnCtcLossPlan& plan,
              buffers.gradients.getMemPtr(),
              buffers.workspace ? buffers.workspace->getMemPtr() : nullptr,
              plan.getWorkspaceSizeInBytes(),
+             config.batchSize,
              stream);
 
     launchCorrectCtcEmptyTargetRows(buffers.activations.getMemPtr<float>(),

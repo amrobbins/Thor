@@ -7,6 +7,7 @@
 #include "DeepLearning/Implementation/Data/Sessions/IndexedNamedBatchSession.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceDatasetResidency.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceDatasetStorageSelection.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentWindowMaterializationKernel.h"
 #include "DeepLearning/Implementation/Data/Residency/NamedDatasetRuntimeAccess.h"
 #include "DeepLearning/Implementation/Training/DeviceStartupCoordinator.h"
 #include "Utilities/Data/Readers/IndexedDatasetReader.h"
@@ -789,6 +790,19 @@ vector<float> tensorValuesOnHost(const Tensor &tensor) {
     return tensorValues(host);
 }
 
+vector<float> tensorValuesOnHostValidPrefix(const Tensor &tensor, uint64_t logicalRows) {
+    const std::vector<uint64_t> dimensions = tensor.getDimensions();
+    THOR_THROW_IF_FALSE(!dimensions.empty());
+    const uint64_t batchCapacity = dimensions.front();
+    THOR_THROW_IF_FALSE(logicalRows <= batchCapacity);
+    const uint64_t totalElements = tensor.getTotalNumElements();
+    THOR_THROW_IF_FALSE(totalElements % batchCapacity == 0);
+    const uint64_t elementsPerRow = totalElements / batchCapacity;
+    vector<float> values = tensorValuesOnHost(tensor);
+    values.resize(logicalRows * elementsPerRow);
+    return values;
+}
+
 Tensor materializeDeviceBatchReference(const Thor::DeviceBatchReference &reference) {
     Tensor destination(reference.getOutputPlacement(), reference.getOutputDescriptor());
     Stream stream(reference.getOutputPlacement());
@@ -817,6 +831,19 @@ vector<uint8_t> uint8TensorValuesOnHost(const Tensor &tensor) {
     const uint64_t count = host.getDescriptor().getArraySizeInBytes();
     const uint8_t *actual = reinterpret_cast<const uint8_t *>(host.getMemPtr<void>());
     return vector<uint8_t>(actual, actual + count);
+}
+
+vector<uint8_t> uint8TensorValuesOnHostValidPrefix(const Tensor &tensor, uint64_t logicalRows) {
+    const std::vector<uint64_t> dimensions = tensor.getDimensions();
+    THOR_THROW_IF_FALSE(!dimensions.empty());
+    const uint64_t batchCapacity = dimensions.front();
+    THOR_THROW_IF_FALSE(logicalRows <= batchCapacity);
+    const uint64_t totalBytes = tensor.getDescriptor().getArraySizeInBytes();
+    THOR_THROW_IF_FALSE(totalBytes % batchCapacity == 0);
+    const uint64_t bytesPerRow = totalBytes / batchCapacity;
+    vector<uint8_t> values = uint8TensorValuesOnHost(tensor);
+    values.resize(logicalRows * bytesPerRow);
+    return values;
 }
 
 void expectUint8TensorValuesOnHost(const Tensor &tensor, const vector<uint8_t> &expected) {
@@ -1869,8 +1896,9 @@ TEST(IndexedNamedBatchSessionTest, RangeBackedSplitDrivesBatchesWithoutMateriali
 
     BatchLease secondLease = session.leaseBatch(ExampleType::TRAIN, batchNum);
     EXPECT_EQ(batchNum, 1u);
-    expectTensorValues(secondLease.get().getTensor("seasonality_inputs"),
-                       {80.0f, 81.0f, 80.0f, 81.0f});
+    EXPECT_EQ(
+        tensorValuesOnHostValidPrefix(secondLease.get().getTensor("seasonality_inputs"), 1),
+        (vector<float>{80.0f, 81.0f}));
     ASSERT_TRUE(secondLease.get().getValidExampleCount().has_value());
     EXPECT_EQ(secondLease.get().getValidExampleCount().value(), 1u);
     secondLease.reset();
@@ -2051,7 +2079,11 @@ TEST(IndexedNamedBatchSessionTest, DeterministicRandomizedTrainOrderForFixedSeed
 
         const Batch& secondBatch = secondBatchLease.get();
         EXPECT_EQ(firstBatchNum, secondBatchNum);
-        EXPECT_EQ(seasonalityValues(firstBatch), seasonalityValues(secondBatch));
+        EXPECT_EQ(firstBatch.getValidExampleCount(), secondBatch.getValidExampleCount());
+        const uint64_t logicalRows = firstBatch.getValidExampleCount().value_or(2);
+        EXPECT_EQ(
+            tensorValuesOnHostValidPrefix(firstBatch.getTensor("seasonality_inputs"), logicalRows),
+            tensorValuesOnHostValidPrefix(secondBatch.getTensor("seasonality_inputs"), logicalRows));
         firstBatchLease.reset();
         secondBatchLease.reset();
     }
@@ -2098,8 +2130,6 @@ TEST(IndexedNamedBatchSessionTest, RandomizedTrainConsumesEachExampleExactlyOnce
                 session.getNumBatchesPerEpoch(ExampleType::TRAIN)) {
                 ASSERT_TRUE(batch.getValidExampleCount().has_value());
                 EXPECT_EQ(batch.getValidExampleCount().value(), 1u);
-                EXPECT_EQ(values.at(2), values.at(0));
-                EXPECT_EQ(values.at(3), values.at(1));
             }
         }
         EXPECT_EQ(validExamplesSeen, 5u);
@@ -2131,7 +2161,9 @@ TEST(IndexedNamedBatchSessionTest, ValidateAndTestSplitsUseExactTailBatches) {
 
     const Batch& validate1 = validate1Lease.get();
     EXPECT_EQ(batchNum, 1);
-    expectTensorValues(validate1.getTensor("seasonality_inputs"), {80.0f, 81.0f, 80.0f, 81.0f});
+    EXPECT_EQ(
+        tensorValuesOnHostValidPrefix(validate1.getTensor("seasonality_inputs"), 1),
+        (vector<float>{80.0f, 81.0f}));
     ASSERT_TRUE(validate1.getValidExampleCount().has_value());
     EXPECT_EQ(validate1.getValidExampleCount().value(), 1u);
     validate1Lease.reset();
@@ -2149,7 +2181,9 @@ TEST(IndexedNamedBatchSessionTest, ValidateAndTestSplitsUseExactTailBatches) {
 
     const Batch& test1 = test1Lease.get();
     EXPECT_EQ(batchNum, 1);
-    expectTensorValues(test1.getTensor("seasonality_inputs"), {20.0f, 21.0f, 20.0f, 21.0f});
+    EXPECT_EQ(
+        tensorValuesOnHostValidPrefix(test1.getTensor("seasonality_inputs"), 1),
+        (vector<float>{20.0f, 21.0f}));
     ASSERT_TRUE(test1.getValidExampleCount().has_value());
     EXPECT_EQ(test1.getValidExampleCount().value(), 1u);
     test1Lease.reset();
@@ -2157,7 +2191,7 @@ TEST(IndexedNamedBatchSessionTest, ValidateAndTestSplitsUseExactTailBatches) {
     std::filesystem::remove_all(datasetPath);
 }
 
-TEST(IndexedNamedBatchSessionTest, SplitSmallerThanCapacityRepeatsOnlyItsValidExample) {
+TEST(IndexedNamedBatchSessionTest, SplitSmallerThanCapacityMaterializesOnlyItsValidExample) {
     const std::filesystem::path datasetPath =
         makeTempDatasetPath("split_smaller_than_capacity");
     DatasetLayout layout = testLayout();
@@ -2180,10 +2214,9 @@ TEST(IndexedNamedBatchSessionTest, SplitSmallerThanCapacityRepeatsOnlyItsValidEx
         EXPECT_EQ(batchNum, 0u);
         ASSERT_TRUE(lease.get().getValidExampleCount().has_value());
         EXPECT_EQ(lease.get().getValidExampleCount().value(), 1u);
-        expectTensorValues(
-            lease.get().getTensor("seasonality_inputs"),
-            {60.0f, 61.0f, 60.0f, 61.0f,
-             60.0f, 61.0f, 60.0f, 61.0f});
+        EXPECT_EQ(
+            tensorValuesOnHostValidPrefix(lease.get().getTensor("seasonality_inputs"), 1),
+            (vector<float>{60.0f, 61.0f}));
         EXPECT_EQ(session.getNextBatchNum(ExampleType::TRAIN), 0u);
     }
 
@@ -3593,13 +3626,13 @@ TEST(DeviceDatasetStorageSelection, BestEffortUsesFullCompactStorageWhenItFits) 
         deviceSessionDescription(*sourceSession);
     EXPECT_EQ(
         Thor::estimateDeviceResidentNamedDatasetStorageBytes(datasetDescription),
-        108u);
+        16u);
     EXPECT_EQ(
         Thor::estimateDeviceResidentNamedDatasetRequiredBytes(
             datasetDescription,
             sessionDescription,
             1),
-        124u);
+        64u);
 
     const uint64_t availableBytes =
         ThorImplementation::DEVICE_STARTUP_SAFETY_RESERVE_BYTES + 124;
@@ -3614,7 +3647,7 @@ TEST(DeviceDatasetStorageSelection, BestEffortUsesFullCompactStorageWhenItFits) 
     EXPECT_TRUE(selection.report.used);
     EXPECT_EQ(selection.report.reason, "compact_file_residency");
     EXPECT_EQ(selection.report.requiredBytes, 124u);
-    EXPECT_EQ(selection.report.residentBytes, 108u);
+    EXPECT_EQ(selection.report.residentBytes, 76u);
     EXPECT_EQ(selection.report.examples, 3u);
     EXPECT_NE(selection.session, sourceSession);
     auto residentSession =
@@ -3627,8 +3660,8 @@ TEST(DeviceDatasetStorageSelection, BestEffortUsesFullCompactStorageWhenItFits) 
     EXPECT_TRUE(resident->usesCompactFileStorage());
     EXPECT_EQ(resident->compactRecordBytes(), 60u);
     EXPECT_EQ(resident->compactSourceBytes(), 16u);
-    EXPECT_EQ(resident->compactMetadataBytes(), 32u);
-    EXPECT_EQ(resident->totalBytes(), 108u);
+    EXPECT_EQ(resident->compactMetadataBytes(), 0u);
+    EXPECT_EQ(resident->totalBytes(), 76u);
     EXPECT_TRUE(resident->hasCompactDirectField("dense"));
     EXPECT_TRUE(resident->hasCompactWindowField("history"));
     EXPECT_TRUE(resident->hasCompactWindowField("history_mask"));
@@ -4283,10 +4316,10 @@ TEST(DeviceResidentFileNamedBatchSessionTest, ReturnsCompactDeviceWindowReferenc
         TensorPlacement(TensorPlacement::MemDevices::GPU, 0),
         std::set<string>{"history", "history_mask"});
     EXPECT_TRUE(resident->usesCompactFileStorage());
-    EXPECT_EQ(resident->compactRecordBytes(), 60u);
+    EXPECT_EQ(resident->compactRecordBytes(), 0u);
     EXPECT_EQ(resident->compactSourceBytes(), 16u);
-    EXPECT_EQ(resident->compactMetadataBytes(), 32u);
-    EXPECT_EQ(resident->totalBytes(), 108u);
+    EXPECT_EQ(resident->compactMetadataBytes(), 0u);
+    EXPECT_EQ(resident->totalBytes(), 16u);
     EXPECT_FALSE(resident->hasTensor("history"));
     TestDeviceResidentFileNamedBatchSession deviceSession(
         datasetDescription,
@@ -4377,16 +4410,33 @@ TEST(DeviceResidentFileNamedBatchSessionTest, ReturnsCompactDeviceWindowReferenc
     ASSERT_TRUE(deviceTail.getValidExampleCount().has_value());
     EXPECT_EQ(sourceTail.getValidExampleCount().value(), 1u);
     EXPECT_EQ(deviceTail.getValidExampleCount().value(), 1u);
-    EXPECT_EQ(tensorValuesOnHost(deviceTail.getTensor("dense")),
-              tensorValues(sourceTail.getTensor("dense")));
+    EXPECT_EQ(
+        tensorValuesOnHostValidPrefix(deviceTail.getTensor("dense"), 1),
+        tensorValuesOnHostValidPrefix(sourceTail.getTensor("dense"), 1));
     Tensor materializedTailHistory = materializeDeviceBatchReference(
         deviceTail.getDeviceBatchReference("history"));
     Tensor materializedTailMask = materializeDeviceBatchReference(
         deviceTail.getDeviceBatchReference("history_mask"));
-    EXPECT_EQ(tensorValuesOnHost(materializedTailHistory),
-              tensorValues(sourceTail.getTensor("history")));
-    EXPECT_EQ(uint8TensorValuesOnHost(materializedTailMask),
-              uint8TensorValuesOnHost(sourceTail.getTensor("history_mask")));
+    // Compact window materialization now launches only the valid logical prefix.
+    // The inactive physical batch-capacity row is intentionally unspecified and
+    // must not be used as observable batch data. Compare only the single valid row.
+    const vector<float> materializedTailHistoryValues =
+        tensorValuesOnHost(materializedTailHistory);
+    const vector<float> sourceTailHistoryValues = tensorValues(sourceTail.getTensor("history"));
+    ASSERT_GE(materializedTailHistoryValues.size(), 3u);
+    ASSERT_GE(sourceTailHistoryValues.size(), 3u);
+    EXPECT_EQ(
+        vector<float>(materializedTailHistoryValues.begin(), materializedTailHistoryValues.begin() + 3),
+        vector<float>(sourceTailHistoryValues.begin(), sourceTailHistoryValues.begin() + 3));
+    const vector<uint8_t> materializedTailMaskValues =
+        uint8TensorValuesOnHost(materializedTailMask);
+    const vector<uint8_t> sourceTailMaskValues =
+        uint8TensorValuesOnHost(sourceTail.getTensor("history_mask"));
+    ASSERT_GE(materializedTailMaskValues.size(), 3u);
+    ASSERT_GE(sourceTailMaskValues.size(), 3u);
+    EXPECT_EQ(
+        vector<uint8_t>(materializedTailMaskValues.begin(), materializedTailMaskValues.begin() + 3),
+        vector<uint8_t>(sourceTailMaskValues.begin(), sourceTailMaskValues.begin() + 3));
     sourceBatchLease.reset();
     deviceBatchLease.reset();
 
@@ -4441,6 +4491,8 @@ TEST(DeviceResidentNamedDatasetTest, ExposesOnlyPayloadWindowSourcesAsL2CacheCan
         gpuPlacement,
         std::set<string>{"history_mask"});
     EXPECT_TRUE(maskOnlyResident->hasCompactWindowField("history_mask"));
+    EXPECT_EQ(maskOnlyResident->compactSourceBytes(), 0u);
+    EXPECT_EQ(maskOnlyResident->totalBytes(), 0u);
     EXPECT_FALSE(
         maskOnlyResident->compactWindowSourceAccessForField("history_mask").has_value());
     EXPECT_TRUE(maskOnlyResident->compactWindowSourceAccesses().empty());
@@ -4560,7 +4612,7 @@ TEST(DeviceResidentNamedDatasetTest, DenseAndRaggedWindowsShareOneResidentSource
 
     EXPECT_EQ(resident->totalBytes(), estimatedBytes);
     EXPECT_EQ(resident->compactSourceBytes(), sourceValues.size() * sizeof(int32_t));
-    EXPECT_GT(resident->compactMetadataBytes(), 0u);
+    EXPECT_EQ(resident->compactMetadataBytes(), 0u);
 
     const auto denseAccess =
         resident->compactWindowSourceAccessForField("dense_history");
@@ -4610,7 +4662,7 @@ TEST(DeviceResidentFileNamedBatchSessionTest, FullCompactResidencyReturnsDirectA
     EXPECT_TRUE(resident->hasCompactWindowField("history"));
     EXPECT_TRUE(resident->hasCompactWindowField("history_mask"));
     EXPECT_EQ(resident->compactRecordBytes(), 60u);
-    EXPECT_EQ(resident->totalBytes(), 108u);
+    EXPECT_EQ(resident->totalBytes(), 76u);
 
     TestDeviceResidentFileNamedBatchSession deviceSession(
         datasetDescription,
@@ -4689,8 +4741,11 @@ TEST(DeviceDatasetStorageSelection, WindowResidencyFallsBackToHybridWhenDirectRe
             std::set<string>{"dense", "history"});
     ASSERT_GT(fullResidentBytes, windowResidentBytes);
     const uint64_t selectionBytes = 2u * sizeof(uint64_t);
-    const uint64_t windowRequiredBytes = windowResidentBytes + selectionBytes;
-    const uint64_t fullRequiredBytes = fullResidentBytes + selectionBytes;
+    const uint64_t windowPlanBytes = 2u * sizeof(DeviceResidentWindowRowPlan32);
+    const uint64_t windowRequiredBytes =
+        windowResidentBytes + selectionBytes + windowPlanBytes;
+    const uint64_t fullRequiredBytes =
+        fullResidentBytes + selectionBytes + windowPlanBytes;
     ASSERT_GT(fullRequiredBytes, windowRequiredBytes);
 
     Thor::DeviceDatasetStorageSelection selection = selectDeviceStorage(
@@ -4767,7 +4822,9 @@ TEST(DeviceDatasetStorageSelection, WindowedDeviceCacheOffLeavesCompactWindowRef
         DeviceResidentNamedDataset::estimateCompactFileDatasetBytes(
             description,
             std::set<string>{"history"});
-    const uint64_t requiredBytes = residentBytes + 2u * sizeof(uint64_t);
+    const uint64_t requiredBytes =
+        residentBytes + 2u * sizeof(uint64_t) +
+        2u * sizeof(DeviceResidentWindowRowPlan32);
 
     Thor::DeviceDatasetStorageSelection selection = selectDeviceStorage(
         sourceSession,
@@ -4828,8 +4885,11 @@ TEST(DeviceDatasetStorageSelection, StrictWindowedOnlyNeverPromotesDirectFields)
             std::set<string>{"dense", "history"});
     ASSERT_GT(fullResidentBytes, windowResidentBytes);
     const uint64_t selectionBytes = 2u * sizeof(uint64_t);
-    const uint64_t windowRequiredBytes = windowResidentBytes + selectionBytes;
-    const uint64_t fullRequiredBytes = fullResidentBytes + selectionBytes;
+    const uint64_t windowPlanBytes = 2u * sizeof(DeviceResidentWindowRowPlan32);
+    const uint64_t windowRequiredBytes =
+        windowResidentBytes + selectionBytes + windowPlanBytes;
+    const uint64_t fullRequiredBytes =
+        fullResidentBytes + selectionBytes + windowPlanBytes;
     ASSERT_GT(fullRequiredBytes, windowRequiredBytes);
 
     Thor::DeviceDatasetStorageSelection selection = selectDeviceStorage(
@@ -4903,8 +4963,8 @@ TEST(DeviceResidentFileNamedBatchSessionTest, CompactAffineReferencesMatchSource
     EXPECT_TRUE(resident->usesCompactFileStorage());
     EXPECT_EQ(resident->compactRecordBytes(), 0u);
     EXPECT_EQ(resident->compactSourceBytes(), 7u);
-    EXPECT_EQ(resident->compactMetadataBytes(), 32u + 2u * 48u);
-    EXPECT_EQ(resident->totalBytes(), 135u);
+    EXPECT_EQ(resident->compactMetadataBytes(), 0u);
+    EXPECT_EQ(resident->totalBytes(), 7u);
 
     TestDeviceResidentFileNamedBatchSession deviceSession(
         datasetDescription,
@@ -5165,20 +5225,20 @@ TEST(DeviceResidentFileNamedBatchSessionTest, SelectionRingKeepsQueuedReferenceB
         tensorValuesOnHost(firstLease.get().getTensor("dense")),
         (vector<float>{5.0f, 6.0f, 1.0f, 2.0f}));
     EXPECT_EQ(
-        tensorValuesOnHost(secondLease.get().getTensor("dense")),
-        (vector<float>{3.0f, 4.0f, 3.0f, 4.0f}));
+        tensorValuesOnHostValidPrefix(secondLease.get().getTensor("dense"), 1),
+        (vector<float>{3.0f, 4.0f}));
     EXPECT_EQ(
         tensorValuesOnHost(firstHistory),
         (vector<float>{12.0f, 13.0f, 0.0f, 10.0f, 11.0f, 12.0f}));
     EXPECT_EQ(
-        tensorValuesOnHost(secondHistory),
-        (vector<float>{0.0f, 0.0f, 10.0f, 0.0f, 0.0f, 10.0f}));
+        tensorValuesOnHostValidPrefix(secondHistory, 1),
+        (vector<float>{0.0f, 0.0f, 10.0f}));
     EXPECT_EQ(
         uint8TensorValuesOnHost(firstMask),
         (vector<uint8_t>{1, 1, 0, 1, 1, 1}));
     EXPECT_EQ(
-        uint8TensorValuesOnHost(secondMask),
-        (vector<uint8_t>{0, 0, 1, 0, 0, 1}));
+        uint8TensorValuesOnHostValidPrefix(secondMask, 1),
+        (vector<uint8_t>{0, 0, 1}));
 
     firstLease.reset();
     secondLease.reset();
@@ -5246,9 +5306,9 @@ TEST(DeviceResidentNamedBatchSessionTest, SequentialBatchesGatherExactEpochs) {
 
     const Batch& batch1 = batch1Lease.get();
     EXPECT_EQ(batchNum, 1);
-    expectTensorValuesOnHost(
-        batch1.getTensor("seasonality_inputs"),
-        {0.0f, 1.0f, 0.0f, 1.0f});
+    EXPECT_EQ(
+        tensorValuesOnHostValidPrefix(batch1.getTensor("seasonality_inputs"), 1),
+        (vector<float>{0.0f, 1.0f}));
     ASSERT_TRUE(batch1.getValidExampleCount().has_value());
     EXPECT_EQ(batch1.getValidExampleCount().value(), 1u);
     EXPECT_EQ(deviceSession.getNextBatchNum(ExampleType::TRAIN), 0);
@@ -5332,9 +5392,9 @@ TEST(DeviceResidentNamedBatchSessionTest, ValidateAndTestManifestsAreSequentialA
 
     const Batch& validateBatch1 = validateBatch1Lease.get();
     EXPECT_EQ(batchNum, 1);
-    expectTensorValuesOnHost(
-        validateBatch1.getTensor("seasonality_inputs"),
-        {80.0f, 81.0f, 80.0f, 81.0f});
+    EXPECT_EQ(
+        tensorValuesOnHostValidPrefix(validateBatch1.getTensor("seasonality_inputs"), 1),
+        (vector<float>{80.0f, 81.0f}));
     ASSERT_TRUE(validateBatch1.getValidExampleCount().has_value());
     EXPECT_EQ(validateBatch1.getValidExampleCount().value(), 1u);
     validateBatch1Lease.reset();
@@ -5383,9 +5443,10 @@ TEST(DeviceResidentNamedBatchSessionTest, RandomizedTrainOrderMatchesSourceSessi
         EXPECT_EQ(deviceBatchNum, sourceBatchNum);
         EXPECT_EQ(deviceBatch.getValidExampleCount(),
                   sourceBatch.getValidExampleCount());
+        const uint64_t logicalRows = deviceBatch.getValidExampleCount().value_or(2);
         EXPECT_EQ(
-            tensorValuesOnHost(deviceBatch.getTensor("seasonality_inputs")),
-            tensorValues(sourceBatch.getTensor("seasonality_inputs")))
+            tensorValuesOnHostValidPrefix(deviceBatch.getTensor("seasonality_inputs"), logicalRows),
+            tensorValuesOnHostValidPrefix(sourceBatch.getTensor("seasonality_inputs"), logicalRows))
             << "i=" << i;
         sourceBatchLease.reset();
         deviceBatchLease.reset();

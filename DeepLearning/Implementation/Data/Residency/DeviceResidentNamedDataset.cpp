@@ -198,16 +198,6 @@ int64_t checkedAffineStart(int64_t base,
     return static_cast<int64_t>(value);
 }
 
-std::set<uint64_t> sourceKeyBits(
-    const DatasetLayout::WindowedTensorSourceSpec &source) {
-    std::set<uint64_t> keys;
-    for (const DatasetLayout::WindowedTensorSourceSequence &sequence :
-         source.sourceSequences) {
-        keys.insert(keyBitsFromHex(sequence.keyHex, source.keyDataType));
-    }
-    return keys;
-}
-
 json readDatasetManifest(const std::filesystem::path &datasetPath) {
     const std::filesystem::path manifestPath = datasetPath / DatasetWriter::MANIFEST_FILENAME;
     std::ifstream in(manifestPath, std::ios::binary);
@@ -312,33 +302,21 @@ std::map<std::string, RequestedCompactField> resolveRequestedCompactFields(
     return requested;
 }
 
-uint64_t affineSegmentCount(const json &manifest) {
-    if (!manifest.contains("affine_window_reference_segments")) {
-        return 0;
-    }
-    const json &segments = manifest.at("affine_window_reference_segments");
-    if (!segments.is_array()) {
-        throw std::runtime_error("Compact resident affine metadata must be an array.");
-    }
-    return static_cast<uint64_t>(segments.size());
-}
-
 uint64_t compactStorageBytes(
     const Thor::DatasetMaterializationDescription &description,
     const std::map<std::string, RequestedCompactField> &requested,
     const json &manifest) {
-    bool needsRecords = false;
+    (void)manifest;
+    bool needsResidentRecords = false;
     uint64_t bytes = 0;
     std::set<std::string> sourceNames;
-    std::set<std::string> sourcesNeedingSequenceMetadata;
-    std::set<std::string> affineFieldNames;
     for (const auto &entry : requested) {
         if (entry.second.kind == RequestedCompactFieldKind::DIRECT) {
-            needsRecords = true;
+            needsResidentRecords = true;
             continue;
         }
         if (entry.second.kind == RequestedCompactFieldKind::RAGGED) {
-            needsRecords = true;
+            needsResidentRecords = true;
             const DatasetLayout::RaggedTensorSpec &spec = *entry.second.raggedSpec;
             if (spec.isWindowedSourceBacked()) {
                 THOR_THROW_IF_FALSE(spec.sourceName.has_value());
@@ -352,16 +330,10 @@ uint64_t compactStorageBytes(
             continue;
         }
         const DatasetLayout::WindowedTensorSpec &spec = *entry.second.windowSpec;
-        sourceNames.insert(spec.sourceName);
-        sourcesNeedingSequenceMetadata.insert(spec.sourceName);
-        if (spec.referenceMode == DatasetLayout::WindowedTensorReferenceMode::INDEXED) {
-            needsRecords = true;
-        } else {
-            affineFieldNames.insert(spec.name);
-        }
+        if (!entry.second.mask) sourceNames.insert(spec.sourceName);
     }
 
-    if (needsRecords) {
+    if (needsResidentRecords) {
         bytes = checkedAdd(
             bytes,
             checkedMul(description.numExamples,
@@ -373,25 +345,6 @@ uint64_t compactStorageBytes(
         const DatasetLayout::WindowedTensorSourceSpec &source =
             description.layout.windowedTensorSource(sourceName);
         bytes = checkedAdd(bytes, source.sourceNumBytes, "Compact resident source storage");
-        if (sourcesNeedingSequenceMetadata.find(sourceName) !=
-            sourcesNeedingSequenceMetadata.end()) {
-            bytes = checkedAdd(
-                bytes,
-                checkedMul(static_cast<uint64_t>(source.sourceSequences.size()),
-                           static_cast<uint64_t>(sizeof(DeviceResidentWindowSourceSequence)),
-                           "Compact resident source metadata"),
-                "Compact resident storage");
-        }
-    }
-    const uint64_t segmentCount = affineSegmentCount(manifest);
-    for (const std::string &fieldName : affineFieldNames) {
-        (void)fieldName;
-        bytes = checkedAdd(
-            bytes,
-            checkedMul(segmentCount,
-                       static_cast<uint64_t>(sizeof(DeviceResidentAffineWindowSegment)),
-                       "Compact resident affine metadata"),
-            "Compact resident storage");
     }
     return bytes;
 }
@@ -460,42 +413,201 @@ Tensor readCompactRecords(
     return records;
 }
 
-void validateIndexedReferences(
-    const Thor::DatasetMaterializationDescription &description,
-    const std::map<std::string, RequestedCompactField> &requested,
-    const Tensor &records) {
-    THOR_THROW_IF_FALSE(records.isInitialized());
-    const uint8_t *recordBytes = records.getMemPtr<uint8_t>();
-    const uint64_t recordSize = description.layout.recordSizeBytes();
-    std::set<std::string> validatedFields;
-    for (const auto &entry : requested) {
-        if (entry.second.kind != RequestedCompactFieldKind::WINDOW) {
-            continue;
+struct HostWindowSourceSequence {
+    int64_t startIndex = 0;
+    int64_t endIndexExclusive = 0;
+    uint64_t offsetBytes = 0;
+};
+
+std::map<uint64_t, HostWindowSourceSequence> hostWindowSourceSequences(
+    const DatasetLayout::WindowedTensorSourceSpec &source) {
+    std::map<uint64_t, HostWindowSourceSequence> sequences;
+    for (const DatasetLayout::WindowedTensorSourceSequence &sequence :
+         source.sourceSequences) {
+        const uint64_t keyBits = keyBitsFromHex(sequence.keyHex, source.keyDataType);
+        if (sequence.endIndexExclusive < sequence.startIndex) {
+            throw std::runtime_error(
+                "Compact resident window source sequence has decreasing bounds.");
         }
-        const DatasetLayout::WindowedTensorSpec &spec = *entry.second.windowSpec;
-        if (spec.referenceMode != DatasetLayout::WindowedTensorReferenceMode::INDEXED ||
-            !validatedFields.insert(spec.name).second) {
-            continue;
-        }
-        const DatasetLayout::WindowedTensorSourceSpec &source =
-            description.layout.windowedTensorSource(spec.sourceName);
-        const std::set<uint64_t> keys = sourceKeyBits(source);
-        for (uint64_t row = 0; row < description.numExamples; ++row) {
-            const uint8_t *reference =
-                recordBytes + row * recordSize + spec.referenceOffsetBytes;
-            const uint64_t keyBits =
-                readLittleEndianUnsignedHost(reference, spec.keyNumBytes());
-            if (keys.find(keyBits) == keys.end()) {
-                throw std::runtime_error(
-                    "Compact resident indexed reference for field '" + spec.name +
-                    "' row " + std::to_string(row) +
-                    " has no matching source sequence.");
-            }
-            const int64_t start =
-                readIndexHost(reference + spec.keyNumBytes(), spec.indexDataType);
-            validateWindowEnd(start, spec.windowLength(), spec.name);
+        const auto [it, inserted] = sequences.emplace(
+            keyBits,
+            HostWindowSourceSequence{
+                .startIndex = sequence.startIndex,
+                .endIndexExclusive = sequence.endIndexExclusive,
+                .offsetBytes = sequence.offsetBytes});
+        (void)it;
+        if (!inserted) {
+            throw std::runtime_error("Compact resident window source contains duplicate keys.");
         }
     }
+    return sequences;
+}
+
+DeviceResidentWindowRowPlan64 resolveWindowRowPlan(
+    const HostWindowSourceSequence &sequence,
+    int64_t requestedStart,
+    uint64_t windowLength,
+    uint64_t sourceStepBytes,
+    uint64_t sourceNumBytes,
+    const std::string &fieldName) {
+    validateWindowEnd(requestedStart, windowLength, fieldName);
+    const int64_t requestedEnd =
+        requestedStart + static_cast<int64_t>(windowLength);
+    const int64_t validStart = std::max(requestedStart, sequence.startIndex);
+    const int64_t validEnd = std::min(requestedEnd, sequence.endIndexExclusive);
+    if (validEnd <= validStart) {
+        return DeviceResidentWindowRowPlan64{};
+    }
+
+    const __int128 outputBeginWide =
+        static_cast<__int128>(validStart) - static_cast<__int128>(requestedStart);
+    const __int128 sourceStepWide =
+        static_cast<__int128>(validStart) - static_cast<__int128>(sequence.startIndex);
+    const __int128 validCountWide =
+        static_cast<__int128>(validEnd) - static_cast<__int128>(validStart);
+    THOR_THROW_IF_FALSE(outputBeginWide >= 0);
+    THOR_THROW_IF_FALSE(sourceStepWide >= 0);
+    THOR_THROW_IF_FALSE(validCountWide > 0);
+    THOR_THROW_IF_FALSE(
+        outputBeginWide <= static_cast<__int128>(std::numeric_limits<uint64_t>::max()));
+    THOR_THROW_IF_FALSE(
+        sourceStepWide <= static_cast<__int128>(std::numeric_limits<uint64_t>::max()));
+    THOR_THROW_IF_FALSE(
+        validCountWide <= static_cast<__int128>(std::numeric_limits<uint64_t>::max()));
+
+    const uint64_t outputBegin = static_cast<uint64_t>(outputBeginWide);
+    const uint64_t sourceStep = static_cast<uint64_t>(sourceStepWide);
+    const uint64_t validCount = static_cast<uint64_t>(validCountWide);
+    const uint64_t sourceByteDelta = checkedMul(
+        sourceStep, sourceStepBytes, "Compact resident window source byte offset");
+    const uint64_t sourceOffsetBytes = checkedAdd(
+        sequence.offsetBytes,
+        sourceByteDelta,
+        "Compact resident window source byte offset");
+    const uint64_t validBytes = checkedMul(
+        validCount, sourceStepBytes, "Compact resident window valid byte count");
+    if (sourceOffsetBytes > sourceNumBytes || validBytes > sourceNumBytes - sourceOffsetBytes) {
+        throw std::runtime_error(
+            "Compact resident window source plan is outside source storage for field '" +
+            fieldName + "'.");
+    }
+    THOR_THROW_IF_FALSE(outputBegin <= windowLength);
+    THOR_THROW_IF_FALSE(validCount <= windowLength - outputBegin);
+    return DeviceResidentWindowRowPlan64{
+        .sourceOffsetBytes = sourceOffsetBytes,
+        .validStepBegin = outputBegin,
+        .validStepCount = validCount};
+}
+
+std::vector<DeviceResidentWindowRowPlan64> buildIndexedWindowRowPlans(
+    const Thor::DatasetMaterializationDescription &description,
+    const DatasetLayout::WindowedTensorSpec &spec,
+    const Tensor &records) {
+    THOR_THROW_IF_FALSE(records.isInitialized());
+    const DatasetLayout::WindowedTensorSourceSpec &source =
+        description.layout.windowedTensorSource(spec.sourceName);
+    const auto sequences = hostWindowSourceSequences(source);
+    const uint8_t *recordBytes = records.getMemPtr<uint8_t>();
+    const uint64_t recordSize = description.layout.recordSizeBytes();
+    if (recordSize < spec.referenceNumBytes ||
+        spec.referenceOffsetBytes > recordSize - spec.referenceNumBytes) {
+        throw std::runtime_error(
+            "Compact resident indexed reference layout is invalid for field '" +
+            spec.name + "'.");
+    }
+
+    std::vector<DeviceResidentWindowRowPlan64> plans(description.numExamples);
+    for (uint64_t row = 0; row < description.numExamples; ++row) {
+        const uint8_t *reference =
+            recordBytes + row * recordSize + spec.referenceOffsetBytes;
+        const uint64_t keyBits =
+            readLittleEndianUnsignedHost(reference, spec.keyNumBytes());
+        const auto sequenceIt = sequences.find(keyBits);
+        if (sequenceIt == sequences.end()) {
+            throw std::runtime_error(
+                "Compact resident indexed reference for field '" + spec.name +
+                "' row " + std::to_string(row) +
+                " has no matching source sequence.");
+        }
+        const int64_t start =
+            readIndexHost(reference + spec.keyNumBytes(), spec.indexDataType);
+        plans[row] = resolveWindowRowPlan(
+            sequenceIt->second,
+            start,
+            spec.windowLength(),
+            spec.sourceStepNumBytes(),
+            source.sourceNumBytes,
+            spec.name);
+    }
+    return plans;
+}
+
+std::vector<DeviceResidentWindowRowPlan64> buildAffineWindowRowPlans(
+    const Thor::DatasetMaterializationDescription &description,
+    const json &manifest,
+    const DatasetLayout::WindowedTensorSpec &spec) {
+    if (!manifest.contains("affine_window_reference_segments") ||
+        !manifest.at("affine_window_reference_segments").is_array()) {
+        throw std::runtime_error("Compact resident affine dataset is missing reference segments.");
+    }
+    const DatasetLayout::WindowedTensorSourceSpec &source =
+        description.layout.windowedTensorSource(spec.sourceName);
+    const auto sequences = hostWindowSourceSequences(source);
+    std::vector<DeviceResidentWindowRowPlan64> plans(description.numExamples);
+    uint64_t expectedRowStart = 0;
+    for (const json &segmentJson : manifest.at("affine_window_reference_segments")) {
+        const uint64_t rowStart = segmentJson.at("row_start").get<uint64_t>();
+        const uint64_t count = segmentJson.at("count").get<uint64_t>();
+        if (rowStart != expectedRowStart || count == 0) {
+            throw std::runtime_error(
+                "Compact resident affine segments must be contiguous and non-empty.");
+        }
+        const json &references = segmentJson.at("references");
+        if (!references.contains(spec.name)) {
+            throw std::runtime_error(
+                "Compact resident affine segment is missing field '" + spec.name + "'.");
+        }
+        const json &reference = references.at(spec.name);
+        const uint64_t keyBits = keyBitsFromHex(
+            reference.at("key_hex").get<std::string>(), source.keyDataType);
+        const auto sequenceIt = sequences.find(keyBits);
+        if (sequenceIt == sequences.end()) {
+            throw std::runtime_error(
+                "Compact resident affine reference for field '" + spec.name +
+                "' has no matching source sequence.");
+        }
+        const int64_t base = reference.at("base").get<int64_t>();
+        const int64_t stride = reference.at("stride").get<int64_t>();
+        const int64_t fieldOffset = reference.at("field_offset").get<int64_t>();
+        if (stride <= 0) {
+            throw std::runtime_error("Compact resident affine stride must be positive.");
+        }
+        const int64_t firstStart =
+            checkedAffineStart(base, stride, fieldOffset, 0, spec.name);
+        const int64_t lastStart =
+            checkedAffineStart(base, stride, fieldOffset, count - 1, spec.name);
+        validateWindowEnd(firstStart, spec.windowLength(), spec.name);
+        validateWindowEnd(lastStart, spec.windowLength(), spec.name);
+        THOR_THROW_IF_FALSE(rowStart <= description.numExamples);
+        THOR_THROW_IF_FALSE(count <= description.numExamples - rowStart);
+        for (uint64_t localRow = 0; localRow < count; ++localRow) {
+            const int64_t start =
+                checkedAffineStart(base, stride, fieldOffset, localRow, spec.name);
+            plans[rowStart + localRow] = resolveWindowRowPlan(
+                sequenceIt->second,
+                start,
+                spec.windowLength(),
+                spec.sourceStepNumBytes(),
+                source.sourceNumBytes,
+                spec.name);
+        }
+        expectedRowStart = checkedAdd(
+            expectedRowStart, count, "Compact resident affine coverage");
+    }
+    if (expectedRowStart != description.numExamples) {
+        throw std::runtime_error("Compact resident affine segments do not cover dataset rows.");
+    }
+    return plans;
 }
 
 Tensor readRaggedValuesBytes(
@@ -600,107 +712,6 @@ Tensor readSourceBytes(const Thor::DatasetMaterializationDescription &descriptio
     return bytes;
 }
 
-Tensor sourceSequenceTensor(const DatasetLayout::WindowedTensorSourceSpec &source) {
-    std::vector<DeviceResidentWindowSourceSequence> sequences;
-    sequences.reserve(source.sourceSequences.size());
-    for (const DatasetLayout::WindowedTensorSourceSequence &sequence :
-         source.sourceSequences) {
-        sequences.push_back(DeviceResidentWindowSourceSequence{
-            .keyBits = keyBitsFromHex(sequence.keyHex, source.keyDataType),
-            .startIndex = sequence.startIndex,
-            .endIndexExclusive = sequence.endIndexExclusive,
-            .offsetBytes = sequence.offsetBytes});
-    }
-    std::sort(sequences.begin(), sequences.end(),
-              [](const auto &left, const auto &right) {
-                  return left.keyBits < right.keyBits;
-              });
-    for (size_t i = 1; i < sequences.size(); ++i) {
-        if (sequences[i - 1].keyBits == sequences[i].keyBits) {
-            throw std::runtime_error("Compact resident window source contains duplicate keys.");
-        }
-    }
-    const uint64_t numBytes = checkedMul(
-        static_cast<uint64_t>(sequences.size()),
-        static_cast<uint64_t>(sizeof(DeviceResidentWindowSourceSequence)),
-        "Compact resident source metadata bytes");
-    Tensor tensor = cpuByteTensor(numBytes);
-    std::memcpy(tensor.getMemPtr(), sequences.data(), static_cast<size_t>(numBytes));
-    return tensor;
-}
-
-Tensor affineSegmentTensor(
-    const Thor::DatasetMaterializationDescription &description,
-    const json &manifest,
-    const DatasetLayout::WindowedTensorSpec &spec,
-    uint64_t &segmentCountOut) {
-    if (!manifest.contains("affine_window_reference_segments") ||
-        !manifest.at("affine_window_reference_segments").is_array()) {
-        throw std::runtime_error("Compact resident affine dataset is missing reference segments.");
-    }
-    const DatasetLayout::WindowedTensorSourceSpec &source =
-        description.layout.windowedTensorSource(spec.sourceName);
-    const std::set<uint64_t> sourceKeys = sourceKeyBits(source);
-    std::vector<DeviceResidentAffineWindowSegment> segments;
-    uint64_t expectedRowStart = 0;
-    for (const json &segmentJson : manifest.at("affine_window_reference_segments")) {
-        const uint64_t rowStart = segmentJson.at("row_start").get<uint64_t>();
-        const uint64_t count = segmentJson.at("count").get<uint64_t>();
-        if (rowStart != expectedRowStart || count == 0) {
-            throw std::runtime_error("Compact resident affine segments must be contiguous and non-empty.");
-        }
-        const json &references = segmentJson.at("references");
-        if (!references.contains(spec.name)) {
-            throw std::runtime_error("Compact resident affine segment is missing field '" +
-                                     spec.name + "'.");
-        }
-        const json &reference = references.at(spec.name);
-        const uint64_t keyBits = keyBitsFromHex(
-            reference.at("key_hex").get<std::string>(), source.keyDataType);
-        if (sourceKeys.find(keyBits) == sourceKeys.end()) {
-            throw std::runtime_error(
-                "Compact resident affine reference for field '" + spec.name +
-                "' has no matching source sequence.");
-        }
-        segments.push_back(DeviceResidentAffineWindowSegment{
-            .rowStart = rowStart,
-            .count = count,
-            .keyBits = keyBits,
-            .base = reference.at("base").get<int64_t>(),
-            .stride = reference.at("stride").get<int64_t>(),
-            .fieldOffset = reference.at("field_offset").get<int64_t>()});
-        if (segments.back().stride <= 0) {
-            throw std::runtime_error("Compact resident affine stride must be positive.");
-        }
-        const int64_t firstStart = checkedAffineStart(
-            segments.back().base,
-            segments.back().stride,
-            segments.back().fieldOffset,
-            0,
-            spec.name);
-        const int64_t lastStart = checkedAffineStart(
-            segments.back().base,
-            segments.back().stride,
-            segments.back().fieldOffset,
-            count - 1,
-            spec.name);
-        validateWindowEnd(firstStart, spec.windowLength(), spec.name);
-        validateWindowEnd(lastStart, spec.windowLength(), spec.name);
-        expectedRowStart = checkedAdd(expectedRowStart, count,
-                                      "Compact resident affine coverage");
-    }
-    if (expectedRowStart != description.numExamples) {
-        throw std::runtime_error("Compact resident affine segments do not cover dataset rows.");
-    }
-    segmentCountOut = static_cast<uint64_t>(segments.size());
-    const uint64_t numBytes = checkedMul(
-        segmentCountOut,
-        static_cast<uint64_t>(sizeof(DeviceResidentAffineWindowSegment)),
-        "Compact resident affine metadata bytes");
-    Tensor tensor = cpuByteTensor(numBytes);
-    std::memcpy(tensor.getMemPtr(), segments.data(), static_cast<size_t>(numBytes));
-    return tensor;
-}
 
 }  // namespace
 
@@ -856,23 +867,24 @@ DeviceResidentNamedDataset::fromCompactFileDataset(
             devicePlacement));
     dataset->compactFileStorage = true;
 
-    bool needsRecords = false;
+    bool needsHostRecords = false;
+    bool needsResidentRecords = false;
     std::set<std::string> sourceNames;
-    std::set<std::string> sourcesNeedingSequenceMetadata;
-    std::set<std::string> affineFieldNames;
     std::map<std::string, RequestedCompactField> requestedWindows;
     std::map<std::string, RequestedCompactField> requestedRagged;
     for (const auto &entry : requested) {
         dataset->compactFieldIds.insert(description.schema.getField(entry.first).id);
         if (entry.second.kind == RequestedCompactFieldKind::DIRECT) {
-            needsRecords = true;
+            needsHostRecords = true;
+            needsResidentRecords = true;
             dataset->compactDirectFields.emplace(
                 entry.first,
                 CompactDirectFieldStorage{*entry.second.directSpec});
             continue;
         }
         if (entry.second.kind == RequestedCompactFieldKind::RAGGED) {
-            needsRecords = true;
+            needsHostRecords = true;
+            needsResidentRecords = true;
             requestedRagged.emplace(entry.first, entry.second);
             const DatasetLayout::RaggedTensorSpec &spec = *entry.second.raggedSpec;
             if (spec.isWindowedSourceBacked()) {
@@ -883,13 +895,12 @@ DeviceResidentNamedDataset::fromCompactFileDataset(
         }
         const DatasetLayout::WindowedTensorSpec &spec = *entry.second.windowSpec;
         requestedWindows.emplace(entry.first, entry.second);
-        sourceNames.insert(spec.sourceName);
-        sourcesNeedingSequenceMetadata.insert(spec.sourceName);
-        needsRecords = needsRecords ||
-                       spec.referenceMode ==
-                           DatasetLayout::WindowedTensorReferenceMode::INDEXED;
-        if (spec.referenceMode == DatasetLayout::WindowedTensorReferenceMode::AFFINE) {
-            affineFieldNames.insert(spec.name);
+        if (!entry.second.mask) sourceNames.insert(spec.sourceName);
+        if (spec.referenceMode == DatasetLayout::WindowedTensorReferenceMode::INDEXED) {
+            // Indexed references are resolved once while the compact records are
+            // already on the host. They no longer force the records themselves
+            // to remain resident on the GPU.
+            needsHostRecords = true;
         }
         dataset->compactWindowFields.emplace(
             entry.first,
@@ -899,15 +910,52 @@ DeviceResidentNamedDataset::fromCompactFileDataset(
     const auto start = std::chrono::steady_clock::now();
     Stream uploadStream(devicePlacement);
     // cudaMemcpyAsync requires every host source allocation to remain alive until
-    // the upload stream reaches the corresponding copy. Keep these compact host
-    // tensors retained until the single synchronization below.
+    // the upload stream reaches the corresponding copy. Keep host tensors that
+    // feed a device allocation retained until the single synchronization below.
     std::vector<Tensor> uploadSources;
+    Tensor recordsHost;
+    if (needsHostRecords) {
+        recordsHost = readCompactRecords(description, manifest);
+    }
+
     std::map<std::string, std::vector<uint64_t>> raggedValueCounts;
-    if (needsRecords) {
-        Tensor recordsHost = readCompactRecords(description, manifest);
-        validateIndexedReferences(description, requestedWindows, recordsHost);
+    if (!requestedRagged.empty()) {
         raggedValueCounts =
             readAndValidateRaggedValueCounts(description, requestedRagged, recordsHost);
+    }
+
+    std::set<std::string> plannedWindowFields;
+    for (const auto &entry : requestedWindows) {
+        const DatasetLayout::WindowedTensorSpec &spec = *entry.second.windowSpec;
+        if (!plannedWindowFields.insert(spec.name).second) continue;
+
+        std::vector<DeviceResidentWindowRowPlan64> plans =
+            spec.referenceMode == DatasetLayout::WindowedTensorReferenceMode::INDEXED
+                ? buildIndexedWindowRowPlans(description, spec, recordsHost)
+                : buildAffineWindowRowPlans(description, manifest, spec);
+        CompactWindowPlanStorage storage;
+        storage.use32BitSteps =
+            spec.windowLength() <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max());
+        if (storage.use32BitSteps) {
+            storage.plans32.reserve(plans.size());
+            for (const DeviceResidentWindowRowPlan64 &plan : plans) {
+                THOR_THROW_IF_FALSE(
+                    plan.validStepBegin <= std::numeric_limits<uint32_t>::max());
+                THOR_THROW_IF_FALSE(
+                    plan.validStepCount <= std::numeric_limits<uint32_t>::max());
+                storage.plans32.push_back(DeviceResidentWindowRowPlan32{
+                    .sourceOffsetBytes = plan.sourceOffsetBytes,
+                    .validStepBegin = static_cast<uint32_t>(plan.validStepBegin),
+                    .validStepCount = static_cast<uint32_t>(plan.validStepCount)});
+            }
+        } else {
+            storage.plans64 = std::move(plans);
+        }
+        dataset->compactWindowPlans.emplace(spec.name, std::move(storage));
+    }
+
+    if (needsResidentRecords) {
+        THOR_THROW_IF_FALSE(recordsHost.isInitialized());
         dataset->compactRecords = uploadTensor(recordsHost, devicePlacement, uploadStream);
         uploadSources.push_back(std::move(recordsHost));
     }
@@ -934,28 +982,8 @@ DeviceResidentNamedDataset::fromCompactFileDataset(
         CompactWindowSourceStorage storage;
         storage.spec = source;
         storage.bytes = uploadTensor(sourceHost, devicePlacement, uploadStream);
-        if (sourcesNeedingSequenceMetadata.find(sourceName) !=
-            sourcesNeedingSequenceMetadata.end()) {
-            Tensor sequencesHost = sourceSequenceTensor(source);
-            storage.sequences = uploadTensor(sequencesHost, devicePlacement, uploadStream);
-            storage.sequenceCount = static_cast<uint64_t>(source.sourceSequences.size());
-            uploadSources.push_back(std::move(sequencesHost));
-        }
         dataset->compactSources.emplace(sourceName, std::move(storage));
         uploadSources.push_back(std::move(sourceHost));
-    }
-
-    for (const std::string &fieldName : affineFieldNames) {
-        const DatasetLayout::WindowedTensorSpec &spec =
-            description.layout.windowedTensor(fieldName);
-        uint64_t segmentCount = 0;
-        Tensor segmentsHost = affineSegmentTensor(
-            description, manifest, spec, segmentCount);
-        CompactAffineFieldStorage storage;
-        storage.segments = uploadTensor(segmentsHost, devicePlacement, uploadStream);
-        storage.segmentCount = segmentCount;
-        dataset->compactAffineFields.emplace(fieldName, std::move(storage));
-        uploadSources.push_back(std::move(segmentsHost));
     }
 
     uploadStream.synchronize();
@@ -991,12 +1019,6 @@ uint64_t DeviceResidentNamedDataset::totalBytes() const {
     }
     for (const auto &entry : compactSources) {
         bytes += entry.second.bytes.getArraySizeInBytes();
-        if (entry.second.sequences.isInitialized()) {
-            bytes += entry.second.sequences.getArraySizeInBytes();
-        }
-    }
-    for (const auto &entry : compactAffineFields) {
-        bytes += entry.second.segments.getArraySizeInBytes();
     }
     return bytes;
 }
@@ -1019,16 +1041,10 @@ uint64_t DeviceResidentNamedDataset::compactSourceBytes() const {
 }
 
 uint64_t DeviceResidentNamedDataset::compactMetadataBytes() const {
-    uint64_t bytes = 0;
-    for (const auto &entry : compactSources) {
-        if (entry.second.sequences.isInitialized()) {
-            bytes += entry.second.sequences.getArraySizeInBytes();
-        }
-    }
-    for (const auto &entry : compactAffineFields) {
-        bytes += entry.second.segments.getArraySizeInBytes();
-    }
-    return bytes;
+    // Window sequence/affine metadata is now resolved once on the host into
+    // immutable row plans. Only the selected batch plan is staged to the GPU,
+    // so the canonical resident dataset owns no device-side window metadata.
+    return 0;
 }
 
 bool DeviceResidentNamedDataset::hasField(Thor::DatasetFieldId id) const {
@@ -1340,9 +1356,99 @@ void DeviceResidentNamedDataset::enqueueSnapshotRaggedFieldMaterialization(
         stream);
 }
 
+std::vector<std::string> DeviceResidentNamedDataset::compactWindowPlanNames() const {
+    std::vector<std::string> names;
+    names.reserve(compactWindowPlans.size());
+    for (const auto &entry : compactWindowPlans) names.push_back(entry.first);
+    return names;
+}
+
+std::optional<std::string> DeviceResidentNamedDataset::compactWindowPlanNameForField(
+    const std::string &fieldName) const {
+    const auto fieldIt = compactWindowFields.find(fieldName);
+    if (fieldIt == compactWindowFields.end()) return std::nullopt;
+    const std::string &planName = fieldIt->second.spec.name;
+    THOR_THROW_IF_FALSE(compactWindowPlans.find(planName) != compactWindowPlans.end());
+    return planName;
+}
+
+uint64_t DeviceResidentNamedDataset::compactWindowPlanBytesPerRow(
+    const std::string &planName) const {
+    const auto found = compactWindowPlans.find(planName);
+    if (found == compactWindowPlans.end()) {
+        throw std::runtime_error(
+            "DeviceResidentNamedDataset has no compact window plan '" + planName + "'.");
+    }
+    return found->second.use32BitSteps
+               ? static_cast<uint64_t>(sizeof(DeviceResidentWindowRowPlan32))
+               : static_cast<uint64_t>(sizeof(DeviceResidentWindowRowPlan64));
+}
+
+void DeviceResidentNamedDataset::stageCompactWindowPlan(
+    const std::string &planName,
+    const Tensor &rowIndicesHost,
+    uint64_t logicalRows,
+    Tensor &planHostStaging) const {
+    const auto found = compactWindowPlans.find(planName);
+    if (found == compactWindowPlans.end()) {
+        throw std::runtime_error(
+            "DeviceResidentNamedDataset has no compact window plan '" + planName + "'.");
+    }
+    THOR_THROW_IF_FALSE(rowIndicesHost.isInitialized());
+    THOR_THROW_IF_FALSE(
+        rowIndicesHost.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(rowIndicesHost.getDataType() == DataType::UINT64);
+    THOR_THROW_IF_FALSE(rowIndicesHost.getDimensions().size() == 1);
+    const uint64_t batchCapacity = rowIndicesHost.getDimensions().front();
+    THOR_THROW_IF_FALSE(logicalRows <= batchCapacity);
+    THOR_THROW_IF_FALSE(planHostStaging.isInitialized());
+    THOR_THROW_IF_FALSE(
+        planHostStaging.getPlacement().getMemDevice() == TensorPlacement::MemDevices::CPU);
+    THOR_THROW_IF_FALSE(
+        planHostStaging.getDataType() == DataType::UINT8 ||
+        planHostStaging.getDataType() == DataType::UINT64);
+    const uint64_t bytesPerRow = compactWindowPlanBytesPerRow(planName);
+    THOR_THROW_IF_FALSE(
+        logicalRows == 0 || bytesPerRow <= std::numeric_limits<uint64_t>::max() / logicalRows);
+    THOR_THROW_IF_FALSE(
+        planHostStaging.getArraySizeInBytes() == logicalRows * bytesPerRow);
+
+    const uint64_t *rowIndices = rowIndicesHost.getMemPtr<uint64_t>();
+    const CompactWindowPlanStorage &storage = found->second;
+    if (storage.use32BitSteps) {
+        THOR_THROW_IF_FALSE(storage.plans32.size() == numExamples);
+        auto *destination =
+            reinterpret_cast<DeviceResidentWindowRowPlan32 *>(planHostStaging.getMemPtr());
+        for (uint64_t row = 0; row < logicalRows; ++row) {
+            const uint64_t sourceRow = rowIndices[row];
+            if (sourceRow >= storage.plans32.size()) {
+                throw std::runtime_error(
+                    "Compact resident window plan selected invalid dataset row " +
+                    std::to_string(sourceRow) + ".");
+            }
+            destination[row] = storage.plans32[sourceRow];
+        }
+    } else {
+        THOR_THROW_IF_FALSE(storage.plans64.size() == numExamples);
+        auto *destination =
+            reinterpret_cast<DeviceResidentWindowRowPlan64 *>(planHostStaging.getMemPtr());
+        for (uint64_t row = 0; row < logicalRows; ++row) {
+            const uint64_t sourceRow = rowIndices[row];
+            if (sourceRow >= storage.plans64.size()) {
+                throw std::runtime_error(
+                    "Compact resident window plan selected invalid dataset row " +
+                    std::to_string(sourceRow) + ".");
+            }
+            destination[row] = storage.plans64[sourceRow];
+        }
+    }
+}
+
 void DeviceResidentNamedDataset::enqueueCompactFieldMaterialization(
     const std::string &fieldName,
     const Tensor &rowIndicesDevice,
+    const Tensor &windowPlanDevice,
+    uint64_t logicalRows,
     Tensor &destination,
     Stream &stream) const {
     const auto directIt = compactDirectFields.find(fieldName);
@@ -1360,6 +1466,7 @@ void DeviceResidentNamedDataset::enqueueCompactFieldMaterialization(
             layout.recordSizeBytes(),
             spec.offsetBytes,
             spec.numBytes,
+            logicalRows,
             destination,
             rowIndicesDevice,
             stream);
@@ -1372,13 +1479,32 @@ void DeviceResidentNamedDataset::enqueueCompactFieldMaterialization(
             "DeviceResidentNamedDataset has no compact field '" + fieldName + "'.");
     }
     const CompactWindowFieldStorage &fieldStorage = fieldIt->second;
-    const auto sourceIt = compactSources.find(fieldStorage.spec.sourceName);
-    THOR_THROW_IF_FALSE(sourceIt != compactSources.end());
+    Tensor noSourceStorage;
+    const Tensor *sourceStorage = &noSourceStorage;
+    if (!fieldStorage.materializeMask) {
+        const auto sourceIt = compactSources.find(fieldStorage.spec.sourceName);
+        THOR_THROW_IF_FALSE(sourceIt != compactSources.end());
+        sourceStorage = &sourceIt->second.bytes;
+    }
     THOR_THROW_IF_FALSE(rowIndicesDevice.isInitialized());
     THOR_THROW_IF_FALSE(rowIndicesDevice.getDimensions().size() == 1);
+    const uint64_t batchCapacity = rowIndicesDevice.getDimensions().front();
+    THOR_THROW_IF_FALSE(logicalRows <= batchCapacity);
+    THOR_THROW_IF_FALSE(windowPlanDevice.isInitialized());
+    THOR_THROW_IF_FALSE(windowPlanDevice.getPlacement() == placement);
+    THOR_THROW_IF_FALSE(
+        windowPlanDevice.getDataType() == DataType::UINT8 ||
+        windowPlanDevice.getDataType() == DataType::UINT64);
+    THOR_THROW_IF_FALSE(
+        logicalRows == 0 ||
+        compactWindowPlanBytesPerRow(fieldStorage.spec.name) <=
+            std::numeric_limits<uint64_t>::max() / logicalRows);
+    THOR_THROW_IF_FALSE(
+        windowPlanDevice.getArraySizeInBytes() ==
+        logicalRows * compactWindowPlanBytesPerRow(fieldStorage.spec.name));
 
     std::vector<uint64_t> expectedDimensions;
-    expectedDimensions.push_back(rowIndicesDevice.getDimensions().front());
+    expectedDimensions.push_back(batchCapacity);
     if (fieldStorage.materializeMask) {
         expectedDimensions.push_back(fieldStorage.spec.windowLength());
         THOR_THROW_IF_FALSE(
@@ -1393,39 +1519,18 @@ void DeviceResidentNamedDataset::enqueueCompactFieldMaterialization(
             TensorDescriptor(fieldStorage.spec.dataType, expectedDimensions));
     }
 
-    Tensor noAffineSegments;
-    const Tensor *affineSegments = &noAffineSegments;
-    uint64_t affineSegmentCount = 0;
-    if (fieldStorage.spec.referenceMode ==
-        DatasetLayout::WindowedTensorReferenceMode::AFFINE) {
-        const auto affineIt = compactAffineFields.find(fieldStorage.spec.name);
-        THOR_THROW_IF_FALSE(affineIt != compactAffineFields.end());
-        affineSegments = &affineIt->second.segments;
-        affineSegmentCount = affineIt->second.segmentCount;
-    }
-
     DeviceResidentWindowMaterializationSpec launchSpec;
-    launchSpec.referenceMode = fieldStorage.spec.referenceMode;
     launchSpec.dataType = fieldStorage.spec.dataType;
-    launchSpec.keyDataType = fieldStorage.spec.keyDataType;
-    launchSpec.indexDataType = fieldStorage.spec.indexDataType;
-    launchSpec.numExamples = numExamples;
-    launchSpec.recordSizeBytes = layout.recordSizeBytes();
-    launchSpec.referenceOffsetBytes = fieldStorage.spec.referenceOffsetBytes;
     launchSpec.windowLength = fieldStorage.spec.windowLength();
     launchSpec.sourceStepBytes = fieldStorage.spec.sourceStepNumBytes();
     launchSpec.padValue = fieldStorage.spec.padValue;
     launchSpec.materializeMask = fieldStorage.materializeMask;
 
     launchDeviceResidentWindowMaterializationKernel(
-        compactRecords,
-        sourceIt->second.bytes,
-        sourceIt->second.sequences,
-        sourceIt->second.sequenceCount,
-        *affineSegments,
-        affineSegmentCount,
+        *sourceStorage,
+        windowPlanDevice,
+        logicalRows,
         launchSpec,
         destination,
-        rowIndicesDevice,
         stream);
 }

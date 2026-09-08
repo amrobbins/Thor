@@ -1715,6 +1715,105 @@ TEST(FullyConnectedApi, BackwardFlattensHigherRankFeatureInputWithoutMaterialize
     expectAllClose(readCpuTensor(weightsAfterHost), expectedWeightsAfter, 1e-5f, 1e-5f, "weights after");
 }
 
+TEST(FullyConnectedApi, PartialBatchPoisonedInactiveRowsDoNotContaminateParameterUpdate) {
+    constexpr uint32_t physicalBatchSize = 2;
+    constexpr uint32_t validBatchSize = 1;
+    constexpr uint32_t numInputFeatures = 2;
+    constexpr uint32_t numOutputFeatures = 2;
+    constexpr float learningRate = 0.1f;
+    const DataType dataType = DataType::FP32;
+
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const vector<float> inputValues = {
+        1.0f, 2.0f,
+        nan, nan,
+    };
+    const vector<float> weightValues = {0.5f, -1.0f, 2.0f, 0.25f};
+    const vector<float> errorInputValues = {
+        1.0f, -0.5f,
+        nan, nan,
+    };
+
+    Api::Network network("partial_batch_poisoned_fc");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({numInputFeatures})
+                                  .dataType(dataType)
+                                  .build();
+    Api::GradientRivet inputRivet = Api::GradientRivet::Builder()
+                                        .network(network)
+                                        .tensor(input.getFeatureOutput().value())
+                                        .build();
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(inputRivet.getFeatureOutput().value())
+                                 .numOutputFeatures(numOutputFeatures)
+                                 .hasBias(false)
+                                 .computeDataType(DataType::FP32)
+                                 .outputDataType(DataType::FP32)
+                                 .noActivation()
+                                 .build();
+    Api::GradientRivet outputRivet = Api::GradientRivet::Builder()
+                                         .network(network)
+                                         .tensor(fc.getFeatureOutput().value())
+                                         .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+    shared_ptr<Api::Sgd> sgd = Api::Sgd::Builder()
+                                   .network(network)
+                                   .initialLearningRate(learningRate)
+                                   .decay(0.0f)
+                                   .momentum(0.0f)
+                                   .build();
+    (void)sgd;
+
+    PlacedFullyConnectedFixture fixture =
+        placeSingleFullyConnectedNetwork(network, input, output, fc, physicalBatchSize, false);
+    ASSERT_EQ(fixture.physicalFc->listParameters(), (vector<string>{"weights"}));
+
+    Stream stream = fixture.physicalFc->getStreams()[0];
+    setParameterTensor(fixture.physicalFc->getParameter("weights"), weightValues, stream);
+    stream.synchronize();
+
+    Impl::Tensor featureInHost(
+        cpuPlacement, Impl::TensorDescriptor(dataType, {physicalBatchSize, numInputFeatures}));
+    writeCpuTensor(featureInHost, inputValues);
+    const vector<float> actualForward =
+        runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, validBatchSize);
+    ASSERT_GE(actualForward.size(), static_cast<size_t>(numOutputFeatures));
+    EXPECT_TRUE(std::isfinite(actualForward[0]));
+    EXPECT_TRUE(std::isfinite(actualForward[1]));
+
+    ASSERT_GT(fixture.physicalFc->getErrorInputs().size(), 0u);
+    ASSERT_TRUE(fixture.physicalFc->getErrorInputs()[0].has_value());
+    Impl::Tensor fcErrorInput = fixture.physicalFc->getErrorInputs()[0].value();
+    Impl::Tensor fcErrorInputHost = fcErrorInput.clone(cpuPlacement);
+    writeCpuTensor(fcErrorInputHost, errorInputValues);
+    fcErrorInput.copyFromAsync(fcErrorInputHost, stream);
+    fixture.physicalFc->backward(fcErrorInput, validBatchSize);
+
+    Stream gradientStream = fixture.physicalFc->getGradientUpdateStream().value();
+    Impl::Tensor weightsAfterHost =
+        copyTensorToCpu(fixture.physicalFc->getParameter("weights")->getStorage().value(), gradientStream);
+    gradientStream.synchronize();
+
+    const vector<float> expectedWeightsGrad = fullyConnectedWeightGradReference(
+        {1.0f, 2.0f}, {1.0f, -0.5f}, validBatchSize, numInputFeatures, numOutputFeatures);
+    const vector<float> expectedWeightsAfter =
+        sgdUpdatedReference(weightValues, expectedWeightsGrad, validBatchSize, learningRate);
+    const vector<float> actualWeightsAfter = readCpuTensor(weightsAfterHost);
+    ASSERT_EQ(actualWeightsAfter.size(), expectedWeightsAfter.size());
+    for (size_t i = 0; i < actualWeightsAfter.size(); ++i) {
+        ASSERT_TRUE(std::isfinite(actualWeightsAfter[i])) << "weight index " << i;
+        EXPECT_NEAR(actualWeightsAfter[i], expectedWeightsAfter[i], 1.0e-5f) << "weight index " << i;
+    }
+}
+
 TEST(FullyConnectedApi, ForwardAppliesEpilogueAfterMatmulBiasAndActivation) {
     constexpr uint32_t batchSize = 2;
     constexpr uint32_t numInputFeatures = 2;

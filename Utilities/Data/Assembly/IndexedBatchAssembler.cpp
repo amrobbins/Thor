@@ -1072,7 +1072,7 @@ bool IndexedBatchAssembler::startNextBatch() {
               batchState->batchNum,
               indices->size(),
               batchSize);
-    batchState->expectedRecords = batchSize;
+    batchState->expectedRecords = batchState->validExampleCount;
     batchState->expectedLoadChunks = 1;
     batchState->completedLoadChunks.store(0, std::memory_order_relaxed);
     batchState->loadComplete = false;
@@ -1086,7 +1086,7 @@ bool IndexedBatchAssembler::startNextBatch() {
         references.resize(static_cast<size_t>(batchSize));
         batchState->raggedReferenceBasePointers.at(static_cast<size_t>(ordinal)) = references.data();
     }
-    batchState->globalExampleIndices.reserve(batchSize);
+    batchState->globalExampleIndices.reserve(batchState->expectedRecords);
     batchState->pendingSince = SteadyClock::now();
     nextBatchToSchedule = (nextBatchToSchedule + 1) % batchesPerEpoch;
 
@@ -1183,15 +1183,8 @@ bool IndexedBatchAssembler::startNextBatch() {
         localLogicalRecordBytesRequested += recordSizeBytes;
     }
     THOR_THROW_IF_FALSE(!batchState->globalExampleIndices.empty());
-    if (!wrapTail) {
-        const uint64_t paddingExampleIndex = batchState->globalExampleIndices.back();
-        for (uint64_t slot = batchState->validExampleCount; slot < batchSize; ++slot) {
-            batchState->globalExampleIndices.push_back(paddingExampleIndex);
-            localRecordsRequested += 1;
-            localLogicalRecordBytesRequested += recordSizeBytes;
-        }
-    }
-    THOR_THROW_IF_FALSE(batchState->globalExampleIndices.size() == batchSize);
+    THOR_THROW_IF_FALSE(
+        batchState->globalExampleIndices.size() == batchState->expectedRecords);
     statsStartBatchPlanningNanoseconds.fetch_add(diagnosticElapsedNanoseconds(planningStart), std::memory_order_relaxed);
     flushLocalRequestStats();
 
@@ -1207,7 +1200,7 @@ bool IndexedBatchAssembler::startNextBatch() {
     work.batchState = batchState.get();
     work.batchOrdinal = batchOrdinal;
     work.slotBegin = 0;
-    work.slotEnd = batchSize;
+    work.slotEnd = batchState->expectedRecords;
     if (!pushLoadWorkWithDrain(work)) {
         return false;
     }

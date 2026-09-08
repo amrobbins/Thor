@@ -1,10 +1,11 @@
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentWindowMaterializationKernel.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
-#include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/Common/LowPrecisionFloat.h"
+#include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime.h>
+#include <cuda/std/bit>
 
 #include <algorithm>
 #include <cstdint>
@@ -18,6 +19,14 @@ using ThorImplementation::Tensor;
 using ThorImplementation::TensorPlacement;
 
 namespace {
+
+constexpr uint32_t kThreadsPerBlock = 256;
+constexpr uint32_t kMaxRowsPerBlock = kThreadsPerBlock;
+constexpr uint64_t kTargetBytesPerLane = 32;
+constexpr uint32_t kMaxPortableBlocks = 65535;
+
+static_assert(sizeof(ulonglong4_32a) == 32);
+static_assert(alignof(ulonglong4_32a) == 32);
 
 uint64_t dataTypeBytes(DataType dataType) {
     switch (dataType) {
@@ -46,16 +55,6 @@ uint64_t dataTypeBytes(DataType dataType) {
     throw std::runtime_error("Unsupported compact resident window data type.");
 }
 
-bool isSignedInteger(DataType dataType) {
-    return dataType == DataType::INT8 || dataType == DataType::INT16 ||
-           dataType == DataType::INT32 || dataType == DataType::INT64;
-}
-
-bool isUnsignedInteger(DataType dataType) {
-    return dataType == DataType::UINT8 || dataType == DataType::UINT16 ||
-           dataType == DataType::UINT32 || dataType == DataType::UINT64;
-}
-
 template <typename T>
 uint64_t scalarBits(T value) {
     uint64_t bits = 0;
@@ -65,9 +64,7 @@ uint64_t scalarBits(T value) {
 }
 
 uint64_t padBits(DataType dataType, double value) {
-    if (value == 0.0) {
-        return 0;
-    }
+    if (value == 0.0) return 0;
     switch (dataType) {
         case DataType::BOOLEAN:
             return scalarBits(static_cast<uint8_t>(value != 0.0));
@@ -105,210 +102,442 @@ uint64_t padBits(DataType dataType, double value) {
     throw std::runtime_error("Unsupported compact resident non-zero window padding data type.");
 }
 
-__device__ uint64_t readLittleEndianUnsigned(const uint8_t *bytes, uint64_t numBytes) {
-    uint64_t value = 0;
-    for (uint64_t i = 0; i < numBytes; ++i) {
-        value |= static_cast<uint64_t>(bytes[i]) << (8 * i);
-    }
-    return value;
+__device__ __forceinline__ uint32_t widestAlignedCopyWidth(const uint8_t *source,
+                                                            const uint8_t *destination) {
+    const uintptr_t combined = reinterpret_cast<uintptr_t>(source) |
+                               reinterpret_cast<uintptr_t>(destination);
+    if ((combined & 31U) == 0) return 32;
+    if ((combined & 15U) == 0) return 16;
+    if ((combined & 7U) == 0) return 8;
+    if ((combined & 3U) == 0) return 4;
+    if ((combined & 1U) == 0) return 2;
+    return 1;
 }
 
-__device__ int64_t signExtend(uint64_t value, uint64_t numBytes) {
-    if (numBytes == 8) {
-        return static_cast<int64_t>(value);
-    }
-    const uint64_t bits = numBytes * 8;
-    const uint64_t signBit = uint64_t{1} << (bits - 1);
-    if ((value & signBit) != 0) {
-        value |= (~uint64_t{0}) << bits;
-    }
-    return static_cast<int64_t>(value);
+__device__ __forceinline__ uint32_t widestAlignedFillWidth(const uint8_t *destination) {
+    const uintptr_t address = reinterpret_cast<uintptr_t>(destination);
+    if ((address & 7U) == 0) return 8;
+    if ((address & 3U) == 0) return 4;
+    if ((address & 1U) == 0) return 2;
+    return 1;
 }
 
-__device__ int64_t readIndex(const uint8_t *bytes, uint64_t numBytes, bool signedType, bool *valid) {
-    const uint64_t raw = readLittleEndianUnsigned(bytes, numBytes);
-    if (signedType) {
-        return signExtend(raw, numBytes);
+template <uint32_t NumBytes>
+struct ExactTailBytes {
+    uint8_t bytes[NumBytes];
+};
+
+template <uint32_t NumBytes>
+struct RawPacketBytes {
+    uint8_t bytes[NumBytes];
+};
+
+template <uint32_t TailBytes, typename CopyT>
+__device__ __forceinline__ void storeExactTailFromPacket(CopyT packet,
+                                                         CopyT *destination) {
+    static_assert(TailBytes > 0);
+    static_assert(TailBytes < sizeof(CopyT));
+    const RawPacketBytes<sizeof(CopyT)> packetBytes =
+        cuda::std::bit_cast<RawPacketBytes<sizeof(CopyT)>>(packet);
+    ExactTailBytes<TailBytes> tail;
+#pragma unroll
+    for (uint32_t byte = 0; byte < TailBytes; ++byte) {
+        tail.bytes[byte] = packetBytes.bytes[byte];
     }
-    if (numBytes == 8 && raw > static_cast<uint64_t>(INT64_MAX)) {
-        *valid = false;
-        return 0;
-    }
-    return static_cast<int64_t>(raw);
+    *reinterpret_cast<ExactTailBytes<TailBytes> *>(destination) = tail;
 }
 
-__device__ int64_t findSequence(const DeviceResidentWindowSourceSequence *sequences,
-                                uint64_t count,
-                                uint64_t keyBits) {
-    uint64_t low = 0;
-    uint64_t high = count;
-    while (low < high) {
-        const uint64_t middle = low + (high - low) / 2;
-        const uint64_t candidate = sequences[middle].keyBits;
-        if (candidate < keyBits) {
-            low = middle + 1;
-        } else {
-            high = middle;
-        }
+template <typename CopyT>
+__device__ __attribute__((noinline)) void copyExactTailPacket(const CopyT *source,
+                                                              CopyT *destination,
+                                                              uint32_t tailBytes) {
+    static_assert(sizeof(CopyT) == 2 || sizeof(CopyT) == 4 || sizeof(CopyT) == 8 ||
+                  sizeof(CopyT) == 16 || sizeof(CopyT) == 32);
+    if (tailBytes == 0 || tailBytes >= sizeof(CopyT)) return;
+    const CopyT packet = *source;
+#define THOR_WINDOW_TAIL_CASE(N)                         \
+    case N:                                              \
+        if constexpr (N < sizeof(CopyT)) {               \
+            storeExactTailFromPacket<N>(packet, destination); \
+        }                                                \
+        return
+    switch (tailBytes) {
+        THOR_WINDOW_TAIL_CASE(1);
+        THOR_WINDOW_TAIL_CASE(2);
+        THOR_WINDOW_TAIL_CASE(3);
+        THOR_WINDOW_TAIL_CASE(4);
+        THOR_WINDOW_TAIL_CASE(5);
+        THOR_WINDOW_TAIL_CASE(6);
+        THOR_WINDOW_TAIL_CASE(7);
+        THOR_WINDOW_TAIL_CASE(8);
+        THOR_WINDOW_TAIL_CASE(9);
+        THOR_WINDOW_TAIL_CASE(10);
+        THOR_WINDOW_TAIL_CASE(11);
+        THOR_WINDOW_TAIL_CASE(12);
+        THOR_WINDOW_TAIL_CASE(13);
+        THOR_WINDOW_TAIL_CASE(14);
+        THOR_WINDOW_TAIL_CASE(15);
+        THOR_WINDOW_TAIL_CASE(16);
+        THOR_WINDOW_TAIL_CASE(17);
+        THOR_WINDOW_TAIL_CASE(18);
+        THOR_WINDOW_TAIL_CASE(19);
+        THOR_WINDOW_TAIL_CASE(20);
+        THOR_WINDOW_TAIL_CASE(21);
+        THOR_WINDOW_TAIL_CASE(22);
+        THOR_WINDOW_TAIL_CASE(23);
+        THOR_WINDOW_TAIL_CASE(24);
+        THOR_WINDOW_TAIL_CASE(25);
+        THOR_WINDOW_TAIL_CASE(26);
+        THOR_WINDOW_TAIL_CASE(27);
+        THOR_WINDOW_TAIL_CASE(28);
+        THOR_WINDOW_TAIL_CASE(29);
+        THOR_WINDOW_TAIL_CASE(30);
+        THOR_WINDOW_TAIL_CASE(31);
+        default:
+            return;
     }
-    if (low >= count || sequences[low].keyBits != keyBits) {
-        return -1;
-    }
-    return static_cast<int64_t>(low);
+#undef THOR_WINDOW_TAIL_CASE
 }
 
-__device__ int64_t findAffineSegment(const DeviceResidentAffineWindowSegment *segments,
-                                     uint64_t count,
-                                     uint64_t row) {
-    uint64_t low = 0;
-    uint64_t high = count;
-    while (low < high) {
-        const uint64_t middle = low + (high - low) / 2;
-        if (segments[middle].rowStart <= row) {
-            low = middle + 1;
-        } else {
-            high = middle;
-        }
-    }
-    if (low == 0) {
-        return -1;
-    }
-    const uint64_t candidate = low - 1;
-    const DeviceResidentAffineWindowSegment &segment = segments[candidate];
-    if (row - segment.rowStart >= segment.count) {
-        return -1;
-    }
-    return static_cast<int64_t>(candidate);
-}
+template <typename CopyT, typename ItemIndexT, uint32_t LanesPerRow>
+__device__ __forceinline__ void copyAlignedWindowSpan(const uint8_t *sourceBytes,
+                                                      uint8_t *destinationBytes,
+                                                      ItemIndexT byteCount,
+                                                      uint32_t lane) {
+    const CopyT *__restrict__ source = reinterpret_cast<const CopyT *>(sourceBytes);
+    CopyT *__restrict__ destination = reinterpret_cast<CopyT *>(destinationBytes);
+    const ItemIndexT itemCount = byteCount / static_cast<ItemIndexT>(sizeof(CopyT));
 
-__global__ void materializeWindowKernel(
-    const uint8_t *__restrict__ records,
-    const uint8_t *__restrict__ source,
-    const DeviceResidentWindowSourceSequence *__restrict__ sequences,
-    uint64_t sequenceCount,
-    const DeviceResidentAffineWindowSegment *__restrict__ affineSegments,
-    uint64_t affineSegmentCount,
-    const uint64_t *__restrict__ rowIndices,
-    uint8_t *__restrict__ destination,
-    uint64_t batchSize,
-    uint64_t numExamples,
-    uint64_t recordSizeBytes,
-    uint64_t referenceOffsetBytes,
-    uint64_t keyBytes,
-    uint64_t indexBytes,
-    bool signedIndex,
-    bool affine,
-    uint64_t windowLength,
-    uint64_t sourceStepBytes,
-    uint64_t elementBytes,
-    uint64_t padValueBits,
-    bool materializeMask) {
-    const uint64_t batchRow = static_cast<uint64_t>(blockIdx.x);
-    if (batchRow >= batchSize) {
-        return;
+    ItemIndexT item = static_cast<ItemIndexT>(lane);
+    while (item < itemCount) {
+        destination[item] = source[item];
+        const ItemIndexT laneStride = static_cast<ItemIndexT>(LanesPerRow);
+        if (itemCount - item <= laneStride) break;
+        item += laneStride;
     }
 
-    __shared__ bool validReference;
-    __shared__ int64_t requestedStart;
-    __shared__ int64_t sequenceStart;
-    __shared__ int64_t sequenceEnd;
-    __shared__ uint64_t sequenceOffsetBytes;
-
-    if (threadIdx.x == 0) {
-        validReference = true;
-        const uint64_t sourceRow = rowIndices[batchRow];
-        uint64_t keyBits = 0;
-        int64_t start = 0;
-        if (sourceRow >= numExamples) {
-            validReference = false;
-        } else if (!affine) {
-            if (records == nullptr || recordSizeBytes == 0 ||
-                referenceOffsetBytes + keyBytes + indexBytes > recordSizeBytes) {
-                validReference = false;
-            } else {
-                const uint8_t *reference =
-                    records + sourceRow * recordSizeBytes + referenceOffsetBytes;
-                keyBits = readLittleEndianUnsigned(reference, keyBytes);
-                start = readIndex(reference + keyBytes, indexBytes, signedIndex, &validReference);
-            }
-        } else {
-            const int64_t segmentIndex =
-                findAffineSegment(affineSegments, affineSegmentCount, sourceRow);
-            if (segmentIndex < 0) {
-                validReference = false;
-            } else {
-                const DeviceResidentAffineWindowSegment &segment =
-                    affineSegments[segmentIndex];
-                const uint64_t localRow = sourceRow - segment.rowStart;
-                // Dataset manifest validation proves this expression is in int64 range
-                // for every row covered by the segment.
-                keyBits = segment.keyBits;
-                start = segment.base + static_cast<int64_t>(localRow) * segment.stride +
-                        segment.fieldOffset;
-            }
-        }
-
-        if (validReference) {
-            const int64_t sequenceIndex = findSequence(sequences, sequenceCount, keyBits);
-            if (sequenceIndex < 0) {
-                validReference = false;
-            } else {
-                const DeviceResidentWindowSourceSequence &sequence =
-                    sequences[sequenceIndex];
-                requestedStart = start;
-                sequenceStart = sequence.startIndex;
-                sequenceEnd = sequence.endIndexExclusive;
-                sequenceOffsetBytes = sequence.offsetBytes;
+    if constexpr (sizeof(CopyT) > 1) {
+        if (lane == 0) {
+            const uint32_t tailBytes = static_cast<uint32_t>(
+                byteCount % static_cast<ItemIndexT>(sizeof(CopyT)));
+            if (tailBytes != 0) {
+                copyExactTailPacket(source + itemCount, destination + itemCount, tailBytes);
             }
         }
     }
-    __syncthreads();
+}
 
-    if (materializeMask) {
-        uint8_t *output = destination + batchRow * windowLength;
-        for (uint64_t step = static_cast<uint64_t>(threadIdx.x);
-             step < windowLength;
-             step += static_cast<uint64_t>(blockDim.x)) {
-            bool valid = validReference;
-            int64_t sourceIndex = 0;
-            if (valid) {
-                valid = step <= static_cast<uint64_t>(INT64_MAX) &&
-                        requestedStart <= INT64_MAX - static_cast<int64_t>(step);
-                if (valid) {
-                    sourceIndex = requestedStart + static_cast<int64_t>(step);
-                    valid = sourceIndex >= sequenceStart && sourceIndex < sequenceEnd;
+template <typename ItemIndexT, uint32_t LanesPerRow>
+__device__ __forceinline__ void copyWindowSpan(const uint8_t *source,
+                                               uint8_t *destination,
+                                               ItemIndexT byteCount,
+                                               uint32_t lane) {
+    if (byteCount == 0) return;
+    switch (widestAlignedCopyWidth(source, destination)) {
+        case 32:
+            copyAlignedWindowSpan<ulonglong4_32a, ItemIndexT, LanesPerRow>(
+                source, destination, byteCount, lane);
+            break;
+        case 16:
+            copyAlignedWindowSpan<uint4, ItemIndexT, LanesPerRow>(
+                source, destination, byteCount, lane);
+            break;
+        case 8:
+            copyAlignedWindowSpan<uint64_t, ItemIndexT, LanesPerRow>(
+                source, destination, byteCount, lane);
+            break;
+        case 4:
+            copyAlignedWindowSpan<uint32_t, ItemIndexT, LanesPerRow>(
+                source, destination, byteCount, lane);
+            break;
+        case 2:
+            copyAlignedWindowSpan<uint16_t, ItemIndexT, LanesPerRow>(
+                source, destination, byteCount, lane);
+            break;
+        default:
+            copyAlignedWindowSpan<uint8_t, ItemIndexT, LanesPerRow>(
+                source, destination, byteCount, lane);
+            break;
+    }
+}
+
+__host__ __device__ uint64_t repeatedPadWord(uint64_t valueBits, uint64_t elementBytes) {
+    if (elementBytes == 8) return valueBits;
+    uint64_t word = 0;
+    const uint64_t mask = (uint64_t{1} << (elementBytes * 8)) - 1;
+    const uint64_t element = valueBits & mask;
+    for (uint64_t byte = 0; byte < 8; byte += elementBytes) {
+        word |= element << (byte * 8);
+    }
+    return word;
+}
+
+template <typename StoreT, typename ItemIndexT, uint32_t LanesPerRow>
+__device__ __forceinline__ void fillAlignedRepeatedPattern(uint8_t *destinationBytes,
+                                                           ItemIndexT byteCount,
+                                                           uint64_t repeatedWord,
+                                                           uint32_t lane) {
+    StoreT pattern;
+    if constexpr (sizeof(StoreT) == 8) {
+        pattern = static_cast<StoreT>(repeatedWord);
+    } else if constexpr (sizeof(StoreT) == 4) {
+        pattern = static_cast<StoreT>(repeatedWord & 0xffffffffU);
+    } else if constexpr (sizeof(StoreT) == 2) {
+        pattern = static_cast<StoreT>(repeatedWord & 0xffffU);
+    } else {
+        pattern = static_cast<StoreT>(repeatedWord & 0xffU);
+    }
+
+    StoreT *__restrict__ destination = reinterpret_cast<StoreT *>(destinationBytes);
+    const ItemIndexT itemCount = byteCount / static_cast<ItemIndexT>(sizeof(StoreT));
+    ItemIndexT item = static_cast<ItemIndexT>(lane);
+    while (item < itemCount) {
+        destination[item] = pattern;
+        const ItemIndexT laneStride = static_cast<ItemIndexT>(LanesPerRow);
+        if (itemCount - item <= laneStride) break;
+        item += laneStride;
+    }
+
+    if constexpr (sizeof(StoreT) > 1) {
+        if (lane == 0) {
+            const uint32_t tailBytes = static_cast<uint32_t>(
+                byteCount % static_cast<ItemIndexT>(sizeof(StoreT)));
+            uint8_t *tail = destinationBytes + itemCount * sizeof(StoreT);
+#pragma unroll
+            for (uint32_t byte = 0; byte < sizeof(StoreT) - 1; ++byte) {
+                if (byte < tailBytes) {
+                    tail[byte] = static_cast<uint8_t>((repeatedWord >> (8 * byte)) & 0xffU);
                 }
             }
-            output[step] = valid ? uint8_t{1} : uint8_t{0};
         }
-        return;
     }
+}
 
-    const uint64_t outputBytes = windowLength * sourceStepBytes;
-    uint8_t *output = destination + batchRow * outputBytes;
-    for (uint64_t byteOffset = static_cast<uint64_t>(threadIdx.x);
-         byteOffset < outputBytes;
-         byteOffset += static_cast<uint64_t>(blockDim.x)) {
-        const uint64_t step = byteOffset / sourceStepBytes;
-        const uint64_t byteWithinStep = byteOffset - step * sourceStepBytes;
-        bool valid = validReference;
-        int64_t sourceIndex = 0;
-        if (valid) {
-            valid = step <= static_cast<uint64_t>(INT64_MAX) &&
-                    requestedStart <= INT64_MAX - static_cast<int64_t>(step);
-            if (valid) {
-                sourceIndex = requestedStart + static_cast<int64_t>(step);
-                valid = sourceIndex >= sequenceStart && sourceIndex < sequenceEnd;
+template <typename ItemIndexT, uint32_t LanesPerRow>
+__device__ __forceinline__ void fillRepeatedPattern(uint8_t *destination,
+                                                    ItemIndexT byteCount,
+                                                    uint64_t repeatedWord,
+                                                    uint32_t lane) {
+    if (byteCount == 0) return;
+    switch (widestAlignedFillWidth(destination)) {
+        case 8:
+            fillAlignedRepeatedPattern<uint64_t, ItemIndexT, LanesPerRow>(
+                destination, byteCount, repeatedWord, lane);
+            break;
+        case 4:
+            fillAlignedRepeatedPattern<uint32_t, ItemIndexT, LanesPerRow>(
+                destination, byteCount, repeatedWord, lane);
+            break;
+        case 2:
+            fillAlignedRepeatedPattern<uint16_t, ItemIndexT, LanesPerRow>(
+                destination, byteCount, repeatedWord, lane);
+            break;
+        default:
+            fillAlignedRepeatedPattern<uint8_t, ItemIndexT, LanesPerRow>(
+                destination, byteCount, repeatedWord, lane);
+            break;
+    }
+}
+
+template <typename PlanT,
+          typename RowIndexT,
+          typename ItemIndexT,
+          uint32_t RowsPerBlock,
+          bool MaterializeMask>
+__global__ void materializeResolvedWindowKernel(
+    const uint8_t *__restrict__ source,
+    const PlanT *__restrict__ rowPlans,
+    uint8_t *__restrict__ destination,
+    RowIndexT logicalRows,
+    ItemIndexT windowLength,
+    ItemIndexT sourceStepBytes,
+    uint64_t repeatedPaddingWord) {
+    static_assert(RowsPerBlock >= 1 && RowsPerBlock <= kMaxRowsPerBlock);
+    static_assert(kThreadsPerBlock % RowsPerBlock == 0);
+    constexpr uint32_t kLanesPerRow = kThreadsPerBlock / RowsPerBlock;
+
+    const uint32_t rowSlot = threadIdx.x / kLanesPerRow;
+    const uint32_t lane = threadIdx.x - rowSlot * kLanesPerRow;
+    const uint32_t rowStride = gridDim.x * RowsPerBlock;
+
+    RowIndexT rowBase = static_cast<RowIndexT>(blockIdx.x) * RowsPerBlock;
+    while (rowBase < logicalRows) {
+        if (static_cast<RowIndexT>(rowSlot) < logicalRows - rowBase) {
+            const RowIndexT batchRow = rowBase + static_cast<RowIndexT>(rowSlot);
+            const PlanT plan = rowPlans[batchRow];
+            const ItemIndexT validStepBegin = static_cast<ItemIndexT>(plan.validStepBegin);
+            const ItemIndexT validStepCount = static_cast<ItemIndexT>(plan.validStepCount);
+
+            if constexpr (MaterializeMask) {
+                uint8_t *rowDestination =
+                    destination + static_cast<uint64_t>(batchRow) * windowLength;
+                const ItemIndexT validStepEnd = validStepBegin + validStepCount;
+                fillRepeatedPattern<ItemIndexT, kLanesPerRow>(
+                    rowDestination, validStepBegin, uint64_t{0}, lane);
+                fillRepeatedPattern<ItemIndexT, kLanesPerRow>(
+                    rowDestination + validStepBegin, validStepCount,
+                    uint64_t{0x0101010101010101ULL}, lane);
+                fillRepeatedPattern<ItemIndexT, kLanesPerRow>(
+                    rowDestination + validStepEnd,
+                    windowLength - validStepEnd,
+                    uint64_t{0}, lane);
+            } else {
+                const ItemIndexT rowBytes = windowLength * sourceStepBytes;
+                const ItemIndexT prefixBytes = validStepBegin * sourceStepBytes;
+                const ItemIndexT validBytes = validStepCount * sourceStepBytes;
+                const ItemIndexT validEndBytes = prefixBytes + validBytes;
+                uint8_t *rowDestination =
+                    destination + static_cast<uint64_t>(batchRow) * rowBytes;
+
+                fillRepeatedPattern<ItemIndexT, kLanesPerRow>(
+                    rowDestination, prefixBytes, repeatedPaddingWord, lane);
+                if (validBytes != 0) {
+                    copyWindowSpan<ItemIndexT, kLanesPerRow>(
+                        source + plan.sourceOffsetBytes,
+                        rowDestination + prefixBytes,
+                        validBytes,
+                        lane);
+                }
+                fillRepeatedPattern<ItemIndexT, kLanesPerRow>(
+                    rowDestination + validEndBytes,
+                    rowBytes - validEndBytes,
+                    repeatedPaddingWord,
+                    lane);
             }
         }
-        if (valid) {
-            const uint64_t sourceStep = static_cast<uint64_t>(sourceIndex - sequenceStart);
-            output[byteOffset] =
-                source[sequenceOffsetBytes + sourceStep * sourceStepBytes + byteWithinStep];
-        } else {
-            const uint64_t patternByte = byteOffset % elementBytes;
-            output[byteOffset] = static_cast<uint8_t>((padValueBits >> (8 * patternByte)) & 0xffu);
-        }
+
+        if (static_cast<RowIndexT>(rowStride) >= logicalRows - rowBase) break;
+        rowBase += static_cast<RowIndexT>(rowStride);
+    }
+}
+
+uint32_t rowsPerBlockFor(uint64_t rowBytes, uint64_t logicalRows) {
+    uint32_t rowsByPayload = 1;
+    if (rowBytes <= kTargetBytesPerLane) {
+        rowsByPayload = 256;
+    } else if (rowBytes <= 2 * kTargetBytesPerLane) {
+        rowsByPayload = 128;
+    } else if (rowBytes <= 4 * kTargetBytesPerLane) {
+        rowsByPayload = 64;
+    } else if (rowBytes <= 8 * kTargetBytesPerLane) {
+        rowsByPayload = 32;
+    } else if (rowBytes <= 16 * kTargetBytesPerLane) {
+        rowsByPayload = 16;
+    } else if (rowBytes <= 32 * kTargetBytesPerLane) {
+        rowsByPayload = 8;
+    } else if (rowBytes <= 64 * kTargetBytesPerLane) {
+        rowsByPayload = 4;
+    } else if (rowBytes <= 128 * kTargetBytesPerLane) {
+        rowsByPayload = 2;
+    }
+
+    uint32_t rowsByParallelism = 1;
+    if (logicalRows >= 16384) {
+        rowsByParallelism = 256;
+    } else if (logicalRows >= 8192) {
+        rowsByParallelism = 128;
+    } else if (logicalRows >= 4096) {
+        rowsByParallelism = 64;
+    } else if (logicalRows >= 2048) {
+        rowsByParallelism = 32;
+    } else if (logicalRows >= 1024) {
+        rowsByParallelism = 16;
+    } else if (logicalRows >= 512) {
+        rowsByParallelism = 8;
+    } else if (logicalRows >= 256) {
+        rowsByParallelism = 4;
+    } else if (logicalRows >= 128) {
+        rowsByParallelism = 2;
+    }
+    return std::min(rowsByPayload, rowsByParallelism);
+}
+
+template <uint32_t RowsPerBlock>
+uint32_t blocksForRows(uint64_t logicalRows) {
+    const uint64_t blocks =
+        logicalRows / RowsPerBlock + (logicalRows % RowsPerBlock != 0 ? 1 : 0);
+    return static_cast<uint32_t>(
+        std::min<uint64_t>(std::max<uint64_t>(blocks, 1), kMaxPortableBlocks));
+}
+
+template <typename PlanT,
+          typename RowIndexT,
+          typename ItemIndexT,
+          uint32_t RowsPerBlock,
+          bool MaterializeMask>
+void launchGrouped(const uint8_t *source,
+                   const PlanT *rowPlans,
+                   uint8_t *destination,
+                   RowIndexT logicalRows,
+                   ItemIndexT windowLength,
+                   ItemIndexT sourceStepBytes,
+                   uint64_t repeatedPaddingWord,
+                   cudaStream_t stream) {
+    const uint32_t blocks = blocksForRows<RowsPerBlock>(static_cast<uint64_t>(logicalRows));
+    materializeResolvedWindowKernel<
+        PlanT, RowIndexT, ItemIndexT, RowsPerBlock, MaterializeMask>
+        <<<blocks, kThreadsPerBlock, 0, stream>>>(
+            source,
+            rowPlans,
+            destination,
+            logicalRows,
+            windowLength,
+            sourceStepBytes,
+            repeatedPaddingWord);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+template <typename PlanT, typename RowIndexT, typename ItemIndexT, bool MaterializeMask>
+void launchForGrouping(const uint8_t *source,
+                       const PlanT *rowPlans,
+                       uint8_t *destination,
+                       RowIndexT logicalRows,
+                       ItemIndexT windowLength,
+                       ItemIndexT sourceStepBytes,
+                       uint64_t repeatedPaddingWord,
+                       uint64_t rowBytes,
+                       cudaStream_t stream) {
+#define THOR_WINDOW_GROUP_CASE(N)                                                    \
+    case N:                                                                          \
+        launchGrouped<PlanT, RowIndexT, ItemIndexT, N, MaterializeMask>(             \
+            source, rowPlans, destination, logicalRows, windowLength, sourceStepBytes, \
+            repeatedPaddingWord, stream);                                             \
+        break
+    switch (rowsPerBlockFor(rowBytes, static_cast<uint64_t>(logicalRows))) {
+        THOR_WINDOW_GROUP_CASE(256);
+        THOR_WINDOW_GROUP_CASE(128);
+        THOR_WINDOW_GROUP_CASE(64);
+        THOR_WINDOW_GROUP_CASE(32);
+        THOR_WINDOW_GROUP_CASE(16);
+        THOR_WINDOW_GROUP_CASE(8);
+        THOR_WINDOW_GROUP_CASE(4);
+        THOR_WINDOW_GROUP_CASE(2);
+        THOR_WINDOW_GROUP_CASE(1);
+        default:
+            throw std::runtime_error("Invalid compact resident window row grouping.");
+    }
+#undef THOR_WINDOW_GROUP_CASE
+}
+
+template <typename PlanT, typename RowIndexT, typename ItemIndexT>
+void launchTyped(const uint8_t *source,
+                 const PlanT *rowPlans,
+                 uint8_t *destination,
+                 RowIndexT logicalRows,
+                 ItemIndexT windowLength,
+                 ItemIndexT sourceStepBytes,
+                 uint64_t repeatedPaddingWord,
+                 uint64_t rowBytes,
+                 bool materializeMask,
+                 cudaStream_t stream) {
+    if (materializeMask) {
+        launchForGrouping<PlanT, RowIndexT, ItemIndexT, true>(
+            source, rowPlans, destination, logicalRows, windowLength, sourceStepBytes,
+            repeatedPaddingWord, rowBytes, stream);
+    } else {
+        launchForGrouping<PlanT, RowIndexT, ItemIndexT, false>(
+            source, rowPlans, destination, logicalRows, windowLength, sourceStepBytes,
+            repeatedPaddingWord, rowBytes, stream);
     }
 }
 
@@ -322,79 +551,99 @@ void validateTensor(const Tensor &tensor, TensorPlacement placement, const char 
 }  // namespace
 
 void launchDeviceResidentWindowMaterializationKernel(
-    const Tensor &recordStorage,
     const Tensor &sourceStorage,
-    const Tensor &sourceSequences,
-    uint64_t sourceSequenceCount,
-    const Tensor &affineSegments,
-    uint64_t affineSegmentCount,
+    const Tensor &rowPlans,
+    uint64_t logicalRows,
     const DeviceResidentWindowMaterializationSpec &spec,
     Tensor &destination,
-    const Tensor &rowIndicesDevice,
     Stream &stream) {
     THOR_THROW_IF_FALSE(destination.isInitialized());
-    THOR_THROW_IF_FALSE(rowIndicesDevice.isInitialized());
+    THOR_THROW_IF_FALSE(rowPlans.isInitialized());
     const TensorPlacement placement = destination.getPlacement();
-    validateTensor(sourceStorage, placement, "source storage");
-    validateTensor(sourceSequences, placement, "source sequence metadata");
-    validateTensor(rowIndicesDevice, placement, "row-index");
-    THOR_THROW_IF_FALSE(rowIndicesDevice.getDataType() == DataType::UINT64);
-    if (spec.referenceMode == DatasetLayout::WindowedTensorReferenceMode::INDEXED) {
-        validateTensor(recordStorage, placement, "record storage");
-    } else {
-        validateTensor(affineSegments, placement, "affine metadata");
-    }
-    THOR_THROW_IF_FALSE(sourceSequenceCount > 0);
-    THOR_THROW_IF_FALSE(spec.numExamples > 0);
+    validateTensor(rowPlans, placement, "window row-plan");
+    // Session-owned plans may be UINT64 alias views into the consolidated
+    // selection-metadata upload allocation.  Direct kernel tests and standalone
+    // callers may continue to provide byte tensors.
+    THOR_THROW_IF_FALSE(
+        rowPlans.getDataType() == DataType::UINT8 ||
+        rowPlans.getDataType() == DataType::UINT64);
+    if (!spec.materializeMask) validateTensor(sourceStorage, placement, "source storage");
+
     THOR_THROW_IF_FALSE(spec.windowLength > 0);
     THOR_THROW_IF_FALSE(spec.sourceStepBytes > 0);
-
     const std::vector<uint64_t> destinationDims = destination.getDimensions();
-    const std::vector<uint64_t> rowDims = rowIndicesDevice.getDimensions();
     THOR_THROW_IF_FALSE(!destinationDims.empty());
-    THOR_THROW_IF_FALSE(rowDims.size() == 1);
-    const uint64_t batchSize = destinationDims.front();
-    THOR_THROW_IF_FALSE(batchSize == rowDims.front());
+    const uint64_t batchCapacity = destinationDims.front();
+    THOR_THROW_IF_FALSE(logicalRows <= batchCapacity);
+
+    THOR_THROW_IF_FALSE(
+        spec.windowLength <= std::numeric_limits<uint64_t>::max() / spec.sourceStepBytes);
+    const uint64_t payloadRowBytes = spec.windowLength * spec.sourceStepBytes;
+    const uint64_t rowBytes = spec.materializeMask ? spec.windowLength : payloadRowBytes;
+    THOR_THROW_IF_FALSE(
+        batchCapacity == 0 || rowBytes <= std::numeric_limits<uint64_t>::max() / batchCapacity);
     if (spec.materializeMask) {
         THOR_THROW_IF_FALSE(destination.getDataType() == DataType::UINT8);
-        THOR_THROW_IF_FALSE(destination.getArraySizeInBytes() == batchSize * spec.windowLength);
+        THOR_THROW_IF_FALSE(destination.getArraySizeInBytes() == batchCapacity * spec.windowLength);
     } else {
         THOR_THROW_IF_FALSE(destination.getDataType() == spec.dataType);
-        THOR_THROW_IF_FALSE(
-            destination.getArraySizeInBytes() == batchSize * spec.windowLength * spec.sourceStepBytes);
+        THOR_THROW_IF_FALSE(destination.getArraySizeInBytes() == batchCapacity * payloadRowBytes);
     }
 
-    const uint64_t keyBytes = dataTypeBytes(spec.keyDataType);
-    const uint64_t indexBytes = dataTypeBytes(spec.indexDataType);
-    THOR_THROW_IF_FALSE(isSignedInteger(spec.indexDataType) || isUnsignedInteger(spec.indexDataType));
-    const uint64_t elementBytes = dataTypeBytes(spec.dataType);
-    const uint64_t padding = padBits(spec.dataType, spec.padValue);
+    const bool usePlan32 = spec.windowLength <= std::numeric_limits<uint32_t>::max();
+    const uint64_t planBytes = usePlan32 ? sizeof(DeviceResidentWindowRowPlan32)
+                                         : sizeof(DeviceResidentWindowRowPlan64);
+    THOR_THROW_IF_FALSE(
+        logicalRows == 0 || planBytes <= std::numeric_limits<uint64_t>::max() / logicalRows);
+    THOR_THROW_IF_FALSE(rowPlans.getArraySizeInBytes() == logicalRows * planBytes);
+    if (logicalRows == 0) return;
 
-    constexpr int threadsPerBlock = 256;
-    THOR_THROW_IF_FALSE(batchSize <= static_cast<uint64_t>(std::numeric_limits<unsigned>::max()));
-    materializeWindowKernel<<<static_cast<unsigned>(batchSize), threadsPerBlock, 0, stream.getStream()>>>(
-        recordStorage.isInitialized() ? static_cast<const uint8_t *>(recordStorage.getMemPtr()) : nullptr,
-        static_cast<const uint8_t *>(sourceStorage.getMemPtr()),
-        reinterpret_cast<const DeviceResidentWindowSourceSequence *>(sourceSequences.getMemPtr()),
-        sourceSequenceCount,
-        affineSegments.isInitialized()
-            ? reinterpret_cast<const DeviceResidentAffineWindowSegment *>(affineSegments.getMemPtr())
-            : nullptr,
-        affineSegmentCount,
-        rowIndicesDevice.getMemPtr<uint64_t>(),
-        static_cast<uint8_t *>(destination.getMemPtr()),
-        batchSize,
-        spec.numExamples,
-        spec.recordSizeBytes,
-        spec.referenceOffsetBytes,
-        keyBytes,
-        indexBytes,
-        isSignedInteger(spec.indexDataType),
-        spec.referenceMode == DatasetLayout::WindowedTensorReferenceMode::AFFINE,
-        spec.windowLength,
-        spec.sourceStepBytes,
-        elementBytes,
-        padding,
-        spec.materializeMask);
-    CUDA_CHECK(cudaGetLastError());
+    const uint64_t elementBytes = dataTypeBytes(spec.dataType);
+    THOR_THROW_IF_FALSE(spec.sourceStepBytes % elementBytes == 0);
+    const uint64_t paddingWord = repeatedPadWord(padBits(spec.dataType, spec.padValue), elementBytes);
+    const uint8_t *source = sourceStorage.isInitialized()
+                                ? static_cast<const uint8_t *>(sourceStorage.getMemPtr())
+                                : nullptr;
+    uint8_t *destinationBytes = static_cast<uint8_t *>(destination.getMemPtr());
+    const bool useRow32 = logicalRows <= std::numeric_limits<uint32_t>::max();
+    const bool useItem32 = rowBytes <= std::numeric_limits<uint32_t>::max() &&
+                           spec.sourceStepBytes <= std::numeric_limits<uint32_t>::max();
+
+#define THOR_LAUNCH_PLAN(PlanT, plansPtr)                                                       \
+    do {                                                                                       \
+        if (useRow32 && useItem32) {                                                           \
+            launchTyped<PlanT, uint32_t, uint32_t>(                                            \
+                source, plansPtr, destinationBytes, static_cast<uint32_t>(logicalRows),        \
+                static_cast<uint32_t>(spec.windowLength),                                      \
+                static_cast<uint32_t>(spec.sourceStepBytes), paddingWord, rowBytes,            \
+                spec.materializeMask, stream.getStream());                                     \
+        } else if (useRow32) {                                                                 \
+            launchTyped<PlanT, uint32_t, uint64_t>(                                            \
+                source, plansPtr, destinationBytes, static_cast<uint32_t>(logicalRows),        \
+                spec.windowLength, spec.sourceStepBytes, paddingWord, rowBytes,                \
+                spec.materializeMask, stream.getStream());                                     \
+        } else if (useItem32) {                                                                \
+            launchTyped<PlanT, uint64_t, uint32_t>(                                            \
+                source, plansPtr, destinationBytes, logicalRows,                               \
+                static_cast<uint32_t>(spec.windowLength),                                      \
+                static_cast<uint32_t>(spec.sourceStepBytes), paddingWord, rowBytes,            \
+                spec.materializeMask, stream.getStream());                                     \
+        } else {                                                                               \
+            launchTyped<PlanT, uint64_t, uint64_t>(                                            \
+                source, plansPtr, destinationBytes, logicalRows, spec.windowLength,            \
+                spec.sourceStepBytes, paddingWord, rowBytes,                                   \
+                spec.materializeMask, stream.getStream());                                     \
+        }                                                                                      \
+    } while (false)
+
+    if (usePlan32) {
+        THOR_LAUNCH_PLAN(
+            DeviceResidentWindowRowPlan32,
+            reinterpret_cast<const DeviceResidentWindowRowPlan32 *>(rowPlans.getMemPtr()));
+    } else {
+        THOR_LAUNCH_PLAN(
+            DeviceResidentWindowRowPlan64,
+            reinterpret_cast<const DeviceResidentWindowRowPlan64 *>(rowPlans.getMemPtr()));
+    }
+#undef THOR_LAUNCH_PLAN
 }

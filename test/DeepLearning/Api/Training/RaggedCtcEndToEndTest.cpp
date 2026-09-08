@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -341,6 +342,13 @@ TEST(RaggedCtcEndToEnd, FileDatasetFeedsCanonicalRaggedCtcForwardBackwardAndExac
             raggedOffsetsAsUint64(lease.get().getRaggedTensor("labels")),
             (std::vector<uint64_t>{0, 1, 1}));
 
+        // Exact partial batches intentionally leave dense inactive capacity untouched.
+        // Poison the inactive input-length row so this test proves CTC presents only
+        // the valid leading batch prefix to cuDNN rather than relying on benign tail bytes.
+        Impl::Tensor inputLengths = lease.get().getTensor("input_lengths");
+        ASSERT_EQ(inputLengths.getPlacement().getMemDevice(), Impl::TensorPlacement::MemDevices::CPU);
+        inputLengths.getMemPtr<int32_t>()[1] = std::numeric_limits<int32_t>::max();
+
         std::map<std::string, Impl::Tensor> outputs;
         std::map<std::string, Event> outputReadyEvents;
         Event done = placed->submitBatch(
@@ -416,8 +424,14 @@ TEST(RaggedCtcEndToEnd, SerializedNetworkTrainsFromCurrentDatasetThroughLogicalB
             .build();
 
     const Api::TrainingRunResult result = trainer.fit(1);
-    EXPECT_TRUE(result.completed());
-    ASSERT_TRUE(result.completedEpoch.has_value());
+    ASSERT_TRUE(result.completed())
+        << "status=" << Api::trainingRunStatusName(result.status)
+        << " exception_type=" << result.exception.type
+        << " exception_message=" << result.exception.message;
+    ASSERT_TRUE(result.completedEpoch.has_value())
+        << "status=" << Api::trainingRunStatusName(result.status)
+        << " exception_type=" << result.exception.type
+        << " exception_message=" << result.exception.message;
     EXPECT_EQ(result.completedEpoch.value(), 1u);
     ASSERT_TRUE(result.finalTrainingStats.has_value());
     EXPECT_EQ(result.finalTrainingStats->samplesProcessed, 3u);

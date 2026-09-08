@@ -217,6 +217,12 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
     std::vector<std::string> expectedInputNames = {"feature_input"};
     if (rowPartitionInputName.has_value()) {
         expectedInputNames.push_back(rowPartitionInputName.value());
+    } else {
+        // Dense FullyConnected executes against physical batch-capacity tensors,
+        // but exact partial batches make only the leading valid-example prefix
+        // semantically live.  Consume CustomLayer's runtime validity mask so
+        // inactive source storage can remain genuinely unspecified.
+        expectedInputNames.push_back(Thor::BATCH_VALIDITY_MASK_NAME);
     }
     if (useResidual) {
         expectedInputNames.push_back(FC_RESIDUAL_INPUT_NAME);
@@ -390,7 +396,76 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                 }
             }
 
+            std::optional<Tensor> denseBatchValidityTensor;
+            if (!rowPartitionTensor.has_value()) {
+                denseBatchValidityTensor = inputs.at(Thor::BATCH_VALIDITY_MASK_NAME);
+                if (denseBatchValidityTensor->getDataType() != DataType::FP32) {
+                    throw std::runtime_error("Dense FullyConnected batch-validity mask must be FP32.");
+                }
+                if (denseBatchValidityTensor->getPlacement() != placement) {
+                    throw std::runtime_error("Dense FullyConnected batch-validity mask placement does not match the layer placement.");
+                }
+                std::vector<uint64_t> expectedValidityDimensions;
+                if (preserveInputPrefixDimensions) {
+                    expectedValidityDimensions = originalFeatureInputDimensions;
+                    expectedValidityDimensions.back() = 1;
+                } else {
+                    expectedValidityDimensions.assign(originalFeatureInputDimensions.size(), 1);
+                    expectedValidityDimensions.front() = originalFeatureInputDimensions.front();
+                }
+                if (denseBatchValidityTensor->getDimensions() != expectedValidityDimensions) {
+                    throw std::runtime_error("Dense FullyConnected batch-validity mask has unexpected dimensions.");
+                }
+            }
+
+            auto denseValidityForDimensions = [&](const std::vector<uint64_t>& dimensions) -> Expression {
+                THOR_THROW_IF_FALSE(denseBatchValidityTensor.has_value());
+                THOR_THROW_IF_FALSE(!dimensions.empty());
+
+                std::vector<uint64_t> maskDimensions;
+                if (preserveInputPrefixDimensions) {
+                    maskDimensions = dimensions;
+                    maskDimensions.back() = 1;
+                } else {
+                    maskDimensions.assign(dimensions.size(), 1);
+                    maskDimensions.front() = dimensions.front();
+                }
+
+                uint64_t maskElements = 1;
+                for (uint64_t dim : maskDimensions) {
+                    THOR_THROW_IF_FALSE(dim != 0);
+                    THOR_THROW_IF_FALSE(maskElements <= std::numeric_limits<uint64_t>::max() / dim);
+                    maskElements *= dim;
+                }
+                if (maskElements != denseBatchValidityTensor->getTotalNumElements()) {
+                    throw std::runtime_error(
+                        "Dense FullyConnected batch-validity mask cannot represent the requested effective geometry.");
+                }
+
+                Expression validity = Expression::input(
+                    Thor::BATCH_VALIDITY_MASK_NAME, DataType::FP32, DataType::FP32);
+                if (denseBatchValidityTensor->getDimensions() != maskDimensions) {
+                    validity = validity.reshape(maskDimensions);
+                }
+                return validity;
+            };
+
+            auto sanitizeDenseBatchInput = [&](Expression value, const std::vector<uint64_t>& dimensions) -> Expression {
+                if (!denseBatchValidityTensor.has_value()) {
+                    return value;
+                }
+                Expression validity = denseValidityForDimensions(dimensions);
+                // Selection is intentional here. Multiplication by a 0/1 mask is
+                // not sufficient because IEEE NaN * 0 remains NaN and can poison
+                // a parameter-gradient reduction from inactive physical rows.
+                return Expression::where(
+                    validity > Expression::constantScalar(0.0),
+                    value,
+                    Expression::constantScalar(0.0));
+            };
+
             auto fin = Expression::input("feature_input", featureInputTensor.getDataType(), featureInputTensor.getDataType());
+            fin = sanitizeDenseBatchInput(fin, originalFeatureInputDimensions);
             if (originalFeatureInputDimensions != logicalFeatureInputDimensions) {
                 fin = fin.reshape(logicalFeatureInputDimensions);
             }
@@ -475,6 +550,8 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                 std::optional<Expression> flattenedResidual;
                 if (useResidual) {
                     flattenedResidual = Expression::input(FC_RESIDUAL_INPUT_NAME, outputDataType, outputDataType);
+                    flattenedResidual = sanitizeDenseBatchInput(
+                        flattenedResidual.value(), runtimeFeatureOutputDimensions);
                     if (runtimeFeatureOutputDimensions != matmulOutputDimensions) {
                         flattenedResidual = flattenedResidual->reshape(matmulOutputDimensions);
                     }
@@ -547,6 +624,8 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
                         const ExpressionInputDataTypes inputDataTypes = expressionInputDataTypes(effectiveEpilogue, auxInputName);
                         Expression physicalAuxInput =
                             Expression::input(auxInputName, inputDataTypes.computeDataType, inputDataTypes.outputDataType);
+                        physicalAuxInput = sanitizeDenseBatchInput(
+                            physicalAuxInput, runtimeFeatureOutputDimensions);
                         if (runtimeFeatureOutputDimensions != matmulOutputDimensions) {
                             physicalAuxInput = physicalAuxInput.reshape(matmulOutputDimensions);
                         }
@@ -590,6 +669,19 @@ ThorImplementation::DynamicExpression buildFullyConnectedExpression(uint64_t api
 
                 if (runtimeFeatureOutputDimensions != matmulOutputDimensions) {
                     branch = branch.reshape(runtimeFeatureOutputDimensions);
+                }
+
+                if (denseBatchValidityTensor.has_value()) {
+                    Expression outputValidity = denseValidityForDimensions(runtimeFeatureOutputDimensions);
+                    // Mask the public branch as well as its inputs. Besides making
+                    // inactive forward rows deterministic, WHERE autodiff selects an
+                    // exact zero incoming gradient for inactive rows. This prevents a
+                    // downstream poisoned tail from reaching matmul/bias/epilogue
+                    // gradient reductions as NaN * 0.
+                    branch = Expression::where(
+                        outputValidity > Expression::constantScalar(0.0),
+                        branch,
+                        Expression::constantScalar(0.0));
                 }
 
                 branch = branch.withOutputDType(outputDataType);
@@ -1355,6 +1447,7 @@ std::shared_ptr<ThorImplementation::Layer> FullyConnected::stamp(ThorImplementat
         physicalParameters,
         inferenceOnly,
         getId(),
+        preserveInputPrefixDimensions,
         outputDropoutProbability > 0.0f
             ? std::optional<ThorImplementation::DynamicExpressionVariantId>(FC_EVALUATION_VARIANT)
             : std::nullopt,

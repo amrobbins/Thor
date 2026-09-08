@@ -52,24 +52,37 @@ int checkedInt(uint32_t value, const char *what) {
     return static_cast<int>(value);
 }
 
+void setBatchMajorPhysicalCtcTensorDescriptor(cudnnTensorDescriptor_t descriptor,
+                                              const CudnnCtcLossConfig &config,
+                                              uint32_t batchSize) {
+    THOR_THROW_IF_FALSE(descriptor != nullptr);
+    THOR_THROW_IF_FALSE(batchSize >= 1 && batchSize <= config.batchSize);
+
+    const int dimA[3] = {checkedInt(config.maxTimeSteps, "maxTimeSteps"),
+                         checkedInt(batchSize, "batchSize"),
+                         checkedInt(config.numClasses, "numClasses")};
+    // Thor physical memory is contiguous [B, T, C]. cuDNN logical indices are [T, B, C], so:
+    //   offset(t,b,c) = b * T * C + t * C + c
+    // The batch stride is the physical row width and therefore does not change for a partial batch.
+    const int strideA[3] = {checkedInt(config.numClasses, "numClasses"),
+                            checkedInt(config.maxTimeSteps * config.numClasses, "maxTimeSteps * numClasses"),
+                            1};
+
+    const cudnnStatus_t cudnnStatus =
+        cudnnSetTensorNdDescriptor(descriptor, CUDNN_DATA_FLOAT, 3, dimA, strideA);
+    THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
+}
+
 cudnnTensorDescriptor_t createBatchMajorPhysicalCtcTensorDescriptor(const CudnnCtcLossConfig &config) {
     cudnnTensorDescriptor_t descriptor = nullptr;
     cudnnStatus_t cudnnStatus = cudnnCreateTensorDescriptor(&descriptor);
     THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 
-    const int dimA[3] = {checkedInt(config.maxTimeSteps, "maxTimeSteps"),
-                         checkedInt(config.batchSize, "batchSize"),
-                         checkedInt(config.numClasses, "numClasses")};
-    // Thor physical memory is contiguous [B, T, C]. cuDNN logical indices are [T, B, C], so:
-    //   offset(t,b,c) = b * T * C + t * C + c
-    const int strideA[3] = {checkedInt(config.numClasses, "numClasses"),
-                            checkedInt(config.maxTimeSteps * config.numClasses, "maxTimeSteps * numClasses"),
-                            1};
-
-    cudnnStatus = cudnnSetTensorNdDescriptor(descriptor, CUDNN_DATA_FLOAT, 3, dimA, strideA);
-    if (cudnnStatus != CUDNN_STATUS_SUCCESS) {
+    try {
+        setBatchMajorPhysicalCtcTensorDescriptor(descriptor, config, config.batchSize);
+    } catch (...) {
         (void)cudnnDestroyTensorDescriptor(descriptor);
-        THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
+        throw;
     }
     return descriptor;
 }
@@ -134,6 +147,9 @@ CudnnCtcLossPlan::CudnnCtcLossPlan(const CudnnCtcLossConfig &config, Stream stre
                                                   gradientsDesc,
                                                   &workspaceSizeInBytes);
     THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
+    currentWorkspaceSizeInBytes = workspaceSizeInBytes;
+    currentBatchSize = config.batchSize;
+    workspaceSizeByBatchSize.emplace(config.batchSize, workspaceSizeInBytes);
 }
 
 CudnnCtcLossPlan::~CudnnCtcLossPlan() { destroy(); }
@@ -153,11 +169,17 @@ CudnnCtcLossPlan &CudnnCtcLossPlan::operator=(CudnnCtcLossPlan &&other) noexcept
     gradientsDesc = other.gradientsDesc;
     ctcLossDesc = other.ctcLossDesc;
     workspaceSizeInBytes = other.workspaceSizeInBytes;
+    currentWorkspaceSizeInBytes = other.currentWorkspaceSizeInBytes;
+    currentBatchSize = other.currentBatchSize;
+    workspaceSizeByBatchSize = std::move(other.workspaceSizeByBatchSize);
 
     other.probabilitiesDesc = nullptr;
     other.gradientsDesc = nullptr;
     other.ctcLossDesc = nullptr;
     other.workspaceSizeInBytes = 0;
+    other.currentWorkspaceSizeInBytes = 0;
+    other.currentBatchSize = 0;
+    other.workspaceSizeByBatchSize.clear();
 
     return *this;
 }
@@ -176,6 +198,9 @@ void CudnnCtcLossPlan::destroy() noexcept {
         probabilitiesDesc = nullptr;
     }
     workspaceSizeInBytes = 0;
+    currentWorkspaceSizeInBytes = 0;
+    currentBatchSize = 0;
+    workspaceSizeByBatchSize.clear();
 }
 
 void CudnnCtcLossPlan::run(void *probabilities,
@@ -186,7 +211,8 @@ void CudnnCtcLossPlan::run(void *probabilities,
                            void *gradients,
                            void *workspace,
                            size_t workspaceSizeBytes,
-                           Stream stream) const {
+                           uint32_t activeBatchSize,
+                           Stream stream) {
     THOR_THROW_IF_FALSE(stream.isInitialized());
     THOR_THROW_IF_FALSE(probabilitiesDesc != nullptr);
     THOR_THROW_IF_FALSE(gradientsDesc != nullptr);
@@ -197,10 +223,40 @@ void CudnnCtcLossPlan::run(void *probabilities,
     THOR_THROW_IF_FALSE(inputLengths != nullptr);
     THOR_THROW_IF_FALSE(costs != nullptr);
     THOR_THROW_IF_FALSE(gradients != nullptr);
+    THOR_THROW_IF_FALSE(activeBatchSize >= 1 && activeBatchSize <= config.batchSize);
     THOR_THROW_IF_FALSE(workspaceSizeBytes >= workspaceSizeInBytes);
     THOR_THROW_IF_FALSE(workspaceSizeInBytes == 0 || workspace != nullptr);
 
     ScopedGpu scopedGpu(stream.getGpuNum());
+
+    if (currentBatchSize != activeBatchSize) {
+        setBatchMajorPhysicalCtcTensorDescriptor(probabilitiesDesc, config, activeBatchSize);
+        setBatchMajorPhysicalCtcTensorDescriptor(gradientsDesc, config, activeBatchSize);
+
+        const auto cachedWorkspace = workspaceSizeByBatchSize.find(activeBatchSize);
+        if (cachedWorkspace != workspaceSizeByBatchSize.end()) {
+            currentWorkspaceSizeInBytes = cachedWorkspace->second;
+        } else {
+            size_t requiredWorkspaceSizeInBytes = 0;
+            const cudnnStatus_t workspaceStatus =
+                cudnnGetCTCLossWorkspaceSize_v8(stream.getCudnnHandle(),
+                                                toCudnnAlgo(config.algorithm),
+                                                ctcLossDesc,
+                                                probabilitiesDesc,
+                                                gradientsDesc,
+                                                &requiredWorkspaceSizeInBytes);
+            THOR_THROW_IF_FALSE(workspaceStatus == CUDNN_STATUS_SUCCESS);
+            // The full-capacity plan owns the reusable workspace. A smaller active
+            // batch is expected to fit inside it; fail before launch if a backend
+            // ever violates that assumption rather than risking an overwrite.
+            THOR_THROW_IF_FALSE(requiredWorkspaceSizeInBytes <= workspaceSizeInBytes);
+            workspaceSizeByBatchSize.emplace(activeBatchSize, requiredWorkspaceSizeInBytes);
+            currentWorkspaceSizeInBytes = requiredWorkspaceSizeInBytes;
+        }
+        currentBatchSize = activeBatchSize;
+    }
+    THOR_THROW_IF_FALSE(workspaceSizeBytes >= currentWorkspaceSizeInBytes);
+    THOR_THROW_IF_FALSE(currentWorkspaceSizeInBytes == 0 || workspace != nullptr);
 
     cudnnStatus_t cudnnStatus = cudnnCTCLoss_v8(stream.getCudnnHandle(),
                                                 toCudnnAlgo(config.algorithm),
@@ -213,7 +269,7 @@ void CudnnCtcLossPlan::run(void *probabilities,
                                                 costs,
                                                 gradientsDesc,
                                                 gradients,
-                                                workspaceSizeInBytes,
+                                                currentWorkspaceSizeInBytes,
                                                 workspace);
     THOR_THROW_IF_FALSE(cudnnStatus == CUDNN_STATUS_SUCCESS);
 }

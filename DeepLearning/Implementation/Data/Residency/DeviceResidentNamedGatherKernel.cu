@@ -482,15 +482,23 @@ void validateGatherTensorShapes(const Tensor &source, const Tensor &destination,
 
 }  // namespace
 
-void launchDeviceResidentNamedGatherKernel(const Tensor &source, Tensor &destination, const Tensor &rowIndicesDevice, Stream &stream) {
+void launchDeviceResidentNamedGatherKernel(
+    const Tensor &source,
+    Tensor &destination,
+    const Tensor &rowIndicesDevice,
+    uint64_t logicalRows,
+    Stream &stream) {
     validateGatherTensorShapes(source, destination, rowIndicesDevice);
 
-    const uint64_t batchSize = destination.getDimensions().at(0);
+    const uint64_t batchCapacity = destination.getDimensions().at(0);
+    const uint64_t rowIndexCapacity = rowIndicesDevice.getDimensions().at(0);
+    THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= batchCapacity);
+    THOR_THROW_IF_FALSE(logicalRows <= rowIndexCapacity);
     const uint64_t sourceRows = source.getDimensions().at(0);
-    const uint64_t rowBytes = destination.getArraySizeInBytes() / batchSize;
+    const uint64_t rowBytes = destination.getArraySizeInBytes() / batchCapacity;
     THOR_THROW_IF_FALSE(rowBytes > 0);
     const uint64_t totalBytes = destination.getArraySizeInBytes();
-    THOR_THROW_IF_FALSE(totalBytes == batchSize * rowBytes);
+    THOR_THROW_IF_FALSE(totalBytes == batchCapacity * rowBytes);
     THOR_THROW_IF_FALSE(source.getArraySizeInBytes() == sourceRows * rowBytes);
 
     const uint8_t *sourceBytes = static_cast<const uint8_t *>(source.getMemPtr());
@@ -506,7 +514,7 @@ void launchDeviceResidentNamedGatherKernel(const Tensor &source, Tensor &destina
         sourceBytes,
         destinationBytes,
         rowIndices,
-        batchSize,
+        logicalRows,
         rowBytes,
         sourceRows,
         cudaStream);

@@ -5,6 +5,7 @@
 #include "DeepLearning/Api/Data/DatasetLayout.h"
 #include "DeepLearning/Implementation/Data/Materialization/DeviceDatasetMaterialization.h"
 #include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentWindowMaterializationKernel.h"
 #include "DeepLearning/Implementation/Tensor/Tensor.h"
 #include "DeepLearning/Implementation/Tensor/RaggedTensor.h"
 
@@ -24,9 +25,10 @@ class Stream;
  *
  * Canonical snapshots may store dense tensors and packed ragged fields in
  * dataset row order. For a file dataset with windowed or ragged fields, the
- * compact representation stores the physical indexed records plus the required
- * source sidecars and
- * metadata. Direct/window outputs are deferred references; ragged outputs are
+ * compact representation keeps only the device records/source sidecars that
+ * value materialization still consumes. Dense window placement metadata is
+ * resolved once on the host and selected row plans are staged per batch.
+ * Direct/window outputs are deferred references; ragged outputs are
  * gathered into reusable batch-capacity buffers for the selected rows.
  */
 struct RaggedBatchExtent {
@@ -128,9 +130,23 @@ class DeviceResidentNamedDataset {
         ThorImplementation::RaggedTensor &destination,
         Stream &stream) const;
 
+    [[nodiscard]] std::vector<std::string> compactWindowPlanNames() const;
+    [[nodiscard]] std::optional<std::string> compactWindowPlanNameForField(
+        const std::string &fieldName) const;
+    [[nodiscard]] uint64_t compactWindowPlanBytesPerRow(const std::string &planName) const;
+    // Stage exactly logicalRows descriptors.  The destination may be a byte
+    // tensor or an aligned UINT64 alias into a larger selection-metadata block.
+    void stageCompactWindowPlan(
+        const std::string &planName,
+        const ThorImplementation::Tensor &rowIndicesHost,
+        uint64_t logicalRows,
+        ThorImplementation::Tensor &planHostStaging) const;
+
     void enqueueCompactFieldMaterialization(
         const std::string &fieldName,
         const ThorImplementation::Tensor &rowIndicesDevice,
+        const ThorImplementation::Tensor &windowPlanDevice,
+        uint64_t logicalRows,
         ThorImplementation::Tensor &destination,
         Stream &stream) const;
 
@@ -159,8 +175,6 @@ class DeviceResidentNamedDataset {
     struct CompactWindowSourceStorage {
         DatasetLayout::WindowedTensorSourceSpec spec;
         ThorImplementation::Tensor bytes;
-        ThorImplementation::Tensor sequences;
-        uint64_t sequenceCount = 0;
     };
 
     struct CompactWindowFieldStorage {
@@ -168,9 +182,10 @@ class DeviceResidentNamedDataset {
         bool materializeMask = false;
     };
 
-    struct CompactAffineFieldStorage {
-        ThorImplementation::Tensor segments;
-        uint64_t segmentCount = 0;
+    struct CompactWindowPlanStorage {
+        bool use32BitSteps = true;
+        std::vector<DeviceResidentWindowRowPlan32> plans32;
+        std::vector<DeviceResidentWindowRowPlan64> plans64;
     };
 
     DeviceResidentNamedDataset(Thor::DatasetId datasetId,
@@ -198,7 +213,7 @@ class DeviceResidentNamedDataset {
     std::map<std::string, SnapshotRaggedFieldStorage> snapshotRaggedFields;
     std::map<std::string, CompactWindowSourceStorage> compactSources;
     std::map<std::string, CompactWindowFieldStorage> compactWindowFields;
-    std::map<std::string, CompactAffineFieldStorage> compactAffineFields;
+    std::map<std::string, CompactWindowPlanStorage> compactWindowPlans;
     std::set<Thor::DatasetFieldId> compactFieldIds;
     double uploadSeconds = 0.0;
 };

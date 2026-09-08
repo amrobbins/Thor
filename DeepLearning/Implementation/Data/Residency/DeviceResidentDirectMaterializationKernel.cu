@@ -493,6 +493,7 @@ void launchDeviceResidentDirectMaterializationKernel(
     uint64_t recordSizeBytes,
     uint64_t fieldOffsetBytes,
     uint64_t fieldBytes,
+    uint64_t logicalRows,
     Tensor &destination,
     const Tensor &rowIndicesDevice,
     Stream &stream) {
@@ -518,11 +519,13 @@ void launchDeviceResidentDirectMaterializationKernel(
     THOR_THROW_IF_FALSE(
         recordStorage.getArraySizeInBytes() / recordSizeBytes == numExamples);
 
-    const uint64_t batchSize = rowIndicesDevice.getDimensions().front();
-    THOR_THROW_IF_FALSE(batchSize > 0);
-    THOR_THROW_IF_FALSE(destination.getDimensions().front() == batchSize);
+    const uint64_t batchCapacity = destination.getDimensions().front();
+    const uint64_t rowIndexCapacity = rowIndicesDevice.getDimensions().front();
+    THOR_THROW_IF_FALSE(batchCapacity > 0);
+    THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= batchCapacity);
+    THOR_THROW_IF_FALSE(logicalRows <= rowIndexCapacity);
     THOR_THROW_IF_FALSE(destination.getArraySizeInBytes() % fieldBytes == 0);
-    THOR_THROW_IF_FALSE(destination.getArraySizeInBytes() / fieldBytes == batchSize);
+    THOR_THROW_IF_FALSE(destination.getArraySizeInBytes() / fieldBytes == batchCapacity);
 
     const uint8_t *records = recordStorage.getMemPtr<uint8_t>();
     const uint64_t *rowIndices = rowIndicesDevice.getMemPtr<uint64_t>();
@@ -538,7 +541,7 @@ void launchDeviceResidentDirectMaterializationKernel(
         records,
         rowIndices,
         destinationBytes,
-        batchSize,
+        logicalRows,
         numExamples,
         recordSizeBytes,
         fieldOffsetBytes,

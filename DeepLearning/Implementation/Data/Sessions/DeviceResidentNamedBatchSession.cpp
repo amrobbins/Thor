@@ -399,11 +399,6 @@ void DeviceResidentNamedBatchSession::fillRowIndexTensor(
         THOR_THROW_IF_FALSE(sourceRow < dataset->getNumExamples());
         rowIndices[slot] = sourceRow;
     }
-
-    const uint64_t paddingSourceRow = rowIndices[validExampleCount - 1];
-    for (uint64_t slot = validExampleCount; slot < batchSize; ++slot) {
-        rowIndices[slot] = paddingSourceRow;
-    }
 }
 
 Batch DeviceResidentNamedBatchSession::acquireBatch(
@@ -476,9 +471,12 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
             extent.hostOffsets, storage.raggedOffsetsHostStaging.at(field.name));
     }
 
-    runtime.rowIndicesDevice.copyFromAsync(
-        runtime.rowIndicesHost,
-        runtime.gatherStream);
+    runtime.rowIndicesHost.uploadSection(
+        runtime.rowIndicesDevice,
+        runtime.gatherStream,
+        /*sourceOffset=*/0,
+        /*destOffset=*/0,
+        static_cast<uint64_t>(validExampleCount) * sizeof(uint64_t));
     for (auto &[fieldName, ragged] : storage.raggedTensors) {
         Tensor deviceOffsets = ragged.getOffsets();
         deviceOffsets.copyFromAsync(
@@ -492,6 +490,7 @@ Batch DeviceResidentNamedBatchSession::acquireBatch(
             source,
             destination,
             runtime.rowIndicesDevice,
+            validExampleCount,
             runtime.gatherStream);
     }
     for (auto &[fieldName, ragged] : storage.raggedTensors) {

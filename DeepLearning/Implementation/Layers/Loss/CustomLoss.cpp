@@ -42,6 +42,26 @@ void validateName(const std::string& name, const std::string& what) {
         throw std::invalid_argument("CustomLoss " + what + " names cannot start with __ that is reserved. Name " + name + " is illegal.");
 }
 
+std::vector<uint64_t> denseLossBatchValidityMaskDimensions(const std::vector<uint64_t>& predictionDimensions) {
+    THOR_THROW_IF_FALSE(!predictionDimensions.empty());
+    std::vector<uint64_t> maskDimensions = predictionDimensions;
+    if (maskDimensions.size() > 1)
+        maskDimensions.back() = 1;
+    return maskDimensions;
+}
+
+void validateDenseLossBatchValidityMaskDimensions(const std::vector<uint64_t>& maskDimensions,
+                                                  const std::vector<uint64_t>& predictionDimensions) {
+    THOR_THROW_IF_FALSE(maskDimensions.size() == predictionDimensions.size());
+    THOR_THROW_IF_FALSE(!predictionDimensions.empty());
+    THOR_THROW_IF_FALSE(maskDimensions.front() == predictionDimensions.front());
+    if (predictionDimensions.size() == 1)
+        return;
+    for (size_t axis = 1; axis + 1 < predictionDimensions.size(); ++axis)
+        THOR_THROW_IF_FALSE(maskDimensions[axis] == predictionDimensions[axis]);
+    THOR_THROW_IF_FALSE(maskDimensions.back() == 1);
+}
+
 
 DynamicExpression applyBatchValidityMaskToGradient(const DynamicExpression& expression,
                                                    const std::string& gradientName,
@@ -294,9 +314,8 @@ std::optional<Tensor> CustomLoss::connectToPredictionsInputLayer(Layer* predicti
                                                                  bool backPropagateError) {
     std::optional<Tensor> error = Loss::connectToPredictionsInputLayer(predictionsInputLayer, featureInput, stream, backPropagateError);
     THOR_THROW_IF_FALSE(this->featureInput.has_value());
-    std::vector<uint64_t> maskDimensions = this->featureInput.value().getDimensions();
-    for (size_t axis = 1; axis < maskDimensions.size(); ++axis)
-        maskDimensions[axis] = 1;
+    const std::vector<uint64_t> maskDimensions =
+        denseLossBatchValidityMaskDimensions(this->featureInput.value().getDimensions());
     batchValidityMask = Tensor(this->featureInput.value().getPlacement(), TensorDescriptor(DataType::FP32, maskDimensions));
     tryFuseGradientIntoDrivingLayer();
     return error;
@@ -327,12 +346,8 @@ void CustomLoss::compileImpl() {
         THOR_THROW_IF_FALSE(batchValidityMask.isInitialized());
         THOR_THROW_IF_FALSE(batchValidityMask.getDataType() == DataType::FP32);
         THOR_THROW_IF_FALSE(batchValidityMask.getPlacement() == featureInput.value().getPlacement());
-        const std::vector<uint64_t> maskDimensions = batchValidityMask.getDimensions();
-        const std::vector<uint64_t> predictionDimensions = featureInput.value().getDimensions();
-        THOR_THROW_IF_FALSE(maskDimensions.size() == predictionDimensions.size());
-        THOR_THROW_IF_FALSE(maskDimensions.front() == predictionDimensions.front());
-        for (size_t axis = 1; axis < maskDimensions.size(); ++axis)
-            THOR_THROW_IF_FALSE(maskDimensions[axis] == 1);
+        validateDenseLossBatchValidityMaskDimensions(
+            batchValidityMask.getDimensions(), featureInput.value().getDimensions());
     } else {
         batchValidityMask.dropReference();
     }

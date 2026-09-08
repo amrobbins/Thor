@@ -235,10 +235,12 @@ void CtcLoss::runCudnn(Stream stream) {
     Tensor& gradientTensor = errorOutput.has_value() ? errorOutput.value() : inferenceGradientScratch.value();
     THOR_THROW_IF_FALSE(gradientTensor.isInitialized());
 
+    const uint32_t activeBatchSize = getValidExampleCount();
+
     rowPartitionOffsetsToInt32LengthsChecked(labelOffsetsInput.value(),
                                              generatedLabelLengths.value(),
                                              labelOffsetsValidationErrorBits.value(),
-                                             ctcBatchSize,
+                                             activeBatchSize,
                                              maxTotalLabelValues,
                                              backendMaxLabelLength,
                                              stream);
@@ -254,6 +256,7 @@ void CtcLoss::runCudnn(Stream stream) {
                  gradientTensor.getMemPtr(),
                  workspacePtr,
                  workspaceSizeBytes,
+                 activeBatchSize,
                  stream);
 
     // cuDNN currently reports zero cost for active rows whose target length is
@@ -265,7 +268,7 @@ void CtcLoss::runCudnn(Stream stream) {
                                     inputLengthsInput.value().getMemPtr<int>(),
                                     featureOutput.value().getMemPtr<float>(),
                                     gradientTensor.getMemPtr<float>(),
-                                    ctcBatchSize,
+                                    activeBatchSize,
                                     maxTimeSteps,
                                     numClasses,
                                     stream);
@@ -275,10 +278,10 @@ void CtcLoss::runCudnn(Stream stream) {
     launchScaleCtcLossOutputs(featureOutput.value().getMemPtr<float>(),
                               gradientTensor.getMemPtr<float>(),
                               inputLengthsInput.value().getMemPtr<int>(),
-                              ctcBatchSize,
+                              activeBatchSize,
                               maxTimeSteps,
                               numClasses,
-                              featureOutput.value().getTotalNumElements(),
+                              activeBatchSize,
                               errorOutput.has_value(),
                               materializedLossWeight,
                               gradientScale,
@@ -358,6 +361,7 @@ void CtcLoss::forward(optional<Tensor> inputTensor, bool validationPass, uint32_
 
     infer(featureInput, featureOutput, stream);
     maskInvalidLossTail();
+    maskInvalidPredictionGradientTail();
 
     stream.putEvent(auxiliaryInputsReusableEvent);
     labelOffsetsStream.waitEvent(auxiliaryInputsReusableEvent);

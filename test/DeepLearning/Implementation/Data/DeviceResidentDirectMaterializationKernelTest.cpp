@@ -63,7 +63,10 @@ void runMaterializationCase(
     uint64_t batchSize,
     uint64_t recordSizeBytes,
     uint64_t fieldOffsetBytes,
-    uint64_t fieldBytes) {
+    uint64_t fieldBytes,
+    uint64_t logicalRows = 0) {
+    if (logicalRows == 0) logicalRows = batchSize;
+    ASSERT_LE(logicalRows, batchSize);
     constexpr uint8_t recordSentinel = 0x5aU;
     constexpr uint8_t destinationSentinel = 0xcdU;
 
@@ -85,7 +88,7 @@ void runMaterializationCase(
     if (batchSize > 263) rowIndices[263] = numExamples;
 
     std::vector<uint8_t> expected(batchSize * fieldBytes, destinationSentinel);
-    for (uint64_t batchRow = 0; batchRow < batchSize; ++batchRow) {
+    for (uint64_t batchRow = 0; batchRow < logicalRows; ++batchRow) {
         const uint64_t sourceRow = rowIndices[batchRow];
         if (sourceRow >= numExamples) continue;
         for (uint64_t byte = 0; byte < fieldBytes; ++byte) {
@@ -108,6 +111,7 @@ void runMaterializationCase(
         recordSizeBytes,
         fieldOffsetBytes,
         fieldBytes,
+        logicalRows,
         destination,
         rowIndicesDevice,
         stream);
@@ -170,6 +174,7 @@ void runExactTailCase(uint32_t copyWidth, uint32_t tailBytes) {
         recordSizeBytes,
         fieldOffsetBytes,
         fieldBytes,
+        batchSize,
         destination,
         rowIndicesDevice,
         stream);
@@ -182,6 +187,16 @@ void runExactTailCase(uint32_t copyWidth, uint32_t tailBytes) {
             << "copyWidth=" << copyWidth << " tailBytes=" << tailBytes
             << " byte offset=" << offset;
     }
+}
+
+TEST(DeviceResidentDirectMaterializationKernelTest, LogicalRowsLeaveInactiveBatchCapacityUntouched) {
+    REQUIRE_CUDA_DEVICE();
+    runMaterializationCase(/*numExamples=*/97,
+                           /*batchSize=*/257,
+                           /*recordSizeBytes=*/64,
+                           /*fieldOffsetBytes=*/32,
+                           /*fieldBytes=*/32,
+                           /*logicalRows=*/17);
 }
 
 TEST(DeviceResidentDirectMaterializationKernelTest, AlignedWideFieldsUseThirtyTwoByteTransactions) {

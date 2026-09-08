@@ -1022,6 +1022,69 @@ TEST(CustomLossApi, PartialBatchMasksFusedGradientAndNormalizesUpdateByValidExam
     EXPECT_NEAR(weightsCpu.getMemPtr<float>()[1], 1.0f, 1.0e-5f);
 }
 
+TEST(CustomLossApi, Rank3PrefixPreservingFusedGradientUsesReshapeCompatibleValidityMask) {
+    if (MachineEvaluator::instance().getNumGpus() == 0)
+        GTEST_SKIP() << "Rank-3 fused CustomLoss validity-mask placement regression requires a GPU";
+
+    constexpr uint32_t batchCapacity = 3;
+    constexpr uint32_t sequenceLength = 7;
+    constexpr uint32_t inputFeatures = 5;
+    constexpr uint32_t outputFeatures = 4;
+
+    shared_ptr<Sgd> sgd = Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+
+    Network network("custom_loss_rank3_prefix_fused_gradient_validity");
+    NetworkInput features = NetworkInput::Builder()
+                                .network(network)
+                                .name("features")
+                                .dimensions({sequenceLength, inputFeatures})
+                                .dataType(DataType::FP32)
+                                .build();
+    FullyConnected fc = FullyConnected::Builder()
+                            .network(network)
+                            .featureInput(features.getFeatureOutput().value())
+                            .numOutputFeatures(outputFeatures)
+                            .preserveInputPrefixDimensions(true)
+                            .hasBias(false)
+                            .weightsDataType(DataType::FP32)
+                            .computeDataType(DataType::FP32)
+                            .outputDataType(DataType::FP32)
+                            .weightsOptimizer(sgd)
+                            .noActivation()
+                            .build();
+    NetworkInput labels = NetworkInput::Builder()
+                              .network(network)
+                              .name("labels")
+                              .dimensions({sequenceLength, outputFeatures})
+                              .dataType(DataType::FP32)
+                              .build();
+    MSE mse = MSE::Builder()
+                  .network(network)
+                  .predictions(fc.getFeatureOutput().value())
+                  .labels(labels.getFeatureOutput().value())
+                  .lossDataType(DataType::FP32)
+                  .reportsBatchLoss()
+                  .build();
+    NetworkOutput::Builder()
+        .network(network)
+        .name("loss")
+        .inputTensor(mse.getLoss())
+        .dataType(DataType::FP32)
+        .build();
+
+    vector<Event> initializationDone;
+    shared_ptr<PlacedNetwork> placed;
+    ASSERT_NO_THROW(placed = network.place(batchCapacity, initializationDone, /*inferenceOnly=*/false));
+    ASSERT_NE(placed, nullptr);
+    for (Event& event : initializationDone)
+        event.synchronize();
+
+    Impl::StampedNetwork& stampedNetwork = placed->getStampedNetwork(0);
+    auto physicalFc = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(fc.getId()));
+    ASSERT_NE(physicalFc, nullptr);
+    EXPECT_EQ(physicalFc->getNumFusedCustomLossGradients(), 1u);
+}
+
 TEST(CustomLossApi, OptionalValidityMaskIsAvailableInsideLossExpression) {
     if (MachineEvaluator::instance().getNumGpus() == 0)
         GTEST_SKIP() << "CustomLoss validity-mask execution test requires a GPU";

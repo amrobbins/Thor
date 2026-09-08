@@ -13,6 +13,7 @@
 #include "DeepLearning/Implementation/Data/Residency/DeviceDatasetResidency.h"
 #include "DeepLearning/Implementation/ThorError.h"
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedDataset.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentWindowMaterializationKernel.h"
 #include "DeepLearning/Implementation/Data/Materialization/MaterializedNamedDatasetSnapshot.h"
 #include "DeepLearning/Implementation/Data/Materialization/NamedDatasetMaterializer.h"
 #include "DeepLearning/Implementation/Tensor/TensorDescriptor.h"
@@ -175,6 +176,7 @@ uint64_t estimateRequiredBytesForPerExampleBytes(
 
 uint64_t compactRequiredBytes(
     uint64_t residentBytes,
+    const DatasetMaterializationDescription &dataset,
     const DeviceDatasetSessionDescription &session,
     uint64_t batchQueueDepth);
 
@@ -233,6 +235,7 @@ uint64_t estimateDeviceResidentCompactDatasetRequiredBytes(
     uint64_t batchQueueDepth) {
     return compactRequiredBytes(
         estimateDeviceResidentCompactDatasetStorageBytes(dataset),
+        dataset,
         session,
         batchQueueDepth);
 }
@@ -256,6 +259,34 @@ uint64_t compactSelectionRingBytes(
         selectionSlotCount,
         selectionBytesPerSlot,
         "Device dataset selection-ring bytes");
+}
+
+uint64_t compactWindowPlanRingBytes(
+    const DatasetMaterializationDescription &dataset,
+    const DeviceDatasetSessionDescription &session,
+    uint64_t batchQueueDepth) {
+    if (batchQueueDepth == 0) {
+        throw std::runtime_error(
+            "Device dataset batch_queue_depth must be >= 1.");
+    }
+    uint64_t planBytesPerRow = 0;
+    for (const DatasetLayout::WindowedTensorSpec &spec : dataset.layout.windowedTensors()) {
+        const uint64_t bytes =
+            spec.windowLength() <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())
+                ? static_cast<uint64_t>(sizeof(DeviceResidentWindowRowPlan32))
+                : static_cast<uint64_t>(sizeof(DeviceResidentWindowRowPlan64));
+        planBytesPerRow = checkedAdd(
+            planBytesPerRow, bytes, "Device dataset window plan bytes per row");
+    }
+    const uint64_t bytesPerSlot = checkedMul(
+        session.getBatching().getBatchSize(),
+        planBytesPerRow,
+        "Device dataset window plan bytes per slot");
+    const uint64_t slotCount = checkedMul(
+        nonEmptySplitCount(session.getSplits()),
+        batchQueueDepth,
+        "Device dataset window plan slot count");
+    return checkedMul(slotCount, bytesPerSlot, "Device dataset window plan ring bytes");
 }
 
 uint64_t compactRaggedBatchRingBytes(
@@ -326,13 +357,17 @@ uint64_t canonicalSnapshotRequiredBytes(
 
 uint64_t compactRequiredBytes(
     uint64_t residentBytes,
+    const DatasetMaterializationDescription &dataset,
     const DeviceDatasetSessionDescription &session,
     uint64_t batchQueueDepth) {
     return checkedAdd(
         checkedAdd(
-            residentBytes,
-            compactSelectionRingBytes(session, batchQueueDepth),
-            "Device dataset compact reference required bytes"),
+            checkedAdd(
+                residentBytes,
+                compactSelectionRingBytes(session, batchQueueDepth),
+                "Device dataset compact reference required bytes"),
+            compactWindowPlanRingBytes(dataset, session, batchQueueDepth),
+            "Device dataset compact window-plan required bytes"),
         compactRaggedBatchRingBytes(session, batchQueueDepth),
         "Device dataset compact ragged required bytes");
 }
@@ -528,6 +563,7 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
                 mandatoryNames);
         const uint64_t mandatoryRequiredBytes = compactRequiredBytes(
             mandatoryResidentBytes,
+            dataset,
             session,
             batchQueueDepth);
         const uint64_t fullResidentBytes =
@@ -536,6 +572,7 @@ DeviceDatasetStorageSelection selectSharedResidencySession(
                 allNames);
         const uint64_t fullRequiredBytes = compactRequiredBytes(
             fullResidentBytes,
+            dataset,
             session,
             batchQueueDepth);
 

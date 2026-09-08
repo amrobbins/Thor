@@ -3,6 +3,7 @@
 #include "DeepLearning/Api/Network/Network.h"
 #include "Utilities/Expression/FusedEquation.h"
 
+#include <limits>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -259,7 +260,22 @@ uint64_t CustomLoss::getFirstInstanceMemRequirementInBytes(uint32_t batchSize,
     }
 
     const uint64_t standardLossBytes = Loss::getFirstInstanceMemRequirementInBytes(batchSize, tensorPlacement);
-    const uint64_t batchValidityMaskBytes = static_cast<uint64_t>(batchSize) * sizeof(float);
+    uint64_t featureVectorCountPerExample = 1;
+    const std::vector<uint64_t>& predictionDimensions = predictionsTensor.getDimensions();
+    for (size_t axis = 0; axis + 1 < predictionDimensions.size(); ++axis) {
+        if (predictionDimensions[axis] != 0 &&
+            featureVectorCountPerExample > std::numeric_limits<uint64_t>::max() / predictionDimensions[axis]) {
+            throw std::overflow_error("CustomLoss batch-validity mask size overflows uint64_t.");
+        }
+        featureVectorCountPerExample *= predictionDimensions[axis];
+    }
+    if (featureVectorCountPerExample > std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(batchSize) ||
+        featureVectorCountPerExample * static_cast<uint64_t>(batchSize) >
+            std::numeric_limits<uint64_t>::max() / sizeof(float)) {
+        throw std::overflow_error("CustomLoss batch-validity mask byte size overflows uint64_t.");
+    }
+    const uint64_t batchValidityMaskBytes =
+        featureVectorCountPerExample * static_cast<uint64_t>(batchSize) * sizeof(float);
     return standardLossBytes + lossShaperBytes + batchValidityMaskBytes;
 }
 

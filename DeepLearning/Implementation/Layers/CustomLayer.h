@@ -138,6 +138,8 @@ class CustomLayer : public TrainableLayer {
     void compileImpl() override;
     PhysicalParameter::StorageContext buildParameterStorageContext() const override;
 
+    virtual std::vector<uint64_t> batchValidityMaskDimensionsForPrimaryInput(const Tensor& primaryInput) const;
+
     // Called after this application's expression work has been submitted and
     // before any downstream layer is notified. Ragged-preserving subclasses use
     // this to publish authoritative host row-partition state on new value

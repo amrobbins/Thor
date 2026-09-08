@@ -60,7 +60,10 @@ std::vector<T> copyGpuTensor(const Tensor &device, Stream &stream) {
     return std::vector<T>(values, values + host.getTotalNumElements());
 }
 
-void runByteGatherCase(uint64_t sourceRows, uint64_t batchSize, uint64_t rowBytes) {
+void runByteGatherCase(
+    uint64_t sourceRows, uint64_t batchSize, uint64_t rowBytes, uint64_t logicalRows = 0) {
+    if (logicalRows == 0) logicalRows = batchSize;
+    ASSERT_LE(logicalRows, batchSize);
     constexpr uint8_t destinationSentinel = 0xcdU;
 
     std::vector<uint8_t> source(sourceRows * rowBytes);
@@ -81,7 +84,7 @@ void runByteGatherCase(uint64_t sourceRows, uint64_t batchSize, uint64_t rowByte
     if (batchSize > 263) rowIndices[263] = sourceRows;
 
     std::vector<uint8_t> expected(batchSize * rowBytes, destinationSentinel);
-    for (uint64_t batchRow = 0; batchRow < batchSize; ++batchRow) {
+    for (uint64_t batchRow = 0; batchRow < logicalRows; ++batchRow) {
         const uint64_t sourceRow = rowIndices[batchRow];
         if (sourceRow >= sourceRows) continue;
         for (uint64_t byte = 0; byte < rowBytes; ++byte) {
@@ -97,7 +100,8 @@ void runByteGatherCase(uint64_t sourceRows, uint64_t batchSize, uint64_t rowByte
         std::vector<uint8_t>(batchSize * rowBytes, destinationSentinel),
         stream);
 
-    launchDeviceResidentNamedGatherKernel(sourceDevice, destination, rowIndicesDevice, stream);
+    launchDeviceResidentNamedGatherKernel(
+        sourceDevice, destination, rowIndicesDevice, logicalRows, stream);
     stream.synchronize();
 
     const std::vector<uint8_t> actual = copyGpuTensor<uint8_t>(destination, stream);
@@ -168,7 +172,7 @@ void runExactTailCase(uint32_t copyWidth, uint32_t tailBytes) {
     }
 
     launchDeviceResidentNamedGatherKernel(
-        sourceDevice, destination, rowIndicesDevice, stream);
+        sourceDevice, destination, rowIndicesDevice, batchSize, stream);
     stream.synchronize();
 
     const std::vector<uint8_t> actual = copyGpuTensor<uint8_t>(destination, stream);
@@ -178,6 +182,12 @@ void runExactTailCase(uint32_t copyWidth, uint32_t tailBytes) {
             << "copyWidth=" << copyWidth << " tailBytes=" << tailBytes
             << " byte offset=" << offset;
     }
+}
+
+TEST(DeviceResidentNamedGatherKernelTest, LogicalRowsLeaveInactiveBatchCapacityUntouched) {
+    REQUIRE_CUDA_DEVICE();
+    runByteGatherCase(
+        /*sourceRows=*/97, /*batchSize=*/257, /*rowBytes=*/32, /*logicalRows=*/17);
 }
 
 TEST(DeviceResidentNamedGatherKernelTest, AlignedRowsUseThirtyTwoByteTransactions) {
@@ -322,7 +332,8 @@ TEST(DeviceResidentNamedGatherKernelTest, ScalarTypedRowsKeepManyIndependentRows
     Tensor destination = makeGpuTensor<uint32_t>(
         {batchSize}, std::vector<uint32_t>(batchSize, destinationSentinel), stream);
 
-    launchDeviceResidentNamedGatherKernel(sourceDevice, destination, rowIndicesDevice, stream);
+    launchDeviceResidentNamedGatherKernel(
+        sourceDevice, destination, rowIndicesDevice, batchSize, stream);
     stream.synchronize();
 
     EXPECT_EQ(copyGpuTensor<uint32_t>(destination, stream), expected);

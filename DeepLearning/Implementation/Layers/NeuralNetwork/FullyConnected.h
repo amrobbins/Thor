@@ -22,6 +22,7 @@ class FullyConnected final : public CustomLayer, public TrainingDropoutControlla
                    std::vector<std::shared_ptr<PhysicalParameter>> physicalParameters,
                    bool inferenceOnly,
                    int64_t stampedId,
+                   bool preserveInputPrefixDimensions,
                    std::optional<DynamicExpressionVariantId> deterministicTrainingVariantId,
                    bool trainingDropoutEnabled)
         : CustomLayer(std::move(expression),
@@ -30,7 +31,11 @@ class FullyConnected final : public CustomLayer, public TrainingDropoutControlla
                       placement,
                       physicalParameters,
                       inferenceOnly,
-                      stampedId),
+                      stampedId,
+                      {},
+                      /*usesBatchValidity=*/true,
+                      /*requiresFullBatch=*/false),
+          preserveInputPrefixDimensions(preserveInputPrefixDimensions),
           deterministicTrainingVariantId(deterministicTrainingVariantId) {
         setTrainingDropoutEnabled(trainingDropoutEnabled);
     }
@@ -45,7 +50,21 @@ class FullyConnected final : public CustomLayer, public TrainingDropoutControlla
 
     [[nodiscard]] bool isTrainingDropoutEnabled() const override { return trainingDropoutEnabled; }
 
+   protected:
+    std::vector<uint64_t> batchValidityMaskDimensionsForPrimaryInput(const Tensor& primaryInput) const override {
+        std::vector<uint64_t> dimensions = primaryInput.getDimensions();
+        THOR_THROW_IF_FALSE(!dimensions.empty());
+        if (preserveInputPrefixDimensions) {
+            dimensions.back() = 1;
+            return dimensions;
+        }
+        std::vector<uint64_t> maskDimensions(dimensions.size(), 1);
+        maskDimensions.front() = dimensions.front();
+        return maskDimensions;
+    }
+
    private:
+    bool preserveInputPrefixDimensions = false;
     std::optional<DynamicExpressionVariantId> deterministicTrainingVariantId;
     bool trainingDropoutEnabled = true;
 };

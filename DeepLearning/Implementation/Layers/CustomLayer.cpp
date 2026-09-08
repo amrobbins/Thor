@@ -967,9 +967,10 @@ bool CustomLayer::registerFusedCustomLossGradient(const Tensor& predictions,
     const std::vector<uint64_t> maskDimensions = batchValidityMask.getDimensions();
     const std::vector<uint64_t> predictionDimensions = predictions.getDimensions();
     THOR_THROW_IF_FALSE(maskDimensions.size() == predictionDimensions.size());
+    THOR_THROW_IF_FALSE(!predictionDimensions.empty());
     THOR_THROW_IF_FALSE(maskDimensions.front() == predictionDimensions.front());
     for (size_t axis = 1; axis < maskDimensions.size(); ++axis)
-        THOR_THROW_IF_FALSE(maskDimensions[axis] == 1);
+        THOR_THROW_IF_FALSE(maskDimensions[axis] == 1 || maskDimensions[axis] == predictionDimensions[axis]);
 
     FusedCustomLossGradient fused{predictions,
                                   labels,
@@ -1541,6 +1542,14 @@ PhysicalParameter::StorageContext CustomLayer::buildParameterStorageContext() co
     return PhysicalParameter::StorageContext(std::move(namedFeatureInputs));
 }
 
+std::vector<uint64_t> CustomLayer::batchValidityMaskDimensionsForPrimaryInput(const Tensor& primaryInput) const {
+    const std::vector<uint64_t> inputDimensions = primaryInput.getDimensions();
+    THOR_THROW_IF_FALSE(!inputDimensions.empty());
+    std::vector<uint64_t> maskDimensions(inputDimensions.size(), 1);
+    maskDimensions.front() = inputDimensions.front();
+    return maskDimensions;
+}
+
 PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs(uint32_t applicationIndex) {
     // Output metadata inference can prepare parameter storage and compile optimizer
     // expressions while graph connections are still being formed, before compileImpl().
@@ -1572,10 +1581,9 @@ PreparedDynamicExpression::TensorMap CustomLayer::buildForwardInputs(uint32_t ap
         const uint32_t primaryFlat = primaryInputFlatIndex(applicationIndex);
         THOR_THROW_IF_FALSE(primaryFlat < featureInputs.size());
         THOR_THROW_IF_FALSE(featureInputs[primaryFlat].has_value());
-        const std::vector<uint64_t> inputDimensions = featureInputs[primaryFlat].value().getDimensions();
-        THOR_THROW_IF_FALSE(!inputDimensions.empty());
-        std::vector<uint64_t> maskDimensions(inputDimensions.size(), 1);
-        maskDimensions.front() = inputDimensions.front();
+        const std::vector<uint64_t> maskDimensions =
+            batchValidityMaskDimensionsForPrimaryInput(featureInputs[primaryFlat].value());
+        THOR_THROW_IF_FALSE(!maskDimensions.empty());
         ApplicationState& app = applications.at(applicationIndex);
         app.batchValidityMask = Tensor(
             featureInputs[primaryFlat].value().getPlacement(), TensorDescriptor(DataType::FP32, maskDimensions));

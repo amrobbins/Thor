@@ -638,7 +638,13 @@ TEST(CtcLossImplementationLayer, PartialBatchUsesEmptyRaggedTailAndZerosLossAndG
     vector<float> actualGradient;
     runTinyCtcNetwork(network, &actualGradient, 1);
 
-    EXPECT_EQ(generatedLabelLengths(network), (vector<int>{1, 0}));
+    const vector<int> generatedLengths = generatedLabelLengths(network);
+    ASSERT_EQ(generatedLengths.size(), B);
+    EXPECT_EQ(generatedLengths[0], 1);
+    // The inactive physical tail is deliberately unspecified. CTC converts
+    // only the active row-partition prefix and cuDNN receives activeBatchSize,
+    // so requiring generatedLengths[1] == 0 would reintroduce the old policy
+    // that inactive batch capacity must be materialized/sanitized.
     EXPECT_EQ(labelOffsetsValidationBits(network), 0u);
 
     Tensor actualLossCpu = network.lossOutput->getFeatureOutput().value();

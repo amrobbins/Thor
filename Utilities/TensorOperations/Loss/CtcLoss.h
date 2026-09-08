@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <unordered_map>
 
 #include <cudnn.h>
 
@@ -87,6 +88,8 @@ class CudnnCtcLossPlan {
     // costs:          [B], fp32, device memory
     // gradients:      physical [B, T, C], fp32, device memory; cuDNN sees logical [T, B, C]
     // workspace:      device memory of at least getWorkspaceSizeInBytes() bytes
+    // activeBatchSize selects the leading physical [0, activeBatchSize) prefix.
+    // This lets exact partial batches avoid reading inactive dense metadata.
     void run(void *probabilities,
              const int *labels,
              const int *labelLengths,
@@ -95,7 +98,8 @@ class CudnnCtcLossPlan {
              void *gradients,
              void *workspace,
              size_t workspaceSizeBytes,
-             Stream stream) const;
+             uint32_t activeBatchSize,
+             Stream stream);
 
    private:
     void destroy() noexcept;
@@ -105,6 +109,9 @@ class CudnnCtcLossPlan {
     cudnnTensorDescriptor_t gradientsDesc = nullptr;
     cudnnCTCLossDescriptor_t ctcLossDesc = nullptr;
     size_t workspaceSizeInBytes = 0;
+    size_t currentWorkspaceSizeInBytes = 0;
+    uint32_t currentBatchSize = 0;
+    std::unordered_map<uint32_t, size_t> workspaceSizeByBatchSize;
 };
 
 }  // namespace ThorImplementation
