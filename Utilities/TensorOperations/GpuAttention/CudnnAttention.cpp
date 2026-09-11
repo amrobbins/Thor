@@ -8,6 +8,9 @@
 #include "Utilities/Common/ScopedGpu.h"
 
 #include <algorithm>
+#ifdef THOR_DEBUG
+#include <atomic>
+#endif
 #include <cmath>
 #include <cstdlib>
 #include <cstddef>
@@ -73,6 +76,18 @@ constexpr int64_t UID_AMAX_DQ = 62;
 constexpr int64_t UID_AMAX_DK = 63;
 constexpr int64_t UID_AMAX_DV = 64;
 constexpr int64_t UID_AMAX_DP = 65;
+
+#ifdef THOR_DEBUG
+struct AttentionTestExecutionCounters {
+    uint32_t forwardCalls{0};
+    uint32_t backwardCalls{0};
+};
+
+AttentionTestExecutionCounters& attentionTestExecutionCounters() {
+    static AttentionTestExecutionCounters counters;
+    return counters;
+}
+#endif
 
 void throwInvalidAttention(const string& message) { throw invalid_argument("Invalid cuDNN attention descriptor: " + message); }
 
@@ -1942,6 +1957,9 @@ void CudnnScaledDotProductAttention::forward(const CudnnAttentionExecutablePlan&
         insertTensor(pack, UID_AMAX_O, args.amaxO.value());
     }
 
+#ifdef THOR_DEBUG
+    attentionTestExecutionCounters().forwardCalls += 1;
+#endif
     executeGraph(plan.executable_, pack, workspace, stream, "SDPA forward");
 }
 
@@ -2088,8 +2106,27 @@ void CudnnScaledDotProductAttention::backward(const CudnnAttentionExecutablePlan
         insertTensor(pack, UID_AMAX_DP, args.amaxDP.value());
     }
 
+#ifdef THOR_DEBUG
+    attentionTestExecutionCounters().backwardCalls += 1;
+#endif
     executeGraph(plan.executable_, pack, workspace, stream, "SDPA backward");
 }
+
+#ifdef THOR_DEBUG
+void CudnnScaledDotProductAttention::resetTestExecutionCounters() {
+    AttentionTestExecutionCounters& counters = attentionTestExecutionCounters();
+    counters.forwardCalls = 0;
+    counters.backwardCalls = 0;
+}
+
+CudnnScaledDotProductAttention::TestExecutionCounters CudnnScaledDotProductAttention::testExecutionCounters() {
+    AttentionTestExecutionCounters& counters = attentionTestExecutionCounters();
+    return TestExecutionCounters{
+        counters.forwardCalls,
+        counters.backwardCalls,
+    };
+}
+#endif
 
 uint64_t CudnnScaledDotProductAttention::forwardWorkspaceSizeInBytes(const CudnnAttentionDescriptor& descriptor, int gpuNum) {
     const CudnnFrontendPlanSelection selection = repository().selectForward(descriptor, gpuNum);

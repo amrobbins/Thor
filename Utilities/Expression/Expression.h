@@ -157,6 +157,18 @@ enum class ExprOp : uint16_t {
     RAGGED_SOFTMAX_BACKWARD,
 };
 
+// Debug/profiling provenance for physical work produced by Expression
+// autodiff.  This is deliberately orthogonal to ExprOp and is not part of the
+// serialized/canonical mathematical expression contract.  Forward is the
+// default for user-authored expressions; BackwardGradient marks operations
+// synthesized to compute a VJP; BackwardForwardReplay marks forward operations
+// cloned into a backward graph in order to recover a primal value.
+enum class ExpressionExecutionProvenance : uint8_t {
+    Forward = 0,
+    BackwardGradient = 1,
+    BackwardForwardReplay = 2,
+};
+
 enum class RotaryScalingKind : uint8_t {
     None = 0,
     Linear = 1,
@@ -259,6 +271,9 @@ inline bool isSoftmaxOp(ExprOp op) { return op == ExprOp::SOFTMAX || op == ExprO
 
 struct ExprNode {
     ExprOp op;
+#ifdef THOR_DEBUG
+    ExpressionExecutionProvenance execution_provenance = ExpressionExecutionProvenance::Forward;
+#endif
     uint32_t lhs = UINT32_MAX;
     uint32_t rhs = UINT32_MAX;  // unused for unary/scalar ops
     uint32_t aux = UINT32_MAX;  // third input for ternary ops like GEMM
@@ -274,6 +289,10 @@ struct ExprNode {
     MatmulEpilogue matmul_epilogue = MatmulEpilogue::Default;
     MatmulBackwardEpilogue matmul_backward_epilogue = MatmulBackwardEpilogue::Default;
     uint32_t matmul_epilogue_aux = UINT32_MAX;
+    // BR4: the forward cuBLASLt GELU epilogue owns an auxiliary output containing
+    // the preactivation required by DGELU. This is an output-state contract, not
+    // an additional expression parent.
+    bool matmul_forward_epilogue_aux = false;
     MatmulPackedRowBinding matmul_packed_row_binding = MatmulPackedRowBinding::None;
     uint64_t matmul_packed_row_capacity = 0;
     ConvolutionSpatial2d conv_spatial_2d{};
@@ -468,6 +487,26 @@ struct PhysicalExpression {
         return names;
     }
 };
+
+#ifdef THOR_DEBUG
+// Collapse node-level provenance to the provenance of one physical stage.  A
+// stage containing any replayed primal work is classified as replay even when
+// that work is fused with derivative arithmetic; otherwise derivative work
+// takes precedence over ordinary forward work.
+inline ExpressionExecutionProvenance expressionExecutionProvenance(const PhysicalExpression& expr) {
+    bool has_backward_gradient = false;
+    for (const ExprNode& node : expr.nodes) {
+        if (node.execution_provenance == ExpressionExecutionProvenance::BackwardForwardReplay) {
+            return ExpressionExecutionProvenance::BackwardForwardReplay;
+        }
+        if (node.execution_provenance == ExpressionExecutionProvenance::BackwardGradient) {
+            has_backward_gradient = true;
+        }
+    }
+    return has_backward_gradient ? ExpressionExecutionProvenance::BackwardGradient
+                                 : ExpressionExecutionProvenance::Forward;
+}
+#endif
 
 struct PhysicalConditionalOutputs;
 

@@ -3,6 +3,7 @@
 #include "Utilities/Common/Stream.h"
 #include "Utilities/Expression/CudaHelpers.h"
 #include "Utilities/TensorOperations/Misc/Concatenate.h"
+#include "Utilities/TensorOperations/Misc/ConcatenateSpanGrouping.h"
 
 #include <cuda_runtime.h>
 #include <cuda/std/bit>
@@ -16,7 +17,6 @@ namespace ThorConcatenateSpanCopy {
 
 constexpr uint32_t kThreads = 256;
 constexpr uint32_t kMaxSpansPerBlock = kThreads;
-constexpr uint64_t kTargetBytesPerLane = 32;
 constexpr uint32_t kMaxPortableBlocks = 65535;
 constexpr uint64_t kMaxUint32 = 0xFFFFFFFFULL;
 
@@ -280,27 +280,7 @@ inline uint64_t checkedMultiply(uint64_t lhs, uint64_t rhs, const char *what) {
 }
 
 inline uint32_t spansPerBlockFor(uint64_t expectedSpanBytes, uint64_t spans) {
-    uint32_t spansByPayload = 1;
-    if (expectedSpanBytes <= kTargetBytesPerLane) spansByPayload = 256;
-    else if (expectedSpanBytes <= 2 * kTargetBytesPerLane) spansByPayload = 128;
-    else if (expectedSpanBytes <= 4 * kTargetBytesPerLane) spansByPayload = 64;
-    else if (expectedSpanBytes <= 8 * kTargetBytesPerLane) spansByPayload = 32;
-    else if (expectedSpanBytes <= 16 * kTargetBytesPerLane) spansByPayload = 16;
-    else if (expectedSpanBytes <= 32 * kTargetBytesPerLane) spansByPayload = 8;
-    else if (expectedSpanBytes <= 64 * kTargetBytesPerLane) spansByPayload = 4;
-    else if (expectedSpanBytes <= 128 * kTargetBytesPerLane) spansByPayload = 2;
-
-    // Keep roughly 64 CTAs available when the logical span count permits it.
-    uint32_t spansByParallelism = 1;
-    if (spans >= 16384) spansByParallelism = 256;
-    else if (spans >= 8192) spansByParallelism = 128;
-    else if (spans >= 4096) spansByParallelism = 64;
-    else if (spans >= 2048) spansByParallelism = 32;
-    else if (spans >= 1024) spansByParallelism = 16;
-    else if (spans >= 512) spansByParallelism = 8;
-    else if (spans >= 256) spansByParallelism = 4;
-    else if (spans >= 128) spansByParallelism = 2;
-    return std::min(spansByPayload, spansByParallelism);
+    return ThorConcatenateSpanGrouping::selectSpansPerCta(spans, expectedSpanBytes);
 }
 
 template <uint32_t SpansPerBlock>
@@ -380,6 +360,36 @@ inline void launch(void *packed,
     } else {
         launchIndexed<PackedIsDestination, uint64_t>(packed, splitArrays, spans,
                                                      numArrays, packedSliceBytes, geometry, spansPerBlock, stream);
+    }
+}
+
+template <bool PackedIsDestination>
+inline void launchWithSpansPerCtaForBenchmark(void *packed,
+                                               void *splitArrays[],
+                                               uint64_t outerSlices,
+                                               uint32_t numArrays,
+                                               uint64_t packedSliceBytes,
+                                               const ConcatenateSpanGeometry *geometry,
+                                               uint32_t spansPerBlock,
+                                               Stream stream) {
+    if (outerSlices == 0) return;
+    if (numArrays == 0) throw std::invalid_argument("Dense concatenate requires at least one array.");
+    if (packedSliceBytes == 0) throw std::invalid_argument("Dense concatenate requires a non-zero packed slice size.");
+    if (geometry == nullptr) throw std::invalid_argument("Dense concatenate span geometry is null.");
+    if (spansPerBlock == 0 || spansPerBlock > kMaxSpansPerBlock ||
+        (spansPerBlock & (spansPerBlock - 1U)) != 0U) {
+        throw std::invalid_argument("Dense concatenate benchmark spans-per-CTA must be a power of two in [1,256].");
+    }
+
+    const uint64_t spans = checkedMultiply(outerSlices, static_cast<uint64_t>(numArrays),
+                                           "Dense concatenate span count overflow.");
+    if (spans <= kMaxUint32) {
+        launchIndexed<PackedIsDestination, uint32_t>(
+            packed, splitArrays, static_cast<uint32_t>(spans), numArrays, packedSliceBytes,
+            geometry, spansPerBlock, stream);
+    } else {
+        launchIndexed<PackedIsDestination, uint64_t>(
+            packed, splitArrays, spans, numArrays, packedSliceBytes, geometry, spansPerBlock, stream);
     }
 }
 

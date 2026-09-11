@@ -165,11 +165,11 @@ struct QueuedTrainingState {
 };
 struct WallThroughputEmaState {
     bool initialized = false;
+    bool ratesInitialized = false;
     double lastElapsedSeconds = 0.0;
     uint64_t lastCompletedBatches = 0;
     uint64_t lastCompletedSamples = 0;
-    uint64_t totalCompletedFloatingPointOperations = 0;
-    uint64_t lastCompletedFloatingPointOperations = 0;
+    double pendingFloatingPointOperations = 0.0;
     double samplesPerSecond = 0.0;
     double batchesPerSecond = 0.0;
     double floatingPointOperationsPerSecond = 0.0;
@@ -196,45 +196,41 @@ void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
         snapshot.floatingPointOperationsPerSecond = floatingPointOperationsPerSecond;
     };
 
+    auto assignCurrentRates = [&]() {
+        assignRates(state.batchesPerSecond, state.samplesPerSecond, state.floatingPointOperationsPerSecond);
+    };
+
+    // Throughput is diagnostic-only.  Do not reconstruct a lifetime integer FLOP
+    // total from cumulative epoch/step counters: resumed/multi-phase training can
+    // legitimately begin a phase with a very large reported step, and even a true
+    // lifetime uint64_t FLOP counter would overflow during a sufficiently long run.
+    // Establish a local baseline and accumulate only the work between wall-rate
+    // samples, in double precision because the published rate is a double anyway.
     if (!state.initialized) {
-        // Preserve the prior startup/resume convention for the first rate
-        // sample: when earlier batches predate this observer state, approximate
-        // them with the first observed batch. From this point onward every
-        // completed batch contributes its exact runtime logical FLOP count.
-        if (floatingPointOperationsThisBatch != 0 &&
-            completedBatches > std::numeric_limits<uint64_t>::max() / floatingPointOperationsThisBatch) {
-            throw std::runtime_error("Wall throughput cumulative FLOP count overflow.");
-        }
-        state.totalCompletedFloatingPointOperations = completedBatches * floatingPointOperationsThisBatch;
-        const double batchesPerSecond = static_cast<double>(completedBatches) / snapshot.elapsedSeconds;
-        const double samplesPerSecond =
-            static_cast<double>(completedSamples) / snapshot.elapsedSeconds;
-        const double floatingPointOperationsPerSecond =
-            static_cast<double>(state.totalCompletedFloatingPointOperations) / snapshot.elapsedSeconds;
         state.initialized = true;
         state.lastElapsedSeconds = snapshot.elapsedSeconds;
         state.lastCompletedBatches = completedBatches;
         state.lastCompletedSamples = completedSamples;
-        state.lastCompletedFloatingPointOperations = state.totalCompletedFloatingPointOperations;
-        state.batchesPerSecond = batchesPerSecond;
-        state.samplesPerSecond = samplesPerSecond;
-        state.floatingPointOperationsPerSecond = floatingPointOperationsPerSecond;
-        assignRates(batchesPerSecond, samplesPerSecond, floatingPointOperationsPerSecond);
+        state.pendingFloatingPointOperations = 0.0;
+        assignCurrentRates();
         return;
     }
 
-    if (floatingPointOperationsThisBatch >
-        std::numeric_limits<uint64_t>::max() - state.totalCompletedFloatingPointOperations) {
-        throw std::runtime_error("Wall throughput cumulative FLOP count overflow.");
-    }
-    state.totalCompletedFloatingPointOperations += floatingPointOperationsThisBatch;
-
+    // A caller may rebase cumulative progress (for example across a resumed or
+    // independently-scoped validation population).  Rebaseline diagnostics rather
+    // than allowing stale telemetry state to affect, much less abort, training.
     if (snapshot.elapsedSeconds <= state.lastElapsedSeconds ||
         completedBatches <= state.lastCompletedBatches ||
         completedSamples <= state.lastCompletedSamples) {
-        assignRates(state.batchesPerSecond, state.samplesPerSecond, state.floatingPointOperationsPerSecond);
+        state.lastElapsedSeconds = snapshot.elapsedSeconds;
+        state.lastCompletedBatches = completedBatches;
+        state.lastCompletedSamples = completedSamples;
+        state.pendingFloatingPointOperations = 0.0;
+        assignCurrentRates();
         return;
     }
+
+    state.pendingFloatingPointOperations += static_cast<double>(floatingPointOperationsThisBatch);
 
     const double intervalSeconds = snapshot.elapsedSeconds - state.lastElapsedSeconds;
     if (intervalSeconds < WALL_THROUGHPUT_EMA_MIN_INTERVAL_SECONDS) {
@@ -243,7 +239,7 @@ void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
         // dequeue intervals turns a short drain burst into a visible throughput
         // spike.  Keep accumulating progress until there is a meaningful wall
         // interval; the eventual update uses the full elapsed/progress delta.
-        assignRates(state.batchesPerSecond, state.samplesPerSecond, state.floatingPointOperationsPerSecond);
+        assignCurrentRates();
         return;
     }
 
@@ -251,26 +247,48 @@ void updateWallThroughputRates(TrainingStatsSnapshot& snapshot,
         static_cast<double>(completedBatches - state.lastCompletedBatches);
     const double intervalSamples =
         static_cast<double>(completedSamples - state.lastCompletedSamples);
-    const double intervalFloatingPointOperations = static_cast<double>(
-        state.totalCompletedFloatingPointOperations - state.lastCompletedFloatingPointOperations);
+    const double intervalFloatingPointOperations = state.pendingFloatingPointOperations;
     const double intervalBatchesPerSecond = intervalBatches / intervalSeconds;
     const double intervalSamplesPerSecond = intervalSamples / intervalSeconds;
     const double intervalFloatingPointOperationsPerSecond =
         intervalFloatingPointOperations / intervalSeconds;
 
-    state.batchesPerSecond = (WALL_THROUGHPUT_EMA_ALPHA * intervalBatchesPerSecond) +
-                             ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.batchesPerSecond);
-    state.samplesPerSecond = (WALL_THROUGHPUT_EMA_ALPHA * intervalSamplesPerSecond) +
-                             ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.samplesPerSecond);
-    state.floatingPointOperationsPerSecond =
-        (WALL_THROUGHPUT_EMA_ALPHA * intervalFloatingPointOperationsPerSecond) +
-        ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.floatingPointOperationsPerSecond);
+    if (!state.ratesInitialized) {
+        state.batchesPerSecond = intervalBatchesPerSecond;
+        state.samplesPerSecond = intervalSamplesPerSecond;
+        state.floatingPointOperationsPerSecond = intervalFloatingPointOperationsPerSecond;
+        state.ratesInitialized = true;
+    } else {
+        state.batchesPerSecond = (WALL_THROUGHPUT_EMA_ALPHA * intervalBatchesPerSecond) +
+                                 ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.batchesPerSecond);
+        state.samplesPerSecond = (WALL_THROUGHPUT_EMA_ALPHA * intervalSamplesPerSecond) +
+                                 ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.samplesPerSecond);
+        state.floatingPointOperationsPerSecond =
+            (WALL_THROUGHPUT_EMA_ALPHA * intervalFloatingPointOperationsPerSecond) +
+            ((1.0 - WALL_THROUGHPUT_EMA_ALPHA) * state.floatingPointOperationsPerSecond);
+    }
 
     state.lastElapsedSeconds = snapshot.elapsedSeconds;
     state.lastCompletedBatches = completedBatches;
     state.lastCompletedSamples = completedSamples;
-    state.lastCompletedFloatingPointOperations = state.totalCompletedFloatingPointOperations;
-    assignRates(state.batchesPerSecond, state.samplesPerSecond, state.floatingPointOperationsPerSecond);
+    state.pendingFloatingPointOperations = 0.0;
+    assignCurrentRates();
+}
+
+
+std::optional<uint64_t> bestEffortCurrentBatchFloatingPointOperations(
+    ThorImplementation::StampedNetwork& stampedNetwork,
+    TrainingEventPhase phase) noexcept {
+    try {
+        return phase == TrainingEventPhase::TRAIN
+            ? stampedNetwork.getFloatingPointOperationsCurrentBatchTraining()
+            : stampedNetwork.getFloatingPointOperationsCurrentBatchForward();
+    } catch (...) {
+        // FLOP accounting is telemetry.  A counting overflow or any other
+        // diagnostic-only failure must never turn a successfully submitted batch
+        // into a failed training job.
+        return std::nullopt;
+    }
 }
 
 
@@ -2371,6 +2389,7 @@ class NativeQueuedEpochScheduler {
             uint64_t coordinatorSetGpuMicros = 0;
             uint64_t coordinatorExecMicros = 0;
             uint64_t coordinatorRoundtripMicros = 0;
+            bool floatingPointOperationsAvailable = true;
             ThorImplementation::BatchSubmissionTiming submitTiming;
             for (const StepExecutable& step : steps) {
                 for (uint32_t repeat = 0; repeat < step.getRepeatCount(); ++repeat) {
@@ -2431,15 +2450,23 @@ class NativeQueuedEpochScheduler {
                     if (collectQueueDiagnostics) {
                         ThorImplementation::accumulateBatchSubmissionTiming(submitTiming, singleSubmitTiming);
                     }
-                    ThorImplementation::StampedNetwork& submittedStamp =
-                        placedNetwork->getStampedNetwork(nextStampToProcess);
-                    const uint64_t submitFlops = diagnosticPhase == TrainingEventPhase::TRAIN
-                        ? submittedStamp.getFloatingPointOperationsCurrentBatchTraining()
-                        : submittedStamp.getFloatingPointOperationsCurrentBatchForward();
-                    if (submitFlops > std::numeric_limits<uint64_t>::max() - params->floatingPointOperations) {
-                        throw std::runtime_error("Native queued batch logical FLOP count overflow.");
+                    if (floatingPointOperationsAvailable) {
+                        ThorImplementation::StampedNetwork& submittedStamp =
+                            placedNetwork->getStampedNetwork(nextStampToProcess);
+                        const std::optional<uint64_t> submitFlops =
+                            bestEffortCurrentBatchFloatingPointOperations(submittedStamp, diagnosticPhase);
+                        if (!submitFlops.has_value() ||
+                            submitFlops.value() >
+                                std::numeric_limits<uint64_t>::max() - params->floatingPointOperations) {
+                            // The batch has already been submitted successfully.
+                            // Drop FLOP telemetry for this batch instead of making
+                            // an accounting limitation fatal to model training.
+                            params->floatingPointOperations = 0;
+                            floatingPointOperationsAvailable = false;
+                        } else {
+                            params->floatingPointOperations += submitFlops.value();
+                        }
                     }
-                    params->floatingPointOperations += submitFlops;
                     submitCalls += 1;
                 }
             }

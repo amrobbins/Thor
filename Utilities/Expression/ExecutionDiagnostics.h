@@ -2,7 +2,56 @@
 
 #include <cstdint>
 
+#include "Utilities/Expression/Expression.h"
+
 namespace ThorImplementation {
+
+#ifdef THOR_DEBUG
+// BR0 physical execution instrumentation.  These counters are incremented at
+// stamped-stage submission time, immediately before the backend operation is
+// launched.  Provenance therefore distinguishes actual replayed physical work
+// from both real forward work and legitimate backward-gradient work.
+struct ExpressionPhysicalExecutionProvenanceCounters {
+    uint64_t forward = 0;
+    uint64_t backward_gradient = 0;
+    uint64_t backward_forward_replay = 0;
+
+    [[nodiscard]] uint64_t total() const noexcept { return forward + backward_gradient + backward_forward_replay; }
+};
+
+struct ExpressionTestExecutionCounters {
+    ExpressionPhysicalExecutionProvenanceCounters fused_kernel;
+    ExpressionPhysicalExecutionProvenanceCounters reduction;
+    ExpressionPhysicalExecutionProvenanceCounters matmul;
+    ExpressionPhysicalExecutionProvenanceCounters convolution;
+    ExpressionPhysicalExecutionProvenanceCounters rms_norm;
+    ExpressionPhysicalExecutionProvenanceCounters softmax;
+
+    [[nodiscard]] uint64_t totalBackwardForwardReplay() const noexcept {
+        return fused_kernel.backward_forward_replay + reduction.backward_forward_replay +
+               matmul.backward_forward_replay +
+               convolution.backward_forward_replay + rms_norm.backward_forward_replay +
+               softmax.backward_forward_replay;
+    }
+};
+
+void resetExpressionTestExecutionCounters();
+[[nodiscard]] ExpressionTestExecutionCounters expressionTestExecutionCounters();
+
+namespace detail {
+enum class ExpressionPhysicalExecutionKind : uint8_t {
+    FusedKernel = 0,
+    Reduction = 1,
+    Matmul = 2,
+    Convolution = 3,
+    RmsNorm = 4,
+    Softmax = 5,
+};
+
+void recordExpressionPhysicalExecutionForTests(ExpressionPhysicalExecutionKind kind,
+                                               ExpressionExecutionProvenance provenance);
+}  // namespace detail
+#endif
 
 // Read-only stamp-time diagnostics for a cuBLASLt-backed Expression Matmul stage.
 // These values describe the selected kernel artifact; collecting them does not

@@ -8,6 +8,7 @@
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
+#include "Utilities/Expression/ExecutionDiagnostics.h"
 
 #include "cuda_bf16.h"
 #include "cuda_fp16.h"
@@ -839,6 +840,85 @@ TEST(Convolution3dApi, StampsAsPhysicalCustomLayerAllocatesParametersAndSerializ
     EXPECT_TRUE(fixture.physicalConvolution->getParameter("weights")->hasOptimizer());
     EXPECT_TRUE(fixture.physicalConvolution->getParameter("biases")->hasOptimizer());
 }
+
+#ifdef THOR_DEBUG
+TEST(Convolution3dApi, Br2DefaultGeluBackwardUsesRetainedForwardValuesWithoutConvolutionReplay) {
+    constexpr uint32_t batchSize = 1;
+    constexpr uint32_t C = 2;
+    constexpr uint32_t D = 4;
+    constexpr uint32_t H = 4;
+    constexpr uint32_t W = 4;
+    constexpr uint32_t K = 3;
+    const DataType dataType = DataType::FP16;
+
+    shared_ptr<Api::Sgd> weightsSgd =
+        Api::Sgd::Builder().initialLearningRate(0.001f).decay(0.0f).momentum(0.0f).build();
+    shared_ptr<Api::Sgd> biasesSgd =
+        Api::Sgd::Builder().initialLearningRate(0.001f).decay(0.0f).momentum(0.0f).build();
+
+    Api::Network network("conv3d_br0_default_gelu_forward_replay");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("input")
+                                  .dimensions({C, D, H, W})
+                                  .dataType(dataType)
+                                  .build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::Convolution3d conv = Api::Convolution3d::Builder()
+                                  .network(network)
+                                  .featureInput(inputRivet.getFeatureOutput().value())
+                                  .numOutputChannels(K)
+                                  .filterDepth(3)
+                                  .filterHeight(3)
+                                  .filterWidth(3)
+                                  .depthPadding(1)
+                                  .verticalPadding(1)
+                                  .horizontalPadding(1)
+                                  .hasBias(true)
+                                  .weightsOptimizer(weightsSgd)
+                                  .biasesOptimizer(biasesSgd)
+                                  .build();  // GELU is intentionally the default.
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(conv.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    PlacedConvolution3dFixture fixture = placeSingleConvolution3dNetwork(network, input, output, conv, batchSize, false);
+    ASSERT_TRUE(fixture.physicalConvolution->getGradientUpdateStream().has_value());
+    Stream stream = fixture.physicalConvolution->getStreams()[0];
+    Stream gradientStream = fixture.physicalConvolution->getGradientUpdateStream().value();
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, C, D, H, W}));
+    writeCpuTensor(featureInHost, vector<float>(batchSize * C * D * H * W, 0.125f));
+    (void)runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+
+    ASSERT_GT(fixture.physicalConvolution->getErrorInputs().size(), 0U);
+    ASSERT_TRUE(fixture.physicalConvolution->getErrorInputs()[0].has_value());
+    Impl::Tensor errorInput = fixture.physicalConvolution->getErrorInputs()[0].value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, vector<float>(tensorNumel(errorInputHost), 1.0f));
+    errorInput.copyFromAsync(errorInputHost, stream);
+    stream.synchronize();
+
+    Impl::resetExpressionTestExecutionCounters();
+    fixture.physicalConvolution->backward(errorInput, batchSize);
+    stream.synchronize();
+    gradientStream.synchronize();
+
+    const Impl::ExpressionTestExecutionCounters counters = Impl::expressionTestExecutionCounters();
+    EXPECT_EQ(counters.convolution.backward_forward_replay, 0U)
+        << "BR2 must feed the real retained GELU prerequisites to both CustomLayer backward plans instead of replaying convolution.";
+    EXPECT_GE(counters.convolution.backward_gradient, 2U)
+        << "Replay must remain distinct from the legitimate dInput/dWeights convolution backward operations.";
+    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U)
+        << "Generic BR2 CustomLayer backward must contain no implicit forward replay.";
+}
+#endif
 
 TEST(Convolution3dApi, ThreePassForwardBackwardWithSgdUpdatesWeightsAndBiases) {
     constexpr uint32_t batchSize = 2;

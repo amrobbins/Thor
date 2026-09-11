@@ -75,6 +75,7 @@ TEST(RaggedPartitionRequirementRP5, DirectRaggedOperatorsDeclareOnlyThePhysicalI
     EXPECT_EQ(StampedPaddedRaggedUnpack::raggedPartitionRequirement(), RaggedPartitionRequirement::DEVICE_OFFSETS);
     EXPECT_EQ(StampedPaddedRaggedPointwise::raggedPartitionRequirement(), RaggedPartitionRequirement::NONE);
     EXPECT_EQ(StampedSanitizePackedTail::raggedPartitionRequirement(), RaggedPartitionRequirement::HOST_EXTENT);
+    EXPECT_EQ(StampedSanitizePaddedRaggedTail::raggedPartitionRequirement(), RaggedPartitionRequirement::DEVICE_OFFSETS);
 }
 
 TEST(RaggedPartitionRequirementRP5, CompilerPayloadsDistinguishScalarExtentFromFullOffsets) {

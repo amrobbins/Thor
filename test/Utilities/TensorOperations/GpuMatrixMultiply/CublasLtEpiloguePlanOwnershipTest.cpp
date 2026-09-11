@@ -3,6 +3,7 @@
 #include "cuda_runtime.h"
 #include "gtest/gtest.h"
 
+#include <cmath>
 #include <cstdint>
 #include <optional>
 #include <type_traits>
@@ -39,7 +40,93 @@ std::vector<float> copyFp32ToHost(const Tensor& gpuTensor, Stream& stream) {
     return std::vector<float>(values, values + cpu.getTotalNumElements());
 }
 
+float cublasLtGeluApprox(float x) {
+    constexpr float sqrtTwoOverPi = 0.7978845608028654f;
+    return 0.5f * x * (1.0f + std::tanh(sqrtTwoOverPi * (x + 0.044715f * x * x * x)));
+}
+
 }  // namespace
+
+TEST(CublasLtEpiloguePlanOwnership, GeluAuxForwardPlanWritesPreactivationAndResult) {
+    REQUIRE_CUDA_DEVICE();
+    constexpr int gpuNum = 0;
+    constexpr int m = 8;
+    constexpr int k = 8;
+    constexpr int n = 8;
+    constexpr float aValue = 0.25f;
+    constexpr float bValue = 0.5f;
+    constexpr float biasValue = 0.1f;
+
+    ScopedGpu scopedGpu(gpuNum);
+    Stream stream(gpuNum);
+    TensorPlacement gpuPlacement(TensorPlacement::MemDevices::GPU, gpuNum);
+    Tensor A(gpuPlacement, TensorDescriptor(DataType::FP32, {m, k}));
+    Tensor B(gpuPlacement, TensorDescriptor(DataType::FP32, {k, n}));
+    Tensor bias(gpuPlacement, TensorDescriptor(DataType::FP32, {n}));
+    Tensor D(gpuPlacement, TensorDescriptor(DataType::FP32, {m, n}));
+    Tensor aux(gpuPlacement, TensorDescriptor(DataType::FP32, {m, n}));
+    A.fill(aValue, stream);
+    B.fill(bValue, stream);
+    bias.fill(biasValue, stream);
+    D.memsetAsync(stream, 0);
+    aux.memsetAsync(stream, 0);
+    stream.synchronize();
+
+    auto& cublas = CublasMatrixMultiply::instance();
+    const CublasMatrixMultiply::MatmulDataTypes dataTypes =
+        CublasMatrixMultiply::MatmulDataTypes::same(DataType::FP32);
+    auto plan = cublas.buildGemmWithEpiloguePlan(gpuNum,
+                                                  m,
+                                                  k,
+                                                  k,
+                                                  n,
+                                                  k,
+                                                  n,
+                                                  n,
+                                                  n,
+                                                  false,
+                                                  false,
+                                                  dataTypes,
+                                                  CublasMatrixMultiply::EpilogueFusion::Gelu,
+                                                  std::optional<Tensor>(bias),
+                                                  true,
+                                                  std::nullopt,
+                                                  std::nullopt,
+                                                  std::optional<Tensor>(aux));
+    if (!plan) {
+        GTEST_SKIP() << "This GPU/cuBLASLt combination has no qualified GELU_AUX_BIAS algorithm for the test shape.";
+    }
+
+    std::optional<Tensor> workspace;
+    if (plan->algorithm.workspace_size_in_bytes != 0) {
+        workspace = Tensor(gpuPlacement, TensorDescriptor(DataType::UINT8, {plan->algorithm.workspace_size_in_bytes}));
+    }
+
+    const float alpha = 1.0f;
+    const float beta = 0.0f;
+    plan->runGemmWithEpilogue(A,
+                              B,
+                              std::optional<Tensor>(bias),
+                              D,
+                              &alpha,
+                              &beta,
+                              stream,
+                              CublasScalarPointerMode::Host,
+                              workspace,
+                              true,
+                              std::optional<Tensor>(aux));
+    stream.synchronize();
+
+    const float expectedPreactivation = static_cast<float>(k) * aValue * bValue + biasValue;
+    for (float value : copyFp32ToHost(aux, stream)) {
+        EXPECT_NEAR(value, expectedPreactivation, 2.0e-4f)
+            << "GELU_AUX must contain the input to GELU after the bias epilogue is applied.";
+    }
+    const float expectedOutput = cublasLtGeluApprox(expectedPreactivation);
+    for (float value : copyFp32ToHost(D, stream)) {
+        EXPECT_NEAR(value, expectedOutput, 3.0e-4f);
+    }
+}
 
 TEST(CublasLtEpiloguePlanOwnership, EquivalentPlansShareSelectionOnlyAndSurviveSelectionCacheClear) {
     REQUIRE_CUDA_DEVICE();

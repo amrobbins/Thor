@@ -22,6 +22,9 @@
 #include <cudnn_frontend.h>
 
 #include <algorithm>
+#ifdef THOR_DEBUG
+#include <atomic>
+#endif
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +53,63 @@ namespace {
 constexpr int64_t CUDNN_FRONTEND_CONV_X_UID = 7'100'001;
 constexpr int64_t CUDNN_FRONTEND_CONV_W_UID = 7'100'002;
 constexpr int64_t CUDNN_FRONTEND_CONV_Y_UID = 7'100'003;
+
+#ifdef THOR_DEBUG
+struct AtomicExpressionPhysicalExecutionProvenanceCounters {
+    std::atomic<uint64_t> forward{0};
+    std::atomic<uint64_t> backward_gradient{0};
+    std::atomic<uint64_t> backward_forward_replay{0};
+};
+
+struct AtomicExpressionTestExecutionCounters {
+    AtomicExpressionPhysicalExecutionProvenanceCounters fused_kernel;
+    AtomicExpressionPhysicalExecutionProvenanceCounters reduction;
+    AtomicExpressionPhysicalExecutionProvenanceCounters matmul;
+    AtomicExpressionPhysicalExecutionProvenanceCounters convolution;
+    AtomicExpressionPhysicalExecutionProvenanceCounters rms_norm;
+    AtomicExpressionPhysicalExecutionProvenanceCounters softmax;
+};
+
+AtomicExpressionTestExecutionCounters& expressionExecutionCountersStorage() {
+    static AtomicExpressionTestExecutionCounters counters;
+    return counters;
+}
+
+AtomicExpressionPhysicalExecutionProvenanceCounters& countersForKind(
+    AtomicExpressionTestExecutionCounters& counters,
+    detail::ExpressionPhysicalExecutionKind kind) {
+    switch (kind) {
+        case detail::ExpressionPhysicalExecutionKind::FusedKernel:
+            return counters.fused_kernel;
+        case detail::ExpressionPhysicalExecutionKind::Reduction:
+            return counters.reduction;
+        case detail::ExpressionPhysicalExecutionKind::Matmul:
+            return counters.matmul;
+        case detail::ExpressionPhysicalExecutionKind::Convolution:
+            return counters.convolution;
+        case detail::ExpressionPhysicalExecutionKind::RmsNorm:
+            return counters.rms_norm;
+        case detail::ExpressionPhysicalExecutionKind::Softmax:
+            return counters.softmax;
+    }
+    throw std::runtime_error("Unknown Expression physical execution counter kind.");
+}
+
+void resetAtomicProvenanceCounters(AtomicExpressionPhysicalExecutionProvenanceCounters& counters) {
+    counters.forward.store(0, std::memory_order_relaxed);
+    counters.backward_gradient.store(0, std::memory_order_relaxed);
+    counters.backward_forward_replay.store(0, std::memory_order_relaxed);
+}
+
+ExpressionPhysicalExecutionProvenanceCounters snapshotAtomicProvenanceCounters(
+    const AtomicExpressionPhysicalExecutionProvenanceCounters& counters) {
+    return ExpressionPhysicalExecutionProvenanceCounters{
+        .forward = counters.forward.load(std::memory_order_relaxed),
+        .backward_gradient = counters.backward_gradient.load(std::memory_order_relaxed),
+        .backward_forward_replay = counters.backward_forward_replay.load(std::memory_order_relaxed),
+    };
+}
+#endif
 
 static uint64_t checkedFinalScanAxis(const std::vector<uint64_t>& dims, uint64_t encoded_axis) {
     if (dims.empty()) {
@@ -301,6 +361,48 @@ static Tensor cudnnSemanticTensorView(const Tensor& tensor, AttentionTensorLayou
 }
 
 }  // namespace
+
+#ifdef THOR_DEBUG
+void resetExpressionTestExecutionCounters() {
+    AtomicExpressionTestExecutionCounters& counters = expressionExecutionCountersStorage();
+    resetAtomicProvenanceCounters(counters.fused_kernel);
+    resetAtomicProvenanceCounters(counters.reduction);
+    resetAtomicProvenanceCounters(counters.matmul);
+    resetAtomicProvenanceCounters(counters.convolution);
+    resetAtomicProvenanceCounters(counters.rms_norm);
+    resetAtomicProvenanceCounters(counters.softmax);
+}
+
+ExpressionTestExecutionCounters expressionTestExecutionCounters() {
+    const AtomicExpressionTestExecutionCounters& counters = expressionExecutionCountersStorage();
+    return ExpressionTestExecutionCounters{
+        .fused_kernel = snapshotAtomicProvenanceCounters(counters.fused_kernel),
+        .reduction = snapshotAtomicProvenanceCounters(counters.reduction),
+        .matmul = snapshotAtomicProvenanceCounters(counters.matmul),
+        .convolution = snapshotAtomicProvenanceCounters(counters.convolution),
+        .rms_norm = snapshotAtomicProvenanceCounters(counters.rms_norm),
+        .softmax = snapshotAtomicProvenanceCounters(counters.softmax),
+    };
+}
+
+void detail::recordExpressionPhysicalExecutionForTests(ExpressionPhysicalExecutionKind kind,
+                                                       ExpressionExecutionProvenance provenance) {
+    AtomicExpressionPhysicalExecutionProvenanceCounters& counters =
+        countersForKind(expressionExecutionCountersStorage(), kind);
+    switch (provenance) {
+        case ExpressionExecutionProvenance::Forward:
+            counters.forward.fetch_add(1, std::memory_order_relaxed);
+            return;
+        case ExpressionExecutionProvenance::BackwardGradient:
+            counters.backward_gradient.fetch_add(1, std::memory_order_relaxed);
+            return;
+        case ExpressionExecutionProvenance::BackwardForwardReplay:
+            counters.backward_forward_replay.fetch_add(1, std::memory_order_relaxed);
+            return;
+    }
+    throw std::runtime_error("Unknown Expression execution provenance.");
+}
+#endif
 
 static void putFrontendTensorPointer(std::unordered_map<int64_t, void*>& pack, int64_t uid, const Tensor& tensor);
 static void executeFrontendConvolutionGraph(const BuiltConvolution& built,
@@ -1068,6 +1170,11 @@ void StampedAttention::retainForwardStateForBackward() {
     if (!forward_state->retain_for_backward) {
         forward_state->has_valid_stats = false;
     }
+    // The physical O tensor is allocated while stamping. Record its exact handle
+    // now so downstream native Attention backward stamping can bind it without
+    // replaying the forward graph. has_valid_stats remains false until runOn()
+    // actually executes this forward for a batch.
+    forward_state->output = output;
     forward_state->retain_for_backward = true;
     if (!forward_state->stats.isInitialized()) {
         ScopedGpuAllocationContext allocation_context(
@@ -1116,28 +1223,63 @@ std::optional<uint64_t> StampedAttentionBackward::runtimeLogicalFlopCount() cons
     return attentionFlopCheckedMul(forward_flops.value(), 4, "StampedAttentionBackward::runtimeLogicalFlopCount");
 }
 
+bool StampedAttentionBackward::tryLinkForwardStateFrom(const std::shared_ptr<StampedAttention>& forward) {
+    if (forward == nullptr || !compiled_attention_backward) {
+        return false;
+    }
+    if (!forward->canProvideForwardStateFor(*compiled_attention_backward,
+                                            q,
+                                            k,
+                                            v,
+                                            bias,
+                                            seq_len_q,
+                                            seq_len_kv,
+                                            q_ragged_offsets,
+                                            kv_ragged_offsets,
+                                            dropout_seed,
+                                            dropout_offset,
+                                            dO)) {
+        return false;
+    }
+
+    forward->retainForwardStateForBackward();
+    std::shared_ptr<AttentionForwardState> candidate = forward->getForwardState();
+    if (candidate == nullptr || !candidate->retain_for_backward || !candidate->stats.isInitialized() ||
+        !(candidate->output == forward->getOutputTensor())) {
+        throw std::runtime_error("Attention forward provider failed to retain complete state for linked backward execution.");
+    }
+
+    saved_forward_state = std::move(candidate);
+    // oScratch/stats are stamping-only descriptor tensors when a backward is
+    // constructed before its cross-plan forward-state link is installed.  They
+    // are never valid runtime substitutes for the real forward activation/state.
+    // Drop them as soon as the required provider has been established.
+    oScratch = Tensor();
+    stats = Tensor();
+    return true;
+}
+
 void StampedAttentionBackward::runOn(Stream& run_stream) const {
     if (!compiled_attention_backward) {
         throw std::runtime_error("StampedAttentionBackward::runOn called with null compiled attention-backward payload.");
     }
 
-    const bool use_saved_forward = saved_forward_state != nullptr;
-    const Tensor& forwardOutput = use_saved_forward ? saved_forward_state->output : oScratch;
-    const Tensor& forwardStats = use_saved_forward ? saved_forward_state->stats : stats;
-
-    if (use_saved_forward) {
-        if (!saved_forward_state->has_valid_stats || !forwardOutput.isInitialized() || !forwardStats.isInitialized()) {
-            throw std::runtime_error(
-                "Attention-backward expected same-plan retained cuDNN forward stats, but the matching forward stage did not populate "
-                "them.");
-        }
-        if (forwardOutput.getDimensions() != dO.getDimensions() || forwardOutput.getDataType() != dO.getDataType() ||
-            forwardOutput.getPlacement() != dO.getPlacement()) {
-            throw std::runtime_error("Retained attention forward output is incompatible with attention-backward dO.");
-        }
+    if (saved_forward_state == nullptr) {
+        throw std::runtime_error(
+            "Attention backward is not linked to its matching retained real-forward state; "
+            "forward replay is not a supported correctness path.");
+    }
+    const Tensor& forwardOutput = saved_forward_state->output;
+    const Tensor& forwardStats = saved_forward_state->stats;
+    if (!saved_forward_state->has_valid_stats || !forwardOutput.isInitialized() || !forwardStats.isInitialized()) {
+        throw std::runtime_error(
+            "Attention backward requires retained cuDNN state produced by its matching real forward, but that forward state is invalid.");
+    }
+    if (forwardOutput.getDimensions() != dO.getDimensions() || forwardOutput.getDataType() != dO.getDataType() ||
+        forwardOutput.getPlacement() != dO.getPlacement()) {
+        throw std::runtime_error("Retained attention forward output is incompatible with attention-backward dO.");
     }
 
-    uint64_t raggedBatchSize = 0;
     if (compiled_attention_backward->use_ragged_offsets) {
         if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value()) {
             throw std::runtime_error("StampedAttentionBackward requires canonical q/kv row partitions for ragged attention.");
@@ -1147,10 +1289,7 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
         if (qOffsetDims.size() != 1 || qOffsetDims != kvOffsetDims || qOffsetDims[0] < 2) {
             throw std::runtime_error("StampedAttentionBackward ragged q/kv row partitions must both have shape [B+1].");
         }
-        raggedBatchSize = qOffsetDims[0] - 1;
     }
-    CudnnAttentionDescriptor descriptor = compiled_attention_backward->descriptorFor(q, k, v, forwardOutput, raggedBatchSize);
-    descriptor.generateStats = true;
 
     const bool queryPackedRagged = compiled_attention_backward->use_ragged_offsets && q.getDimensions().size() == 3;
     const bool kvPackedRagged = compiled_attention_backward->use_ragged_offsets && k.getDimensions().size() == 3;
@@ -1162,45 +1301,6 @@ void StampedAttentionBackward::runOn(Stream& run_stream) const {
     Tensor cudnnDQ = queryPackedRagged ? dQ : cudnnSemanticTensorView(dQ, compiled_attention_backward->q_layout, "dQ");
     Tensor cudnnDK = kvPackedRagged ? dK : cudnnSemanticTensorView(dK, compiled_attention_backward->k_layout, "dK");
     Tensor cudnnDV = kvPackedRagged ? dV : cudnnSemanticTensorView(dV, compiled_attention_backward->v_layout, "dV");
-
-    if (!use_saved_forward) {
-        Tensor cudnnOScratch = queryPackedRagged ? oScratch : cudnnSemanticTensorView(oScratch, compiled_attention_backward->o_layout, "oScratch");
-        CudnnAttentionForwardArgs fwdArgs{.q = cudnnQ, .k = cudnnK, .v = cudnnV, .o = cudnnOScratch, .stats = stats};
-        if (compiled_attention_backward->use_bias) {
-            if (!bias.has_value()) {
-                throw std::runtime_error("StampedAttentionBackward requires an additive bias tensor but none was provided.");
-            }
-            fwdArgs.bias = bias.value();
-        }
-        if (compiled_attention_backward->use_padding_mask) {
-            if (!seq_len_q.has_value() || !seq_len_kv.has_value()) {
-                throw std::runtime_error("StampedAttentionBackward requires q/kv sequence length tensors for padding-mask attention.");
-            }
-            fwdArgs.seqLenQ = seq_len_q.value();
-            fwdArgs.seqLenKv = seq_len_kv.value();
-        }
-        if (compiled_attention_backward->use_ragged_offsets) {
-            if (!q_ragged_offsets.has_value() || !kv_ragged_offsets.has_value() || !ragged_scratch.has_value()) {
-                throw std::runtime_error(
-                    "StampedAttentionBackward requires canonical q/kv row partitions and ragged metadata scratch.");
-            }
-            fwdArgs.qRowPartitionOffsets = q_ragged_offsets.value();
-            fwdArgs.kvRowPartitionOffsets = kv_ragged_offsets.value();
-            fwdArgs.raggedScratch = ragged_scratch.value();
-        }
-        if (compiled_attention_backward->dropout_probability > 0.0f) {
-            if (!dropout_seed.has_value() || !dropout_offset.has_value()) {
-                throw std::runtime_error("StampedAttentionBackward requires dropout seed/offset tensors for attention dropout.");
-            }
-            fwdArgs.dropoutSeed = dropout_seed.value();
-            fwdArgs.dropoutOffset = dropout_offset.value();
-        }
-        if (!fallback_forward_plan.has_value()) {
-            throw std::runtime_error("StampedAttentionBackward has no prepared fallback-forward executable plan.");
-        }
-        CudnnScaledDotProductAttention::instance().forward(
-            fallback_forward_plan.value(), fwdArgs, fallback_forward_workspace, run_stream);
-    }
 
     CudnnAttentionBackwardArgs bwdArgs{.q = cudnnQ,
                                        .k = cudnnK,
@@ -1326,17 +1426,12 @@ StampedAttentionBackward::StampedAttentionBackward(std::shared_ptr<CompiledAtten
                                       "attention_backward",
                                       attentionWorkspaceDetail(descriptor, compiled_attention_backward->use_ragged_offsets));
 
-    if (!this->saved_forward_state) {
-        CudnnAttentionForwardArgs forwardWorkspaceArgs{.q = q, .k = k, .v = v, .o = oScratch};
-        forwardWorkspaceArgs.bias = bias;
-        fallback_forward_plan.emplace(
-            CudnnScaledDotProductAttention::instance().prepareForward(descriptor, forwardWorkspaceArgs, stream));
-        ensureAttentionExecutionWorkspace(
-            fallback_forward_workspace,
-            dQ.getPlacement(),
-            fallback_forward_plan->workspaceBytes(),
-            "attention_fallback_forward",
-            attentionWorkspaceDetail(descriptor, compiled_attention_backward->use_ragged_offsets));
+    if (this->saved_forward_state != nullptr) {
+        if (!this->saved_forward_state->output.isInitialized() || !this->saved_forward_state->stats.isInitialized()) {
+            throw std::runtime_error("Attention backward received incomplete retained forward state during stamping.");
+        }
+        this->oScratch = Tensor();
+        this->stats = Tensor();
     }
 }
 
@@ -1854,11 +1949,9 @@ struct RaggedConv1dPaddedForwardState {
 };
 
 struct RaggedConv1dPaddedBackwardDataState {
-    // Producer-owned dY remains untouched. T9A owns a separate consumer scratch
-    // with exactly the same retained plan; sanitation copies active values and
-    // zeros only the scratch tail before cuDNN dgrad observes it.
+    // PRS3 inserts an explicit graph-visible sanitation stage before cuDNN.
+    // dgrad therefore consumes the retained dY generation directly.
     std::shared_ptr<PaddedRaggedSequence> grad_output_padded;
-    std::shared_ptr<PaddedRaggedSequence> sanitized_grad_output;
     std::shared_ptr<PaddedRaggedSequence> output_padded;
     std::shared_ptr<CompiledConvolutionBackward> dense_dgrad;
     Tensor filter_2d;
@@ -1869,10 +1962,9 @@ struct RaggedConv1dPaddedBackwardDataState {
 };
 
 struct RaggedConv1dPaddedBackwardFilterState {
+    // PRS3 prepares both retained inputs in place before this vendor stage.
     std::shared_ptr<PaddedRaggedSequence> input_padded;
     std::shared_ptr<PaddedRaggedSequence> grad_output_padded;
-    std::shared_ptr<PaddedRaggedSequence> sanitized_input;
-    std::shared_ptr<PaddedRaggedSequence> sanitized_grad_output;
     std::shared_ptr<CompiledConvolutionBackward> dense_wgrad;
     std::vector<uint64_t> width_capacity_family;
     std::vector<std::shared_ptr<BuiltConvolution>> prebuilt_wgrads;
@@ -2087,13 +2179,12 @@ void buildT7r5PlanFamily(RaggedConv1dPaddedForwardState& state,
 
     uint64_t max_workspace_bytes = 0;
     for (uint64_t width_capacity : state.width_capacity_family) {
-        state.input_padded->reconfigure(
-            makeT7r5StructuralPaddedPlan(compiled, compiled.input_channels, compiled.input_dtype, width_capacity));
-        state.output_padded->reconfigure(
-            makeT7r5StructuralPaddedPlan(compiled, compiled.output_channels, compiled.output_dtype, width_capacity));
-
-        Tensor padded_input = state.input_padded->paddedTensor();
-        Tensor padded_output = state.output_padded->paddedTensor();
+        // Build every cuDNN plan against a width-specific view of the retained
+        // backing storage. Stamping must not change the runtime-selected W or
+        // active population carried by either retained physical value. This is
+        // the same non-mutating placement-time contract used by dgrad/wgrad.
+        Tensor padded_input = state.input_padded->paddedTensorForWidth(width_capacity);
+        Tensor padded_output = state.output_padded->paddedTensorForWidth(width_capacity);
         std::shared_ptr<BuiltConvolution> built =
             StampedEquation::buildConvolution(state.dense_convolution,
                                               padded_input,
@@ -2199,8 +2290,8 @@ void buildT9aDgradPlanFamily(RaggedConv1dPaddedBackwardDataState& state,
         throw std::runtime_error(
             "Ragged Conv1D padded cuDNN dgrad currently supports FP16, BF16, and FP32 dtypes; no alternate backend is used.");
     }
-    if (!state.grad_output_padded || !state.sanitized_grad_output || !state.output_padded) {
-        throw std::runtime_error("T9A ragged Conv1D dgrad requires producer dY, sanitation scratch, and padded dX.");
+    if (!state.grad_output_padded || !state.output_padded) {
+        throw std::runtime_error("T9A ragged Conv1D dgrad requires retained dY and padded dX.");
     }
     if (state.width_capacity_family.empty()) {
         throw std::runtime_error("Ragged Conv1D dgrad placement produced an empty width-capacity family.");
@@ -2213,13 +2304,11 @@ void buildT9aDgradPlanFamily(RaggedConv1dPaddedBackwardDataState& state,
 
     uint64_t max_workspace_bytes = 0;
     for (uint64_t width_capacity : state.width_capacity_family) {
-        state.grad_output_padded->reconfigure(makeStructuralPaddedPlan(compiled.padded_grad_output_layout, width_capacity));
-        state.sanitized_grad_output->reconfigure(
-            makeStructuralPaddedPlan(compiled.padded_grad_output_layout, width_capacity));
-        state.output_padded->reconfigure(makeStructuralPaddedPlan(compiled.padded_output_layout, width_capacity));
-
-        Tensor padded_dy = state.sanitized_grad_output->paddedTensor();
-        Tensor padded_dx = state.output_padded->paddedTensor();
+        // Build every cuDNN plan directly against the retained backing storage.
+        // paddedTensorForWidth() creates only a view and does not mutate the
+        // runtime-selected representation plan.
+        Tensor padded_dy = state.grad_output_padded->paddedTensorForWidth(width_capacity);
+        Tensor padded_dx = state.output_padded->paddedTensorForWidth(width_capacity);
         std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolutionBackward(
             state.dense_dgrad,
             state.filter_2d,
@@ -2242,7 +2331,7 @@ void buildT9aDgradPlanFamily(RaggedConv1dPaddedBackwardDataState& state,
 
 void prepareT9aDgradForRetainedGradOutput(RaggedConv1dPaddedBackwardDataState& state,
                                            const CompiledRaggedConv1dCausalBackwardData& compiled) {
-    if (!state.grad_output_padded || !state.sanitized_grad_output || !state.output_padded || !state.dense_dgrad ||
+    if (!state.grad_output_padded || !state.output_padded || !state.dense_dgrad ||
         state.prebuilt_dgrads.size() != state.width_capacity_family.size()) {
         throw std::runtime_error("Ragged Conv1D dgrad plan family was not completely prepared during stamping.");
     }
@@ -2271,9 +2360,6 @@ void prepareT9aDgradForRetainedGradOutput(RaggedConv1dPaddedBackwardDataState& s
         throw std::runtime_error("Ragged Conv1D dgrad width-0 dY cannot contain active values.");
     }
 
-    PaddedRaggedSequencePlan sanitized_plan = makeStructuralPaddedPlan(compiled.padded_grad_output_layout, dy_plan.widthCapacity);
-    sanitized_plan.activeValues = dy_plan.activeValues;
-    state.sanitized_grad_output->reconfigure(std::move(sanitized_plan));
     PaddedRaggedSequencePlan dx_plan = makeStructuralPaddedPlan(compiled.padded_output_layout, dy_plan.widthCapacity);
     dx_plan.activeValues = dy_plan.activeValues;
     state.output_padded->reconfigure(std::move(dx_plan));
@@ -2320,20 +2406,18 @@ void buildT9bWgradPlanFamily(RaggedConv1dPaddedBackwardFilterState& state,
         throw std::runtime_error(
             "Ragged Conv1D padded cuDNN wgrad currently supports FP16, BF16, and FP32 dtypes; no alternate backend is used.");
     }
-    if (!state.input_padded || !state.grad_output_padded || !state.sanitized_input || !state.sanitized_grad_output) {
-        throw std::runtime_error("T9B ragged Conv1D wgrad requires X, dY, and both sanitation scratch values.");
+    if (!state.input_padded || !state.grad_output_padded) {
+        throw std::runtime_error("T9B ragged Conv1D wgrad requires retained X and dY.");
     }
     state.dense_wgrad = makeT9bDenseWgradDescriptor(compiled);
     Tensor output_2d = output;
     output_2d.reshape({compiled.output_channels, compiled.input_channels / compiled.groups, 1, compiled.kernel_width});
     uint64_t max_workspace_bytes = 0;
     for (uint64_t width_capacity : state.width_capacity_family) {
-        // Plan construction uses consumer-owned scratch only. Never reconfigure
-        // producer-retained X/dY merely to build the finite wgrad family.
-        state.sanitized_input->reconfigure(makeStructuralPaddedPlan(compiled.padded_input_layout, width_capacity));
-        state.sanitized_grad_output->reconfigure(makeStructuralPaddedPlan(compiled.padded_grad_output_layout, width_capacity));
-        Tensor x = state.sanitized_input->paddedTensor();
-        Tensor dy = state.sanitized_grad_output->paddedTensor();
+        // Build directly against retained X/dY storage without changing either
+        // value's runtime-selected W.
+        Tensor x = state.input_padded->paddedTensorForWidth(width_capacity);
+        Tensor dy = state.grad_output_padded->paddedTensorForWidth(width_capacity);
         std::shared_ptr<BuiltConvolution> built = StampedEquation::buildConvolutionBackward(
             state.dense_wgrad, x, dy, output_2d, stream, output.getPlacement().getDeviceNum());
         if (!built) throw std::runtime_error("Ragged Conv1D wgrad placement failed to build a cuDNN backward-filter plan.");
@@ -2376,12 +2460,6 @@ void prepareT9bWgradForRetainedInputs(RaggedConv1dPaddedBackwardFilterState& sta
     } else if (dy_plan.activeValues != 0) {
         throw std::runtime_error("Ragged Conv1D wgrad width-0 inputs cannot contain active values.");
     }
-    PaddedRaggedSequencePlan sx = makeStructuralPaddedPlan(compiled.padded_input_layout, dy_plan.widthCapacity);
-    PaddedRaggedSequencePlan sdy = makeStructuralPaddedPlan(compiled.padded_grad_output_layout, dy_plan.widthCapacity);
-    sx.activeValues = dy_plan.activeValues;
-    sdy.activeValues = dy_plan.activeValues;
-    state.sanitized_input->reconfigure(std::move(sx));
-    state.sanitized_grad_output->reconfigure(std::move(sdy));
 }
 
 std::shared_ptr<BuiltConvolution> t9bPrebuiltWgradForWidth(const RaggedConv1dPaddedBackwardFilterState& state,
@@ -2435,6 +2513,24 @@ StampedPaddedRaggedPack::StampedPaddedRaggedPack(CompiledPaddedRaggedSequenceLay
     if (this->width_capacities.empty() || this->width_capacities.back() < this->layout.max_values_per_row) {
         throw std::runtime_error("StampedPaddedRaggedPack requires a complete placement-time width family.");
     }
+
+    for (const uint64_t width_capacity : this->width_capacities) {
+        if (width_capacity == 0 || width_capacity > this->layout.max_values_per_row) {
+            throw std::runtime_error("StampedPaddedRaggedPack width family contains an invalid capacity.");
+        }
+        const auto [it, inserted] = launch_plan_by_width.emplace(
+            width_capacity,
+            preparePaddedRaggedPackLaunchPlan(this->layout.batch_size,
+                                              this->layout.max_total_values,
+                                              this->layout.channels,
+                                              width_capacity,
+                                              this->layout.values_dtype,
+                                              this->layout.offset_dtype));
+        if (!inserted) {
+            throw std::runtime_error("StampedPaddedRaggedPack width family contains duplicate capacities.");
+        }
+        (void)it;
+    }
 }
 
 void StampedPaddedRaggedPack::run() { runOn(stream); }
@@ -2444,23 +2540,146 @@ void StampedPaddedRaggedPack::runOn(Stream& run_stream) const {
         throw std::runtime_error("Padded ragged pack stream GPU does not match tensor placement.");
     }
     preparePaddedForCurrentPartition(*padded_values, layout, width_capacities);
-    padded_values->packFrom(packed_values, run_stream);
+    const uint64_t width_capacity = padded_values->getPlan().widthCapacity;
+    if (width_capacity == 0) {
+        return;
+    }
+    const auto launch_plan = launch_plan_by_width.find(width_capacity);
+    if (launch_plan == launch_plan_by_width.end()) {
+        throw std::runtime_error("StampedPaddedRaggedPack selected a width whose CUDA launch plan was not prebuilt.");
+    }
+    padded_values->packFrom(packed_values, launch_plan->second, run_stream);
 }
 
-StampedPaddedRaggedUnpack::StampedPaddedRaggedUnpack(std::shared_ptr<PaddedRaggedSequence> padded_values,
+StampedSanitizePaddedRaggedTail::StampedSanitizePaddedRaggedTail(
+    std::shared_ptr<PaddedRaggedSequence> padded_values,
+    std::vector<uint64_t> width_capacities,
+    const Stream& stream)
+    : padded_values(std::move(padded_values)),
+      width_capacities(std::move(width_capacities)),
+      stream(stream) {
+    if (!this->padded_values) {
+        throw std::invalid_argument("StampedSanitizePaddedRaggedTail requires a padded value.");
+    }
+
+    const PaddedRaggedSequencePlan& structural_plan = this->padded_values->getPlan();
+    const Tensor row_offsets = this->padded_values->getRowOffsets();
+    const Tensor storage = this->padded_values->getPaddedValuesStorage();
+    if (structural_plan.batchSize == 0 || structural_plan.channels == 0 || structural_plan.maxValuesPerRow == 0) {
+        throw std::invalid_argument("StampedSanitizePaddedRaggedTail received invalid static padded geometry.");
+    }
+    if (!storage.isInitialized() || storage.getPlacement().getMemDevice() != TensorPlacement::MemDevices::GPU ||
+        row_offsets.getPlacement() != storage.getPlacement() ||
+        stream.getGpuNum() != storage.getPlacement().getDeviceNum()) {
+        throw std::invalid_argument(
+            "StampedSanitizePaddedRaggedTail requires initialized padded storage, offsets, and stream on one GPU.");
+    }
+    if (storage.getDataType() != structural_plan.valuesDataType ||
+        row_offsets.getDataType() != structural_plan.offsetsDataType ||
+        row_offsets.getDimensions() != std::vector<uint64_t>({structural_plan.batchSize + 1}) ||
+        !storage.isDenseContiguous() || !row_offsets.isDenseContiguous()) {
+        throw std::invalid_argument("StampedSanitizePaddedRaggedTail padded storage does not match its static plan.");
+    }
+
+    std::sort(this->width_capacities.begin(), this->width_capacities.end());
+    this->width_capacities.erase(
+        std::unique(this->width_capacities.begin(), this->width_capacities.end()), this->width_capacities.end());
+    if (this->width_capacities.empty() || this->width_capacities.front() == 0 ||
+        this->width_capacities.back() < structural_plan.maxValuesPerRow) {
+        throw std::invalid_argument(
+            "StampedSanitizePaddedRaggedTail requires a complete positive placement-time width family.");
+    }
+    if (structural_plan.widthCapacity != 0 &&
+        !std::binary_search(this->width_capacities.begin(), this->width_capacities.end(), structural_plan.widthCapacity)) {
+        throw std::invalid_argument(
+            "StampedSanitizePaddedRaggedTail current selected width is outside its placement-time family.");
+    }
+
+    launch_plan_by_width.reserve(this->width_capacities.size());
+    for (uint64_t width_capacity : this->width_capacities) {
+        // paddedTensorForWidth validates that this stamped width fits the one
+        // retained allocation. The alias is discarded immediately; only the
+        // immutable launch plan is retained by the sanitation stage.
+        (void)this->padded_values->paddedTensorForWidth(width_capacity);
+        PaddedRaggedTailZeroLaunchPlan plan = preparePaddedRaggedTailZeroLaunchPlan(
+            structural_plan.batchSize,
+            structural_plan.channels,
+            width_capacity,
+            structural_plan.valuesDataType,
+            structural_plan.offsetsDataType);
+        const bool inserted = launch_plan_by_width.emplace(width_capacity, std::move(plan)).second;
+        if (!inserted) {
+            throw std::logic_error("StampedSanitizePaddedRaggedTail width family contains a duplicate.");
+        }
+    }
+}
+
+uint32_t StampedSanitizePaddedRaggedTail::gpuNum() const {
+    return padded_values->getPaddedValuesStorage().getPlacement().getDeviceNum();
+}
+
+void StampedSanitizePaddedRaggedTail::runOn(Stream& run_stream) const {
+    if (run_stream.getGpuNum() != static_cast<int32_t>(gpuNum())) {
+        throw std::runtime_error("Padded ragged tail sanitation stream GPU does not match tensor placement.");
+    }
+
+    const uint64_t width_capacity = padded_values->getPlan().widthCapacity;
+    if (width_capacity == 0) {
+        return;
+    }
+    const auto plan_it = launch_plan_by_width.find(width_capacity);
+    if (plan_it == launch_plan_by_width.end()) {
+        throw std::runtime_error(
+            "StampedSanitizePaddedRaggedTail runtime selected W outside its placement-time family.");
+    }
+
+    Tensor storage = padded_values->getPaddedValuesStorage();
+    const Tensor row_offsets = padded_values->getRowOffsets();
+    launchZeroPaddedRaggedSequenceTail(storage, row_offsets, plan_it->second, run_stream);
+}
+
+StampedPaddedRaggedUnpack::StampedPaddedRaggedUnpack(CompiledPaddedRaggedSequenceLayout layout,
+                                                     std::vector<uint64_t> width_capacities,
+                                                     std::shared_ptr<PaddedRaggedSequence> padded_values,
                                                      Tensor packed_values,
                                                      const Stream& stream)
-    : padded_values(std::move(padded_values)), packed_values(std::move(packed_values)), stream(stream) {
+    : layout(std::move(layout)),
+      width_capacities(std::move(width_capacities)),
+      padded_values(std::move(padded_values)),
+      packed_values(std::move(packed_values)),
+      stream(stream) {
     if (!this->padded_values) {
         throw std::runtime_error("StampedPaddedRaggedUnpack requires a padded source.");
     }
-    const PaddedRaggedSequencePlan& plan = this->padded_values->getPlan();
-    if (this->packed_values.getDataType() != plan.valuesDataType ||
-        this->packed_values.getDimensions() != std::vector<uint64_t>({plan.maxTotalValues, plan.channels}) ||
+    validatePaddedLayoutMatches(*this->padded_values, this->layout, "unpack source");
+    if (this->packed_values.getDataType() != this->layout.values_dtype ||
+        this->packed_values.getDimensions() !=
+            std::vector<uint64_t>({this->layout.max_total_values, this->layout.channels}) ||
         this->packed_values.getPlacement() != this->padded_values->getPaddedValuesStorage().getPlacement() ||
         !this->packed_values.isDenseContiguous()) {
         throw std::runtime_error(
-            "StampedPaddedRaggedUnpack packed destination must be a dense tensor matching its padded source.");
+            "StampedPaddedRaggedUnpack packed destination must be a dense tensor matching its compiled representation.");
+    }
+    if (this->width_capacities.empty() || this->width_capacities.back() < this->layout.max_values_per_row) {
+        throw std::runtime_error("StampedPaddedRaggedUnpack requires a complete placement-time width family.");
+    }
+
+    for (const uint64_t width_capacity : this->width_capacities) {
+        if (width_capacity == 0 || width_capacity > this->layout.max_values_per_row) {
+            throw std::runtime_error("StampedPaddedRaggedUnpack width family contains an invalid capacity.");
+        }
+        const auto [it, inserted] = launch_plan_by_width.emplace(
+            width_capacity,
+            preparePaddedRaggedUnpackLaunchPlan(this->layout.batch_size,
+                                                this->layout.max_total_values,
+                                                this->layout.channels,
+                                                width_capacity,
+                                                this->layout.values_dtype,
+                                                this->layout.offset_dtype));
+        if (!inserted) {
+            throw std::runtime_error("StampedPaddedRaggedUnpack width family contains duplicate capacities.");
+        }
+        (void)it;
     }
 }
 
@@ -2470,7 +2689,15 @@ void StampedPaddedRaggedUnpack::runOn(Stream& run_stream) const {
     if (run_stream.getGpuNum() != packed_values.getPlacement().getDeviceNum()) {
         throw std::runtime_error("Padded ragged unpack stream GPU does not match tensor placement.");
     }
-    padded_values->unpackTo(packed_values, run_stream);
+    const uint64_t width_capacity = padded_values->getPlan().widthCapacity;
+    if (width_capacity == 0) {
+        return;
+    }
+    const auto launch_plan = launch_plan_by_width.find(width_capacity);
+    if (launch_plan == launch_plan_by_width.end()) {
+        throw std::runtime_error("StampedPaddedRaggedUnpack selected a width whose CUDA launch plan was not prebuilt.");
+    }
+    padded_values->unpackTo(packed_values, launch_plan->second, run_stream);
 }
 
 StampedPaddedRaggedPointwise::StampedPaddedRaggedPointwise(
@@ -2864,11 +3091,6 @@ StampedRaggedConv1dCausalBackwardData::StampedRaggedConv1dCausalBackwardData(
     if (state.width_capacity_family.empty()) {
         throw std::runtime_error("Ragged Conv1D dgrad requires a non-empty placement-time width family.");
     }
-    const uint64_t reserved_width = state.width_capacity_family.back();
-    PaddedRaggedSequencePlan scratch_plan =
-        makeStructuralPaddedPlan(compiled_ragged_conv1d_causal_backward_data->padded_grad_output_layout, reserved_width);
-    state.sanitized_grad_output = std::make_shared<PaddedRaggedSequence>(
-        std::move(scratch_plan), row_offsets, placement, reserved_width);
     buildT9aDgradPlanFamily(state, *compiled_ragged_conv1d_causal_backward_data, filter, stream);
 }
 
@@ -2917,11 +3139,10 @@ void StampedRaggedConv1dCausalBackwardData::runOn(Stream& run_stream) const {
         return;
     }
 
-    // T9A consumer responsibility: sanitize into private scratch immediately
-    // before dgrad. Never mutate producer dY, and never promise any dX tail value.
-    state.sanitized_grad_output->sanitizedCopyFrom(*state.grad_output_padded, run_stream);
+    // PRS3 guarantees that this exact retained dY generation has already had
+    // its selected inactive tail canonicalized to zero.
     std::shared_ptr<BuiltConvolution> built = t9aPrebuiltDgradForWidth(state, width_capacity);
-    Tensor padded_dy = state.sanitized_grad_output->paddedTensor();
+    Tensor padded_dy = state.grad_output_padded->paddedTensor();
     Tensor padded_dx = state.output_padded->paddedTensor();
     StampedConvolutionBackward dgrad(state.dense_dgrad,
                                      built,
@@ -2946,7 +3167,7 @@ RaggedConv1dStageDiagnostic StampedRaggedConv1dCausalBackwardData::diagnostic() 
             : 0;
     out.width_capacity_count = state.width_capacity_family.size();
     out.prebuilt_cudnn_plan_count = state.prebuilt_dgrads.size();
-    if (!state.grad_output_padded || !state.sanitized_grad_output || !state.output_padded) {
+    if (!state.grad_output_padded || !state.output_padded) {
         return out;
     }
     const PaddedRaggedSequencePlan& dy_plan = state.grad_output_padded->getPlan();
@@ -2955,9 +3176,8 @@ RaggedConv1dStageDiagnostic StampedRaggedConv1dCausalBackwardData::diagnostic() 
     out.selected_width_capacity = dy_plan.widthCapacity;
     out.input_padded_value_bytes = dy_plan.valueBytes;
     out.output_padded_value_bytes = dx_plan.valueBytes;
-    out.allocated_padded_value_bytes = state.grad_output_padded->allocatedValueBytes() +
-                                       state.sanitized_grad_output->allocatedValueBytes() +
-                                       state.output_padded->allocatedValueBytes();
+    out.allocated_padded_value_bytes =
+        state.grad_output_padded->allocatedValueBytes() + state.output_padded->allocatedValueBytes();
     return out;
 }
 
@@ -3002,11 +3222,6 @@ StampedRaggedConv1dCausalBackwardFilter::StampedRaggedConv1dCausalBackwardFilter
     state.grad_output_padded = std::move(padded_grad_output);
     state.width_capacity_family = makeRaggedConv1dWidthCapacities(c.max_values_per_row);
     if (state.width_capacity_family.empty()) throw std::runtime_error("Ragged Conv1D wgrad requires a non-empty width family.");
-    const uint64_t reserved_width = state.width_capacity_family.back();
-    state.sanitized_input = std::make_shared<PaddedRaggedSequence>(
-        makeStructuralPaddedPlan(c.padded_input_layout, reserved_width), row_offsets, placement, reserved_width);
-    state.sanitized_grad_output = std::make_shared<PaddedRaggedSequence>(
-        makeStructuralPaddedPlan(c.padded_grad_output_layout, reserved_width), row_offsets, placement, reserved_width);
     buildT9bWgradPlanFamily(state, c, output, stream);
 }
 
@@ -3042,12 +3257,10 @@ void StampedRaggedConv1dCausalBackwardFilter::runOn(Stream& run_stream) const {
         output.memsetAsync(run_stream, 0);
         return;
     }
-    // Both consumers are sanitized because zero dY does not make NaN X safe:
-    // IEEE 0 * NaN is NaN. Producer storage is never mutated.
-    state.sanitized_input->sanitizedCopyFrom(*state.input_padded, run_stream);
-    state.sanitized_grad_output->sanitizedCopyFrom(*state.grad_output_padded, run_stream);
-    Tensor x = state.sanitized_input->paddedTensor();
-    Tensor dy = state.sanitized_grad_output->paddedTensor();
+    // PRS3 prepares both retained generations explicitly. Both are required:
+    // IEEE 0 * NaN is NaN, so zero dY alone cannot make an undefined X tail safe.
+    Tensor x = state.input_padded->paddedTensor();
+    Tensor dy = state.grad_output_padded->paddedTensor();
     Tensor dw = output;
     const auto& c = *compiled_ragged_conv1d_causal_backward_filter;
     dw.reshape({c.output_channels, c.input_channels / c.groups, 1, c.kernel_width});
@@ -3067,14 +3280,14 @@ RaggedConv1dStageDiagnostic StampedRaggedConv1dCausalBackwardFilter::diagnostic(
             : 0;
     out.width_capacity_count = state.width_capacity_family.size();
     out.prebuilt_cudnn_plan_count = state.prebuilt_wgrads.size();
-    if (!state.input_padded || !state.grad_output_padded || !state.sanitized_input || !state.sanitized_grad_output) return out;
+    if (!state.input_padded || !state.grad_output_padded) return out;
     const auto& plan = state.grad_output_padded->getPlan();
     out.active_values = plan.activeValues;
     out.selected_width_capacity = plan.widthCapacity;
     out.input_padded_value_bytes = state.input_padded->getPlan().valueBytes + plan.valueBytes;
     out.output_padded_value_bytes = 0;
-    out.allocated_padded_value_bytes = state.input_padded->allocatedValueBytes() + state.grad_output_padded->allocatedValueBytes() +
-                                       state.sanitized_input->allocatedValueBytes() + state.sanitized_grad_output->allocatedValueBytes();
+    out.allocated_padded_value_bytes =
+        state.input_padded->allocatedValueBytes() + state.grad_output_padded->allocatedValueBytes();
     return out;
 }
 
@@ -3928,7 +4141,7 @@ void StampedRmsNorm::runOn(Stream& run_stream) const {
 
     // cuDNN deliberately executes the selected physical bucket. Expression plans
     // satisfy this through an explicit SANITIZE_PACKED_TAIL dependency; direct
-    // StampedRmsNorm users retain the local fallback for API compatibility.
+    // StampedRmsNorm users retain the local sanitation path for API compatibility.
     if (!packed_tail_prepared_externally) {
         Tensor mutable_input = input;
         sanitizePackedRmsNormOverreadRows(mutable_input,
@@ -4061,32 +4274,10 @@ std::vector<uintptr_t> StampedRmsNormBackward::backwardExecutablePlanIds() const
     return ids;
 }
 
-std::vector<uintptr_t> StampedRmsNormBackward::fallbackForwardExecutablePlanIds() const {
-    std::vector<std::pair<uint64_t, uintptr_t>> keyed;
-    keyed.reserve(fallback_forward_executable_plans.size());
-    for (const auto& [outer, plan] : fallback_forward_executable_plans) keyed.emplace_back(outer, plan.executableId());
-    std::sort(keyed.begin(), keyed.end());
-    std::vector<uintptr_t> ids;
-    ids.reserve(keyed.size());
-    for (const auto& [_, id] : keyed) ids.push_back(id);
-    return ids;
-}
-
 std::vector<CudnnFrontendPlanSelection> StampedRmsNormBackward::backwardPlanSelections() const {
     std::vector<std::pair<uint64_t, CudnnFrontendPlanSelection>> keyed;
     keyed.reserve(backward_executable_plans.size());
     for (const auto& [outer, plan] : backward_executable_plans) keyed.emplace_back(outer, plan.selection());
-    std::sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-    std::vector<CudnnFrontendPlanSelection> selections;
-    selections.reserve(keyed.size());
-    for (auto& [_, selection] : keyed) selections.push_back(std::move(selection));
-    return selections;
-}
-
-std::vector<CudnnFrontendPlanSelection> StampedRmsNormBackward::fallbackForwardPlanSelections() const {
-    std::vector<std::pair<uint64_t, CudnnFrontendPlanSelection>> keyed;
-    keyed.reserve(fallback_forward_executable_plans.size());
-    for (const auto& [outer, plan] : fallback_forward_executable_plans) keyed.emplace_back(outer, plan.selection());
     std::sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     std::vector<CudnnFrontendPlanSelection> selections;
     selections.reserve(keyed.size());
@@ -4103,20 +4294,9 @@ const CudnnRmsNormExecutablePlan& StampedRmsNormBackward::backwardExecutableForO
     return iter->second;
 }
 
-const CudnnRmsNormExecutablePlan& StampedRmsNormBackward::fallbackForwardExecutableForOuter(uint64_t outer) const {
-    const auto iter = fallback_forward_executable_plans.find(outer);
-    if (iter == fallback_forward_executable_plans.end()) {
-        throw std::runtime_error("Stamped RMSNorm backward has no prepared local fallback-forward executable for outer extent " +
-                                 std::to_string(outer) + ".");
-    }
-    return iter->second;
-}
-
 void StampedRmsNormBackward::prepareBackwardExecutableFamilies() {
     std::unordered_map<uint64_t, CudnnRmsNormExecutablePlan> prepared_backward;
-    std::unordered_map<uint64_t, CudnnRmsNormExecutablePlan> prepared_fallback_forward;
     uint64_t max_backward_workspace_bytes = 0;
-    uint64_t max_fallback_forward_workspace_bytes = 0;
 
     auto prepare_descriptor = [&](const CudnnRmsNormDescriptor& descriptor) {
         CudnnRmsNormExecutablePlan backward_plan = CudnnRmsNorm::instance().prepareBackward(descriptor, stream);
@@ -4125,18 +4305,6 @@ void StampedRmsNormBackward::prepareBackwardExecutableFamilies() {
         const auto [_, backward_inserted] = prepared_backward.emplace(outer, std::move(backward_plan));
         if (!backward_inserted) {
             throw std::runtime_error("Stamped RMSNorm backward finite family produced a duplicate outer extent.");
-        }
-
-        if (saved_forward_state == nullptr) {
-            CudnnRmsNormDescriptor forward_descriptor = descriptor;
-            forward_descriptor.training = true;
-            CudnnRmsNormExecutablePlan forward_plan = CudnnRmsNorm::instance().prepareForward(forward_descriptor, stream);
-            max_fallback_forward_workspace_bytes =
-                std::max(max_fallback_forward_workspace_bytes, forward_plan.workspaceBytes());
-            const auto [__, forward_inserted] = prepared_fallback_forward.emplace(outer, std::move(forward_plan));
-            if (!forward_inserted) {
-                throw std::runtime_error("Stamped RMSNorm fallback-forward finite family produced a duplicate outer extent.");
-            }
         }
     };
 
@@ -4168,7 +4336,6 @@ void StampedRmsNormBackward::prepareBackwardExecutableFamilies() {
         throw std::runtime_error("Stamped RMSNorm backward prepared an empty executable family.");
     }
     backward_executable_plans = std::move(prepared_backward);
-    fallback_forward_executable_plans = std::move(prepared_fallback_forward);
 
     ensureRmsNormExecutionWorkspace(
         backward_workspace,
@@ -4177,15 +4344,6 @@ void StampedRmsNormBackward::prepareBackwardExecutableFamilies() {
         "rmsnorm_backward",
         "input=" + input.getDescriptor().toString() + " packed_capacity=" +
             std::to_string(compiled_rms_norm_backward->packed_row_capacity));
-    if (saved_forward_state == nullptr) {
-        ensureRmsNormExecutionWorkspace(
-            fallback_forward_workspace,
-            input.getPlacement(),
-            max_fallback_forward_workspace_bytes,
-            "rmsnorm_fallback_forward",
-            "input=" + input.getDescriptor().toString() + " packed_capacity=" +
-                std::to_string(compiled_rms_norm_backward->packed_row_capacity));
-    }
 }
 
 std::optional<uint64_t> StampedRmsNormBackward::runtimeLogicalFlopCount() const {
@@ -4233,14 +4391,6 @@ StampedRmsNormBackward::StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBa
     }
 
     prepareBackwardExecutableFamilies();
-
-    if (this->saved_forward_state == nullptr) {
-        fallback_forward_state = std::make_shared<RmsNormForwardState>();
-        ScopedGpuAllocationContext allocation_context("rmsnorm_fallback_forward_state");
-        fallback_forward_state->inv_variance =
-            Tensor(input.getPlacement(), TensorDescriptor(DataType::FP32, {input.getDimensions().at(0)}));
-        fallback_output = Tensor(input.getPlacement(), TensorDescriptor(dY.getDataType(), input.getDimensions()));
-    }
 }
 
 bool StampedRmsNormBackward::tryLinkForwardStateFrom(const std::shared_ptr<StampedRmsNorm>& forward) {
@@ -4249,43 +4399,29 @@ bool StampedRmsNormBackward::tryLinkForwardStateFrom(const std::shared_ptr<Stamp
         return false;
     }
     forward->retainForwardStateForBackward();
-    saved_forward_state = forward->getForwardState();
-    // A linked backward will consume retained forward statistics and can never
-    // execute the standalone fallback forward. Release that private scratch.
-    fallback_forward_executable_plans.clear();
-    fallback_forward_workspace.reset();
-    fallback_forward_state.reset();
-    fallback_output = Tensor();
+    std::shared_ptr<RmsNormForwardState> candidate = forward->getForwardState();
+    if (candidate == nullptr || !candidate->retain_for_backward || !candidate->inv_variance.isInitialized()) {
+        throw std::runtime_error("RMSNorm forward provider failed to retain complete state for linked backward execution.");
+    }
+    saved_forward_state = std::move(candidate);
     return true;
 }
 
 void StampedRmsNormBackward::run() { runOn(stream); }
 
 void StampedRmsNormBackward::runOn(Stream& run_stream) const {
+    const std::shared_ptr<RmsNormForwardState> state = saved_forward_state;
+    if (state == nullptr) {
+        throw std::runtime_error(
+            "RMSNorm backward is not linked to its matching retained real-forward state; "
+            "forward replay is not a supported correctness path.");
+    }
+
     if (compiled_rms_norm_backward->packed_row_capacity == 0) {
         const uint64_t outer = input.getDimensions().at(0);
-        std::shared_ptr<RmsNormForwardState> state = saved_forward_state;
-        if (state != nullptr) {
-            if (!state->has_valid_state || !state->inv_variance.isInitialized()) {
-                throw std::runtime_error(
-                    "Dense RMSNorm backward was linked to forward state that has not been populated by a training forward pass.");
-            }
-        } else {
-            // A standalone differentiated equation has no separately stamped forward execution plan.
-            // Generate the exact cuDNN training statistic with the already-prepared local fallback plan.
-            if (fallback_forward_state == nullptr || !fallback_forward_state->inv_variance.isInitialized() ||
-                !fallback_output.isInitialized()) {
-                throw std::runtime_error("Standalone RMSNorm backward fallback state was not prepared before execution.");
-            }
-            const CudnnRmsNormExecutablePlan& fallback_plan = fallbackForwardExecutableForOuter(outer);
-            CudnnRmsNormForwardArgs forward_args;
-            forward_args.x = input;
-            forward_args.scale = scale;
-            forward_args.y = fallback_output;
-            forward_args.invVariance = fallback_forward_state->inv_variance;
-            CudnnRmsNorm::instance().forward(fallback_plan, forward_args, fallback_forward_workspace, run_stream);
-            fallback_forward_state->has_valid_state = true;
-            state = fallback_forward_state;
+        if (!state->has_valid_state || !state->inv_variance.isInitialized()) {
+            throw std::runtime_error(
+                "Dense RMSNorm backward requires retained cuDNN state produced by its matching real forward, but that forward state is invalid.");
         }
 
         const CudnnRmsNormExecutablePlan& backward_plan = backwardExecutableForOuter(outer);
@@ -4331,42 +4467,10 @@ void StampedRmsNormBackward::runOn(Stream& run_stream) const {
     Tensor bucket_dy = dY.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
     Tensor bucket_dx = dX.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
 
-    std::shared_ptr<RmsNormForwardState> state = saved_forward_state;
-    if (state != nullptr) {
-        if (!state->has_valid_state || !state->inv_variance.isInitialized() ||
-            state->packed_active_rows != active_rows || state->packed_selected_rows != selected_rows) {
-            throw std::runtime_error(
-                "Packed-row RMSNorm backward forward state does not match the current logical/bucket extent.");
-        }
-    } else {
-        // Standalone differentiated packed equations have no separately stamped
-        // forward stage. Execute the already-prepared fallback plan for the same
-        // selected physical bucket while honoring consumer responsibility.
-        if (!packed_tails_prepared_externally) {
-            Tensor mutable_input = input;
-            sanitizePackedRmsNormOverreadRows(mutable_input,
-                                              active_rows,
-                                              selected_rows,
-                                              compiled_rms_norm_backward->packed_row_capacity,
-                                              outer_per_packed_row,
-                                              run_stream);
-        }
-        if (fallback_forward_state == nullptr || !fallback_forward_state->inv_variance.isInitialized() ||
-            !fallback_output.isInitialized()) {
-            throw std::runtime_error("Standalone packed RMSNorm backward fallback state was not prepared before execution.");
-        }
-        Tensor bucket_fallback_output = fallback_output.aliasView({selected_outer, hidden}, {hidden, 1}, 0);
-        const CudnnRmsNormExecutablePlan& fallback_plan = fallbackForwardExecutableForOuter(selected_outer);
-        CudnnRmsNormForwardArgs forward_args;
-        forward_args.x = bucket_input;
-        forward_args.scale = scale;
-        forward_args.y = bucket_fallback_output;
-        forward_args.invVariance = fallback_forward_state->inv_variance.aliasView({selected_outer}, {1}, 0);
-        CudnnRmsNorm::instance().forward(fallback_plan, forward_args, fallback_forward_workspace, run_stream);
-        fallback_forward_state->packed_active_rows = active_rows;
-        fallback_forward_state->packed_selected_rows = selected_rows;
-        fallback_forward_state->has_valid_state = true;
-        state = fallback_forward_state;
+    if (!state->has_valid_state || !state->inv_variance.isInitialized() ||
+        state->packed_active_rows != active_rows || state->packed_selected_rows != selected_rows) {
+        throw std::runtime_error(
+            "Packed-row RMSNorm backward requires retained cuDNN state from the matching real forward at the current logical/bucket extent.");
     }
 
     const CudnnRmsNormExecutablePlan& backward_plan = backwardExecutableForOuter(selected_outer);
@@ -4458,6 +4562,12 @@ StampedMatmul::StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
     }
     if (compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default && !epilogue_aux.has_value()) {
         throw std::runtime_error("StampedMatmul backward cuBLASLt epilogue requires epilogue_aux.");
+    }
+    if (compiled_matmul->forward_epilogue_aux && !epilogue_aux.has_value()) {
+        throw std::runtime_error("StampedMatmul forward cuBLASLt GELU epilogue requires an auxiliary output tensor.");
+    }
+    if (compiled_matmul->forward_epilogue_aux && compiled_matmul->backward_epilogue != MatmulBackwardEpilogue::Default) {
+        throw std::runtime_error("StampedMatmul cannot use forward and backward epilogue auxiliary contracts in one stage.");
     }
     if (compiled_matmul->bgrad_output_dtype.has_value() && !bgrad_output.has_value()) {
         throw std::runtime_error("StampedMatmul backward cuBLASLt bgrad epilogue requires bgrad_output.");
@@ -5008,8 +5118,17 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
         if (!built_matmul->epilogue_plan) {
             throw std::runtime_error("Stamped MATMUL epilogue runtime missing compile-time cuBLASLt plan.");
         }
-        built_matmul->epilogue_plan->runGemmWithEpilogue(
-            lhs, rhs, std::nullopt, output, &alphaOne, &betaZero, run_stream, CublasScalarPointerMode::Host, workspace, false);
+        built_matmul->epilogue_plan->runGemmWithEpilogue(lhs,
+                                                         rhs,
+                                                         std::nullopt,
+                                                         output,
+                                                         &alphaOne,
+                                                         &betaZero,
+                                                         run_stream,
+                                                         CublasScalarPointerMode::Host,
+                                                         workspace,
+                                                         false,
+                                                         compiled_matmul->forward_epilogue_aux ? epilogue_aux : std::nullopt);
         return;
     }
 
@@ -5096,7 +5215,8 @@ void StampedMatmul::runOn(Stream& run_stream, const std::unordered_map<std::stri
                                                          run_stream,
                                                          resolved_scales.pointer_mode,
                                                          workspace,
-                                                         use_bias_epilogue);
+                                                         use_bias_epilogue,
+                                                         compiled_matmul->forward_epilogue_aux ? epilogue_aux : std::nullopt);
         return;
     }
 
@@ -5233,7 +5353,8 @@ void StampedMatmul::runOnConditionalGraphCapture(Stream& run_stream) const {
                                                          run_stream,
                                                          resolved_scales.pointer_mode,
                                                          workspace,
-                                                         use_bias_epilogue);
+                                                         use_bias_epilogue,
+                                                         compiled_matmul->forward_epilogue_aux ? epilogue_aux : std::nullopt);
         return;
     }
 
@@ -6084,6 +6205,58 @@ static std::unordered_set<std::string> runtimeScalarNamesForStage(const StampedE
         stage_names = stage.conditional->runtimeScalarNames();
     }
     return stage_names;
+}
+
+std::vector<RetainedAttentionForwardValues> StampedExecutionPlan::retainAttentionForwardValuesForBackward() {
+    std::vector<RetainedAttentionForwardValues> retained;
+    for (const StampedExecutionStage& stage : steps) {
+        if (stage.kind != StampedExecutionStage::Kind::Attention) {
+            continue;
+        }
+        if (stage.attention == nullptr) {
+            throw std::runtime_error("Attention execution stage is missing its stamped Attention forward operation.");
+        }
+
+        stage.attention->retainForwardStateForBackward();
+        RetainedAttentionForwardValues values{
+            .q = stage.attention->getQueryTensor(),
+            .k = stage.attention->getKeyTensor(),
+            .v = stage.attention->getValueTensor(),
+            .o = stage.attention->getOutputTensor(),
+            .forward_state = stage.attention->getForwardState(),
+        };
+        if (!values.complete()) {
+            throw std::runtime_error("Attention forward retention did not produce complete Q/K/V/O/stats state.");
+        }
+        if (!(values.forward_state->output == values.o)) {
+            throw std::runtime_error("Attention forward retention did not preserve the physical SDPA output tensor identity.");
+        }
+        retained.push_back(std::move(values));
+    }
+    return retained;
+}
+
+void StampedExecutionPlan::linkAttentionBackwardStatesFrom(const StampedExecutionPlan& forward_plan) {
+    for (const StampedExecutionStage& backward_stage : steps) {
+        if (backward_stage.kind != StampedExecutionStage::Kind::AttentionBackward ||
+            backward_stage.attention_backward == nullptr) {
+            continue;
+        }
+        bool linked = false;
+        for (const StampedExecutionStage& forward_stage : forward_plan.steps) {
+            if (forward_stage.kind != StampedExecutionStage::Kind::Attention || forward_stage.attention == nullptr) {
+                continue;
+            }
+            if (backward_stage.attention_backward->tryLinkForwardStateFrom(forward_stage.attention)) {
+                linked = true;
+                break;
+            }
+        }
+        if (!linked) {
+            throw std::runtime_error(
+                "Attention backward stage could not find the matching retained real-forward state provider.");
+        }
+    }
 }
 
 void StampedExecutionPlan::linkRmsNormBackwardStatesFrom(const StampedExecutionPlan& forward_plan) {
@@ -7857,6 +8030,20 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
         epilogue_aux.value().getDescriptor().getDataType() != compiled_matmul->epilogue_aux_dtype.value()) {
         throw std::runtime_error("buildMatmul epilogue_aux dtype does not match the compiled matmul dtype plan.");
     }
+    if (compiled_matmul->forward_epilogue_aux) {
+        if (use_backward_epilogue || compiled_matmul->epilogue != MatmulEpilogue::Gelu) {
+            throw std::runtime_error("buildMatmul forward epilogue aux is valid only for a forward GELU epilogue.");
+        }
+        if (!epilogue_aux.has_value()) {
+            throw std::runtime_error("buildMatmul forward GELU epilogue requires an auxiliary output tensor.");
+        }
+        if (epilogue_aux.value().getDescriptor() != output.getDescriptor()) {
+            throw std::runtime_error("buildMatmul forward GELU epilogue aux descriptor must match the output descriptor.");
+        }
+        if (output.getDimensions().size() != 2 || (output.getDimensions()[1] % 8U) != 0U) {
+            throw std::runtime_error("buildMatmul forward GELU epilogue aux requires output columns divisible by 8.");
+        }
+    }
     if (bgrad_output.has_value()) {
         if (bgrad_output.value().getDimensions().size() != 1 || bgrad_output.value().getDimensions()[0] != output.getDimensions()[1]) {
             throw std::runtime_error("buildMatmul bgrad_output must be a rank-1 tensor with one element per output column.");
@@ -7890,6 +8077,7 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                        use_bias_epilogue,
                        compiled_matmul->epilogue,
                        compiled_matmul->backward_epilogue,
+                       compiled_matmul->forward_epilogue_aux,
                        bgrad_output.has_value(),
                        dataTypes.A,
                        dataTypes.B,
@@ -8015,7 +8203,10 @@ std::unique_ptr<BuiltMatmul> StampedEquation::buildMatmul(const std::shared_ptr<
                                                                            dataTypes,
                                                                            toCublasEpilogueFusion(compiled_matmul->epilogue),
                                                                            addend,
-                                                                           use_bias_epilogue);
+                                                                           use_bias_epilogue,
+                                                                           std::nullopt,
+                                                                           std::nullopt,
+                                                                           compiled_matmul->forward_epilogue_aux ? epilogue_aux : std::nullopt);
             kernelWillRunOnGpu = static_cast<bool>(built->epilogue_plan);
             if (kernelWillRunOnGpu) {
                 built->epilogue_algorithm = built->epilogue_plan->algorithm;

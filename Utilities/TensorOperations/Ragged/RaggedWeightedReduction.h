@@ -37,4 +37,21 @@ void raggedWeightedMeanStatistics(const Tensor& values,
                                   uint64_t elements_per_value,
                                   Stream& stream);
 
+// Benchmark-only selector/query and forcing hook. forced_partial_count must be
+// non-zero and no larger than the capacity-sized production workspace. The
+// exact production kernels are used; only the first-pass grid size is forced.
+uint32_t raggedWeightedMeanPartialBlockCountForBenchmark(uint64_t active_scalar_count);
+
+void raggedWeightedMeanStatisticsWithPartialCountForBenchmark(
+    const Tensor& values,
+    const Tensor& weights,
+    Tensor& partial_statistics,
+    Tensor& numerator,
+    Tensor& denominator,
+    uint64_t active_value_count,
+    uint64_t max_total_values,
+    uint64_t elements_per_value,
+    uint32_t forced_partial_count,
+    Stream& stream);
+
 }  // namespace ThorImplementation

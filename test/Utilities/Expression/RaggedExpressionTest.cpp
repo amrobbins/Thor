@@ -6,10 +6,12 @@
 #include "Utilities/Expression/EquationCompiler.h"
 #include "Utilities/Expression/CudaSourceEmitter.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
+#include "Utilities/Expression/ExecutionDiagnostics.h"
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "Utilities/TensorOperations/Ragged/PaddedRaggedSequence.h"
+#include "Utilities/TensorOperations/Ragged/RaggedConv1dWidthCapacity.h"
 
 #include "cuda_runtime.h"
 
@@ -3000,16 +3002,28 @@ TEST(RaggedExpression, PackedRmsNormC6OwnsFiniteExecutableFamiliesAndNeverPrepar
     compiled_backward->compute_dtype = DataType::FP32;
     compiled_backward->debug_name = "c6_packed_rmsnorm_backward";
 
-    StampedRmsNormBackward standalone_backward(
+    StampedRmsNormBackward linked_backward(
         compiled_backward, x_a, scale_a, dy, dx, dscale, stream_a, offsets_a);
-    EXPECT_EQ(standalone_backward.backwardExecutablePlanCount(), buckets.size());
-    EXPECT_EQ(standalone_backward.fallbackForwardExecutablePlanCount(), buckets.size());
+    EXPECT_EQ(linked_backward.backwardExecutablePlanCount(), buckets.size());
+#ifdef THOR_DEBUG
+    resetExpressionTestExecutionCounters();
+#endif
+    EXPECT_THROW(linked_backward.runOn(stream_a), std::runtime_error)
+        << "BR5 standalone RMSNorm backward must fail instead of regenerating forward statistics.";
+#ifdef THOR_DEBUG
+    EXPECT_EQ(expressionTestExecutionCounters().totalBackwardForwardReplay(), 0U);
+#endif
+    ASSERT_TRUE(linked_backward.tryLinkForwardStateFrom(stamp_a))
+        << "BR5 RMSNorm backward must consume the exact invVariance retained by its matching real forward.";
 
     // Everything below is execution only. Selection state can disappear and
     // every bucket transition must choose among already-owned local plans.
     rms_norm.clearSelectionCache();
     ASSERT_EQ(rms_norm.cachedSelectionCount(), 0U);
     const uint64_t preparations_after_stamping = cudnnFrontendExecutablePreparationCountForTests();
+#ifdef THOR_DEBUG
+    resetExpressionTestExecutionCounters();
+#endif
     for (const uint64_t active_rows : std::vector<uint64_t>{7, 9, capacity}) {
         SCOPED_TRACE("activeRows=" + std::to_string(active_rows));
         RowPartitionRuntime(offsets_a, RowPartitionDescriptor(batch_size, capacity, DataType::UINT32))
@@ -3018,13 +3032,19 @@ TEST(RaggedExpression, PackedRmsNormC6OwnsFiniteExecutableFamiliesAndNeverPrepar
             .setHostOffsets({0, active_rows, active_rows});
         stamp_a->runOn(stream_a);
         stamp_b->runOn(stream_b);
-        standalone_backward.runOn(stream_a);
+        linked_backward.runOn(stream_a);
         stream_a.synchronize();
         stream_b.synchronize();
         EXPECT_EQ(rms_norm.cachedSelectionCount(), 0U);
         EXPECT_EQ(cudnnFrontendExecutablePreparationCountForTests(), preparations_after_stamping)
             << "RMSNorm bucket transitions must not build/replay/deserialize plans at runtime.";
     }
+#ifdef THOR_DEBUG
+    const ExpressionTestExecutionCounters replay_counters = expressionTestExecutionCounters();
+    EXPECT_EQ(replay_counters.rms_norm.backward_forward_replay, 0U)
+        << "BR5 forbids RMSNorm backward from regenerating invVariance with a private forward replay.";
+    EXPECT_EQ(replay_counters.totalBackwardForwardReplay(), 0U);
+#endif
 }
 
 TEST(RaggedExpression, PackedLayerNormUsesFiniteRmsNormCapacityFamilyWithoutTailSanitation) {
@@ -4389,7 +4409,9 @@ TEST(RaggedExpression, CausalConv1dT8ARetainsOnePaddedRepresentationAcrossCompat
     StampedExecutionPlan plan = equation.stamp(named_inputs, stream, {}, {{"y", packed_output}});
     EXPECT_EQ(plan.stageKindNames(),
               (std::vector<std::string>{"PaddedRaggedPack",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack"}));
 
@@ -4707,8 +4729,10 @@ TEST(RaggedExpression, CausalConv1dT8BRetainsChannelBiasAndActivationWithUndefin
 
     EXPECT_EQ(plan.stageKindNames(),
               (std::vector<std::string>{"PaddedRaggedPack",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedPointwise",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack"}));
 
@@ -4809,6 +4833,7 @@ TEST(RaggedExpression, CausalConv1dT8BRetainsRuntimeScalarPointwiseBeforeConvolu
     EXPECT_EQ(plan.stageKindNames(),
               (std::vector<std::string>{"PaddedRaggedPack",
                                         "PaddedRaggedPointwise",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack"}));
     EXPECT_EQ(plan.runtimeScalarNames(), (std::unordered_set<std::string>{"alpha"}));
@@ -5475,7 +5500,7 @@ TEST(RaggedExpression, CausalConv1dT9AAllEmptyUsesWidthZeroAndLeavesDxInactiveSt
     EXPECT_EQ(diagnostics.front().prebuilt_cudnn_plan_count, diagnostics.front().width_capacity_count);
 }
 
-TEST(RaggedExpression, CausalConv1dT9ADgradConsumerSanitizesPoisonedRetainedDyWithoutMutatingProducer) {
+TEST(RaggedExpression, CausalConv1dT9ADgradConsumesExplicitlyPreparedRetainedDyInPlace) {
     REQUIRE_CUDA_DEVICE();
 
     constexpr uint64_t batch_size = 2;
@@ -5524,10 +5549,9 @@ TEST(RaggedExpression, CausalConv1dT9ADgradConsumerSanitizesPoisonedRetainedDyWi
                                                                              1,
                                                                              1);
     StampedRaggedConv1dCausalBackwardData dgrad(compiled, gpu_filter, padded_dy, gpu_offsets, padded_dx, stream);
-    // Plan-family construction is placement-only and may leave the shared value
-    // configured at the last prebuilt W. Establish this execution's retained W
-    // exactly as an upstream retained producer would before poisoning its tail.
-    padded_dy->reconfigure(dy_plan);
+    StampedSanitizePaddedRaggedTail sanitize_dy(
+        padded_dy, makeRaggedConv1dWidthCapacities(max_values_per_row), stream);
+    EXPECT_EQ(padded_dy->getPlan().widthCapacity, selected_width);
 
     std::vector<float> poisoned(batch_size * output_channels * selected_width,
                                 std::numeric_limits<float>::quiet_NaN());
@@ -5552,6 +5576,7 @@ TEST(RaggedExpression, CausalConv1dT9ADgradConsumerSanitizesPoisonedRetainedDyWi
 
     Stream other_stream(0);
     EXPECT_THROW(dgrad.runOn(other_stream), std::runtime_error);
+    sanitize_dy.runOn(stream);
     dgrad.runOn(stream);
     stream.synchronize();
 
@@ -5576,11 +5601,19 @@ TEST(RaggedExpression, CausalConv1dT9ADgradConsumerSanitizesPoisonedRetainedDyWi
 
     const std::vector<float> producer_after = copyToCpuValues(dy_storage, stream);
     ASSERT_EQ(producer_after.size(), producer_before.size());
-    for (size_t i = 0; i < producer_before.size(); ++i) {
-        if (std::isnan(producer_before[i])) {
-            EXPECT_TRUE(std::isnan(producer_after[i])) << "producer dY index " << i;
-        } else {
-            EXPECT_EQ(producer_after[i], producer_before[i]) << "producer dY index " << i;
+    for (uint64_t row = 0; row < batch_size; ++row) {
+        const uint64_t row_length = offsets[row + 1] - offsets[row];
+        for (uint64_t channel = 0; channel < output_channels; ++channel) {
+            for (uint64_t timestep = 0; timestep < selected_width; ++timestep) {
+                const size_t index = (row * output_channels + channel) * selected_width + timestep;
+                if (timestep < row_length) {
+                    EXPECT_EQ(producer_after[index], producer_before[index])
+                        << "active producer dY index " << index;
+                } else {
+                    EXPECT_EQ(producer_after[index], 0.0F)
+                        << "prepared producer dY tail index " << index;
+                }
+            }
         }
     }
     const RaggedConv1dStageDiagnostic diagnostic = dgrad.diagnostic();
@@ -5589,6 +5622,9 @@ TEST(RaggedExpression, CausalConv1dT9ADgradConsumerSanitizesPoisonedRetainedDyWi
     EXPECT_EQ(diagnostic.prebuilt_cudnn_plan_count, diagnostic.width_capacity_count);
     EXPECT_GT(diagnostic.prebuilt_cudnn_plan_count, 0u);
     EXPECT_EQ(diagnostic.explicit_unfold_workspace_bytes, 0u);
+    EXPECT_EQ(diagnostic.allocated_padded_value_bytes,
+              padded_dy->allocatedValueBytes() + padded_dx->allocatedValueBytes())
+        << "dgrad must not allocate a private padded sanitation copy";
 }
 
 TEST(RaggedExpression, CausalConv1dT9BWgradMatchesPackedReferenceForGroupedAndDepthwise) {
@@ -5733,7 +5769,7 @@ TEST(RaggedExpression, CausalConv1dT9BAllEmptyProducesExactZeroWeightGradient) {
     EXPECT_EQ(diagnostics.front().prebuilt_cudnn_plan_count, diagnostics.front().width_capacity_count);
 }
 
-TEST(RaggedExpression, CausalConv1dT9BWgradConsumerSanitizesBothInputsAndCatchesZeroTimesNaN) {
+TEST(RaggedExpression, CausalConv1dT9BWgradConsumesExplicitlyPreparedInputsAndCatchesZeroTimesNaN) {
     REQUIRE_CUDA_DEVICE();
 
     constexpr uint64_t batch_size = 2;
@@ -5770,8 +5806,8 @@ TEST(RaggedExpression, CausalConv1dT9BWgradConsumerSanitizesBothInputsAndCatches
         preparePaddedRaggedSequencePlan(partition, input_channels, DataType::FP32, selected_width);
     PaddedRaggedSequencePlan dy_plan =
         preparePaddedRaggedSequencePlan(partition, output_channels, DataType::FP32, selected_width);
-    auto padded_x = std::make_shared<PaddedRaggedSequence>(x_plan, gpu_offsets, gpuPlacement, selected_width);
-    auto padded_dy = std::make_shared<PaddedRaggedSequence>(dy_plan, gpu_offsets, gpuPlacement, selected_width);
+    auto padded_x = std::make_shared<PaddedRaggedSequence>(x_plan, gpu_offsets, gpuPlacement, max_values_per_row);
+    auto padded_dy = std::make_shared<PaddedRaggedSequence>(dy_plan, gpu_offsets, gpuPlacement, max_values_per_row);
     Tensor dw(gpuPlacement, TensorDescriptor(DataType::FP32, {output_channels, input_channels, kernel_width}));
     auto compiled = std::make_shared<CompiledRaggedConv1dCausalBackwardFilter>(DataType::FP32,
                                                                                DataType::FP32,
@@ -5787,11 +5823,16 @@ TEST(RaggedExpression, CausalConv1dT9BWgradConsumerSanitizesBothInputsAndCatches
                                                                                1,
                                                                                1);
     StampedRaggedConv1dCausalBackwardFilter wgrad(compiled, padded_x, padded_dy, gpu_offsets, dw, stream);
+    StampedSanitizePaddedRaggedTail sanitize_x(
+        padded_x, makeRaggedConv1dWidthCapacities(max_values_per_row), stream);
+    StampedSanitizePaddedRaggedTail sanitize_dy(
+        padded_dy, makeRaggedConv1dWidthCapacities(max_values_per_row), stream);
     EXPECT_EQ(padded_x->getPlan().widthCapacity, selected_width);
     EXPECT_EQ(padded_dy->getPlan().widthCapacity, selected_width);
 
     auto make_poisoned_padded = [&](uint64_t channels, const std::vector<float>& packed, bool poison_tail) {
-        std::vector<float> values(batch_size * channels * selected_width, 0.0F);
+        const uint64_t reserved_elements = batch_size * channels * max_values_per_row;
+        std::vector<float> values(reserved_elements, -43210.0F);
         for (uint64_t row = 0; row < batch_size; ++row) {
             const uint64_t begin = offsets[row];
             const uint64_t row_length = offsets[row + 1] - begin;
@@ -5825,24 +5866,39 @@ TEST(RaggedExpression, CausalConv1dT9BWgradConsumerSanitizesBothInputsAndCatches
     const std::vector<float> dy_before = copyToCpuValues(dy_storage, stream);
     Stream other_stream(0);
     EXPECT_THROW(wgrad.runOn(other_stream), std::runtime_error);
+    sanitize_x.runOn(stream);
+    sanitize_dy.runOn(stream);
     wgrad.runOn(stream);
     stream.synchronize();
     expectNear(copyToCpuValues(dw, stream), expected, 1.0e-5F);
     for (float value : copyToCpuValues(dw, stream)) EXPECT_TRUE(std::isfinite(value));
 
-    auto expect_storage_unchanged = [&](const Tensor& storage, const std::vector<float>& before, const char* label) {
+    auto expect_storage_prepared = [&](const Tensor& storage,
+                                       const std::vector<float>& before,
+                                       uint64_t channels,
+                                       const char* label) {
         const std::vector<float> after = copyToCpuValues(storage, stream);
         ASSERT_EQ(after.size(), before.size());
-        for (size_t i = 0; i < before.size(); ++i) {
-            if (std::isnan(before[i])) {
-                EXPECT_TRUE(std::isnan(after[i])) << label << " index " << i;
-            } else {
-                EXPECT_EQ(after[i], before[i]) << label << " index " << i;
+        for (uint64_t row = 0; row < batch_size; ++row) {
+            const uint64_t row_length = offsets[row + 1] - offsets[row];
+            for (uint64_t channel = 0; channel < channels; ++channel) {
+                for (uint64_t timestep = 0; timestep < selected_width; ++timestep) {
+                    const size_t index = (row * channels + channel) * selected_width + timestep;
+                    if (timestep < row_length) {
+                        EXPECT_EQ(after[index], before[index]) << label << " active index " << index;
+                    } else {
+                        EXPECT_EQ(after[index], 0.0F) << label << " prepared tail index " << index;
+                    }
+                }
             }
         }
+        const uint64_t selected_elements = batch_size * channels * selected_width;
+        for (uint64_t index = selected_elements; index < after.size(); ++index) {
+            EXPECT_EQ(after[index], before[index]) << label << " reserved suffix index " << index;
+        }
     };
-    expect_storage_unchanged(x_storage, x_before, "producer X");
-    expect_storage_unchanged(dy_storage, dy_before, "producer dY");
+    expect_storage_prepared(x_storage, x_before, input_channels, "producer X");
+    expect_storage_prepared(dy_storage, dy_before, output_channels, "producer dY");
 
     // Second execution independently proves dY sanitation: keep inactive X
     // finite/zero and poison inactive dY with NaN/Inf.
@@ -5852,12 +5908,14 @@ TEST(RaggedExpression, CausalConv1dT9BWgradConsumerSanitizesBothInputsAndCatches
     overwriteGpuTensor<float>(dy_storage, poisoned_dy, stream);
     const std::vector<float> x2_before = copyToCpuValues(x_storage, stream);
     const std::vector<float> dy2_before = copyToCpuValues(dy_storage, stream);
+    sanitize_x.runOn(stream);
+    sanitize_dy.runOn(stream);
     wgrad.runOn(stream);
     stream.synchronize();
     expectNear(copyToCpuValues(dw, stream), expected, 1.0e-5F);
     for (float value : copyToCpuValues(dw, stream)) EXPECT_TRUE(std::isfinite(value));
-    expect_storage_unchanged(x_storage, x2_before, "producer X second run");
-    expect_storage_unchanged(dy_storage, dy2_before, "producer dY second run");
+    expect_storage_prepared(x_storage, x2_before, input_channels, "producer X second run");
+    expect_storage_prepared(dy_storage, dy2_before, output_channels, "producer dY second run");
 
     const RaggedConv1dStageDiagnostic diagnostic = wgrad.diagnostic();
     EXPECT_EQ(diagnostic.active_values, offsets.back());
@@ -5865,6 +5923,140 @@ TEST(RaggedExpression, CausalConv1dT9BWgradConsumerSanitizesBothInputsAndCatches
     EXPECT_EQ(diagnostic.prebuilt_cudnn_plan_count, diagnostic.width_capacity_count);
     EXPECT_GT(diagnostic.prebuilt_cudnn_plan_count, 0u);
     EXPECT_EQ(diagnostic.explicit_unfold_workspace_bytes, 0u);
+    EXPECT_EQ(diagnostic.allocated_padded_value_bytes,
+              padded_x->allocatedValueBytes() + padded_dy->allocatedValueBytes())
+        << "wgrad must not allocate private padded sanitation copies";
+}
+
+TEST(RaggedExpression, CausalConv1dT9BPRS3SharesOneDySanitizerAcrossDgradAndWgrad) {
+    REQUIRE_CUDA_DEVICE();
+
+    constexpr uint64_t batch_size = 2;
+    constexpr uint64_t max_total_values = 8;
+    constexpr uint64_t channels = 2;
+    constexpr uint64_t kernel_width = 3;
+    const std::vector<uint32_t> offsets32{0, 2, 5};
+    const std::vector<uint64_t> offsets(offsets32.begin(), offsets32.end());
+    const std::vector<float> x(max_total_values * channels, 0.25F);
+    const std::vector<float> dy(max_total_values * channels, -0.125F);
+    const std::vector<float> filter{
+        0.5F, -0.25F, 0.75F,
+        -0.4F, 0.2F, 0.1F,
+        0.3F, 0.6F, -0.5F,
+        -0.15F, 0.45F, 0.8F,
+    };
+
+    Stream stream(0);
+    Tensor gpu_offsets = makeGpuTensor<uint32_t>({batch_size + 1}, offsets32, stream);
+    RowPartitionRuntime partition(
+        gpu_offsets,
+        RowPartitionDescriptor(batch_size, max_total_values, DataType::UINT32, max_total_values));
+    partition.setHostOffsets(offsets);
+    Tensor gpu_x = makeGpuTensor<float>({max_total_values, channels}, x, stream);
+    Tensor gpu_dy = makeGpuTensor<float>({max_total_values, channels}, dy, stream);
+    Tensor gpu_filter = makeGpuTensor<float>({channels, channels, kernel_width}, filter, stream);
+
+    const RaggedExpression input = RaggedExpression::input(
+        "tokens", makeDescriptor(DataType::FP32, {channels}, batch_size, max_total_values, DataType::UINT32));
+    const Expression filter_expr = Expression::input("filter", std::nullopt, DataType::FP32);
+    const RaggedExpression output =
+        input.causalConv1d(filter_expr, channels, kernel_width, 1, DataType::FP32, DataType::FP32);
+    FusedEquation forward =
+        FusedEquation::compile(Expression::outputs({{"y", output.getValues()}}).physicalOutputs(), 0);
+    FusedEquation backward = forward.compileBackward({"tokens.values", "filter"}, "dy");
+
+    constexpr float inactive_dx_sentinel = -9191.0F;
+    Tensor gpu_dx(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, channels}));
+    gpu_dx.fill(inactive_dx_sentinel, stream);
+    StampedExecutionPlan plan = backward.stamp({{"tokens.values", gpu_x},
+                                                {"tokens.offsets", gpu_offsets},
+                                                {"filter", gpu_filter},
+                                                {"dy", gpu_dy}},
+                                               stream,
+                                               {},
+                                               {{"tokens.values_grad", gpu_dx}});
+    const std::vector<std::string> stage_names = plan.stageKindNames();
+    const std::vector<std::vector<uint32_t>> dependencies = plan.stageDependencyIndices();
+    ASSERT_EQ(stage_names.size(), dependencies.size());
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "RaggedConv1dCausalBackwardData"), 1);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "RaggedConv1dCausalBackwardFilter"), 1);
+    EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "SanitizePaddedRaggedTail"), 2)
+        << "X and dY are distinct physical generations, while dY must be shared by dgrad/wgrad";
+
+    auto find_single_stage = [&](const std::string& name) {
+        std::optional<uint32_t> result;
+        for (uint32_t stage_index = 0; stage_index < stage_names.size(); ++stage_index) {
+            if (stage_names[stage_index] != name) {
+                continue;
+            }
+            EXPECT_FALSE(result.has_value()) << "expected exactly one " << name << " stage";
+            result = stage_index;
+        }
+        EXPECT_TRUE(result.has_value()) << "missing " << name << " stage";
+        return result.value_or(UINT32_MAX);
+    };
+    const uint32_t dgrad_index = find_single_stage("RaggedConv1dCausalBackwardData");
+    const uint32_t wgrad_index = find_single_stage("RaggedConv1dCausalBackwardFilter");
+    ASSERT_NE(dgrad_index, UINT32_MAX);
+    ASSERT_NE(wgrad_index, UINT32_MAX);
+
+    auto direct_sanitizers = [&](uint32_t consumer_index) {
+        std::vector<uint32_t> result;
+        for (uint32_t dependency_index : dependencies.at(consumer_index)) {
+            if (stage_names.at(dependency_index) == "SanitizePaddedRaggedTail") {
+                result.push_back(dependency_index);
+            }
+        }
+        std::sort(result.begin(), result.end());
+        return result;
+    };
+    const std::vector<uint32_t> dgrad_sanitizers = direct_sanitizers(dgrad_index);
+    const std::vector<uint32_t> wgrad_sanitizers = direct_sanitizers(wgrad_index);
+    ASSERT_EQ(dgrad_sanitizers.size(), 1u)
+        << "dgrad must receive padded dY only through its explicit sanitation dependency";
+    ASSERT_EQ(wgrad_sanitizers.size(), 2u)
+        << "wgrad must receive distinct explicit sanitation dependencies for X and dY";
+    EXPECT_EQ(dependencies[dgrad_index].size(), 1u)
+        << "the padded producer edge must terminate at sanitation rather than bypass it into dgrad";
+    EXPECT_EQ(dependencies[wgrad_index].size(), 2u)
+        << "the two padded producer edges must terminate at their sanitation stages rather than bypass wgrad";
+
+    const uint32_t shared_dy_sanitizer = dgrad_sanitizers.front();
+    EXPECT_NE(std::find(wgrad_sanitizers.begin(), wgrad_sanitizers.end(), shared_dy_sanitizer),
+              wgrad_sanitizers.end())
+        << "dgrad and wgrad must fan out from one sanitation stage for the same dY generation";
+    for (uint32_t sanitizer_index : wgrad_sanitizers) {
+        EXPECT_LT(sanitizer_index, wgrad_index);
+    }
+    EXPECT_LT(shared_dy_sanitizer, dgrad_index);
+
+    std::vector<uint32_t> sanitizer_indices;
+    for (uint32_t stage_index = 0; stage_index < stage_names.size(); ++stage_index) {
+        if (stage_names[stage_index] == "SanitizePaddedRaggedTail") {
+            sanitizer_indices.push_back(stage_index);
+            ASSERT_EQ(dependencies[stage_index].size(), 1u)
+                << "with external canonical offsets, each sanitizer should depend only on its padded producer";
+            const uint32_t producer_index = dependencies[stage_index].front();
+            ASSERT_LT(producer_index, stage_index);
+            EXPECT_EQ(stage_names[producer_index], "PaddedRaggedPack")
+                << "this focused graph creates each padded physical generation at exactly one entry pack";
+        }
+    }
+    ASSERT_EQ(sanitizer_indices.size(), 2u);
+    EXPECT_NE(sanitizer_indices[0], sanitizer_indices[1])
+        << "distinct X and dY generations must never share one sanitation stage";
+
+    // Entry packs intentionally leave inactive padded tails undefined. The
+    // explicit graph sanitation stages above are therefore the safety boundary
+    // that makes both retained cuDNN consumers safe.
+    plan.run();
+    stream.synchronize();
+    const std::vector<float> expected_dx = cpuRaggedCausalConv1dDgrad(
+        dy, offsets, filter, max_total_values, channels, channels, kernel_width, 1, inactive_dx_sentinel);
+    const std::vector<float> expected_dw = cpuRaggedCausalConv1dWgrad(
+        x, dy, offsets, max_total_values, channels, channels, kernel_width, 1);
+    expectNear(copyToCpuValues(plan.output("tokens.values_grad"), stream), expected_dx, 1.0e-5F);
+    expectNear(copyToCpuValues(plan.output("filter_grad"), stream), expected_dw, 1.0e-5F);
 }
 
 TEST(RaggedExpression, CausalConv1dT9CRetainsReluBackwardBetweenConvolutions) {
@@ -6482,10 +6674,13 @@ TEST(RaggedExpression, CausalConv1dT9EThreeConvBackwardRegionRetainsSpineAndMatc
     StampedExecutionPlan forward_plan = forward.stamp(forward_inputs, stream);
     EXPECT_EQ(forward_plan.stageKindNames(),
               (std::vector<std::string>{"PaddedRaggedPack",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedPointwise",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedPointwise",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack"}))
         << "the realistic forward chain must remain one retained padded region";
@@ -6521,7 +6716,6 @@ TEST(RaggedExpression, CausalConv1dT9EThreeConvBackwardRegionRetainsSpineAndMatc
         << "only the bias-reduction branch and the final public dX may exit retained storage";
     EXPECT_GE(std::count(stage_names.begin(), stage_names.end(), "PaddedRaggedPointwise"), 2)
         << "ReLU/bias and tanh backward must remain in retained pointwise regions";
-
     auto ancestor_set = [&](uint32_t stage_index) {
         std::set<uint32_t> ancestors;
         std::vector<uint32_t> pending = dependencies.at(stage_index);
@@ -6896,7 +7090,7 @@ TEST(RaggedExpression, CausalConv1dT9FRuntimeWidthFamilyRemainsFiniteAndAllocati
 }
 
 
-TEST(RaggedExpression, CausalConv1dT9GPoisonedFanoutKeepsProducerStorageImmutableAndConsumersCorrect) {
+TEST(RaggedExpression, CausalConv1dT9GPreparedFanoutCanonicalizesTailsOnceAndKeepsConsumersCorrect) {
     REQUIRE_CUDA_DEVICE();
 
     constexpr uint64_t batch_size = 2;
@@ -6996,15 +7190,24 @@ TEST(RaggedExpression, CausalConv1dT9GPoisonedFanoutKeepsProducerStorageImmutabl
     Tensor gpu_dw(gpuPlacement, TensorDescriptor(DataType::FP32, {output_channels, input_channels, kernel_width}));
     StampedRaggedConv1dCausal compatible_forward(
         compiled_forward, padded_x, gpu_filter, gpu_offsets, padded_y, stream);
-    StampedRaggedConv1dCausalBackwardData sanitizing_dgrad(
+    StampedRaggedConv1dCausalBackwardData dgrad(
         compiled_dgrad, gpu_filter, padded_dy, gpu_offsets, padded_dx, stream);
-    StampedRaggedConv1dCausalBackwardFilter sanitizing_wgrad(
+    StampedRaggedConv1dCausalBackwardFilter wgrad(
         compiled_wgrad, padded_x, padded_dy, gpu_offsets, gpu_dw, stream);
 
-    // Placement-time family construction may inspect every W. Re-establish the
-    // actual retained producer state before injecting undefined-tail poison.
-    padded_x->reconfigure(x_plan);
-    padded_dy->reconfigure(dy_plan);
+    // Placement-time cuDNN plan-family construction must be metadata-pure for
+    // retained padded values. In particular, the forward stage must not walk
+    // its width family by reconfiguring X/Y and thereby erase the active
+    // population that wgrad shares with dY.
+    EXPECT_EQ(padded_x->getPlan(), x_plan);
+    EXPECT_EQ(padded_dy->getPlan(), dy_plan);
+    EXPECT_EQ(padded_y->getPlan(), y_plan);
+    EXPECT_EQ(padded_dx->getPlan(), dx_plan);
+
+    StampedSanitizePaddedRaggedTail sanitize_x(
+        padded_x, makeRaggedConv1dWidthCapacities(max_values_per_row), stream);
+    StampedSanitizePaddedRaggedTail sanitize_dy(
+        padded_dy, makeRaggedConv1dWidthCapacities(max_values_per_row), stream);
 
     auto make_poisoned_retained = [&](uint64_t channels, const std::vector<float>& packed, uint64_t salt) {
         std::vector<float> values(batch_size * channels * selected_width, 0.0F);
@@ -7044,23 +7247,40 @@ TEST(RaggedExpression, CausalConv1dT9GPoisonedFanoutKeepsProducerStorageImmutabl
     const std::vector<float> x_before = copyToCpuValues(x_storage, stream);
     const std::vector<float> dy_before = copyToCpuValues(dy_storage, stream);
 
-    auto expect_storage_unchanged = [&](const Tensor& storage,
-                                        const std::vector<float>& before,
-                                        const char* producer_name) {
+    auto expect_storage_prepared = [&](const Tensor& storage,
+                                       const std::vector<float>& before,
+                                       uint64_t channels,
+                                       const char* producer_name) {
         const std::vector<float> after = copyToCpuValues(storage, stream);
         ASSERT_EQ(after.size(), before.size());
-        for (size_t i = 0; i < before.size(); ++i) {
-            if (std::isnan(before[i])) {
-                EXPECT_TRUE(std::isnan(after[i])) << producer_name << " index " << i;
-            } else {
-                EXPECT_EQ(after[i], before[i]) << producer_name << " index " << i;
+        for (uint64_t row = 0; row < batch_size; ++row) {
+            const uint64_t row_length = offsets[row + 1] - offsets[row];
+            for (uint64_t channel = 0; channel < channels; ++channel) {
+                for (uint64_t timestep = 0; timestep < selected_width; ++timestep) {
+                    const size_t index = (row * channels + channel) * selected_width + timestep;
+                    if (timestep < row_length) {
+                        EXPECT_EQ(after[index], before[index])
+                            << producer_name << " active index " << index;
+                    } else {
+                        EXPECT_EQ(after[index], 0.0F)
+                            << producer_name << " canonical tail index " << index;
+                    }
+                }
             }
         }
     };
-    auto expect_both_producers_unchanged = [&]() {
-        expect_storage_unchanged(x_storage, x_before, "retained X producer");
-        expect_storage_unchanged(dy_storage, dy_before, "retained dY producer");
+    auto expect_both_producers_prepared = [&]() {
+        expect_storage_prepared(x_storage, x_before, input_channels, "retained X producer");
+        expect_storage_prepared(dy_storage, dy_before, output_channels, "retained dY producer");
     };
+
+    // Direct vendor-stage tests must model PRS3 explicitly: one visible
+    // sanitation stage prepares each retained physical generation before any
+    // cuDNN consumer observes it. Multiple consumers then share that preparation.
+    sanitize_x.runOn(stream);
+    sanitize_dy.runOn(stream);
+    stream.synchronize();
+    expect_both_producers_prepared();
 
     const std::vector<float> expected_y = cpuRaggedCausalConv1d(packed_x,
                                                                  offsets,
@@ -7096,7 +7316,7 @@ TEST(RaggedExpression, CausalConv1dT9GPoisonedFanoutKeepsProducerStorageImmutabl
         padded_y->unpackTo(packed_y, stream);
         stream.synchronize();
         expectNear(copyToCpuValues(packed_y, stream), expected_y, 1.0e-5F);
-        expect_both_producers_unchanged();
+        expect_both_producers_prepared();
     };
 
     auto verify_incompatible_unpack = [&]() {
@@ -7109,11 +7329,11 @@ TEST(RaggedExpression, CausalConv1dT9GPoisonedFanoutKeepsProducerStorageImmutabl
             expected[i] = output_inactive_sentinel;
         }
         EXPECT_EQ(copyToCpuValues(unpacked_x, stream), expected);
-        expect_both_producers_unchanged();
+        expect_both_producers_prepared();
     };
 
     auto verify_dgrad = [&]() {
-        sanitizing_dgrad.runOn(stream);
+        dgrad.runOn(stream);
         Tensor packed_dx(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, input_channels}));
         packed_dx.fill(output_inactive_sentinel, stream);
         padded_dx->unpackTo(packed_dx, stream);
@@ -7123,29 +7343,24 @@ TEST(RaggedExpression, CausalConv1dT9GPoisonedFanoutKeepsProducerStorageImmutabl
         for (uint64_t i = 0; i < offsets.back() * input_channels; ++i) {
             EXPECT_TRUE(std::isfinite(actual[i])) << "active dX index " << i;
         }
-        expect_both_producers_unchanged();
+        expect_both_producers_prepared();
     };
 
     auto verify_wgrad = [&]() {
         gpu_dw.fill(std::numeric_limits<float>::quiet_NaN(), stream);
-        sanitizing_wgrad.runOn(stream);
+        wgrad.runOn(stream);
         stream.synchronize();
         const std::vector<float> actual = copyToCpuValues(gpu_dw, stream);
         expectNear(actual, expected_dw, 1.0e-5F);
         for (size_t i = 0; i < actual.size(); ++i) {
             EXPECT_TRUE(std::isfinite(actual[i])) << "dW index " << i;
         }
-        expect_both_producers_unchanged();
+        expect_both_producers_prepared();
     };
 
-    // One retained X producer has three semantically different consumers:
-    //   * compatible forward Conv1D, which may observe undefined tails only at
-    //     output positions that are themselves inactive;
-    //   * an incompatible packed exit adapter;
-    //   * wgrad, which must sanitize privately.
-    // The retained dY producer is shared by the independently sanitizing dgrad
-    // and wgrad consumers. Exercise two different consumer orders to make the
-    // ownership rule independent of fanout scheduling order.
+    // One retained X generation feeds forward, unpack, and wgrad; one retained
+    // dY generation feeds dgrad and wgrad. Preparation happens once per physical
+    // generation, then the read-only consumers may execute in either order.
     verify_compatible_forward();
     verify_incompatible_unpack();
     verify_dgrad();
@@ -7156,10 +7371,10 @@ TEST(RaggedExpression, CausalConv1dT9GPoisonedFanoutKeepsProducerStorageImmutabl
     verify_incompatible_unpack();
     verify_compatible_forward();
 
-    expect_both_producers_unchanged();
+    expect_both_producers_prepared();
     EXPECT_EQ(compatible_forward.diagnostic().selected_width_capacity, selected_width);
-    EXPECT_EQ(sanitizing_dgrad.diagnostic().selected_width_capacity, selected_width);
-    EXPECT_EQ(sanitizing_wgrad.diagnostic().selected_width_capacity, selected_width);
+    EXPECT_EQ(dgrad.diagnostic().selected_width_capacity, selected_width);
+    EXPECT_EQ(wgrad.diagnostic().selected_width_capacity, selected_width);
 }
 
 TEST(RaggedExpression, CausalConv1dT10RetainedTrainingGateCoversDtypesGroupedDepthwiseAndMultilayerBackward) {
@@ -7267,8 +7482,10 @@ TEST(RaggedExpression, CausalConv1dT10RetainedTrainingGateCoversDtypesGroupedDep
                                                           stream);
         EXPECT_EQ(forward_plan.stageKindNames(),
                   (std::vector<std::string>{"PaddedRaggedPack",
+                                            "SanitizePaddedRaggedTail",
                                             "RaggedConv1dCausal",
                                             "PaddedRaggedPointwise",
+                                            "SanitizePaddedRaggedTail",
                                             "RaggedConv1dCausal",
                                             "PaddedRaggedUnpack"}))
             << "T10 forward topology may not acquire an internal representation boundary";
@@ -7479,11 +7696,13 @@ TEST(RaggedExpression, CausalConv1dT8CRmsNormIsExplicitPaddedRepresentationBound
 
     EXPECT_EQ(plan.stageKindNames(),
               (std::vector<std::string>{"PaddedRaggedPack",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack",
                                         "SanitizePackedTail",
                                         "RmsNorm",
                                         "PaddedRaggedPack",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack"}));
     const std::vector<RaggedConv1dStageDiagnostic> conv_diagnostics = plan.raggedConv1dStageDiagnostics();
@@ -7639,10 +7858,12 @@ TEST(RaggedExpression, CausalConv1dT8CLayerNormIsExplicitPaddedRepresentationBou
 
     EXPECT_EQ(plan.stageKindNames(),
               (std::vector<std::string>{"PaddedRaggedPack",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack",
                                         "LayerNorm",
                                         "PaddedRaggedPack",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack"}));
     const std::vector<RaggedConv1dStageDiagnostic> conv_diagnostics = plan.raggedConv1dStageDiagnostics();
@@ -7791,6 +8012,7 @@ TEST(RaggedExpression, CausalConv1dT8CMixedPointwiseRegionStopsAtNormalizationBo
     // active packed values and does not introduce another representation change.
     EXPECT_EQ(plan.stageKindNames(),
               (std::vector<std::string>{"PaddedRaggedPack",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack",
                                         "FusedKernel",
@@ -7799,6 +8021,7 @@ TEST(RaggedExpression, CausalConv1dT8CMixedPointwiseRegionStopsAtNormalizationBo
                                         "SanitizePackedTail",
                                         "RmsNorm",
                                         "PaddedRaggedPack",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack"}));
 

@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -600,4 +601,37 @@ TEST(NativeQueuedPartialBatchAccounting, CappedTrainingWorkQuantaContinueAcrossP
     EXPECT_EQ(fieldValues(train, &TrainingStatsSnapshot::samplesProcessed), (std::vector<uint64_t>{4, 8, 10, 14}));
     EXPECT_EQ(session->getNextBatchNum(ExampleType::TRAIN), 1u);
     EXPECT_EQ(session->getNextBatchNum(ExampleType::VALIDATE), 0u);
+}
+
+TEST(NativeQueuedPartialBatchAccounting, LargeInitialEpochCannotMakeThroughputFlopAccountingFatal) {
+    auto session = std::make_shared<ExactPopulationBatchSession>(10, 6, 4);
+
+    TrainingRunRequest request;
+    request.network = makeInputLossNetwork();
+    request.batchSession = session;
+    request.optimizer = Sgd::Builder().initialLearningRate(0.01f).build();
+    request.datasetInputBindings = {TrainingInputBinding("predictions", "predictions"),
+                                    TrainingInputBinding("labels", "labels"),
+                                    TrainingInputBinding("weights", "weights")};
+    request.runtime.scalarTensorsToReport = {"loss", "prediction_mean"};
+    request.epochs = 1;
+    // Reproduce the production shape of the failure: training uses a local capped
+    // step counter, while validation reports a large cumulative epoch-derived
+    // step.  The old throughput code multiplied that cumulative step by the
+    // current batch FLOP count and could throw before validation completed.
+    request.initialCompletedEpochs = std::numeric_limits<uint64_t>::max() / 8;
+    request.maxTrainingBatchesPerEpoch = 1;
+
+    CapturingObserver observer;
+    EXPECT_NO_THROW(runNativeQueuedTraining(
+        request,
+        observer,
+        NativeQueuedTrainingOptions{.maxInFlightBatches = 3, .synchronizeAfterEveryBatch = false}));
+
+    const std::vector<TrainingStatsSnapshot> train = observer.stats(TrainingEventPhase::TRAIN);
+    const std::vector<TrainingStatsSnapshot> validate = observer.stats(TrainingEventPhase::VALIDATE);
+    ASSERT_EQ(train.size(), 1u);
+    ASSERT_EQ(validate.size(), 2u);
+    EXPECT_EQ(train.front().step, 1u);
+    EXPECT_GT(validate.front().step, uint64_t{1} << 60);
 }

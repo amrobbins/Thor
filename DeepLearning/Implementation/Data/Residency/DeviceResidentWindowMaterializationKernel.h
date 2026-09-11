@@ -38,3 +38,13 @@ void launchDeviceResidentWindowMaterializationKernel(
     const DeviceResidentWindowMaterializationSpec &spec,
     ThorImplementation::Tensor &destination,
     Stream &stream);
+
+/** Benchmark-only launch hook that forces a specific rows-per-CTA specialization. */
+void launchDeviceResidentWindowMaterializationKernelWithRowsPerCtaForBenchmark(
+    const ThorImplementation::Tensor &sourceStorage,
+    const ThorImplementation::Tensor &rowPlans,
+    uint64_t logicalRows,
+    const DeviceResidentWindowMaterializationSpec &spec,
+    ThorImplementation::Tensor &destination,
+    uint32_t rowsPerCta,
+    Stream &stream);

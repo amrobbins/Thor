@@ -507,6 +507,25 @@ DynamicExpression buildBf16BroadcastContextExpression(const TensorPlacement& pla
     });
 }
 
+DynamicExpression buildPromotedBf16SquareExpression(const TensorPlacement& placement) {
+    return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
+                                         const DynamicExpression::TensorMap& outputs,
+                                         Stream& stream) -> DynamicExpressionBuild {
+        (void)stream;
+        // Mirror the ProductTransformer diagnostic pattern: physical BF16 storage is
+        // intentionally promoted to an FP32 logical value for the CustomLayer compute.
+        // Backward still has to return the graph-boundary dInput in BF16 storage.
+        auto values = Expression::input("values", DataType::FP32, DataType::FP32);
+        auto expressionOutputs = Expression::outputs({{"square", values * values}});
+        return DynamicExpressionBuild{
+            std::make_shared<FusedEquation>(FusedEquation::compile(expressionOutputs.physicalOutputs(), placement.getDeviceNum())),
+            inputs,
+            {},
+            outputs,
+            {}};
+    });
+}
+
 DynamicExpression buildTwoInputTwoOutputExpression(const TensorPlacement& placement) {
     return DynamicExpression([placement](const DynamicExpression::TensorMap& inputs,
                                          const DynamicExpression::TensorMap& outputs,
@@ -2058,6 +2077,39 @@ TEST(CustomLayer, MultiInputInferenceOnlyForwardCycleResetsStateWithoutBackward)
     runPass(lhsPass2_h, rhsPass2_h, {4.0f, 2.0f, 0.0f, 6.0f, 5.0f, 4.0f}, {-6.0f, -6.0f, -6.0f, 10.0f, 13.0f, 16.0f}, 2);
 
     cleanupLayers({&lhsIn, &rhsIn, &lhsBridge, &rhsBridge, &custom, &sumSink, &diffSink});
+}
+
+TEST(CustomLayer, PromotedBf16InputBackwardRequirementsPreservePhysicalGradientStorageDType) {
+    const uint64_t batchSize = 2;
+    const uint64_t width = 4;
+
+    NetworkInput valuesIn(gpuPlacement, DataType::BF16, std::vector<unsigned long>{batchSize, width});
+    GradientRivet valuesGradientRivet;
+    CountingPassthrough valuesBridge;
+    CustomLayer custom(buildPromotedBf16SquareExpression(gpuPlacement),
+                       {"values"},
+                       {"square"},
+                       gpuPlacement,
+                       {},
+                       false);
+    CountingPassthrough sink;
+
+    valuesIn.connectToNextLayer(&valuesGradientRivet);
+    valuesGradientRivet.connectToNextLayer(&valuesBridge);
+    valuesBridge.connectToNextLayer(&custom);
+    custom.connectToNextLayer(&sink);
+
+    // BR2/BR4 requirement-mode backward differentiates a training-preview forward
+    // expression.  That preview is already dtype-resolved inside FusedEquation, so
+    // CustomLayer must still restore the physical input-gradient storage contract
+    // before AutoDiff chooses the terminal values_grad materialization dtype.
+    EXPECT_NO_THROW(compileAndInitialize({&valuesIn, &valuesGradientRivet, &valuesBridge, &custom, &sink}));
+
+    ASSERT_EQ(custom.getErrorOutputs().size(), 1u);
+    ASSERT_TRUE(custom.getErrorOutputs()[0].has_value());
+    EXPECT_EQ(custom.getErrorOutputs()[0]->getDataType(), DataType::BF16);
+
+    cleanupLayers({&valuesIn, &valuesGradientRivet, &valuesBridge, &custom, &sink});
 }
 
 TEST(CustomLayer, Bf16BroadcastBackwardSpecializesReductionOutputToPreallocatedGradientDType) {

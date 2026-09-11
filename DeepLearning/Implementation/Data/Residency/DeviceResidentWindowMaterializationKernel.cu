@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentWindowMaterializationKernel.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentRowGrouping.h"
 #include "Utilities/Common/LowPrecisionFloat.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
@@ -22,7 +23,8 @@ namespace {
 
 constexpr uint32_t kThreadsPerBlock = 256;
 constexpr uint32_t kMaxRowsPerBlock = kThreadsPerBlock;
-constexpr uint64_t kTargetBytesPerLane = 32;
+static_assert(kThreadsPerBlock == DeviceResidentRowGrouping::kThreadsPerCta,
+              "Row-grouping policy must match the residency CTA width.");
 constexpr uint32_t kMaxPortableBlocks = 65535;
 
 static_assert(sizeof(ulonglong4_32a) == 32);
@@ -411,47 +413,6 @@ __global__ void materializeResolvedWindowKernel(
     }
 }
 
-uint32_t rowsPerBlockFor(uint64_t rowBytes, uint64_t logicalRows) {
-    uint32_t rowsByPayload = 1;
-    if (rowBytes <= kTargetBytesPerLane) {
-        rowsByPayload = 256;
-    } else if (rowBytes <= 2 * kTargetBytesPerLane) {
-        rowsByPayload = 128;
-    } else if (rowBytes <= 4 * kTargetBytesPerLane) {
-        rowsByPayload = 64;
-    } else if (rowBytes <= 8 * kTargetBytesPerLane) {
-        rowsByPayload = 32;
-    } else if (rowBytes <= 16 * kTargetBytesPerLane) {
-        rowsByPayload = 16;
-    } else if (rowBytes <= 32 * kTargetBytesPerLane) {
-        rowsByPayload = 8;
-    } else if (rowBytes <= 64 * kTargetBytesPerLane) {
-        rowsByPayload = 4;
-    } else if (rowBytes <= 128 * kTargetBytesPerLane) {
-        rowsByPayload = 2;
-    }
-
-    uint32_t rowsByParallelism = 1;
-    if (logicalRows >= 16384) {
-        rowsByParallelism = 256;
-    } else if (logicalRows >= 8192) {
-        rowsByParallelism = 128;
-    } else if (logicalRows >= 4096) {
-        rowsByParallelism = 64;
-    } else if (logicalRows >= 2048) {
-        rowsByParallelism = 32;
-    } else if (logicalRows >= 1024) {
-        rowsByParallelism = 16;
-    } else if (logicalRows >= 512) {
-        rowsByParallelism = 8;
-    } else if (logicalRows >= 256) {
-        rowsByParallelism = 4;
-    } else if (logicalRows >= 128) {
-        rowsByParallelism = 2;
-    }
-    return std::min(rowsByPayload, rowsByParallelism);
-}
-
 template <uint32_t RowsPerBlock>
 uint32_t blocksForRows(uint64_t logicalRows) {
     const uint64_t blocks =
@@ -496,6 +457,7 @@ void launchForGrouping(const uint8_t *source,
                        ItemIndexT sourceStepBytes,
                        uint64_t repeatedPaddingWord,
                        uint64_t rowBytes,
+                       uint32_t rowsPerBlockOverride,
                        cudaStream_t stream) {
 #define THOR_WINDOW_GROUP_CASE(N)                                                    \
     case N:                                                                          \
@@ -503,7 +465,8 @@ void launchForGrouping(const uint8_t *source,
             source, rowPlans, destination, logicalRows, windowLength, sourceStepBytes, \
             repeatedPaddingWord, stream);                                             \
         break
-    switch (rowsPerBlockFor(rowBytes, static_cast<uint64_t>(logicalRows))) {
+    const uint32_t rowsPerBlock = rowsPerBlockOverride;
+    switch (rowsPerBlock) {
         THOR_WINDOW_GROUP_CASE(256);
         THOR_WINDOW_GROUP_CASE(128);
         THOR_WINDOW_GROUP_CASE(64);
@@ -529,15 +492,16 @@ void launchTyped(const uint8_t *source,
                  uint64_t repeatedPaddingWord,
                  uint64_t rowBytes,
                  bool materializeMask,
+                 uint32_t rowsPerBlockOverride,
                  cudaStream_t stream) {
     if (materializeMask) {
         launchForGrouping<PlanT, RowIndexT, ItemIndexT, true>(
             source, rowPlans, destination, logicalRows, windowLength, sourceStepBytes,
-            repeatedPaddingWord, rowBytes, stream);
+            repeatedPaddingWord, rowBytes, rowsPerBlockOverride, stream);
     } else {
         launchForGrouping<PlanT, RowIndexT, ItemIndexT, false>(
             source, rowPlans, destination, logicalRows, windowLength, sourceStepBytes,
-            repeatedPaddingWord, rowBytes, stream);
+            repeatedPaddingWord, rowBytes, rowsPerBlockOverride, stream);
     }
 }
 
@@ -550,12 +514,13 @@ void validateTensor(const Tensor &tensor, TensorPlacement placement, const char 
 
 }  // namespace
 
-void launchDeviceResidentWindowMaterializationKernel(
+void launchDeviceResidentWindowMaterializationKernelWithRowsPerCtaForBenchmark(
     const Tensor &sourceStorage,
     const Tensor &rowPlans,
     uint64_t logicalRows,
     const DeviceResidentWindowMaterializationSpec &spec,
     Tensor &destination,
+    uint32_t rowsPerCta,
     Stream &stream) {
     THOR_THROW_IF_FALSE(destination.isInitialized());
     THOR_THROW_IF_FALSE(rowPlans.isInitialized());
@@ -575,6 +540,8 @@ void launchDeviceResidentWindowMaterializationKernel(
     THOR_THROW_IF_FALSE(!destinationDims.empty());
     const uint64_t batchCapacity = destinationDims.front();
     THOR_THROW_IF_FALSE(logicalRows <= batchCapacity);
+    THOR_THROW_IF_FALSE(rowsPerCta == 0 ||
+                        (rowsPerCta <= 256 && (rowsPerCta & (rowsPerCta - 1)) == 0));
 
     THOR_THROW_IF_FALSE(
         spec.windowLength <= std::numeric_limits<uint64_t>::max() / spec.sourceStepBytes);
@@ -601,6 +568,10 @@ void launchDeviceResidentWindowMaterializationKernel(
     const uint64_t elementBytes = dataTypeBytes(spec.dataType);
     THOR_THROW_IF_FALSE(spec.sourceStepBytes % elementBytes == 0);
     const uint64_t paddingWord = repeatedPadWord(padBits(spec.dataType, spec.padValue), elementBytes);
+    const uint32_t selectedRowsPerCta =
+        rowsPerCta == 0
+            ? DeviceResidentRowGrouping::selectRowsPerCta(logicalRows, rowBytes)
+            : rowsPerCta;
     const uint8_t *source = sourceStorage.isInitialized()
                                 ? static_cast<const uint8_t *>(sourceStorage.getMemPtr())
                                 : nullptr;
@@ -616,23 +587,23 @@ void launchDeviceResidentWindowMaterializationKernel(
                 source, plansPtr, destinationBytes, static_cast<uint32_t>(logicalRows),        \
                 static_cast<uint32_t>(spec.windowLength),                                      \
                 static_cast<uint32_t>(spec.sourceStepBytes), paddingWord, rowBytes,            \
-                spec.materializeMask, stream.getStream());                                     \
+                spec.materializeMask, selectedRowsPerCta, stream.getStream());                                     \
         } else if (useRow32) {                                                                 \
             launchTyped<PlanT, uint32_t, uint64_t>(                                            \
                 source, plansPtr, destinationBytes, static_cast<uint32_t>(logicalRows),        \
                 spec.windowLength, spec.sourceStepBytes, paddingWord, rowBytes,                \
-                spec.materializeMask, stream.getStream());                                     \
+                spec.materializeMask, selectedRowsPerCta, stream.getStream());                                     \
         } else if (useItem32) {                                                                \
             launchTyped<PlanT, uint64_t, uint32_t>(                                            \
                 source, plansPtr, destinationBytes, logicalRows,                               \
                 static_cast<uint32_t>(spec.windowLength),                                      \
                 static_cast<uint32_t>(spec.sourceStepBytes), paddingWord, rowBytes,            \
-                spec.materializeMask, stream.getStream());                                     \
+                spec.materializeMask, selectedRowsPerCta, stream.getStream());                                     \
         } else {                                                                               \
             launchTyped<PlanT, uint64_t, uint64_t>(                                            \
                 source, plansPtr, destinationBytes, logicalRows, spec.windowLength,            \
                 spec.sourceStepBytes, paddingWord, rowBytes,                                   \
-                spec.materializeMask, stream.getStream());                                     \
+                spec.materializeMask, selectedRowsPerCta, stream.getStream());                                     \
         }                                                                                      \
     } while (false)
 
@@ -646,4 +617,16 @@ void launchDeviceResidentWindowMaterializationKernel(
             reinterpret_cast<const DeviceResidentWindowRowPlan64 *>(rowPlans.getMemPtr()));
     }
 #undef THOR_LAUNCH_PLAN
+}
+
+
+void launchDeviceResidentWindowMaterializationKernel(
+    const Tensor &sourceStorage,
+    const Tensor &rowPlans,
+    uint64_t logicalRows,
+    const DeviceResidentWindowMaterializationSpec &spec,
+    Tensor &destination,
+    Stream &stream) {
+    launchDeviceResidentWindowMaterializationKernelWithRowsPerCtaForBenchmark(
+        sourceStorage, rowPlans, logicalRows, spec, destination, 0, stream);
 }

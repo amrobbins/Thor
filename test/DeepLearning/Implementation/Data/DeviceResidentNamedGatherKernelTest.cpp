@@ -292,12 +292,11 @@ TEST(DeviceResidentNamedGatherKernelTest, PayloadThresholdTransitionsUseNextWide
     }
 }
 
-TEST(DeviceResidentNamedGatherKernelTest, SmallRowsRetainBlockParallelismFloor) {
+TEST(DeviceResidentNamedGatherKernelTest, SmallRowsRemainCorrectWithInputSizedGrouping) {
     REQUIRE_CUDA_DEVICE();
 
-    // A one-byte row always prefers 256 rows/CTA by payload. The batch-size
-    // guard intentionally walks the full 1/2/4/8/16/32/64/128/256 rows/CTA
-    // ladder so small batches still expose roughly 64 CTAs of parallelism.
+    // A one-byte row always prefers 256 rows/CTA by payload. These batch
+    // sizes exercise correctness while the input-sized selector groups rows without consulting the SM count.
     for (const uint64_t batchSize :
          {64ULL, 128ULL, 256ULL, 512ULL, 1024ULL, 2048ULL, 4096ULL, 8192ULL, 16384ULL}) {
         runByteGatherCase(/*sourceRows=*/31, batchSize, /*rowBytes=*/1);

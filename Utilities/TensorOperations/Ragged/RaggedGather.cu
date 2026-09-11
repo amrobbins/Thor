@@ -95,6 +95,37 @@ void validateForward(const Tensor& sourceValues,
     }
 }
 
+void validateBackward(const Tensor& sourceOffsets,
+                      const Tensor& indicesValues,
+                      const Tensor& indicesOffsets,
+                      const Tensor& outputGradient,
+                      const Tensor& sourceGradient,
+                      uint64_t batchSize) {
+    validateOffsets(sourceOffsets, batchSize, "source offsets");
+    validateOffsets(indicesOffsets, batchSize, "indices offsets");
+    requireGpu(indicesValues, "indices values");
+    requireGpu(outputGradient, "output gradient");
+    requireGpu(sourceGradient, "source gradient");
+    requireSamePlacement(sourceGradient, sourceOffsets, "source gradient/offsets");
+    requireSamePlacement(sourceGradient, indicesValues, "source gradient/indices values");
+    requireSamePlacement(sourceGradient, indicesOffsets, "source gradient/indices offsets");
+    requireSamePlacement(sourceGradient, outputGradient, "source/output gradients");
+    if (indicesValues.getDataType() != DataType::UINT32 && indicesValues.getDataType() != DataType::UINT64) {
+        throw std::invalid_argument("RaggedGather backward indices values must use UINT32 or UINT64 dtype.");
+    }
+    const std::vector<uint64_t> sourceDimensions = sourceGradient.getDimensions();
+    const std::vector<uint64_t> outputDimensions = outputGradient.getDimensions();
+    if (sourceGradient.getDataType() != outputGradient.getDataType() || sourceDimensions.size() != outputDimensions.size() ||
+        sourceDimensions.empty() ||
+        !std::equal(sourceDimensions.begin() + 1, sourceDimensions.end(), outputDimensions.begin() + 1)) {
+        throw std::invalid_argument("RaggedGather backward gradients must share dtype and trailing dimensions.");
+    }
+    if (indicesValues.getNumDimensions() != 1 || indicesValues.getTotalNumElements() != outputDimensions[0]) {
+        throw std::invalid_argument("RaggedGather backward indices/output gradient packed capacities must match.");
+    }
+}
+
+
 uint32_t laneShiftForItems(uint64_t items) {
     if (items <= 1) return 0;
     if (items <= 2) return 1;
@@ -111,6 +142,43 @@ uint32_t widestAlignedCopyWidth(const Tensor& sourceValues, const Tensor& output
         if (valueBytes % width == 0 && sourceAddress % width == 0 && outputAddress % width == 0) return width;
     }
     return 1;
+}
+
+uint32_t validateForcedLanesPerToken(uint32_t forcedLanesPerToken) {
+    if (forcedLanesPerToken == 0) return 0;
+    if (forcedLanesPerToken > 32 || (forcedLanesPerToken & (forcedLanesPerToken - 1U)) != 0) {
+        throw std::invalid_argument(
+            "RaggedGather benchmark forced lanes-per-token must be 0 or a power of two in [1,32].");
+    }
+    return forcedLanesPerToken;
+}
+
+uint32_t laneShiftForSelection(uint64_t items, uint32_t forcedLanesPerToken) {
+    forcedLanesPerToken = validateForcedLanesPerToken(forcedLanesPerToken);
+    if (forcedLanesPerToken == 0) return laneShiftForItems(items);
+    uint32_t shift = 0;
+    while ((1U << shift) < forcedLanesPerToken) ++shift;
+    return shift;
+}
+
+uint32_t copyWidthForSelection(const Tensor& sourceValues,
+                               const Tensor& outputValues,
+                               uint64_t valueBytes,
+                               uint32_t forcedCopyWidth) {
+    if (forcedCopyWidth == 0) return widestAlignedCopyWidth(sourceValues, outputValues, valueBytes);
+    if (!(forcedCopyWidth == 1 || forcedCopyWidth == 2 || forcedCopyWidth == 4 ||
+          forcedCopyWidth == 8 || forcedCopyWidth == 16)) {
+        throw std::invalid_argument(
+            "RaggedGather benchmark forced copy width must be 0, 1, 2, 4, 8, or 16 bytes.");
+    }
+    const uintptr_t sourceAddress = reinterpret_cast<uintptr_t>(sourceValues.getMemPtr());
+    const uintptr_t outputAddress = reinterpret_cast<uintptr_t>(outputValues.getMemPtr());
+    if (valueBytes % forcedCopyWidth != 0 || sourceAddress % forcedCopyWidth != 0 ||
+        outputAddress % forcedCopyWidth != 0) {
+        throw std::invalid_argument(
+            "RaggedGather benchmark forced copy width is incompatible with value bytes or tensor alignment.");
+    }
+    return forcedCopyWidth;
 }
 
 template <typename SourceOffsetT,
@@ -387,10 +455,11 @@ void launchGatherCopyIndexTyped(const Tensor& sourceValues,
                                 const Tensor& indicesOffsets,
                                 Tensor& outputValues,
                                 uint64_t copyItemsPerValue,
+                                uint32_t forcedLanesPerToken,
                                 uint64_t batchSize,
                                 Stream& stream) {
     const uint32_t blocks = blocksForRows(batchSize);
-    const uint32_t laneShift = laneShiftForItems(copyItemsPerValue);
+    const uint32_t laneShift = laneShiftForSelection(copyItemsPerValue, forcedLanesPerToken);
     if (batchSize <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
         gatherKernel<SourceOffsetT, IndexOffsetT, IndexT, CopyT, PackedIndexT, CopyIndexT, uint32_t>
             <<<blocks, kThreads, 0, stream.getStream()>>>(reinterpret_cast<const CopyT*>(sourceValues.getMemPtr()),
@@ -423,6 +492,7 @@ void launchGatherCopyTyped(const Tensor& sourceValues,
                            Tensor& outputValues,
                            uint64_t copyItemsPerValue,
                            uint32_t copyWidth,
+                           uint32_t forcedLanesPerToken,
                            uint64_t batchSize,
                            Stream& stream) {
     const uint64_t sourcePackedItems = sourceValues.getArraySizeInBytes() / copyWidth;
@@ -435,6 +505,7 @@ void launchGatherCopyTyped(const Tensor& sourceValues,
                                                                                                   indicesOffsets,
                                                                                                   outputValues,
                                                                                                   copyItemsPerValue,
+                                                                                                  forcedLanesPerToken,
                                                                                                   batchSize,
                                                                                                   stream);
     } else if (copyItemsPerValue <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
@@ -444,6 +515,7 @@ void launchGatherCopyTyped(const Tensor& sourceValues,
                                                                                                   indicesOffsets,
                                                                                                   outputValues,
                                                                                                   copyItemsPerValue,
+                                                                                                  forcedLanesPerToken,
                                                                                                   batchSize,
                                                                                                   stream);
     } else {
@@ -453,6 +525,7 @@ void launchGatherCopyTyped(const Tensor& sourceValues,
                                                                                                   indicesOffsets,
                                                                                                   outputValues,
                                                                                                   copyItemsPerValue,
+                                                                                                  forcedLanesPerToken,
                                                                                                   batchSize,
                                                                                                   stream);
     }
@@ -465,6 +538,8 @@ void launchGatherTyped(const Tensor& sourceValues,
                        const Tensor& indicesOffsets,
                        Tensor& outputValues,
                        uint64_t batchSize,
+                       uint32_t forcedCopyWidth,
+                       uint32_t forcedLanesPerToken,
                        Stream& stream) {
     const uint64_t trailingElements = elementsPerValue(sourceValues);
     const uint64_t elementBytes = TensorDescriptor::getElementSizeInBytes(sourceValues.getDataType());
@@ -472,7 +547,7 @@ void launchGatherTyped(const Tensor& sourceValues,
         throw std::overflow_error("RaggedGather trailing value byte count overflow.");
     }
     const uint64_t valueBytes = trailingElements * elementBytes;
-    const uint32_t copyWidth = widestAlignedCopyWidth(sourceValues, outputValues, valueBytes);
+    const uint32_t copyWidth = copyWidthForSelection(sourceValues, outputValues, valueBytes, forcedCopyWidth);
     const uint64_t copyItemsPerValue = valueBytes / copyWidth;
 
     switch (copyWidth) {
@@ -484,6 +559,7 @@ void launchGatherTyped(const Tensor& sourceValues,
                                                                             outputValues,
                                                                             copyItemsPerValue,
                                                                             copyWidth,
+                                                                            forcedLanesPerToken,
                                                                             batchSize,
                                                                             stream);
             return;
@@ -495,6 +571,7 @@ void launchGatherTyped(const Tensor& sourceValues,
                                                                                 outputValues,
                                                                                 copyItemsPerValue,
                                                                                 copyWidth,
+                                                                                forcedLanesPerToken,
                                                                                 batchSize,
                                                                                 stream);
             return;
@@ -506,6 +583,7 @@ void launchGatherTyped(const Tensor& sourceValues,
                                                                                 outputValues,
                                                                                 copyItemsPerValue,
                                                                                 copyWidth,
+                                                                                forcedLanesPerToken,
                                                                                 batchSize,
                                                                                 stream);
             return;
@@ -517,6 +595,7 @@ void launchGatherTyped(const Tensor& sourceValues,
                                                                                 outputValues,
                                                                                 copyItemsPerValue,
                                                                                 copyWidth,
+                                                                                forcedLanesPerToken,
                                                                                 batchSize,
                                                                                 stream);
             return;
@@ -528,6 +607,7 @@ void launchGatherTyped(const Tensor& sourceValues,
                                                                                outputValues,
                                                                                copyItemsPerValue,
                                                                                copyWidth,
+                                                                               forcedLanesPerToken,
                                                                                batchSize,
                                                                                stream);
             return;
@@ -546,9 +626,10 @@ void launchBackwardPackedTyped(const Tensor& sourceOffsets,
                                const Tensor& outputGradient,
                                Tensor& sourceGradient,
                                uint64_t trailingElements,
+                               uint32_t forcedLanesPerToken,
                                uint64_t batchSize,
                                Stream& stream) {
-    const uint32_t laneShift = laneShiftForItems(trailingElements);
+    const uint32_t laneShift = laneShiftForSelection(trailingElements, forcedLanesPerToken);
     const uint32_t blocks = blocksForRows(batchSize);
     if (batchSize <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
         gatherBackwardKernel<SourceOffsetT, IndexOffsetT, IndexT, ValueT, PackedIndexT, FeatureIndexT, uint32_t>
@@ -581,6 +662,7 @@ void launchBackwardTyped(const Tensor& sourceOffsets,
                          const Tensor& outputGradient,
                          Tensor& sourceGradient,
                          uint64_t batchSize,
+                         uint32_t forcedLanesPerToken,
                          Stream& stream) {
     const uint64_t trailingElements = elementsPerValue(sourceGradient);
     const uint64_t maxPackedScalars = std::max(sourceGradient.getTotalNumElements(), outputGradient.getTotalNumElements());
@@ -592,6 +674,7 @@ void launchBackwardTyped(const Tensor& sourceOffsets,
                                                                                                   outputGradient,
                                                                                                   sourceGradient,
                                                                                                   trailingElements,
+                                                                                                  forcedLanesPerToken,
                                                                                                   batchSize,
                                                                                                   stream);
     } else if (trailingElements <= static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
@@ -601,6 +684,7 @@ void launchBackwardTyped(const Tensor& sourceOffsets,
                                                                                                   outputGradient,
                                                                                                   sourceGradient,
                                                                                                   trailingElements,
+                                                                                                  forcedLanesPerToken,
                                                                                                   batchSize,
                                                                                                   stream);
     } else {
@@ -610,6 +694,7 @@ void launchBackwardTyped(const Tensor& sourceOffsets,
                                                                                                   outputGradient,
                                                                                                   sourceGradient,
                                                                                                   trailingElements,
+                                                                                                  forcedLanesPerToken,
                                                                                                   batchSize,
                                                                                                   stream);
     }
@@ -622,13 +707,17 @@ void dispatchForwardIndex(const Tensor& sourceValues,
                           const Tensor& indicesOffsets,
                           Tensor& outputValues,
                           uint64_t batchSize,
+                          uint32_t forcedCopyWidth,
+                          uint32_t forcedLanesPerToken,
                           Stream& stream) {
     if (indicesValues.getDataType() == DataType::UINT32) {
         launchGatherTyped<SourceOffsetT, IndexOffsetT, uint32_t>(
-            sourceValues, sourceOffsets, indicesValues, indicesOffsets, outputValues, batchSize, stream);
+            sourceValues, sourceOffsets, indicesValues, indicesOffsets, outputValues, batchSize,
+            forcedCopyWidth, forcedLanesPerToken, stream);
     } else {
         launchGatherTyped<SourceOffsetT, IndexOffsetT, uint64_t>(
-            sourceValues, sourceOffsets, indicesValues, indicesOffsets, outputValues, batchSize, stream);
+            sourceValues, sourceOffsets, indicesValues, indicesOffsets, outputValues, batchSize,
+            forcedCopyWidth, forcedLanesPerToken, stream);
     }
 }
 
@@ -639,13 +728,16 @@ void dispatchBackwardIndex(const Tensor& sourceOffsets,
                            const Tensor& outputGradient,
                            Tensor& sourceGradient,
                            uint64_t batchSize,
+                           uint32_t forcedLanesPerToken,
                            Stream& stream) {
     if (indicesValues.getDataType() == DataType::UINT32) {
         launchBackwardTyped<SourceOffsetT, IndexOffsetT, uint32_t, ValueT>(
-            sourceOffsets, indicesValues, indicesOffsets, outputGradient, sourceGradient, batchSize, stream);
+            sourceOffsets, indicesValues, indicesOffsets, outputGradient, sourceGradient, batchSize,
+            forcedLanesPerToken, stream);
     } else {
         launchBackwardTyped<SourceOffsetT, IndexOffsetT, uint64_t, ValueT>(
-            sourceOffsets, indicesValues, indicesOffsets, outputGradient, sourceGradient, batchSize, stream);
+            sourceOffsets, indicesValues, indicesOffsets, outputGradient, sourceGradient, batchSize,
+            forcedLanesPerToken, stream);
     }
 }
 
@@ -656,13 +748,17 @@ void dispatchForwardIndexOffsets(const Tensor& sourceValues,
                                  const Tensor& indicesOffsets,
                                  Tensor& outputValues,
                                  uint64_t batchSize,
+                                 uint32_t forcedCopyWidth,
+                                 uint32_t forcedLanesPerToken,
                                  Stream& stream) {
     if (indicesOffsets.getDataType() == DataType::UINT32) {
         dispatchForwardIndex<SourceOffsetT, uint32_t>(
-            sourceValues, sourceOffsets, indicesValues, indicesOffsets, outputValues, batchSize, stream);
+            sourceValues, sourceOffsets, indicesValues, indicesOffsets, outputValues, batchSize,
+            forcedCopyWidth, forcedLanesPerToken, stream);
     } else {
         dispatchForwardIndex<SourceOffsetT, uint64_t>(
-            sourceValues, sourceOffsets, indicesValues, indicesOffsets, outputValues, batchSize, stream);
+            sourceValues, sourceOffsets, indicesValues, indicesOffsets, outputValues, batchSize,
+            forcedCopyWidth, forcedLanesPerToken, stream);
     }
 }
 
@@ -673,13 +769,16 @@ void dispatchBackwardIndexOffsets(const Tensor& sourceOffsets,
                                   const Tensor& outputGradient,
                                   Tensor& sourceGradient,
                                   uint64_t batchSize,
+                                  uint32_t forcedLanesPerToken,
                                   Stream& stream) {
     if (indicesOffsets.getDataType() == DataType::UINT32) {
         dispatchBackwardIndex<SourceOffsetT, uint32_t, ValueT>(
-            sourceOffsets, indicesValues, indicesOffsets, outputGradient, sourceGradient, batchSize, stream);
+            sourceOffsets, indicesValues, indicesOffsets, outputGradient, sourceGradient, batchSize,
+            forcedLanesPerToken, stream);
     } else {
         dispatchBackwardIndex<SourceOffsetT, uint64_t, ValueT>(
-            sourceOffsets, indicesValues, indicesOffsets, outputGradient, sourceGradient, batchSize, stream);
+            sourceOffsets, indicesValues, indicesOffsets, outputGradient, sourceGradient, batchSize,
+            forcedLanesPerToken, stream);
     }
 }
 
@@ -696,10 +795,10 @@ void launchRaggedGather(const Tensor& source_values,
     ScopedGpu scopedGpu(stream.getGpuNum());
     if (source_offsets.getDataType() == DataType::UINT32) {
         dispatchForwardIndexOffsets<uint32_t>(
-            source_values, source_offsets, indices_values, indices_offsets, output_values, batch_size, stream);
+            source_values, source_offsets, indices_values, indices_offsets, output_values, batch_size, 0, 0, stream);
     } else {
         dispatchForwardIndexOffsets<uint64_t>(
-            source_values, source_offsets, indices_values, indices_offsets, output_values, batch_size, stream);
+            source_values, source_offsets, indices_values, indices_offsets, output_values, batch_size, 0, 0, stream);
     }
 }
 
@@ -710,38 +809,17 @@ void launchRaggedGatherBackward(const Tensor& source_offsets,
                                 Tensor& source_gradient,
                                 uint64_t batch_size,
                                 Stream& stream) {
-    validateOffsets(source_offsets, batch_size, "source offsets");
-    validateOffsets(indices_offsets, batch_size, "indices offsets");
-    requireGpu(indices_values, "indices values");
-    requireGpu(output_gradient, "output gradient");
-    requireGpu(source_gradient, "source gradient");
-    requireSamePlacement(source_gradient, source_offsets, "source gradient/offsets");
-    requireSamePlacement(source_gradient, indices_values, "source gradient/indices values");
-    requireSamePlacement(source_gradient, indices_offsets, "source gradient/indices offsets");
-    requireSamePlacement(source_gradient, output_gradient, "source/output gradients");
-    if (indices_values.getDataType() != DataType::UINT32 && indices_values.getDataType() != DataType::UINT64) {
-        throw std::invalid_argument("RaggedGather backward indices values must use UINT32 or UINT64 dtype.");
-    }
-    const std::vector<uint64_t> sourceDimensions = source_gradient.getDimensions();
-    const std::vector<uint64_t> outputDimensions = output_gradient.getDimensions();
-    if (source_gradient.getDataType() != output_gradient.getDataType() || sourceDimensions.size() != outputDimensions.size() ||
-        sourceDimensions.empty() ||
-        !std::equal(sourceDimensions.begin() + 1, sourceDimensions.end(), outputDimensions.begin() + 1)) {
-        throw std::invalid_argument("RaggedGather backward gradients must share dtype and trailing dimensions.");
-    }
-    if (indices_values.getNumDimensions() != 1 || indices_values.getTotalNumElements() != outputDimensions[0]) {
-        throw std::invalid_argument("RaggedGather backward indices/output gradient packed capacities must match.");
-    }
+    validateBackward(source_offsets, indices_values, indices_offsets, output_gradient, source_gradient, batch_size);
 
     ScopedGpu scopedGpu(stream.getGpuNum());
     auto launchForValueType = [&](auto typeTag) {
         using ValueT = decltype(typeTag);
         if (source_offsets.getDataType() == DataType::UINT32) {
             dispatchBackwardIndexOffsets<uint32_t, ValueT>(
-                source_offsets, indices_values, indices_offsets, output_gradient, source_gradient, batch_size, stream);
+                source_offsets, indices_values, indices_offsets, output_gradient, source_gradient, batch_size, 0, stream);
         } else {
             dispatchBackwardIndexOffsets<uint64_t, ValueT>(
-                source_offsets, indices_values, indices_offsets, output_gradient, source_gradient, batch_size, stream);
+                source_offsets, indices_values, indices_offsets, output_gradient, source_gradient, batch_size, 0, stream);
         }
     };
 
@@ -755,6 +833,122 @@ void launchRaggedGatherBackward(const Tensor& source_offsets,
         case DataType::FP32:
             launchForValueType(float{});
             return;
+        default:
+            throw std::invalid_argument("RaggedGather backward supports only FP16, BF16, and FP32 feature gradients.");
+    }
+}
+
+RaggedGatherForwardBenchmarkLaunchInfo raggedGatherForwardLaunchInfoForBenchmark(
+    const Tensor& source_values,
+    const Tensor& output_values,
+    uint64_t batch_size,
+    uint32_t forced_copy_width_bytes,
+    uint32_t forced_lanes_per_token) {
+    requireGpu(source_values, "source values");
+    requireGpu(output_values, "output values");
+    requireSamePlacement(source_values, output_values, "source/output values");
+    const std::vector<uint64_t> sourceDimensions = source_values.getDimensions();
+    const std::vector<uint64_t> outputDimensions = output_values.getDimensions();
+    if (source_values.getDataType() != output_values.getDataType() || sourceDimensions.size() != outputDimensions.size() ||
+        sourceDimensions.empty() ||
+        !std::equal(sourceDimensions.begin() + 1, sourceDimensions.end(), outputDimensions.begin() + 1)) {
+        throw std::invalid_argument("RaggedGather benchmark source/output values must share dtype and trailing dimensions.");
+    }
+    const uint64_t trailingElements = elementsPerValue(source_values);
+    const uint64_t elementBytes = TensorDescriptor::getElementSizeInBytes(source_values.getDataType());
+    if (trailingElements > std::numeric_limits<uint64_t>::max() / elementBytes)
+        throw std::overflow_error("RaggedGather benchmark trailing value byte count overflow.");
+    const uint64_t valueBytes = trailingElements * elementBytes;
+    const uint32_t copyWidth = copyWidthForSelection(source_values, output_values, valueBytes, forced_copy_width_bytes);
+    const uint64_t copyItems = valueBytes / copyWidth;
+    const uint32_t laneShift = laneShiftForSelection(copyItems, forced_lanes_per_token);
+    const uint32_t lanes = 1U << laneShift;
+    return RaggedGatherForwardBenchmarkLaunchInfo{
+        blocksForRows(batch_size), copyWidth, lanes, kThreads / lanes, copyItems};
+}
+
+RaggedGatherBackwardBenchmarkLaunchInfo raggedGatherBackwardLaunchInfoForBenchmark(
+    const Tensor& source_gradient,
+    uint64_t batch_size,
+    uint32_t forced_lanes_per_token) {
+    requireGpu(source_gradient, "source gradient");
+    const uint64_t trailingElements = elementsPerValue(source_gradient);
+    const uint32_t laneShift = laneShiftForSelection(trailingElements, forced_lanes_per_token);
+    const uint32_t lanes = 1U << laneShift;
+    return RaggedGatherBackwardBenchmarkLaunchInfo{
+        blocksForRows(batch_size), lanes, kThreads / lanes, trailingElements};
+}
+
+void launchRaggedGatherForBenchmark(const Tensor& source_values,
+                                    const Tensor& source_offsets,
+                                    const Tensor& indices_values,
+                                    const Tensor& indices_offsets,
+                                    Tensor& output_values,
+                                    uint64_t batch_size,
+                                    uint32_t forced_copy_width_bytes,
+                                    uint32_t forced_lanes_per_token,
+                                    Stream& stream) {
+    validateForward(source_values, source_offsets, indices_values, indices_offsets, output_values, batch_size);
+    ScopedGpu scopedGpu(stream.getGpuNum());
+    if (source_offsets.getDataType() == DataType::UINT32) {
+        dispatchForwardIndexOffsets<uint32_t>(source_values,
+                                              source_offsets,
+                                              indices_values,
+                                              indices_offsets,
+                                              output_values,
+                                              batch_size,
+                                              forced_copy_width_bytes,
+                                              forced_lanes_per_token,
+                                              stream);
+    } else {
+        dispatchForwardIndexOffsets<uint64_t>(source_values,
+                                              source_offsets,
+                                              indices_values,
+                                              indices_offsets,
+                                              output_values,
+                                              batch_size,
+                                              forced_copy_width_bytes,
+                                              forced_lanes_per_token,
+                                              stream);
+    }
+}
+
+void launchRaggedGatherBackwardForBenchmark(const Tensor& source_offsets,
+                                            const Tensor& indices_values,
+                                            const Tensor& indices_offsets,
+                                            const Tensor& output_gradient,
+                                            Tensor& source_gradient,
+                                            uint64_t batch_size,
+                                            uint32_t forced_lanes_per_token,
+                                            Stream& stream) {
+    validateBackward(source_offsets, indices_values, indices_offsets, output_gradient, source_gradient, batch_size);
+    ScopedGpu scopedGpu(stream.getGpuNum());
+    auto launchForValueType = [&](auto typeTag) {
+        using ValueT = decltype(typeTag);
+        if (source_offsets.getDataType() == DataType::UINT32) {
+            dispatchBackwardIndexOffsets<uint32_t, ValueT>(source_offsets,
+                                                           indices_values,
+                                                           indices_offsets,
+                                                           output_gradient,
+                                                           source_gradient,
+                                                           batch_size,
+                                                           forced_lanes_per_token,
+                                                           stream);
+        } else {
+            dispatchBackwardIndexOffsets<uint64_t, ValueT>(source_offsets,
+                                                           indices_values,
+                                                           indices_offsets,
+                                                           output_gradient,
+                                                           source_gradient,
+                                                           batch_size,
+                                                           forced_lanes_per_token,
+                                                           stream);
+        }
+    };
+    switch (source_gradient.getDataType()) {
+        case DataType::FP16: launchForValueType(__half{}); return;
+        case DataType::BF16: launchForValueType(__nv_bfloat16{}); return;
+        case DataType::FP32: launchForValueType(float{}); return;
         default:
             throw std::invalid_argument("RaggedGather backward supports only FP16, BF16, and FP32 feature gradients.");
     }

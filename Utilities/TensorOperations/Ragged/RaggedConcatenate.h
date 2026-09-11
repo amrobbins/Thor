@@ -56,3 +56,17 @@ void launchRaggedSplit(void *dest[],
                        const RaggedConcatenateSpanGeometry spanGeometry[],
                        uint64_t activeRows,
                        Stream stream);
+
+// Benchmark-only launch hooks that force one existing spans-per-CTA specialization.
+// Production callers should use launchRaggedConcatenate()/launchRaggedSplit().
+void launchRaggedConcatenateWithSpansPerCtaForBenchmark(
+    void *dest, void *source[], uint64_t capacityRows, uint64_t outputValueBytes,
+    uint64_t outerSlicesPerValue, uint32_t numSourceArrays,
+    const RaggedConcatenateSpanGeometry spanGeometry[], uint64_t activeRows,
+    uint32_t spansPerCta, Stream stream);
+
+void launchRaggedSplitWithSpansPerCtaForBenchmark(
+    void *dest[], void *source, uint64_t capacityRows, uint64_t sourceValueBytes,
+    uint64_t outerSlicesPerValue, uint32_t numDestArrays,
+    const RaggedConcatenateSpanGeometry spanGeometry[], uint64_t activeRows,
+    uint32_t spansPerCta, Stream stream);

@@ -35,6 +35,7 @@
 #include "Utilities/TensorOperations/Cub/CubReduction.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/BucketedCublasGemm.h"
+#include "Utilities/TensorOperations/Ragged/PaddedRaggedSequenceKernel.h"
 
 namespace ThorImplementation {
 
@@ -173,6 +174,7 @@ struct MatmulCacheKey {
     const bool bias_epilogue;
     const MatmulEpilogue epilogue;
     const MatmulBackwardEpilogue backward_epilogue;
+    const bool forward_epilogue_aux;
     const bool bgrad_epilogue;
     const DataType a_dtype;
     const DataType b_dtype;
@@ -199,6 +201,7 @@ struct MatmulCacheKey {
                    bool bias_epilogue,
                    MatmulEpilogue epilogue,
                    MatmulBackwardEpilogue backward_epilogue,
+                   bool forward_epilogue_aux,
                    bool bgrad_epilogue,
                    DataType a_dtype,
                    DataType b_dtype,
@@ -222,6 +225,7 @@ struct MatmulCacheKey {
           bias_epilogue(bias_epilogue),
           epilogue(epilogue),
           backward_epilogue(backward_epilogue),
+          forward_epilogue_aux(forward_epilogue_aux),
           bgrad_epilogue(bgrad_epilogue),
           a_dtype(a_dtype),
           b_dtype(b_dtype),
@@ -733,8 +737,9 @@ struct RaggedConv1dPaddedBackwardDataState;
 struct RaggedConv1dPaddedBackwardFilterState;
 
 // T8A representation-boundary adapters. Packing establishes the selected
-// [B,C,1,W] view and canonicalizes the entry tail to zero. Unpacking exports
-// only logical active values and never reads or writes the undefined padded tail.
+// [B,C,1,W] view and writes only logical active values; its inactive tail remains
+// undefined. Unpacking exports only logical active values and never reads or
+// writes the undefined padded tail.
 class StampedPaddedRaggedPack {
    public:
     StampedPaddedRaggedPack(CompiledPaddedRaggedSequenceLayout layout,
@@ -746,6 +751,7 @@ class StampedPaddedRaggedPack {
     void run();
     void runOn(Stream& run_stream) const;
     uint32_t gpuNum() const { return packed_values.getPlacement().getDeviceNum(); }
+    [[nodiscard]] size_t preStampedWidthCount() const { return launch_plan_by_width.size(); }
     [[nodiscard]] static constexpr RaggedPartitionRequirement raggedPartitionRequirement() noexcept {
         return RaggedPartitionRequirement::HOST_EXTENT | RaggedPartitionRequirement::DEVICE_OFFSETS;
     }
@@ -755,25 +761,59 @@ class StampedPaddedRaggedPack {
     std::vector<uint64_t> width_capacities;
     Tensor packed_values;
     std::shared_ptr<PaddedRaggedSequence> padded_values;
+    std::unordered_map<uint64_t, PaddedRaggedPackLaunchPlan> launch_plan_by_width;
     Stream stream;
 };
 
-class StampedPaddedRaggedUnpack {
+// Physical preparation stage for padded ragged consumers that require the
+// inactive selected-width tail to be canonical zero. The complete launch
+// geometry for every allowed width is prepared while stamping; runtime only
+// selects the already-built plan for the padded value's current width and
+// consumes the canonical device offsets.
+class StampedSanitizePaddedRaggedTail {
    public:
-    StampedPaddedRaggedUnpack(std::shared_ptr<PaddedRaggedSequence> padded_values,
-                              Tensor packed_values,
-                              const Stream& stream);
+    StampedSanitizePaddedRaggedTail(std::shared_ptr<PaddedRaggedSequence> padded_values,
+                                    std::vector<uint64_t> width_capacities,
+                                    const Stream& stream);
 
-    void run();
+    void run() { runOn(stream); }
     void runOn(Stream& run_stream) const;
-    uint32_t gpuNum() const { return packed_values.getPlacement().getDeviceNum(); }
+
+    uint32_t gpuNum() const;
+    [[nodiscard]] size_t preStampedWidthCount() const { return launch_plan_by_width.size(); }
     [[nodiscard]] static constexpr RaggedPartitionRequirement raggedPartitionRequirement() noexcept {
         return RaggedPartitionRequirement::DEVICE_OFFSETS;
     }
 
    private:
     std::shared_ptr<PaddedRaggedSequence> padded_values;
+    std::vector<uint64_t> width_capacities;
+    std::unordered_map<uint64_t, PaddedRaggedTailZeroLaunchPlan> launch_plan_by_width;
+    Stream stream;
+};
+
+class StampedPaddedRaggedUnpack {
+   public:
+    StampedPaddedRaggedUnpack(CompiledPaddedRaggedSequenceLayout layout,
+                              std::vector<uint64_t> width_capacities,
+                              std::shared_ptr<PaddedRaggedSequence> padded_values,
+                              Tensor packed_values,
+                              const Stream& stream);
+
+    void run();
+    void runOn(Stream& run_stream) const;
+    uint32_t gpuNum() const { return packed_values.getPlacement().getDeviceNum(); }
+    [[nodiscard]] size_t preStampedWidthCount() const { return launch_plan_by_width.size(); }
+    [[nodiscard]] static constexpr RaggedPartitionRequirement raggedPartitionRequirement() noexcept {
+        return RaggedPartitionRequirement::DEVICE_OFFSETS;
+    }
+
+   private:
+    CompiledPaddedRaggedSequenceLayout layout;
+    std::vector<uint64_t> width_capacities;
+    std::shared_ptr<PaddedRaggedSequence> padded_values;
     mutable Tensor packed_values;
+    std::unordered_map<uint64_t, PaddedRaggedUnpackLaunchPlan> launch_plan_by_width;
     Stream stream;
 };
 
@@ -1125,15 +1165,9 @@ class StampedRmsNormBackward {
     [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes() const {
         return backward_workspace.has_value() ? backward_workspace->getArraySizeInBytes() : 0;
     }
-    [[nodiscard]] uint64_t fallbackForwardWorkspaceSizeInBytes() const {
-        return fallback_forward_workspace.has_value() ? fallback_forward_workspace->getArraySizeInBytes() : 0;
-    }
     [[nodiscard]] size_t backwardExecutablePlanCount() const noexcept { return backward_executable_plans.size(); }
-    [[nodiscard]] size_t fallbackForwardExecutablePlanCount() const noexcept { return fallback_forward_executable_plans.size(); }
     [[nodiscard]] std::vector<uintptr_t> backwardExecutablePlanIds() const;
-    [[nodiscard]] std::vector<uintptr_t> fallbackForwardExecutablePlanIds() const;
     [[nodiscard]] std::vector<CudnnFrontendPlanSelection> backwardPlanSelections() const;
-    [[nodiscard]] std::vector<CudnnFrontendPlanSelection> fallbackForwardPlanSelections() const;
     bool tryLinkForwardStateFrom(const std::shared_ptr<StampedRmsNorm>& forward);
 
     StampedRmsNormBackward(std::shared_ptr<CompiledRmsNormBackward> compiled,
@@ -1159,22 +1193,15 @@ class StampedRmsNormBackward {
     std::vector<Tensor> outputs;
     std::shared_ptr<RmsNormForwardState> saved_forward_state;
     const bool packed_tails_prepared_externally;
-    mutable std::shared_ptr<RmsNormForwardState> fallback_forward_state;
-    mutable Tensor fallback_output;
-    // Dense backward has one plan in each applicable family. Packed backward
-    // owns one local executable per finite selected outer size. The fallback
-    // forward family exists only for a standalone differentiated stage that has
-    // no linked forward statistics.
+    // Dense backward has one plan. Packed backward owns one local executable
+    // per finite selected outer size. Backward never owns a private forward
+    // executable: the cuDNN invVariance statistic must come from the matching
+    // real training forward via linkRmsNormBackwardStatesFrom().
     std::unordered_map<uint64_t, CudnnRmsNormExecutablePlan> backward_executable_plans;
-    std::unordered_map<uint64_t, CudnnRmsNormExecutablePlan> fallback_forward_executable_plans;
-    // Backward and fallback-forward are independently executable cuDNN graphs,
-    // so each stamped backward stage owns distinct scratch for each role.
     mutable std::optional<Tensor> backward_workspace;
-    mutable std::optional<Tensor> fallback_forward_workspace;
 
     void prepareBackwardExecutableFamilies();
     [[nodiscard]] const CudnnRmsNormExecutablePlan& backwardExecutableForOuter(uint64_t outer) const;
-    [[nodiscard]] const CudnnRmsNormExecutablePlan& fallbackForwardExecutableForOuter(uint64_t outer) const;
 };
 
 
@@ -1213,6 +1240,7 @@ class StampedMatmul {
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
     Tensor getOutputTensor() const { return output; }
+    std::optional<Tensor> getEpilogueAuxTensor() const { return epilogue_aux; }
     std::optional<Tensor> getBiasGradientTensor() const { return bgrad_output; }
 
     StampedMatmul(std::shared_ptr<CompiledMatmul> compiled,
@@ -1280,6 +1308,24 @@ struct AttentionForwardState {
     bool has_valid_stats = false;
 };
 
+// Direct handles to the physical values produced/consumed by one real Attention
+// forward stage. These are retention aliases, not materialized copies: Q/K/V are
+// the exact post-projection/post-RoPE tensors consumed by SDPA, O is the exact
+// pre-output-projection tensor produced by SDPA, and forward_state owns the cuDNN
+// statistics generated by that same forward execution.
+struct RetainedAttentionForwardValues {
+    Tensor q;
+    Tensor k;
+    Tensor v;
+    Tensor o;
+    std::shared_ptr<AttentionForwardState> forward_state;
+
+    [[nodiscard]] bool complete() const {
+        return q.isInitialized() && k.isInitialized() && v.isInitialized() && o.isInitialized() &&
+               forward_state != nullptr && forward_state->stats.isInitialized();
+    }
+};
+
 class StampedAttention {
    public:
     void run();
@@ -1294,6 +1340,9 @@ class StampedAttention {
 
     uint32_t gpuNum() const { return output.getPlacement().getDeviceNum(); }
 
+    Tensor getQueryTensor() const { return q; }
+    Tensor getKeyTensor() const { return k; }
+    Tensor getValueTensor() const { return v; }
     Tensor getOutputTensor() const { return output; }
     std::shared_ptr<AttentionForwardState> getForwardState() const { return forward_state; }
     [[nodiscard]] uint64_t workspaceSizeInBytes() const {
@@ -1397,15 +1446,21 @@ class StampedAttentionBackward {
     [[nodiscard]] uint64_t backwardWorkspaceSizeInBytes() const {
         return backward_workspace.has_value() ? backward_workspace->getArraySizeInBytes() : 0;
     }
-    [[nodiscard]] uint64_t fallbackForwardWorkspaceSizeInBytes() const {
-        return fallback_forward_workspace.has_value() ? fallback_forward_workspace->getArraySizeInBytes() : 0;
-    }
+    // Attention backward has no forward-replay executable or workspace.  Keep
+    // these zero-valued diagnostics so structural tests can guard that contract.
+    [[nodiscard]] uint64_t fallbackForwardWorkspaceSizeInBytes() const { return 0; }
     [[nodiscard]] uintptr_t backwardExecutableId() const {
         return backward_plan.has_value() ? backward_plan->executableId() : 0;
     }
-    [[nodiscard]] uintptr_t fallbackForwardExecutableId() const {
-        return fallback_forward_plan.has_value() ? fallback_forward_plan->executableId() : 0;
+    [[nodiscard]] uintptr_t fallbackForwardExecutableId() const { return 0; }
+    [[nodiscard]] bool hasLinkedForwardState() const noexcept { return saved_forward_state != nullptr; }
+    [[nodiscard]] uintptr_t linkedForwardStateId() const noexcept {
+        return reinterpret_cast<uintptr_t>(saved_forward_state.get());
     }
+    [[nodiscard]] bool hasFallbackForwardScratchState() const noexcept {
+        return oScratch.isInitialized() || stats.isInitialized();
+    }
+    bool tryLinkForwardStateFrom(const std::shared_ptr<StampedAttention>& forward);
 
     StampedAttentionBackward(std::shared_ptr<CompiledAttentionBackward> compiled,
                              const Tensor& q,
@@ -1452,13 +1507,13 @@ class StampedAttentionBackward {
     Stream stream;
     std::shared_ptr<AttentionForwardState> saved_forward_state;
     std::vector<Tensor> outputs;
-    // Backward and fallback-forward are independently executable cuDNN plans.
-    // Each owns its finalized local Frontend state and independent scratch. The
-    // fallback pair is omitted when a retained forward state is linked during stamping.
+    // Only the true backward executable is prepared. oScratch/stats may exist
+    // transiently while a cross-plan backward is stamped, solely to provide
+    // descriptors to cuDNN prepareBackward(); runOn() never consumes them.
+    // linkAttentionBackwardStatesFrom() releases them after binding the matching
+    // retained real-forward state.
     std::optional<CudnnAttentionExecutablePlan> backward_plan;
-    std::optional<CudnnAttentionExecutablePlan> fallback_forward_plan;
     mutable std::optional<Tensor> backward_workspace;
-    mutable std::optional<Tensor> fallback_forward_workspace;
 };
 
 class StampedConvolution {
@@ -1684,6 +1739,7 @@ struct StampedExecutionStage {
         Scan,
         Softmax,
         SanitizePackedTail,
+        SanitizePaddedRaggedTail,
         RmsNorm,
         LayerNorm,
         RmsNormBackward,
@@ -1732,6 +1788,8 @@ struct StampedExecutionStage {
                 return "Softmax";
             case Kind::SanitizePackedTail:
                 return "SanitizePackedTail";
+            case Kind::SanitizePaddedRaggedTail:
+                return "SanitizePaddedRaggedTail";
             case Kind::RmsNorm:
                 return "RmsNorm";
             case Kind::LayerNorm:
@@ -1770,6 +1828,12 @@ struct StampedExecutionStage {
     const uint32_t gpu_num;
     const uint64_t flop_count = 0;
     const std::optional<RuntimeRaggedFusedFlopAccounting> runtime_ragged_fused_flop_accounting = std::nullopt;
+#ifdef THOR_DEBUG
+    // BR0: provenance is stamped from the source PhysicalExpression after the
+    // stage object is constructed. It is diagnostic-only and intentionally
+    // does not participate in compilation/cache keys or runtime semantics.
+    ExpressionExecutionProvenance execution_provenance = ExpressionExecutionProvenance::Forward;
+#endif
 
     const std::shared_ptr<StampedEquation> kernel = nullptr;
     const std::shared_ptr<StampedCudaKernel> cuda_kernel = nullptr;
@@ -1786,6 +1850,7 @@ struct StampedExecutionStage {
     const std::shared_ptr<StampedScan> scan = nullptr;
     const std::shared_ptr<StampedSoftmax> softmax = nullptr;
     const std::shared_ptr<StampedSanitizePackedTail> sanitize_packed_tail = nullptr;
+    const std::shared_ptr<StampedSanitizePaddedRaggedTail> sanitize_padded_ragged_tail = nullptr;
     const std::shared_ptr<StampedRmsNorm> rms_norm = nullptr;
     const std::shared_ptr<StampedLayerNorm> layer_norm = nullptr;
     const std::shared_ptr<StampedRmsNormBackward> rms_norm_backward = nullptr;
@@ -1938,6 +2003,13 @@ struct StampedExecutionStage {
           dependency_stage_indices(std::move(dependency_stage_indices)),
           gpu_num(sanitize_packed_tail->gpuNum()),
           sanitize_packed_tail(sanitize_packed_tail) {}
+
+    explicit StampedExecutionStage(const std::shared_ptr<StampedSanitizePaddedRaggedTail>& sanitize_padded_ragged_tail,
+                                   std::vector<uint32_t> dependency_stage_indices = {})
+        : kind(Kind::SanitizePaddedRaggedTail),
+          dependency_stage_indices(std::move(dependency_stage_indices)),
+          gpu_num(sanitize_padded_ragged_tail->gpuNum()),
+          sanitize_padded_ragged_tail(sanitize_padded_ragged_tail) {}
 
 
     explicit StampedExecutionStage(const std::shared_ptr<StampedRmsNorm>& rms_norm,
@@ -2167,6 +2239,10 @@ struct StampedExecutionStage {
     void runOn(Stream& run_stream, const std::unordered_map<std::string, float>& runtime_scalars) const {
         if (kind == Kind::FusedKernel) {
             THOR_THROW_IF_FALSE(kernel != nullptr);
+#ifdef THOR_DEBUG
+            detail::recordExpressionPhysicalExecutionForTests(
+                detail::ExpressionPhysicalExecutionKind::FusedKernel, execution_provenance);
+#endif
             if (runtime_scalars.empty())
                 kernel->runOn(run_stream);
             else
@@ -2179,12 +2255,24 @@ struct StampedExecutionStage {
                 cuda_kernel->runOn(run_stream, runtime_scalars);
         } else if (kind == Kind::Reduction) {
             THOR_THROW_IF_FALSE(reduction != nullptr);
+#ifdef THOR_DEBUG
+            detail::recordExpressionPhysicalExecutionForTests(
+                detail::ExpressionPhysicalExecutionKind::Reduction, execution_provenance);
+#endif
             reduction->runOn(run_stream);
         } else if (kind == Kind::ArgMinMax) {
             THOR_THROW_IF_FALSE(arg_minmax != nullptr);
+#ifdef THOR_DEBUG
+            detail::recordExpressionPhysicalExecutionForTests(
+                detail::ExpressionPhysicalExecutionKind::Reduction, execution_provenance);
+#endif
             arg_minmax->runOn(run_stream);
         } else if (kind == Kind::SegmentedReduction) {
             THOR_THROW_IF_FALSE(segmented_reduction != nullptr);
+#ifdef THOR_DEBUG
+            detail::recordExpressionPhysicalExecutionForTests(
+                detail::ExpressionPhysicalExecutionKind::Reduction, execution_provenance);
+#endif
             segmented_reduction->runOn(run_stream);
         } else if (kind == Kind::SegmentedBroadcast) {
             THOR_THROW_IF_FALSE(segmented_broadcast != nullptr);
@@ -2194,6 +2282,10 @@ struct StampedExecutionStage {
             padded_ragged_pack->runOn(run_stream);
         } else if (kind == Kind::PaddedRaggedPointwise) {
             THOR_THROW_IF_FALSE(padded_ragged_pointwise != nullptr);
+#ifdef THOR_DEBUG
+            detail::recordExpressionPhysicalExecutionForTests(
+                detail::ExpressionPhysicalExecutionKind::FusedKernel, execution_provenance);
+#endif
             if (runtime_scalars.empty())
                 padded_ragged_pointwise->runOn(run_stream);
             else
@@ -2215,24 +2307,43 @@ struct StampedExecutionStage {
             scan->runOn(run_stream);
         } else if (kind == Kind::Softmax) {
             THOR_THROW_IF_FALSE(softmax != nullptr);
+#ifdef THOR_DEBUG
+            detail::recordExpressionPhysicalExecutionForTests(
+                detail::ExpressionPhysicalExecutionKind::Softmax, execution_provenance);
+#endif
             softmax->runOn(run_stream);
         } else if (kind == Kind::SanitizePackedTail) {
             THOR_THROW_IF_FALSE(sanitize_packed_tail != nullptr);
             sanitize_packed_tail->runOn(run_stream);
+        } else if (kind == Kind::SanitizePaddedRaggedTail) {
+            THOR_THROW_IF_FALSE(sanitize_padded_ragged_tail != nullptr);
+            sanitize_padded_ragged_tail->runOn(run_stream);
         } else if (kind == Kind::RmsNorm) {
             THOR_THROW_IF_FALSE(rms_norm != nullptr);
+#ifdef THOR_DEBUG
+            detail::recordExpressionPhysicalExecutionForTests(
+                detail::ExpressionPhysicalExecutionKind::RmsNorm, execution_provenance);
+#endif
             rms_norm->runOn(run_stream);
         } else if (kind == Kind::LayerNorm) {
             THOR_THROW_IF_FALSE(layer_norm != nullptr);
             layer_norm->runOn(run_stream);
         } else if (kind == Kind::RmsNormBackward) {
             THOR_THROW_IF_FALSE(rms_norm_backward != nullptr);
+#ifdef THOR_DEBUG
+            detail::recordExpressionPhysicalExecutionForTests(
+                detail::ExpressionPhysicalExecutionKind::RmsNorm, execution_provenance);
+#endif
             rms_norm_backward->runOn(run_stream);
         } else if (kind == Kind::EmbeddingLookup) {
             THOR_THROW_IF_FALSE(embedding_lookup != nullptr);
             embedding_lookup->runOn(run_stream);
         } else if (kind == Kind::Matmul) {
             THOR_THROW_IF_FALSE(matmul != nullptr);
+#ifdef THOR_DEBUG
+            detail::recordExpressionPhysicalExecutionForTests(
+                detail::ExpressionPhysicalExecutionKind::Matmul, execution_provenance);
+#endif
             if (runtime_scalars.empty())
                 matmul->runOn(run_stream);
             else
@@ -2252,9 +2363,17 @@ struct StampedExecutionStage {
             attention_backward->runOn(run_stream);
         } else if (kind == Kind::Convolution) {
             THOR_THROW_IF_FALSE(convolution != nullptr);
+#ifdef THOR_DEBUG
+            detail::recordExpressionPhysicalExecutionForTests(
+                detail::ExpressionPhysicalExecutionKind::Convolution, execution_provenance);
+#endif
             convolution->runOn(run_stream);
         } else if (kind == Kind::ConvolutionBackward) {
             THOR_THROW_IF_FALSE(convolution_backward != nullptr);
+#ifdef THOR_DEBUG
+            detail::recordExpressionPhysicalExecutionForTests(
+                detail::ExpressionPhysicalExecutionKind::Convolution, execution_provenance);
+#endif
             convolution_backward->runOn(run_stream);
         } else if (kind == Kind::ReduceMinMaxBackward) {
             THOR_THROW_IF_FALSE(reduce_minmax_backward != nullptr);
@@ -2306,11 +2425,15 @@ class StampedExecutionPlan {
     StampedExecutionPlan(std::vector<StampedExecutionStage> steps,
                          std::unordered_map<std::string, Tensor> final_outputs,
                          const Stream& stream,
-                         std::vector<StampedOutputMaterialization> output_materializations = {})
+                         std::vector<StampedOutputMaterialization> output_materializations = {},
+                         std::unordered_map<uint32_t, Tensor> retained_forward_values = {},
+                         std::unordered_map<uint32_t, Tensor> retained_forward_epilogue_aux_values = {})
         : steps(std::move(steps)),
           final_outputs(std::move(final_outputs)),
           stream(stream),
           output_materializations(std::move(output_materializations)),
+          retained_forward_values(std::move(retained_forward_values)),
+          retained_forward_epilogue_aux_values(std::move(retained_forward_epilogue_aux_values)),
           execution_schedule(
               detail::buildStampedExecutionSchedule(this->steps, static_cast<uint32_t>(stream.getGpuNum()))) {}
 
@@ -2322,8 +2445,53 @@ class StampedExecutionPlan {
     [[nodiscard]] bool requiresRuntimeScalars() const;
     [[nodiscard]] std::unordered_set<std::string> runtimeScalarNames() const;
 
-    // Link dense RMSNorm backward stages to retained invVariance produced by the matching forward plan.
+    // Link RMSNorm backward stages to the invVariance retained by the matching real training forward.
+// Unlinked RMSNorm backward execution is invalid; backward never regenerates this state.
     void linkRmsNormBackwardStatesFrom(const StampedExecutionPlan& forward_plan);
+
+    // Link Attention backward stages to the exact Q/K/V/O/stats provider from the
+    // real forward plan. A linked backward discards its legacy fallback-forward
+    // executable/workspace and must consume the retained state at runtime.
+    void linkAttentionBackwardStatesFrom(const StampedExecutionPlan& forward_plan);
+
+    struct AttentionBackwardStateDiagnostic {
+        bool linked_forward_state = false;
+        uintptr_t linked_forward_state_id = 0;
+        uintptr_t backward_executable_id = 0;
+        uintptr_t fallback_forward_executable_id = 0;
+        uint64_t backward_workspace_bytes = 0;
+        uint64_t fallback_forward_workspace_bytes = 0;
+        bool fallback_forward_scratch_present = false;
+    };
+
+    [[nodiscard]] std::vector<AttentionBackwardStateDiagnostic> attentionBackwardStateDiagnostics() const {
+        std::vector<AttentionBackwardStateDiagnostic> out;
+        for (const StampedExecutionStage& step : steps) {
+            if (step.kind != StampedExecutionStage::Kind::AttentionBackward) {
+                continue;
+            }
+            if (!step.attention_backward) {
+                throw std::runtime_error("Attention backward stage is missing its stamped operation.");
+            }
+            out.push_back(AttentionBackwardStateDiagnostic{
+                .linked_forward_state = step.attention_backward->hasLinkedForwardState(),
+                .linked_forward_state_id = step.attention_backward->linkedForwardStateId(),
+                .backward_executable_id = step.attention_backward->backwardExecutableId(),
+                .fallback_forward_executable_id = step.attention_backward->fallbackForwardExecutableId(),
+                .backward_workspace_bytes = step.attention_backward->backwardWorkspaceSizeInBytes(),
+                .fallback_forward_workspace_bytes = step.attention_backward->fallbackForwardWorkspaceSizeInBytes(),
+                .fallback_forward_scratch_present = step.attention_backward->hasFallbackForwardScratchState(),
+            });
+        }
+        return out;
+    }
+
+    // Retain the values/state produced by every physical Attention forward stage
+    // in this already-stamped plan. No graph is restamped and no activation is
+    // copied; the returned Tensor handles extend the lifetime of the exact stage
+    // values while retainForwardStateForBackward() allocates cuDNN stats/storage
+    // during stamping.
+    [[nodiscard]] std::vector<RetainedAttentionForwardValues> retainAttentionForwardValuesForBackward();
 
     [[nodiscard]] uint64_t flopCount() const {
         uint64_t total = 0;
@@ -2514,6 +2682,41 @@ class StampedExecutionPlan {
 
     std::unordered_map<std::string, Tensor> getFinalOutputs() const { return final_outputs; }
 
+    [[nodiscard]] bool hasRetainedForwardValue(uint32_t logical_node_index) const {
+        return retained_forward_values.contains(logical_node_index);
+    }
+
+    [[nodiscard]] Tensor retainedForwardValue(uint32_t logical_node_index) const {
+        auto it = retained_forward_values.find(logical_node_index);
+        if (it == retained_forward_values.end()) {
+            throw std::runtime_error("StampedExecutionPlan has no retained forward value for logical node " +
+                                     std::to_string(logical_node_index) + ".");
+        }
+        return it->second;
+    }
+
+    [[nodiscard]] const std::unordered_map<uint32_t, Tensor>& retainedForwardValues() const {
+        return retained_forward_values;
+    }
+
+    [[nodiscard]] bool hasRetainedForwardEpilogueAux(uint32_t logical_node_index) const {
+        return retained_forward_epilogue_aux_values.contains(logical_node_index);
+    }
+
+    [[nodiscard]] Tensor retainedForwardEpilogueAux(uint32_t logical_node_index) const {
+        auto it = retained_forward_epilogue_aux_values.find(logical_node_index);
+        if (it == retained_forward_epilogue_aux_values.end()) {
+            throw std::runtime_error(
+                "StampedExecutionPlan has no retained forward matmul epilogue auxiliary value for logical node " +
+                std::to_string(logical_node_index) + ".");
+        }
+        return it->second;
+    }
+
+    [[nodiscard]] const std::unordered_map<uint32_t, Tensor>& retainedForwardEpilogueAuxValues() const {
+        return retained_forward_epilogue_aux_values;
+    }
+
    private:
     friend struct detail::ConditionalGraphCaptureAccess;
 
@@ -2523,6 +2726,8 @@ class StampedExecutionPlan {
     std::unordered_map<std::string, Tensor> final_outputs;
     Stream stream;
     std::vector<StampedOutputMaterialization> output_materializations;
+    std::unordered_map<uint32_t, Tensor> retained_forward_values;
+    std::unordered_map<uint32_t, Tensor> retained_forward_epilogue_aux_values;
     const detail::StampedExecutionSchedule execution_schedule;
 };
 
@@ -2579,6 +2784,7 @@ struct hash<ThorImplementation::MatmulCacheKey> {
         hashCombine(h, hash<bool>{}(k.bias_epilogue));
         hashCombine(h, hash<int>{}(static_cast<int>(k.epilogue)));
         hashCombine(h, hash<int>{}(static_cast<int>(k.backward_epilogue)));
+        hashCombine(h, hash<bool>{}(k.forward_epilogue_aux));
         hashCombine(h, hash<bool>{}(k.bgrad_epilogue));
         hashCombine(h, hash<ThorImplementation::DataType>{}(k.a_dtype));
         hashCombine(h, hash<ThorImplementation::DataType>{}(k.b_dtype));

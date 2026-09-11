@@ -17,3 +17,12 @@ void launchDeviceResidentNamedGatherKernel(const ThorImplementation::Tensor &sou
                                            const ThorImplementation::Tensor &rowIndicesDevice,
                                            uint64_t logicalRows,
                                            Stream &stream);
+
+/** Benchmark-only launch hook that forces a specific rows-per-CTA specialization. */
+void launchDeviceResidentNamedGatherKernelWithRowsPerCtaForBenchmark(
+    const ThorImplementation::Tensor &source,
+    ThorImplementation::Tensor &destination,
+    const ThorImplementation::Tensor &rowIndicesDevice,
+    uint64_t logicalRows,
+    uint32_t rowsPerCta,
+    Stream &stream);

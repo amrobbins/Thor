@@ -28,3 +28,14 @@ void launchConcatenate(void *dest,
                        uint64_t packedSliceBytes,
                        const ConcatenateSpanGeometry spanGeometry[],
                        Stream stream);
+
+// Benchmark-only launch hook that forces one existing spans-per-CTA specialization.
+// Production callers should use launchConcatenate().
+void launchConcatenateWithSpansPerCtaForBenchmark(void *dest,
+                                                  void *source[],
+                                                  uint64_t outerSlices,
+                                                  uint32_t numSourceArrays,
+                                                  uint64_t packedSliceBytes,
+                                                  const ConcatenateSpanGeometry spanGeometry[],
+                                                  uint32_t spansPerCta,
+                                                  Stream stream);

@@ -756,8 +756,10 @@ TEST(RaggedCapacityPerformance, CausalConv1dT10RetainedTrainingDoesNotMaterially
 
     EXPECT_EQ(retained_forward_plan.stageKindNames(),
               (std::vector<std::string>{"PaddedRaggedPack",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedPointwise",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack"}));
     const std::vector<std::string> retained_backward_stage_names = retained_backward_plan.stageKindNames();
@@ -993,20 +995,22 @@ TEST(RaggedCapacityPerformance, RetainedPaddedRaggedPointwiseFlopsUseRuntimeActi
 
     ASSERT_EQ(plan.stageKindNames(),
               (std::vector<std::string>{"PaddedRaggedPack",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedPointwise",
+                                        "SanitizePaddedRaggedTail",
                                         "RaggedConv1dCausal",
                                         "PaddedRaggedUnpack"}));
 
     // Each 1x1 convolution uses 2*C*C FLOPs per logical row. ReLU is one
-    // useful comparison per channel and pack/unpack are data movement, not FLOPs.
-    EXPECT_EQ(plan.stageFlopCounts(), (std::vector<uint64_t>{0, 5u * 32u, 5u * channels, 5u * 32u, 0}));
+    // useful comparison per channel; pack/unpack/sanitation are data movement, not FLOPs.
+    EXPECT_EQ(plan.stageFlopCounts(), (std::vector<uint64_t>{0, 0, 5u * 32u, 5u * channels, 0, 5u * 32u, 0}));
 
     partition.setHostOffsets({0, 0, 2});
-    EXPECT_EQ(plan.stageFlopCounts(), (std::vector<uint64_t>{0, 2u * 32u, 2u * channels, 2u * 32u, 0}));
+    EXPECT_EQ(plan.stageFlopCounts(), (std::vector<uint64_t>{0, 0, 2u * 32u, 2u * channels, 0, 2u * 32u, 0}));
 
     partition.setHostOffsets({0, 0, 0});
-    EXPECT_EQ(plan.stageFlopCounts(), (std::vector<uint64_t>{0, 0, 0, 0, 0}));
+    EXPECT_EQ(plan.stageFlopCounts(), (std::vector<uint64_t>{0, 0, 0, 0, 0, 0, 0}));
 }
 
 TEST(RaggedCapacityPerformance, RaggedNormalizationFlopsUseRuntimeActiveValues) {

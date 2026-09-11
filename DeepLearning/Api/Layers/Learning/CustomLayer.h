@@ -122,7 +122,12 @@ class CustomLayer : public TrainableLayer {
                                                      Thor::Tensor connectingApiTensor,
                                                      const bool inferenceOnly) const override;
 
-    virtual std::shared_ptr<ThorImplementation::CustomLayer> createPhysicalLayer(
+    // The API-level CustomLayer stamping path intentionally returns the generic
+    // TrainableLayer base. Most CustomLayers still stamp to an implementation
+    // CustomLayer, but specialized API layers (notably Attention) are allowed to
+    // replace the generic executor with a native trainable physical layer without
+    // changing their public API inheritance.
+    virtual std::shared_ptr<ThorImplementation::TrainableLayer> createPhysicalLayer(
         ThorImplementation::DynamicExpression expression,
         std::vector<std::string> physicalInputNames,
         std::vector<std::string> physicalOutputNames,

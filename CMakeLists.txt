@@ -1694,6 +1694,61 @@ target_compile_options(thor_softmax_benchmark PRIVATE
         $<$<CONFIG:Debug>:-O0 -ggdb>
 )
 
+# Residency/materialization benchmark contains a small CUDA cache-eviction kernel even
+# though the source keeps the requested .cpp name. Compile this translation unit as CUDA.
+set_source_files_properties(benchmarks/ResidencyMaterializationBenchmark.cpp PROPERTIES LANGUAGE CUDA)
+add_executable(thor_residency_materialization_benchmark EXCLUDE_FROM_ALL
+        benchmarks/ResidencyMaterializationBenchmark.cpp
+)
+thor_apply_linker_settings(thor_residency_materialization_benchmark)
+# Do not apply host-only IPO to a CUDA translation unit; see the type-converter benchmark below.
+thor_enable_release_no_semantic_interposition(thor_residency_materialization_benchmark)
+target_link_libraries(thor_residency_materialization_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_residency_materialization_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_residency_materialization_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_residency_materialization_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
+)
+
+# Concatenate benchmark contains a small CUDA cache-eviction kernel while keeping
+# the requested .cpp filename. Compile the translation unit as CUDA.
+set_source_files_properties(benchmarks/ConcatenateBenchmark.cpp PROPERTIES LANGUAGE CUDA)
+add_executable(thor_concatenate_benchmark EXCLUDE_FROM_ALL
+        benchmarks/ConcatenateBenchmark.cpp
+)
+thor_apply_linker_settings(thor_concatenate_benchmark)
+thor_enable_release_no_semantic_interposition(thor_concatenate_benchmark)
+target_link_libraries(thor_concatenate_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_concatenate_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_concatenate_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_concatenate_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
+)
+
+# Ragged primitive benchmark contains a small CUDA cache-eviction kernel while keeping
+# the requested .cpp filename. Compile the translation unit as CUDA.
+set_source_files_properties(benchmarks/RaggedPrimitiveBenchmark.cpp PROPERTIES LANGUAGE CUDA)
+add_executable(thor_ragged_primitive_benchmark EXCLUDE_FROM_ALL
+        benchmarks/RaggedPrimitiveBenchmark.cpp
+)
+thor_apply_linker_settings(thor_ragged_primitive_benchmark)
+thor_enable_release_no_semantic_interposition(thor_ragged_primitive_benchmark)
+target_link_libraries(thor_ragged_primitive_benchmark PRIVATE Thor ${THOR_CUDA_LINK_LIBRARIES})
+target_link_libraries(thor_ragged_primitive_benchmark PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(thor_ragged_primitive_benchmark PRIVATE PkgConfig::LIBURING)
+target_compile_options(thor_ragged_primitive_benchmark PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:RelWithDebInfo>:-O3>
+        $<$<CONFIG:Debug>:-O0>
+        $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CONFIG:Debug>>:-G>
+)
+
 add_executable(thor_type_converter_benchmark EXCLUDE_FROM_ALL
         benchmarks/TypeConverterBenchmark.cu
 )

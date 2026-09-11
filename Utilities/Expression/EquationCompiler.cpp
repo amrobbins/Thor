@@ -1820,7 +1820,8 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                 s = std::string(fusedOpTag(node.op)) + "(lhs=" + lhs + ",rhs=" + rhs + ",ta=" + std::to_string(node.transpose_lhs ? 1 : 0) +
                     ",tb=" + std::to_string(node.transpose_rhs ? 1 : 0) +
                     ",epilogue=" + std::string(matmulEpilogueSignatureName(node.matmul_epilogue)) +
-                    ",backward_epilogue=" + std::string(matmulBackwardEpilogueSignatureName(node.matmul_backward_epilogue));
+                    ",backward_epilogue=" + std::string(matmulBackwardEpilogueSignatureName(node.matmul_backward_epilogue)) +
+                    ",forward_epilogue_aux=" + std::to_string(node.matmul_forward_epilogue_aux ? 1 : 0);
                 if (node.matmul_epilogue_aux != UINT32_MAX) {
                     s += ",epilogue_aux=" + fusedRegionSignatureRec(expr, node.matmul_epilogue_aux);
                 }
@@ -1833,7 +1834,8 @@ static std::string fusedRegionSignatureRec(const PhysicalExpression& expr, uint3
                     ",alpha=" + gemmScaleSignature(expr, node.alpha_node, node.alpha_fp) +
                     ",beta=" + gemmScaleSignature(expr, node.beta_node, node.beta_fp) +
                     ",epilogue=" + std::string(matmulEpilogueSignatureName(node.matmul_epilogue)) +
-                    ",backward_epilogue=" + std::string(matmulBackwardEpilogueSignatureName(node.matmul_backward_epilogue));
+                    ",backward_epilogue=" + std::string(matmulBackwardEpilogueSignatureName(node.matmul_backward_epilogue)) +
+                    ",forward_epilogue_aux=" + std::to_string(node.matmul_forward_epilogue_aux ? 1 : 0);
                 if (node.matmul_epilogue_aux != UINT32_MAX) {
                     s += ",epilogue_aux=" + fusedRegionSignatureRec(expr, node.matmul_epilogue_aux);
                 }
@@ -3683,7 +3685,8 @@ shared_ptr<CompiledMatmul> EquationCompiler::compileMatmul(const PhysicalExpress
                                        node.ragged_runtime_offsets_input_slot,
                                        node.ragged_runtime_batch_size,
                                        epilogue_aux_dtype,
-                                       bgrad_output_dtype);
+                                       bgrad_output_dtype,
+                                       node.matmul_forward_epilogue_aux);
 }
 
 static bool isCudnnAttentionTensorDType(DataType dtype) {
@@ -7747,6 +7750,12 @@ static void lowerOutputStorageDTypes(PhysicalExpression& expr, std::vector<Named
         cast_node.compute_dtype = requested_dtype;
         cast_node.backward_output_dtype = requested_dtype;
         cast_node.backward_compute_dtype = requested_dtype;
+#ifdef THOR_DEBUG
+        // Output-materialization casts are compiler-inserted wrappers around an
+        // existing logical value. Preserve that value's provenance so BR0 does
+        // not relabel a backward/replay terminal cast as ordinary forward work.
+        cast_node.execution_provenance = expr.nodes.at(output.node_idx).execution_provenance;
+#endif
         const uint32_t cast_idx = static_cast<uint32_t>(expr.nodes.size());
         expr.nodes.push_back(std::move(cast_node));
         lowered_casts.emplace(key, cast_idx);
@@ -9193,6 +9202,9 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
     };
 
     for (const PhysicalExecutionStage& stage : planned.stages) {
+#ifdef THOR_DEBUG
+        const size_t compiled_stage_begin = compiled->stages.size();
+#endif
         std::shared_ptr<CompiledEquation> flat;
         std::shared_ptr<CompiledReduction> reduction;
         switch (stage.kind) {
@@ -9364,6 +9376,13 @@ std::shared_ptr<CompiledOutputs> EquationCompiler::compile(const PhysicalOutputs
             default:
                 throw std::runtime_error("Unknown stage kind in EquationCompiler::compile(PhysicalOutputs).");
         }
+#ifdef THOR_DEBUG
+        const ExpressionExecutionProvenance provenance = expressionExecutionProvenance(stage.expr);
+        for (size_t compiled_stage_idx = compiled_stage_begin; compiled_stage_idx < compiled->stages.size();
+             ++compiled_stage_idx) {
+            compiled->stages[compiled_stage_idx].execution_provenance = provenance;
+        }
+#endif
     }
 
     // T8A: a pure RAGGED_VALUEWISE_EXTENT stage is metadata, not a

@@ -691,6 +691,7 @@ struct CompiledMatmul {
     const MatmulEpilogue epilogue;
     const MatmulBackwardEpilogue backward_epilogue;
     const uint32_t epilogue_aux_input_slot;
+    const bool forward_epilogue_aux;
     const MatmulPackedRowBinding packed_row_binding;
     const uint64_t packed_row_capacity;
     const uint32_t ragged_offsets_input_slot;
@@ -727,7 +728,9 @@ struct CompiledMatmul {
                    uint32_t ragged_offsets_input_slot = UINT32_MAX,
                    uint64_t ragged_batch_size = 0,
                    std::optional<DataType> epilogue_aux_dtype = std::nullopt,
-                   std::optional<DataType> bgrad_output_dtype = std::nullopt)
+                   std::optional<DataType> bgrad_output_dtype = std::nullopt,
+                   // Keep newly-added optional arguments at the end: tests and downstream code use this constructor positionally.
+                   bool forward_epilogue_aux = false)
         : op(op),
           transpose_lhs(transpose_lhs),
           transpose_rhs(transpose_rhs),
@@ -745,6 +748,7 @@ struct CompiledMatmul {
           epilogue(epilogue),
           backward_epilogue(backward_epilogue),
           epilogue_aux_input_slot(epilogue_aux_input_slot),
+          forward_epilogue_aux(forward_epilogue_aux),
           packed_row_binding(packed_row_binding),
           packed_row_capacity(packed_row_capacity),
           ragged_offsets_input_slot(ragged_offsets_input_slot),

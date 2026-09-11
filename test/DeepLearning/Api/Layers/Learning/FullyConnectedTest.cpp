@@ -20,6 +20,7 @@
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
 #include "test/DeepLearning/RaggedTestUtils.h"
 #include "Utilities/TensorOperations/GpuMatrixMultiply/RaggedMatmulCapacityBuckets.h"
+#include "Utilities/Expression/ExecutionDiagnostics.h"
 
 #include <regex>
 #include "cuda_bf16.h"
@@ -1955,6 +1956,75 @@ TEST(FullyConnectedApi, BuilderRejectsUnsupportedMixedInputAndWeightDtypesInstea
             .build(),
         std::invalid_argument);
 }
+
+#ifdef THOR_DEBUG
+TEST(FullyConnectedApi, Br2DefaultGeluBackwardUsesRetainedForwardValuesWithoutAffineReplay) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t numInputFeatures = 3;
+    constexpr uint32_t numOutputFeatures = 4;
+    const DataType dataType = DataType::FP16;
+
+    Api::Network network("fc_br0_default_gelu_forward_replay");
+    Api::NetworkInput input =
+        Api::NetworkInput::Builder().network(network).name("input").dimensions({numInputFeatures}).dataType(dataType).build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::FullyConnected fc = Api::FullyConnected::Builder()
+                                 .network(network)
+                                 .featureInput(inputRivet.getFeatureOutput().value())
+                                 .numOutputFeatures(numOutputFeatures)
+                                 .hasBias(true)
+                                 .build();  // GELU is intentionally the default.
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(fc.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+    shared_ptr<Api::Sgd> sgd =
+        Api::Sgd::Builder().network(network).initialLearningRate(0.001f).decay(0.0f).momentum(0.0f).build();
+    (void)sgd;
+
+    PlacedFullyConnectedFixture fixture = placeSingleFullyConnectedNetwork(network, input, output, fc, batchSize, false);
+    ASSERT_TRUE(fixture.physicalFc->getGradientUpdateStream().has_value());
+    Stream stream = fixture.physicalFc->getStreams()[0];
+    Stream gradientStream = fixture.physicalFc->getGradientUpdateStream().value();
+
+    Impl::Tensor featureInHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, numInputFeatures}));
+    writeCpuTensor(featureInHost, vector<float>(batchSize * numInputFeatures, 0.25f));
+    Impl::resetExpressionTestExecutionCounters();
+    (void)runForward(*fixture.physicalInput, *fixture.physicalOutput, featureInHost, batchSize);
+    const Impl::ExpressionTestExecutionCounters forwardCounters = Impl::expressionTestExecutionCounters();
+    EXPECT_EQ(forwardCounters.matmul.forward, 1U)
+        << "BR3 must not turn default-GELU retained prerequisites into a second affine GEMM during the real forward.";
+
+    ASSERT_GT(fixture.physicalFc->getErrorInputs().size(), 0U);
+    ASSERT_TRUE(fixture.physicalFc->getErrorInputs()[0].has_value());
+    Impl::Tensor errorInput = fixture.physicalFc->getErrorInputs()[0].value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, vector<float>(tensorNumel(errorInputHost), 1.0f));
+    errorInput.copyFromAsync(errorInputHost, stream);
+    stream.synchronize();
+
+    // BR2 still constructs the dInput and parameter-update graphs independently,
+    // but both now consume primal values retained by the one real forward. BR6
+    // will address shared-VJP duplication; this test is specifically about replay.
+    Impl::resetExpressionTestExecutionCounters();
+    fixture.physicalFc->backward(errorInput, batchSize);
+    stream.synchronize();
+    gradientStream.synchronize();
+
+    const Impl::ExpressionTestExecutionCounters counters = Impl::expressionTestExecutionCounters();
+    EXPECT_EQ(counters.matmul.backward_forward_replay, 0U)
+        << "BR2 must bind default-GELU FullyConnected backward to retained real-forward values rather than replaying the affine GEMM.";
+    EXPECT_GE(counters.matmul.backward_gradient, 2U)
+        << "The replay counter must remain distinct from the legitimate dInput/dWeights GEMMs.";
+    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U)
+        << "Generic BR2 CustomLayer backward must contain no implicit forward replay.";
+}
+#endif
 
 TEST(FullyConnectedApi, BackwardNumericalWithSgdUpdate) {
     constexpr uint32_t batchSize = 4;

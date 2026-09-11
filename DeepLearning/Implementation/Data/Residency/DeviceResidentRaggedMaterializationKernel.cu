@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentRaggedMaterializationKernel.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentRowGrouping.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime.h>
@@ -19,7 +20,8 @@ namespace {
 
 constexpr uint32_t kThreadsPerBlock = 256;
 constexpr uint32_t kMaxRowsPerBlock = kThreadsPerBlock;
-constexpr uint64_t kTargetBytesPerLane = 32;
+static_assert(kThreadsPerBlock == DeviceResidentRowGrouping::kThreadsPerCta,
+              "Row-grouping policy must match the residency CTA width.");
 constexpr uint32_t kMaxPortableBlocks = 65535;
 constexpr uint64_t kMaxUint32 = 0xFFFFFFFFULL;
 
@@ -344,56 +346,6 @@ __global__ void gatherRaggedValuesKernel(
     }
 }
 
-uint32_t rowsPerBlockFor(uint64_t expectedRowBytes, uint64_t logicalRows) {
-    // Give each lane about 32 bytes of expected row payload. A 32-byte-aligned
-    // row can issue one ulonglong4_32a transaction per iteration; a row with
-    // narrower alignment still reaches the same per-lane payload with multiple
-    // 16/8/4/2/1-byte transactions. This yields the full power-of-two ladder
-    // from one row using the whole CTA through 256 independent one-thread rows.
-    uint32_t rowsByPayload = 1;
-    if (expectedRowBytes <= kTargetBytesPerLane) {
-        rowsByPayload = 256;
-    } else if (expectedRowBytes <= 2 * kTargetBytesPerLane) {
-        rowsByPayload = 128;
-    } else if (expectedRowBytes <= 4 * kTargetBytesPerLane) {
-        rowsByPayload = 64;
-    } else if (expectedRowBytes <= 8 * kTargetBytesPerLane) {
-        rowsByPayload = 32;
-    } else if (expectedRowBytes <= 16 * kTargetBytesPerLane) {
-        rowsByPayload = 16;
-    } else if (expectedRowBytes <= 32 * kTargetBytesPerLane) {
-        rowsByPayload = 8;
-    } else if (expectedRowBytes <= 64 * kTargetBytesPerLane) {
-        rowsByPayload = 4;
-    } else if (expectedRowBytes <= 128 * kTargetBytesPerLane) {
-        rowsByPayload = 2;
-    }
-
-    // Do not sacrifice block-level parallelism just because rows are tiny.
-    // This is the same ~64-CTA floor encoded by the previous row-count-only
-    // selector, extended through the new 16/32/64/128/256-row specializations.
-    uint32_t rowsByParallelism = 1;
-    if (logicalRows >= 16384) {
-        rowsByParallelism = 256;
-    } else if (logicalRows >= 8192) {
-        rowsByParallelism = 128;
-    } else if (logicalRows >= 4096) {
-        rowsByParallelism = 64;
-    } else if (logicalRows >= 2048) {
-        rowsByParallelism = 32;
-    } else if (logicalRows >= 1024) {
-        rowsByParallelism = 16;
-    } else if (logicalRows >= 512) {
-        rowsByParallelism = 8;
-    } else if (logicalRows >= 256) {
-        rowsByParallelism = 4;
-    } else if (logicalRows >= 128) {
-        rowsByParallelism = 2;
-    }
-
-    return std::min(rowsByPayload, rowsByParallelism);
-}
-
 template <uint32_t RowsPerBlock>
 uint32_t blocksForRows(uint64_t logicalRows) {
     const uint64_t blocks =
@@ -444,6 +396,7 @@ void launchForConfiguration(
     Tensor &destinationValues,
     const Tensor &destinationOffsets,
     const Tensor &rowIndicesDevice,
+    uint32_t rowsPerBlockOverride,
     Stream &stream) {
     const uint8_t *records = recordStorage.getMemPtr<uint8_t>();
     const uint64_t *rowIndices = rowIndicesDevice.getMemPtr<uint64_t>();
@@ -453,7 +406,8 @@ void launchForConfiguration(
     const uint8_t *packedValues =
         static_cast<const uint8_t *>(packedValuesStorage.getMemPtr<void>());
     uint8_t *destination = static_cast<uint8_t *>(destinationValues.getMemPtr());
-    switch (rowsPerBlockFor(expectedRowBytes, static_cast<uint64_t>(logicalRows))) {
+    const uint32_t rowsPerBlock = rowsPerBlockOverride;
+    switch (rowsPerBlock) {
         case 1:
             launchGatherGrouped<OffsetT, ReferenceLoadT, RowIndexT, 1>(
                 records, packedValues, rowIndices, offsets, recordSizeBytes,
@@ -517,6 +471,7 @@ void launchForRowIndexType(
     Tensor &destinationValues,
     const Tensor &destinationOffsets,
     const Tensor &rowIndicesDevice,
+    uint32_t rowsPerBlockOverride,
     Stream &stream) {
     const uint8_t *records = recordStorage.getMemPtr<uint8_t>();
 
@@ -526,22 +481,22 @@ void launchForRowIndexType(
         launchForConfiguration<OffsetT, uint64_t, RowIndexT>(
             recordStorage, packedValuesStorage, recordSizeBytes, referenceOffsetBytes,
             valueBytes, expectedRowBytes, logicalRows, destinationValues,
-            destinationOffsets, rowIndicesDevice, stream);
+            destinationOffsets, rowIndicesDevice, rowsPerBlockOverride, stream);
     } else if (canUseReferenceLoadType<uint32_t>(records, recordSizeBytes, referenceOffsetBytes)) {
         launchForConfiguration<OffsetT, uint32_t, RowIndexT>(
             recordStorage, packedValuesStorage, recordSizeBytes, referenceOffsetBytes,
             valueBytes, expectedRowBytes, logicalRows, destinationValues,
-            destinationOffsets, rowIndicesDevice, stream);
+            destinationOffsets, rowIndicesDevice, rowsPerBlockOverride, stream);
     } else if (canUseReferenceLoadType<uint16_t>(records, recordSizeBytes, referenceOffsetBytes)) {
         launchForConfiguration<OffsetT, uint16_t, RowIndexT>(
             recordStorage, packedValuesStorage, recordSizeBytes, referenceOffsetBytes,
             valueBytes, expectedRowBytes, logicalRows, destinationValues,
-            destinationOffsets, rowIndicesDevice, stream);
+            destinationOffsets, rowIndicesDevice, rowsPerBlockOverride, stream);
     } else {
         launchForConfiguration<OffsetT, uint8_t, RowIndexT>(
             recordStorage, packedValuesStorage, recordSizeBytes, referenceOffsetBytes,
             valueBytes, expectedRowBytes, logicalRows, destinationValues,
-            destinationOffsets, rowIndicesDevice, stream);
+            destinationOffsets, rowIndicesDevice, rowsPerBlockOverride, stream);
     }
 }
 
@@ -557,6 +512,7 @@ void launchTyped(
     Tensor &destinationValues,
     const Tensor &destinationOffsets,
     const Tensor &rowIndicesDevice,
+    uint32_t rowsPerBlockOverride,
     Stream &stream) {
     const uint64_t batchSize = rowIndicesDevice.getDimensions().front();
 
@@ -575,6 +531,7 @@ void launchTyped(
             destinationValues,
             destinationOffsets,
             rowIndicesDevice,
+            rowsPerBlockOverride,
             stream);
     } else {
         launchForRowIndexType<OffsetT, uint64_t>(
@@ -588,6 +545,7 @@ void launchTyped(
             destinationValues,
             destinationOffsets,
             rowIndicesDevice,
+            rowsPerBlockOverride,
             stream);
     }
 }
@@ -612,6 +570,7 @@ void launchValidated(
     Tensor &destinationValues,
     const Tensor &destinationOffsets,
     const Tensor &rowIndicesDevice,
+    uint32_t rowsPerBlockOverride,
     Stream &stream) {
     THOR_THROW_IF_FALSE(recordStorage.isInitialized());
     THOR_THROW_IF_FALSE(packedValuesStorage.isInitialized() || storedValueCount == 0);
@@ -646,11 +605,18 @@ void launchValidated(
     const uint64_t batchSize = rowIndicesDevice.getDimensions().front();
     THOR_THROW_IF_FALSE(batchSize > 0);
     THOR_THROW_IF_FALSE(logicalRows >= 1 && logicalRows <= batchSize);
+    THOR_THROW_IF_FALSE(rowsPerBlockOverride == 0 ||
+                        (rowsPerBlockOverride <= 256 &&
+                         (rowsPerBlockOverride & (rowsPerBlockOverride - 1)) == 0));
     THOR_THROW_IF_FALSE(destinationOffsets.getDimensions().front() == batchSize + 1);
     THOR_THROW_IF_FALSE(destinationValues.getDimensions().front() > 0);
 
     const uint64_t expectedRowBytes =
         expectedResidentRowBytes(storedValueCount, valueBytes, numExamples);
+    const uint32_t selectedRowsPerCta =
+        rowsPerBlockOverride == 0
+            ? DeviceResidentRowGrouping::selectRowsPerCta(logicalRows, expectedRowBytes)
+            : rowsPerBlockOverride;
 
     switch (destinationOffsets.getDataType()) {
         case DataType::UINT32:
@@ -660,14 +626,14 @@ void launchValidated(
             launchTyped<uint32_t>(
                 recordStorage, packedValuesStorage, recordSizeBytes, referenceOffsetBytes,
                 valueBytes, expectedRowBytes, logicalRows, destinationValues,
-                destinationOffsets, rowIndicesDevice, stream);
+                destinationOffsets, rowIndicesDevice, selectedRowsPerCta, stream);
             return;
         case DataType::UINT64:
             if (storedValueCount == 0) return;
             launchTyped<uint64_t>(
                 recordStorage, packedValuesStorage, recordSizeBytes, referenceOffsetBytes,
                 valueBytes, expectedRowBytes, logicalRows, destinationValues,
-                destinationOffsets, rowIndicesDevice, stream);
+                destinationOffsets, rowIndicesDevice, selectedRowsPerCta, stream);
             return;
         default:
             break;
@@ -703,5 +669,27 @@ void launchDeviceResidentRaggedMaterializationKernel(
         destinationValues,
         destinationOffsets,
         rowIndicesDevice,
+        0,
         stream);
+}
+
+
+void launchDeviceResidentRaggedMaterializationKernelWithRowsPerCtaForBenchmark(
+    const Tensor &recordStorage,
+    const Tensor &packedValuesStorage,
+    uint64_t numExamples,
+    uint64_t recordSizeBytes,
+    uint64_t referenceOffsetBytes,
+    uint64_t storedValueCount,
+    uint64_t valueBytes,
+    uint64_t logicalRows,
+    Tensor &destinationValues,
+    const Tensor &destinationOffsets,
+    const Tensor &rowIndicesDevice,
+    uint32_t rowsPerCta,
+    Stream &stream) {
+    launchValidated(
+        recordStorage, packedValuesStorage, numExamples, recordSizeBytes,
+        referenceOffsetBytes, storedValueCount, valueBytes, logicalRows,
+        destinationValues, destinationOffsets, rowIndicesDevice, rowsPerCta, stream);
 }

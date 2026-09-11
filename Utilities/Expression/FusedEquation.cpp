@@ -13,6 +13,7 @@
 #include "Utilities/Expression/Expression.h"
 #include "Utilities/Expression/ExpressionDTypeResolution.h"
 #include "Utilities/Expression/StampedEquation.h"
+#include "Utilities/TensorOperations/GpuMatrixMultiply/CublasMatrixMultiply.h"
 #include "Utilities/TensorOperations/Ragged/RowPartitionDTypePolicy.h"
 #include "Utilities/TensorOperations/Ragged/PaddedRaggedSequence.h"
 
@@ -30,6 +31,59 @@ using DataType = ThorImplementation::DataType;
 
 namespace ThorImplementation {
 
+static std::string retainedForwardOutputName(uint32_t logical_node_index) {
+    return "__thor_retained_forward_output_" + std::to_string(logical_node_index);
+}
+
+static void appendRetainedForwardOutputs(PhysicalOutputs& outputs, const std::vector<uint32_t>& logical_node_indices) {
+    if (logical_node_indices.empty()) {
+        return;
+    }
+    if (outputs.isConditional()) {
+        throw std::runtime_error("Saved forward-value retention does not yet support conditional PhysicalOutputs.");
+    }
+    if (!outputs.expr) {
+        throw std::runtime_error("Saved forward-value retention requires non-null PhysicalOutputs.expr.");
+    }
+
+    std::unordered_set<std::string> output_names;
+    output_names.reserve(outputs.outputs.size() + logical_node_indices.size());
+    for (const NamedOutput& output : outputs.outputs) {
+        output_names.insert(output.name);
+    }
+
+    std::unordered_set<uint32_t> public_output_nodes;
+    public_output_nodes.reserve(outputs.outputs.size());
+    for (const NamedOutput& output : outputs.outputs) {
+        public_output_nodes.insert(output.node_idx);
+    }
+
+    std::unordered_set<uint32_t> seen_nodes;
+    seen_nodes.reserve(logical_node_indices.size());
+    for (uint32_t logical_node_index : logical_node_indices) {
+        if (logical_node_index >= outputs.expr->nodes.size()) {
+            throw std::runtime_error("Saved forward-value retention node index is out of range: " +
+                                     std::to_string(logical_node_index) + ".");
+        }
+        if (!seen_nodes.insert(logical_node_index).second || public_output_nodes.contains(logical_node_index)) {
+            // A public output already keeps this logical value live through the end of
+            // the forward. stampImpl captures its producer tensor directly, before any
+            // caller-requested output copy/cast/materialization, so no hidden alias is
+            // needed for that case.
+            continue;
+        }
+        const std::string hidden_name = retainedForwardOutputName(logical_node_index);
+        if (output_names.contains(hidden_name)) {
+            throw std::runtime_error("Forward output name collides with Thor's retained-forward namespace: " + hidden_name + ".");
+        }
+        output_names.insert(hidden_name);
+        outputs.outputs.push_back(NamedOutput{
+            .name = hidden_name,
+            .node_idx = logical_node_index,
+            .materialization = {},
+        });
+    }
+}
 
 static std::optional<Tensor> allocateExpressionWorkspace(const TensorPlacement& placement,
                                                          uint64_t workspace_bytes,
@@ -1227,18 +1281,52 @@ static void validateRopePositionIdsDims(const ExprNode& node,
     }
 }
 
+static void validateRaggedValuewiseExtentCarrierDims(const ExprNode& node,
+                                                      const std::vector<uint64_t>& partition_carrier_dims) {
+    // The row-partition carrier is structural metadata, but device consumers
+    // still have an exact physical representation contract. Keep that contract
+    // in ordinary shape validation rather than relying on optional FLOP
+    // accounting to reject a mismatched carrier.
+    switch (node.ragged_runtime_extent_source) {
+        case RaggedRuntimeExtentSource::DEVICE_OFFSETS: {
+            if (node.ragged_runtime_batch_size == std::numeric_limits<uint64_t>::max()) {
+                throw std::runtime_error("ragged valuewise extent batch size overflows offsets carrier shape.");
+            }
+            const std::vector<uint64_t> expected_dims{node.ragged_runtime_batch_size + 1};
+            if (partition_carrier_dims != expected_dims) {
+                throw std::runtime_error(
+                    "ragged valuewise extent DEVICE_OFFSETS carrier must have shape [batch+1].");
+            }
+            return;
+        }
+        case RaggedRuntimeExtentSource::DEVICE_ACTIVE_COUNT:
+            if (partition_carrier_dims != std::vector<uint64_t>{1}) {
+                throw std::runtime_error(
+                    "ragged valuewise extent DEVICE_ACTIVE_COUNT carrier must have shape [1].");
+            }
+            return;
+        case RaggedRuntimeExtentSource::HOST_EXTENT:
+            // HOST_EXTENT is metadata-only and may intentionally alias an
+            // ordinary values tensor; it has no device-carrier shape contract.
+            return;
+    }
+    throw std::runtime_error("ragged valuewise extent encountered an unknown physical source.");
+}
+
 static std::vector<uint64_t> inferRaggedValuewiseExtentDims(const ExprNode& node,
                                                                const std::vector<uint64_t>& values_dims,
                                                                const std::vector<uint64_t>& partition_carrier_dims) {
-    (void)partition_carrier_dims;
     if (node.ragged_runtime_max_active_values == 0 || node.ragged_runtime_elements_per_value == 0) {
         throw std::runtime_error("ragged valuewise extent metadata must be non-zero.");
     }
-    // RAGGED_VALUEWISE_EXTENT is also the structural carrier into packed host
-    // stages. Its physical representation is selected explicitly by
-    // ragged_runtime_extent_source; its shape does not affect the marker's
-    // logical value shape. Fused GPU stages validate that representation
-    // separately.
+    (void)partition_carrier_dims;
+
+    // RAGGED_VALUEWISE_EXTENT does not change the logical value shape. Shape
+    // inference is also used while CustomLayer graph connections are being
+    // constructed, before compile() owns the physical execution contract.
+    // Validate DEVICE_OFFSETS / DEVICE_ACTIVE_COUNT carrier shapes at plan
+    // stamp time instead, so malformed physical metadata is rejected by
+    // compile() rather than by connectToNextLayer().
     uint64_t expected_numel = node.ragged_runtime_max_active_values;
     if (node.ragged_runtime_elements_per_value > std::numeric_limits<uint64_t>::max() / expected_numel) {
         throw std::runtime_error("ragged valuewise extent maximum element count overflows uint64_t.");
@@ -1248,6 +1336,39 @@ static std::vector<uint64_t> inferRaggedValuewiseExtentDims(const ExprNode& node
         throw std::runtime_error("ragged valuewise extent metadata does not match values capacity.");
     }
     return values_dims;
+}
+
+static void validateRaggedValuewiseExtentCarriersForStamp(
+    const CompiledExecutionStage& stage,
+    const std::unordered_map<uint32_t, RuntimeInputValue>& values) {
+    if (stage.kind != CompiledExecutionStage::Kind::FusedKernel) {
+        return;
+    }
+
+    for (const ExprNode& node : stage.expr.nodes) {
+        if (node.op != ExprOp::RAGGED_VALUEWISE_EXTENT) {
+            continue;
+        }
+        if (node.rhs >= stage.expr.nodes.size()) {
+            throw std::runtime_error(
+                "ragged valuewise extent partition carrier node is out of range while stamping.");
+        }
+
+        const ExprNode& partition_node = stage.expr.nodes[node.rhs];
+        if (partition_node.op != ExprOp::INPUT || partition_node.input_slot >= stage.input_value_ids.size()) {
+            throw std::runtime_error(
+                "ragged valuewise extent requires a direct partition input while stamping.");
+        }
+
+        const uint32_t partition_value_id = stage.input_value_ids[partition_node.input_slot];
+        const auto value_it = values.find(partition_value_id);
+        if (value_it == values.end()) {
+            throw std::runtime_error(
+                "ragged valuewise extent partition carrier is unavailable while stamping.");
+        }
+
+        validateRaggedValuewiseExtentCarrierDims(node, runtimeInputDims(value_it->second));
+    }
 }
 
 static std::vector<std::vector<uint64_t>> inferExpressionNodeDimsForOptimization(
@@ -1705,7 +1826,8 @@ static bool canFuseMatmulActivationEpilogue(const PhysicalExpression& expr,
     const ExprNode& node = expr.nodes[node_idx];
     if (!isMatmulOp(node.op) || node.matmul_epilogue != MatmulEpilogue::Default ||
         node.matmul_backward_epilogue != MatmulBackwardEpilogue::Default || node.matmul_epilogue_aux != UINT32_MAX ||
-        node.matmul_packed_row_binding != MatmulPackedRowBinding::None || node_dims[node_idx].size() != 2) {
+        node.matmul_forward_epilogue_aux || node.matmul_packed_row_binding != MatmulPackedRowBinding::None ||
+        node_dims[node_idx].size() != 2) {
         return false;
     }
 
@@ -1750,6 +1872,7 @@ static bool sameSubexpressionForMatmulEpilogue(const PhysicalExpression& expr,
         case ExprOp::MATMUL:
             return a.transpose_lhs == b.transpose_lhs && a.transpose_rhs == b.transpose_rhs && a.matmul_epilogue == b.matmul_epilogue &&
                    a.matmul_backward_epilogue == b.matmul_backward_epilogue &&
+                   a.matmul_forward_epilogue_aux == b.matmul_forward_epilogue_aux &&
                    a.matmul_packed_row_binding == b.matmul_packed_row_binding &&
                    a.matmul_packed_row_capacity == b.matmul_packed_row_capacity &&
                    (a.matmul_epilogue_aux == b.matmul_epilogue_aux ||
@@ -1760,6 +1883,7 @@ static bool sameSubexpressionForMatmulEpilogue(const PhysicalExpression& expr,
             return a.transpose_lhs == b.transpose_lhs && a.transpose_rhs == b.transpose_rhs && a.transpose_aux == b.transpose_aux &&
                    a.alpha_fp == b.alpha_fp && a.beta_fp == b.beta_fp && a.matmul_epilogue == b.matmul_epilogue &&
                    a.matmul_backward_epilogue == b.matmul_backward_epilogue &&
+                   a.matmul_forward_epilogue_aux == b.matmul_forward_epilogue_aux &&
                    (a.matmul_epilogue_aux == b.matmul_epilogue_aux ||
                     sameSubexpressionForMatmulEpilogue(expr, a.matmul_epilogue_aux, b.matmul_epilogue_aux, depth + 1)) &&
                    sameSubexpressionForMatmulEpilogue(expr, a.lhs, b.lhs, depth + 1) &&
@@ -2149,10 +2273,233 @@ static bool tryBuildGemmLoweringPattern(const PhysicalExpression& expr,
     return false;
 }
 
+static void collectGemmRewriteReachableNodes(const PhysicalExpression& expr,
+                                               uint32_t node_idx,
+                                               std::unordered_set<uint32_t>& reachable) {
+    if (node_idx == UINT32_MAX) {
+        return;
+    }
+    if (node_idx >= expr.nodes.size()) {
+        throw std::runtime_error("GEMM rewrite reachability encountered an out-of-range node index.");
+    }
+    if (!reachable.insert(node_idx).second) {
+        return;
+    }
+
+    const ExprNode& node = expr.nodes[node_idx];
+    if (Expression::isLeafOp(node.op)) {
+        return;
+    }
+
+    if (node.lhs != UINT32_MAX) {
+        collectGemmRewriteReachableNodes(expr, node.lhs, reachable);
+    }
+    if ((Expression::isBinaryOp(node.op) || Expression::isTernaryOp(node.op)) && node.rhs != UINT32_MAX) {
+        collectGemmRewriteReachableNodes(expr, node.rhs, reachable);
+    }
+    if (Expression::isTernaryOp(node.op) && node.aux != UINT32_MAX) {
+        collectGemmRewriteReachableNodes(expr, node.aux, reachable);
+    }
+
+    // GEMM carries a few logical dependencies outside the ordinary lhs/rhs/aux
+    // child convention. They are usually runtime scalars or an epilogue auxiliary
+    // value, but include them so the retention rule remains correct as those
+    // contracts evolve.
+    if (isMatmulOp(node.op)) {
+        if (node.op == ExprOp::GEMM && node.aux != UINT32_MAX) {
+            collectGemmRewriteReachableNodes(expr, node.aux, reachable);
+        }
+        if (node.alpha_node != UINT32_MAX) {
+            collectGemmRewriteReachableNodes(expr, node.alpha_node, reachable);
+        }
+        if (node.beta_node != UINT32_MAX) {
+            collectGemmRewriteReachableNodes(expr, node.beta_node, reachable);
+        }
+        if (node.matmul_epilogue_aux != UINT32_MAX) {
+            collectGemmRewriteReachableNodes(expr, node.matmul_epilogue_aux, reachable);
+        }
+    }
+}
+
+static bool gemmRewriteWouldBypassRetainedDescendant(
+    const PhysicalExpression& expr,
+    uint32_t rewrite_root_idx,
+    const std::unordered_set<uint32_t>* retained_forward_nodes) {
+    if (retained_forward_nodes == nullptr || retained_forward_nodes->empty()) {
+        return false;
+    }
+
+    std::unordered_set<uint32_t> reachable;
+    collectGemmRewriteReachableNodes(expr, rewrite_root_idx, reachable);
+    reachable.erase(rewrite_root_idx);
+
+    for (uint32_t retained_node_idx : *retained_forward_nodes) {
+        if (reachable.contains(retained_node_idx)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool denseRowMajorTensorForGeluAuxProbe(const PhysicalExpression& expr,
+                                                uint32_t node_idx,
+                                                const std::unordered_map<uint32_t, RuntimeInputValue>& root_values,
+                                                Tensor& out) {
+    if (node_idx >= expr.nodes.size()) {
+        return false;
+    }
+    const ExprNode& node = expr.nodes[node_idx];
+    if (node.op != ExprOp::INPUT || node.input_slot == UINT32_MAX) {
+        return false;
+    }
+    auto it = root_values.find(node.input_slot);
+    if (it == root_values.end() || !std::holds_alternative<Tensor>(it->second)) {
+        return false;
+    }
+    out = std::get<Tensor>(it->second);
+    const std::vector<uint64_t> dims = out.getDimensions();
+    const std::vector<uint64_t> strides = out.getStridesElements();
+    return dims.size() == 2 && strides.size() == 2 && strides[1] == 1 && strides[0] == dims[1];
+}
+
+static bool canProvideForwardGeluAux(const PhysicalExpression& expr,
+                                     const PhysicalExpression& dtype_view,
+                                     uint32_t activation_root_idx,
+                                     const MatmulActivationEpiloguePattern& pattern,
+                                     const std::vector<std::vector<uint64_t>>& node_dims,
+                                     const std::unordered_map<uint32_t, RuntimeInputValue>& root_values) {
+    if (pattern.epilogue != MatmulEpilogue::Gelu || pattern.source_idx >= expr.nodes.size() ||
+        activation_root_idx >= expr.nodes.size() || pattern.source_idx >= node_dims.size()) {
+        return false;
+    }
+    const ExprNode& source = expr.nodes[pattern.source_idx];
+    if (!isMatmulOp(source.op) || source.transpose_lhs || source.transpose_rhs || source.transpose_aux ||
+        source.matmul_packed_row_binding != MatmulPackedRowBinding::None ||
+        source.matmul_backward_epilogue != MatmulBackwardEpilogue::Default ||
+        source.matmul_epilogue_aux != UINT32_MAX) {
+        return false;
+    }
+    const std::vector<uint64_t>& output_dims = node_dims[pattern.source_idx];
+    if (output_dims.size() != 2 || output_dims[1] == 0 || (output_dims[1] % 8U) != 0U) {
+        // cuBLASLt documents GELU_AUX AUX_LD as a multiple-of-eight contract.
+        // BR4 intentionally falls back to the BR3 unfused path rather than
+        // allocating a second producer or replaying the affine operation.
+        return false;
+    }
+
+    Tensor lhs;
+    Tensor rhs;
+    if (!denseRowMajorTensorForGeluAuxProbe(expr, source.lhs, root_values, lhs) ||
+        !denseRowMajorTensorForGeluAuxProbe(expr, source.rhs, root_values, rhs)) {
+        return false;
+    }
+    const std::vector<uint64_t> lhs_dims = lhs.getDimensions();
+    const std::vector<uint64_t> rhs_dims = rhs.getDimensions();
+    if (lhs_dims[1] != rhs_dims[0] || lhs_dims[0] != output_dims[0] || rhs_dims[1] != output_dims[1]) {
+        return false;
+    }
+
+    bool has_addend = false;
+    bool addend_is_bias = false;
+    DataType c_dtype = dtype_view.nodes.at(pattern.source_idx).output_dtype.value_or(lhs.getDataType());
+    if (source.op == ExprOp::GEMM) {
+        if (source.aux >= expr.nodes.size()) {
+            return false;
+        }
+        const ExprNode& aux_node = expr.nodes[source.aux];
+        if (aux_node.op != ExprOp::INPUT || aux_node.input_slot == UINT32_MAX) {
+            return false;
+        }
+        auto aux_it = root_values.find(aux_node.input_slot);
+        if (aux_it == root_values.end() || !std::holds_alternative<Tensor>(aux_it->second)) {
+            return false;
+        }
+        const Tensor& addend = std::get<Tensor>(aux_it->second);
+        const std::vector<uint64_t> addend_dims = addend.getDimensions();
+        has_addend = true;
+        addend_is_bias = addend_dims.size() == 1 && addend_dims[0] == output_dims[1];
+        if (!addend_is_bias) {
+            // BR4's first provider contract deliberately targets the common FC
+            // bias/no-bias epilogue. Matrix-C fusion can be enabled later after
+            // its beta/layout cases receive the same qualification coverage.
+            return false;
+        }
+        c_dtype = addend.getDataType();
+    }
+
+    const ExprNode& dtype_source = dtype_view.nodes.at(pattern.source_idx);
+    const DataType output_dtype = dtype_source.output_dtype.value_or(lhs.getDataType());
+    const DataType compute_dtype = source.compute_dtype.value_or(output_dtype);
+    const CublasMatrixMultiply::MatmulDataTypes data_types{
+        lhs.getDataType(), rhs.getDataType(), has_addend && !addend_is_bias ? c_dtype : output_dtype, output_dtype, compute_dtype};
+
+    const int32_t a_rows = static_cast<int32_t>(lhs_dims[0]);
+    const int32_t a_cols = static_cast<int32_t>(lhs_dims[1]);
+    const int32_t b_rows = static_cast<int32_t>(rhs_dims[0]);
+    const int32_t b_cols = static_cast<int32_t>(rhs_dims[1]);
+    if (static_cast<uint64_t>(a_rows) != lhs_dims[0] || static_cast<uint64_t>(a_cols) != lhs_dims[1] ||
+        static_cast<uint64_t>(b_rows) != rhs_dims[0] || static_cast<uint64_t>(b_cols) != rhs_dims[1]) {
+        return false;
+    }
+    const int32_t ld_a = a_cols;
+    const int32_t ld_b = b_cols;
+    const int32_t ld_c = b_cols;
+    const int32_t ld_d = b_cols;
+
+    try {
+        return CublasMatrixMultiply::instance()
+            .selectGemmWithEpilogueAlgorithm(lhs.getPlacement().getDeviceNum(),
+                                             a_rows,
+                                             a_cols,
+                                             b_rows,
+                                             b_cols,
+                                             ld_a,
+                                             ld_b,
+                                             ld_c,
+                                             ld_d,
+                                             false,
+                                             false,
+                                             data_types,
+                                             CublasMatrixMultiply::EpilogueFusion::Gelu,
+                                             has_addend,
+                                             addend_is_bias,
+                                             std::nullopt,
+                                             true,
+                                             b_cols)
+            .has_value();
+    } catch (const std::invalid_argument&) {
+        // Unsupported dtype/scale combinations are a capability miss, not a
+        // reason to make training fail. BR3 remains the qualified fallback.
+        return false;
+    } catch (const std::runtime_error& error) {
+        // Some cuBLASLt versions report unsupported epilogue/dtype combinations
+        // through descriptor setup rather than by returning zero heuristics.
+        // Only swallow capability-style statuses; allocation/device failures
+        // must remain visible to the caller.
+        const std::string message = error.what();
+        if (message.find("CUBLAS_STATUS_NOT_SUPPORTED") != std::string::npos ||
+            message.find("CUBLAS_STATUS_INVALID_VALUE") != std::string::npos ||
+            message.find("CUBLAS_STATUS_ARCH_MISMATCH") != std::string::npos) {
+            return false;
+        }
+        throw;
+    }
+}
+
+enum class GemmOptimizationPurpose : uint8_t {
+    Ordinary = 0,
+    TrainingBackwardPreview = 1,
+    TrainingRetainedForward = 2,
+};
+
 static void optimizeExpressionGemmPatternsInPlace(
     PhysicalExpression& expr,
     const std::unordered_map<uint32_t, RuntimeInputValue>& root_values,
-    const PhysicalExpression* dtype_resolved_expr = nullptr) {
+    const PhysicalExpression* dtype_resolved_expr = nullptr,
+    const std::unordered_set<uint32_t>* retained_forward_nodes = nullptr,
+    GemmOptimizationPurpose purpose = GemmOptimizationPurpose::Ordinary,
+    const std::unordered_set<uint32_t>* retained_forward_epilogue_aux_nodes = nullptr,
+    const std::unordered_set<uint32_t>* allowed_forward_epilogue_aux_nodes = nullptr) {
     if (expr.nodes.empty() || !expressionHasPotentialGemmLoweringPattern(expr)) {
         return;
     }
@@ -2167,6 +2514,14 @@ static void optimizeExpressionGemmPatternsInPlace(
     for (uint32_t node_idx = 0; node_idx < expr.nodes.size(); ++node_idx) {
         GemmLoweringPattern pattern;
         if (!tryBuildGemmLoweringPattern(expr, dtype_view, node_idx, node_dims, pattern)) {
+            continue;
+        }
+        if (gemmRewriteWouldBypassRetainedDescendant(expr, node_idx, retained_forward_nodes)) {
+            // BR3: lowering an ADD/SUB into GEMM is allowed to replace the
+            // requested value at node_idx itself, but it must not make a retained
+            // descendant reachable only through a separate hidden-output branch.
+            // Without a backend auxiliary provider that would turn retention into
+            // duplicate forward compute (for example MATMUL plus a second GEMM).
             continue;
         }
 
@@ -2211,7 +2566,44 @@ static void optimizeExpressionGemmPatternsInPlace(
         if (!tryBuildMatmulActivationEpiloguePattern(expr, node_idx, node_dims, pattern)) {
             continue;
         }
+        const bool bypasses_retained =
+            gemmRewriteWouldBypassRetainedDescendant(expr, node_idx, retained_forward_nodes);
+        const bool aux_requested = retained_forward_epilogue_aux_nodes != nullptr &&
+                                   retained_forward_epilogue_aux_nodes->contains(node_idx);
+        const bool training_preview = purpose == GemmOptimizationPurpose::TrainingBackwardPreview;
+        const bool training_retained = purpose == GemmOptimizationPurpose::TrainingRetainedForward;
+
+        bool provide_forward_aux = false;
+        const bool aux_node_allowed = allowed_forward_epilogue_aux_nodes == nullptr ||
+                                      allowed_forward_epilogue_aux_nodes->contains(node_idx);
+        if (aux_node_allowed && pattern.epilogue == MatmulEpilogue::Gelu && (training_preview || aux_requested)) {
+            provide_forward_aux = canProvideForwardGeluAux(
+                expr, dtype_view, node_idx, pattern, node_dims, root_values);
+        }
+
+        if (training_preview) {
+            // A training preview must only expose an activation epilogue to
+            // AutoDiff if its backward prerequisite can be produced by the same
+            // real forward operation. Otherwise keep the exact expression graph
+            // so BR1/BR2 request ordinary retained values and BR3 preserves one
+            // affine producer. ReLU has no forward-aux provider in BR4.
+            if (!provide_forward_aux) {
+                continue;
+            }
+        } else if (training_retained) {
+            if (aux_requested) {
+                if (!provide_forward_aux) {
+                    continue;
+                }
+            } else if (bypasses_retained) {
+                continue;
+            }
+        } else if (bypasses_retained) {
+            continue;
+        }
+
         rewriteAsMatmulActivationEpilogue(expr, node_idx, pattern);
+        expr.nodes[node_idx].matmul_forward_epilogue_aux = provide_forward_aux;
         node_dims[node_idx] = node_dims[pattern.source_idx];
     }
 }
@@ -5127,6 +5519,43 @@ static uint64_t computeStageFlops(const CompiledExecutionStage& stage, const std
     throw std::runtime_error("Unknown stage kind while computing FLOPs.");
 }
 
+static uint64_t bestEffortComputeStageFlops(
+    const CompiledExecutionStage& stage,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims) noexcept {
+    try {
+        return computeStageFlops(stage, stage_input_dims);
+    } catch (...) {
+        // FLOP estimation is telemetry only.  Plan stamping/execution must remain
+        // usable even when a diagnostic count cannot be represented or derived.
+        return 0;
+    }
+}
+
+static std::optional<RaggedFusedStageFlopModelSpec> bestEffortComputeActiveExtentFusedStageFlopModel(
+    const PhysicalExpression& expr,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims,
+    const std::vector<CompiledStageOutput>& outputs,
+    uint64_t max_active_values,
+    const std::unordered_set<uint32_t>& active_extent_input_slots) noexcept {
+    try {
+        return computeActiveExtentFusedStageFlopModel(
+            expr, stage_input_dims, outputs, max_active_values, active_extent_input_slots);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+static std::optional<RaggedFusedStageFlopModelSpec> bestEffortComputeRaggedFusedStageFlopModel(
+    const PhysicalExpression& expr,
+    const std::vector<std::vector<uint64_t>>& stage_input_dims,
+    const std::vector<CompiledStageOutput>& outputs) noexcept {
+    try {
+        return computeRaggedFusedStageFlopModel(expr, stage_input_dims, outputs);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 static std::vector<uint64_t> resolveOutputDimsForStageOutput(const CompiledExecutionStage& stage,
                                                              size_t output_idx,
                                                              const std::vector<std::vector<uint64_t>>& stage_input_dims) {
@@ -7315,7 +7744,8 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(
 
     const RuntimeDTypeKey dtype_cache_key = makeRuntimeDTypeKey(root_inputs, root_values);
     const bool has_shape_dependent_gemm_lowering =
-        outputs_template.expr && expressionHasPotentialGemmLoweringPattern(*outputs_template.expr);
+        (outputs_template.expr && expressionHasPotentialGemmLoweringPattern(*outputs_template.expr)) ||
+        !retained_forward_epilogue_aux_node_indices.empty();
 
     if (!backward_config.has_value() && !has_shape_dependent_gemm_lowering) {
         std::shared_ptr<CompiledOutputs> cached_compiled_outputs;
@@ -7325,6 +7755,7 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(
 
         PhysicalOutputs resolved_outputs = outputs_template;
         resolved_outputs.expr = std::make_shared<PhysicalExpression>(*outputs_template.expr);
+        appendRetainedForwardOutputs(resolved_outputs, retained_forward_value_node_indices);
         resolveOutputsDTypesInPlace(resolved_outputs, dtype_cache_key.root_input_dtypes);
 
         std::shared_ptr<CompiledOutputs> compiled_outputs = EquationCompiler::compile(resolved_outputs, base_signature, true);
@@ -7340,6 +7771,9 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(
 
     PhysicalOutputs resolved_outputs = backward_config.has_value() ? buildShapeSpecializedOutputs(root_values) : outputs_template;
     resolved_outputs.expr = std::make_shared<PhysicalExpression>(*resolved_outputs.expr);
+    if (!backward_config.has_value()) {
+        appendRetainedForwardOutputs(resolved_outputs, retained_forward_value_node_indices);
+    }
 
     // For backward equations, buildShapeSpecializedOutputs() already rebuilt the backward graph
     // from a shape-specialized, GEMM-lowered forward expression. Running the generic whole-expression
@@ -7354,8 +7788,36 @@ std::shared_ptr<CompiledOutputs> FusedEquation::compileForRootValues(
         PhysicalOutputs dtype_resolved_outputs = resolved_outputs;
         dtype_resolved_outputs.expr = std::make_shared<PhysicalExpression>(*resolved_outputs.expr);
         resolveOutputsDTypesInPlace(dtype_resolved_outputs, dtype_cache_key.root_input_dtypes);
+        const std::unordered_set<uint32_t> retained_forward_nodes(retained_forward_value_node_indices.begin(),
+                                                                  retained_forward_value_node_indices.end());
+        const std::unordered_set<uint32_t> retained_forward_epilogue_aux_nodes(
+            retained_forward_epilogue_aux_node_indices.begin(), retained_forward_epilogue_aux_node_indices.end());
+        std::unordered_set<uint32_t> public_output_nodes;
+        public_output_nodes.reserve(outputs_template.outputs.size());
+        for (const NamedOutput& output : outputs_template.outputs) {
+            public_output_nodes.insert(output.node_idx);
+        }
         optimizeExpressionGemmPatternsInPlace(
-            *resolved_outputs.expr, root_values, dtype_resolved_outputs.expr.get());
+            *resolved_outputs.expr,
+            root_values,
+            dtype_resolved_outputs.expr.get(),
+            retained_forward_nodes.empty() ? nullptr : &retained_forward_nodes,
+            retained_forward_epilogue_aux_nodes.empty() ? GemmOptimizationPurpose::Ordinary
+                                                        : GemmOptimizationPurpose::TrainingRetainedForward,
+            retained_forward_epilogue_aux_nodes.empty() ? nullptr : &retained_forward_epilogue_aux_nodes,
+            retained_forward_epilogue_aux_nodes.empty() ? nullptr : &public_output_nodes);
+
+        for (uint32_t node_idx : retained_forward_epilogue_aux_node_indices) {
+            if (node_idx >= resolved_outputs.expr->nodes.size()) {
+                throw std::runtime_error("Retained forward matmul epilogue auxiliary node index is out of range after optimization.");
+            }
+            const ExprNode& node = resolved_outputs.expr->nodes[node_idx];
+            if (!isMatmulOp(node.op) || node.matmul_epilogue != MatmulEpilogue::Gelu ||
+                !node.matmul_forward_epilogue_aux) {
+                throw std::runtime_error(
+                    "Requested forward GELU epilogue auxiliary value could not be provided by the optimized real-forward matmul.");
+            }
+        }
     }
 
     resolveOutputsDTypesInPlace(resolved_outputs, dtype_cache_key.root_input_dtypes);
@@ -8484,6 +8946,17 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         output = Tensor(lhs.getPlacement(), outputDescriptor);
     }
 
+    std::optional<Tensor> effective_epilogue_aux = epilogue_aux;
+    if (compiledStage->forward_epilogue_aux) {
+        if (epilogue_aux.has_value()) {
+            throw std::runtime_error("Forward MATMUL GELU auxiliary output cannot alias a backward epilogue auxiliary input.");
+        }
+        if (output_dims.size() != 2 || (output_dims[1] % 8U) != 0U) {
+            throw std::runtime_error("Forward MATMUL GELU auxiliary output requires output columns divisible by 8.");
+        }
+        effective_epilogue_aux = Tensor(lhs.getPlacement(), TensorDescriptor(compiledStage->output_dtype, output_dims));
+    }
+
     std::optional<Tensor> bgrad_output = std::nullopt;
     if (compiledStage->bgrad_output_dtype.has_value()) {
         if (output_dims.size() != 2) {
@@ -8512,7 +8985,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                                       std::nullopt,
                                                                       output,
                                                                       lhs.getPlacement().getDeviceNum(),
-                                                                      epilogue_aux,
+                                                                      effective_epilogue_aux,
                                                                       bgrad_output);
 
     std::optional<Tensor> workspace = allocateExpressionWorkspace(
@@ -8538,7 +9011,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       std::nullopt,
                                       std::nullopt,
                                       std::nullopt,
-                                      epilogue_aux,
+                                      effective_epilogue_aux,
                                       bgrad_output,
                                       rowPartitionOffsets,
                                       packedTailsPreparedExternally);
@@ -8635,6 +9108,17 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
         output = Tensor(lhs.getPlacement(), outputDescriptor);
     }
 
+    std::optional<Tensor> effective_epilogue_aux = epilogue_aux;
+    if (compiledStage->forward_epilogue_aux) {
+        if (epilogue_aux.has_value()) {
+            throw std::runtime_error("Forward MATMUL GELU auxiliary output cannot alias a backward epilogue auxiliary input.");
+        }
+        if (output_dims.size() != 2 || (output_dims[1] % 8U) != 0U) {
+            throw std::runtime_error("Forward MATMUL GELU auxiliary output requires output columns divisible by 8.");
+        }
+        effective_epilogue_aux = Tensor(lhs.getPlacement(), TensorDescriptor(compiledStage->output_dtype, output_dims));
+    }
+
     std::optional<Tensor> bgrad_output = std::nullopt;
     if (compiledStage->bgrad_output_dtype.has_value()) {
         if (output_dims.size() != 2) {
@@ -8663,7 +9147,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                                                       std::optional<Tensor>(addend),
                                                                       output,
                                                                       lhs.getPlacement().getDeviceNum(),
-                                                                      epilogue_aux,
+                                                                      effective_epilogue_aux,
                                                                       bgrad_output);
 
     std::optional<Tensor> workspace = allocateExpressionWorkspace(
@@ -8705,7 +9189,7 @@ std::shared_ptr<StampedMatmul> FusedEquation::stampMatmul(const std::shared_ptr<
                                       beta_device_scratch,
                                       alpha_host_scratch,
                                       beta_host_scratch,
-                                      epilogue_aux,
+                                      effective_epilogue_aux,
                                       bgrad_output,
                                       rowPartitionOffsets,
                                       packedTailsPreparedExternally);
@@ -9453,6 +9937,154 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                           const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
                                           const std::unordered_map<std::string, Tensor>& preallocated_outputs,
                                           const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
+    return stampImpl(inputs,
+                     stream,
+                     tensor_scalar_inputs,
+                     preallocated_outputs,
+                     requestedOutputShapes,
+                     false);
+}
+
+StampedExecutionPlan FusedEquation::stampRetainingForwardValues(
+    const std::vector<uint32_t>& logical_forward_node_indices,
+    const std::unordered_map<std::string, Tensor>& inputs,
+    const Stream& stream,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+    const std::unordered_map<std::string, Tensor>& preallocated_outputs,
+    const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
+    static const std::vector<uint32_t> no_epilogue_aux_nodes;
+    return stampRetainingForwardValues(logical_forward_node_indices,
+                                       no_epilogue_aux_nodes,
+                                       inputs,
+                                       stream,
+                                       tensor_scalar_inputs,
+                                       preallocated_outputs,
+                                       requestedOutputShapes);
+}
+
+StampedExecutionPlan FusedEquation::stampRetainingForwardValues(
+    const std::vector<uint32_t>& logical_forward_node_indices,
+    const std::vector<uint32_t>& logical_forward_epilogue_aux_node_indices,
+    const std::unordered_map<std::string, Tensor>& inputs,
+    const Stream& stream,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+    const std::unordered_map<std::string, Tensor>& preallocated_outputs,
+    const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
+    if (logical_forward_node_indices.empty() && logical_forward_epilogue_aux_node_indices.empty()) {
+        return stamp(inputs, stream, tensor_scalar_inputs, preallocated_outputs, requestedOutputShapes);
+    }
+    if (backward_config.has_value()) {
+        throw std::runtime_error("stampRetainingForwardValues is only valid for a real forward equation.");
+    }
+    if (outputs_template.isConditional()) {
+        throw std::runtime_error("stampRetainingForwardValues does not yet support conditional forward equations.");
+    }
+
+    std::vector<uint32_t> normalized_nodes = logical_forward_node_indices;
+    std::sort(normalized_nodes.begin(), normalized_nodes.end());
+    normalized_nodes.erase(std::unique(normalized_nodes.begin(), normalized_nodes.end()), normalized_nodes.end());
+
+    std::vector<uint32_t> normalized_epilogue_aux_nodes = logical_forward_epilogue_aux_node_indices;
+    std::sort(normalized_epilogue_aux_nodes.begin(), normalized_epilogue_aux_nodes.end());
+    normalized_epilogue_aux_nodes.erase(
+        std::unique(normalized_epilogue_aux_nodes.begin(), normalized_epilogue_aux_nodes.end()),
+        normalized_epilogue_aux_nodes.end());
+
+    std::unordered_set<uint32_t> public_output_nodes;
+    public_output_nodes.reserve(outputs_template.outputs.size());
+    for (const NamedOutput& output : outputs_template.outputs) {
+        public_output_nodes.insert(output.node_idx);
+    }
+    for (uint32_t node_idx : normalized_epilogue_aux_nodes) {
+        if (node_idx >= outputs_template.expr->nodes.size()) {
+            throw std::runtime_error("Forward matmul epilogue auxiliary retention node index is out of range: " +
+                                     std::to_string(node_idx) + ".");
+        }
+        if (!public_output_nodes.contains(node_idx)) {
+            throw std::runtime_error(
+                "BR4 forward matmul epilogue auxiliary retention currently requires the fused GELU node to be a "
+                "public forward output; node " +
+                std::to_string(node_idx) + " is not one.");
+        }
+    }
+
+    FusedEquation retained_equation(outputs_template,
+                                    device_num,
+                                    use_fast_math,
+                                    base_signature,
+                                    std::nullopt,
+                                    std::move(normalized_nodes),
+                                    std::move(normalized_epilogue_aux_nodes));
+    return retained_equation.stampImpl(inputs,
+                                       stream,
+                                       tensor_scalar_inputs,
+                                       preallocated_outputs,
+                                       requestedOutputShapes,
+                                       false);
+}
+
+PhysicalOutputs FusedEquation::physicalOutputsForTrainingBackward(
+    const std::unordered_map<std::string, Tensor>& inputs,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) const {
+    if (backward_config.has_value()) {
+        throw std::runtime_error("physicalOutputsForTrainingBackward is only valid for a real forward equation.");
+    }
+    if (outputs_template.isConditional()) {
+        throw std::runtime_error("physicalOutputsForTrainingBackward does not yet support conditional forward equations.");
+    }
+    if (!outputs_template.expr) {
+        throw std::runtime_error("physicalOutputsForTrainingBackward requires a non-null forward expression.");
+    }
+
+    const std::unordered_map<uint32_t, RuntimeInputValue> root_values =
+        bindRootInputsForCompilation(inputs, {}, tensor_scalar_inputs, {});
+    const RuntimeDTypeKey dtype_key = makeRuntimeDTypeKey(root_inputs, root_values);
+
+    PhysicalOutputs resolved_outputs = outputs_template;
+    resolved_outputs.expr = std::make_shared<PhysicalExpression>(*outputs_template.expr);
+
+    PhysicalOutputs dtype_view = resolved_outputs;
+    dtype_view.expr = std::make_shared<PhysicalExpression>(*resolved_outputs.expr);
+    resolveOutputsDTypesInPlace(dtype_view, dtype_key.root_input_dtypes);
+
+    std::unordered_set<uint32_t> public_output_nodes;
+    public_output_nodes.reserve(outputs_template.outputs.size());
+    for (const NamedOutput& output : outputs_template.outputs) {
+        public_output_nodes.insert(output.node_idx);
+    }
+
+    optimizeExpressionGemmPatternsInPlace(*resolved_outputs.expr,
+                                          root_values,
+                                          dtype_view.expr.get(),
+                                          nullptr,
+                                          GemmOptimizationPurpose::TrainingBackwardPreview,
+                                          nullptr,
+                                          &public_output_nodes);
+    resolveOutputsDTypesInPlace(resolved_outputs, dtype_key.root_input_dtypes);
+    return resolved_outputs;
+}
+
+StampedExecutionPlan FusedEquation::stampForImmediateCrossPlanBackwardLinking(
+    const std::unordered_map<std::string, Tensor>& inputs,
+    const Stream& stream,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+    const std::unordered_map<std::string, Tensor>& preallocated_outputs,
+    const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes) const {
+    return stampImpl(inputs,
+                     stream,
+                     tensor_scalar_inputs,
+                     preallocated_outputs,
+                     requestedOutputShapes,
+                     true);
+}
+
+StampedExecutionPlan FusedEquation::stampImpl(
+    const std::unordered_map<std::string, Tensor>& inputs,
+    const Stream& stream,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+    const std::unordered_map<std::string, Tensor>& preallocated_outputs,
+    const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes,
+    bool allow_unlinked_attention_backward_for_cross_plan_linking) const {
     if (outputs_template.isConditional()) {
         if (backward_config.has_value()) {
             if (accumulatesIntoGradOutputs(backward_config) && preallocated_outputs.empty()) {
@@ -9495,12 +10127,13 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 }
             }
 
-            return specialized_equation.stamp(
+            return specialized_equation.stampImpl(
                 specialized_inputs,
                 stream,
                 filterTensorScalarInputsForOutputs(specialized_outputs, tensor_scalar_inputs),
                 preallocated_outputs,
-                effective_requested_output_shapes);
+                effective_requested_output_shapes,
+                allow_unlinked_attention_backward_for_cross_plan_linking);
         }
         const PhysicalConditionalOutputs& conditional = *outputs_template.conditional;
 
@@ -9543,10 +10176,17 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         const auto else_tensor_scalars = filter_tensor_scalar_inputs(else_equation);
 
         auto predicate_plan = std::make_shared<StampedExecutionPlan>(
-            predicate_equation.stamp(predicate_inputs, stream, predicate_tensor_scalars, {}, {}));
+            predicate_equation.stampImpl(
+                predicate_inputs, stream, predicate_tensor_scalars, {}, {}, allow_unlinked_attention_backward_for_cross_plan_linking));
 
         auto then_plan = std::make_shared<StampedExecutionPlan>(
-            then_equation.stamp(then_inputs, stream, then_tensor_scalars, preallocated_outputs, requestedOutputShapes));
+            then_equation.stampImpl(
+                then_inputs,
+                stream,
+                then_tensor_scalars,
+                preallocated_outputs,
+                requestedOutputShapes,
+                allow_unlinked_attention_backward_for_cross_plan_linking));
 
         std::unordered_map<std::string, Tensor> shared_outputs = then_plan->getFinalOutputs();
         for (const auto& [name, tensor] : preallocated_outputs) {
@@ -9557,7 +10197,13 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         }
 
         auto else_plan = std::make_shared<StampedExecutionPlan>(
-            else_equation.stamp(else_inputs, stream, else_tensor_scalars, shared_outputs, requestedOutputShapes));
+            else_equation.stampImpl(
+                else_inputs,
+                stream,
+                else_tensor_scalars,
+                shared_outputs,
+                requestedOutputShapes,
+                allow_unlinked_attention_backward_for_cross_plan_linking));
 
         std::vector<std::string> output_names;
         output_names.reserve(outputs_template.outputs.size());
@@ -9624,6 +10270,42 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             traversed_alias = true;
         }
     };
+
+    // BR4 maps each requested logical GELU output to the compiled value produced
+    // by its fused MATMUL/GEMM stage. Capture the stamped operation's auxiliary
+    // tensor at stage-construction time; producer indices can be reordered later.
+    std::unordered_map<uint32_t, uint32_t> retained_forward_epilogue_aux_node_by_value_id;
+    if (!retained_forward_epilogue_aux_node_indices.empty()) {
+        std::unordered_map<std::string, uint32_t> requested_aux_node_by_output_name;
+        requested_aux_node_by_output_name.reserve(retained_forward_epilogue_aux_node_indices.size());
+        const std::unordered_set<uint32_t> requested_aux_nodes(retained_forward_epilogue_aux_node_indices.begin(),
+                                                               retained_forward_epilogue_aux_node_indices.end());
+        for (const NamedOutput& output : outputs_template.outputs) {
+            if (requested_aux_nodes.contains(output.node_idx)) {
+                requested_aux_node_by_output_name.emplace(output.name, output.node_idx);
+            }
+        }
+        for (const CompiledStageOutput& final_output : compiled_outputs->final_outputs) {
+            auto requested_it = requested_aux_node_by_output_name.find(final_output.name);
+            if (requested_it == requested_aux_node_by_output_name.end()) {
+                continue;
+            }
+            const uint32_t producer_value_id =
+                ultimateAliasSourceValueId(final_output.value_id).value_or(final_output.value_id);
+            auto [existing_it, inserted] =
+                retained_forward_epilogue_aux_node_by_value_id.emplace(producer_value_id, requested_it->second);
+            if (!inserted && existing_it->second != requested_it->second) {
+                throw std::runtime_error(
+                    "Two retained forward GELU auxiliary requests unexpectedly resolve to one compiled producer value.");
+            }
+        }
+        if (retained_forward_epilogue_aux_node_by_value_id.size() != retained_forward_epilogue_aux_node_indices.size()) {
+            throw std::runtime_error(
+                "Could not map every retained forward GELU epilogue auxiliary request to a compiled public-output producer.");
+        }
+    }
+    std::unordered_map<uint32_t, Tensor> retained_forward_epilogue_aux_values;
+    retained_forward_epilogue_aux_values.reserve(retained_forward_epilogue_aux_node_indices.size());
 
     // A specialized stage should write directly into a caller-preallocated final output
     // whenever that final logical value has a unique destination.  Stage-local output names
@@ -9931,7 +10613,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
 
         const uint32_t unpack_stage_idx = static_cast<uint32_t>(stampedStages.size());
         std::shared_ptr<StampedPaddedRaggedUnpack> unpack =
-            std::make_shared<StampedPaddedRaggedUnpack>(padded_it->second.value, packed, stream);
+            std::make_shared<StampedPaddedRaggedUnpack>(layout,
+                                                       padded_it->second.representation.width_capacities,
+                                                       padded_it->second.value,
+                                                       packed,
+                                                       stream);
         stampedStages.emplace_back(unpack, std::vector<uint32_t>{producer_it->second}, 0);
         values[value_id] = packed;
         producer_stage_by_value_id[value_id] = unpack_stage_idx;
@@ -10103,9 +10789,119 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         return sanitize_stage_idx;
     };
 
+    struct PaddedTailSanitizationBinding {
+        uint64_t tensor_id = 0;
+        uint64_t storage_element_offset = 0;
+        uint64_t total_num_elements = 0;
+        uint64_t offsets_tensor_id = 0;
+        uint64_t offsets_storage_element_offset = 0;
+        uint64_t offsets_total_num_elements = 0;
+        uint32_t producer_stage_index = UINT32_MAX;
+        CompiledPaddedRaggedSequenceLayout layout;
+        std::vector<uint64_t> width_capacities;
+        uint32_t stage_index = 0;
+    };
+    std::vector<PaddedTailSanitizationBinding> padded_tail_sanitizations;
+
+    auto ensurePaddedTailSanitized = [&](const std::shared_ptr<PaddedRaggedSequence>& padded_value,
+                                         const CompiledPaddedRaggedValueRepresentation& representation,
+                                         uint32_t producer_stage_index,
+                                         const Tensor& offsets,
+                                         std::vector<uint32_t>& consumer_dependencies) -> uint32_t {
+        if (!padded_value) {
+            throw std::runtime_error("SANITIZE_PADDED_RAGGED_TAIL requires a physical padded value.");
+        }
+        if (producer_stage_index >= stampedStages.size()) {
+            throw std::runtime_error("SANITIZE_PADDED_RAGGED_TAIL requires the padded producer to precede sanitation.");
+        }
+        if (representation.width_capacities.empty()) {
+            throw std::runtime_error("SANITIZE_PADDED_RAGGED_TAIL requires a placement-time width family.");
+        }
+
+        const Tensor storage = padded_value->getPaddedValuesStorage();
+        const Tensor canonical_offsets = padded_value->getRowOffsets();
+        const PaddedRaggedSequencePlan& plan = padded_value->getPlan();
+        const CompiledPaddedRaggedSequenceLayout& layout = representation.layout;
+        if (canonical_offsets.getTensorId() != offsets.getTensorId() ||
+            canonical_offsets.getStorageElementOffset() != offsets.getStorageElementOffset() ||
+            canonical_offsets.getTotalNumElements() != offsets.getTotalNumElements()) {
+            throw std::runtime_error(
+                "SANITIZE_PADDED_RAGGED_TAIL padded value does not use the requested canonical offsets slice.");
+        }
+        if (plan.valuesDataType != layout.values_dtype || plan.offsetsDataType != layout.offset_dtype ||
+            plan.batchSize != layout.batch_size || plan.maxTotalValues != layout.max_total_values ||
+            plan.maxValuesPerRow != layout.max_values_per_row || plan.channels != layout.channels) {
+            throw std::runtime_error(
+                "SANITIZE_PADDED_RAGGED_TAIL physical value does not match its compiler representation.");
+        }
+
+        // The producer stage is part of the identity intentionally. A later
+        // producer may reuse the same allocation/slice, but that is a new
+        // physical generation whose inactive tail is undefined again.
+        for (const PaddedTailSanitizationBinding& binding : padded_tail_sanitizations) {
+            const bool same_physical_generation =
+                binding.tensor_id == storage.getTensorId() &&
+                binding.storage_element_offset == storage.getStorageElementOffset() &&
+                binding.total_num_elements == storage.getTotalNumElements() &&
+                binding.producer_stage_index == producer_stage_index;
+            if (!same_physical_generation) {
+                continue;
+            }
+            if (binding.offsets_tensor_id != offsets.getTensorId() ||
+                binding.offsets_storage_element_offset != offsets.getStorageElementOffset() ||
+                binding.offsets_total_num_elements != offsets.getTotalNumElements() || binding.layout != layout ||
+                binding.width_capacities != representation.width_capacities) {
+                throw std::runtime_error(
+                    "One padded physical generation cannot be sanitized against conflicting ragged representation metadata.");
+            }
+            if (std::find(consumer_dependencies.begin(), consumer_dependencies.end(), binding.stage_index) ==
+                consumer_dependencies.end()) {
+                consumer_dependencies.push_back(binding.stage_index);
+            }
+            return binding.stage_index;
+        }
+
+        std::vector<uint32_t> sanitize_dependencies{producer_stage_index};
+        auto offsets_producer_it = producer_stage_by_value_id.find(representation.offsets_value_id);
+        if (offsets_producer_it != producer_stage_by_value_id.end() &&
+            std::find(sanitize_dependencies.begin(), sanitize_dependencies.end(), offsets_producer_it->second) ==
+                sanitize_dependencies.end()) {
+            sanitize_dependencies.push_back(offsets_producer_it->second);
+        }
+        std::sort(sanitize_dependencies.begin(), sanitize_dependencies.end());
+
+        const uint32_t sanitize_stage_idx = static_cast<uint32_t>(stampedStages.size());
+        auto sanitize = std::make_shared<StampedSanitizePaddedRaggedTail>(
+            padded_value, representation.width_capacities, stream);
+        stampedStages.emplace_back(sanitize, std::move(sanitize_dependencies));
+        padded_tail_sanitizations.push_back(PaddedTailSanitizationBinding{
+            .tensor_id = storage.getTensorId(),
+            .storage_element_offset = storage.getStorageElementOffset(),
+            .total_num_elements = storage.getTotalNumElements(),
+            .offsets_tensor_id = offsets.getTensorId(),
+            .offsets_storage_element_offset = offsets.getStorageElementOffset(),
+            .offsets_total_num_elements = offsets.getTotalNumElements(),
+            .producer_stage_index = producer_stage_index,
+            .layout = layout,
+            .width_capacities = representation.width_capacities,
+            .stage_index = sanitize_stage_idx,
+        });
+        if (std::find(consumer_dependencies.begin(), consumer_dependencies.end(), sanitize_stage_idx) ==
+            consumer_dependencies.end()) {
+            consumer_dependencies.push_back(sanitize_stage_idx);
+        }
+        return sanitize_stage_idx;
+    };
+
     for (size_t stage_idx = 0; stage_idx < compiled_outputs->stages.size(); ++stage_idx) {
         const CompiledExecutionStage& stage = compiled_outputs->stages.at(stage_idx);
         applyAvailableValueAliases(compiled_outputs->value_aliases, values, &producer_stage_by_value_id);
+
+        // Row-partition carrier shape is a runtime physical contract, not
+        // output-shape metadata or FLOP telemetry. Validate it at the real
+        // execution-plan stamping boundary, before any ragged marker can be
+        // elided as a retained padded alias.
+        validateRaggedValuewiseExtentCarriersForStamp(stage, values);
 
         const std::optional<std::pair<uint32_t, uint32_t>> extent_alias = purePaddedRaggedExtentAlias(stage);
         if (extent_alias.has_value()) {
@@ -10373,7 +11169,7 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                         logical_input_dims.push_back(runtimeInputDims(static_inputs[input_idx]));
                     }
                 }
-                const uint64_t stage_flops = computeStageFlops(stage, logical_input_dims);
+                const uint64_t stage_flops = bestEffortComputeStageFlops(stage, logical_input_dims);
                 std::unordered_set<uint32_t> padded_value_input_slots;
                 for (uint32_t input_idx = 0; input_idx < input_access.size(); ++input_idx) {
                     if (input_access[input_idx] == PaddedRaggedPointwiseInputAccess::PaddedValue) {
@@ -10381,22 +11177,21 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     }
                 }
                 const std::optional<RaggedFusedStageFlopModelSpec> ragged_flop_model =
-                    computeActiveExtentFusedStageFlopModel(stage.expr,
-                                                           logical_input_dims,
-                                                           stage.outputs,
-                                                           anchor_layout.max_total_values,
-                                                           padded_value_input_slots);
-                if (!ragged_flop_model.has_value()) {
-                    throw std::runtime_error(
-                        "Retained padded ragged pointwise stage could not derive useful-work FLOP accounting.");
+                    bestEffortComputeActiveExtentFusedStageFlopModel(stage.expr,
+                                                                     logical_input_dims,
+                                                                     stage.outputs,
+                                                                     anchor_layout.max_total_values,
+                                                                     padded_value_input_slots);
+                std::optional<RuntimeRaggedFusedFlopAccounting> runtime_flop_accounting;
+                if (ragged_flop_model.has_value()) {
+                    runtime_flop_accounting = RuntimeRaggedFusedFlopAccounting{
+                        .row_partition_offsets = offsets_tensor,
+                        .batch_size = anchor_layout.batch_size,
+                        .max_active_values = anchor_layout.max_total_values,
+                        .flops_per_active_value = ragged_flop_model->flops_per_active_value,
+                        .fixed_flops_when_nonempty = ragged_flop_model->fixed_flops_when_nonempty,
+                    };
                 }
-                RuntimeRaggedFusedFlopAccounting runtime_flop_accounting{
-                    .row_partition_offsets = offsets_tensor,
-                    .batch_size = anchor_layout.batch_size,
-                    .max_active_values = anchor_layout.max_total_values,
-                    .flops_per_active_value = ragged_flop_model->flops_per_active_value,
-                    .fixed_flops_when_nonempty = ragged_flop_model->fixed_flops_when_nonempty,
-                };
 
                 const uint32_t pointwise_stage_idx = static_cast<uint32_t>(stampedStages.size());
                 std::shared_ptr<StampedPaddedRaggedPointwise> stamped_pointwise =
@@ -10410,6 +11205,9 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                                                                   stream);
                 stampedStages.emplace_back(
                     stamped_pointwise, std::move(dependencies), stage_flops, std::move(runtime_flop_accounting));
+#ifdef THOR_DEBUG
+                stampedStages.back().execution_provenance = stage.execution_provenance;
+#endif
 
                 for (size_t output_idx = 0; output_idx < stage.outputs.size(); ++output_idx) {
                     const CompiledStageOutput& output = stage.outputs[output_idx];
@@ -10560,10 +11358,10 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
             }
         }
 
-        const uint64_t stage_flops = computeStageFlops(stage, stage_input_dims);
+        const uint64_t stage_flops = bestEffortComputeStageFlops(stage, stage_input_dims);
         std::optional<RaggedFusedStageFlopModelSpec> ragged_fused_flop_model;
         if (stage.kind == CompiledExecutionStage::Kind::FusedKernel) {
-            ragged_fused_flop_model = computeRaggedFusedStageFlopModel(stage.expr, stage_input_dims, stage.outputs);
+            ragged_fused_flop_model = bestEffortComputeRaggedFusedStageFlopModel(stage.expr, stage_input_dims, stage.outputs);
         }
 
         switch (stage.kind) {
@@ -11020,11 +11818,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (padded_input_producer_it == padded_producer_stage_by_key.end()) {
                     throw std::runtime_error("T8A retained ragged Conv1D input is missing its producer stage.");
                 }
-                if (std::find(dependency_stage_indices.begin(),
-                              dependency_stage_indices.end(),
-                              padded_input_producer_it->second) == dependency_stage_indices.end()) {
-                    dependency_stage_indices.push_back(padded_input_producer_it->second);
-                }
+                ensurePaddedTailSanitized(padded_input_it->second.value,
+                                          input_representation,
+                                          padded_input_producer_it->second,
+                                          offsetsTensor,
+                                          dependency_stage_indices);
                 std::sort(dependency_stage_indices.begin(), dependency_stage_indices.end());
 
                 auto representation_it = compiled_outputs->padded_ragged_values.find(
@@ -11152,10 +11950,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 if (dy_producer_it == padded_producer_stage_by_key.end()) {
                     throw std::runtime_error("T9A retained ragged Conv1D backward-data dY is missing its producer stage.");
                 }
-                if (std::find(dependency_stage_indices.begin(), dependency_stage_indices.end(), dy_producer_it->second) ==
-                    dependency_stage_indices.end()) {
-                    dependency_stage_indices.push_back(dy_producer_it->second);
-                }
+                ensurePaddedTailSanitized(padded_dy_it->second.value,
+                                          dy_representation,
+                                          dy_producer_it->second,
+                                          offsetsTensor,
+                                          dependency_stage_indices);
                 std::sort(dependency_stage_indices.begin(), dependency_stage_indices.end());
 
                 auto output_representation_it = compiled_outputs->padded_ragged_values.find(
@@ -11272,10 +12071,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                         throw std::runtime_error(std::string("T9B retained ragged Conv1D backward-filter ") + label +
                                                  " is missing its producer stage.");
                     }
-                    if (std::find(dependency_stage_indices.begin(), dependency_stage_indices.end(), producer_it->second) ==
-                        dependency_stage_indices.end()) {
-                        dependency_stage_indices.push_back(producer_it->second);
-                    }
+                    ensurePaddedTailSanitized(padded_it->second.value,
+                                              representation,
+                                              producer_it->second,
+                                              offsetsTensor,
+                                              dependency_stage_indices);
                     return padded_it->second.value;
                 };
 
@@ -11896,6 +12696,22 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                 values[matrixStageOutput.value_id] = outputTensor;
                 producer_stage_by_value_id[matrixStageOutput.value_id] = static_cast<uint32_t>(stampedStages.size());
 
+                auto retained_aux_it = retained_forward_epilogue_aux_node_by_value_id.find(matrixStageOutput.value_id);
+                if (retained_aux_it != retained_forward_epilogue_aux_node_by_value_id.end()) {
+                    std::optional<Tensor> auxTensor = stampedMatmul->getEpilogueAuxTensor();
+                    if (!auxTensor.has_value() || !stage.matmul->forward_epilogue_aux ||
+                        stage.matmul->epilogue != MatmulEpilogue::Gelu) {
+                        throw std::runtime_error(
+                            "BR4 expected a fused forward GELU matmul auxiliary tensor, but the stamped producer did not provide one.");
+                    }
+                    auto [existing_it, inserted] =
+                        retained_forward_epilogue_aux_values.emplace(retained_aux_it->second, auxTensor.value());
+                    if (!inserted && !(existing_it->second == auxTensor.value())) {
+                        throw std::runtime_error(
+                            "One retained forward GELU auxiliary node resolved to multiple physical tensors.");
+                    }
+                }
+
                 if (stage.outputs.size() > 1) {
                     std::optional<Tensor> bgradTensor = stampedMatmul->getBiasGradientTensor();
                     if (!bgradTensor.has_value()) {
@@ -12190,6 +13006,13 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
                     }
                 }
 
+                if (savedForwardState == nullptr && !allow_unlinked_attention_backward_for_cross_plan_linking) {
+                    throw std::runtime_error(
+                        "Standalone Attention backward stamping is unsupported. Attention backward must be stamped "
+                        "with its matching forward in the same execution plan so it can consume the real forward's "
+                        "retained output/statistics.");
+                }
+
                 std::shared_ptr<StampedAttentionBackward> stampedAttentionBackward = stampAttentionBackward(stage.attention_backward,
                                                                                                             qTensor,
                                                                                                             kTensor,
@@ -12372,6 +13195,11 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         }
 
         const uint32_t stamped_stage_end = static_cast<uint32_t>(stampedStages.size());
+#ifdef THOR_DEBUG
+        for (uint32_t stamped_stage_idx = stamped_stage_begin; stamped_stage_idx < stamped_stage_end; ++stamped_stage_idx) {
+            stampedStages[stamped_stage_idx].execution_provenance = stage.execution_provenance;
+        }
+#endif
         if (!aliased_preallocated_tensor_ids.empty()) {
             while (external_read_tensor_ids_by_stage.size() < stampedStages.size()) {
                 external_read_tensor_ids_by_stage.emplace_back();
@@ -12541,6 +13369,23 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         output_materialization_by_name.emplace(output.name, output.materialization);
     }
 
+    std::unordered_set<uint32_t> requested_retained_forward_nodes(retained_forward_value_node_indices.begin(),
+                                                                 retained_forward_value_node_indices.end());
+    std::unordered_map<std::string, uint32_t> retained_forward_node_by_hidden_output_name;
+    retained_forward_node_by_hidden_output_name.reserve(retained_forward_value_node_indices.size());
+    for (uint32_t logical_node_index : retained_forward_value_node_indices) {
+        retained_forward_node_by_hidden_output_name.emplace(retainedForwardOutputName(logical_node_index), logical_node_index);
+    }
+    std::unordered_map<std::string, uint32_t> retained_forward_node_by_public_output_name;
+    retained_forward_node_by_public_output_name.reserve(outputs_template.outputs.size());
+    for (const NamedOutput& output : outputs_template.outputs) {
+        if (requested_retained_forward_nodes.contains(output.node_idx)) {
+            retained_forward_node_by_public_output_name.emplace(output.name, output.node_idx);
+        }
+    }
+    std::unordered_map<uint32_t, Tensor> retained_forward_values;
+    retained_forward_values.reserve(retained_forward_value_node_indices.size());
+
     std::vector<StampedOutputMaterialization> outputMaterializations;
     outputMaterializations.reserve(compiled_outputs->final_outputs.size() * 2);
     std::vector<ResolvedFinalOutput> resolvedFinalOutputs;
@@ -12553,6 +13398,23 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         }
 
         Tensor produced = runtimeInputTensor(it->second);
+        auto hidden_retained_it = retained_forward_node_by_hidden_output_name.find(final_output.name);
+        if (hidden_retained_it != retained_forward_node_by_hidden_output_name.end()) {
+            auto [existing_it, inserted] = retained_forward_values.emplace(hidden_retained_it->second, produced);
+            if (!inserted && !(existing_it->second == produced)) {
+                throw std::runtime_error("One retained forward node resolved to multiple physical tensors.");
+            }
+            continue;
+        }
+
+        auto public_retained_it = retained_forward_node_by_public_output_name.find(final_output.name);
+        if (public_retained_it != retained_forward_node_by_public_output_name.end()) {
+            // Two public aliases of one logical value may legitimately materialize to
+            // distinct destinations. Keep the first logical producer rather than making
+            // backward depend on a public storage/materialization choice.
+            retained_forward_values.emplace(public_retained_it->second, produced);
+        }
+
         auto contract_it = output_materialization_by_name.find(final_output.name);
         if (contract_it == output_materialization_by_name.end()) {
             throw std::runtime_error("Missing output materialization contract for output: " + final_output.name);
@@ -12637,8 +13499,20 @@ StampedExecutionPlan FusedEquation::stamp(const std::unordered_map<std::string, 
         finalOutputsByName.emplace(std::move(resolved.name), std::move(resolved.result));
     }
 
-    return StampedExecutionPlan(
-        std::move(stampedStages), std::move(finalOutputsByName), stream, std::move(outputMaterializations));
+    if (retained_forward_values.size() != retained_forward_value_node_indices.size()) {
+        throw std::runtime_error("Forward stamping did not materialize every requested retained forward value.");
+    }
+    if (retained_forward_epilogue_aux_values.size() != retained_forward_epilogue_aux_node_indices.size()) {
+        throw std::runtime_error(
+            "Forward stamping did not capture every requested retained forward GELU epilogue auxiliary value.");
+    }
+
+    return StampedExecutionPlan(std::move(stampedStages),
+                                std::move(finalOutputsByName),
+                                stream,
+                                std::move(outputMaterializations),
+                                std::move(retained_forward_values),
+                                std::move(retained_forward_epilogue_aux_values));
 }
 
 void FusedEquation::run(const Tensor& input, Tensor& output, Stream& stream) const {

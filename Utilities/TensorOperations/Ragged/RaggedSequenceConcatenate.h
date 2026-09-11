@@ -65,3 +65,17 @@ void launchRaggedSequenceConcatenateBackward(void *input_gradients[],
                                              std::size_t offsets_element_size_bytes,
                                              uint64_t active_output_values,
                                              Stream stream);
+
+// Benchmark-only launch hooks that force one existing spans-per-CTA specialization.
+// Production callers should use the ordinary forward/backward launch functions.
+void launchRaggedSequenceConcatenateWithSpansPerCtaForBenchmark(
+    void *output_values, void *input_values[], const void *copy_spans, uint64_t span_count,
+    std::size_t value_element_size_bytes, uint64_t elements_per_value,
+    std::size_t offsets_element_size_bytes, uint64_t active_output_values,
+    uint32_t spans_per_cta, Stream stream);
+
+void launchRaggedSequenceConcatenateBackwardWithSpansPerCtaForBenchmark(
+    void *input_gradients[], const void *output_gradient, const void *copy_spans, uint64_t span_count,
+    std::size_t value_element_size_bytes, uint64_t elements_per_value,
+    std::size_t offsets_element_size_bytes, uint64_t active_output_values,
+    uint32_t spans_per_cta, Stream stream);

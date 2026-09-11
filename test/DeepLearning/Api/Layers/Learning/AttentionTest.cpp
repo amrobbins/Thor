@@ -8,11 +8,13 @@
 #include "DeepLearning/Api/Optimizers/AdamW.h"
 #include "DeepLearning/Api/Network/PlacedNetwork.h"
 #include "DeepLearning/Implementation/Layers/CustomLayer.h"
+#include "DeepLearning/Implementation/Layers/NeuralNetwork/Attention.h"
 #include "DeepLearning/Implementation/Layers/RaggedCustomLayer.h"
 #include "DeepLearning/Implementation/Tensor/RowPartitionRuntime.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkInput.h"
 #include "DeepLearning/Implementation/Layers/Utility/NetworkOutput.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
+#include "Utilities/TensorOperations/GpuAttention/CudnnAttention.h"
 #include "test/DeepLearning/Api/Helpers/GradientRivet.h"
 #include "test/DeepLearning/RaggedTestUtils.h"
 
@@ -1059,6 +1061,13 @@ struct ResidualAttentionTrainingResult {
     unordered_map<string, vector<float>> parametersAfter;
     vector<float> residualValues;
     vector<float> upstreamGradient;
+    vector<string> nativeBackwardStageKinds;
+    vector<Impl::StampedExecutionPlan::AttentionBackwardStateDiagnostic> nativeAttentionBackwardDiagnostics;
+    uintptr_t nativeRetainedForwardStateId = 0;
+#ifdef THOR_DEBUG
+    Impl::CudnnScaledDotProductAttention::TestExecutionCounters attentionExecutionsAfterForward;
+    Impl::CudnnScaledDotProductAttention::TestExecutionCounters attentionExecutionsAfterBackward;
+#endif
 };
 
 struct RaggedAttentionPoisonTrainingResult {
@@ -1066,6 +1075,10 @@ struct RaggedAttentionPoisonTrainingResult {
     vector<float> queryGradientActive;
     optional<vector<float>> contextGradient;
     unordered_map<string, vector<float>> parametersAfter;
+#ifdef THOR_DEBUG
+    Impl::CudnnScaledDotProductAttention::TestExecutionCounters attentionExecutionsAfterForward;
+    Impl::CudnnScaledDotProductAttention::TestExecutionCounters attentionExecutionsAfterBackward;
+#endif
 };
 
 RaggedAttentionPoisonTrainingResult runRaggedQueryAttentionPoisonTrainingCase(
@@ -1156,12 +1169,17 @@ RaggedAttentionPoisonTrainingResult runRaggedQueryAttentionPoisonTrainingCase(
     auto queryOffsetsInput = stamped.getManagedPartitionOffsetsInputForTest(query.getRowPartitionId());
     auto physicalContext = denseContext ? stamped.getNamedInput("context") : nullptr;
     auto physicalAttention =
-        dynamic_pointer_cast<Impl::CustomLayer>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
+        dynamic_pointer_cast<Impl::Attention>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
     auto physicalOutput =
         dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
     if (queryValuesInput == nullptr || queryOffsetsInput == nullptr || physicalAttention == nullptr ||
         physicalOutput == nullptr || (denseContext && physicalContext == nullptr)) {
         throw runtime_error("Ragged Attention poison training case failed to resolve physical layers.");
+    }
+    const Impl::AttentionNativeExecutionVariantPlans& retainedVariant =
+        physicalAttention->getNativeExecutionPlans().at(0, Impl::kPrimaryDynamicExpressionVariant);
+    if (!retainedVariant.hasRetainedForward()) {
+        throw runtime_error("Ragged Attention training forward did not retain Q/K/V/O/stats during stamping.");
     }
 
     Stream stream = physicalAttention->getStreams()[0];
@@ -1181,6 +1199,10 @@ RaggedAttentionPoisonTrainingResult runRaggedQueryAttentionPoisonTrainingCase(
                            stream);
     }
     stream.synchronize();
+
+#ifdef THOR_DEBUG
+    Impl::CudnnScaledDotProductAttention::resetTestExecutionCounters();
+#endif
 
     vector<float> queryValues(queryCapacity * features, 0.0f);
     for (uint64_t row = 0; row < activeQueryRows; ++row) {
@@ -1213,6 +1235,9 @@ RaggedAttentionPoisonTrainingResult runRaggedQueryAttentionPoisonTrainingCase(
     physicalOutput->getOutputReadyEvent().synchronize();
 
     RaggedAttentionPoisonTrainingResult result;
+#ifdef THOR_DEBUG
+    result.attentionExecutionsAfterForward = Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+#endif
     const vector<float> outputValues = readCpuTensor(physicalOutput->getFeatureOutput().value());
     result.outputActive.assign(outputValues.begin(), outputValues.begin() + activeQueryRows * features);
 
@@ -1273,6 +1298,9 @@ RaggedAttentionPoisonTrainingResult runRaggedQueryAttentionPoisonTrainingCase(
     }
     stream.synchronize();
     gradientStream.synchronize();
+#ifdef THOR_DEBUG
+    result.attentionExecutionsAfterBackward = Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+#endif
     return result;
 }
 
@@ -1321,7 +1349,11 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
                                                                  bool fused,
                                                                  bool crossAttention,
                                                                  float dropoutProbability = 0.0f,
-                                                                 bool trainingDropoutEnabled = true) {
+                                                                 bool trainingDropoutEnabled = true,
+                                                                 bool useAdamW = false,
+                                                                 bool hasBias = false,
+                                                                 bool useRope = false,
+                                                                 bool freezeAttentionTraining = false) {
     auto require = [](bool condition, const string& message) {
         if (!condition) {
             throw runtime_error(message);
@@ -1350,7 +1382,18 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
     const vector<float> upstreamGradient = deterministicValues(
         static_cast<uint64_t>(batchSize) * querySequenceLength * outputFeatures, 0.10f, 0.29f);
 
-    shared_ptr<Api::Sgd> sgd = Api::Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+    shared_ptr<Api::Optimizer> optimizer;
+    if (useAdamW) {
+        optimizer = Api::AdamW::Builder()
+                        .alpha(learningRate)
+                        .beta1(0.9f)
+                        .beta2(0.99f)
+                        .epsilon(1.0e-8f)
+                        .weightDecay(0.0f)
+                        .build();
+    } else {
+        optimizer = Api::Sgd::Builder().initialLearningRate(learningRate).decay(0.0f).momentum(0.0f).build();
+    }
 
     Api::Network network(networkName);
     Api::NetworkInput query = Api::NetworkInput::Builder()
@@ -1391,11 +1434,11 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
         .headDim(headDim)
         .valueDim(valueDim)
         .outputFeatures(outputFeatures)
-        .hasBias(false)
+        .hasBias(hasBias)
         .weightsDataType(dataType)
         .computeDataType(DataType::FP32)
         .outputDataType(dataType)
-        .optimizer(sgd);
+        .optimizer(optimizer);
     if (crossAttention) {
         builder.keyInput(contextRivet->getFeatureOutput().value()).valueInput(contextRivet->getFeatureOutput().value());
     } else {
@@ -1404,12 +1447,22 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
     if (dropoutProbability > 0.0f) {
         builder.dropout(dropoutProbability, 1234, 5678);
     }
+    if (useRope) {
+        Impl::RotaryPositionEmbeddingOptions rope;
+        rope.rotary_dim = headDim;
+        rope.compute_dtype = DataType::FP32;
+        rope.output_dtype = dataType;
+        builder.ropeOptions(rope).queryRopePositionOffset(17).keyRopePositionOffset(29);
+    }
     if (fused) {
         Impl::Expression attentionOutput = Api::Attention::epilogueInput(DataType::FP32, dataType);
         Impl::Expression residualInput = Api::Attention::epilogueAuxInput("residual", DataType::FP32, dataType);
         builder.epilogueInput("residual", residualRivet.getFeatureOutput().value()).epilogue(attentionOutput + residualInput);
     }
     Api::Attention attention = builder.build();
+    if (freezeAttentionTraining) {
+        attention.freezeTraining();
+    }
 
     optional<Api::CustomLayer> residualAdd;
     Api::Tensor transformerOutput = attention.getFeatureOutput().value();
@@ -1454,7 +1507,7 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
     auto physicalResidual =
         dynamic_pointer_cast<Impl::NetworkInput>(stampedNetwork.getPhysicalLayerFromApiLayer(residual.getId()));
     auto physicalOutput = dynamic_pointer_cast<Impl::NetworkOutput>(stampedNetwork.getPhysicalLayerFromApiLayer(output.getId()));
-    auto physicalAttention = dynamic_pointer_cast<Impl::CustomLayer>(stampedNetwork.getPhysicalLayerFromApiLayer(attention.getId()));
+    auto physicalAttention = dynamic_pointer_cast<Impl::Attention>(stampedNetwork.getPhysicalLayerFromApiLayer(attention.getId()));
     auto physicalResidualAdd = !fused
                                    ? dynamic_pointer_cast<Impl::CustomLayer>(
                                          stampedNetwork.getPhysicalLayerFromApiLayer(residualAdd->getId()))
@@ -1467,9 +1520,12 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
     if (!fused) require(physicalResidualAdd != nullptr, "Residual attention test failed to place unfused residual add.");
 
     Stream stream = physicalAttention->getStreams()[0];
-    require(physicalAttention->getGradientUpdateStream().has_value(),
-            "Residual attention training test requires a gradient update stream.");
-    Stream gradientStream = physicalAttention->getGradientUpdateStream().value();
+    const optional<Stream> gradientStream = physicalAttention->getGradientUpdateStream();
+    if (!freezeAttentionTraining) {
+        require(gradientStream.has_value(),
+                "Trainable residual attention test requires a gradient update stream.");
+    }
+    Stream parameterReadStream = gradientStream.value_or(stream);
 
     for (const string& parameterName : physicalAttention->listParameters()) {
         const shared_ptr<Impl::PhysicalParameter> parameter = physicalAttention->getParameter(parameterName);
@@ -1480,6 +1536,12 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
         setParameterTensor(parameter, values, stream);
     }
     stream.synchronize();
+
+#ifdef THOR_DEBUG
+    // AB0 execution accounting starts after placement/initialization so it measures only
+    // the one logical Attention operation exercised by this training batch.
+    Impl::CudnnScaledDotProductAttention::resetTestExecutionCounters();
+#endif
 
     Impl::Tensor queryHost(cpuPlacement, Impl::TensorDescriptor(dataType, {batchSize, querySequenceLength, queryFeatures}));
     writeCpuTensor(queryHost, queryValues);
@@ -1498,6 +1560,20 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
     physicalOutput->getOutputReadyEvent().synchronize();
 
     ResidualAttentionTrainingResult result;
+    const Impl::DynamicExpressionVariantId activeVariant =
+        physicalAttention->getTrainingExecutionContract().activeTrainingVariant();
+    const Impl::AttentionNativeExecutionVariantPlans& nativeVariant =
+        physicalAttention->getNativeExecutionPlans().at(0, activeVariant);
+    require(nativeVariant.hasBackward(), "A3 expected Attention to own a stamped native shared backward plan.");
+    require(nativeVariant.hasRetainedForward() && nativeVariant.retained_forward->forward_state != nullptr,
+            "A4 expected Attention native backward ownership to retain the real forward state.");
+    result.nativeRetainedForwardStateId =
+        reinterpret_cast<uintptr_t>(nativeVariant.retained_forward->forward_state.get());
+    result.nativeBackwardStageKinds = nativeVariant.backward->stageKindNames();
+    result.nativeAttentionBackwardDiagnostics = nativeVariant.backward->attentionBackwardStateDiagnostics();
+#ifdef THOR_DEBUG
+    result.attentionExecutionsAfterForward = Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+#endif
     result.output = readCpuTensor(physicalOutput->getFeatureOutput().value());
     result.residualValues = residualValues;
     result.upstreamGradient = upstreamGradient;
@@ -1549,10 +1625,15 @@ ResidualAttentionTrainingResult runResidualAttentionTrainingCase(const string& n
     for (const string& parameterName : physicalAttention->listParameters()) {
         result.parametersAfter.emplace(
             parameterName,
-            readCpuTensor(copyTensorToCpu(physicalAttention->getParameter(parameterName)->getStorage().value(), gradientStream)));
+            readCpuTensor(copyTensorToCpu(physicalAttention->getParameter(parameterName)->getStorage().value(), parameterReadStream)));
     }
     stream.synchronize();
-    gradientStream.synchronize();
+    if (gradientStream.has_value()) {
+        gradientStream->synchronize();
+    }
+#ifdef THOR_DEBUG
+    result.attentionExecutionsAfterBackward = Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+#endif
     return result;
 }
 
@@ -1586,6 +1667,206 @@ void expectResidualAttentionTrainingMatchesUnfused(bool crossAttention) {
 }
 
 }  // namespace
+
+TEST(AttentionApi, A1NativeTrainingExecutionContractForbidsReplay) {
+    using Contract = Impl::AttentionTrainingExecutionContract;
+
+    EXPECT_FALSE(Contract::kForwardReplayAllowed);
+    EXPECT_EQ(Contract::kPhysicalForwardExecutionsPerApplication, 1U);
+    EXPECT_EQ(Contract::kPhysicalBackwardExecutionsPerApplication, 1U);
+    EXPECT_TRUE(Contract::kBackwardRequiresMatchingForwardState);
+
+    constexpr Impl::DynamicExpressionVariantId deterministicVariant = 7;
+    Contract contract(deterministicVariant, true);
+    EXPECT_EQ(contract.activeTrainingVariant(), Impl::kPrimaryDynamicExpressionVariant);
+    EXPECT_TRUE(contract.isTrainingDropoutEnabled());
+
+    contract.setTrainingDropoutEnabled(false);
+    EXPECT_EQ(contract.activeTrainingVariant(), deterministicVariant);
+    EXPECT_FALSE(contract.isTrainingDropoutEnabled());
+
+    Contract noDeterministicVariant(std::nullopt, false);
+    EXPECT_EQ(noDeterministicVariant.activeTrainingVariant(), Impl::kPrimaryDynamicExpressionVariant);
+}
+
+TEST(AttentionApi, A2RealForwardRetainsExactQkvoAndStatsWithoutRestamping) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint64_t sequenceLength = 3;
+    constexpr uint64_t features = 16;
+
+    Api::Network network("attention_api_a2_retained_real_forward_values");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({sequenceLength, features})
+                                  .dataType(DataType::FP16)
+                                  .build();
+    shared_ptr<Api::Sgd> sgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .queryInput(input.getFeatureOutput().value())
+                                   .keyInput(input.getFeatureOutput().value())
+                                   .valueInput(input.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(8)
+                                   .hasBias(false)
+                                   .dropout(0.125f, 1234, 5678)
+                                   .optimizer(sgd)
+                                   .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(attention.getFeatureOutput().value())
+                                    .dataType(DataType::FP16)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+    auto physicalInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(stamped.getPhysicalLayerFromApiLayer(input.getId()));
+    auto physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalAttention =
+        dynamic_pointer_cast<Impl::Attention>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalAttention, nullptr);
+
+    const Impl::AttentionNativeExecutionPlans& nativePlans = physicalAttention->getNativeExecutionPlans();
+    ASSERT_EQ(nativePlans.applications.size(), 1U);
+
+    auto verifyRetainedVariant = [&](Impl::DynamicExpressionVariantId variantId,
+                                     Impl::RetainedAttentionForwardValues& retainedOut) {
+        const Impl::AttentionNativeExecutionVariantPlans& variant = nativePlans.at(0, variantId);
+        ASSERT_TRUE(variant.hasForward());
+        EXPECT_FALSE(variant.hasBackward());
+        ASSERT_TRUE(variant.hasRetainedForward());
+        ASSERT_TRUE(variant.retained_forward.has_value());
+        const Impl::RetainedAttentionForwardValues& retained = variant.retained_forward.value();
+        ASSERT_NE(retained.forward_state, nullptr);
+        EXPECT_TRUE(retained.forward_state->retain_for_backward);
+        EXPECT_FALSE(retained.forward_state->has_valid_stats);
+        EXPECT_TRUE(retained.forward_state->stats.isInitialized());
+        EXPECT_EQ(retained.forward_state->output.getTensorId(), retained.o.getTensorId());
+        EXPECT_NE(retained.q.getTensorId(), 0U);
+        EXPECT_NE(retained.k.getTensorId(), 0U);
+        EXPECT_NE(retained.v.getTensorId(), 0U);
+        EXPECT_NE(retained.o.getTensorId(), 0U);
+        EXPECT_EQ(retained.q.getDimensions(),
+                  (vector<uint64_t>{batchSize, sequenceLength, 2, 8}));
+        EXPECT_EQ(retained.k.getDimensions(),
+                  (vector<uint64_t>{batchSize, sequenceLength, 2, 8}));
+        EXPECT_EQ(retained.v.getDimensions(),
+                  (vector<uint64_t>{batchSize, sequenceLength, 2, 8}));
+        EXPECT_EQ(retained.o.getDimensions(),
+                  (vector<uint64_t>{batchSize, sequenceLength, 2, 8}));
+        EXPECT_EQ(retained.forward_state->stats.getDimensions(),
+                  (vector<uint64_t>{batchSize, 2, sequenceLength, 1}));
+        retainedOut = retained;
+    };
+
+    Impl::RetainedAttentionForwardValues primary;
+    verifyRetainedVariant(Impl::kPrimaryDynamicExpressionVariant, primary);
+    const optional<Impl::DynamicExpressionVariantId> deterministicVariant =
+        physicalAttention->getTrainingExecutionContract().getDeterministicTrainingVariantId();
+    ASSERT_TRUE(deterministicVariant.has_value());
+    Impl::RetainedAttentionForwardValues deterministic;
+    verifyRetainedVariant(deterministicVariant.value(), deterministic);
+
+    // Both training-capable forward variants have their retention state prepared
+    // before the first batch. The saved O handle within each variant is the exact
+    // SDPA stage output; no D2D save copy exists.
+    EXPECT_TRUE(primary.complete());
+    EXPECT_TRUE(deterministic.complete());
+    // A stamped execution variant owns its own retained Attention state. Switching
+    // dropout policy selects a different stamped variant; it must not alias the
+    // mutable cuDNN stats/output state of the other variant.
+    EXPECT_NE(primary.forward_state.get(), deterministic.forward_state.get());
+
+#ifdef THOR_DEBUG
+    Impl::CudnnScaledDotProductAttention::resetTestExecutionCounters();
+#endif
+    Impl::Tensor hostInput(cpuPlacement,
+                           Impl::TensorDescriptor(DataType::FP16, {batchSize, sequenceLength, features}));
+    writeCpuTensor(hostInput, deterministicValues(batchSize * sequenceLength * features, 0.02f, 0.3f));
+    const vector<float> forwardOutput =
+        runForward(*physicalInput, *physicalOutput, hostInput, batchSize, /*validationPass=*/false);
+    EXPECT_EQ(forwardOutput.size(), batchSize * sequenceLength * features);
+
+    // The first forward may legitimately recompile/restamp the CustomLayer when a
+    // parameter reports needsExpressionRecompile(). Reacquire the Attention-owned
+    // plans after execution so these assertions inspect the state belonging to the
+    // plan that actually ran rather than a pre-restamp snapshot.
+    const Impl::AttentionNativeExecutionPlans& nativePlansAfterForward =
+        physicalAttention->getNativeExecutionPlans();
+    const Impl::AttentionNativeExecutionVariantPlans& primaryAfterForward =
+        nativePlansAfterForward.at(0, Impl::kPrimaryDynamicExpressionVariant);
+    const Impl::AttentionNativeExecutionVariantPlans& deterministicAfterForward =
+        nativePlansAfterForward.at(0, deterministicVariant.value());
+    ASSERT_TRUE(primaryAfterForward.retained_forward.has_value());
+    ASSERT_TRUE(deterministicAfterForward.retained_forward.has_value());
+    ASSERT_NE(primaryAfterForward.retained_forward->forward_state, nullptr);
+    ASSERT_NE(deterministicAfterForward.retained_forward->forward_state, nullptr);
+
+    // Only the selected training variant ran. Its stats now belong to this exact
+    // real forward execution; the separately stamped deterministic variant remains
+    // prepared but has not falsely become valid.
+    EXPECT_TRUE(primaryAfterForward.retained_forward->forward_state->has_valid_stats);
+    EXPECT_FALSE(deterministicAfterForward.retained_forward->forward_state->has_valid_stats);
+    EXPECT_EQ(primaryAfterForward.retained_forward->forward_state->output.getTensorId(),
+              primaryAfterForward.retained_forward->o.getTensorId());
+#ifdef THOR_DEBUG
+    const Impl::CudnnScaledDotProductAttention::TestExecutionCounters counters =
+        Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+    EXPECT_EQ(counters.forwardCalls, 1U);
+    EXPECT_EQ(counters.backwardCalls, 0U);
+#endif
+}
+
+TEST(AttentionApi, A2InferenceForwardDoesNotAllocateBackwardRetentionState) {
+    constexpr uint32_t batchSize = 2;
+    Api::Network network("attention_api_a2_inference_has_no_retained_backward_state");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({3, 16})
+                                  .dataType(DataType::FP16)
+                                  .build();
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .queryInput(input.getFeatureOutput().value())
+                                   .keyInput(input.getFeatureOutput().value())
+                                   .valueInput(input.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(8)
+                                   .hasBias(false)
+                                   .build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(attention.getFeatureOutput().value())
+                                    .dataType(DataType::FP16)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/true);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+    auto physicalAttention =
+        dynamic_pointer_cast<Impl::Attention>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
+    ASSERT_NE(physicalAttention, nullptr);
+
+    const Impl::AttentionNativeExecutionVariantPlans& variant =
+        physicalAttention->getNativeExecutionPlans().at(0, Impl::kPrimaryDynamicExpressionVariant);
+    EXPECT_TRUE(variant.hasForward());
+    EXPECT_FALSE(variant.hasBackward());
+    EXPECT_FALSE(variant.retained_forward.has_value());
+}
 
 TEST(AttentionApi, BuildsComposedCausalSelfAttention) {
     Api::Network network("attention_api_builds_composed_causal_self_attention");
@@ -2204,6 +2485,711 @@ TEST(AttentionApi, RaggedQueryDenseKvForwardBackwardAndUpdatesIgnoreInactivePois
     expectRaggedAttentionPoisonTrainingInvariant(/*denseContext=*/true);
 }
 
+TEST(AttentionApi, A3NativeSharedBackwardUsesRetainedForwardAndContainsNoAttentionReplay) {
+    for (const bool crossAttention : {false, true}) {
+        SCOPED_TRACE(crossAttention ? "cross attention" : "self attention");
+        const ResidualAttentionTrainingResult result = runResidualAttentionTrainingCase(
+            crossAttention ? "attention_api_a3_native_shared_backward_cross"
+                           : "attention_api_a3_native_shared_backward_self",
+            true,
+            crossAttention,
+            0.125f,
+            true,
+            false);
+
+        EXPECT_EQ(std::count(result.nativeBackwardStageKinds.begin(),
+                             result.nativeBackwardStageKinds.end(),
+                             "Attention"),
+                  0);
+        EXPECT_EQ(std::count(result.nativeBackwardStageKinds.begin(),
+                             result.nativeBackwardStageKinds.end(),
+                             "AttentionBackward"),
+                  1);
+        ASSERT_EQ(result.nativeAttentionBackwardDiagnostics.size(), 1U);
+        const auto& diagnostic = result.nativeAttentionBackwardDiagnostics.front();
+        EXPECT_TRUE(diagnostic.linked_forward_state);
+        EXPECT_NE(diagnostic.backward_executable_id, 0U);
+        EXPECT_EQ(diagnostic.fallback_forward_executable_id, 0U);
+        EXPECT_EQ(diagnostic.fallback_forward_workspace_bytes, 0U);
+        EXPECT_FALSE(diagnostic.fallback_forward_scratch_present);
+    }
+}
+
+TEST(AttentionApi, A4NativeBackwardIsStaticallyOwnedByExactStampedForwardState) {
+    for (const bool crossAttention : {false, true}) {
+        SCOPED_TRACE(crossAttention ? "cross attention" : "self attention");
+        const ResidualAttentionTrainingResult result = runResidualAttentionTrainingCase(
+            crossAttention ? "attention_api_a4_exact_forward_state_cross"
+                           : "attention_api_a4_exact_forward_state_self",
+            true,
+            crossAttention,
+            0.125f,
+            true,
+            false);
+
+        ASSERT_NE(result.nativeRetainedForwardStateId, 0U);
+        ASSERT_EQ(result.nativeAttentionBackwardDiagnostics.size(), 1U);
+        const auto& diagnostic = result.nativeAttentionBackwardDiagnostics.front();
+        ASSERT_TRUE(diagnostic.linked_forward_state);
+        EXPECT_EQ(diagnostic.linked_forward_state_id, result.nativeRetainedForwardStateId);
+
+        // A4 deliberately has no generation counters or runtime forward/backward
+        // sequencing protocol. The ownership relationship is established once at
+        // stamping: the native backward holds the exact state object retained by
+        // its corresponding stamped real forward, and Thor's normal layer schedule
+        // provides the forward-then-backward lifetime contract.
+        EXPECT_EQ(diagnostic.fallback_forward_executable_id, 0U);
+        EXPECT_EQ(diagnostic.fallback_forward_workspace_bytes, 0U);
+        EXPECT_FALSE(diagnostic.fallback_forward_scratch_present);
+    }
+}
+
+TEST(AttentionApi, A4DistinctPlacedAttentionStampsOwnDistinctForwardState) {
+    struct PlacedAttentionOwner {
+        shared_ptr<Api::Network> network;
+        shared_ptr<Api::PlacedNetwork> placed;
+        shared_ptr<Impl::Attention> physicalAttention;
+        uintptr_t retainedForwardStateId = 0;
+        uintptr_t linkedBackwardForwardStateId = 0;
+    };
+
+    auto placeAttention = [](const string& networkName) {
+        constexpr uint32_t batchSize = 2;
+        auto network = make_shared<Api::Network>(networkName);
+        Api::NetworkInput input = Api::NetworkInput::Builder()
+                                      .network(*network)
+                                      .name("tokens")
+                                      .dimensions({3, 16})
+                                      .dataType(DataType::FP16)
+                                      .build();
+        shared_ptr<Api::Sgd> sgd =
+            Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+        Api::Attention attention = Api::Attention::Builder()
+                                       .network(*network)
+                                       .queryInput(input.getFeatureOutput().value())
+                                       .keyInput(input.getFeatureOutput().value())
+                                       .valueInput(input.getFeatureOutput().value())
+                                       .numHeads(2)
+                                       .headDim(8)
+                                       .hasBias(false)
+                                       .dropout(0.125f, 1234, 5678)
+                                       .optimizer(sgd)
+                                       .build();
+        // A4 is testing ownership of a stamped training backward, so provide an
+        // explicit downstream gradient endpoint.  A bare NetworkOutput is forward-only
+        // and correctly gives Attention no backward plan to own.
+        Api::GradientRivet outputRivet =
+            Api::GradientRivet::Builder().network(*network).tensor(attention.getFeatureOutput().value()).build();
+        Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                        .network(*network)
+                                        .name("output")
+                                        .inputTensor(outputRivet.getFeatureOutput().value())
+                                        .dataType(DataType::FP16)
+                                        .build();
+
+        vector<Event> initDoneEvents;
+        shared_ptr<Api::PlacedNetwork> placed = network->place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+        synchronizeEvents(initDoneEvents);
+        Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+        auto physicalAttention =
+            dynamic_pointer_cast<Impl::Attention>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
+        if (physicalAttention == nullptr) {
+            throw runtime_error("A4 failed to place physical Attention.");
+        }
+
+        const Impl::AttentionNativeExecutionVariantPlans& variant =
+            physicalAttention->getNativeExecutionPlans().at(0, Impl::kPrimaryDynamicExpressionVariant);
+        if (!variant.hasRetainedForward() || !variant.hasBackward() || variant.retained_forward->forward_state == nullptr) {
+            throw runtime_error("A4 expected complete native forward/backward ownership for placed Attention.");
+        }
+        const auto diagnostics = variant.backward->attentionBackwardStateDiagnostics();
+        if (diagnostics.size() != 1U || !diagnostics.front().linked_forward_state) {
+            throw runtime_error("A4 expected one native AttentionBackward linked to its real forward state.");
+        }
+
+        const uintptr_t retainedForwardStateId =
+            reinterpret_cast<uintptr_t>(variant.retained_forward->forward_state.get());
+        const uintptr_t linkedBackwardForwardStateId = diagnostics.front().linked_forward_state_id;
+        return PlacedAttentionOwner{
+            .network = std::move(network),
+            .placed = std::move(placed),
+            .physicalAttention = std::move(physicalAttention),
+            .retainedForwardStateId = retainedForwardStateId,
+            .linkedBackwardForwardStateId = linkedBackwardForwardStateId,
+        };
+    };
+
+    PlacedAttentionOwner first = placeAttention("attention_api_a4_stamp_state_owner_first");
+    PlacedAttentionOwner second = placeAttention("attention_api_a4_stamp_state_owner_second");
+
+    ASSERT_NE(first.retainedForwardStateId, 0U);
+    ASSERT_NE(second.retainedForwardStateId, 0U);
+    EXPECT_EQ(first.linkedBackwardForwardStateId, first.retainedForwardStateId);
+    EXPECT_EQ(second.linkedBackwardForwardStateId, second.retainedForwardStateId);
+    EXPECT_NE(first.retainedForwardStateId, second.retainedForwardStateId);
+}
+
+TEST(AttentionApi, A3NativeSharedBackwardIgnoresUnusedSavedForwardBindings) {
+    constexpr uint32_t batchSize = 2;
+    Api::Network network("attention_api_a3_unused_saved_forward_binding");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({3, 16})
+                                  .dataType(DataType::FP16)
+                                  .build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .queryInput(inputRivet.getFeatureOutput().value())
+                                   .keyInput(inputRivet.getFeatureOutput().value())
+                                   .valueInput(inputRivet.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(8)
+                                   .hasBias(false)
+                                   .build();
+    attention.freezeTraining();
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(attention.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(DataType::FP16)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+    auto physicalAttention =
+        dynamic_pointer_cast<Impl::Attention>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
+    ASSERT_NE(physicalAttention, nullptr);
+
+    // With Attention's parameters frozen, this native plan only propagates the
+    // downstream gradient to its inputs.  Saved SDPA O is therefore a valid A2
+    // retained candidate but is not referenced by this differentiated graph.
+    // Placement must not pass that unused candidate to FusedEquation::stamp().
+    const Impl::AttentionNativeExecutionVariantPlans& variant =
+        physicalAttention->getNativeExecutionPlans().at(0, Impl::kPrimaryDynamicExpressionVariant);
+    ASSERT_TRUE(variant.hasBackward());
+    const vector<string> kinds = variant.backward->stageKindNames();
+    EXPECT_EQ(std::count(kinds.begin(), kinds.end(), "Attention"), 0);
+    EXPECT_EQ(std::count(kinds.begin(), kinds.end(), "AttentionBackward"), 1);
+}
+
+TEST(AttentionApi, A5NativeSharedBackwardWritesConnectedAndOptimizerGradientsDirectly) {
+    constexpr uint32_t batchSize = 2;
+    Api::Network network("attention_api_a5_native_gradient_destinations");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({3, 16})
+                                  .dataType(DataType::FP16)
+                                  .build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    shared_ptr<Api::Sgd> sgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .queryInput(inputRivet.getFeatureOutput().value())
+                                   .keyInput(inputRivet.getFeatureOutput().value())
+                                   .valueInput(inputRivet.getFeatureOutput().value())
+                                   .numHeads(2)
+                                   .headDim(8)
+                                   .hasBias(false)
+                                   .optimizer(sgd)
+                                   .build();
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(attention.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(DataType::FP16)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+    auto physicalAttention =
+        dynamic_pointer_cast<Impl::Attention>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
+    ASSERT_NE(physicalAttention, nullptr);
+
+    const Impl::AttentionNativeExecutionVariantPlans& variant =
+        physicalAttention->getNativeExecutionPlans().at(0, Impl::kPrimaryDynamicExpressionVariant);
+    ASSERT_TRUE(variant.hasBackward());
+    const auto finalOutputs = variant.backward->getFinalOutputs();
+
+    ASSERT_EQ(physicalAttention->getErrorOutputs().size(), 3U);
+    ASSERT_TRUE(physicalAttention->getErrorOutputs().at(0).has_value());
+    ASSERT_TRUE(physicalAttention->getErrorOutputs().at(1).has_value());
+    ASSERT_TRUE(physicalAttention->getErrorOutputs().at(2).has_value());
+    ASSERT_TRUE(finalOutputs.contains("query_input_grad"));
+    ASSERT_TRUE(finalOutputs.contains("key_input_grad"));
+    ASSERT_TRUE(finalOutputs.contains("value_input_grad"));
+    EXPECT_EQ(finalOutputs.at("query_input_grad"), physicalAttention->getErrorOutputs().at(0).value());
+    EXPECT_EQ(finalOutputs.at("key_input_grad"), physicalAttention->getErrorOutputs().at(1).value());
+    EXPECT_EQ(finalOutputs.at("value_input_grad"), physicalAttention->getErrorOutputs().at(2).value());
+
+    for (const string& parameterName : physicalAttention->listParameters()) {
+        const shared_ptr<Impl::PhysicalParameter> parameter = physicalAttention->getParameter(parameterName);
+        ASSERT_NE(parameter, nullptr);
+        ASSERT_TRUE(parameter->hasOptimizer());
+        ASSERT_NE(parameter->getOptimizer(), nullptr);
+        ASSERT_TRUE(parameter->getOptimizer()->getWeightsGradient().has_value());
+        const string gradientName = parameterName + "_grad";
+        ASSERT_TRUE(finalOutputs.contains(gradientName));
+        EXPECT_EQ(finalOutputs.at(gradientName), parameter->getOptimizer()->getWeightsGradient().value());
+    }
+}
+
+#ifdef THOR_DEBUG
+TEST(AttentionApi, A5TrainingPhysicalAttentionExecutesExactlyOnceForwardAndBackward) {
+    for (const bool useAdamW : {false, true}) {
+        SCOPED_TRACE(useAdamW ? "AdamW optimizer" : "SGD optimizer");
+        const ResidualAttentionTrainingResult result = runResidualAttentionTrainingCase(
+            useAdamW ? "attention_api_a5_physical_execution_invariant_adamw"
+                     : "attention_api_a5_physical_execution_invariant_sgd",
+            true,
+            false,
+            0.0f,
+            true,
+            useAdamW);
+
+        // AB0 measured 4 forwards / 2 backwards for this same logical Attention.
+        // A5 cuts runtime over to the retained-state native shared VJP: backward
+        // must add no forward dispatch and exactly one physical AttentionBackward.
+        EXPECT_EQ(result.attentionExecutionsAfterForward.forwardCalls, 1U);
+        EXPECT_EQ(result.attentionExecutionsAfterForward.backwardCalls, 0U);
+        EXPECT_EQ(result.attentionExecutionsAfterBackward.forwardCalls, 1U);
+        EXPECT_EQ(result.attentionExecutionsAfterBackward.backwardCalls, 1U);
+    }
+}
+
+
+void expectSinglePhysicalAttentionForwardBackward(
+    const Impl::CudnnScaledDotProductAttention::TestExecutionCounters& afterForward,
+    const Impl::CudnnScaledDotProductAttention::TestExecutionCounters& afterBackward) {
+    EXPECT_EQ(afterForward.forwardCalls, 1U);
+    EXPECT_EQ(afterForward.backwardCalls, 0U);
+    EXPECT_EQ(afterBackward.forwardCalls, 1U);
+    EXPECT_EQ(afterBackward.backwardCalls, 1U);
+}
+
+Impl::CudnnScaledDotProductAttention::TestExecutionCounters runDenseQueryRaggedKvExecutionCountCase(
+    Impl::CudnnScaledDotProductAttention::TestExecutionCounters& afterForward) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t queryLength = 4;
+    constexpr uint32_t features = 16;
+    constexpr uint64_t contextCapacity = 8;
+    constexpr uint64_t activeContextRows = 7;
+    const DataType dataType = DataType::FP16;
+
+    Api::Network network("attention_api_a6_dense_query_ragged_kv_execution_count");
+    Api::NetworkInput query = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("query")
+                                  .dimensions({queryLength, features})
+                                  .dataType(dataType)
+                                  .build();
+    Api::GradientRivet queryRivet =
+        Api::GradientRivet::Builder().network(network).tensor(query.getFeatureOutput().value()).build();
+    Api::RaggedTensor context = Api::RaggedNetworkInput::Builder()
+                                    .network(network)
+                                    .name("context")
+                                    .valuesDataType(dataType)
+                                    .offsetsDataType(DataType::UINT32)
+                                    .trailingDimensions({features})
+                                    .maxTotalValues(contextCapacity)
+                                    .batchSize(batchSize)
+                                    .build();
+    Api::GradientRivet contextRivet =
+        Api::GradientRivet::Builder().network(network).tensor(context.getValues()).build();
+    Api::RaggedTensor contextForAttention(contextRivet.getFeatureOutput().value(), context.getOffsets());
+
+    shared_ptr<Api::Sgd> sgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+    Impl::RotaryPositionEmbeddingOptions rope;
+    rope.rotary_dim = features;
+    rope.compute_dtype = DataType::FP32;
+    rope.output_dtype = dataType;
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .queryInput(queryRivet.getFeatureOutput().value())
+                                   .keyInput(contextForAttention)
+                                   .valueInput(contextForAttention)
+                                   .numHeads(1)
+                                   .headDim(features)
+                                   .valueDim(features)
+                                   .outputFeatures(features)
+                                   .hasBias(false)
+                                   .ropeOptions(rope)
+                                   .queryRopePositionOffset(17)
+                                   .keyRopePositionOffset(29)
+                                   .weightsDataType(dataType)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(dataType)
+                                   .optimizer(sgd)
+                                   .build();
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(attention.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    if (placed == nullptr) throw runtime_error("A6 dense-query/ragged-KV case failed to place network.");
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+    auto physicalQuery = stamped.getNamedInput("query");
+    auto physicalContextValues = stamped.getNamedInput("context.values");
+    auto physicalContextOffsets = stamped.getManagedPartitionOffsetsInputForTest(context.getRowPartitionId());
+    auto physicalAttention =
+        dynamic_pointer_cast<Impl::Attention>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
+    auto physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
+    if (physicalQuery == nullptr || physicalContextValues == nullptr || physicalContextOffsets == nullptr ||
+        physicalAttention == nullptr || physicalOutput == nullptr) {
+        throw runtime_error("A6 dense-query/ragged-KV case failed to resolve physical layers.");
+    }
+    if (!physicalAttention->getGradientUpdateStream().has_value()) {
+        throw runtime_error("A6 dense-query/ragged-KV case requires a gradient update stream.");
+    }
+    Stream computeStream = physicalAttention->getStreams()[0];
+    Stream gradientStream = physicalAttention->getGradientUpdateStream().value();
+    for (const string& parameterName : physicalAttention->listParameters()) {
+        const shared_ptr<Impl::PhysicalParameter> parameter = physicalAttention->getParameter(parameterName);
+        if (parameter == nullptr || !parameter->getStorage().has_value()) {
+            throw runtime_error("A6 dense-query/ragged-KV case encountered an unbacked parameter.");
+        }
+        setParameterTensor(parameter,
+                           deterministicValues(tensorNumel(parameter->getStorage().value()),
+                                               0.04f,
+                                               deterministicParameterPhase(parameterName)),
+                           computeStream);
+    }
+    computeStream.synchronize();
+
+    Impl::Tensor queryHost(cpuPlacement,
+                           Impl::TensorDescriptor(dataType, {batchSize, queryLength, features}));
+    writeCpuTensor(queryHost,
+                   deterministicValues(static_cast<uint64_t>(batchSize) * queryLength * features, 0.02f, 0.11f));
+    Impl::Tensor contextValuesHost(cpuPlacement,
+                                   Impl::TensorDescriptor(dataType, {contextCapacity, features}));
+    vector<float> contextValues = deterministicValues(contextCapacity * features, 0.015f, 0.23f);
+    Impl::Tensor contextOffsetsHost(cpuPlacement,
+                                    Impl::TensorDescriptor(DataType::UINT32, {batchSize + 1}));
+    writeCpuTensor(contextValuesHost, contextValues);
+    writeCpuUint32Tensor(contextOffsetsHost, {0U, 3U, static_cast<uint32_t>(activeContextRows)});
+
+    Impl::CudnnScaledDotProductAttention::resetTestExecutionCounters();
+    physicalQuery->forward(queryHost, false, batchSize);
+    physicalContextValues->forward(contextValuesHost, false, batchSize);
+    forwardPhysicalRowPartitionOffsets(
+        *physicalContextOffsets, contextOffsetsHost, batchSize, contextCapacity, activeContextRows);
+    physicalOutput->getOutputReadyEvent().synchronize();
+    afterForward = Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+
+    if (physicalAttention->getErrorInputs().size() != 1U || !physicalAttention->getErrorInputs().front().has_value()) {
+        throw runtime_error("A6 dense-query/ragged-KV case expected one downstream error input.");
+    }
+    Impl::Tensor errorInput = physicalAttention->getErrorInputs().front().value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, deterministicValues(tensorNumel(errorInput), 0.01f, 0.31f));
+    errorInput.copyFromAsync(errorInputHost, computeStream);
+    physicalAttention->backward(errorInput, batchSize);
+    computeStream.synchronize();
+    gradientStream.synchronize();
+    return Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+}
+
+TEST(AttentionApi, A6DenseCrossBiasRopeSdpaDropoutExecutesExactlyOnce) {
+    const ResidualAttentionTrainingResult result = runResidualAttentionTrainingCase(
+        "attention_api_a6_dense_cross_bias_rope_sdpa_dropout",
+        /*fused=*/true,
+        /*crossAttention=*/true,
+        /*dropoutProbability=*/0.125f,
+        /*trainingDropoutEnabled=*/true,
+        /*useAdamW=*/true,
+        /*hasBias=*/true,
+        /*useRope=*/true);
+    expectSinglePhysicalAttentionForwardBackward(
+        result.attentionExecutionsAfterForward, result.attentionExecutionsAfterBackward);
+}
+
+TEST(AttentionApi, A6FrozenParametersStillExecuteOneAttentionBackwardForInputGradient) {
+    const ResidualAttentionTrainingResult result = runResidualAttentionTrainingCase(
+        "attention_api_a6_frozen_parameters_input_gradient",
+        /*fused=*/true,
+        /*crossAttention=*/false,
+        /*dropoutProbability=*/0.0f,
+        /*trainingDropoutEnabled=*/true,
+        /*useAdamW=*/false,
+        /*hasBias=*/true,
+        /*useRope=*/false,
+        /*freezeAttentionTraining=*/true);
+    expectSinglePhysicalAttentionForwardBackward(
+        result.attentionExecutionsAfterForward, result.attentionExecutionsAfterBackward);
+}
+
+TEST(AttentionApi, A6DisabledTrainingDropoutVariantStillExecutesExactlyOnce) {
+    const ResidualAttentionTrainingResult result = runResidualAttentionTrainingCase(
+        "attention_api_a6_disabled_training_dropout_execution_count",
+        /*fused=*/true,
+        /*crossAttention=*/false,
+        /*dropoutProbability=*/0.5f,
+        /*trainingDropoutEnabled=*/false,
+        /*useAdamW=*/true);
+    expectSinglePhysicalAttentionForwardBackward(
+        result.attentionExecutionsAfterForward, result.attentionExecutionsAfterBackward);
+}
+
+TEST(AttentionApi, A6OutputDropoutResidualExecutesExactlyOnce) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t sequenceLength = 3;
+    constexpr uint32_t features = 8;
+    const DataType dataType = DataType::BF16;
+
+    Api::Network network("attention_api_a6_output_dropout_execution_count");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({sequenceLength, features})
+                                  .dataType(dataType)
+                                  .build();
+    Api::NetworkInput residual = Api::NetworkInput::Builder()
+                                     .network(network)
+                                     .name("residual")
+                                     .dimensions({sequenceLength, features})
+                                     .dataType(dataType)
+                                     .build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    Api::GradientRivet residualRivet =
+        Api::GradientRivet::Builder().network(network).tensor(residual.getFeatureOutput().value()).build();
+    shared_ptr<Api::AdamW> adamw = Api::AdamW::Builder()
+                                       .alpha(0.003f)
+                                       .beta1(0.9f)
+                                       .beta2(0.99f)
+                                       .epsilon(1.0e-8f)
+                                       .weightDecay(0.0f)
+                                       .build();
+    Api::Attention attention = Api::Attention::Builder()
+                                   .network(network)
+                                   .queryInput(inputRivet.getFeatureOutput().value())
+                                   .keyInput(inputRivet.getFeatureOutput().value())
+                                   .valueInput(inputRivet.getFeatureOutput().value())
+                                   .numHeads(1)
+                                   .headDim(features)
+                                   .valueDim(features)
+                                   .outputFeatures(features)
+                                   .weightsDataType(dataType)
+                                   .computeDataType(DataType::FP32)
+                                   .outputDataType(dataType)
+                                   .optimizer(adamw)
+                                   .outputDropoutProbability(0.25f)
+                                   .outputDropoutSeed(9876)
+                                   .residualInput(residualRivet.getFeatureOutput().value())
+                                   .build();
+    Api::GradientRivet outputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(attention.getFeatureOutput().value()).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+    auto physicalInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(stamped.getPhysicalLayerFromApiLayer(input.getId()));
+    auto physicalResidual =
+        dynamic_pointer_cast<Impl::NetworkInput>(stamped.getPhysicalLayerFromApiLayer(residual.getId()));
+    auto physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
+    auto physicalAttention =
+        dynamic_pointer_cast<Impl::Attention>(stamped.getPhysicalLayerFromApiLayer(attention.getId()));
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalResidual, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+    ASSERT_NE(physicalAttention, nullptr);
+    ASSERT_TRUE(physicalAttention->getGradientUpdateStream().has_value());
+
+    Impl::Tensor inputHost(cpuPlacement,
+                           Impl::TensorDescriptor(dataType, {batchSize, sequenceLength, features}));
+    Impl::Tensor residualHost(cpuPlacement,
+                              Impl::TensorDescriptor(dataType, {batchSize, sequenceLength, features}));
+    writeCpuTensor(inputHost,
+                   deterministicValues(static_cast<uint64_t>(batchSize) * sequenceLength * features, 0.08f, 0.17f));
+    writeCpuTensor(residualHost,
+                   deterministicValues(static_cast<uint64_t>(batchSize) * sequenceLength * features, 0.04f, 0.41f));
+
+    Impl::CudnnScaledDotProductAttention::resetTestExecutionCounters();
+    physicalInput->forward(inputHost, false, batchSize);
+    physicalResidual->forward(residualHost, false, batchSize);
+    physicalOutput->getOutputReadyEvent().synchronize();
+    const auto afterForward = Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+
+    ASSERT_EQ(physicalAttention->getErrorInputs().size(), 1U);
+    ASSERT_TRUE(physicalAttention->getErrorInputs().front().has_value());
+    Impl::Tensor errorInput = physicalAttention->getErrorInputs().front().value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, deterministicValues(tensorNumel(errorInput), 0.02f, 0.29f));
+    Stream computeStream = physicalAttention->getStreams()[0];
+    errorInput.copyFromAsync(errorInputHost, computeStream);
+    physicalAttention->backward(errorInput, batchSize);
+    computeStream.synchronize();
+    physicalAttention->getGradientUpdateStream().value().synchronize();
+    const auto afterBackward = Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+    expectSinglePhysicalAttentionForwardBackward(afterForward, afterBackward);
+}
+
+TEST(AttentionApi, A6RaggedTrainingModesExecuteExactlyOnce) {
+    for (const bool denseContext : {false, true}) {
+        SCOPED_TRACE(denseContext ? "ragged query + dense K/V" : "fully ragged self-attention");
+        const RaggedAttentionPoisonTrainingResult result = runRaggedQueryAttentionPoisonTrainingCase(
+            denseContext ? "attention_api_a6_ragged_query_dense_kv" : "attention_api_a6_fully_ragged_self",
+            denseContext,
+            ThorTest::RaggedInactivePoison::PositiveFinite,
+            ThorTest::RaggedInactivePoison::NaN);
+        expectSinglePhysicalAttentionForwardBackward(
+            result.attentionExecutionsAfterForward, result.attentionExecutionsAfterBackward);
+    }
+
+    Impl::CudnnScaledDotProductAttention::TestExecutionCounters denseQueryRaggedKvAfterForward;
+    const auto denseQueryRaggedKvAfterBackward =
+        runDenseQueryRaggedKvExecutionCountCase(denseQueryRaggedKvAfterForward);
+    expectSinglePhysicalAttentionForwardBackward(
+        denseQueryRaggedKvAfterForward, denseQueryRaggedKvAfterBackward);
+}
+
+TEST(AttentionApi, A6ThreeLayerStackExecutesThreeForwardsAndThreeBackwards) {
+    constexpr uint32_t batchSize = 2;
+    constexpr uint32_t sequenceLength = 4;
+    constexpr uint32_t features = 16;
+    const DataType dataType = DataType::BF16;
+
+    Api::Network network("attention_api_a6_three_layer_execution_count");
+    Api::NetworkInput input = Api::NetworkInput::Builder()
+                                  .network(network)
+                                  .name("tokens")
+                                  .dimensions({sequenceLength, features})
+                                  .dataType(dataType)
+                                  .build();
+    Api::GradientRivet inputRivet =
+        Api::GradientRivet::Builder().network(network).tensor(input.getFeatureOutput().value()).build();
+    shared_ptr<Api::Sgd> sgd =
+        Api::Sgd::Builder().initialLearningRate(0.01f).decay(0.0f).momentum(0.0f).build();
+
+    Api::Tensor current = inputRivet.getFeatureOutput().value();
+    vector<uint64_t> attentionIds;
+    attentionIds.reserve(3);
+    for (uint32_t i = 0; i < 3; ++i) {
+        Api::Attention attention = Api::Attention::Builder()
+                                       .network(network)
+                                       .queryInput(current)
+                                       .keyInput(current)
+                                       .valueInput(current)
+                                       .numHeads(2)
+                                       .headDim(8)
+                                       .valueDim(8)
+                                       .outputFeatures(features)
+                                       .hasBias(i == 1)
+                                       .weightsDataType(dataType)
+                                       .computeDataType(DataType::FP32)
+                                       .outputDataType(dataType)
+                                       .optimizer(sgd)
+                                       .build();
+        current = attention.getFeatureOutput().value();
+        attentionIds.push_back(attention.getId());
+    }
+    Api::GradientRivet outputRivet = Api::GradientRivet::Builder().network(network).tensor(current).build();
+    Api::NetworkOutput output = Api::NetworkOutput::Builder()
+                                    .network(network)
+                                    .name("output")
+                                    .inputTensor(outputRivet.getFeatureOutput().value())
+                                    .dataType(dataType)
+                                    .build();
+
+    vector<Event> initDoneEvents;
+    shared_ptr<Api::PlacedNetwork> placed = network.place(batchSize, initDoneEvents, /*inferenceOnly=*/false);
+    synchronizeEvents(initDoneEvents);
+    ASSERT_NE(placed, nullptr);
+    Impl::StampedNetwork& stamped = placed->getStampedNetwork(0);
+    auto physicalInput =
+        dynamic_pointer_cast<Impl::NetworkInput>(stamped.getPhysicalLayerFromApiLayer(input.getId()));
+    auto physicalOutput =
+        dynamic_pointer_cast<Impl::NetworkOutput>(stamped.getPhysicalLayerFromApiLayer(output.getId()));
+    ASSERT_NE(physicalInput, nullptr);
+    ASSERT_NE(physicalOutput, nullptr);
+
+    vector<shared_ptr<Impl::Attention>> physicalAttentions;
+    for (uint32_t i = 0; i < attentionIds.size(); ++i) {
+        auto physicalAttention =
+            dynamic_pointer_cast<Impl::Attention>(stamped.getPhysicalLayerFromApiLayer(attentionIds[i]));
+        ASSERT_NE(physicalAttention, nullptr);
+        ASSERT_TRUE(physicalAttention->getGradientUpdateStream().has_value());
+        Stream stream = physicalAttention->getStreams()[0];
+        for (const string& parameterName : physicalAttention->listParameters()) {
+            const shared_ptr<Impl::PhysicalParameter> parameter = physicalAttention->getParameter(parameterName);
+            ASSERT_NE(parameter, nullptr);
+            ASSERT_TRUE(parameter->getStorage().has_value());
+            setParameterTensor(parameter,
+                               deterministicValues(tensorNumel(parameter->getStorage().value()),
+                                                   0.03f,
+                                                   deterministicParameterPhase(parameterName) + 0.07f * i),
+                               stream);
+        }
+        stream.synchronize();
+        physicalAttentions.push_back(std::move(physicalAttention));
+    }
+
+    Impl::Tensor inputHost(cpuPlacement,
+                           Impl::TensorDescriptor(dataType, {batchSize, sequenceLength, features}));
+    writeCpuTensor(inputHost,
+                   deterministicValues(static_cast<uint64_t>(batchSize) * sequenceLength * features, 0.08f, 0.13f));
+
+    Impl::CudnnScaledDotProductAttention::resetTestExecutionCounters();
+    physicalInput->forward(inputHost, false, batchSize);
+    physicalOutput->getOutputReadyEvent().synchronize();
+    const auto afterForward = Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+    EXPECT_EQ(afterForward.forwardCalls, 3U);
+    EXPECT_EQ(afterForward.backwardCalls, 0U);
+
+    shared_ptr<Impl::Attention> terminalAttention = physicalAttentions.back();
+    ASSERT_EQ(terminalAttention->getErrorInputs().size(), 1U);
+    ASSERT_TRUE(terminalAttention->getErrorInputs().front().has_value());
+    Impl::Tensor errorInput = terminalAttention->getErrorInputs().front().value();
+    Impl::Tensor errorInputHost = errorInput.clone(cpuPlacement);
+    writeCpuTensor(errorInputHost, deterministicValues(tensorNumel(errorInput), 0.02f, 0.37f));
+    Stream terminalStream = terminalAttention->getStreams()[0];
+    errorInput.copyFromAsync(errorInputHost, terminalStream);
+    terminalAttention->backward(errorInput, batchSize);
+
+    for (const shared_ptr<Impl::Attention>& physicalAttention : physicalAttentions) {
+        physicalAttention->getStreams()[0].synchronize();
+        physicalAttention->getGradientUpdateStream().value().synchronize();
+    }
+    const auto afterBackward = Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+    EXPECT_EQ(afterBackward.forwardCalls, 3U)
+        << "No Attention forward may be replayed after backward begins.";
+    EXPECT_EQ(afterBackward.backwardCalls, 3U);
+}
+
+#endif
+
 TEST(AttentionApi, ResidualEpilogueForwardBackwardMatchesUnfusedSelfAttention) {
     expectResidualAttentionTrainingMatchesUnfused(false);
 }
@@ -2385,9 +3371,19 @@ TEST(AttentionApi, OutputDropoutResidualUsesResidualPlusDroppedProjectionAndIden
     physicalOutput->getOutputReadyEvent().synchronize();
     const vector<float> deterministicOutput = readCpuTensor(physicalOutput->getFeatureOutput().value());
 
+#ifdef THOR_DEBUG
+    // A6 measures only the training pass. The deterministic validation forward above
+    // is an intentional reference computation and is excluded from the invariant.
+    Impl::CudnnScaledDotProductAttention::resetTestExecutionCounters();
+#endif
     physicalInput->forward(inputHost, false, batchSize);
     physicalResidual->forward(residualHost, false, batchSize);
     physicalOutput->getOutputReadyEvent().synchronize();
+#ifdef THOR_DEBUG
+    const auto a6AfterForward = Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+    EXPECT_EQ(a6AfterForward.forwardCalls, 1U);
+    EXPECT_EQ(a6AfterForward.backwardCalls, 0U);
+#endif
     const vector<float> stochasticOutput = readCpuTensor(physicalOutput->getFeatureOutput().value());
 
     ASSERT_EQ(deterministicOutput.size(), residualValues.size());
@@ -2425,6 +3421,13 @@ TEST(AttentionApi, OutputDropoutResidualUsesResidualPlusDroppedProjectionAndIden
         readCpuTensor(copyTensorToCpu(physicalAttention->getErrorOutputs().at(3).value(), computeStream));
     expectAllClose(residualGradient, upstreamGradient, 2.0e-2f, 2.0e-2f);
     computeStream.synchronize();
+    physicalAttention->getGradientUpdateStream().value().synchronize();
+#ifdef THOR_DEBUG
+    const auto a6AfterBackward = Impl::CudnnScaledDotProductAttention::testExecutionCounters();
+    EXPECT_EQ(a6AfterBackward.forwardCalls, 1U)
+        << "Output-dropout backward must not replay Attention forward.";
+    EXPECT_EQ(a6AfterBackward.backwardCalls, 1U);
+#endif
 }
 
 TEST(AttentionApi, OutputDropoutResidualFusedAdamWUpdateBindsTensorRuntimeScalars) {

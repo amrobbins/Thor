@@ -303,7 +303,7 @@ class Attention : public CustomLayer, public TrainingDropoutControllable {
     const std::vector<std::pair<std::string, Tensor>>& getEpilogueInputBindings() const { return epilogueInputBindings; }
 
    protected:
-    std::shared_ptr<ThorImplementation::CustomLayer> createPhysicalLayer(
+    std::shared_ptr<ThorImplementation::TrainableLayer> createPhysicalLayer(
         ThorImplementation::DynamicExpression expression,
         std::vector<std::string> physicalInputNames,
         std::vector<std::string> physicalOutputNames,

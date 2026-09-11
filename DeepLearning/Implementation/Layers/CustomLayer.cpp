@@ -21,6 +21,16 @@ using namespace std;
 namespace ThorImplementation {
 
 namespace {
+uint64_t bestEffortExecutionPlanFlopCount(const StampedExecutionPlan& plan) noexcept {
+    try {
+        return plan.flopCount();
+    } catch (...) {
+        // Layer-submit diagnostics are optional telemetry.  Never allow FLOP
+        // accounting to fail an otherwise successful layer execution.
+        return 0;
+    }
+}
+
 std::set<std::string> toNameSet(const std::vector<std::string>& names) { return std::set<std::string>(names.begin(), names.end()); }
 
 bool isInternalExpressionInputName(const std::string& name) { return name.rfind("__", 0) == 0; }
@@ -98,6 +108,32 @@ PreparedDynamicExpression::TensorMap filterTensorInputsForPhysicalOutputs(
         filteredInputs.emplace(input.name, it->second);
     }
     return filteredInputs;
+}
+
+void bindRetainedForwardValues(const BackwardBuildResult& backwardBuild,
+                               const StampedExecutionPlan& forwardPlan,
+                               PreparedDynamicExpression::TensorMap& inputs) {
+    for (const ForwardValueRequirement& requirement : backwardBuild.forward_value_requirements) {
+        if (requirement.forward_node_index == UINT32_MAX || requirement.backward_input_name.empty()) {
+            throw runtime_error("CustomLayer backward contains an incomplete saved-forward requirement.");
+        }
+        Tensor retained;
+        switch (requirement.kind) {
+            case ForwardValueRequirementKind::NodeOutput:
+                retained = forwardPlan.retainedForwardValue(requirement.forward_node_index);
+                break;
+            case ForwardValueRequirementKind::MatmulEpilogueAux:
+                retained = forwardPlan.retainedForwardEpilogueAux(requirement.forward_node_index);
+                break;
+            default:
+                throw runtime_error("CustomLayer backward contains an unknown saved-forward requirement kind.");
+        }
+        auto [it, inserted] = inputs.emplace(requirement.backward_input_name, retained);
+        if (!inserted && !(it->second == retained)) {
+            throw runtime_error("CustomLayer saved-forward input name collides with a different tensor: " +
+                                requirement.backward_input_name);
+        }
+    }
 }
 
 PreparedDynamicExpression::TensorScalarMap filterTensorScalarInputsForPhysicalOutputs(
@@ -189,16 +225,12 @@ std::vector<DataType> customLayerRuntimeInputDTypesForOutputs(
     return dtypes;
 }
 
-void resolveCustomLayerForwardDTypesInPlace(
-    PhysicalOutputs& outputs,
-    const PreparedDynamicExpression::TensorMap& tensorInputs,
-    const PreparedDynamicExpression::TensorScalarMap& tensorScalarInputs) {
+void applyCustomLayerInputGradientStorageContractInPlace(PhysicalOutputs& outputs) {
     if (outputs.expr == nullptr) {
         throw runtime_error("CustomLayer backward dtype specialization requires non-null PhysicalOutputs.expr.");
     }
-    if (!outputs.isConditional()) {
-        resolveOutputsDTypesInPlace(outputs, customLayerRuntimeInputDTypesForOutputs(outputs, tensorInputs, tensorScalarInputs));
 
+    if (!outputs.isConditional()) {
         // A CustomLayer expression may intentionally promote a physical feature input
         // for forward compute, for example BF16 storage -> FP32 logical value via
         // context.input(..., output_dtype=FP32).  The gradient exposed back to the
@@ -217,6 +249,24 @@ void resolveCustomLayerForwardDTypesInPlace(
                 node.backward_output_dtype = node.input_tensor_dtype.value();
             }
         }
+        return;
+    }
+
+    applyCustomLayerInputGradientStorageContractInPlace(outputs.conditional->predicate);
+    applyCustomLayerInputGradientStorageContractInPlace(outputs.conditional->then_branch);
+    applyCustomLayerInputGradientStorageContractInPlace(outputs.conditional->else_branch);
+}
+
+void resolveCustomLayerForwardDTypesInPlace(
+    PhysicalOutputs& outputs,
+    const PreparedDynamicExpression::TensorMap& tensorInputs,
+    const PreparedDynamicExpression::TensorScalarMap& tensorScalarInputs) {
+    if (outputs.expr == nullptr) {
+        throw runtime_error("CustomLayer backward dtype specialization requires non-null PhysicalOutputs.expr.");
+    }
+    if (!outputs.isConditional()) {
+        resolveOutputsDTypesInPlace(outputs, customLayerRuntimeInputDTypesForOutputs(outputs, tensorInputs, tensorScalarInputs));
+        applyCustomLayerInputGradientStorageContractInPlace(outputs);
         return;
     }
 
@@ -1010,10 +1060,13 @@ bool CustomLayer::unregisterFusedCustomLossGradient(const Tensor& predictions) {
     return fusedCustomLossGradientByOutputFlatIndex.erase(matchedFlatIndex.value()) != 0;
 }
 
-PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applicationIndex,
-                                                                DynamicExpressionVariantId variantId,
-                                                                const std::vector<std::string>& wrtNames,
-                                                                bool accumulateGradOutputs) {
+BackwardBuildResult CustomLayer::buildBackwardOutputsForApplication(
+    uint32_t applicationIndex,
+    DynamicExpressionVariantId variantId,
+    const std::vector<std::string>& wrtNames,
+    bool accumulateGradOutputs,
+    bool requireForwardValueRequirements,
+    const SavedForwardValueInputNames& savedForwardValueInputNames) {
     ApplicationState& app = applications[applicationIndex];
 
     PreparedDynamicExpression::ShapeMap forwardInputDims;
@@ -1047,19 +1100,48 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
     // particular, a BF16 broadcast gradient should request a BF16-output reduction (with FP32
     // accumulation) when the graph-level input-gradient buffer is BF16.  Differentiate a private,
     // runtime-dtype-specialized clone so the cached forward expression remains reusable.
-    PhysicalOutputs forwardOutputs =
-        clonePhysicalOutputsTreeForBackwardDTypeResolution(app.forwardPrepared->equationForVariant(variantId).physicalOutputs());
-    resolveCustomLayerForwardDTypesInPlace(forwardOutputs,
-                                           app.forwardPrepared->stampInputs(),
-                                           app.forwardPrepared->tensorScalarInputsForVariant(variantId));
+    PhysicalOutputs forwardOutputs;
+    if (requireForwardValueRequirements) {
+        // BR4: differentiate the same retention-aware forward shape that the real
+        // training forward will stamp. An eligible fused GELU is represented as a
+        // MATMUL/GEMM carrying a forward epilogue-aux provider, so AutoDiff asks
+        // for that provider instead of reconstructing the affine preactivation.
+        forwardOutputs = app.forwardPrepared->equationForVariant(variantId).physicalOutputsForTrainingBackward(
+            app.forwardPrepared->stampInputs(), app.forwardPrepared->tensorScalarInputsForVariant(variantId));
+        // physicalOutputsForTrainingBackward() resolves and optimizes the BR4 training
+        // preview inside FusedEquation, so it bypasses resolveCustomLayerForwardDTypesInPlace().
+        // Re-apply the CustomLayer graph-boundary contract after that preview: logical
+        // promotion is a forward/compute choice and must not widen the storage dtype of
+        // the gradient handed back to the physical producer.
+        applyCustomLayerInputGradientStorageContractInPlace(forwardOutputs);
+    } else {
+        forwardOutputs =
+            clonePhysicalOutputsTreeForBackwardDTypeResolution(app.forwardPrepared->equationForVariant(variantId).physicalOutputs());
+        resolveCustomLayerForwardDTypesInPlace(forwardOutputs,
+                                               app.forwardPrepared->stampInputs(),
+                                               app.forwardPrepared->tensorScalarInputsForVariant(variantId));
+    }
 
     if (app.fusedCustomLossGradientsByOutput.empty()) {
-        return buildBackwardOutputs(forwardOutputs,
-                                    wrtNames,
-                                    app.upstreamInputNamesByOutput,
-                                    upstreamInputDTypesByOutput,
-                                    forwardInputDims,
-                                    accumulateGradOutputs);
+        if (requireForwardValueRequirements) {
+            return buildBackwardOutputsWithForwardValueRequirements(forwardOutputs,
+                                                                    wrtNames,
+                                                                    app.upstreamInputNamesByOutput,
+                                                                    upstreamInputDTypesByOutput,
+                                                                    forwardInputDims,
+                                                                    accumulateGradOutputs,
+                                                                    savedForwardValueInputNames);
+        }
+
+        BackwardBuildResult result;
+        result.outputs = buildBackwardOutputs(forwardOutputs,
+                                              wrtNames,
+                                              app.upstreamInputNamesByOutput,
+                                              upstreamInputDTypesByOutput,
+                                              forwardInputDims,
+                                              accumulateGradOutputs,
+                                              savedForwardValueInputNames);
+        return result;
     }
 
     if (!forwardOutputs.expr) {
@@ -1081,12 +1163,25 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
         fusedSeedInputNameByOutput.emplace(outputName, seedName);
     }
 
-    PhysicalOutputs seededBackwardOutputs = buildBackwardOutputs(forwardOutputs,
-                                                                 wrtNames,
-                                                                 upstreamInputNamesByOutput,
-                                                                 upstreamInputDTypesByOutput,
-                                                                 forwardInputDims,
-                                                                 accumulateGradOutputs);
+    BackwardBuildResult seededBackwardBuild;
+    if (requireForwardValueRequirements) {
+        seededBackwardBuild = buildBackwardOutputsWithForwardValueRequirements(forwardOutputs,
+                                                                               wrtNames,
+                                                                               upstreamInputNamesByOutput,
+                                                                               upstreamInputDTypesByOutput,
+                                                                               forwardInputDims,
+                                                                               accumulateGradOutputs,
+                                                                               savedForwardValueInputNames);
+    } else {
+        seededBackwardBuild.outputs = buildBackwardOutputs(forwardOutputs,
+                                                           wrtNames,
+                                                           upstreamInputNamesByOutput,
+                                                           upstreamInputDTypesByOutput,
+                                                           forwardInputDims,
+                                                           accumulateGradOutputs,
+                                                           savedForwardValueInputNames);
+    }
+    PhysicalOutputs& seededBackwardOutputs = seededBackwardBuild.outputs;
     if (!seededBackwardOutputs.expr) {
         throw runtime_error("CustomLayer fused CustomLoss backward produced a null backward expression.");
     }
@@ -1176,28 +1271,89 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
             throw runtime_error("CustomLayer fused CustomLoss gradient expression did not produce expected output: " + fused.gradientName);
         }
 
-        const uint32_t forwardCudaKernelExpressionOffset = static_cast<uint32_t>(fusedExpr.cuda_kernel_expressions.size());
-        fusedExpr.cuda_kernel_expressions.insert(fusedExpr.cuda_kernel_expressions.end(),
-                                                forwardOutputs.expr->cuda_kernel_expressions.begin(),
-                                                forwardOutputs.expr->cuda_kernel_expressions.end());
-
-        std::unordered_map<std::string, uint32_t> forwardInputReplacements;
-        for (const NamedInput& input : forwardOutputs.expr->inputs) {
-            auto inputNodeIt = fusedExprInputNodeByName.find(input.name);
-            if (inputNodeIt == fusedExprInputNodeByName.end()) {
-                throw runtime_error("CustomLayer fused CustomLoss backward missing forward input clone for: " + input.name);
+        uint32_t predictionNode = UINT32_MAX;
+        if (requireForwardValueRequirements) {
+            std::string savedPredictionInputName;
+            auto existingRequirementIt = std::find_if(
+                seededBackwardBuild.forward_value_requirements.begin(),
+                seededBackwardBuild.forward_value_requirements.end(),
+                [&](const ForwardValueRequirement& requirement) {
+                    // A fused CustomLoss needs the actual prediction value. BR4
+                    // may already have declared a MatmulEpilogueAux requirement
+                    // at this same logical output node for GELU backward; that
+                    // tensor is the preactivation and must never be substituted
+                    // for the post-GELU prediction.
+                    return requirement.forward_node_index == forwardOutputNode.value() &&
+                           requirement.kind == ForwardValueRequirementKind::NodeOutput;
+                });
+            auto explicitSavedIt = savedForwardValueInputNames.find(forwardOutputNode.value());
+            if (explicitSavedIt != savedForwardValueInputNames.end()) {
+                savedPredictionInputName = explicitSavedIt->second;
+                if (existingRequirementIt != seededBackwardBuild.forward_value_requirements.end() &&
+                    existingRequirementIt->backward_input_name != savedPredictionInputName) {
+                    throw runtime_error(
+                        "CustomLayer fused CustomLoss saved-forward binding disagrees with AutoDiff requirement name.");
+                }
+            } else if (existingRequirementIt != seededBackwardBuild.forward_value_requirements.end()) {
+                savedPredictionInputName = existingRequirementIt->backward_input_name;
+            } else {
+                const std::string baseName = "__thor_saved_forward_value_" + std::to_string(forwardOutputNode.value());
+                savedPredictionInputName = baseName;
+                for (uint32_t suffix = 1; fusedExprInputNodeByName.contains(savedPredictionInputName); ++suffix) {
+                    savedPredictionInputName = baseName + "_" + std::to_string(suffix);
+                }
             }
-            forwardInputReplacements.emplace(input.name, inputNodeIt->second);
-        }
 
-        std::unordered_map<uint32_t, uint32_t> clonedForwardNodes;
-        const uint32_t predictionNode = cloneExpressionNodeWithInputReplacements(*forwardOutputs.expr,
-                                                                                 forwardOutputNode.value(),
-                                                                                 fusedExpr,
-                                                                                 forwardInputReplacements,
-                                                                                 inputBySlot(*forwardOutputs.expr),
-                                                                                 forwardCudaKernelExpressionOffset,
-                                                                                 clonedForwardNodes);
+            if (existingRequirementIt == seededBackwardBuild.forward_value_requirements.end()) {
+                seededBackwardBuild.forward_value_requirements.push_back(ForwardValueRequirement{
+                    .forward_node_index = forwardOutputNode.value(),
+                    .backward_input_name = savedPredictionInputName,
+                    .kind = ForwardValueRequirementKind::NodeOutput,
+                });
+            }
+
+            auto inputNodeIt = fusedExprInputNodeByName.find(savedPredictionInputName);
+            if (inputNodeIt != fusedExprInputNodeByName.end()) {
+                predictionNode = inputNodeIt->second;
+            } else {
+                NamedInput savedPredictionInput{
+                    savedPredictionInputName,
+                    static_cast<uint32_t>(fusedExpr.inputs.size()),
+                    NamedInput::Kind::Tensor,
+                };
+                predictionNode = ensureInputNode(savedPredictionInput);
+            }
+
+            const ExprNode& sourcePrediction = forwardOutputs.expr->nodes.at(forwardOutputNode.value());
+            const std::optional<DataType> predictionDType = sourcePrediction.output_dtype.has_value()
+                                                                ? sourcePrediction.output_dtype
+                                                                : sourcePrediction.input_tensor_dtype;
+            fusedExpr.nodes.at(predictionNode).input_tensor_dtype = predictionDType;
+            fusedExpr.nodes.at(predictionNode).output_dtype = predictionDType;
+        } else {
+            const uint32_t forwardCudaKernelExpressionOffset = static_cast<uint32_t>(fusedExpr.cuda_kernel_expressions.size());
+            fusedExpr.cuda_kernel_expressions.insert(fusedExpr.cuda_kernel_expressions.end(),
+                                                    forwardOutputs.expr->cuda_kernel_expressions.begin(),
+                                                    forwardOutputs.expr->cuda_kernel_expressions.end());
+
+            std::unordered_map<std::string, uint32_t> forwardInputReplacements;
+            for (const NamedInput& input : forwardOutputs.expr->inputs) {
+                auto inputNodeIt = fusedExprInputNodeByName.find(input.name);
+                if (inputNodeIt == fusedExprInputNodeByName.end()) {
+                    throw runtime_error("CustomLayer fused CustomLoss backward missing forward input clone for: " + input.name);
+                }
+                forwardInputReplacements.emplace(input.name, inputNodeIt->second);
+            }
+
+            std::unordered_map<uint32_t, uint32_t> clonedForwardNodes;
+            predictionNode = cloneExpressionNodeWithInputReplacements(*forwardOutputs.expr,
+                                                                       forwardOutputNode.value(),
+                                                                       fusedExpr,
+                                                                       forwardInputReplacements,
+                                                                       inputBySlot(*forwardOutputs.expr),
+                                                                       forwardCudaKernelExpressionOffset,
+                                                                       clonedForwardNodes);
+        }
 
         const uint32_t labelsInputNode = appendTensorInputNode(fusedExpr, fused.fusedLabelsInputName);
         const uint32_t batchValidityMaskInputNode =
@@ -1316,23 +1472,44 @@ PhysicalOutputs CustomLayer::buildBackwardOutputsForApplication(uint32_t applica
         });
     }
 
-    return fusedBackwardOutputs;
+    std::sort(seededBackwardBuild.forward_value_requirements.begin(),
+              seededBackwardBuild.forward_value_requirements.end(),
+              [](const ForwardValueRequirement& lhs, const ForwardValueRequirement& rhs) {
+                  if (lhs.forward_node_index != rhs.forward_node_index) {
+                      return lhs.forward_node_index < rhs.forward_node_index;
+                  }
+                  if (lhs.kind != rhs.kind) {
+                      return static_cast<uint8_t>(lhs.kind) < static_cast<uint8_t>(rhs.kind);
+                  }
+                  return lhs.backward_input_name < rhs.backward_input_name;
+              });
+    seededBackwardBuild.forward_value_requirements.erase(
+        std::unique(seededBackwardBuild.forward_value_requirements.begin(),
+                    seededBackwardBuild.forward_value_requirements.end(),
+                    [](const ForwardValueRequirement& lhs, const ForwardValueRequirement& rhs) {
+                        return lhs.forward_node_index == rhs.forward_node_index &&
+                               lhs.kind == rhs.kind &&
+                               lhs.backward_input_name == rhs.backward_input_name;
+                    }),
+        seededBackwardBuild.forward_value_requirements.end());
+
+    seededBackwardBuild.outputs = std::move(fusedBackwardOutputs);
+    return seededBackwardBuild;
 }
 
 std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
     uint32_t applicationIndex,
     DynamicExpressionVariantId variantId,
-    const std::vector<std::string>& wrtNames,
+    const BackwardBuildResult& backwardBuild,
     bool accumulateGradOutputs,
     const PreparedDynamicExpression::TensorMap& preallocatedGradOutputs,
     Stream& runStream) {
     ApplicationState& app = applications[applicationIndex];
-    if (wrtNames.empty()) {
+    if (!backwardBuild.outputs.expr || backwardBuild.outputs.outputs.empty()) {
         return nullptr;
     }
 
-    PhysicalOutputs backwardOutputs = buildBackwardOutputsForApplication(applicationIndex, variantId, wrtNames, accumulateGradOutputs);
-    FusedEquation backwardEquation = FusedEquation::compile(backwardOutputs, placement.getDeviceNum());
+    FusedEquation backwardEquation = FusedEquation::compile(backwardBuild.outputs, placement.getDeviceNum());
 
     // Differentiate the prepared forward equation, not merely the layer's externally connected inputs.
     // DynamicExpression builders may add internal stamp-time tensors (for example ragged Attention
@@ -1341,6 +1518,13 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
     PreparedDynamicExpression::TensorMap stampInputs = app.forwardPrepared->stampInputs();
     for (const auto& [name, tensor] : app.backwardAdditionalInputsByName) {
         stampInputs[name] = tensor;
+    }
+    StampedExecutionVariant& variant = stampedVariant(applicationIndex, variantId);
+    if (!backwardBuild.forward_value_requirements.empty()) {
+        if (variant.forward == nullptr) {
+            throw runtime_error("CustomLayer saved-forward backward requires the real forward execution plan.");
+        }
+        bindRetainedForwardValues(backwardBuild, *variant.forward, stampInputs);
     }
     if (accumulateGradOutputs) {
         // CustomLayer builds the backward graph directly so layer-specific shape-specialized
@@ -1353,10 +1537,23 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::stampBackwardForApplication(
         }
     }
 
+    // Requirement-mode autodiff deliberately omits forward roots that are no longer
+    // needed once an intermediate primal is supplied as a saved input. The legacy
+    // replay graph often happened to read those roots while reconstructing the primal,
+    // so passing every forward stamp input used to work by accident. Filter to the
+    // actual backward ABI before stamping or BR2 would turn eliminated replay roots
+    // into "Unexpected input sent to fused equation" failures.
+    PreparedDynamicExpression::TensorMap filteredStampInputs =
+        filterTensorInputsForPhysicalOutputs(stampInputs, backwardBuild.outputs);
+    PreparedDynamicExpression::TensorScalarMap filteredTensorScalarInputs =
+        filterTensorScalarInputsForPhysicalOutputs(
+            app.forwardPrepared->tensorScalarInputsForVariant(variantId), backwardBuild.outputs);
+
     auto backwardPlan = std::make_shared<StampedExecutionPlan>(
-        backwardEquation.stamp(
-            stampInputs, runStream, app.forwardPrepared->tensorScalarInputsForVariant(variantId), preallocatedGradOutputs));
-    StampedExecutionVariant& variant = stampedVariant(applicationIndex, variantId);
+        backwardEquation.stamp(filteredStampInputs,
+                               runStream,
+                               filteredTensorScalarInputs,
+                               preallocatedGradOutputs));
     if (variant.forward != nullptr) {
         backwardPlan->linkRmsNormBackwardStatesFrom(*variant.forward);
     }
@@ -1367,6 +1564,7 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
     uint32_t applicationIndex,
     DynamicExpressionVariantId variantId,
     const std::vector<std::string>& fusedParameterTargets,
+    const BackwardBuildResult& parameterGradientBuild,
     const std::unordered_map<std::string, Tensor>& optimizerUpdateInputs) {
     if (fusedParameterTargets.empty()) {
         return nullptr;
@@ -1380,8 +1578,10 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
     variant.fusedOptimizerRuntimeScalarBindings.clear();
     variant.fusedOptimizerRuntimeScalars.clear();
 
-    PhysicalOutputs backwardOutputs =
-        buildBackwardOutputsForApplication(applicationIndex, variantId, fusedParameterTargets, false);
+    const PhysicalOutputs& backwardOutputs = parameterGradientBuild.outputs;
+    if (!backwardOutputs.expr) {
+        throw runtime_error("CustomLayer fused optimizer update received a null parameter-gradient expression.");
+    }
 
     std::unordered_map<std::string, Expression> gradientsByParameter;
     for (const NamedOutput& output : backwardOutputs.outputs) {
@@ -1400,6 +1600,12 @@ std::shared_ptr<StampedExecutionPlan> CustomLayer::buildFusedOptimizerUpdatePlan
     std::unordered_map<std::string, Tensor> stampInputs = app.forwardPrepared->stampInputs();
     for (const auto& [name, tensor] : app.backwardAdditionalInputsByName) {
         stampInputs[name] = tensor;
+    }
+    if (!parameterGradientBuild.forward_value_requirements.empty()) {
+        if (variant.forward == nullptr) {
+            throw runtime_error("CustomLayer fused optimizer saved-forward binding requires the real forward execution plan.");
+        }
+        bindRetainedForwardValues(parameterGradientBuild, *variant.forward, stampInputs);
     }
 
     std::unordered_map<std::string, Tensor> preallocatedOutputs;
@@ -1942,7 +2148,11 @@ void CustomLayer::compileImpl() {
         }
 
         if (!compiledOptimizers) {
-            const bool materializeDenseGradients = !canFuseOptimizerUpdatesForApplication(applicationIndex);
+            // A native shared backward is the sole producer of Attention parameter gradients.
+            // Materialize the optimizer-owned gradient buffers so that one combined VJP can
+            // write dX and dW directly without a second differentiated optimizer branch.
+            const bool materializeDenseGradients =
+                executesNativeSharedBackwardPlan() || !canFuseOptimizerUpdatesForApplication(applicationIndex);
             for (const auto& parameter : parameters) {
                 if (!parameter->isTrainable()) {
                     continue;
@@ -1978,15 +2188,52 @@ void CustomLayer::compileImpl() {
         app.stampedVariants.clear();
         app.evaluationVariantId = app.forwardPrepared->evaluationVariantId();
         app.forwardVariantThisPass.reset();
-        for (DynamicExpressionVariantId variantId : app.forwardPrepared->executionVariantIds()) {
+        const std::vector<DynamicExpressionVariantId> executionVariantIds = app.forwardPrepared->executionVariantIds();
+        for (DynamicExpressionVariantId variantId : executionVariantIds) {
             StampedExecutionVariant variant;
-            variant.forward = std::make_shared<StampedExecutionPlan>(
-                app.forwardPrepared->stampExecutionVariant(variantId, app.forwardOutputsByName));
             variant.preForwardHook = app.forwardPrepared->preForwardHookForVariant(variantId);
             variant.supportsBackward = app.forwardPrepared->executionVariantSupportsBackward(variantId);
-            validateStampedOutputNames(*variant.forward, outputNames, "forward execution variant");
             app.stampedVariants.emplace(variantId, std::move(variant));
         }
+
+        // BR2 must discover every saved-forward dependency before stamping the real
+        // forward.  A backward plan stores Tensor handles from that one forward plan,
+        // so replacing a previously stamped plan after binding a backward would leave
+        // the backward attached to tensors that are never produced.  Centralize forward
+        // stamping here and require exactly one stamp per execution variant.
+        auto stampForwardVariant = [&](DynamicExpressionVariantId variantId,
+                                       const std::vector<uint32_t>& retainedForwardNodes,
+                                       const std::vector<uint32_t>& retainedForwardEpilogueAuxNodes) {
+            StampedExecutionVariant& variant = stampedVariant(applicationIndex, variantId);
+            if (variant.forward != nullptr) {
+                throw runtime_error("CustomLayer attempted to stamp one forward execution variant more than once.");
+            }
+
+            const bool retainAnything = !retainedForwardNodes.empty() || !retainedForwardEpilogueAuxNodes.empty();
+            if (!retainAnything) {
+                variant.forward = std::make_shared<StampedExecutionPlan>(
+                    app.forwardPrepared->stampExecutionVariant(variantId, app.forwardOutputsByName));
+            } else {
+                variant.forward = std::make_shared<StampedExecutionPlan>(
+                    app.forwardPrepared->stampExecutionVariantRetainingForwardValues(variantId,
+                                                                                      retainedForwardNodes,
+                                                                                      retainedForwardEpilogueAuxNodes,
+                                                                                      app.forwardOutputsByName));
+            }
+            validateStampedOutputNames(*variant.forward,
+                                       outputNames,
+                                       retainAnything ? "forward execution variant with retained backward values"
+                                                      : "forward execution variant");
+            onForwardExecutionVariantStamped(applicationIndex, variantId, variant.forward, variant.supportsBackward);
+        };
+        auto stampAllForwardVariantsWithoutRetention = [&]() {
+            static const std::vector<uint32_t> noRetainedForwardNodes;
+            static const std::vector<uint32_t> noRetainedForwardEpilogueAuxNodes;
+            for (DynamicExpressionVariantId variantId : executionVariantIds) {
+                stampForwardVariant(variantId, noRetainedForwardNodes, noRetainedForwardEpilogueAuxNodes);
+            }
+        };
+
         const StampedExecutionVariant& activeTrainingVariant = stampedVariant(applicationIndex, activeTrainingVariantId);
         if (!activeTrainingVariant.supportsBackward && !isInferenceOnly()) {
             throw runtime_error("CustomLayer active training execution variant " +
@@ -2002,11 +2249,13 @@ void CustomLayer::compileImpl() {
         app.backwardGradientPatternCompiled = false;
 
         if (isInferenceOnly() || isBackPropStub()) {
+            stampAllForwardVariantsWithoutRetention();
             app.backwardGradientPatternCompiled = true;
             continue;
         }
 
         if (!applicationHasAnyDownstreamBackprop(applicationIndex)) {
+            stampAllForwardVariantsWithoutRetention();
             pruneUpstreamErrorOutputsForApplication(applicationIndex);
             app.backwardAdditionalInputsByName.clear();
             app.backwardInputGradOutputsByName.clear();
@@ -2019,7 +2268,11 @@ void CustomLayer::compileImpl() {
         // CustomLoss gradient likewise cannot be cloned into that flat expression. Keep either case
         // on the ordinary materialized gradient path; notifying the owning loss before it compiles
         // makes it stamp its normal gradient expression into the error tensor.
-        const bool allowFusedCustomLossGradient = !applicationHasConditionalBackwardVariant(applicationIndex);
+        // The native shared backward consumes the ordinary materialized downstream
+        // gradient tensor.  Do not inline a CustomLoss gradient into a second backward
+        // construction path; the loss will stamp its normal gradient producer instead.
+        const bool allowFusedCustomLossGradient =
+            !executesNativeSharedBackwardPlan() && !applicationHasConditionalBackwardVariant(applicationIndex);
         auto fusedCustomLossGradientCanInline = [&](const FusedCustomLossGradient& fused) {
             PreparedDynamicExpression::TensorMap gradientInputs;
             gradientInputs.emplace(fused.predictionsName, fused.predictionsTensor);
@@ -2084,19 +2337,32 @@ void CustomLayer::compileImpl() {
             }
         }
 
-        for (DynamicExpressionVariantId variantId : app.forwardPrepared->executionVariantIds()) {
+        if (executesNativeSharedBackwardPlan() && applications.size() != 1) {
+            throw runtime_error(
+                "Native shared-backward execution currently requires exactly one physical application; "
+                "Attention's public layer contract provides one application.");
+        }
+        if (executesNativeSharedBackwardPlan() && !wantsNativeSharedBackwardPlan()) {
+            throw runtime_error("Native shared-backward execution requires native shared-backward stamping.");
+        }
+
+        for (DynamicExpressionVariantId variantId : executionVariantIds) {
             StampedExecutionVariant& variant = stampedVariant(applicationIndex, variantId);
             if (!variant.supportsBackward) {
+                static const std::vector<uint32_t> noRetainedForwardNodes;
+                static const std::vector<uint32_t> noRetainedForwardEpilogueAuxNodes;
+                stampForwardVariant(variantId, noRetainedForwardNodes, noRetainedForwardEpilogueAuxNodes);
                 continue;
             }
 
-            if (!inputTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
-                variant.backwardError = stampBackwardForApplication(applicationIndex,
-                                                                    variantId,
-                                                                    inputTargets,
-                                                                    false,
-                                                                    app.backwardInputGradOutputsByName,
-                                                                    computeStream(applicationIndex));
+            // Attention's temporary native-shared-backward compatibility path asks
+            // the specialization for tensors/state owned by the real forward. Stamp
+            // that forward before querying those bindings. Current native ownership
+            // (Attention) then exits this variant before the generic BR2 path below.
+            if (wantsNativeSharedBackwardPlan()) {
+                static const std::vector<uint32_t> noRetainedForwardNodes;
+                static const std::vector<uint32_t> noRetainedForwardEpilogueAuxNodes;
+                stampForwardVariant(variantId, noRetainedForwardNodes, noRetainedForwardEpilogueAuxNodes);
             }
 
             std::vector<std::string> activeParameterTargets =
@@ -2114,6 +2380,131 @@ void CustomLayer::compileImpl() {
             }
             variant.activeParameterTargetNames =
                 std::unordered_set<std::string>(activeParameterTargets.begin(), activeParameterTargets.end());
+
+            if (wantsNativeSharedBackwardPlan() && !app.backwardAdditionalInputsByName.empty() &&
+                app.fusedCustomLossGradientsByOutput.empty()) {
+                std::vector<std::string> combinedTargets = inputTargets;
+                for (const std::string& parameterName : activeParameterTargets) {
+                    if (std::find(combinedTargets.begin(), combinedTargets.end(), parameterName) == combinedTargets.end()) {
+                        combinedTargets.push_back(parameterName);
+                    }
+                }
+
+                if (!combinedTargets.empty()) {
+                    const PhysicalOutputs& forwardPhysicalOutputs =
+                        app.forwardPrepared->equationForVariant(variantId).physicalOutputs();
+                    const std::vector<NativeSharedBackwardSavedValue> savedValues =
+                        nativeSharedBackwardSavedValues(applicationIndex, variantId, forwardPhysicalOutputs);
+
+                    SavedForwardValueInputNames savedInputNames;
+                    PreparedDynamicExpression::TensorMap savedInputs;
+                    for (const NativeSharedBackwardSavedValue& saved : savedValues) {
+                        if (saved.forwardNodeIndex == UINT32_MAX || saved.backwardInputName.empty() || !saved.tensor.isInitialized()) {
+                            throw runtime_error("Native shared backward received an incomplete saved-forward value binding.");
+                        }
+                        if (saved.forwardNodeIndex >= forwardPhysicalOutputs.expr->nodes.size()) {
+                            throw runtime_error("Native shared backward saved-forward node index is out of range.");
+                        }
+                        auto [nameIt, insertedName] = savedInputNames.emplace(saved.forwardNodeIndex, saved.backwardInputName);
+                        if (!insertedName && nameIt->second != saved.backwardInputName) {
+                            throw runtime_error("Native shared backward assigned two input names to one saved forward node.");
+                        }
+                        auto [tensorIt, insertedTensor] = savedInputs.emplace(saved.backwardInputName, saved.tensor);
+                        if (!insertedTensor && !(tensorIt->second == saved.tensor)) {
+                            throw runtime_error("Native shared backward saved-forward input name aliases different tensors.");
+                        }
+                    }
+
+                    BackwardBuildResult sharedBackwardBuild = buildBackwardOutputsForApplication(
+                        applicationIndex, variantId, combinedTargets, false, false, savedInputNames);
+                    PhysicalOutputs& sharedBackwardOutputs = sharedBackwardBuild.outputs;
+                    FusedEquation sharedBackwardEquation =
+                        FusedEquation::compile(sharedBackwardOutputs, placement.getDeviceNum());
+                    PreparedDynamicExpression::TensorMap availableSharedBackwardInputs =
+                        app.forwardPrepared->stampInputs();
+                    for (const auto& [name, tensor] : app.backwardAdditionalInputsByName) {
+                        availableSharedBackwardInputs[name] = tensor;
+                    }
+                    for (const auto& [name, tensor] : savedInputs) {
+                        auto [_, inserted] = availableSharedBackwardInputs.emplace(name, tensor);
+                        if (!inserted) {
+                            throw runtime_error("Native shared backward saved-forward input name collides with an existing stamp input: " + name);
+                        }
+                    }
+
+                    // A saved-forward binding is a candidate replacement for cloneForward(), not
+                    // necessarily an input of every differentiated target set.  For example, an
+                    // input-gradient-only Attention backward consumes saved Q/K/V but does not need
+                    // saved SDPA O.  Stamp only the tensor/scalar inputs the resulting physical
+                    // backward graph actually declares; FusedEquation intentionally rejects extras.
+                    PreparedDynamicExpression::TensorMap sharedBackwardInputs =
+                        filterTensorInputsForPhysicalOutputs(availableSharedBackwardInputs, sharedBackwardOutputs);
+                    PreparedDynamicExpression::TensorScalarMap sharedBackwardTensorScalarInputs =
+                        filterTensorScalarInputsForPhysicalOutputs(
+                            app.forwardPrepared->tensorScalarInputsForVariant(variantId), sharedBackwardOutputs);
+
+                    PreparedDynamicExpression::TensorMap sharedBackwardPreallocatedOutputs;
+                    if (executesNativeSharedBackwardPlan()) {
+                        // One native backward owns every requested gradient destination.  Input
+                        // gradients go directly to their graph-connected error tensors and parameter
+                        // gradients go directly to the optimizer-owned materialized buffers.  No
+                        // second VJP, temporary gradient, or D2D save/copy is introduced.
+                        PreparedDynamicExpression::TensorMap candidateOutputs = app.backwardInputGradOutputsByName;
+                        for (const std::string& parameterName : activeParameterTargets) {
+                            shared_ptr<PhysicalParameter> targetParameter;
+                            for (const auto& parameter : parameters) {
+                                if (parameter->getName() == parameterName) {
+                                    targetParameter = parameter;
+                                    break;
+                                }
+                            }
+                            if (targetParameter == nullptr || !targetParameter->hasOptimizer() ||
+                                targetParameter->getOptimizer() == nullptr ||
+                                !targetParameter->getOptimizer()->getWeightsGradient().has_value()) {
+                                throw runtime_error(
+                                    "Native shared backward requires an optimizer-owned materialized gradient buffer for parameter '" +
+                                    parameterName + "'.");
+                            }
+                            candidateOutputs.emplace(
+                                parameterName + "_grad", targetParameter->getOptimizer()->getWeightsGradient().value());
+                        }
+
+                        for (const NamedOutput& output : sharedBackwardOutputs.outputs) {
+                            auto outputIt = candidateOutputs.find(output.name);
+                            if (outputIt == candidateOutputs.end()) {
+                                throw runtime_error(
+                                    "Native shared backward has no preallocated physical destination for output '" +
+                                    output.name + "'.");
+                            }
+                            sharedBackwardPreallocatedOutputs.emplace(output.name, outputIt->second);
+                        }
+                    }
+
+                    auto sharedBackwardPlan = std::make_shared<StampedExecutionPlan>(
+                        sharedBackwardEquation.stampForImmediateCrossPlanBackwardLinking(
+                            sharedBackwardInputs,
+                            computeStream(applicationIndex),
+                            sharedBackwardTensorScalarInputs,
+                            sharedBackwardPreallocatedOutputs));
+                    if (variant.forward == nullptr) {
+                        throw runtime_error("Native shared backward requires the real forward execution plan.");
+                    }
+                    sharedBackwardPlan->linkRmsNormBackwardStatesFrom(*variant.forward);
+                    sharedBackwardPlan->linkAttentionBackwardStatesFrom(*variant.forward);
+                    variant.nativeSharedBackward = sharedBackwardPlan;
+                    onNativeSharedBackwardExecutionVariantStamped(applicationIndex, variantId, sharedBackwardPlan);
+                }
+            }
+
+            if (executesNativeSharedBackwardPlan()) {
+                if (!app.backwardAdditionalInputsByName.empty() && variant.nativeSharedBackward == nullptr) {
+                    throw runtime_error("Native shared backward execution requires a stamped shared backward plan.");
+                }
+                // Attention's parameter gradients are already outputs of the one shared VJP.
+                // Do not stamp backwardWeights{Clear,Accumulate} or a fused optimizer plan,
+                // any of which would independently differentiate the forward expression again.
+                continue;
+            }
 
             if (trainingUpdateDiagnosticsEnabled()) {
                 std::fprintf(stderr,
@@ -2176,6 +2567,90 @@ void CustomLayer::compileImpl() {
                 }
             }
 
+            // BR2: build every generic backward graph before stamping any of them so the
+            // real forward can retain the union of all primal values needed by this variant.
+            // This is important: restamping the forward after one backward plan has already
+            // captured retained Tensor handles would bind that plan to a forward that never runs.
+            const bool useForwardValueRequirements =
+                !app.forwardPrepared->equationForVariant(variantId).physicalOutputs().isConditional();
+
+            std::optional<BackwardBuildResult> backwardErrorBuild;
+            std::optional<BackwardBuildResult> fusedParameterGradientBuild;
+            std::optional<BackwardBuildResult> backwardWeightsClearBuild;
+            std::optional<BackwardBuildResult> backwardWeightsAccumulateBuild;
+
+            if (!app.backwardAdditionalInputsByName.empty()) {
+                if (!inputTargets.empty()) {
+                    backwardErrorBuild = buildBackwardOutputsForApplication(
+                        applicationIndex, variantId, inputTargets, false, useForwardValueRequirements);
+                }
+                if (!fusedParameterTargets.empty()) {
+                    fusedParameterGradientBuild = buildBackwardOutputsForApplication(
+                        applicationIndex, variantId, fusedParameterTargets, false, useForwardValueRequirements);
+                }
+                if (!allMaterializedParameterTargets.empty()) {
+                    backwardWeightsClearBuild = buildBackwardOutputsForApplication(
+                        applicationIndex, variantId, allMaterializedParameterTargets, false, useForwardValueRequirements);
+                }
+                if (!activeMaterializedParameterTargets.empty()) {
+                    backwardWeightsAccumulateBuild = buildBackwardOutputsForApplication(
+                        applicationIndex, variantId, activeMaterializedParameterTargets, true, useForwardValueRequirements);
+                }
+            }
+
+            std::vector<uint32_t> retainedForwardNodes;
+            std::vector<uint32_t> retainedForwardEpilogueAuxNodes;
+            auto appendRequirements = [&](const std::optional<BackwardBuildResult>& build) {
+                if (!build.has_value()) {
+                    return;
+                }
+                for (const ForwardValueRequirement& requirement : build->forward_value_requirements) {
+                    if (requirement.forward_node_index == UINT32_MAX || requirement.backward_input_name.empty()) {
+                        throw runtime_error("CustomLayer BR2/BR4 preflight produced an incomplete saved-forward requirement.");
+                    }
+                    switch (requirement.kind) {
+                        case ForwardValueRequirementKind::NodeOutput:
+                            retainedForwardNodes.push_back(requirement.forward_node_index);
+                            break;
+                        case ForwardValueRequirementKind::MatmulEpilogueAux:
+                            retainedForwardEpilogueAuxNodes.push_back(requirement.forward_node_index);
+                            break;
+                        default:
+                            throw runtime_error("CustomLayer BR4 preflight produced an unknown saved-forward requirement kind.");
+                    }
+                }
+            };
+            appendRequirements(backwardErrorBuild);
+            appendRequirements(fusedParameterGradientBuild);
+            appendRequirements(backwardWeightsClearBuild);
+            appendRequirements(backwardWeightsAccumulateBuild);
+            std::sort(retainedForwardNodes.begin(), retainedForwardNodes.end());
+            retainedForwardNodes.erase(std::unique(retainedForwardNodes.begin(), retainedForwardNodes.end()), retainedForwardNodes.end());
+            std::sort(retainedForwardEpilogueAuxNodes.begin(), retainedForwardEpilogueAuxNodes.end());
+            retainedForwardEpilogueAuxNodes.erase(
+                std::unique(retainedForwardEpilogueAuxNodes.begin(), retainedForwardEpilogueAuxNodes.end()),
+                retainedForwardEpilogueAuxNodes.end());
+
+            if (variant.forward == nullptr) {
+                stampForwardVariant(variantId, retainedForwardNodes, retainedForwardEpilogueAuxNodes);
+            } else if (!retainedForwardNodes.empty() || !retainedForwardEpilogueAuxNodes.empty()) {
+                // A specialization that asks for the legacy native shared plan but does
+                // not execute it would have stamped the forward before generic BR2
+                // requirements were known. No current layer has that contract; reject it
+                // rather than silently replacing the plan and invalidating native state.
+                throw runtime_error(
+                    "CustomLayer cannot add generic saved-forward retention after a native-shared forward plan was stamped.");
+            }
+
+            if (backwardErrorBuild.has_value()) {
+                variant.backwardError = stampBackwardForApplication(applicationIndex,
+                                                                    variantId,
+                                                                    backwardErrorBuild.value(),
+                                                                    false,
+                                                                    app.backwardInputGradOutputsByName,
+                                                                    computeStream(applicationIndex));
+            }
+
             if (trainingUpdateDiagnosticsEnabled()) {
                 std::fprintf(stderr,
                              "THOR_TRAINING_UPDATE_DIAGNOSTIC layer=%s app=%u variant=%u compile_parameter_targets fused=%s all_materialized=%s active_materialized=%s materialized_preallocated_outputs=%zu active_preallocated_outputs=%zu\n",
@@ -2192,26 +2667,30 @@ void CustomLayer::compileImpl() {
             if (!allTrainableParameterTargets.empty() && !app.backwardAdditionalInputsByName.empty()) {
                 THOR_THROW_IF_FALSE(gradientUpdateStream.has_value());
 
-                if (!fusedParameterTargets.empty()) {
+                if (fusedParameterGradientBuild.has_value()) {
                     variant.backwardWeightsFusedOptimizerUpdate =
-                        buildFusedOptimizerUpdatePlan(applicationIndex, variantId, fusedParameterTargets, parameterStorageByName);
+                        buildFusedOptimizerUpdatePlan(applicationIndex,
+                                                      variantId,
+                                                      fusedParameterTargets,
+                                                      fusedParameterGradientBuild.value(),
+                                                      parameterStorageByName);
                 }
 
-                if (!allMaterializedParameterTargets.empty()) {
+                if (backwardWeightsClearBuild.has_value()) {
                     // Every backward-capable execution variant gets a clear-first stamp that writes every
                     // materialized gradient buffer. Parameters handled by the fused optimizer stamp intentionally
                     // skip this dense gradient write/read round trip.
                     variant.backwardWeightsClear = stampBackwardForApplication(applicationIndex,
                                                                                variantId,
-                                                                               allMaterializedParameterTargets,
+                                                                               backwardWeightsClearBuild.value(),
                                                                                false,
                                                                                allMaterializedParameterPreallocatedOutputs,
                                                                                gradientUpdateStream.value());
 
-                    if (!activeMaterializedParameterTargets.empty()) {
+                    if (backwardWeightsAccumulateBuild.has_value()) {
                         variant.backwardWeightsAccumulate = stampBackwardForApplication(applicationIndex,
                                                                                         variantId,
-                                                                                        activeMaterializedParameterTargets,
+                                                                                        backwardWeightsAccumulateBuild.value(),
                                                                                         true,
                                                                                         activeMaterializedParameterPreallocatedOutputs,
                                                                                         gradientUpdateStream.value());
@@ -2714,6 +3193,10 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
 
         StampedExecutionVariant& variant = backwardVariantForApplication(applicationIndex);
         const DynamicExpressionVariantId variantId = app.forwardVariantThisPass.value();
+        const bool useNativeSharedBackward = executesNativeSharedBackwardPlan();
+        if (useNativeSharedBackward && variant.nativeSharedBackward == nullptr) {
+            throw runtime_error("Native shared backward execution requested without a stamped shared backward plan.");
+        }
 
         if (trainingUpdateDiagnosticsEnabled()) {
             std::fprintf(stderr,
@@ -2743,7 +3226,7 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         app.backwardRanThisPass = true;
 
         Event* errorInputReadyEvent = nullptr;
-        if (gradientUpdateStream.has_value()) {
+        if (!useNativeSharedBackward && gradientUpdateStream.has_value()) {
             const auto readyEventStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             computeStream(applicationIndex).putEvent(app.errorInputReadyEvent);
             errorInputReadyEvent = &app.errorInputReadyEvent;
@@ -2753,36 +3236,40 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         }
 
         std::optional<Event> errorOutHasBeenComputedEvent = std::nullopt;
-        if (variant.backwardError != nullptr) {
+        if (useNativeSharedBackward) {
+            const auto errorComputeStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
+            variant.nativeSharedBackward->run();
+            computeStream(applicationIndex).putEvent(app.backwardErrorReadyEvent);
+            errorOutHasBeenComputedEvent = app.backwardErrorReadyEvent;
+            if (emitLayerDiagnostics) {
+                errorComputeMicros = layerSubmitDiagnosticElapsedMicros(errorComputeStart, layerSubmitDiagnosticNow());
+            }
+        } else if (variant.backwardError != nullptr) {
             const auto errorComputeStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
             errorOutHasBeenComputedEvent = computeErrorOut(inputFlatIndex(applicationIndex, 0));
             if (emitLayerDiagnostics) {
                 errorComputeMicros = layerSubmitDiagnosticElapsedMicros(errorComputeStart, layerSubmitDiagnosticNow());
             }
-            if (errorOutHasBeenComputedEvent.has_value()) {
-                errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent.value());
+        }
 
-                // The backward expression runs on this application's primary compute stream, but a
-                // multi-input CustomLayer can have a different upstream stream for every input port.
-                // Publish the produced input gradients to those connection streams before recursively
-                // invoking the upstream layers. Otherwise the upstream layer can record its own
-                // `errorInputReadyEvent` on a stream that has no dependency on the stream which wrote
-                // the error tensor, allowing its parameter-gradient work to race the downstream VJP.
-                //
-                // This is the backward analogue of synchronizeComputeStreamForForwardInputs(): the
-                // producer owns readiness, and each consumer stream must wait for that readiness
-                // before it may treat the tensor as available.
-                Stream& backwardComputeStream = computeStream(applicationIndex);
-                for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
-                    const uint32_t inputFlat = inputFlatIndex(applicationIndex, inputPort);
-                    if (inputFlat >= streams.size() || !previousLayers[inputFlat].has_value() ||
-                        !errorOutputs[inputFlat].has_value()) {
-                        continue;
-                    }
-                    Stream& upstreamStream = streams[inputFlat];
-                    if (upstreamStream != backwardComputeStream) {
-                        upstreamStream.waitEvent(errorOutHasBeenComputedEvent.value());
-                    }
+        if (errorOutHasBeenComputedEvent.has_value()) {
+            errorOutHasBeenComputedEvents.push_back(errorOutHasBeenComputedEvent.value());
+
+            // The backward expression runs on this application's primary compute stream, but a
+            // multi-input layer can have a different upstream stream for every input port.
+            // Publish the produced input gradients to those connection streams before recursively
+            // invoking the upstream layers.  For native Attention this same event also marks all
+            // parameter gradients ready; the optimizer stream joins it before applying updates.
+            Stream& backwardComputeStream = computeStream(applicationIndex);
+            for (uint32_t inputPort = 0; inputPort < inputNames.size(); ++inputPort) {
+                const uint32_t inputFlat = inputFlatIndex(applicationIndex, inputPort);
+                if (inputFlat >= streams.size() || !previousLayers[inputFlat].has_value() ||
+                    !errorOutputs[inputFlat].has_value()) {
+                    continue;
+                }
+                Stream& upstreamStream = streams[inputFlat];
+                if (upstreamStream != backwardComputeStream) {
+                    upstreamStream.waitEvent(errorOutHasBeenComputedEvent.value());
                 }
             }
         }
@@ -2807,7 +3294,9 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
         }
 
         const auto accumulateStart = emitLayerDiagnostics ? layerSubmitDiagnosticNow() : LayerSubmitDiagnosticTimePoint();
-        accumulateWeightsGradientForApplication(applicationIndex, clearGradientFirstThisBackwardPass, batchSize);
+        if (!useNativeSharedBackward) {
+            accumulateWeightsGradientForApplication(applicationIndex, clearGradientFirstThisBackwardPass, batchSize);
+        }
         if (emitLayerDiagnostics) {
             accumulateMicros = layerSubmitDiagnosticElapsedMicros(accumulateStart, layerSubmitDiagnosticNow());
         }
@@ -2887,10 +3376,11 @@ void CustomLayer::backward(std::optional<Tensor> errorInput, uint32_t batchSize)
             const uint64_t waitErrorOutputsMicros =
                 emitApplyDiagnostics ? layerSubmitDiagnosticElapsedMicros(waitErrorOutputsStart, layerSubmitDiagnosticNow()) : 0;
 
-            // Parameter-gradient/fused-optimizer work was already submitted on
-            // gradientUpdateStream for every application above, and this stream
-            // has now joined every backward-error compute event.  Therefore an
-            // event recorded here is the local last-use point for any labels or
+            // Legacy parameter-gradient/fused-optimizer work is submitted on
+            // gradientUpdateStream; a native shared backward may instead produce
+            // dX and dW together on the layer compute stream.  This stream has now
+            // joined every local backward-completion event, so an event recorded
+            // here is the local last-use point for any labels or
             // batch-validity-mask tensors captured by a fused CustomLoss gradient.
             // Return that dependency to the owning loss before the next batch can
             // enqueue reuse of those tensors on its labels/loss streams.
@@ -3092,7 +3582,7 @@ void CustomLayer::computeFeatureOutForPass(uint32_t connectionNumber, bool valid
                                    {"prerun_us", preRunHookMicros},
                                    {"run_us", runMicros},
                                    {"has_prerun", preRunHook ? 1UL : 0UL},
-                                   {"flops", executionPlan.flopCount()}});
+                                   {"flops", bestEffortExecutionPlanFlopCount(executionPlan)}});
     }
 }
 
@@ -3134,7 +3624,7 @@ std::optional<Event> CustomLayer::computeErrorOut(uint32_t connectionNumber) {
                                    {"connection", connectionNumber},
                                    {"run_us", runMicros},
                                    {"put_event_us", eventMicros},
-                                   {"flops", variant.backwardError->flopCount()}});
+                                   {"flops", bestEffortExecutionPlanFlopCount(*variant.backwardError)}});
     }
     return app.backwardErrorReadyEvent;
 }
@@ -3252,6 +3742,10 @@ uint64_t CustomLayer::flopCountBackward() {
             continue;
         }
         const StampedExecutionVariant& variant = it->second;
+        if (variant.nativeSharedBackward != nullptr) {
+            flops += variant.nativeSharedBackward->flopCount();
+            continue;
+        }
         if (variant.backwardError != nullptr) {
             flops += variant.backwardError->flopCount();
         }

@@ -98,15 +98,31 @@ uint32_t categoricalLanesPerToken(uint64_t num_classes) {
     return 32;
 }
 
-uint32_t categoricalPartialBlockCount(uint64_t active_value_count, uint64_t num_classes) {
+uint32_t validateCategoricalLanesPerToken(uint32_t lanes_per_token) {
+    if (!(lanes_per_token == 2 || lanes_per_token == 4 || lanes_per_token == 8 ||
+          lanes_per_token == 16 || lanes_per_token == 32)) {
+        throw std::invalid_argument(
+            "Ragged CategoricalAccuracy benchmark lanes-per-token must be 2, 4, 8, 16, or 32.");
+    }
+    return lanes_per_token;
+}
+
+uint32_t categoricalPartialBlockCountForLanes(uint64_t active_value_count,
+                                               uint64_t num_classes,
+                                               uint32_t lanes_per_token) {
     if (active_value_count == 0) return 1;
+    lanes_per_token = validateCategoricalLanesPerToken(lanes_per_token);
     const uint64_t scalar_work = checkedMultiply(
         active_value_count, num_classes, "Ragged CategoricalAccuracy scalar work overflows uint64_t.");
-    const uint64_t lanes_per_token = categoricalLanesPerToken(num_classes);
     const uint64_t groups_per_block = kBlockSize / lanes_per_token;
     const uint64_t max_useful_blocks = 1 + (active_value_count - 1) / groups_per_block;
     return static_cast<uint32_t>(
         std::min<uint64_t>(partialBlockCount(scalar_work), max_useful_blocks));
+}
+
+uint32_t categoricalPartialBlockCount(uint64_t active_value_count, uint64_t num_classes) {
+    return categoricalPartialBlockCountForLanes(
+        active_value_count, num_classes, categoricalLanesPerToken(num_classes));
 }
 
 __device__ __forceinline__ void storeFinalStatistics(uint64_t correct,
@@ -444,29 +460,38 @@ void dispatchCategoricalLaneCount(const Tensor& predictions,
                                   IndexT active_value_count,
                                   IndexT num_classes,
                                   uint32_t partial_count,
+                                  uint32_t lanes_per_token,
                                   Tensor& correct_count,
                                   Tensor& token_count,
                                   Stream& stream) {
-    if (num_classes <= static_cast<IndexT>(2)) {
-        launchCategoricalTyped<2, PredictionT, LabelT, IndexT, ClassIndexLabels>(
-            predictions, labels, partial_correct_counts, active_value_count, num_classes, partial_count,
-            correct_count, token_count, stream);
-    } else if (num_classes <= static_cast<IndexT>(4)) {
-        launchCategoricalTyped<4, PredictionT, LabelT, IndexT, ClassIndexLabels>(
-            predictions, labels, partial_correct_counts, active_value_count, num_classes, partial_count,
-            correct_count, token_count, stream);
-    } else if (num_classes <= static_cast<IndexT>(8)) {
-        launchCategoricalTyped<8, PredictionT, LabelT, IndexT, ClassIndexLabels>(
-            predictions, labels, partial_correct_counts, active_value_count, num_classes, partial_count,
-            correct_count, token_count, stream);
-    } else if (num_classes <= static_cast<IndexT>(16)) {
-        launchCategoricalTyped<16, PredictionT, LabelT, IndexT, ClassIndexLabels>(
-            predictions, labels, partial_correct_counts, active_value_count, num_classes, partial_count,
-            correct_count, token_count, stream);
-    } else {
-        launchCategoricalTyped<32, PredictionT, LabelT, IndexT, ClassIndexLabels>(
-            predictions, labels, partial_correct_counts, active_value_count, num_classes, partial_count,
-            correct_count, token_count, stream);
+    switch (validateCategoricalLanesPerToken(lanes_per_token)) {
+        case 2:
+            launchCategoricalTyped<2, PredictionT, LabelT, IndexT, ClassIndexLabels>(
+                predictions, labels, partial_correct_counts, active_value_count, num_classes, partial_count,
+                correct_count, token_count, stream);
+            return;
+        case 4:
+            launchCategoricalTyped<4, PredictionT, LabelT, IndexT, ClassIndexLabels>(
+                predictions, labels, partial_correct_counts, active_value_count, num_classes, partial_count,
+                correct_count, token_count, stream);
+            return;
+        case 8:
+            launchCategoricalTyped<8, PredictionT, LabelT, IndexT, ClassIndexLabels>(
+                predictions, labels, partial_correct_counts, active_value_count, num_classes, partial_count,
+                correct_count, token_count, stream);
+            return;
+        case 16:
+            launchCategoricalTyped<16, PredictionT, LabelT, IndexT, ClassIndexLabels>(
+                predictions, labels, partial_correct_counts, active_value_count, num_classes, partial_count,
+                correct_count, token_count, stream);
+            return;
+        case 32:
+            launchCategoricalTyped<32, PredictionT, LabelT, IndexT, ClassIndexLabels>(
+                predictions, labels, partial_correct_counts, active_value_count, num_classes, partial_count,
+                correct_count, token_count, stream);
+            return;
+        default:
+            throw std::logic_error("unreachable Ragged CategoricalAccuracy lane count");
     }
 }
 
@@ -480,20 +505,21 @@ void launchCategoricalForIndex(const Tensor& predictions,
                                Tensor& correct_count,
                                Tensor& token_count,
                                RaggedCategoricalLabelFormat label_format,
+                               uint32_t lanes_per_token,
                                Stream& stream) {
     auto launch_prediction = [&]<typename PredictionT>() {
         if (label_format == RaggedCategoricalLabelFormat::CLASS_INDEX) {
             auto launch_label = [&]<typename LabelT>() {
                 dispatchCategoricalLaneCount<PredictionT, LabelT, IndexT, true>(
                     predictions, labels, partial_correct_counts, active_value_count, num_classes,
-                    partial_count, correct_count, token_count, stream);
+                    partial_count, lanes_per_token, correct_count, token_count, stream);
             };
             dispatchClassIndexLabelDType(labels.getDataType(), launch_label);
         } else {
             auto launch_label = [&]<typename LabelT>() {
                 dispatchCategoricalLaneCount<PredictionT, LabelT, IndexT, false>(
                     predictions, labels, partial_correct_counts, active_value_count, num_classes,
-                    partial_count, correct_count, token_count, stream);
+                    partial_count, lanes_per_token, correct_count, token_count, stream);
             };
             dispatchBinaryOrPerClassLabelDType(labels.getDataType(), launch_label);
         }
@@ -635,7 +661,9 @@ void raggedCategoricalAccuracyStatistics(const Tensor& predictions,
 
     const uint64_t active_scalar_count = checkedMultiply(
         active_value_count, num_classes, "Ragged CategoricalAccuracy active scalar count overflows uint64_t.");
-    const uint32_t partial_count = categoricalPartialBlockCount(active_value_count, num_classes);
+    const uint32_t lanes_per_token = categoricalLanesPerToken(num_classes);
+    const uint32_t partial_count = categoricalPartialBlockCountForLanes(
+        active_value_count, num_classes, lanes_per_token);
     if (partial_count > partial_correct_counts.getDimensions().front())
         throw std::logic_error("Ragged CategoricalAccuracy runtime partial count exceeds workspace capacity.");
 
@@ -649,6 +677,7 @@ void raggedCategoricalAccuracyStatistics(const Tensor& predictions,
                                             correct_count,
                                             token_count,
                                             label_format,
+                                            lanes_per_token,
                                             stream);
     } else {
         launchCategoricalForIndex<uint64_t>(predictions,
@@ -660,6 +689,176 @@ void raggedCategoricalAccuracyStatistics(const Tensor& predictions,
                                             correct_count,
                                             token_count,
                                             label_format,
+                                            lanes_per_token,
+                                            stream);
+    }
+    finalizeIfNeeded(partial_correct_counts, partial_count, active_value_count, correct_count, token_count, stream);
+}
+
+uint32_t raggedBinaryAccuracyPartialBlockCountForBenchmark(uint64_t active_value_count) {
+    return partialBlockCount(active_value_count);
+}
+
+uint32_t raggedCategoricalAccuracyLanesPerTokenForBenchmark(uint64_t num_classes) {
+    if (num_classes < 2)
+        throw std::invalid_argument("Ragged CategoricalAccuracy requires at least two classes.");
+    return categoricalLanesPerToken(num_classes);
+}
+
+uint32_t raggedCategoricalAccuracyPartialBlockCountForBenchmark(
+    uint64_t active_value_count,
+    uint64_t num_classes,
+    uint32_t forced_lanes_per_token) {
+    if (num_classes < 2)
+        throw std::invalid_argument("Ragged CategoricalAccuracy requires at least two classes.");
+    const uint32_t lanes = forced_lanes_per_token == 0
+                               ? categoricalLanesPerToken(num_classes)
+                               : validateCategoricalLanesPerToken(forced_lanes_per_token);
+    return categoricalPartialBlockCountForLanes(active_value_count, num_classes, lanes);
+}
+
+void raggedBinaryAccuracyStatisticsForBenchmark(const Tensor& predictions,
+                                                const Tensor& labels,
+                                                Tensor& partial_correct_counts,
+                                                Tensor& correct_count,
+                                                Tensor& token_count,
+                                                uint64_t active_value_count,
+                                                uint64_t max_total_values,
+                                                uint32_t forced_partial_count,
+                                                Stream& stream) {
+    validateCommon(predictions,
+                   labels,
+                   partial_correct_counts,
+                   correct_count,
+                   token_count,
+                   active_value_count,
+                   max_total_values,
+                   1);
+    if (!isBinaryLabelDTypeSupported(labels.getDataType()))
+        throw std::invalid_argument("Ragged BinaryAccuracy labels use an unsupported dtype.");
+    if (predictions.getDimensions() != std::vector<uint64_t>{max_total_values, 1} ||
+        labels.getDimensions() != std::vector<uint64_t>{max_total_values, 1}) {
+        throw std::invalid_argument("Ragged BinaryAccuracy predictions and labels must contain one scalar per packed token.");
+    }
+    requireStorageForNumItems(predictions, "ragged BinaryAccuracy predictions", max_total_values);
+    requireStorageForNumItems(labels, "ragged BinaryAccuracy labels", max_total_values);
+
+    if (active_value_count == 0) {
+        CUDA_CHECK(cudaMemsetAsync(correct_count.getMemPtr<float>(), 0, sizeof(float), stream.getStream()));
+        CUDA_CHECK(cudaMemsetAsync(token_count.getMemPtr<float>(), 0, sizeof(float), stream.getStream()));
+        return;
+    }
+    const uint32_t partial_count = forced_partial_count == 0
+                                       ? partialBlockCount(active_value_count)
+                                       : forced_partial_count;
+    if (partial_count > partial_correct_counts.getDimensions().front())
+        throw std::invalid_argument("Ragged BinaryAccuracy benchmark partial count exceeds workspace capacity.");
+    if (active_value_count <= std::numeric_limits<uint32_t>::max()) {
+        launchBinaryForIndex<uint32_t>(predictions,
+                                       labels,
+                                       partial_correct_counts,
+                                       static_cast<uint32_t>(active_value_count),
+                                       partial_count,
+                                       correct_count,
+                                       token_count,
+                                       stream);
+    } else {
+        launchBinaryForIndex<uint64_t>(predictions,
+                                       labels,
+                                       partial_correct_counts,
+                                       active_value_count,
+                                       partial_count,
+                                       correct_count,
+                                       token_count,
+                                       stream);
+    }
+    finalizeIfNeeded(partial_correct_counts, partial_count, active_value_count, correct_count, token_count, stream);
+}
+
+void raggedCategoricalAccuracyStatisticsForBenchmark(
+    const Tensor& predictions,
+    const Tensor& labels,
+    Tensor& partial_correct_counts,
+    Tensor& correct_count,
+    Tensor& token_count,
+    uint64_t active_value_count,
+    uint64_t max_total_values,
+    uint64_t num_classes,
+    RaggedCategoricalLabelFormat label_format,
+    uint32_t forced_partial_count,
+    uint32_t forced_lanes_per_token,
+    Stream& stream) {
+    validateCommon(predictions,
+                   labels,
+                   partial_correct_counts,
+                   correct_count,
+                   token_count,
+                   active_value_count,
+                   max_total_values,
+                   num_classes);
+    if (num_classes < 2)
+        throw std::invalid_argument("Ragged CategoricalAccuracy requires at least two classes.");
+    if (predictions.getDimensions() != std::vector<uint64_t>{max_total_values, num_classes})
+        throw std::invalid_argument("Ragged CategoricalAccuracy predictions must have trailing class width num_classes.");
+    const uint64_t max_scalar_count = checkedMultiply(
+        max_total_values, num_classes, "Ragged CategoricalAccuracy packed prediction element count overflows uint64_t.");
+    requireStorageForNumItems(predictions, "ragged CategoricalAccuracy predictions", max_scalar_count);
+
+    if (label_format == RaggedCategoricalLabelFormat::CLASS_INDEX) {
+        if (!isClassIndexLabelDTypeSupported(labels.getDataType()))
+            throw std::invalid_argument("Ragged CategoricalAccuracy class-index labels must use an integer dtype.");
+        if (labels.getDimensions() != std::vector<uint64_t>{max_total_values, 1})
+            throw std::invalid_argument("Ragged CategoricalAccuracy class-index labels must contain one scalar per packed token.");
+        requireStorageForNumItems(labels, "ragged CategoricalAccuracy class-index labels", max_total_values);
+    } else {
+        if (!isPerClassLabelDTypeSupported(labels.getDataType()))
+            throw std::invalid_argument("Ragged CategoricalAccuracy per-class labels use an unsupported dtype.");
+        if (labels.getDimensions() != std::vector<uint64_t>{max_total_values, num_classes})
+            throw std::invalid_argument("Ragged CategoricalAccuracy per-class labels must match prediction class width.");
+        requireStorageForNumItems(labels, "ragged CategoricalAccuracy per-class labels", max_scalar_count);
+    }
+
+    if (active_value_count == 0) {
+        CUDA_CHECK(cudaMemsetAsync(correct_count.getMemPtr<float>(), 0, sizeof(float), stream.getStream()));
+        CUDA_CHECK(cudaMemsetAsync(token_count.getMemPtr<float>(), 0, sizeof(float), stream.getStream()));
+        return;
+    }
+
+    const uint64_t active_scalar_count = checkedMultiply(
+        active_value_count, num_classes, "Ragged CategoricalAccuracy active scalar count overflows uint64_t.");
+    const uint32_t lanes_per_token = forced_lanes_per_token == 0
+                                         ? categoricalLanesPerToken(num_classes)
+                                         : validateCategoricalLanesPerToken(forced_lanes_per_token);
+    const uint32_t partial_count = forced_partial_count == 0
+                                       ? categoricalPartialBlockCountForLanes(
+                                             active_value_count, num_classes, lanes_per_token)
+                                       : forced_partial_count;
+    if (partial_count > partial_correct_counts.getDimensions().front())
+        throw std::invalid_argument("Ragged CategoricalAccuracy benchmark partial count exceeds workspace capacity.");
+
+    if (active_scalar_count <= std::numeric_limits<uint32_t>::max()) {
+        launchCategoricalForIndex<uint32_t>(predictions,
+                                            labels,
+                                            partial_correct_counts,
+                                            static_cast<uint32_t>(active_value_count),
+                                            static_cast<uint32_t>(num_classes),
+                                            partial_count,
+                                            correct_count,
+                                            token_count,
+                                            label_format,
+                                            lanes_per_token,
+                                            stream);
+    } else {
+        launchCategoricalForIndex<uint64_t>(predictions,
+                                            labels,
+                                            partial_correct_counts,
+                                            active_value_count,
+                                            num_classes,
+                                            partial_count,
+                                            correct_count,
+                                            token_count,
+                                            label_format,
+                                            lanes_per_token,
                                             stream);
     }
     finalizeIfNeeded(partial_correct_counts, partial_count, active_value_count, correct_count, token_count, stream);

@@ -51,9 +51,12 @@ struct PaddedRaggedSequencePlan {
 // T8A runtime owner for one compiler-level padded ragged physical value. One
 // maximum-sized allocation is retained, while paddedTensor() exposes only the
 // selected [B,C,1,W] prefix. The active prefix of each row is semantically
-// valid; the inactive tail is undefined after arbitrary compatible producers.
-// Entry packing canonicalizes that tail only because convolution consumers may
-// require zeros at the representation boundary.
+// valid; the inactive tail is undefined by default. Consumers that require a
+// canonical zero tail must establish it explicitly for the exact physical
+// generation before use.
+struct PaddedRaggedPackLaunchPlan;
+using PaddedRaggedUnpackLaunchPlan = PaddedRaggedPackLaunchPlan;
+
 class PaddedRaggedSequence {
    public:
     PaddedRaggedSequence(PaddedRaggedSequencePlan plan,
@@ -83,18 +86,19 @@ class PaddedRaggedSequence {
     // allocation and all structural row-partition geometry remain fixed.
     void reconfigure(PaddedRaggedSequencePlan newPlan);
 
-    // One fused direct loader copies logical positions and writes zero to each
-    // inactive tail position within the selected dense prefix.
+    // Copy only logical positions into the selected dense prefix. Inactive
+    // selected-width tail storage remains untouched and semantically undefined.
     void packFrom(const Tensor& packedValues, Stream& stream);
-
-    // Consumer-owned copy from another retained representation with the same
-    // structural/runtime plan. Active values are preserved and this object's
-    // inactive selected-width tail is zeroed. The source is never modified.
-    void sanitizedCopyFrom(const PaddedRaggedSequence& source, Stream& stream);
+    // Stamped path: launch geometry/index-width policy was prepared once for
+    // this selected W during stamping.
+    void packFrom(const Tensor& packedValues, const PaddedRaggedPackLaunchPlan& launchPlan, Stream& stream);
 
     // Exit adapter writes only logical positions back to packed storage; packed
     // spare capacity is left untouched.
     void unpackTo(Tensor& packedValues, Stream& stream) const;
+    // Stamped path: inverse-transpose geometry/index-width policy was prepared
+    // once for this selected W during stamping.
+    void unpackTo(Tensor& packedValues, const PaddedRaggedUnpackLaunchPlan& launchPlan, Stream& stream) const;
 
    private:
     PaddedRaggedSequencePlan plan;

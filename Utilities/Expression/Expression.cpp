@@ -674,6 +674,7 @@ json exprNodeToJson(const ExprNode& node) {
     j["matmul_epilogue"] = matmulEpilogueName(node.matmul_epilogue);
     j["matmul_backward_epilogue"] = matmulBackwardEpilogueName(node.matmul_backward_epilogue);
     j["matmul_epilogue_aux"] = node.matmul_epilogue_aux;
+    j["matmul_forward_epilogue_aux"] = node.matmul_forward_epilogue_aux;
     j["matmul_packed_row_binding"] = static_cast<int>(node.matmul_packed_row_binding);
     j["matmul_packed_row_capacity"] = node.matmul_packed_row_capacity;
     j["conv_stride_d"] = node.conv_spatial_3d.stride_d;
@@ -852,6 +853,7 @@ ExprNode exprNodeFromJson(const json& j) {
     node.matmul_epilogue = matmulEpilogueFromName(j.value("matmul_epilogue", std::string("default")));
     node.matmul_backward_epilogue = matmulBackwardEpilogueFromName(j.value("matmul_backward_epilogue", std::string("default")));
     node.matmul_epilogue_aux = j.value("matmul_epilogue_aux", UINT32_MAX);
+    node.matmul_forward_epilogue_aux = j.value("matmul_forward_epilogue_aux", false);
     node.matmul_packed_row_binding = static_cast<MatmulPackedRowBinding>(j.value("matmul_packed_row_binding", 0));
     node.matmul_packed_row_capacity = j.value("matmul_packed_row_capacity", uint64_t{0});
     node.ragged_conv_spatial_1d.stride = j.value("ragged_conv_stride", 1);
@@ -1730,6 +1732,7 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                 out += ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0);
                 out += ";epilogue=" + std::string(matmulEpilogueName(n.matmul_epilogue));
                 out += ";backwardEpilogue=" + std::string(matmulBackwardEpilogueName(n.matmul_backward_epilogue));
+                out += ";forwardEpilogueAux=" + std::to_string(n.matmul_forward_epilogue_aux ? 1 : 0);
                 out += ";packedRowsBinding=" + std::to_string(static_cast<int>(n.matmul_packed_row_binding));
                 out += ";packedRowsCapacity=" + std::to_string(n.matmul_packed_row_capacity);
                 if (n.matmul_epilogue_aux != UINT32_MAX) {
@@ -1933,7 +1936,8 @@ static std::string canonicalizeNode(const PhysicalExpression& expr,
                   gemmScaleString("beta", n.beta_node, n.beta_fp) + ";tA=" + std::to_string(n.transpose_lhs ? 1 : 0) +
                   ";tB=" + std::to_string(n.transpose_rhs ? 1 : 0) + ";tC=" + std::to_string(n.transpose_aux ? 1 : 0) +
                   ";epilogue=" + std::string(matmulEpilogueName(n.matmul_epilogue)) +
-                  ";backwardEpilogue=" + std::string(matmulBackwardEpilogueName(n.matmul_backward_epilogue));
+                  ";backwardEpilogue=" + std::string(matmulBackwardEpilogueName(n.matmul_backward_epilogue)) +
+                  ";forwardEpilogueAux=" + std::to_string(n.matmul_forward_epilogue_aux ? 1 : 0);
             if (n.matmul_epilogue_aux != UINT32_MAX) {
                 out += ";epilogueAux=" + canonicalizeNode(expr, n.matmul_epilogue_aux, memo, memoReady);
             }
@@ -2412,6 +2416,13 @@ void ExpressionDefinition::validate() const {
             validateNodeIndex(node.matmul_epilogue_aux, "matmul backward epilogue aux");
             if (node.matmul_epilogue_aux >= node_index_u32) {
                 throw std::runtime_error("ExpressionDefinition matmul backward epilogue aux must reference an earlier node.");
+            }
+        }
+        if (node.matmul_forward_epilogue_aux) {
+            if ((node.op != ExprOp::MATMUL && node.op != ExprOp::GEMM) || node.matmul_epilogue != MatmulEpilogue::Gelu ||
+                node.matmul_backward_epilogue != MatmulBackwardEpilogue::Default || node.matmul_epilogue_aux != UINT32_MAX) {
+                throw std::runtime_error(
+                    "ExpressionDefinition forward matmul epilogue auxiliary state requires a forward GELU MATMUL/GEMM with no backward epilogue.");
             }
         }
         if ((node.op == ExprOp::ATTENTION) && node.attention_use_bias) {

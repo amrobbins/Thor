@@ -53,4 +53,39 @@ void raggedCategoricalAccuracyStatistics(const Tensor& predictions,
                                          RaggedCategoricalLabelFormat label_format,
                                          Stream& stream);
 
+// Benchmark-only selectors and forcing hooks. A forced value of 0 means
+// production auto. These entry points launch the same production kernels and
+// exist to make transition/geometry sweeps measurable without benchmark-side
+// kernel copies.
+uint32_t raggedBinaryAccuracyPartialBlockCountForBenchmark(uint64_t active_value_count);
+uint32_t raggedCategoricalAccuracyLanesPerTokenForBenchmark(uint64_t num_classes);
+uint32_t raggedCategoricalAccuracyPartialBlockCountForBenchmark(
+    uint64_t active_value_count,
+    uint64_t num_classes,
+    uint32_t forced_lanes_per_token = 0);
+
+void raggedBinaryAccuracyStatisticsForBenchmark(const Tensor& predictions,
+                                                const Tensor& labels,
+                                                Tensor& partial_correct_counts,
+                                                Tensor& correct_count,
+                                                Tensor& token_count,
+                                                uint64_t active_value_count,
+                                                uint64_t max_total_values,
+                                                uint32_t forced_partial_count,
+                                                Stream& stream);
+
+void raggedCategoricalAccuracyStatisticsForBenchmark(
+    const Tensor& predictions,
+    const Tensor& labels,
+    Tensor& partial_correct_counts,
+    Tensor& correct_count,
+    Tensor& token_count,
+    uint64_t active_value_count,
+    uint64_t max_total_values,
+    uint64_t num_classes,
+    RaggedCategoricalLabelFormat label_format,
+    uint32_t forced_partial_count,
+    uint32_t forced_lanes_per_token,
+    Stream& stream);
+
 }  // namespace ThorImplementation

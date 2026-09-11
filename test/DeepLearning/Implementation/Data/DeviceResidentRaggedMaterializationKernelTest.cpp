@@ -583,14 +583,13 @@ TEST(DeviceResidentRaggedMaterializationKernelTest, LargeBatchGatherPreservesPub
     runMultiTileMaterializationCase<uint64_t>();
 }
 
-TEST(DeviceResidentRaggedMaterializationKernelTest, PayloadAwareRowGroupingCoversFullLaneLadderForBothOffsetWidths) {
+TEST(DeviceResidentRaggedMaterializationKernelTest, PayloadAwareBoundaryCasesRemainCorrectForBothOffsetWidths) {
     REQUIRE_CUDA_DEVICE();
 
-    // With >=16384 logical rows the parallelism floor permits every grouping,
-    // so these resident averages select 256/128/64/32/16/8/4/2/1 rows per CTA
-    // respectively with the 32-byte-per-lane payload target. The selected
-    // example itself is only one byte, keeping this launch-policy test
-    // lightweight even for the >4-KiB resident average.
+    // Exercise historically sensitive resident-average boundaries. Grouping is
+    // now selected only from the expected resident row payload. The selected
+    // example itself is only one byte, keeping the test lightweight even for
+    // the >4-KiB average.
     for (const uint64_t expectedResidentRowBytes :
          {32ULL, 33ULL, 65ULL, 129ULL, 257ULL, 513ULL, 1025ULL, 2049ULL, 4097ULL}) {
         runPayloadAwareRowGroupingCase<uint32_t>(expectedResidentRowBytes, 16384);
@@ -598,12 +597,12 @@ TEST(DeviceResidentRaggedMaterializationKernelTest, PayloadAwareRowGroupingCover
     }
 }
 
-TEST(DeviceResidentRaggedMaterializationKernelTest, PayloadAwareRowGroupingRetainsBlockParallelismFloor) {
+TEST(DeviceResidentRaggedMaterializationKernelTest, PayloadAwareRowGroupingUsesInputSizedLaunch) {
     REQUIRE_CUDA_DEVICE();
 
-    // A one-byte resident average always prefers 256 rows/CTA by payload. The
-    // row-count guard should nevertheless retain roughly 64 CTAs until enough
-    // rows exist, exercising 1/2/4/8/16/32/64/128/256 rows per CTA.
+    // A one-byte resident average uses the same four-rows-per-CTA grouping
+    // regardless of logical row count; only the resulting grid size scales with
+    // the input.
     for (const uint64_t logicalRows :
          {64ULL, 128ULL, 256ULL, 512ULL, 1024ULL, 2048ULL, 4096ULL, 8192ULL, 16384ULL}) {
         runPayloadAwareRowGroupingCase<uint32_t>(1, logicalRows);

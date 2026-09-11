@@ -1488,7 +1488,7 @@ ThorImplementation::DynamicExpression makeAttentionExpression(uint64_t querySequ
 
 namespace Thor {
 
-std::shared_ptr<ThorImplementation::CustomLayer> Attention::createPhysicalLayer(
+std::shared_ptr<ThorImplementation::TrainableLayer> Attention::createPhysicalLayer(
     ThorImplementation::DynamicExpression expression,
     std::vector<std::string> physicalInputNames,
     std::vector<std::string> physicalOutputNames,

@@ -277,9 +277,12 @@ TEST(AcceleratorBackendCachePolicy, MigratedRmsNormGlobalStateIsSelectionOnly) {
 
     EXPECT_NE(stampedHeader.find("forward_executable_plans"), string::npos);
     EXPECT_NE(stampedHeader.find("backward_executable_plans"), string::npos);
-    EXPECT_NE(stampedHeader.find("fallback_forward_executable_plans"), string::npos);
+    EXPECT_EQ(stampedHeader.find("fallback_forward_executable_plans"), string::npos);
+    EXPECT_EQ(stampedHeader.find("mutable std::optional<Tensor> fallback_forward_workspace;"), string::npos);
     EXPECT_NE(stampedSource.find("prepareForwardExecutableFamily"), string::npos);
     EXPECT_NE(stampedSource.find("prepareBackwardExecutableFamilies"), string::npos);
+    EXPECT_NE(stampedSource.find("RMSNorm backward is not linked to its matching retained real-forward state"), string::npos);
+    EXPECT_EQ(stampedSource.find("rmsnorm_fallback_forward"), string::npos);
 
     // Runtime must select only from already-prepared operation-local families.
     const size_t forwardRun = stampedSource.find("void StampedRmsNorm::runOn(Stream& run_stream) const");
@@ -325,9 +328,11 @@ TEST(AcceleratorBackendCachePolicy, MigratedAttentionGlobalStateIsSelectionOnly)
 
     EXPECT_NE(stampedHeader.find("std::optional<CudnnAttentionExecutablePlan> forward_plan"), string::npos);
     EXPECT_NE(stampedHeader.find("std::optional<CudnnAttentionExecutablePlan> backward_plan"), string::npos);
-    EXPECT_NE(stampedHeader.find("std::optional<CudnnAttentionExecutablePlan> fallback_forward_plan"), string::npos);
+    EXPECT_EQ(stampedHeader.find("std::optional<CudnnAttentionExecutablePlan> fallback_forward_plan"), string::npos);
     EXPECT_NE(stampedSource.find("prepareForward(descriptor, workspaceArgs, stream)"), string::npos);
     EXPECT_NE(stampedSource.find("prepareBackward(descriptor, backwardWorkspaceArgs, stream)"), string::npos);
+    EXPECT_NE(stampedSource.find("forward replay is not a supported correctness path"), string::npos);
+    EXPECT_EQ(stampedSource.find("attention_fallback_forward"), string::npos);
 
     // Runtime may bind tensors and prepare ragged metadata, but it must never
     // consult selection state or construct/replay a Frontend executable.

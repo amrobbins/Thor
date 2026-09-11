@@ -5,6 +5,7 @@
 #include "DeepLearning/Implementation/Layers/TrainableLayer.h"
 #include "DeepLearning/Implementation/Parameter/PhysicalParameter.h"
 #include "Utilities/Expression/DynamicExpression.h"
+#include "Utilities/Expression/AutoDiff.h"
 #include "Utilities/TensorOperations/Masking/BatchValidity.h"
 #include "Utilities/Expression/FusedEquation.h"
 #include "Utilities/Expression/StampedEquation.h"
@@ -147,6 +148,53 @@ class CustomLayer : public TrainableLayer {
     virtual void prepareApplicationOutputsForDownstream(uint32_t applicationIndex) {
         (void)applicationIndex;
     }
+
+    // Specializations that are migrating away from the generic CustomLayer executor
+    // can observe the one real forward plan after it has been stamped, without
+    // restamping or exposing internal expression values as public layer outputs.
+    // The default CustomLayer has no additional forward-plan ownership requirements.
+    virtual void onForwardExecutionVariantStamped(uint32_t applicationIndex,
+                                                   DynamicExpressionVariantId variantId,
+                                                   const std::shared_ptr<StampedExecutionPlan>& forwardPlan,
+                                                   bool supportsBackward) {
+        (void)applicationIndex;
+        (void)variantId;
+        (void)forwardPlan;
+        (void)supportsBackward;
+    }
+
+    struct NativeSharedBackwardSavedValue {
+        uint32_t forwardNodeIndex = UINT32_MAX;
+        std::string backwardInputName;
+        Tensor tensor;
+    };
+
+    // Native specializations can ask CustomLayer's temporary compatibility
+    // executor to stamp one combined backward graph.  A specialization may also
+    // opt into executing that graph as its physical backward implementation.
+    // The executing form currently requires one physical application so its
+    // parameter gradients can overwrite the optimizer-owned buffers directly;
+    // this is exactly the public Attention application contract.
+    virtual bool wantsNativeSharedBackwardPlan() const { return false; }
+    virtual bool executesNativeSharedBackwardPlan() const { return false; }
+    virtual std::vector<NativeSharedBackwardSavedValue> nativeSharedBackwardSavedValues(
+        uint32_t applicationIndex,
+        DynamicExpressionVariantId variantId,
+        const PhysicalOutputs& forwardOutputs) const {
+        (void)applicationIndex;
+        (void)variantId;
+        (void)forwardOutputs;
+        return {};
+    }
+    virtual void onNativeSharedBackwardExecutionVariantStamped(
+        uint32_t applicationIndex,
+        DynamicExpressionVariantId variantId,
+        const std::shared_ptr<StampedExecutionPlan>& backwardPlan) {
+        (void)applicationIndex;
+        (void)variantId;
+        (void)backwardPlan;
+    }
+
     void propagateApplicationRowPartitionHostState(uint32_t applicationIndex, uint32_t sourceInputPort);
     void pruneUpstreamErrorOutputsForApplication(uint32_t applicationIndex);
     void setActiveTrainingExecutionVariant(DynamicExpressionVariantId variantId);
@@ -181,6 +229,7 @@ class CustomLayer : public TrainableLayer {
         std::shared_ptr<StampedExecutionPlan> backwardWeightsClear;
         std::shared_ptr<StampedExecutionPlan> backwardWeightsAccumulate;
         std::shared_ptr<StampedExecutionPlan> backwardWeightsFusedOptimizerUpdate;
+        std::shared_ptr<StampedExecutionPlan> nativeSharedBackward;
 
         std::unordered_set<std::string> optimizerUpdateFusedParameterNames;
         std::unordered_set<std::string> activeParameterTargetNames;
@@ -265,14 +314,17 @@ class CustomLayer : public TrainableLayer {
     const StampedExecutionVariant& stampedVariant(uint32_t applicationIndex, DynamicExpressionVariantId variantId) const;
     StampedExecutionVariant& backwardVariantForApplication(uint32_t applicationIndex);
     const StampedExecutionVariant& backwardVariantForApplication(uint32_t applicationIndex) const;
-    PhysicalOutputs buildBackwardOutputsForApplication(uint32_t applicationIndex,
-                                                       DynamicExpressionVariantId variantId,
-                                                       const std::vector<std::string>& wrtNames,
-                                                       bool accumulateGradOutputs);
-    std::shared_ptr<StampedExecutionPlan> stampBackwardForApplication(
+    BackwardBuildResult buildBackwardOutputsForApplication(
         uint32_t applicationIndex,
         DynamicExpressionVariantId variantId,
         const std::vector<std::string>& wrtNames,
+        bool accumulateGradOutputs,
+        bool requireForwardValueRequirements,
+        const SavedForwardValueInputNames& savedForwardValueInputNames = {});
+    std::shared_ptr<StampedExecutionPlan> stampBackwardForApplication(
+        uint32_t applicationIndex,
+        DynamicExpressionVariantId variantId,
+        const BackwardBuildResult& backwardBuild,
         bool accumulateGradOutputs,
         const PreparedDynamicExpression::TensorMap& preallocatedGradOutputs,
         Stream& runStream);
@@ -280,6 +332,7 @@ class CustomLayer : public TrainableLayer {
         uint32_t applicationIndex,
         DynamicExpressionVariantId variantId,
         const std::vector<std::string>& fusedParameterTargets,
+        const BackwardBuildResult& parameterGradientBuild,
         const std::unordered_map<std::string, Tensor>& optimizerUpdateInputs);
     const std::unordered_map<std::string, float>& updateFusedOptimizerRuntimeScalars(
         uint32_t applicationIndex, DynamicExpressionVariantId variantId, uint32_t batchSize);

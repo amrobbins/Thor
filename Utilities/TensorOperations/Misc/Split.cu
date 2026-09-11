@@ -14,3 +14,15 @@ void launchSplit(void *dest[],
     ThorConcatenateSpanCopy::launch<false>(
         source, dest, outerSlices, numDestArrays, packedSliceBytes, spanGeometry, stream);
 }
+
+void launchSplitWithSpansPerCtaForBenchmark(void *dest[],
+                                            void *source,
+                                            uint64_t outerSlices,
+                                            uint32_t numDestArrays,
+                                            uint64_t packedSliceBytes,
+                                            const ConcatenateSpanGeometry spanGeometry[],
+                                            uint32_t spansPerCta,
+                                            Stream stream) {
+    ThorConcatenateSpanCopy::launchWithSpansPerCtaForBenchmark<false>(
+        source, dest, outerSlices, numDestArrays, packedSliceBytes, spanGeometry, spansPerCta, stream);
+}

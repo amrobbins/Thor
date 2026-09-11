@@ -1423,11 +1423,17 @@ std::shared_ptr<ThorImplementation::Layer> CustomLayer::stamp(ThorImplementation
                                                  return flags;
                                              }(),
                                              fixedBatchCapacity);
-    physicalLayer->setLayerName(getLayerType());
+    // Generic CustomLayer implementations carry a diagnostic layer name. A
+    // specialized native TrainableLayer owns its own layer type and need not
+    // inherit the CustomLayer naming surface merely to use this stamping path.
+    if (auto customPhysicalLayer = std::dynamic_pointer_cast<ThorImplementation::CustomLayer>(physicalLayer);
+        customPhysicalLayer != nullptr) {
+        customPhysicalLayer->setLayerName(getLayerType());
+    }
     return physicalLayer;
 }
 
-std::shared_ptr<ThorImplementation::CustomLayer> CustomLayer::createPhysicalLayer(
+std::shared_ptr<ThorImplementation::TrainableLayer> CustomLayer::createPhysicalLayer(
     ThorImplementation::DynamicExpression expression,
     std::vector<std::string> physicalInputNames,
     std::vector<std::string> physicalOutputNames,

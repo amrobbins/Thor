@@ -51,3 +51,16 @@ void launchConcatenate(void *dest,
     ThorConcatenateSpanCopy::launch<true>(
         dest, source, outerSlices, numSourceArrays, packedSliceBytes, spanGeometry, stream);
 }
+
+void launchConcatenateWithSpansPerCtaForBenchmark(void *dest,
+                                                  void *source[],
+                                                  uint64_t outerSlices,
+                                                  uint32_t numSourceArrays,
+                                                  uint64_t packedSliceBytes,
+                                                  const ConcatenateSpanGeometry spanGeometry[],
+                                                  uint32_t spansPerCta,
+                                                  Stream stream) {
+    ScopedGpu scopedGpu(stream.getGpuNum());
+    ThorConcatenateSpanCopy::launchWithSpansPerCtaForBenchmark<true>(
+        dest, source, outerSlices, numSourceArrays, packedSliceBytes, spanGeometry, spansPerCta, stream);
+}

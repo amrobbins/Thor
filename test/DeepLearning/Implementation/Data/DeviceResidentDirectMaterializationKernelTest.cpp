@@ -297,7 +297,7 @@ TEST(DeviceResidentDirectMaterializationKernelTest, PayloadAwareGroupingCoversFu
     }
 }
 
-TEST(DeviceResidentDirectMaterializationKernelTest, PayloadThresholdTransitionsUseNextWiderRowGrouping) {
+TEST(DeviceResidentDirectMaterializationKernelTest, PayloadThresholdCasesRemainCorrectAcrossGroupingChanges) {
     REQUIRE_CUDA_DEVICE();
 
     struct LaunchCase {
@@ -305,9 +305,9 @@ TEST(DeviceResidentDirectMaterializationKernelTest, PayloadThresholdTransitionsU
         uint64_t batchSize;
     };
 
-    // Exercise the first byte immediately above every 32-bytes/lane boundary.
-    // Each transition halves rows/CTA and doubles lanes/row without depending on
-    // the transaction width selected for the compact record.
+    // Exercise the old payload-boundary sizes as general regression cases. The
+    // production grouping is now selected only from row payload size, but all
+    // of these historically sensitive widths must remain correct.
     constexpr std::array<LaunchCase, 8> cases{{
         {33, 16384},
         {65, 8192},
@@ -328,12 +328,11 @@ TEST(DeviceResidentDirectMaterializationKernelTest, PayloadThresholdTransitionsU
     }
 }
 
-TEST(DeviceResidentDirectMaterializationKernelTest, SmallFieldsRetainBlockParallelismFloor) {
+TEST(DeviceResidentDirectMaterializationKernelTest, SmallFieldsRemainCorrectWithInputSizedGrouping) {
     REQUIRE_CUDA_DEVICE();
 
-    // A one-byte field always prefers 256 rows/CTA by payload. The batch-size
-    // guard intentionally walks the entire 1/2/4/8/16/32/64/128/256 rows/CTA
-    // ladder so small batches still expose roughly 64 CTAs of parallelism.
+    // A one-byte field always prefers 256 rows/CTA by payload. These batch
+    // sizes exercise correctness while the input-sized selector groups rows without consulting the SM count.
     for (const uint64_t batchSize :
          {64ULL, 128ULL, 256ULL, 512ULL, 1024ULL, 2048ULL, 4096ULL, 8192ULL, 16384ULL}) {
         runMaterializationCase(/*numExamples=*/31,

@@ -296,7 +296,7 @@ class Layer {
         }
     }
 
-    virtual bool isInferenceOnly() { return inferenceOnly; }
+    virtual bool isInferenceOnly() const { return inferenceOnly; }
     virtual void setConstructForInferenceOnly(bool inferenceOnly) {
         THOR_THROW_IF_FALSE(!compiled);
         this->inferenceOnly = inferenceOnly;

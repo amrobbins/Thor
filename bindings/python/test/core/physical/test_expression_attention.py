@@ -701,7 +701,7 @@ def test_attention_dense_layout_contract_matches_reference_for_mha_gqa_mqa(
 
 
 @pytest.mark.cuda
-def test_attention_bshd_strided_packed_qkv_view_backward_scatter_add_matches_reference():
+def test_attention_bshd_strided_packed_qkv_view_backward_scatter_add_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     batch = 2
@@ -794,14 +794,7 @@ def test_attention_bshd_strided_packed_qkv_view_backward_scatter_add_matches_ref
     assert stage_kinds.count("FusedKernel") == 1
     assert stage_kinds.index("AttentionBackward") < stage_kinds.index("FusedKernel")
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    runtime_stage_kinds = stamped._debug_stage_kinds()
-    assert runtime_stage_kinds == ["AttentionBackward"]
-    assert "FusedKernel" not in runtime_stage_kinds
-
-    stamped.run()
-    got = _copy_to_host(stamped.outputs()["qkv_grad"], dtype, stream)
-    _assert_close(got, expected_qkv_grad, dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
@@ -3121,8 +3114,16 @@ def _reduce_attention_bias_grad_to_shape(dense_dbias: np.ndarray, bias_shape: tu
     return reduced.astype(np.float32)
 
 
+def _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream):
+    # AttentionBackward consumes output/statistics from the exact forward that
+    # actually executed.  A separately stamped compile_backward() plan has no
+    # such state provider and must not manufacture one by replaying Attention.
+    with pytest.raises(RuntimeError, match="Standalone Attention backward stamping is unsupported"):
+        bwd_eq.stamp(inputs_gpu, stream)
+
+
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_uses_single_attention_backward_stage_and_matches_reference():
+def test_attention_compile_backward_qkv_uses_single_attention_backward_stage_and_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.9 / math.sqrt(64.0)
@@ -3163,19 +3164,11 @@ def test_attention_compile_backward_qkv_uses_single_attention_backward_stage_and
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_close(
-        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_with_ragged_offsets_bshd_packed_matches_reference():
+def test_attention_compile_backward_qkv_with_ragged_offsets_bshd_packed_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.63 / math.sqrt(64.0)
@@ -3243,34 +3236,11 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_bshd_packed_matches_
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    got_dq = _copy_to_host(got["q_grad"], dtype, stream)
-    got_dk = _copy_to_host(got["k_grad"], dtype, stream)
-    got_dv = _copy_to_host(got["v_grad"], dtype, stream)
-    np.testing.assert_allclose(
-        _packed_bshd_ragged_valid_values(got_dq, q_lengths).astype(np.float32),
-        _packed_bshd_ragged_valid_values(expected_dq_storage, q_lengths).astype(np.float32),
-        rtol=5e-2,
-        atol=5e-2,
-    )
-    np.testing.assert_allclose(
-        _packed_bshd_ragged_valid_values(got_dk, kv_lengths).astype(np.float32),
-        _packed_bshd_ragged_valid_values(expected_dk_storage, kv_lengths).astype(np.float32),
-        rtol=5e-2,
-        atol=5e-2,
-    )
-    np.testing.assert_allclose(
-        _packed_bshd_ragged_valid_values(got_dv, kv_lengths).astype(np.float32),
-        _packed_bshd_ragged_valid_values(expected_dv_storage, kv_lengths).astype(np.float32),
-        rtol=5e-2,
-        atol=5e-2,
-    )
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_with_ragged_offsets_gqa_bshd_packed_matches_reference():
+def test_attention_compile_backward_qkv_with_ragged_offsets_gqa_bshd_packed_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.67 / math.sqrt(64.0)
@@ -3338,16 +3308,11 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_gqa_bshd_packed_matc
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_packed_bshd_ragged_close(_copy_to_host(got["q_grad"], dtype, stream), expected_dq_storage, q_lengths)
-    _assert_packed_bshd_ragged_close(_copy_to_host(got["k_grad"], dtype, stream), expected_dk_storage, kv_lengths)
-    _assert_packed_bshd_ragged_close(_copy_to_host(got["v_grad"], dtype, stream), expected_dv_storage, kv_lengths)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_with_ragged_offsets_causal_top_left_bshd_packed_matches_reference():
+def test_attention_compile_backward_qkv_with_ragged_offsets_causal_top_left_bshd_packed_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.62 / math.sqrt(64.0)
@@ -3417,12 +3382,7 @@ def test_attention_compile_backward_qkv_with_ragged_offsets_causal_top_left_bshd
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_packed_bshd_ragged_close(_copy_to_host(got["q_grad"], dtype, stream), expected_dq_storage, q_lengths)
-    _assert_packed_bshd_ragged_close(_copy_to_host(got["k_grad"], dtype, stream), expected_dk_storage, kv_lengths)
-    _assert_packed_bshd_ragged_close(_copy_to_host(got["v_grad"], dtype, stream), expected_dv_storage, kv_lengths)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
@@ -3486,7 +3446,7 @@ def test_attention_backward_with_ragged_offsets_reuses_same_plan_forward_stats_m
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_with_alibi_causal_mask_matches_reference():
+def test_attention_compile_backward_qkv_with_alibi_causal_mask_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.76 / math.sqrt(64.0)
@@ -3536,15 +3496,7 @@ def test_attention_compile_backward_qkv_with_alibi_causal_mask_matches_reference
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_close(
-        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
@@ -3626,7 +3578,7 @@ def test_attention_backward_with_alibi_reuses_same_plan_forward_stats_when_forwa
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_with_causal_bottom_right_decode_mask_matches_reference():
+def test_attention_compile_backward_qkv_with_causal_bottom_right_decode_mask_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.77 / math.sqrt(64.0)
@@ -3674,15 +3626,7 @@ def test_attention_compile_backward_qkv_with_causal_bottom_right_decode_mask_mat
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_close(
-        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
@@ -3742,7 +3686,7 @@ def test_attention_backward_with_causal_bottom_right_decode_mask_reuses_same_pla
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_with_padding_mask_stays_single_attention_backward_stage_and_matches_reference():
+def test_attention_compile_backward_qkv_with_padding_mask_stays_single_attention_backward_stage_and_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.65 / math.sqrt(64.0)
@@ -3798,19 +3742,11 @@ def test_attention_compile_backward_qkv_with_padding_mask_stays_single_attention
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_close(
-        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_with_padding_mask_and_additive_bias_matches_reference():
+def test_attention_compile_backward_qkv_with_padding_mask_and_additive_bias_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.62 / math.sqrt(64.0)
@@ -3871,19 +3807,11 @@ def test_attention_compile_backward_qkv_with_padding_mask_and_additive_bias_matc
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_close(
-        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_with_padding_mask_and_causal_mask_matches_reference():
+def test_attention_compile_backward_qkv_with_padding_mask_and_causal_mask_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.68 / math.sqrt(64.0)
@@ -3941,15 +3869,7 @@ def test_attention_compile_backward_qkv_with_padding_mask_and_causal_mask_matche
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_close(
-        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
@@ -5191,7 +5111,7 @@ def test_attention_sequence_broadcast_additive_bias_forward_is_production_enable
         pytest.param((2, 4, 1, 1), id="bias_b_h_1_1"),
     ],
 )
-def test_attention_sequence_broadcast_additive_bias_backward_expands_dense_and_reduces_dbias(bias_shape):
+def test_attention_sequence_broadcast_additive_bias_backward_expands_dense_and_reduces_dbias_rejects_standalone_stamp(bias_shape):
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     batch = 2
@@ -5264,18 +5184,7 @@ def test_attention_sequence_broadcast_additive_bias_backward_expands_dense_and_r
     assert "AttentionBackward" in stage_kinds
     assert "Reduction" in stage_kinds
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_close(
-        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
-    assert got["bias_grad"].dtype == dtype
-    _assert_close(
-        _copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 def _enable_experimental_cudnn_attention_surface_probe_or_skip(monkeypatch):
@@ -6331,7 +6240,7 @@ def test_attention_additive_bias_dtype_must_match_compute_dtype_without_hidden_c
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_with_additive_bias_stays_single_attention_backward_stage_and_matches_reference(
+def test_attention_compile_backward_qkv_with_additive_bias_stays_single_attention_backward_stage_and_rejects_standalone_stamp(
 ):
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
@@ -6376,19 +6285,11 @@ def test_attention_compile_backward_qkv_with_additive_bias_stays_single_attentio
         "v_grad": [1, 2, 64, 64],
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_close(
-        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_and_dbias_with_additive_bias_matches_reference():
+def test_attention_compile_backward_qkv_and_dbias_with_additive_bias_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.7 / math.sqrt(64.0)
@@ -6433,22 +6334,12 @@ def test_attention_compile_backward_qkv_and_dbias_with_additive_bias_matches_ref
         "bias_grad": [1, 2, 64, 64],
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_close(
-        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("bias_shape", [(1, 1, 64, 64), (1, 4, 64, 64), (2, 1, 64, 64), (2, 4, 64, 64)])
-def test_attention_compile_backward_dbias_with_broadcast_additive_bias_shapes_match_reference(bias_shape):
+def test_attention_compile_backward_dbias_with_broadcast_additive_bias_shapes_and_rejects_standalone_stamp(bias_shape):
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.73 / math.sqrt(64.0)
@@ -6495,20 +6386,12 @@ def test_attention_compile_backward_dbias_with_broadcast_additive_bias_shapes_ma
     expected_stage_kinds = (
         ["AttentionBackward"] if bias_shape == (2, 4, 64, 64) else ["AttentionBackward", "Reduction"])
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == expected_stage_kinds
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got_dbias_tensor = stamped.outputs()["bias_grad"]
-    assert got_dbias_tensor.dtype == dtype
-    _assert_close(
-        _copy_to_host(got_dbias_tensor, dtype, stream),
-        _cast_reference_to_storage_dtype(expected_dbias, dtype),
-        dtype,
-    )
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("bias_shape", [(1, 1, 64, 64), (1, 4, 64, 64), (2, 1, 64, 64), (2, 4, 64, 64)])
-def test_attention_compile_backward_qkv_and_dbias_with_broadcast_additive_bias_shapes_match_reference(bias_shape):
+def test_attention_compile_backward_qkv_and_dbias_with_broadcast_additive_bias_shapes_and_rejects_standalone_stamp(bias_shape):
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.71 / math.sqrt(64.0)
@@ -6557,18 +6440,7 @@ def test_attention_compile_backward_qkv_and_dbias_with_broadcast_additive_bias_s
     expected_stage_kinds = (
         ["AttentionBackward"] if bias_shape == (2, 4, 64, 64) else ["AttentionBackward", "Reduction"])
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == expected_stage_kinds
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_close(
-        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
-    assert got["bias_grad"].dtype == dtype
-    _assert_close(
-        _copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
@@ -6640,7 +6512,7 @@ def test_attention_same_plan_backward_dbias_with_broadcast_additive_bias_reuses_
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_dbias_only_with_additive_bias_matches_reference():
+def test_attention_compile_backward_dbias_only_with_additive_bias_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.69 / math.sqrt(64.0)
@@ -6683,15 +6555,11 @@ def test_attention_compile_backward_dbias_only_with_additive_bias_matches_refere
         "bias_grad": [1, 2, 64, 64]
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_close(
-        _copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_dbias_gqa_with_additive_bias_matches_reference():
+def test_attention_compile_backward_dbias_gqa_with_additive_bias_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.74 / math.sqrt(64.0)
@@ -6736,21 +6604,11 @@ def test_attention_compile_backward_dbias_gqa_with_additive_bias_matches_referen
         "bias_grad": [1, 4, 64, 64],
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    _assert_close(
-        _copy_to_host(got["q_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dq, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["k_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dk, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["v_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dv, dtype), dtype)
-    _assert_close(
-        _copy_to_host(got["bias_grad"], dtype, stream), _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_dbias_with_padding_mask_matches_reference_and_zeroes_invalid_positions():
+def test_attention_compile_backward_dbias_with_padding_mask_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.66 / math.sqrt(64.0)
@@ -6809,16 +6667,11 @@ def test_attention_compile_backward_dbias_with_padding_mask_matches_reference_an
         "bias_grad": [2, 2, 64, 64]
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got_dbias = _copy_to_host(stamped.outputs()["bias_grad"], dtype, stream)
-    _assert_close(got_dbias, _cast_reference_to_storage_dtype(expected_dbias, dtype), dtype)
-    assert np.count_nonzero(got_dbias[1, :, q_lengths[1]:, :]) == 0
-    assert np.count_nonzero(got_dbias[1, :, :, kv_lengths[1]:]) == 0
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_dbias_with_bf16_inputs_matches_reference():
+def test_attention_compile_backward_dbias_with_bf16_inputs_rejects_standalone_stamp():
     dtype = thor.DataType.bf16
     upstream_name = "__grad_output"
     scale = 0.62 / math.sqrt(64.0)
@@ -6860,13 +6713,7 @@ def test_attention_compile_backward_dbias_with_bf16_inputs_matches_reference():
         "bias_grad": [1, 2, 64, 64]
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    _assert_close(
-        _copy_to_host(stamped.outputs()["bias_grad"], dtype, stream),
-        _cast_reference_to_storage_dtype(expected_dbias, dtype),
-        dtype,
-    )
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
@@ -7038,7 +6885,7 @@ def test_attention_same_plan_backward_dbias_only_with_padding_mask_reuses_forwar
         (["q", "k", "v", "bias"], ["q_grad", "k_grad", "v_grad", "bias_grad"]),
     ],
 )
-def test_attention_backward_selector_subsets_with_additive_bias_merge_to_one_cudnn_stage(
+def test_attention_backward_selector_subsets_with_additive_bias_merge_to_one_cudnn_stage_rejects_standalone_stamp(
         wrt_names: list[str], expected_names: list[str]):
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
@@ -7082,9 +6929,7 @@ def test_attention_backward_selector_subsets_with_additive_bias_merge_to_one_cud
         name: expected_shapes[name] for name in expected_names
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    assert set(stamped.outputs().keys()) == set(expected_names)
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
@@ -7159,7 +7004,7 @@ def test_attention_same_plan_backward_mqa_gqa_dbias_reuses_forward_stats_and_mat
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_dbias_with_alibi_causal_mask_matches_reference():
+def test_attention_compile_backward_dbias_with_alibi_causal_mask_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     scale = 0.61 / math.sqrt(64.0)
@@ -7212,17 +7057,11 @@ def test_attention_compile_backward_dbias_with_alibi_causal_mask_matches_referen
         "bias_grad": [1, 4, 64, 64]
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    _assert_close(
-        _copy_to_host(stamped.outputs()["bias_grad"], dtype, stream),
-        _cast_reference_to_storage_dtype(expected_dbias, dtype),
-        dtype,
-    )
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_dbias_with_dropout_and_additive_bias_stays_single_attention_backward_stage():
+def test_attention_compile_backward_dbias_with_dropout_and_additive_bias_stays_single_attention_backward_stage_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     q = ex.input("q")
@@ -7268,13 +7107,7 @@ def test_attention_compile_backward_dbias_with_dropout_and_additive_bias_stays_s
         "bias_grad": [1, 2, 64, 64],
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    assert got["q_grad"].dimensions == [1, 2, 64, 64]
-    assert got["k_grad"].dimensions == [1, 2, 64, 64]
-    assert got["v_grad"].dimensions == [1, 2, 64, 64]
-    assert got["bias_grad"].dimensions == [1, 2, 64, 64]
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
@@ -7358,10 +7191,9 @@ def test_attention_same_plan_backward_selector_subsets_share_saved_stats_attenti
         output_dtype=dtype,
         compute_dtype=thor.DataType.fp32,
     )
-    # Use a loss whose derivative depends on the forward attention output.
-    # A plain reduce_sum(attn) has constant upstream gradient, so compile_backward
-    # can legally use the standalone/rematerialized AttentionBackward path without
-    # preserving an explicit Attention stage in the same plan.
+    # Use a loss whose derivative depends on the forward attention output so the
+    # differentiated equation retains the matching Attention forward in the same
+    # stamped plan. Standalone AttentionBackward stamping is intentionally unsupported.
     loss = ex.reduce_sum(attn * attn, axis=[0, 1, 2, 3], squeeze=False)
     fwd_eq = ex.compile(loss, device_num=0)
     bwd_eq = fwd_eq.compile_backward(requested_names)
@@ -7665,7 +7497,7 @@ def test_attention_forward_dropout_with_padding_and_bias_stays_single_stage_and_
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_with_dropout_stays_single_attention_backward_stage():
+def test_attention_compile_backward_qkv_with_dropout_stays_single_attention_backward_stage_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     q = ex.input("q")
@@ -7706,12 +7538,7 @@ def test_attention_compile_backward_qkv_with_dropout_stays_single_attention_back
         "v_grad": [1, 2, 64, 64],
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    assert got["q_grad"].dimensions == [1, 2, 64, 64]
-    assert got["k_grad"].dimensions == [1, 2, 64, 64]
-    assert got["v_grad"].dimensions == [1, 2, 64, 64]
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda
@@ -7848,7 +7675,7 @@ def test_attention_rejects_bottom_right_decode_mask_with_additive_bias_before_cu
 
 
 @pytest.mark.cuda
-def test_attention_compile_backward_qkv_with_dropout_padding_and_bias_stays_single_attention_backward_stage():
+def test_attention_compile_backward_qkv_with_dropout_padding_and_bias_stays_single_attention_backward_stage_rejects_standalone_stamp():
     dtype = thor.DataType.fp16
     upstream_name = "__grad_output"
     q = ex.input("q")
@@ -7901,12 +7728,7 @@ def test_attention_compile_backward_qkv_with_dropout_padding_and_bias_stays_sing
         "v_grad": [1, 2, 64, 64],
     }
     assert bwd_eq._debug_stage_kinds(inputs_gpu) == ["AttentionBackward"]
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
-    stamped.run()
-    got = stamped.outputs()
-    assert got["q_grad"].dimensions == [1, 2, 64, 64]
-    assert got["k_grad"].dimensions == [1, 2, 64, 64]
-    assert got["v_grad"].dimensions == [1, 2, 64, 64]
+    _assert_standalone_attention_backward_stamp_rejected(bwd_eq, inputs_gpu, stream)
 
 
 @pytest.mark.cuda

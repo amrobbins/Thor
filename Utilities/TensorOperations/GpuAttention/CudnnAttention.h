@@ -309,6 +309,18 @@ class CudnnScaledDotProductAttention {
     [[nodiscard]] uint64_t selectionCacheHitCount() const;
     [[nodiscard]] uint64_t selectionCacheMissCount() const;
 
+#ifdef THOR_DEBUG
+    struct TestExecutionCounters {
+        uint32_t forwardCalls = 0;
+        uint32_t backwardCalls = 0;
+    };
+
+    // Counts physical cuDNN SDPA executions, not graph nodes or prepared plans.
+    // Tests reset immediately before the execution window they want to inspect.
+    static void resetTestExecutionCounters();
+    [[nodiscard]] static TestExecutionCounters testExecutionCounters();
+#endif
+
     static bool frontendAvailable();
 
    private:

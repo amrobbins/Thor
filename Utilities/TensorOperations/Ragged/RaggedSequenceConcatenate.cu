@@ -632,3 +632,101 @@ void launchRaggedSequenceConcatenateBackward(void *input_gradients[],
             stream);
     }
 }
+
+void launchRaggedSequenceConcatenateWithSpansPerCtaForBenchmark(
+    void *output_values,
+    void *input_values[],
+    const void *copy_spans,
+    uint64_t span_count,
+    std::size_t value_element_size_bytes,
+    uint64_t elements_per_value,
+    std::size_t offsets_element_size_bytes,
+    uint64_t active_output_values,
+    uint32_t spans_per_cta,
+    Stream stream) {
+    if (value_element_size_bytes == 0 || elements_per_value == 0) {
+        throw std::invalid_argument("RaggedSequenceConcatenate values must have non-zero element geometry.");
+    }
+    validateOffsetSize(offsets_element_size_bytes);
+    if (active_output_values == 0) {
+        if (span_count != 0)
+            throw std::invalid_argument("RaggedSequenceConcatenate zero active prefix requires an empty copy plan.");
+        return;
+    }
+    if (span_count == 0 || copy_spans == nullptr) {
+        throw std::invalid_argument("RaggedSequenceConcatenate non-empty active prefix requires copy spans.");
+    }
+    if (spans_per_cta == 0 || spans_per_cta > kMaxSpansPerBlock ||
+        (spans_per_cta & (spans_per_cta - 1U)) != 0U) {
+        throw std::invalid_argument("RaggedSequenceConcatenate benchmark spans-per-CTA must be a power of two in [1,256].");
+    }
+
+    ScopedGpu scopedGpu(stream.getGpuNum());
+    const uint64_t valueBytes = bytesPerValue(value_element_size_bytes, elements_per_value);
+    if (offsets_element_size_bytes == sizeof(uint32_t)) {
+        if (span_count <= kMaxUint32) {
+            launchForwardIndexed<ThorImplementation::RaggedSequenceCopySpan32, uint32_t>(
+                output_values, input_values, copy_spans, valueBytes, static_cast<uint32_t>(span_count), spans_per_cta, stream);
+        } else {
+            launchForwardIndexed<ThorImplementation::RaggedSequenceCopySpan32, uint64_t>(
+                output_values, input_values, copy_spans, valueBytes, span_count, spans_per_cta, stream);
+        }
+    } else {
+        if (span_count <= kMaxUint32) {
+            launchForwardIndexed<ThorImplementation::RaggedSequenceCopySpan64, uint32_t>(
+                output_values, input_values, copy_spans, valueBytes, static_cast<uint32_t>(span_count), spans_per_cta, stream);
+        } else {
+            launchForwardIndexed<ThorImplementation::RaggedSequenceCopySpan64, uint64_t>(
+                output_values, input_values, copy_spans, valueBytes, span_count, spans_per_cta, stream);
+        }
+    }
+}
+
+void launchRaggedSequenceConcatenateBackwardWithSpansPerCtaForBenchmark(
+    void *input_gradients[],
+    const void *output_gradient,
+    const void *copy_spans,
+    uint64_t span_count,
+    std::size_t value_element_size_bytes,
+    uint64_t elements_per_value,
+    std::size_t offsets_element_size_bytes,
+    uint64_t active_output_values,
+    uint32_t spans_per_cta,
+    Stream stream) {
+    if (value_element_size_bytes == 0 || elements_per_value == 0) {
+        throw std::invalid_argument("RaggedSequenceConcatenate backward values must have non-zero element geometry.");
+    }
+    validateOffsetSize(offsets_element_size_bytes);
+    if (active_output_values == 0) {
+        if (span_count != 0)
+            throw std::invalid_argument("RaggedSequenceConcatenate backward zero active prefix requires an empty copy plan.");
+        return;
+    }
+    if (span_count == 0 || copy_spans == nullptr) {
+        throw std::invalid_argument("RaggedSequenceConcatenate backward non-empty active prefix requires copy spans.");
+    }
+    if (spans_per_cta == 0 || spans_per_cta > kMaxSpansPerBlock ||
+        (spans_per_cta & (spans_per_cta - 1U)) != 0U) {
+        throw std::invalid_argument("RaggedSequenceConcatenate backward benchmark spans-per-CTA must be a power of two in [1,256].");
+    }
+
+    ScopedGpu scopedGpu(stream.getGpuNum());
+    const uint64_t valueBytes = bytesPerValue(value_element_size_bytes, elements_per_value);
+    if (offsets_element_size_bytes == sizeof(uint32_t)) {
+        if (span_count <= kMaxUint32) {
+            launchBackwardIndexed<ThorImplementation::RaggedSequenceCopySpan32, uint32_t>(
+                input_gradients, output_gradient, copy_spans, valueBytes, static_cast<uint32_t>(span_count), spans_per_cta, stream);
+        } else {
+            launchBackwardIndexed<ThorImplementation::RaggedSequenceCopySpan32, uint64_t>(
+                input_gradients, output_gradient, copy_spans, valueBytes, span_count, spans_per_cta, stream);
+        }
+    } else {
+        if (span_count <= kMaxUint32) {
+            launchBackwardIndexed<ThorImplementation::RaggedSequenceCopySpan64, uint32_t>(
+                input_gradients, output_gradient, copy_spans, valueBytes, static_cast<uint32_t>(span_count), spans_per_cta, stream);
+        } else {
+            launchBackwardIndexed<ThorImplementation::RaggedSequenceCopySpan64, uint64_t>(
+                input_gradients, output_gradient, copy_spans, valueBytes, span_count, spans_per_cta, stream);
+        }
+    }
+}

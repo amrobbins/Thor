@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentNamedGatherKernel.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentRowGrouping.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime.h>
@@ -19,7 +20,8 @@ namespace {
 
 constexpr uint32_t kThreadsPerBlock = 256;
 constexpr uint32_t kMaxRowsPerBlock = kThreadsPerBlock;
-constexpr uint64_t kTargetBytesPerLane = 32;
+static_assert(kThreadsPerBlock == DeviceResidentRowGrouping::kThreadsPerCta,
+              "Row-grouping policy must match the residency CTA width.");
 constexpr uint32_t kMaxPortableBlocks = 65535;
 
 static_assert(sizeof(ulonglong4_32a) == 32);
@@ -258,55 +260,6 @@ __global__ void gatherRowsKernel(const uint8_t *__restrict__ sourceBytes,
     }
 }
 
-uint32_t rowsPerBlockFor(uint64_t rowBytes, uint64_t batchSize) {
-    // Target about 32 bytes of useful row payload per lane. Transaction width
-    // is deliberately not part of this policy: a 16/8/4/2/1-byte fallback may
-    // require multiple transactions per lane, but consecutive lanes continue
-    // to operate on adjacent contiguous items.
-    uint32_t rowsByPayload = 1;
-    if (rowBytes <= kTargetBytesPerLane) {
-        rowsByPayload = 256;
-    } else if (rowBytes <= 2 * kTargetBytesPerLane) {
-        rowsByPayload = 128;
-    } else if (rowBytes <= 4 * kTargetBytesPerLane) {
-        rowsByPayload = 64;
-    } else if (rowBytes <= 8 * kTargetBytesPerLane) {
-        rowsByPayload = 32;
-    } else if (rowBytes <= 16 * kTargetBytesPerLane) {
-        rowsByPayload = 16;
-    } else if (rowBytes <= 32 * kTargetBytesPerLane) {
-        rowsByPayload = 8;
-    } else if (rowBytes <= 64 * kTargetBytesPerLane) {
-        rowsByPayload = 4;
-    } else if (rowBytes <= 128 * kTargetBytesPerLane) {
-        rowsByPayload = 2;
-    }
-
-    // Keep roughly 64 CTAs available for small rows instead of packing a small
-    // batch into only one or two blocks. Once the batch is large enough,
-    // payload geometry alone determines the row grouping.
-    uint32_t rowsByParallelism = 1;
-    if (batchSize >= 16384) {
-        rowsByParallelism = 256;
-    } else if (batchSize >= 8192) {
-        rowsByParallelism = 128;
-    } else if (batchSize >= 4096) {
-        rowsByParallelism = 64;
-    } else if (batchSize >= 2048) {
-        rowsByParallelism = 32;
-    } else if (batchSize >= 1024) {
-        rowsByParallelism = 16;
-    } else if (batchSize >= 512) {
-        rowsByParallelism = 8;
-    } else if (batchSize >= 256) {
-        rowsByParallelism = 4;
-    } else if (batchSize >= 128) {
-        rowsByParallelism = 2;
-    }
-
-    return std::min(rowsByPayload, rowsByParallelism);
-}
-
 template <uint32_t RowsPerBlock>
 uint32_t blocksForRows(uint64_t batchSize) {
     const uint64_t blocks =
@@ -345,9 +298,10 @@ void launchForGrouping(const uint8_t *source,
                        RowIndexT batchSize,
                        ItemIndexT rowBytes,
                        uint64_t sourceRows,
+                       uint32_t rowsPerBlockOverride,
                        cudaStream_t stream) {
-    switch (rowsPerBlockFor(static_cast<uint64_t>(rowBytes),
-                            static_cast<uint64_t>(batchSize))) {
+    const uint32_t rowsPerBlock = rowsPerBlockOverride;
+    switch (rowsPerBlock) {
         case 1:
             launchGrouped<RowIndexT, ItemIndexT, 1>(
                 source, destination, rowIndices, batchSize, rowBytes, sourceRows, stream);
@@ -397,6 +351,7 @@ void launchForItemIndexType(const uint8_t *source,
                             RowIndexT batchSize,
                             uint64_t rowBytes,
                             uint64_t sourceRows,
+                            uint32_t rowsPerBlockOverride,
                             cudaStream_t stream) {
     // Keep ordinary per-row copy arithmetic 32-bit. Leave headroom for the
     // largest 256-lane stride so the terminal increment cannot wrap.
@@ -409,6 +364,7 @@ void launchForItemIndexType(const uint8_t *source,
             batchSize,
             static_cast<uint32_t>(rowBytes),
             sourceRows,
+            rowsPerBlockOverride,
             stream);
     } else {
         launchForGrouping<RowIndexT, uint64_t>(
@@ -418,6 +374,7 @@ void launchForItemIndexType(const uint8_t *source,
             batchSize,
             rowBytes,
             sourceRows,
+            rowsPerBlockOverride,
             stream);
     }
 }
@@ -428,6 +385,7 @@ void launchForRowIndexType(const uint8_t *source,
                            uint64_t batchSize,
                            uint64_t rowBytes,
                            uint64_t sourceRows,
+                           uint32_t rowsPerBlockOverride,
                            cudaStream_t stream) {
     // Batch-row arithmetic is 32-bit for the overwhelmingly common case.
     // Source/destination byte addresses remain 64-bit because valid tensors may
@@ -440,6 +398,7 @@ void launchForRowIndexType(const uint8_t *source,
             static_cast<uint32_t>(batchSize),
             rowBytes,
             sourceRows,
+            rowsPerBlockOverride,
             stream);
     } else {
         launchForItemIndexType<uint64_t>(
@@ -449,6 +408,7 @@ void launchForRowIndexType(const uint8_t *source,
             batchSize,
             rowBytes,
             sourceRows,
+            rowsPerBlockOverride,
             stream);
     }
 }
@@ -482,11 +442,12 @@ void validateGatherTensorShapes(const Tensor &source, const Tensor &destination,
 
 }  // namespace
 
-void launchDeviceResidentNamedGatherKernel(
+void launchDeviceResidentNamedGatherKernelWithRowsPerCtaForBenchmark(
     const Tensor &source,
     Tensor &destination,
     const Tensor &rowIndicesDevice,
     uint64_t logicalRows,
+    uint32_t rowsPerCta,
     Stream &stream) {
     validateGatherTensorShapes(source, destination, rowIndicesDevice);
 
@@ -500,11 +461,17 @@ void launchDeviceResidentNamedGatherKernel(
     const uint64_t totalBytes = destination.getArraySizeInBytes();
     THOR_THROW_IF_FALSE(totalBytes == batchCapacity * rowBytes);
     THOR_THROW_IF_FALSE(source.getArraySizeInBytes() == sourceRows * rowBytes);
+    THOR_THROW_IF_FALSE(rowsPerCta == 0 ||
+                        (rowsPerCta <= 256 && (rowsPerCta & (rowsPerCta - 1)) == 0));
 
     const uint8_t *sourceBytes = static_cast<const uint8_t *>(source.getMemPtr());
     uint8_t *destinationBytes = static_cast<uint8_t *>(destination.getMemPtr());
     const uint64_t *rowIndices = rowIndicesDevice.getMemPtr<uint64_t>();
     const cudaStream_t cudaStream = stream.getStream();
+    const uint32_t selectedRowsPerCta =
+        rowsPerCta == 0
+            ? DeviceResidentRowGrouping::selectRowsPerCta(logicalRows, rowBytes)
+            : rowsPerCta;
 
     // Copy width is selected independently for each gathered source/destination
     // row pair from its actual alignment. This lets odd row strides retain wide
@@ -517,5 +484,16 @@ void launchDeviceResidentNamedGatherKernel(
         logicalRows,
         rowBytes,
         sourceRows,
+        selectedRowsPerCta,
         cudaStream);
+}
+
+void launchDeviceResidentNamedGatherKernel(
+    const Tensor &source,
+    Tensor &destination,
+    const Tensor &rowIndicesDevice,
+    uint64_t logicalRows,
+    Stream &stream) {
+    launchDeviceResidentNamedGatherKernelWithRowsPerCtaForBenchmark(
+        source, destination, rowIndicesDevice, logicalRows, 0, stream);
 }

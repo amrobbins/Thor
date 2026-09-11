@@ -110,6 +110,7 @@ class CublasMatrixMultiply {
         cublasLtMatrixLayout_t c_desc = nullptr;
         cublasLtMatrixLayout_t d_desc = nullptr;
         LtMatmulAlgorithmSelection algorithm;
+        bool forward_epilogue_aux = false;
 
         LtMatmulPlan() = default;
         ~LtMatmulPlan();
@@ -136,7 +137,8 @@ class CublasMatrixMultiply {
                                  Stream stream,
                                  CublasScalarPointerMode pointerMode,
                                  std::optional<Tensor> workspace,
-                                 bool addendIsBiasVector) const;
+                                 bool addendIsBiasVector,
+                                 std::optional<Tensor> forwardEpilogueAux = std::nullopt) const;
 
         void runGemmWithBackwardEpilogue(Tensor A,
                                          Tensor B,
@@ -431,7 +433,9 @@ class CublasMatrixMultiply {
         EpilogueFusion epilogue,
         bool hasAddend,
         bool addendIsBiasVector,
-        std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
+        std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt,
+        bool produceEpilogueAux = false,
+        int64_t epilogueAuxLd = 0);
 
     std::unique_ptr<LtMatmulPlan> buildGemmWithEpiloguePlan(int gpuNum,
                                                             const int32_t A_rows,
@@ -449,7 +453,8 @@ class CublasMatrixMultiply {
                                                             std::optional<Tensor> addend,
                                                             bool addendIsBiasVector,
                                                             std::optional<LtMatmulAlgorithmSelection> selectedAlgorithm = std::nullopt,
-                                                            std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt);
+                                                            std::optional<uint64_t> maxWorkspaceSizeInBytes = std::nullopt,
+                                                            std::optional<Tensor> forwardEpilogueAux = std::nullopt);
 
     void runGemmWithEpiloguePlan(Tensor A,
                                  Tensor B,
@@ -461,7 +466,8 @@ class CublasMatrixMultiply {
                                  CublasScalarPointerMode pointerMode,
                                  std::optional<Tensor> workspace,
                                  const LtMatmulPlan &plan,
-                                 bool addendIsBiasVector);
+                                 bool addendIsBiasVector,
+                                 std::optional<Tensor> forwardEpilogueAux = std::nullopt);
 
     uint64_t getGemmWithEpilogueWorkspaceSizeInBytes(int gpuNum,
                                                      const int32_t A_rows,

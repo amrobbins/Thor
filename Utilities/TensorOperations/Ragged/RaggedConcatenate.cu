@@ -2,6 +2,7 @@
 
 #include "Utilities/Common/ScopedGpu.h"
 #include "Utilities/Expression/CudaHelpers.h"
+#include "Utilities/TensorOperations/Misc/ConcatenateSpanGrouping.h"
 
 #include <cuda_runtime.h>
 #include <cuda/std/bit>
@@ -15,7 +16,6 @@ namespace {
 
 constexpr uint32_t kThreads = 256;
 constexpr uint32_t kMaxSpansPerBlock = kThreads;
-constexpr uint64_t kTargetBytesPerLane = 32;
 constexpr uint32_t kMaxPortableBlocks = 65535;
 constexpr uint64_t kMaxUint32 = 0xFFFFFFFFULL;
 
@@ -395,26 +395,7 @@ void validateLaunchGeometry(uint64_t capacityRows,
 }
 
 uint32_t spansPerBlockFor(uint64_t expectedSpanBytes, uint64_t spans) {
-    uint32_t spansByPayload = 1;
-    if (expectedSpanBytes <= kTargetBytesPerLane) spansByPayload = 256;
-    else if (expectedSpanBytes <= 2 * kTargetBytesPerLane) spansByPayload = 128;
-    else if (expectedSpanBytes <= 4 * kTargetBytesPerLane) spansByPayload = 64;
-    else if (expectedSpanBytes <= 8 * kTargetBytesPerLane) spansByPayload = 32;
-    else if (expectedSpanBytes <= 16 * kTargetBytesPerLane) spansByPayload = 16;
-    else if (expectedSpanBytes <= 32 * kTargetBytesPerLane) spansByPayload = 8;
-    else if (expectedSpanBytes <= 64 * kTargetBytesPerLane) spansByPayload = 4;
-    else if (expectedSpanBytes <= 128 * kTargetBytesPerLane) spansByPayload = 2;
-
-    uint32_t spansByParallelism = 1;
-    if (spans >= 16384) spansByParallelism = 256;
-    else if (spans >= 8192) spansByParallelism = 128;
-    else if (spans >= 4096) spansByParallelism = 64;
-    else if (spans >= 2048) spansByParallelism = 32;
-    else if (spans >= 1024) spansByParallelism = 16;
-    else if (spans >= 512) spansByParallelism = 8;
-    else if (spans >= 256) spansByParallelism = 4;
-    else if (spans >= 128) spansByParallelism = 2;
-    return std::min(spansByPayload, spansByParallelism);
+    return ThorConcatenateSpanGrouping::selectSpansPerCta(spans, expectedSpanBytes);
 }
 
 template <uint32_t SpansPerBlock>
@@ -587,5 +568,67 @@ void launchRaggedSplit(void *dest[],
     } else {
         launchBackwardIndexed<uint64_t>(dest, source, spans, outerSlicesPerValue, numDestArrays,
             sourceValueBytes, sourceSliceBytes, spanGeometry, spansPerBlock, stream);
+    }
+}
+
+void launchRaggedConcatenateWithSpansPerCtaForBenchmark(
+    void *dest,
+    void *source[],
+    uint64_t capacityRows,
+    uint64_t outputValueBytes,
+    uint64_t outerSlicesPerValue,
+    uint32_t numSourceArrays,
+    const RaggedConcatenateSpanGeometry spanGeometry[],
+    uint64_t activeRows,
+    uint32_t spansPerCta,
+    Stream stream) {
+    validateLaunchGeometry(capacityRows, outputValueBytes, outerSlicesPerValue,
+                           numSourceArrays, spanGeometry, activeRows);
+    if (activeRows == 0) return;
+    if (spansPerCta == 0 || spansPerCta > kMaxSpansPerBlock ||
+        (spansPerCta & (spansPerCta - 1U)) != 0U) {
+        throw std::invalid_argument("RaggedConcatenate benchmark spans-per-CTA must be a power of two in [1,256].");
+    }
+    const uint64_t spans = spanCount(activeRows, outerSlicesPerValue, numSourceArrays);
+    const uint64_t outputSliceBytes = outputValueBytes / outerSlicesPerValue;
+    ScopedGpu scopedGpu(stream.getGpuNum());
+    if (spans <= kMaxUint32 && outerSlicesPerValue <= kMaxUint32) {
+        launchForwardIndexed<uint32_t>(dest, source, static_cast<uint32_t>(spans),
+            static_cast<uint32_t>(outerSlicesPerValue), numSourceArrays,
+            outputValueBytes, outputSliceBytes, spanGeometry, spansPerCta, stream);
+    } else {
+        launchForwardIndexed<uint64_t>(dest, source, spans, outerSlicesPerValue, numSourceArrays,
+            outputValueBytes, outputSliceBytes, spanGeometry, spansPerCta, stream);
+    }
+}
+
+void launchRaggedSplitWithSpansPerCtaForBenchmark(
+    void *dest[],
+    void *source,
+    uint64_t capacityRows,
+    uint64_t sourceValueBytes,
+    uint64_t outerSlicesPerValue,
+    uint32_t numDestArrays,
+    const RaggedConcatenateSpanGeometry spanGeometry[],
+    uint64_t activeRows,
+    uint32_t spansPerCta,
+    Stream stream) {
+    validateLaunchGeometry(capacityRows, sourceValueBytes, outerSlicesPerValue,
+                           numDestArrays, spanGeometry, activeRows);
+    if (activeRows == 0) return;
+    if (spansPerCta == 0 || spansPerCta > kMaxSpansPerBlock ||
+        (spansPerCta & (spansPerCta - 1U)) != 0U) {
+        throw std::invalid_argument("RaggedSplit benchmark spans-per-CTA must be a power of two in [1,256].");
+    }
+    const uint64_t spans = spanCount(activeRows, outerSlicesPerValue, numDestArrays);
+    const uint64_t sourceSliceBytes = sourceValueBytes / outerSlicesPerValue;
+    ScopedGpu scopedGpu(stream.getGpuNum());
+    if (spans <= kMaxUint32 && outerSlicesPerValue <= kMaxUint32) {
+        launchBackwardIndexed<uint32_t>(dest, source, static_cast<uint32_t>(spans),
+            static_cast<uint32_t>(outerSlicesPerValue), numDestArrays,
+            sourceValueBytes, sourceSliceBytes, spanGeometry, spansPerCta, stream);
+    } else {
+        launchBackwardIndexed<uint64_t>(dest, source, spans, outerSlicesPerValue, numDestArrays,
+            sourceValueBytes, sourceSliceBytes, spanGeometry, spansPerCta, stream);
     }
 }

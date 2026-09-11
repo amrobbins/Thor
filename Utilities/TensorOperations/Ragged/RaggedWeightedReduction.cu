@@ -306,4 +306,54 @@ void raggedWeightedMeanStatistics(const Tensor& values,
     }
 }
 
+uint32_t raggedWeightedMeanPartialBlockCountForBenchmark(uint64_t active_scalar_count) {
+    return partialBlockCount(active_scalar_count);
+}
+
+void raggedWeightedMeanStatisticsWithPartialCountForBenchmark(
+    const Tensor& values,
+    const Tensor& weights,
+    Tensor& partial_statistics,
+    Tensor& numerator,
+    Tensor& denominator,
+    uint64_t active_value_count,
+    uint64_t max_total_values,
+    uint64_t elements_per_value,
+    uint32_t forced_partial_count,
+    Stream& stream) {
+    if (forced_partial_count == 0)
+        throw std::invalid_argument("ragged WeightedMean benchmark forced_partial_count must be non-zero.");
+    validate(values,
+             weights,
+             partial_statistics,
+             numerator,
+             denominator,
+             active_value_count,
+             max_total_values,
+             elements_per_value);
+    if (active_value_count > std::numeric_limits<uint64_t>::max() / elements_per_value)
+        throw std::overflow_error("ragged WeightedMean active scalar count overflows uint64_t.");
+    const uint64_t active_scalar_count = active_value_count * elements_per_value;
+    if (forced_partial_count > partial_statistics.getDimensions().front())
+        throw std::invalid_argument(
+            "ragged WeightedMean benchmark forced partial count exceeds workspace capacity.");
+
+    dispatchIndexAndLaunch(values,
+                           weights,
+                           partial_statistics,
+                           active_scalar_count,
+                           forced_partial_count,
+                           numerator,
+                           denominator,
+                           stream);
+    if (forced_partial_count > 1) {
+        finalizeWeightedStatisticsKernel<<<1, kBlockSize, 0, stream.getStream()>>>(
+            reinterpret_cast<const WeightedStatistics*>(partial_statistics.getMemPtr<float>()),
+            forced_partial_count,
+            numerator.getMemPtr<float>(),
+            denominator.getMemPtr<float>());
+        CUDA_CHECK(cudaPeekAtLastError());
+    }
+}
+
 }  // namespace ThorImplementation

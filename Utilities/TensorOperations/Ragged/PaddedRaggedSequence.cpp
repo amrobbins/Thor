@@ -155,6 +155,14 @@ Tensor PaddedRaggedSequence::paddedTensorForWidth(uint64_t widthCapacity) const 
 }
 
 void PaddedRaggedSequence::packFrom(const Tensor& packedValues, Stream& stream) {
+    const PaddedRaggedPackLaunchPlan launchPlan = preparePaddedRaggedPackLaunchPlan(
+        plan.batchSize, plan.maxTotalValues, plan.channels, plan.widthCapacity, plan.valuesDataType, plan.offsetsDataType);
+    packFrom(packedValues, launchPlan, stream);
+}
+
+void PaddedRaggedSequence::packFrom(const Tensor& packedValues,
+                                    const PaddedRaggedPackLaunchPlan& launchPlan,
+                                    Stream& stream) {
     if (packedValues.getPlacement() != rowOffsets.getPlacement() || packedValues.getDataType() != plan.valuesDataType ||
         packedValues.getDimensions() != std::vector<uint64_t>({plan.maxTotalValues, plan.channels})) {
         throw std::invalid_argument("PaddedRaggedSequence::packFrom packed values do not match the prepared plan.");
@@ -162,32 +170,26 @@ void PaddedRaggedSequence::packFrom(const Tensor& packedValues, Stream& stream) 
     if (stream.getGpuNum() != packedValues.getPlacement().getDeviceNum()) {
         throw std::invalid_argument("PaddedRaggedSequence::packFrom stream GPU does not match tensor placement.");
     }
-    if (plan.widthCapacity == 0) {
-        return;
-    }
-    launchPackedToPaddedRaggedSequence(
-        packedValues, rowOffsets, paddedValues, plan.batchSize, plan.channels, plan.widthCapacity, stream);
-}
-
-void PaddedRaggedSequence::sanitizedCopyFrom(const PaddedRaggedSequence& source, Stream& stream) {
-    if (source.getRowOffsets() != rowOffsets) {
-        throw std::invalid_argument("PaddedRaggedSequence::sanitizedCopyFrom requires the same canonical offsets tensor.");
-    }
-    if (source.getPlan() != plan) {
-        throw std::invalid_argument("PaddedRaggedSequence::sanitizedCopyFrom requires identical selected representation plans.");
-    }
-    if (stream.getGpuNum() != rowOffsets.getPlacement().getDeviceNum()) {
-        throw std::invalid_argument("PaddedRaggedSequence::sanitizedCopyFrom stream GPU does not match tensor placement.");
+    if (launchPlan.valuesDataType != plan.valuesDataType || launchPlan.offsetsDataType != plan.offsetsDataType ||
+        launchPlan.batchSize != plan.batchSize || launchPlan.maxTotalValues != plan.maxTotalValues ||
+        launchPlan.channels != plan.channels || launchPlan.widthCapacity != plan.widthCapacity) {
+        throw std::invalid_argument("PaddedRaggedSequence::packFrom launch plan does not match the selected padded plan.");
     }
     if (plan.widthCapacity == 0) {
         return;
     }
-    Tensor sourceStorage = source.getPaddedValuesStorage();
-    launchSanitizedPaddedRaggedSequenceCopy(
-        sourceStorage, rowOffsets, paddedValues, plan.batchSize, plan.channels, plan.widthCapacity, stream);
+    launchPackedToPaddedRaggedSequence(packedValues, rowOffsets, paddedValues, launchPlan, stream);
 }
 
 void PaddedRaggedSequence::unpackTo(Tensor& packedValues, Stream& stream) const {
+    const PaddedRaggedUnpackLaunchPlan launchPlan = preparePaddedRaggedUnpackLaunchPlan(
+        plan.batchSize, plan.maxTotalValues, plan.channels, plan.widthCapacity, plan.valuesDataType, plan.offsetsDataType);
+    unpackTo(packedValues, launchPlan, stream);
+}
+
+void PaddedRaggedSequence::unpackTo(Tensor& packedValues,
+                                    const PaddedRaggedUnpackLaunchPlan& launchPlan,
+                                    Stream& stream) const {
     if (packedValues.getPlacement() != rowOffsets.getPlacement() || packedValues.getDataType() != plan.valuesDataType ||
         packedValues.getDimensions() != std::vector<uint64_t>({plan.maxTotalValues, plan.channels})) {
         throw std::invalid_argument("PaddedRaggedSequence::unpackTo packed values do not match the prepared plan.");
@@ -195,11 +197,15 @@ void PaddedRaggedSequence::unpackTo(Tensor& packedValues, Stream& stream) const 
     if (stream.getGpuNum() != packedValues.getPlacement().getDeviceNum()) {
         throw std::invalid_argument("PaddedRaggedSequence::unpackTo stream GPU does not match tensor placement.");
     }
+    if (launchPlan.valuesDataType != plan.valuesDataType || launchPlan.offsetsDataType != plan.offsetsDataType ||
+        launchPlan.batchSize != plan.batchSize || launchPlan.maxTotalValues != plan.maxTotalValues ||
+        launchPlan.channels != plan.channels || launchPlan.widthCapacity != plan.widthCapacity) {
+        throw std::invalid_argument("PaddedRaggedSequence::unpackTo launch plan does not match the selected padded plan.");
+    }
     if (plan.widthCapacity == 0) {
         return;
     }
-    launchPaddedToPackedRaggedSequence(
-        paddedValues, rowOffsets, packedValues, plan.batchSize, plan.channels, plan.widthCapacity, stream);
+    launchPaddedToPackedRaggedSequence(paddedValues, rowOffsets, packedValues, launchPlan, stream);
 }
 
 }  // namespace ThorImplementation

@@ -155,22 +155,64 @@ static std::vector<uint64_t> resolveReductionAxesForAutodiff(const std::vector<u
     return axes;
 }
 
-uint32_t cloneForwardSubtree(const PhysicalExpression& src,
+uint32_t recomputeForwardSubtree(const PhysicalExpression& src,
                              uint32_t src_node_index,
                              PhysicalExpression& dst,
                              std::unordered_map<uint32_t, uint32_t>& old_to_new,
-                             std::unordered_map<uint32_t, uint32_t>& old_cuda_to_new) {
+                             std::unordered_map<uint32_t, uint32_t>& old_cuda_to_new,
+                             const SavedForwardValueInputNames* saved_forward_value_input_names = nullptr) {
     auto it = old_to_new.find(src_node_index);
     if (it != old_to_new.end()) {
         return it->second;
     }
 
     if (src_node_index >= src.nodes.size()) {
-        throw std::runtime_error("cloneForwardSubtree source node index out of range.");
+        throw std::runtime_error("recomputeForwardSubtree source node index out of range.");
+    }
+
+    if (saved_forward_value_input_names != nullptr) {
+        auto saved_it = saved_forward_value_input_names->find(src_node_index);
+        if (saved_it != saved_forward_value_input_names->end()) {
+            if (saved_it->second.empty()) {
+                throw std::runtime_error("Saved forward value binding has an empty backward input name.");
+            }
+            ExprNode saved_input{};
+            saved_input.op = ExprOp::INPUT;
+            saved_input.input_slot = dst.getOrCreateInputSlot(saved_it->second);
+            const ExprNode& source_node = src.nodes[src_node_index];
+            saved_input.input_tensor_dtype = source_node.output_dtype;
+            saved_input.output_dtype = source_node.output_dtype;
+            const uint32_t saved_index = static_cast<uint32_t>(dst.nodes.size());
+            dst.nodes.push_back(std::move(saved_input));
+            old_to_new[src_node_index] = saved_index;
+            return saved_index;
+        }
     }
 
     const ExprNode& src_node = src.nodes[src_node_index];
     ExprNode new_node = src_node;
+#ifdef THOR_DEBUG
+    // Anything copied through recomputeForwardSubtree is primal recomputation in a
+    // backward graph unless a saved-forward binding terminated the traversal
+    // above.  Preserve this provenance all the way to physical execution so
+    // tests can distinguish replayed forward GEMMs/convolutions from the
+    // legitimate gradient operations that reverse mode also creates.
+    // Root inputs, scalar metadata, and metadata-only view aliases do not
+    // execute physical forward work and are kept neutral so merely reading an
+    // operand cannot taint a legitimate backward-gradient stage as replay.
+    // FILL is intentionally *not* neutral:
+    // although Expression classifies it as a leaf for graph traversal, a tensor
+    // FILL is real materialized work and cloning one during backward is replay.
+    const bool non_executing_primal_node =
+        src_node.op == ExprOp::INPUT || src_node.op == ExprOp::RUNTIME_SCALAR ||
+        src_node.op == ExprOp::TENSOR_RUNTIME_SCALAR || src_node.op == ExprOp::SCALAR_FP ||
+        src_node.op == ExprOp::RESHAPE || src_node.op == ExprOp::STRIDED_VIEW ||
+        src_node.op == ExprOp::TRANSPOSE || src_node.op == ExprOp::UNSQUEEZE ||
+        src_node.op == ExprOp::SQUEEZE || src_node.op == ExprOp::RAGGED_VALUEWISE_EXTENT;
+    new_node.execution_provenance = non_executing_primal_node
+                                        ? ExpressionExecutionProvenance::Forward
+                                        : ExpressionExecutionProvenance::BackwardForwardReplay;
+#endif
     if (new_node.op == ExprOp::ROPE) {
         // Backward graphs may clone forward RoPE subtrees for saved activations. Keep those clones out-of-place so
         // gradient evaluation cannot destructively mutate recomputed forward values.
@@ -181,60 +223,60 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
         if (src_node.lhs == UINT32_MAX) {
             throw std::runtime_error("Malformed forward expression: unary node missing lhs.");
         }
-        new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new, old_cuda_to_new);
+        new_node.lhs = recomputeForwardSubtree(src, src_node.lhs, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
         new_node.rhs = UINT32_MAX;
         new_node.aux = UINT32_MAX;
     } else if (Expression::isBinaryOp(src_node.op)) {
         if (src_node.lhs == UINT32_MAX || src_node.rhs == UINT32_MAX) {
             throw std::runtime_error("Malformed forward expression: binary node missing child.");
         }
-        new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new, old_cuda_to_new);
-        new_node.rhs = cloneForwardSubtree(src, src_node.rhs, dst, old_to_new, old_cuda_to_new);
+        new_node.lhs = recomputeForwardSubtree(src, src_node.lhs, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
+        new_node.rhs = recomputeForwardSubtree(src, src_node.rhs, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
         new_node.aux = UINT32_MAX;
     } else if (Expression::isTernaryOp(src_node.op)) {
         if (src_node.lhs == UINT32_MAX || src_node.rhs == UINT32_MAX || src_node.aux == UINT32_MAX) {
             throw std::runtime_error("Malformed forward expression: ternary node missing child.");
         }
-        new_node.lhs = cloneForwardSubtree(src, src_node.lhs, dst, old_to_new, old_cuda_to_new);
-        new_node.rhs = cloneForwardSubtree(src, src_node.rhs, dst, old_to_new, old_cuda_to_new);
-        new_node.aux = cloneForwardSubtree(src, src_node.aux, dst, old_to_new, old_cuda_to_new);
+        new_node.lhs = recomputeForwardSubtree(src, src_node.lhs, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
+        new_node.rhs = recomputeForwardSubtree(src, src_node.rhs, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
+        new_node.aux = recomputeForwardSubtree(src, src_node.aux, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
         if (src_node.alpha_node != UINT32_MAX) {
-            new_node.alpha_node = cloneForwardSubtree(src, src_node.alpha_node, dst, old_to_new, old_cuda_to_new);
+            new_node.alpha_node = recomputeForwardSubtree(src, src_node.alpha_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
         }
         if (src_node.beta_node != UINT32_MAX) {
-            new_node.beta_node = cloneForwardSubtree(src, src_node.beta_node, dst, old_to_new, old_cuda_to_new);
+            new_node.beta_node = recomputeForwardSubtree(src, src_node.beta_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
         }
         if (src_node.attention_use_padding_mask) {
             if (src_node.attention_seq_len_q_node == UINT32_MAX || src_node.attention_seq_len_kv_node == UINT32_MAX) {
                 throw std::runtime_error(
                     "Malformed attention expression: missing padding-mask sequence length node while cloning forward subtree for autodiff.");
             }
-            new_node.attention_seq_len_q_node = cloneForwardSubtree(src, src_node.attention_seq_len_q_node, dst, old_to_new, old_cuda_to_new);
-            new_node.attention_seq_len_kv_node = cloneForwardSubtree(src, src_node.attention_seq_len_kv_node, dst, old_to_new, old_cuda_to_new);
+            new_node.attention_seq_len_q_node = recomputeForwardSubtree(src, src_node.attention_seq_len_q_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
+            new_node.attention_seq_len_kv_node = recomputeForwardSubtree(src, src_node.attention_seq_len_kv_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
         }
         if (src_node.attention_use_ragged_offsets) {
             if (src_node.attention_ragged_offset_q_node == UINT32_MAX || src_node.attention_ragged_offset_kv_node == UINT32_MAX) {
                 throw std::runtime_error(
                     "Malformed attention expression: missing ragged offset node while cloning forward subtree for autodiff.");
             }
-            new_node.attention_ragged_offset_q_node = cloneForwardSubtree(src, src_node.attention_ragged_offset_q_node, dst, old_to_new, old_cuda_to_new);
-            new_node.attention_ragged_offset_kv_node = cloneForwardSubtree(src, src_node.attention_ragged_offset_kv_node, dst, old_to_new, old_cuda_to_new);
+            new_node.attention_ragged_offset_q_node = recomputeForwardSubtree(src, src_node.attention_ragged_offset_q_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
+            new_node.attention_ragged_offset_kv_node = recomputeForwardSubtree(src, src_node.attention_ragged_offset_kv_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
         }
         if (src_node.attention_use_paged_kv_cache) {
             if (src_node.attention_page_table_k_node == UINT32_MAX || src_node.attention_page_table_v_node == UINT32_MAX) {
                 throw std::runtime_error(
                     "Malformed attention expression: missing paged KV page-table node while cloning forward subtree for autodiff.");
             }
-            new_node.attention_page_table_k_node = cloneForwardSubtree(src, src_node.attention_page_table_k_node, dst, old_to_new, old_cuda_to_new);
-            new_node.attention_page_table_v_node = cloneForwardSubtree(src, src_node.attention_page_table_v_node, dst, old_to_new, old_cuda_to_new);
+            new_node.attention_page_table_k_node = recomputeForwardSubtree(src, src_node.attention_page_table_k_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
+            new_node.attention_page_table_v_node = recomputeForwardSubtree(src, src_node.attention_page_table_v_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
         }
         if (src_node.attention_dropout_probability > 0.0f) {
             if (src_node.attention_dropout_seed_node == UINT32_MAX || src_node.attention_dropout_offset_node == UINT32_MAX) {
                 throw std::runtime_error(
                     "Malformed attention expression: missing dropout seed/offset node while cloning forward subtree for autodiff.");
             }
-            new_node.attention_dropout_seed_node = cloneForwardSubtree(src, src_node.attention_dropout_seed_node, dst, old_to_new, old_cuda_to_new);
-            new_node.attention_dropout_offset_node = cloneForwardSubtree(src, src_node.attention_dropout_offset_node, dst, old_to_new, old_cuda_to_new);
+            new_node.attention_dropout_seed_node = recomputeForwardSubtree(src, src_node.attention_dropout_seed_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
+            new_node.attention_dropout_offset_node = recomputeForwardSubtree(src, src_node.attention_dropout_offset_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
         }
     } else if (src_node.op == ExprOp::CUDA_KERNEL_OUTPUT) {
         if (src_node.cuda_kernel_spec_index >= src.cuda_kernel_expressions.size() ||
@@ -245,7 +287,7 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
         new_node.cuda_kernel_input_nodes.reserve(src_node.cuda_kernel_input_nodes.size());
         for (uint32_t input_node : src_node.cuda_kernel_input_nodes) {
             new_node.cuda_kernel_input_nodes.push_back(
-                cloneForwardSubtree(src, input_node, dst, old_to_new, old_cuda_to_new));
+                recomputeForwardSubtree(src, input_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names));
         }
         auto spec_it = old_cuda_to_new.find(src_node.cuda_kernel_spec_index);
         if (spec_it == old_cuda_to_new.end()) {
@@ -264,11 +306,11 @@ uint32_t cloneForwardSubtree(const PhysicalExpression& src,
 
     if (src_node.op == ExprOp::ROPE && src_node.rope_effective_sequence_length_node != UINT32_MAX) {
         new_node.rope_effective_sequence_length_node =
-            cloneForwardSubtree(src, src_node.rope_effective_sequence_length_node, dst, old_to_new, old_cuda_to_new);
+            recomputeForwardSubtree(src, src_node.rope_effective_sequence_length_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
     }
     if (src_node.op == ExprOp::ROPE && src_node.rope_position_ids_node != UINT32_MAX) {
         new_node.rope_position_ids_node =
-            cloneForwardSubtree(src, src_node.rope_position_ids_node, dst, old_to_new, old_cuda_to_new);
+            recomputeForwardSubtree(src, src_node.rope_position_ids_node, dst, old_to_new, old_cuda_to_new, saved_forward_value_input_names);
     }
 
     const uint32_t new_index = static_cast<uint32_t>(dst.nodes.size());
@@ -616,9 +658,30 @@ struct RaggedGradientExtent {
     uint64_t elementsPerValue = 0;
 };
 
+enum class ForwardValueResolutionMode : uint8_t {
+    // Compatibility mode used by the existing buildBackwardOutputs APIs until
+    // BR2 wires generic forward retention into CustomLayer/FusedEquation.
+    RecomputeIfUnbound = 0,
+    // BR1 mode: computed primal values become explicit backward inputs.
+    RequireSavedForward = 1,
+};
+
 class BackwardGraphBuilder {
    public:
-    explicit BackwardGraphBuilder(const PhysicalExpression& forward_expr) : forward_expr(forward_expr) {
+    explicit BackwardGraphBuilder(
+        const PhysicalExpression& forward_expr,
+        const SavedForwardValueInputNames* saved_forward_value_input_names = nullptr,
+        ForwardValueResolutionMode forward_value_resolution_mode = ForwardValueResolutionMode::RecomputeIfUnbound,
+        std::vector<ForwardValueRequirement>* forward_value_requirements = nullptr)
+        : forward_expr(forward_expr),
+          saved_forward_value_input_names(saved_forward_value_input_names),
+          forward_value_resolution_mode(forward_value_resolution_mode),
+          forward_value_requirements(forward_value_requirements) {
+        if (forward_value_resolution_mode == ForwardValueResolutionMode::RequireSavedForward &&
+            forward_value_requirements == nullptr) {
+            throw std::runtime_error(
+                "BackwardGraphBuilder RequireSavedForward mode requires a forward-value requirement sink.");
+        }
         grad_expr.inputs = forward_expr.inputs;
     }
 
@@ -1369,42 +1432,49 @@ class BackwardGraphBuilder {
     }
 
 
-    uint32_t cloneForwardMatmulPreamble(const ExprNode& forward_node) {
+    uint32_t recomputeForwardMatmulPreamble(const ExprNode& forward_node) {
         if (forward_node.op == ExprOp::MATMUL) {
-            uint32_t result = matmul(cloneForward(forward_node.lhs),
-                                     cloneForward(forward_node.rhs),
+            uint32_t result = matmul(forwardValue(forward_node.lhs),
+                                     forwardValue(forward_node.rhs),
                                      forward_node.transpose_lhs,
                                      forward_node.transpose_rhs,
                                      forward_node.output_dtype,
                                      forward_node.compute_dtype);
             ExprNode& result_node = grad_expr.nodes.at(result);
+#ifdef THOR_DEBUG
+            result_node.execution_provenance = ExpressionExecutionProvenance::BackwardForwardReplay;
+#endif
             result_node.matmul_packed_row_binding = forward_node.matmul_packed_row_binding;
             result_node.matmul_packed_row_capacity = forward_node.matmul_packed_row_capacity;
             result_node.alpha_fp = forward_node.alpha_fp;
             result_node.beta_fp = forward_node.beta_fp;
             if (forward_node.alpha_node != UINT32_MAX) {
-                result_node.alpha_node = cloneForward(forward_node.alpha_node);
+                result_node.alpha_node = forwardValue(forward_node.alpha_node);
             }
             if (forward_node.beta_node != UINT32_MAX) {
-                result_node.beta_node = cloneForward(forward_node.beta_node);
+                result_node.beta_node = forwardValue(forward_node.beta_node);
             }
             return result;
         }
         if (forward_node.op == ExprOp::GEMM) {
-            return gemm(cloneForward(forward_node.lhs),
-                        cloneForward(forward_node.rhs),
-                        cloneForward(forward_node.aux),
-                        forward_node.alpha_fp,
-                        forward_node.beta_fp,
-                        forward_node.transpose_lhs,
-                        forward_node.transpose_rhs,
-                        forward_node.transpose_aux,
-                        forward_node.output_dtype,
-                        forward_node.compute_dtype,
-                        forward_node.alpha_node != UINT32_MAX ? cloneForward(forward_node.alpha_node) : UINT32_MAX,
-                        forward_node.beta_node != UINT32_MAX ? cloneForward(forward_node.beta_node) : UINT32_MAX);
+            const uint32_t result = gemm(forwardValue(forward_node.lhs),
+                                         forwardValue(forward_node.rhs),
+                                         forwardValue(forward_node.aux),
+                                         forward_node.alpha_fp,
+                                         forward_node.beta_fp,
+                                         forward_node.transpose_lhs,
+                                         forward_node.transpose_rhs,
+                                         forward_node.transpose_aux,
+                                         forward_node.output_dtype,
+                                         forward_node.compute_dtype,
+                                         forward_node.alpha_node != UINT32_MAX ? forwardValue(forward_node.alpha_node) : UINT32_MAX,
+                                         forward_node.beta_node != UINT32_MAX ? forwardValue(forward_node.beta_node) : UINT32_MAX);
+#ifdef THOR_DEBUG
+            grad_expr.nodes.at(result).execution_provenance = ExpressionExecutionProvenance::BackwardForwardReplay;
+#endif
+            return result;
         }
-        throw std::runtime_error("cloneForwardMatmulPreamble requires a MATMUL or GEMM node.");
+        throw std::runtime_error("recomputeForwardMatmulPreamble requires a MATMUL or GEMM node.");
     }
 
     uint32_t duplicateMatmulWithBackwardEpilogue(uint32_t matmul_idx, uint32_t epilogue_aux, MatmulBackwardEpilogue epilogue) {
@@ -1444,7 +1514,25 @@ class BackwardGraphBuilder {
             return grad_like_output;
         }
 
-        const uint32_t preactivation = cloneForwardMatmulPreamble(forward_node);
+        uint32_t preactivation = UINT32_MAX;
+        if (forward_value_resolution_mode == ForwardValueResolutionMode::RequireSavedForward) {
+            if (forward_node.matmul_epilogue == MatmulEpilogue::Gelu && forward_node.matmul_forward_epilogue_aux) {
+                preactivation = bindForwardEpilogueAuxInput(forward_node);
+            } else {
+                // BR5: requirement-mode autodiff is the no-replay training path.
+                // A fused activation whose derivative needs a swallowed primal
+                // must have a real-forward auxiliary provider. BR3 deliberately
+                // keeps unsupported activation cases unfused; reaching this branch
+                // therefore indicates a training-preview/real-forward contract bug.
+                throw std::runtime_error(
+                    "Autodiff requirement-mode matmul activation backward has no retained real-forward prerequisite; "
+                    "keep the activation unfused or provide an explicit forward auxiliary state instead of replaying the affine preamble.");
+            }
+        } else {
+            // Legacy/explicit compatibility mode may still reconstruct the
+            // preactivation. Normal CustomLayer training never reaches this path.
+            preactivation = recomputeForwardMatmulPreamble(forward_node);
+        }
         if (forward_node.matmul_epilogue == MatmulEpilogue::Relu) {
             const uint32_t fused = duplicateMatmulWithBackwardEpilogue(grad_like_output, preactivation, MatmulBackwardEpilogue::DRelu);
             if (fused != UINT32_MAX) {
@@ -2279,13 +2367,95 @@ class BackwardGraphBuilder {
         return outputs;
     }
 
-    uint32_t cloneForward(uint32_t forward_node_index) {
-        return cloneForwardSubtree(forward_expr, forward_node_index, grad_expr, forward_to_grad_node_map, forward_to_grad_cuda_kernel_map);
+    // Return a primal value needed by a VJP.  In compatibility mode this keeps
+    // the pre-BR1 behavior (recursive replay unless an explicit saved binding
+    // stops it).  In RequireSavedForward mode, only non-executing roots/views
+    // are reconstructed; any materialized producer becomes an explicit backward
+    // input and is reported to the caller as a ForwardValueRequirement.
+    uint32_t forwardValue(uint32_t forward_node_index) {
+        if (forward_node_index >= forward_expr.nodes.size()) {
+            throw std::runtime_error("Autodiff forwardValue node index out of range.");
+        }
+
+        auto existing = forward_value_to_grad_node_map.find(forward_node_index);
+        if (existing != forward_value_to_grad_node_map.end()) {
+            return existing->second;
+        }
+
+        if (saved_forward_value_input_names != nullptr) {
+            auto saved_it = saved_forward_value_input_names->find(forward_node_index);
+            if (saved_it != saved_forward_value_input_names->end()) {
+                return bindForwardValueInput(forward_node_index, saved_it->second);
+            }
+        }
+
+        if (forward_value_resolution_mode == ForwardValueResolutionMode::RecomputeIfUnbound) {
+            // Preserve the legacy saved-binding behavior for descendants too: an
+            // explicitly bound node encountered while recursively rebuilding an
+            // ancestor still terminates replay at that node.
+            return recomputeForwardSubtree(forward_expr,
+                                           forward_node_index,
+                                           grad_expr,
+                                           forward_value_to_grad_node_map,
+                                           forward_value_cuda_kernel_map,
+                                           saved_forward_value_input_names);
+        }
+
+        const ExprNode& source = forward_expr.nodes.at(forward_node_index);
+        ExprNode clone = source;
+#ifdef THOR_DEBUG
+        clone.execution_provenance = ExpressionExecutionProvenance::Forward;
+#endif
+        switch (source.op) {
+            case ExprOp::INPUT:
+            case ExprOp::RUNTIME_SCALAR:
+            case ExprOp::TENSOR_RUNTIME_SCALAR:
+            case ExprOp::SCALAR_FP:
+                return appendNonExecutingForwardValue(forward_node_index, std::move(clone));
+
+            case ExprOp::RESHAPE:
+            case ExprOp::STRIDED_VIEW:
+            case ExprOp::TRANSPOSE:
+            case ExprOp::UNSQUEEZE:
+            case ExprOp::SQUEEZE:
+                if (source.lhs == UINT32_MAX) {
+                    throw std::runtime_error("Malformed non-executing forward alias requested by autodiff.");
+                }
+                clone.lhs = forwardValue(source.lhs);
+                clone.rhs = UINT32_MAX;
+                clone.aux = UINT32_MAX;
+                return appendNonExecutingForwardValue(forward_node_index, std::move(clone));
+
+            case ExprOp::RAGGED_VALUEWISE_EXTENT:
+                if (source.lhs == UINT32_MAX || source.rhs == UINT32_MAX) {
+                    throw std::runtime_error("Malformed ragged forward-value extent requested by autodiff.");
+                }
+                clone.lhs = forwardValue(source.lhs);
+                clone.rhs = forwardValue(source.rhs);
+                clone.aux = UINT32_MAX;
+                return appendNonExecutingForwardValue(forward_node_index, std::move(clone));
+
+            default:
+                return bindForwardValueInput(forward_node_index, makeForwardValueInputName(forward_node_index));
+        }
+    }
+
+    // Explicit checkpoint/recompute primitive.  Unlike forwardValue(), this
+    // always reconstructs the requested producer subtree and deliberately does
+    // not consult saved-forward bindings.  BR7 can later gate calls to this
+    // method behind a user-visible checkpoint policy.
+    uint32_t recomputeForward(uint32_t forward_node_index) {
+        return recomputeForwardSubtree(forward_expr,
+                                       forward_node_index,
+                                       grad_expr,
+                                       explicit_recompute_to_grad_node_map,
+                                       explicit_recompute_cuda_kernel_map,
+                                       nullptr);
     }
 
     uint32_t buildScaledByGemmFactor(uint32_t maybe_scale_node, double constant_scale, uint32_t value_node) {
         if (maybe_scale_node != UINT32_MAX) {
-            uint32_t scale = cloneForward(maybe_scale_node);
+            uint32_t scale = forwardValue(maybe_scale_node);
             if (constant_scale != 1.0) {
                 scale = mul(scalar(constant_scale), scale);
             }
@@ -2332,9 +2502,191 @@ class BackwardGraphBuilder {
         node.matmul_packed_row_capacity = capacity;
     }
 
-    PhysicalExpression takeExpression() { return std::move(grad_expr); }
+    PhysicalExpression takeExpression() {
+        if (forward_value_resolution_mode == ForwardValueResolutionMode::RequireSavedForward) {
+            pruneUnusedInputsForRequirementMode();
+        }
+        return std::move(grad_expr);
+    }
 
    private:
+    void pruneUnusedInputsForRequirementMode() {
+        // BackwardGraphBuilder starts with the forward expression's complete input
+        // ABI so cloned/reconstructed forward nodes can preserve their original
+        // slots.  In RequireSavedForward mode, however, a retained primal can
+        // eliminate the last use of one or more forward roots.  Leaving those
+        // stale NamedInput entries behind makes FusedEquation incorrectly require
+        // tensors that are no longer referenced by any backward node.
+        //
+        // Compact the ABI to exactly the named-input nodes that survived autodiff
+        // (tensor INPUT plus runtime-scalar carriers) and remap their slots. This is
+        // intentionally limited to requirement mode so
+        // the compatibility/recompute APIs retain their historical ABI behavior.
+        auto uses_named_input_slot = [](const ExprNode& node) {
+            return node.op == ExprOp::INPUT || node.op == ExprOp::RUNTIME_SCALAR ||
+                   node.op == ExprOp::TENSOR_RUNTIME_SCALAR;
+        };
+
+        std::vector<bool> used_slots(grad_expr.inputs.size(), false);
+        for (const ExprNode& node : grad_expr.nodes) {
+            if (!uses_named_input_slot(node)) {
+                continue;
+            }
+            if (node.input_slot >= used_slots.size()) {
+                throw std::runtime_error(
+                    "BackwardGraphBuilder found a named-input node with an out-of-range input slot while pruning requirement-mode ABI.");
+            }
+            used_slots[node.input_slot] = true;
+        }
+
+        std::vector<uint32_t> old_to_new_slot(grad_expr.inputs.size(), UINT32_MAX);
+        std::vector<NamedInput> compact_inputs;
+        compact_inputs.reserve(grad_expr.inputs.size());
+        for (const NamedInput& input : grad_expr.inputs) {
+            if (input.slot >= used_slots.size()) {
+                throw std::runtime_error(
+                    "BackwardGraphBuilder found a NamedInput with an out-of-range slot while pruning requirement-mode ABI.");
+            }
+            if (!used_slots[input.slot]) {
+                continue;
+            }
+            if (old_to_new_slot[input.slot] != UINT32_MAX) {
+                throw std::runtime_error(
+                    "BackwardGraphBuilder found duplicate NamedInput slots while pruning requirement-mode ABI.");
+            }
+            const uint32_t new_slot = static_cast<uint32_t>(compact_inputs.size());
+            old_to_new_slot[input.slot] = new_slot;
+            compact_inputs.push_back(NamedInput{input.name, new_slot, input.kind});
+        }
+
+        for (ExprNode& node : grad_expr.nodes) {
+            if (!uses_named_input_slot(node)) {
+                continue;
+            }
+            if (node.input_slot >= old_to_new_slot.size() || old_to_new_slot[node.input_slot] == UINT32_MAX) {
+                throw std::runtime_error(
+                    "BackwardGraphBuilder could not remap a named-input node while pruning requirement-mode ABI.");
+            }
+            node.input_slot = old_to_new_slot[node.input_slot];
+        }
+
+        grad_expr.inputs = std::move(compact_inputs);
+    }
+
+    uint32_t appendNonExecutingForwardValue(uint32_t forward_node_index, ExprNode node) {
+        const uint32_t node_idx = static_cast<uint32_t>(grad_expr.nodes.size());
+        grad_expr.nodes.push_back(std::move(node));
+        forward_value_to_grad_node_map.emplace(forward_node_index, node_idx);
+        return node_idx;
+    }
+
+    std::string makeForwardValueInputName(uint32_t forward_node_index) const {
+        const std::string base = "__thor_saved_forward_value_" + std::to_string(forward_node_index);
+        auto name_is_available = [&](const std::string& candidate) {
+            return std::none_of(grad_expr.inputs.begin(), grad_expr.inputs.end(), [&](const NamedInput& input) {
+                return input.name == candidate;
+            });
+        };
+        if (name_is_available(base)) {
+            return base;
+        }
+        for (uint32_t suffix = 1;; ++suffix) {
+            const std::string candidate = base + "_" + std::to_string(suffix);
+            if (name_is_available(candidate)) {
+                return candidate;
+            }
+        }
+    }
+
+    uint32_t bindForwardEpilogueAuxInput(const ExprNode& forward_node) {
+        if (!forward_node.matmul_forward_epilogue_aux || forward_node.matmul_epilogue != MatmulEpilogue::Gelu) {
+            throw std::runtime_error("Autodiff requested a matmul forward epilogue auxiliary value from a node that does not provide one.");
+        }
+
+        const uint32_t forward_node_index = static_cast<uint32_t>(&forward_node - forward_expr.nodes.data());
+        if (forward_node_index >= forward_expr.nodes.size()) {
+            throw std::runtime_error("Autodiff could not identify the forward matmul epilogue node.");
+        }
+        auto existing = forward_epilogue_aux_to_grad_node_map.find(forward_node_index);
+        if (existing != forward_epilogue_aux_to_grad_node_map.end()) {
+            return existing->second;
+        }
+
+        const std::string backward_input_name = makeForwardEpilogueAuxInputName(forward_node_index);
+        ExprNode saved_input{};
+        saved_input.op = ExprOp::INPUT;
+        saved_input.input_slot = grad_expr.getOrCreateInputSlot(backward_input_name);
+        const std::optional<DataType> saved_dtype =
+            forward_node.output_dtype.has_value() ? forward_node.output_dtype : forward_node.input_tensor_dtype;
+        saved_input.input_tensor_dtype = saved_dtype;
+        saved_input.output_dtype = saved_dtype;
+#ifdef THOR_DEBUG
+        saved_input.execution_provenance = ExpressionExecutionProvenance::Forward;
+#endif
+        const uint32_t saved_index = static_cast<uint32_t>(grad_expr.nodes.size());
+        grad_expr.nodes.push_back(std::move(saved_input));
+        forward_epilogue_aux_to_grad_node_map.emplace(forward_node_index, saved_index);
+
+        if (forward_value_requirements != nullptr) {
+            forward_value_requirements->push_back(ForwardValueRequirement{
+                .forward_node_index = forward_node_index,
+                .backward_input_name = backward_input_name,
+                .kind = ForwardValueRequirementKind::MatmulEpilogueAux,
+            });
+        }
+        return saved_index;
+    }
+
+    std::string makeForwardEpilogueAuxInputName(uint32_t forward_node_index) const {
+        const std::string base = "__thor_saved_forward_matmul_epilogue_aux_" + std::to_string(forward_node_index);
+        auto name_is_available = [&](const std::string& candidate) {
+            return std::none_of(grad_expr.inputs.begin(), grad_expr.inputs.end(), [&](const NamedInput& input) {
+                return input.name == candidate;
+            });
+        };
+        if (name_is_available(base)) {
+            return base;
+        }
+        for (uint32_t suffix = 1;; ++suffix) {
+            const std::string candidate = base + "_" + std::to_string(suffix);
+            if (name_is_available(candidate)) {
+                return candidate;
+            }
+        }
+    }
+
+    uint32_t bindForwardValueInput(uint32_t forward_node_index, const std::string& backward_input_name) {
+        if (backward_input_name.empty()) {
+            throw std::runtime_error("Saved forward value binding has an empty backward input name.");
+        }
+        auto existing = forward_value_to_grad_node_map.find(forward_node_index);
+        if (existing != forward_value_to_grad_node_map.end()) {
+            return existing->second;
+        }
+
+        const ExprNode& source = forward_expr.nodes.at(forward_node_index);
+        ExprNode saved_input{};
+        saved_input.op = ExprOp::INPUT;
+        saved_input.input_slot = grad_expr.getOrCreateInputSlot(backward_input_name);
+        const std::optional<DataType> saved_dtype = source.output_dtype.has_value() ? source.output_dtype : source.input_tensor_dtype;
+        saved_input.input_tensor_dtype = saved_dtype;
+        saved_input.output_dtype = saved_dtype;
+#ifdef THOR_DEBUG
+        saved_input.execution_provenance = ExpressionExecutionProvenance::Forward;
+#endif
+        const uint32_t saved_index = static_cast<uint32_t>(grad_expr.nodes.size());
+        grad_expr.nodes.push_back(std::move(saved_input));
+        forward_value_to_grad_node_map.emplace(forward_node_index, saved_index);
+
+        if (forward_value_requirements != nullptr) {
+            forward_value_requirements->push_back(ForwardValueRequirement{
+                .forward_node_index = forward_node_index,
+                .backward_input_name = backward_input_name,
+            });
+        }
+        return saved_index;
+    }
+
     bool isKnownMaterializedAs(uint32_t node_idx, DataType dtype) const {
         if (node_idx >= grad_expr.nodes.size()) {
             throw std::runtime_error("BackwardGraphBuilder materialized-dtype query index out of range.");
@@ -2359,15 +2711,31 @@ class BackwardGraphBuilder {
     }
 
     uint32_t push(ExprNode node) {
+#ifdef THOR_DEBUG
+        // Nodes constructed by BackwardGraphBuilder are genuine derivative
+        // work by default. recomputeForwardSubtree bypasses push() and stamps its
+        // copies as BackwardForwardReplay instead.
+        node.execution_provenance = ExpressionExecutionProvenance::BackwardGradient;
+#endif
         const uint32_t idx = static_cast<uint32_t>(grad_expr.nodes.size());
         grad_expr.nodes.push_back(std::move(node));
         return idx;
     }
 
     const PhysicalExpression& forward_expr;
+    const SavedForwardValueInputNames* saved_forward_value_input_names = nullptr;
+    ForwardValueResolutionMode forward_value_resolution_mode = ForwardValueResolutionMode::RecomputeIfUnbound;
+    std::vector<ForwardValueRequirement>* forward_value_requirements = nullptr;
     PhysicalExpression grad_expr;
-    std::unordered_map<uint32_t, uint32_t> forward_to_grad_node_map;
-    std::unordered_map<uint32_t, uint32_t> forward_to_grad_cuda_kernel_map;
+    // forwardValue() and explicit recompute intentionally use disjoint caches:
+    // a saved value must never accidentally satisfy an explicit checkpoint
+    // recomputation request, and a replayed producer must never hide a declared
+    // saved-forward dependency.
+    std::unordered_map<uint32_t, uint32_t> forward_value_to_grad_node_map;
+    std::unordered_map<uint32_t, uint32_t> forward_epilogue_aux_to_grad_node_map;
+    std::unordered_map<uint32_t, uint32_t> forward_value_cuda_kernel_map;
+    std::unordered_map<uint32_t, uint32_t> explicit_recompute_to_grad_node_map;
+    std::unordered_map<uint32_t, uint32_t> explicit_recompute_cuda_kernel_map;
     std::vector<std::optional<uint32_t>> node_grads;
 };
 
@@ -3800,7 +4168,10 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                                          const std::optional<std::unordered_map<std::string, uint32_t>>& upstream_node_indices_by_output,
                                          const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
                                          bool accumulate_grad_outputs,
-                                         bool allow_shape_deferred_placeholders = false) {
+                                         bool allow_shape_deferred_placeholders = false,
+                                         const SavedForwardValueInputNames* saved_forward_value_input_names = nullptr,
+                                         ForwardValueResolutionMode forward_value_resolution_mode = ForwardValueResolutionMode::RecomputeIfUnbound,
+                                         std::vector<ForwardValueRequirement>* forward_value_requirements = nullptr) {
     if (!forward_outputs.expr) {
         throw std::runtime_error("buildBackwardOutputs requires non-null forward_outputs.expr.");
     }
@@ -3886,7 +4257,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
         }
     }
 
-    BackwardGraphBuilder builder(forward_expr);
+    BackwardGraphBuilder builder(
+        forward_expr, saved_forward_value_input_names, forward_value_resolution_mode, forward_value_requirements);
     builder.initializeAdjoints();
 
     for (const NamedOutput& forward_output : forward_outputs.outputs) {
@@ -3895,7 +4267,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
             if (upstream_node_indices_by_output.has_value()) {
                 auto upstream_node_it = upstream_node_indices_by_output->find(forward_output.name);
                 if (upstream_node_it != upstream_node_indices_by_output->end()) {
-                    output_seed = builder.cloneForward(upstream_node_it->second);
+                    output_seed = builder.forwardValue(upstream_node_it->second);
                 }
             }
 
@@ -4051,7 +4423,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         node.ragged_runtime_elements_per_value == 0) {
                         throw std::runtime_error("Ragged valuewise autodiff encountered incomplete runtime-extent metadata.");
                     }
-                    const uint32_t offsets = builder.cloneForward(node.rhs);
+                    const uint32_t offsets = builder.forwardValue(node.rhs);
                     const uint32_t ragged_grad = builder.raggedValuewiseExtent(
                         grad,
                         offsets,
@@ -4084,11 +4456,11 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::MUL: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    const uint32_t rhs = builder.forwardValue(node.rhs);
                     addContributionToChild(node.lhs, builder.mul(grad, rhs), node_dims);
                 }
                 if (node_reaches_requested_inputs.at(node.rhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     addContributionToChild(node.rhs, builder.mul(grad, lhs), node_dims);
                 }
                 break;
@@ -4096,12 +4468,12 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::DIV: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    const uint32_t rhs = builder.forwardValue(node.rhs);
                     addContributionToChild(node.lhs, builder.div(grad, rhs), node_dims);
                 }
                 if (node_reaches_requested_inputs.at(node.rhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
-                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
+                    const uint32_t rhs = builder.forwardValue(node.rhs);
                     const uint32_t rhs_sq = builder.mul(rhs, rhs);
                     addContributionToChild(node.rhs, builder.neg(builder.div(builder.mul(grad, lhs), rhs_sq)), node_dims);
                 }
@@ -4116,7 +4488,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::ABS: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t neg_lhs = builder.neg(lhs);
 
                     // sign(lhs) with safe 0 handling:
@@ -4133,7 +4505,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
             }
 
             case ExprOp::WHERE: {
-                const uint32_t cond = builder.cloneForward(node.lhs);
+                const uint32_t cond = builder.forwardValue(node.lhs);
                 const uint32_t zero = builder.scalar(0.0);
                 if (node_reaches_requested_inputs.at(node.rhs)) {
                     const uint32_t true_contrib = builder.where(cond, grad, zero);
@@ -4189,7 +4561,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::SIN: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     addContributionToChild(node.lhs, builder.mul(grad, builder.cos(lhs)), node_dims);
                 }
                 break;
@@ -4197,7 +4569,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::COS: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     addContributionToChild(node.lhs, builder.mul(builder.neg(grad), builder.sin(lhs)), node_dims);
                 }
                 break;
@@ -4205,7 +4577,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::TAN: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
                     const uint32_t one_plus_out_squared = builder.add(builder.scalar(1.0), builder.mul(out, out));
                     addContributionToChild(node.lhs, builder.mul(grad, one_plus_out_squared), node_dims);
                 }
@@ -4214,7 +4586,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::ASIN: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t one_minus_lhs_squared = builder.sub(builder.scalar(1.0), builder.mul(lhs, lhs));
                     addContributionToChild(node.lhs, builder.div(grad, builder.sqrt(one_minus_lhs_squared)), node_dims);
                 }
@@ -4223,7 +4595,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::ACOS: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t one_minus_lhs_squared = builder.sub(builder.scalar(1.0), builder.mul(lhs, lhs));
                     addContributionToChild(node.lhs, builder.div(builder.neg(grad), builder.sqrt(one_minus_lhs_squared)), node_dims);
                 }
@@ -4232,7 +4604,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::ATAN: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t one_plus_lhs_squared = builder.add(builder.scalar(1.0), builder.mul(lhs, lhs));
                     addContributionToChild(node.lhs, builder.div(grad, one_plus_lhs_squared), node_dims);
                 }
@@ -4241,7 +4613,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::SINH: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     addContributionToChild(node.lhs, builder.mul(grad, builder.cosh(lhs)), node_dims);
                 }
                 break;
@@ -4249,7 +4621,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::COSH: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     addContributionToChild(node.lhs, builder.mul(grad, builder.sinh(lhs)), node_dims);
                 }
                 break;
@@ -4257,7 +4629,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::ASINH: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t denom = builder.sqrt(builder.add(builder.mul(lhs, lhs), builder.scalar(1.0)));
                     addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
                 }
@@ -4266,7 +4638,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::ACOSH: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t denom = builder.mul(builder.sqrt(builder.sub(lhs, builder.scalar(1.0))),
                                                        builder.sqrt(builder.add(lhs, builder.scalar(1.0))));
                     addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
@@ -4276,7 +4648,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::ATANH: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t denom = builder.sub(builder.scalar(1.0), builder.mul(lhs, lhs));
                     addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
                 }
@@ -4285,7 +4657,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::ERF: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t lhs_squared = builder.mul(lhs, lhs);
                     const uint32_t scale = builder.scalar(1.1283791670955126);  // 2 / sqrt(pi)
                     addContributionToChild(node.lhs, builder.mul(grad, builder.mul(scale, builder.exp(builder.neg(lhs_squared)))), node_dims);
@@ -4295,7 +4667,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::ERFC: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t lhs_squared = builder.mul(lhs, lhs);
                     const uint32_t scale = builder.scalar(-1.1283791670955126);  // -2 / sqrt(pi)
                     addContributionToChild(node.lhs, builder.mul(grad, builder.mul(scale, builder.exp(builder.neg(lhs_squared)))), node_dims);
@@ -4305,8 +4677,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::ERFCX: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
-                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
+                    const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
                     const uint32_t two_x_erfcx = builder.mul(builder.scalar(2.0), builder.mul(lhs, out));
                     const uint32_t two_over_sqrt_pi = builder.scalar(1.1283791670955126);
                     addContributionToChild(node.lhs, builder.mul(grad, builder.sub(two_x_erfcx, two_over_sqrt_pi)), node_dims);
@@ -4316,7 +4688,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::ERFINV: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
                     const uint32_t scale = builder.scalar(0.8862269254527580);  // sqrt(pi) / 2
                     addContributionToChild(node.lhs, builder.mul(grad, builder.mul(scale, builder.exp(builder.mul(out, out)))), node_dims);
                 }
@@ -4325,7 +4697,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::ERFCINV: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
                     const uint32_t scale = builder.scalar(-0.8862269254527580);  // -sqrt(pi) / 2
                     addContributionToChild(node.lhs, builder.mul(grad, builder.mul(scale, builder.exp(builder.mul(out, out)))), node_dims);
                 }
@@ -4334,8 +4706,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::TGAMMA: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
-                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
+                    const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
                     addContributionToChild(node.lhs, builder.mul(grad, builder.mul(out, builder.digamma(lhs))), node_dims);
                 }
                 break;
@@ -4343,7 +4715,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::LGAMMA: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     addContributionToChild(node.lhs, builder.mul(grad, builder.digamma(lhs)), node_dims);
                 }
                 break;
@@ -4617,7 +4989,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                                                  "kernel input: " + backward_input.name);
                     }
                     const uint32_t forward_input_node = node.cuda_kernel_input_nodes[forward_input_it->second];
-                    backward_input_nodes.emplace(backward_input.name, builder.cloneForward(forward_input_node));
+                    backward_input_nodes.emplace(backward_input.name, builder.forwardValue(forward_input_node));
                     if (has_forward_dims) {
                         backward_input_shapes.emplace(backward_input.name, forward_node_dims.at(forward_input_node));
                     }
@@ -4686,7 +5058,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::EXP: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
                     addContributionToChild(node.lhs, builder.mul(grad, out), node_dims);
                 }
                 break;
@@ -4694,15 +5066,19 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::EXPM1: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
-                    addContributionToChild(node.lhs, builder.mul(grad, builder.exp(lhs)), node_dims);
+                    // d/dx expm1(x) = exp(x) = expm1(x) + 1. Consume the
+                    // real forward output instead of launching another EXP in
+                    // backward merely to reconstruct the derivative factor.
+                    const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
+                    const uint32_t exp_x = builder.add(out, builder.scalar(1.0));
+                    addContributionToChild(node.lhs, builder.mul(grad, exp_x), node_dims);
                 }
                 break;
             }
 
             case ExprOp::EXP2: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
                     const uint32_t scale = builder.scalar(std::log(2.0));
                     addContributionToChild(node.lhs, builder.mul(grad, builder.mul(out, scale)), node_dims);
                 }
@@ -4711,7 +5087,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::EXP10: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
                     const uint32_t scale = builder.scalar(std::log(10.0));
                     addContributionToChild(node.lhs, builder.mul(grad, builder.mul(out, scale)), node_dims);
                 }
@@ -4720,7 +5096,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::LN: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     addContributionToChild(node.lhs, builder.div(grad, lhs), node_dims);
                 }
                 break;
@@ -4728,7 +5104,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::LOG1P: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t denom = builder.add(builder.scalar(1.0), lhs);
                     addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
                 }
@@ -4737,7 +5113,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::LOG2: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t denom = builder.mul(lhs, builder.scalar(std::log(2.0)));
                     addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
                 }
@@ -4746,7 +5122,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::LOG10: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t denom = builder.mul(lhs, builder.scalar(std::log(10.0)));
                     addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
                 }
@@ -4755,7 +5131,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::SQRT: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
                     const uint32_t denom = builder.mul(builder.scalar(2.0), out);
                     addContributionToChild(node.lhs, builder.div(grad, denom), node_dims);
                 }
@@ -4764,7 +5140,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::TANH: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
                     const uint32_t one = builder.scalar(1.0);
                     const uint32_t one_minus_out_squared = builder.sub(one, builder.mul(out, out));
                     addContributionToChild(node.lhs, builder.mul(grad, one_minus_out_squared), node_dims);
@@ -4774,7 +5150,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::NORMCDF: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t neg_half = builder.scalar(-0.5);
                     const uint32_t inv_sqrt_two_pi = builder.scalar(0.3989422804014327);
                     const uint32_t pdf = builder.mul(inv_sqrt_two_pi, builder.exp(builder.mul(neg_half, builder.mul(lhs, lhs))));
@@ -4788,11 +5164,11 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     const uint32_t effective_sequence_length =
                         node.rope_effective_sequence_length_node == UINT32_MAX
                             ? UINT32_MAX
-                            : builder.cloneForward(node.rope_effective_sequence_length_node);
+                            : builder.forwardValue(node.rope_effective_sequence_length_node);
                     const uint32_t position_ids =
                         node.rope_position_ids_node == UINT32_MAX
                             ? UINT32_MAX
-                            : builder.cloneForward(node.rope_position_ids_node);
+                            : builder.forwardValue(node.rope_position_ids_node);
                     const uint32_t lhs_grad = builder.rotaryPositionEmbedding(
                         grad,
                         node,
@@ -4836,8 +5212,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         // an FP32 accumulator into an FP16/BF16 forward, so make the boundary
                         // dtype explicit just as the RMSNorm backward path does.
                         grad_like_output = builder.cast(grad_like_output, node.output_dtype.value());
-                        const uint32_t y = builder.cloneForward(static_cast<uint32_t>(node_idx));
-                        const uint32_t offsets = builder.cloneForward(forward_input.rhs);
+                        const uint32_t y = builder.forwardValue(static_cast<uint32_t>(node_idx));
+                        const uint32_t offsets = builder.forwardValue(forward_input.rhs);
                         uint32_t dx = builder.raggedSoftmaxBackward(y,
                                                                    grad_like_output,
                                                                    offsets,
@@ -4872,13 +5248,17 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     }
 
                     if (node.softmax_algorithm == CUDNN_SOFTMAX_LOG) {
-                        const uint32_t lhs = builder.cloneForward(node.lhs);
-                        const uint32_t ordinary_softmax = builder.softmax(lhs, CUDNN_SOFTMAX_ACCURATE, node.softmax_mode);
+                        // d log_softmax(x) consumes softmax(x). Since the real
+                        // forward already materialized log_softmax(x), recover
+                        // the probability pointwise as exp(forward_output)
+                        // instead of launching a second cuDNN Softmax from x.
+                        const uint32_t log_softmax_out = builder.forwardValue(static_cast<uint32_t>(node_idx));
+                        const uint32_t ordinary_softmax = builder.exp(log_softmax_out);
                         const uint32_t sum_grad = builder.reduction(ExprOp::REDUCE_SUM, grad, axes, {});
                         const uint32_t correction = builder.mul(ordinary_softmax, sum_grad);
                         addContributionToChild(node.lhs, builder.sub(grad, correction), node_dims);
                     } else {
-                        const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                        const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
                         const uint32_t sum_grad_times_out = builder.reduction(ExprOp::REDUCE_SUM, builder.mul(grad, out), axes, {});
                         addContributionToChild(node.lhs, builder.mul(out, builder.sub(grad, sum_grad_times_out)), node_dims);
                     }
@@ -4932,8 +5312,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     if (node.output_dtype.has_value()) {
                         grad_like_output = builder.cast(grad_like_output, node.output_dtype.value());
                     }
-                    const uint32_t x = builder.cloneForward(node.lhs);
-                    const uint32_t scale = builder.cloneForward(node.rhs);
+                    const uint32_t x = builder.forwardValue(node.lhs);
+                    const uint32_t scale = builder.forwardValue(node.rhs);
                     const ExprNode& forward_x = forward_expr.nodes.at(node.lhs);
                     const ExprNode& forward_scale = forward_expr.nodes.at(node.rhs);
                     if (!forward_x.output_dtype.has_value() || !forward_scale.output_dtype.has_value()) {
@@ -4993,8 +5373,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 if (node.output_dtype.has_value()) {
                     grad_like_output = builder.cast(grad_like_output, node.output_dtype.value());
                 }
-                const uint32_t x = builder.cloneForward(node.lhs);
-                const uint32_t scale = builder.cloneForward(node.rhs);
+                const uint32_t x = builder.forwardValue(node.lhs);
+                const uint32_t scale = builder.forwardValue(node.rhs);
                 const ExprNode& forward_scale = forward_expr.nodes.at(node.rhs);
                 const ExprNode& forward_values = forward_expr.nodes.at(forward_x_extent.lhs);
                 if (!forward_values.output_dtype.has_value() || !forward_scale.output_dtype.has_value()) {
@@ -5041,15 +5421,15 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
 
             case ExprOp::POW: {
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
-                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
+                    const uint32_t rhs = builder.forwardValue(node.rhs);
                     const uint32_t rhs_minus_one = builder.sub(rhs, builder.scalar(1.0));
                     const uint32_t lhs_pow_rhs_minus_one = builder.binary(ExprOp::POW, lhs, rhs_minus_one);
                     addContributionToChild(node.lhs, builder.mul(grad, builder.mul(rhs, lhs_pow_rhs_minus_one)), node_dims);
                 }
                 if (node_reaches_requested_inputs.at(node.rhs)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
-                    const uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
+                    const uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
                     addContributionToChild(node.rhs, builder.mul(grad, builder.mul(out, builder.unary(ExprOp::LN, lhs))), node_dims);
                 }
                 break;
@@ -5126,7 +5506,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
                     }
 
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t expanded_grad =
                         broadcastGradToDims(grad_before_expand, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
                     const uint32_t scaled = builder.mul(builder.scalar(2.0), builder.mul(expanded_grad, lhs));
@@ -5140,7 +5520,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
 
                     uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
-                    uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
 
                     if (has_forward_dims && !node.squeeze_axes.empty()) {
                         const std::vector<uint64_t> unsqueeze_axes =
@@ -5149,7 +5529,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         out = builder.unsqueeze(out, unsqueeze_axes);
                     }
 
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t expanded_grad =
                         broadcastGradToDims(grad_before_expand, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
                     const uint32_t scaled = builder.div(builder.mul(expanded_grad, lhs), out);
@@ -5159,8 +5539,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
             }
 
             case ExprOp::MIN: {
-                const uint32_t lhs = builder.cloneForward(node.lhs);
-                const uint32_t rhs = builder.cloneForward(node.rhs);
+                const uint32_t lhs = builder.forwardValue(node.lhs);
+                const uint32_t rhs = builder.forwardValue(node.rhs);
                 if (node_reaches_requested_inputs.at(node.lhs)) {
                     const uint32_t lhs_mask = builder.binary(ExprOp::MIN_GRAD_LEFT, lhs, rhs);
                     addContributionToChild(node.lhs, builder.mul(grad, lhs_mask), node_dims);
@@ -5173,8 +5553,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
             }
 
             case ExprOp::MAX: {
-                const uint32_t lhs = builder.cloneForward(node.lhs);
-                const uint32_t rhs = builder.cloneForward(node.rhs);
+                const uint32_t lhs = builder.forwardValue(node.lhs);
+                const uint32_t rhs = builder.forwardValue(node.rhs);
                 if (node_reaches_requested_inputs.at(node.lhs)) {
                     const uint32_t lhs_mask = builder.binary(ExprOp::MAX_GRAD_LEFT, lhs, rhs);
                     addContributionToChild(node.lhs, builder.mul(grad, lhs_mask), node_dims);
@@ -5191,7 +5571,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     const std::vector<uint64_t> lhs_dims = has_forward_dims ? forward_node_dims.at(node.lhs) : node_dims;
 
                     uint32_t grad_before_expand = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
-                    uint32_t out = builder.cloneForward(static_cast<uint32_t>(node_idx));
+                    uint32_t out = builder.forwardValue(static_cast<uint32_t>(node_idx));
 
                     if (has_forward_dims && !node.squeeze_axes.empty()) {
                         const std::vector<uint64_t> unsqueeze_axes =
@@ -5200,7 +5580,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         out = builder.unsqueeze(out, unsqueeze_axes);
                     }
 
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t expanded_grad =
                         broadcastGradToDims(grad_before_expand, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
 
@@ -5223,7 +5603,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         grad_before_expand = builder.unsqueeze(grad_before_expand, unsqueeze_axes);
                     }
 
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
                     const uint32_t expanded_grad =
                         broadcastGradToDims(grad_before_expand, lhs_dims, preferredGradValueDType(forward_expr.nodes.at(node.lhs)));
 
@@ -5244,7 +5624,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     uint32_t grad_like_output = shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
                     const uint32_t routed = builder.reduceMinMaxBackward(
                         node.op == ExprOp::REDUCE_MIN ? ExprOp::REDUCE_MIN_BACKWARD : ExprOp::REDUCE_MAX_BACKWARD,
-                        builder.cloneForward(node.lhs),
+                        builder.forwardValue(node.lhs),
                         grad_like_output,
                         node.reduction_axes,
                         node.squeeze_axes,
@@ -5291,7 +5671,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 const ExprNode* lhs_ragged_marker = direct_ragged_marker(node.lhs);
                 auto wrap_with_marker = [&](uint32_t value, const ExprNode& marker, uint64_t elements_per_value) {
                     return builder.raggedValuewiseExtent(value,
-                                                         builder.cloneForward(marker.rhs),
+                                                         builder.forwardValue(marker.rhs),
                                                          marker.ragged_runtime_batch_size,
                                                          marker.ragged_runtime_max_active_values,
                                                          elements_per_value,
@@ -5326,7 +5706,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 };
 
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    uint32_t rhs = builder.cloneForward(node.rhs);
+                    uint32_t rhs = builder.forwardValue(node.rhs);
                     if (low_precision_operand_dtype.has_value()) {
                         // A forward operand may be backed by BF16/FP16 storage while deliberately
                         // exposing an FP32 logical value.  Reusing that logical value as a backward
@@ -5365,13 +5745,13 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 if (node_reaches_requested_inputs.at(node.rhs)) {
                     uint32_t lhs = UINT32_MAX;
                     if (lhs_ragged_marker != nullptr) {
-                        lhs = builder.cloneForward(lhs_ragged_marker->lhs);
+                        lhs = builder.forwardValue(lhs_ragged_marker->lhs);
                         if (low_precision_operand_dtype.has_value()) {
                             lhs = builder.cast(lhs, low_precision_operand_dtype.value());
                         }
                         lhs = wrap_with_marker(lhs, *lhs_ragged_marker, lhs_ragged_marker->ragged_runtime_elements_per_value);
                     } else {
-                        lhs = builder.cloneForward(node.lhs);
+                        lhs = builder.forwardValue(node.lhs);
                         if (low_precision_operand_dtype.has_value()) {
                             lhs = builder.cast(lhs, low_precision_operand_dtype.value());
                         }
@@ -5408,7 +5788,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 const auto rhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.rhs));
 
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    const uint32_t filter = builder.cloneForward(node.rhs);
+                    const uint32_t filter = builder.forwardValue(node.rhs);
                     uint32_t lhs_grad = UINT32_MAX;
                     if (node.op == ExprOp::CONV3D) {
                         lhs_grad = builder.conv3dBackwardData(filter,
@@ -5431,7 +5811,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 }
 
                 if (node_reaches_requested_inputs.at(node.rhs)) {
-                    const uint32_t input = builder.cloneForward(node.lhs);
+                    const uint32_t input = builder.forwardValue(node.lhs);
                     uint32_t rhs_grad = UINT32_MAX;
                     if (node.op == ExprOp::CONV3D) {
                         rhs_grad = builder.conv3dBackwardFilter(input,
@@ -5490,7 +5870,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 }
 
                 if (node_reaches_requested_inputs.at(node.lhs)) {
-                    uint32_t rhs = builder.cloneForward(node.rhs);
+                    uint32_t rhs = builder.forwardValue(node.rhs);
                     if (low_precision_operand_dtype.has_value()) {
                         rhs = builder.cast(rhs, low_precision_operand_dtype.value());
                     }
@@ -5510,7 +5890,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 }
 
                 if (node_reaches_requested_inputs.at(node.rhs)) {
-                    uint32_t lhs = builder.cloneForward(node.lhs);
+                    uint32_t lhs = builder.forwardValue(node.lhs);
                     if (low_precision_operand_dtype.has_value()) {
                         lhs = builder.cast(lhs, low_precision_operand_dtype.value());
                     }
@@ -5535,8 +5915,8 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     (has_forward_dims && node.beta_node != UINT32_MAX) ? forward_node_dims.at(node.beta_node) : std::vector<uint64_t>{};
 
                 if (node.alpha_node != UINT32_MAX && node_reaches_requested_inputs.at(node.alpha_node)) {
-                    const uint32_t lhs = builder.cloneForward(node.lhs);
-                    const uint32_t rhs = builder.cloneForward(node.rhs);
+                    const uint32_t lhs = builder.forwardValue(node.lhs);
+                    const uint32_t rhs = builder.forwardValue(node.rhs);
 
                     uint32_t alpha_term = builder.matmul(lhs,
                                                          rhs,
@@ -5556,7 +5936,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                             "transpose_aux/transposeC.");
                     }
 
-                    const uint32_t aux = builder.cloneForward(node.aux);
+                    const uint32_t aux = builder.forwardValue(node.aux);
                     uint32_t beta_grad = builder.mul(grad_like_output, aux);
                     addContributionToChild(node.beta_node, beta_grad, node_dims);
                 }
@@ -5607,10 +5987,10 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     (has_forward_dims && node.attention_use_bias && node.alpha_node != UINT32_MAX)
                         ? forward_node_dims.at(node.alpha_node)
                         : std::vector<uint64_t>{};
-                const uint32_t q = builder.cloneForward(node.lhs);
-                const uint32_t k = builder.cloneForward(node.rhs);
-                const uint32_t v = builder.cloneForward(node.aux);
-                uint32_t bias = node.attention_use_bias ? builder.cloneForward(node.alpha_node) : UINT32_MAX;
+                const uint32_t q = builder.forwardValue(node.lhs);
+                const uint32_t k = builder.forwardValue(node.rhs);
+                const uint32_t v = builder.forwardValue(node.aux);
+                uint32_t bias = node.attention_use_bias ? builder.forwardValue(node.alpha_node) : UINT32_MAX;
                 if (bias != UINT32_MAX && q_dims.size() == 4 && k_dims.size() == 4 && bias_dims.size() == 4) {
                     const std::vector<uint64_t> dense_score_bias_dims = inferAttentionDenseBiasDims(node, q_dims, k_dims);
                     const bool broadcasts_query_sequence = bias_dims[2] == 1 && dense_score_bias_dims[2] != 1;
@@ -5635,20 +6015,20 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 }
                 ExprNode attention_for_backward = node;
                 if (node.attention_use_padding_mask) {
-                    attention_for_backward.attention_seq_len_q_node = builder.cloneForward(node.attention_seq_len_q_node);
-                    attention_for_backward.attention_seq_len_kv_node = builder.cloneForward(node.attention_seq_len_kv_node);
+                    attention_for_backward.attention_seq_len_q_node = builder.forwardValue(node.attention_seq_len_q_node);
+                    attention_for_backward.attention_seq_len_kv_node = builder.forwardValue(node.attention_seq_len_kv_node);
                 }
                 if (node.attention_use_ragged_offsets) {
-                    attention_for_backward.attention_ragged_offset_q_node = builder.cloneForward(node.attention_ragged_offset_q_node);
-                    attention_for_backward.attention_ragged_offset_kv_node = builder.cloneForward(node.attention_ragged_offset_kv_node);
+                    attention_for_backward.attention_ragged_offset_q_node = builder.forwardValue(node.attention_ragged_offset_q_node);
+                    attention_for_backward.attention_ragged_offset_kv_node = builder.forwardValue(node.attention_ragged_offset_kv_node);
                 }
                 if (node.attention_use_paged_kv_cache) {
-                    attention_for_backward.attention_page_table_k_node = builder.cloneForward(node.attention_page_table_k_node);
-                    attention_for_backward.attention_page_table_v_node = builder.cloneForward(node.attention_page_table_v_node);
+                    attention_for_backward.attention_page_table_k_node = builder.forwardValue(node.attention_page_table_k_node);
+                    attention_for_backward.attention_page_table_v_node = builder.forwardValue(node.attention_page_table_v_node);
                 }
                 if (node.attention_dropout_probability > 0.0f) {
-                    attention_for_backward.attention_dropout_seed_node = builder.cloneForward(node.attention_dropout_seed_node);
-                    attention_for_backward.attention_dropout_offset_node = builder.cloneForward(node.attention_dropout_offset_node);
+                    attention_for_backward.attention_dropout_seed_node = builder.forwardValue(node.attention_dropout_seed_node);
+                    attention_for_backward.attention_dropout_offset_node = builder.forwardValue(node.attention_dropout_offset_node);
                 }
 
                 if (node_reaches_requested_inputs.at(node.lhs)) {
@@ -5752,7 +6132,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         "Segmented ragged reduction backward requires ragged extent metadata or forward input dimensions.");
                 }
 
-                const uint32_t offsets = builder.cloneForward(node.rhs);
+                const uint32_t offsets = builder.forwardValue(node.rhs);
                 const auto grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
                 uint32_t segment_grad = grad;
                 if (has_forward_dims) {
@@ -5827,7 +6207,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         "Segmented ragged min/max backward requires ragged extent metadata or forward input dimensions.");
                 }
 
-                const uint32_t offsets = builder.cloneForward(node.rhs);
+                const uint32_t offsets = builder.forwardValue(node.rhs);
                 const auto grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
                 uint32_t segment_grad = grad;
                 if (has_forward_dims) {
@@ -5849,7 +6229,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 const uint32_t routed = builder.segmentedReduceMinMaxBackward(
                     node.op == ExprOp::SEGMENTED_REDUCE_MIN ? ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD
                                                             : ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD,
-                    builder.cloneForward(node.lhs),
+                    builder.forwardValue(node.lhs),
                     segment_grad,
                     offsets,
                     batch_size,
@@ -5886,10 +6266,10 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 }
                 const uint32_t grad_like_output =
                     shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx), node_dims);
-                const uint32_t offsets = builder.cloneForward(node.aux);
+                const uint32_t offsets = builder.forwardValue(node.aux);
 
                 if (need_dgrad) {
-                    const uint32_t filter = builder.cloneForward(node.rhs);
+                    const uint32_t filter = builder.forwardValue(node.rhs);
                     const auto dx_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
                     uint32_t dx = builder.raggedConv1dCausalBackwardData(
                         filter, grad_like_output, offsets, node, dx_dtype, node.compute_dtype);
@@ -5906,7 +6286,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 }
 
                 if (need_wgrad) {
-                    uint32_t input = builder.cloneForward(node.lhs);
+                    uint32_t input = builder.forwardValue(node.lhs);
                     input = builder.raggedValuewiseExtent(input,
                                                           offsets,
                                                           node.ragged_runtime_batch_size,
@@ -5939,7 +6319,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                     throw std::runtime_error("Segmented broadcast backward requires complete ragged extent metadata.");
                 }
 
-                const uint32_t offsets = builder.cloneForward(node.rhs);
+                const uint32_t offsets = builder.forwardValue(node.rhs);
                 const auto grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
                 const uint32_t grad_like_output =
                     has_forward_dims ? shapeGradLikeNodeOutput(grad, static_cast<uint32_t>(node_idx),
@@ -5977,7 +6357,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 const auto lhs_grad_dtype = preferredGradValueDType(forward_expr.nodes.at(node.lhs));
                 uint32_t segmented_offsets = UINT32_MAX;
                 if (node.op == ExprOp::SEGMENTED_SCAN) {
-                    segmented_offsets = builder.cloneForward(node.rhs);
+                    segmented_offsets = builder.forwardValue(node.rhs);
                 }
 
                 uint32_t dx;
@@ -6006,7 +6386,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                         : (node.scan_op == ScanOp::Min ? ExprOp::SCAN_MIN_BACKWARD : ExprOp::SCAN_MAX_BACKWARD);
                     const uint32_t grad_for_scatter = builder.cast(grad_like_output, DataType::FP32);
                     dx = builder.scanMinMaxBackward(backward_op,
-                                                    builder.cloneForward(node.lhs),
+                                                    builder.forwardValue(node.lhs),
                                                     grad_for_scatter,
                                                     segmented_offsets,
                                                     node.scan_mode,
@@ -6137,7 +6517,7 @@ static PhysicalOutputs buildFlatBackwardOutputsImpl(const PhysicalOutputs& forwa
                 // coercion, the zero is the value of dOutput/dInput itself.
                 total_grad = builder.fill(0.0, forward_node_dims.at(first_it->second), grad_dtype);
             } else {
-                const uint32_t input_clone = builder.cloneForward(first_it->second);
+                const uint32_t input_clone = builder.forwardValue(first_it->second);
                 total_grad = builder.mul(input_clone, builder.scalar(0.0));
             }
         } else if (accumulate_grad_outputs) {
@@ -6496,7 +6876,10 @@ static PhysicalOutputs buildBackwardOutputsImpl(
     const std::optional<std::unordered_map<std::string, uint32_t>>& upstream_node_indices_by_output,
     const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
     bool accumulate_grad_outputs,
-    bool allow_shape_deferred_placeholders = false) {
+    bool allow_shape_deferred_placeholders = false,
+    const SavedForwardValueInputNames* saved_forward_value_input_names = nullptr,
+    ForwardValueResolutionMode forward_value_resolution_mode = ForwardValueResolutionMode::RecomputeIfUnbound,
+    std::vector<ForwardValueRequirement>* forward_value_requirements = nullptr) {
     if (!forward_outputs.expr) {
         throw std::runtime_error("buildBackwardOutputs requires non-null forward_outputs.expr.");
     }
@@ -6508,11 +6891,22 @@ static PhysicalOutputs buildBackwardOutputsImpl(
                                             upstream_node_indices_by_output,
                                             forward_input_dims,
                                             accumulate_grad_outputs,
-                                            allow_shape_deferred_placeholders);
+                                            allow_shape_deferred_placeholders,
+                                            saved_forward_value_input_names,
+                                            forward_value_resolution_mode,
+                                            forward_value_requirements);
     }
     if (upstream_node_indices_by_output.has_value() && !upstream_node_indices_by_output->empty()) {
         throw std::runtime_error(
             "Graph-level conditional autodiff does not support upstream seeds by physical node index; use named upstream inputs.");
+    }
+    if (forward_value_resolution_mode == ForwardValueResolutionMode::RequireSavedForward) {
+        throw std::runtime_error(
+            "Forward-value requirements are not yet supported for conditional backward trees.");
+    }
+    if (saved_forward_value_input_names != nullptr && !saved_forward_value_input_names->empty()) {
+        throw std::runtime_error(
+            "Saved forward value bindings are not yet supported for conditional backward trees.");
     }
 
     const std::vector<std::string> normalized_wrt = normalizeWrtNames(*forward_outputs.expr, wrt_names);
@@ -6564,14 +6958,52 @@ PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,
                                      const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
                                      const std::unordered_map<std::string, DataType>& upstream_input_dtypes_by_output,
                                      const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
-                                     bool accumulate_grad_outputs) {
+                                     bool accumulate_grad_outputs,
+                                     const SavedForwardValueInputNames& saved_forward_value_input_names) {
     return buildBackwardOutputsImpl(forward_outputs,
                                     wrt_names,
                                     normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_names_by_output),
                                     upstream_input_dtypes_by_output,
                                     std::nullopt,
                                     forward_input_dims,
-                                    accumulate_grad_outputs);
+                                    accumulate_grad_outputs,
+                                    false,
+                                    saved_forward_value_input_names.empty() ? nullptr : &saved_forward_value_input_names);
+}
+
+BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& wrt_names,
+    const std::unordered_map<std::string, std::string>& upstream_input_names_by_output,
+    const std::unordered_map<std::string, DataType>& upstream_input_dtypes_by_output,
+    const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims,
+    bool accumulate_grad_outputs,
+    const SavedForwardValueInputNames& saved_forward_value_input_names) {
+    BackwardBuildResult result;
+    result.outputs = buildBackwardOutputsImpl(
+        forward_outputs,
+        wrt_names,
+        normalizeUpstreamInputNamesByOutput(forward_outputs, upstream_input_names_by_output),
+        upstream_input_dtypes_by_output,
+        std::nullopt,
+        forward_input_dims,
+        accumulate_grad_outputs,
+        false,
+        saved_forward_value_input_names.empty() ? nullptr : &saved_forward_value_input_names,
+        ForwardValueResolutionMode::RequireSavedForward,
+        &result.forward_value_requirements);
+    std::sort(result.forward_value_requirements.begin(),
+              result.forward_value_requirements.end(),
+              [](const ForwardValueRequirement& lhs, const ForwardValueRequirement& rhs) {
+                  if (lhs.forward_node_index != rhs.forward_node_index) {
+                      return lhs.forward_node_index < rhs.forward_node_index;
+                  }
+                  if (lhs.kind != rhs.kind) {
+                      return static_cast<uint8_t>(lhs.kind) < static_cast<uint8_t>(rhs.kind);
+                  }
+                  return lhs.backward_input_name < rhs.backward_input_name;
+              });
+    return result;
 }
 
 PhysicalOutputs buildBackwardOutputs(const PhysicalOutputs& forward_outputs,

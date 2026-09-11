@@ -1,6 +1,7 @@
 #include "DeepLearning/Implementation/Data/Residency/DeviceResidentDirectMaterializationKernel.h"
 
 #include "DeepLearning/Implementation/ThorError.h"
+#include "DeepLearning/Implementation/Data/Residency/DeviceResidentRowGrouping.h"
 #include "Utilities/Expression/CudaHelpers.h"
 
 #include <cuda_runtime.h>
@@ -19,7 +20,8 @@ namespace {
 
 constexpr uint32_t kThreadsPerBlock = 256;
 constexpr uint32_t kMaxRowsPerBlock = kThreadsPerBlock;
-constexpr uint64_t kTargetBytesPerLane = 32;
+static_assert(kThreadsPerBlock == DeviceResidentRowGrouping::kThreadsPerCta,
+              "Row-grouping policy must match the residency CTA width.");
 constexpr uint32_t kMaxPortableBlocks = 65535;
 
 static_assert(sizeof(ulonglong4_32a) == 32);
@@ -263,55 +265,6 @@ __global__ void materializeDirectFieldKernel(
     }
 }
 
-uint32_t rowsPerBlockFor(uint64_t fieldBytes, uint64_t batchSize) {
-    // Target about 32 bytes of useful row payload per lane. Transaction width
-    // is deliberately not part of this policy: narrower alignment may require
-    // multiple 16/8/4/2/1-byte transactions per lane, but consecutive lanes
-    // still operate on adjacent contiguous items.
-    uint32_t rowsByPayload = 1;
-    if (fieldBytes <= kTargetBytesPerLane) {
-        rowsByPayload = 256;
-    } else if (fieldBytes <= 2 * kTargetBytesPerLane) {
-        rowsByPayload = 128;
-    } else if (fieldBytes <= 4 * kTargetBytesPerLane) {
-        rowsByPayload = 64;
-    } else if (fieldBytes <= 8 * kTargetBytesPerLane) {
-        rowsByPayload = 32;
-    } else if (fieldBytes <= 16 * kTargetBytesPerLane) {
-        rowsByPayload = 16;
-    } else if (fieldBytes <= 32 * kTargetBytesPerLane) {
-        rowsByPayload = 8;
-    } else if (fieldBytes <= 64 * kTargetBytesPerLane) {
-        rowsByPayload = 4;
-    } else if (fieldBytes <= 128 * kTargetBytesPerLane) {
-        rowsByPayload = 2;
-    }
-
-    // Keep roughly 64 CTAs available for small fields instead of packing a
-    // small batch into only one or two blocks. Once the batch is large enough,
-    // payload geometry alone determines the row grouping.
-    uint32_t rowsByParallelism = 1;
-    if (batchSize >= 16384) {
-        rowsByParallelism = 256;
-    } else if (batchSize >= 8192) {
-        rowsByParallelism = 128;
-    } else if (batchSize >= 4096) {
-        rowsByParallelism = 64;
-    } else if (batchSize >= 2048) {
-        rowsByParallelism = 32;
-    } else if (batchSize >= 1024) {
-        rowsByParallelism = 16;
-    } else if (batchSize >= 512) {
-        rowsByParallelism = 8;
-    } else if (batchSize >= 256) {
-        rowsByParallelism = 4;
-    } else if (batchSize >= 128) {
-        rowsByParallelism = 2;
-    }
-
-    return std::min(rowsByPayload, rowsByParallelism);
-}
-
 template <uint32_t RowsPerBlock>
 uint32_t blocksForRows(uint64_t batchSize) {
     const uint64_t blocks =
@@ -356,9 +309,10 @@ void launchForGrouping(const uint8_t *records,
                        uint64_t recordSizeBytes,
                        uint64_t fieldOffsetBytes,
                        ItemIndexT fieldBytes,
+                       uint32_t rowsPerBlockOverride,
                        cudaStream_t stream) {
-    switch (rowsPerBlockFor(static_cast<uint64_t>(fieldBytes),
-                            static_cast<uint64_t>(batchSize))) {
+    const uint32_t rowsPerBlock = rowsPerBlockOverride;
+    switch (rowsPerBlock) {
         case 1:
             launchGrouped<RowIndexT, ItemIndexT, 1>(
                 records, rowIndices, destination, batchSize, numExamples,
@@ -419,6 +373,7 @@ void launchForItemIndexType(const uint8_t *records,
                             uint64_t recordSizeBytes,
                             uint64_t fieldOffsetBytes,
                             uint64_t fieldBytes,
+                            uint32_t rowsPerBlockOverride,
                             cudaStream_t stream) {
     // Keep ordinary per-row copy arithmetic 32-bit. Leave headroom for the
     // largest 256-lane stride so the terminal increment cannot wrap.
@@ -433,6 +388,7 @@ void launchForItemIndexType(const uint8_t *records,
             recordSizeBytes,
             fieldOffsetBytes,
             static_cast<uint32_t>(fieldBytes),
+            rowsPerBlockOverride,
             stream);
     } else {
         launchForGrouping<RowIndexT, uint64_t>(
@@ -444,6 +400,7 @@ void launchForItemIndexType(const uint8_t *records,
             recordSizeBytes,
             fieldOffsetBytes,
             fieldBytes,
+            rowsPerBlockOverride,
             stream);
     }
 }
@@ -456,6 +413,7 @@ void launchForRowIndexType(const uint8_t *records,
                            uint64_t recordSizeBytes,
                            uint64_t fieldOffsetBytes,
                            uint64_t fieldBytes,
+                           uint32_t rowsPerBlockOverride,
                            cudaStream_t stream) {
     // Batch-row arithmetic is 32-bit for the overwhelmingly common case.
     // Source byte addresses remain 64-bit because a valid resident dataset may
@@ -470,6 +428,7 @@ void launchForRowIndexType(const uint8_t *records,
             recordSizeBytes,
             fieldOffsetBytes,
             fieldBytes,
+            rowsPerBlockOverride,
             stream);
     } else {
         launchForItemIndexType<uint64_t>(
@@ -481,13 +440,14 @@ void launchForRowIndexType(const uint8_t *records,
             recordSizeBytes,
             fieldOffsetBytes,
             fieldBytes,
+            rowsPerBlockOverride,
             stream);
     }
 }
 
 }  // namespace
 
-void launchDeviceResidentDirectMaterializationKernel(
+void launchDeviceResidentDirectMaterializationKernelWithRowsPerCtaForBenchmark(
     const Tensor &recordStorage,
     uint64_t numExamples,
     uint64_t recordSizeBytes,
@@ -496,6 +456,7 @@ void launchDeviceResidentDirectMaterializationKernel(
     uint64_t logicalRows,
     Tensor &destination,
     const Tensor &rowIndicesDevice,
+    uint32_t rowsPerCta,
     Stream &stream) {
     THOR_THROW_IF_FALSE(recordStorage.isInitialized());
     THOR_THROW_IF_FALSE(destination.isInitialized());
@@ -526,11 +487,17 @@ void launchDeviceResidentDirectMaterializationKernel(
     THOR_THROW_IF_FALSE(logicalRows <= rowIndexCapacity);
     THOR_THROW_IF_FALSE(destination.getArraySizeInBytes() % fieldBytes == 0);
     THOR_THROW_IF_FALSE(destination.getArraySizeInBytes() / fieldBytes == batchCapacity);
+    THOR_THROW_IF_FALSE(rowsPerCta == 0 ||
+                        (rowsPerCta <= 256 && (rowsPerCta & (rowsPerCta - 1)) == 0));
 
     const uint8_t *records = recordStorage.getMemPtr<uint8_t>();
     const uint64_t *rowIndices = rowIndicesDevice.getMemPtr<uint64_t>();
     uint8_t *destinationBytes = static_cast<uint8_t *>(destination.getMemPtr());
     const cudaStream_t cudaStream = stream.getStream();
+    const uint32_t selectedRowsPerCta =
+        rowsPerCta == 0
+            ? DeviceResidentRowGrouping::selectRowsPerCta(logicalRows, fieldBytes)
+            : rowsPerCta;
 
     // Compact records and packed destination rows may have byte strides that
     // change alignment from one selected row to the next. Select vector width
@@ -546,5 +513,21 @@ void launchDeviceResidentDirectMaterializationKernel(
         recordSizeBytes,
         fieldOffsetBytes,
         fieldBytes,
+        selectedRowsPerCta,
         cudaStream);
+}
+
+void launchDeviceResidentDirectMaterializationKernel(
+    const Tensor &recordStorage,
+    uint64_t numExamples,
+    uint64_t recordSizeBytes,
+    uint64_t fieldOffsetBytes,
+    uint64_t fieldBytes,
+    uint64_t logicalRows,
+    Tensor &destination,
+    const Tensor &rowIndicesDevice,
+    Stream &stream) {
+    launchDeviceResidentDirectMaterializationKernelWithRowsPerCtaForBenchmark(
+        recordStorage, numExamples, recordSizeBytes, fieldOffsetBytes, fieldBytes,
+        logicalRows, destination, rowIndicesDevice, 0, stream);
 }

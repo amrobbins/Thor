@@ -894,11 +894,17 @@ def _build_packed_qkv_attention_backward_case(
             output_dtype=dtype,
             compute_dtype=thor.DataType.fp32,
         )
-        fwd = ex.compile(out, device_num=GPU_NUM)
-        bwd = fwd.compile_backward(["qkv"], error_input_name="__grad_output")
+
+        # AttentionBackward may not be stamped standalone: cuDNN backward must consume
+        # state from the real forward that actually executed. Make this a same-plan
+        # backward by choosing a loss whose derivative depends on the Attention output.
+        # The resulting pointwise/reduction work runs before AttentionBackward; the
+        # packed dQ/dK/dV scatter, if it were not elided, would run after it.
+        loss = ex.reduce_sum(out * out, axis=[0, 1, 2, 3], squeeze=False)
+        fwd = ex.compile(loss, device_num=GPU_NUM)
+        bwd = fwd.compile_backward(["qkv"])
         input_shapes = {
             "qkv": (batch * sequence, qkv_width),
-            "__grad_output": (batch, sequence, query_heads, v_dim),
         }
         output_shape = (batch * sequence, qkv_width)
         flops = 2 * _attention_flops(
@@ -1341,13 +1347,19 @@ def test_packed_qkv_attention_backward_runtime_has_no_pack_scatter_kernel(dtype:
     record_property("runtime_stage_kinds", str(runtime_stage_kinds))
     record_property("output_shape", str(output_shape))
 
-    # The logical compiled graph may still contain a FusedKernel pack/scatter stage,
-    # but the benchmark hot path must not execute it. The stamped plan is the
-    # concrete runtime plan that the benchmark repeatedly launches.
+    # The same-plan loss intentionally adds forward Attention plus derivative work
+    # before AttentionBackward. The logical compiled graph still contains the packed
+    # dQKV scatter as a FusedKernel after AttentionBackward; stamping must elide that
+    # trailing kernel by wiring cuDNN dQ/dK/dV directly into the packed dQKV buffer.
+    assert compiled_stage_kinds.count("Attention") == 1
     assert compiled_stage_kinds.count("AttentionBackward") == 1
-    assert compiled_stage_kinds.count("FusedKernel") == 1
-    assert runtime_stage_kinds == ["AttentionBackward"]
-    assert "FusedKernel" not in runtime_stage_kinds
+    compiled_backward_index = compiled_stage_kinds.index("AttentionBackward")
+    assert "FusedKernel" in compiled_stage_kinds[compiled_backward_index + 1 :]
+
+    assert runtime_stage_kinds.count("Attention") == 1
+    assert runtime_stage_kinds.count("AttentionBackward") == 1
+    runtime_backward_index = runtime_stage_kinds.index("AttentionBackward")
+    assert "FusedKernel" not in runtime_stage_kinds[runtime_backward_index + 1 :]
 
 
 @pytest.mark.cuda

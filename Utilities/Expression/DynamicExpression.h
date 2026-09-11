@@ -163,6 +163,49 @@ class PreparedDynamicExpression {
                                                     final_requested_output_shapes);
     }
 
+    [[nodiscard]] StampedExecutionPlan stampExecutionVariantRetainingForwardValues(
+        DynamicExpressionVariantId variant_id,
+        const std::vector<uint32_t>& logical_forward_node_indices,
+        const TensorMap& preallocated_outputs_override,
+        const ShapeMap& requested_output_shapes_override = {}) const {
+        static const std::vector<uint32_t> no_epilogue_aux_nodes;
+        return stampExecutionVariantRetainingForwardValues(variant_id,
+                                                           logical_forward_node_indices,
+                                                           no_epilogue_aux_nodes,
+                                                           preallocated_outputs_override,
+                                                           requested_output_shapes_override);
+    }
+
+    [[nodiscard]] StampedExecutionPlan stampExecutionVariantRetainingForwardValues(
+        DynamicExpressionVariantId variant_id,
+        const std::vector<uint32_t>& logical_forward_node_indices,
+        const std::vector<uint32_t>& logical_forward_epilogue_aux_node_indices,
+        const TensorMap& preallocated_outputs_override,
+        const ShapeMap& requested_output_shapes_override = {}) const {
+        validateTensorMap(preallocated_outputs_override,
+                          stream_,
+                          false,
+                          "execution variant " + std::to_string(variant_id) + " preallocated output override");
+
+        TensorMap final_preallocated_outputs = build_.preallocated_outputs;
+        for (const auto& [name, tensor] : preallocated_outputs_override) {
+            final_preallocated_outputs[name] = tensor;
+        }
+
+        ShapeMap final_requested_output_shapes = build_.requested_output_shapes;
+        for (const auto& [name, shape] : requested_output_shapes_override) {
+            final_requested_output_shapes[name] = shape;
+        }
+
+        return equationForVariant(variant_id).stampRetainingForwardValues(logical_forward_node_indices,
+                                                                          logical_forward_epilogue_aux_node_indices,
+                                                                          build_.stamp_inputs,
+                                                                          stream_,
+                                                                          tensorScalarInputsForVariant(variant_id),
+                                                                          final_preallocated_outputs,
+                                                                          final_requested_output_shapes);
+    }
+
     [[nodiscard]] StampedExecutionPlan stamp(const TensorMap& preallocated_outputs_override,
                                              const ShapeMap& requested_output_shapes_override = {}) const {
         validateTensorMap(preallocated_outputs_override, stream_, false, "preallocated output override");
