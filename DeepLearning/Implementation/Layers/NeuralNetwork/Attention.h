@@ -153,44 +153,6 @@ class Attention final : public CustomLayer, public TrainingDropoutControllable {
     bool wantsNativeSharedBackwardPlan() const override { return !isInferenceOnly(); }
     bool executesNativeSharedBackwardPlan() const override { return !isInferenceOnly(); }
 
-    std::vector<NativeSharedBackwardSavedValue> nativeSharedBackwardSavedValues(
-        uint32_t applicationIndex,
-        DynamicExpressionVariantId variantId,
-        const PhysicalOutputs& forwardOutputs) const override {
-        const AttentionNativeExecutionVariantPlans& nativeVariant = nativeExecutionPlans.at(applicationIndex, variantId);
-        if (!nativeVariant.retained_forward.has_value() || !nativeVariant.retained_forward->complete()) {
-            throw std::runtime_error("Attention native shared backward requires complete A2 retained Q/K/V/O state.");
-        }
-        if (forwardOutputs.expr == nullptr) {
-            throw std::runtime_error("Attention native shared backward requires a physical forward expression.");
-        }
-
-        std::optional<uint32_t> attentionNodeIndex;
-        for (uint32_t nodeIndex = 0; nodeIndex < forwardOutputs.expr->nodes.size(); ++nodeIndex) {
-            if (forwardOutputs.expr->nodes[nodeIndex].op != ExprOp::ATTENTION) {
-                continue;
-            }
-            if (attentionNodeIndex.has_value()) {
-                throw std::runtime_error("Physical Attention forward must contain exactly one SDPA node.");
-            }
-            attentionNodeIndex = nodeIndex;
-        }
-        if (!attentionNodeIndex.has_value()) {
-            throw std::runtime_error("Physical Attention forward contains no SDPA node.");
-        }
-
-        const ExprNode& attentionNode = forwardOutputs.expr->nodes.at(attentionNodeIndex.value());
-        if (attentionNode.lhs == UINT32_MAX || attentionNode.rhs == UINT32_MAX || attentionNode.aux == UINT32_MAX) {
-            throw std::runtime_error("Physical Attention SDPA node is missing Q/K/V operands.");
-        }
-        const RetainedAttentionForwardValues& retained = nativeVariant.retained_forward.value();
-        return {
-            NativeSharedBackwardSavedValue{attentionNode.lhs, "__thor_attention_saved_q", retained.q},
-            NativeSharedBackwardSavedValue{attentionNode.rhs, "__thor_attention_saved_k", retained.k},
-            NativeSharedBackwardSavedValue{attentionNode.aux, "__thor_attention_saved_v", retained.v},
-            NativeSharedBackwardSavedValue{attentionNodeIndex.value(), "__thor_attention_saved_o", retained.o},
-        };
-    }
 
     void onNativeSharedBackwardExecutionVariantStamped(
         uint32_t applicationIndex,

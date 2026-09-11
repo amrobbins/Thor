@@ -58,7 +58,6 @@ constexpr int64_t CUDNN_FRONTEND_CONV_Y_UID = 7'100'003;
 struct AtomicExpressionPhysicalExecutionProvenanceCounters {
     std::atomic<uint64_t> forward{0};
     std::atomic<uint64_t> backward_gradient{0};
-    std::atomic<uint64_t> backward_forward_replay{0};
 };
 
 struct AtomicExpressionTestExecutionCounters {
@@ -98,7 +97,6 @@ AtomicExpressionPhysicalExecutionProvenanceCounters& countersForKind(
 void resetAtomicProvenanceCounters(AtomicExpressionPhysicalExecutionProvenanceCounters& counters) {
     counters.forward.store(0, std::memory_order_relaxed);
     counters.backward_gradient.store(0, std::memory_order_relaxed);
-    counters.backward_forward_replay.store(0, std::memory_order_relaxed);
 }
 
 ExpressionPhysicalExecutionProvenanceCounters snapshotAtomicProvenanceCounters(
@@ -106,7 +104,6 @@ ExpressionPhysicalExecutionProvenanceCounters snapshotAtomicProvenanceCounters(
     return ExpressionPhysicalExecutionProvenanceCounters{
         .forward = counters.forward.load(std::memory_order_relaxed),
         .backward_gradient = counters.backward_gradient.load(std::memory_order_relaxed),
-        .backward_forward_replay = counters.backward_forward_replay.load(std::memory_order_relaxed),
     };
 }
 #endif
@@ -395,9 +392,6 @@ void detail::recordExpressionPhysicalExecutionForTests(ExpressionPhysicalExecuti
             return;
         case ExpressionExecutionProvenance::BackwardGradient:
             counters.backward_gradient.fetch_add(1, std::memory_order_relaxed);
-            return;
-        case ExpressionExecutionProvenance::BackwardForwardReplay:
-            counters.backward_forward_replay.fetch_add(1, std::memory_order_relaxed);
             return;
     }
     throw std::runtime_error("Unknown Expression execution provenance.");

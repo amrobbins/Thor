@@ -163,29 +163,16 @@ class CustomLayer : public TrainableLayer {
         (void)supportsBackward;
     }
 
-    struct NativeSharedBackwardSavedValue {
-        uint32_t forwardNodeIndex = UINT32_MAX;
-        std::string backwardInputName;
-        Tensor tensor;
-    };
-
     // Native specializations can ask CustomLayer's temporary compatibility
-    // executor to stamp one combined backward graph.  A specialization may also
+    // executor to stamp one combined backward graph. A specialization may also
     // opt into executing that graph as its physical backward implementation.
+    // Retained primal tensors are supplied through the same generic
+    // ForwardValueRequirement contract as every other flat CustomLayer VJP.
     // The executing form currently requires one physical application so its
     // parameter gradients can overwrite the optimizer-owned buffers directly;
     // this is exactly the public Attention application contract.
     virtual bool wantsNativeSharedBackwardPlan() const { return false; }
     virtual bool executesNativeSharedBackwardPlan() const { return false; }
-    virtual std::vector<NativeSharedBackwardSavedValue> nativeSharedBackwardSavedValues(
-        uint32_t applicationIndex,
-        DynamicExpressionVariantId variantId,
-        const PhysicalOutputs& forwardOutputs) const {
-        (void)applicationIndex;
-        (void)variantId;
-        (void)forwardOutputs;
-        return {};
-    }
     virtual void onNativeSharedBackwardExecutionVariantStamped(
         uint32_t applicationIndex,
         DynamicExpressionVariantId variantId,
@@ -319,7 +306,7 @@ class CustomLayer : public TrainableLayer {
         DynamicExpressionVariantId variantId,
         const std::vector<std::string>& wrtNames,
         bool accumulateGradOutputs,
-        bool requireForwardValueRequirements,
+        bool useTrainingBackwardPreview,
         const SavedForwardValueInputNames& savedForwardValueInputNames = {});
     std::shared_ptr<StampedExecutionPlan> stampBackwardForApplication(
         uint32_t applicationIndex,

@@ -66,19 +66,6 @@ float cublasLtGeluApproxDerivative(float x) {
            0.5f * x * sech2 * sqrt_two_over_pi * (1.0f + 3.0f * cubic * x2);
 }
 
-PhysicalOutputs matmulTanhBackward(const SavedForwardValueInputNames& saved_forward_values = {}) {
-    return buildBackwardOutputs(
-        matmulTanhForward(),
-        {"x"},
-        std::unordered_map<std::string, std::string>{{"y", "dy"}},
-        std::unordered_map<std::string, DataType>{{"y", DataType::FP32}},
-        std::unordered_map<std::string, std::vector<uint64_t>>{
-            {"x", {2, 3}},
-            {"w", {3, 4}},
-        },
-        false,
-        saved_forward_values);
-}
 
 #ifdef THOR_DEBUG
 size_t countNodesWithProvenance(const PhysicalOutputs& outputs,
@@ -97,25 +84,76 @@ size_t countNodesWithProvenance(const PhysicalOutputs& outputs,
 }  // namespace
 
 #ifdef THOR_DEBUG
-TEST(ExpressionForwardReplayInstrumentation, AutoDiffSeparatesClonedForwardMatmulFromGradientMatmul) {
-    const PhysicalOutputs backward = matmulTanhBackward();
-    ASSERT_NE(backward.expr, nullptr);
+TEST(ExpressionForwardReplayInstrumentation, Br60BLegacyPhysicalOutputsApiRejectsUndisclosedForwardRequirement) {
+    const PhysicalOutputs forward = matmulTanhForward();
+    try {
+        (void)buildBackwardOutputs(
+            forward,
+            {"x"},
+            std::optional<std::string>{"dy"},
+            std::unordered_map<std::string, std::vector<uint64_t>>{
+                {"x", {2, 3}},
+                {"w", {3, 4}},
+            });
+        FAIL() << "Legacy PhysicalOutputs-only AutoDiff must reject a newly discovered retained-forward requirement.";
+    } catch (const std::runtime_error& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("buildBackwardOutputsWithForwardValueRequirements()"), std::string::npos);
+        EXPECT_NE(message.find("retained real-forward"), std::string::npos);
+    }
+}
 
-    // TANH backward requests the forward TANH output. Today that recursively
-    // clones the MATMUL producer, so BR0 must make the replay visible without
-    // confusing it with the legitimate dX MATMUL.
+TEST(ExpressionForwardReplayInstrumentation, Br60BLegacyPhysicalOutputsApiAcceptsExplicitSavedForwardBinding) {
+    const PhysicalOutputs forward = matmulTanhForward();
+    ASSERT_EQ(forward.outputs.size(), 1U);
+    const uint32_t tanh_node = forward.outputs.front().node_idx;
+    const std::string saved_name = "saved_tanh_output";
+
+    const PhysicalOutputs backward = buildBackwardOutputs(
+        forward,
+        {"x"},
+        std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        std::unordered_map<std::string, DataType>{{"y", DataType::FP32}},
+        std::unordered_map<std::string, std::vector<uint64_t>>{
+            {"x", {2, 3}},
+            {"w", {3, 4}},
+        },
+        false,
+        SavedForwardValueInputNames{{tanh_node, saved_name}});
+
+    ASSERT_NE(backward.expr, nullptr);
     EXPECT_EQ(countNodesWithProvenance(
-                  backward, ExprOp::MATMUL, ExpressionExecutionProvenance::BackwardForwardReplay),
-              1U);
+                  backward, ExprOp::MATMUL, ExpressionExecutionProvenance::Forward),
+              0U);
     EXPECT_EQ(countNodesWithProvenance(
-                  backward, ExprOp::TANH, ExpressionExecutionProvenance::BackwardForwardReplay),
-              1U);
+                  backward, ExprOp::TANH, ExpressionExecutionProvenance::Forward),
+              0U);
     EXPECT_EQ(countNodesWithProvenance(
                   backward, ExprOp::MATMUL, ExpressionExecutionProvenance::BackwardGradient),
               1U);
+    EXPECT_TRUE(std::any_of(backward.expr->inputs.begin(), backward.expr->inputs.end(), [&](const NamedInput& input) {
+        return input.name == saved_name;
+    }));
 }
 
-TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModeDoesNotSaveRootInputs) {
+TEST(ExpressionForwardReplayInstrumentation, Br60BLegacyPhysicalOutputsApiStillSupportsRootOnlyVjp) {
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const PhysicalOutputs forward = Expression::outputs({{"y", x * x}}).physicalOutputs();
+
+    EXPECT_NO_THROW({
+        const PhysicalOutputs backward = buildBackwardOutputs(
+            forward,
+            {"x"},
+            std::unordered_map<std::string, std::string>{{"y", "dy"}},
+            std::unordered_map<std::string, DataType>{{"y", DataType::FP32}},
+            std::unordered_map<std::string, std::vector<uint64_t>>{{"x", {2, 4}}});
+        EXPECT_FALSE(std::any_of(backward.expr->inputs.begin(), backward.expr->inputs.end(), [](const NamedInput& input) {
+            return input.name.rfind("__thor_saved_forward_value_", 0) == 0;
+        }));
+    });
+}
+
+TEST(ExpressionForwardReplayInstrumentation, SavedForwardAutodiffDoesNotRetainRootInputs) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
     const PhysicalOutputs forward = Expression::outputs({{"y", x * x}}).physicalOutputs();
 
@@ -128,11 +166,11 @@ TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModeDoesNotS
 
     EXPECT_TRUE(result.forward_value_requirements.empty());
     EXPECT_EQ(countNodesWithProvenance(
-                  result.outputs, ExprOp::MUL, ExpressionExecutionProvenance::BackwardForwardReplay),
+                  result.outputs, ExprOp::MUL, ExpressionExecutionProvenance::Forward),
               0U);
 }
 
-TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModeDeclaresTanhOutputInsteadOfReplayingProducer) {
+TEST(ExpressionForwardReplayInstrumentation, SavedForwardAutodiffDeclaresTanhOutputInsteadOfReplayingProducer) {
     const PhysicalOutputs forward = matmulTanhForward();
     ASSERT_EQ(forward.outputs.size(), 1U);
 
@@ -152,10 +190,10 @@ TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModeDeclares
     EXPECT_FALSE(result.forward_value_requirements.front().backward_input_name.empty());
 
     EXPECT_EQ(countNodesWithProvenance(
-                  result.outputs, ExprOp::MATMUL, ExpressionExecutionProvenance::BackwardForwardReplay),
+                  result.outputs, ExprOp::MATMUL, ExpressionExecutionProvenance::Forward),
               0U);
     EXPECT_EQ(countNodesWithProvenance(
-                  result.outputs, ExprOp::TANH, ExpressionExecutionProvenance::BackwardForwardReplay),
+                  result.outputs, ExprOp::TANH, ExpressionExecutionProvenance::Forward),
               0U);
     EXPECT_EQ(countNodesWithProvenance(
                   result.outputs, ExprOp::MATMUL, ExpressionExecutionProvenance::BackwardGradient),
@@ -170,11 +208,45 @@ TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModeDeclares
     EXPECT_TRUE(has_input(saved_name));
     EXPECT_TRUE(has_input("w"));
     EXPECT_TRUE(has_input("dy"));
-    EXPECT_FALSE(has_input("x"))
-        << "Once the TANH output is supplied as retained forward state, dX no longer reads the original x root; requirement-mode ABI must not retain that stale input.";
+    EXPECT_TRUE(has_input("x"))
+        << "Saved-forward inputs replace primal computation, not the public forward-root ABI of a standalone backward equation.";
 }
 
-TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModePrunesOnlyUnusedNamedInputs) {
+TEST(ExpressionForwardReplayInstrumentation, SavedForwardBooleanRequirementPreservesBooleanStorageDType) {
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression parameter = Expression::input("parameter", DataType::FP32, DataType::FP32);
+    const Expression condition = x > Expression::constantScalar(0.0);
+    const PhysicalOutputs forward =
+        Expression::outputs({{"y", Expression::where(condition, x, parameter)}}).physicalOutputs();
+
+    const BackwardBuildResult result = buildBackwardOutputsWithForwardValueRequirements(
+        forward,
+        {"parameter"},
+        std::nullopt,
+        std::unordered_map<std::string, std::vector<uint64_t>>{
+            {"x", {2, 4}},
+            {"parameter", {4}},
+        });
+
+    ASSERT_EQ(result.forward_value_requirements.size(), 1U);
+    const std::string& saved_name = result.forward_value_requirements.front().backward_input_name;
+    const auto input_it = std::find_if(
+        result.outputs.expr->inputs.begin(), result.outputs.expr->inputs.end(), [&](const NamedInput& input) {
+            return input.name == saved_name;
+        });
+    ASSERT_NE(input_it, result.outputs.expr->inputs.end());
+
+    const auto node_it = std::find_if(result.outputs.expr->nodes.begin(), result.outputs.expr->nodes.end(), [&](const ExprNode& node) {
+        return node.op == ExprOp::INPUT && node.input_slot == input_it->slot;
+    });
+    ASSERT_NE(node_it, result.outputs.expr->nodes.end());
+    ASSERT_TRUE(node_it->input_tensor_dtype.has_value());
+    ASSERT_TRUE(node_it->output_dtype.has_value());
+    EXPECT_EQ(node_it->input_tensor_dtype.value(), DataType::BOOLEAN);
+    EXPECT_EQ(node_it->output_dtype.value(), DataType::BOOLEAN);
+}
+
+TEST(ExpressionForwardReplayInstrumentation, SavedForwardAutodiffPreservesForwardRootInputAbi) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
     const Expression scale = Expression::runtimeScalar("scale", DataType::FP32, DataType::FP32);
     const PhysicalOutputs forward = Expression::outputs({{"y", x * scale}}).physicalOutputs();
@@ -194,16 +266,16 @@ TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModePrunesOn
             return input.name == name;
         });
     };
-    EXPECT_EQ(find_input("x"), result.outputs.expr->inputs.end())
-        << "d(x * scale)/dx does not read x itself, so requirement-mode ABI should prune x.";
+    EXPECT_NE(find_input("x"), result.outputs.expr->inputs.end())
+        << "Backward equations preserve the original forward-root ABI even when a particular VJP does not read that root.";
     const auto scale_input = find_input("scale");
     ASSERT_NE(scale_input, result.outputs.expr->inputs.end());
     EXPECT_EQ(scale_input->kind, NamedInput::Kind::RuntimeScalarFp32)
-        << "ABI pruning must preserve surviving runtime-scalar input kinds while compacting slots.";
+        << "Preserving the forward-root ABI must also preserve runtime-scalar input kinds.";
     EXPECT_NE(find_input("dy"), result.outputs.expr->inputs.end());
 }
 
-TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModeRebuildsViewsButRetainsMaterializedAncestor) {
+TEST(ExpressionForwardReplayInstrumentation, SavedForwardAutodiffRebuildsViewsButRetainsMaterializedAncestor) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
     const Expression w = Expression::input("w", DataType::FP32, DataType::FP32);
     const Expression product = Expression::matmul(x, w, false, false, DataType::FP32, DataType::FP32);
@@ -232,14 +304,14 @@ TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModeRebuilds
     EXPECT_EQ(result.forward_value_requirements.front().forward_node_index, matmul_node)
         << "RESHAPE is metadata-only and should be reconstructed around the saved MATMUL value.";
     EXPECT_EQ(countNodesWithProvenance(
-                  result.outputs, ExprOp::MATMUL, ExpressionExecutionProvenance::BackwardForwardReplay),
+                  result.outputs, ExprOp::MATMUL, ExpressionExecutionProvenance::Forward),
               0U);
     EXPECT_GE(countNodesWithProvenance(
                   result.outputs, ExprOp::RESHAPE, ExpressionExecutionProvenance::Forward),
               1U);
 }
 
-TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModeUsesStableExplicitBindingName) {
+TEST(ExpressionForwardReplayInstrumentation, SavedForwardAutodiffUsesStableExplicitBindingName) {
     const PhysicalOutputs forward = matmulTanhForward();
     ASSERT_EQ(forward.outputs.size(), 1U);
 
@@ -263,7 +335,7 @@ TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModeUsesStab
     EXPECT_EQ(result.forward_value_requirements.front().backward_input_name, "retained_y");
 }
 
-TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModeDeclaresReductionOutputInsteadOfReplayingReduction) {
+TEST(ExpressionForwardReplayInstrumentation, SavedForwardAutodiffDeclaresReductionOutputInsteadOfReplayingReduction) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
     const PhysicalOutputs forward =
         Expression::outputs({{"y", x.reduce_norm2({1}, {1}, DataType::FP32)}}).physicalOutputs();
@@ -278,11 +350,11 @@ TEST(ExpressionForwardReplayInstrumentation, ForwardValueRequirementModeDeclares
     ASSERT_EQ(result.forward_value_requirements.size(), 1U);
     EXPECT_EQ(result.forward_value_requirements.front().forward_node_index, forward.outputs.front().node_idx);
     EXPECT_EQ(countNodesWithProvenance(
-                  result.outputs, ExprOp::REDUCE_NORM2, ExpressionExecutionProvenance::BackwardForwardReplay),
+                  result.outputs, ExprOp::REDUCE_NORM2, ExpressionExecutionProvenance::Forward),
               0U);
 }
 
-TEST(ExpressionForwardReplayInstrumentation, SavedForwardBindingTerminatesReplayProvenanceAtBoundValue) {
+TEST(ExpressionForwardReplayInstrumentation, SavedForwardBindingUsesStableInputWithoutReplay) {
     const PhysicalOutputs forward = matmulTanhForward();
     ASSERT_EQ(forward.outputs.size(), 1U);
 
@@ -302,45 +374,51 @@ TEST(ExpressionForwardReplayInstrumentation, SavedForwardBindingTerminatesReplay
         saved_forward_values);
 
     EXPECT_EQ(countNodesWithProvenance(
-                  backward, ExprOp::MATMUL, ExpressionExecutionProvenance::BackwardForwardReplay),
+                  backward, ExprOp::MATMUL, ExpressionExecutionProvenance::Forward),
               0U);
     EXPECT_EQ(countNodesWithProvenance(
-                  backward, ExprOp::TANH, ExpressionExecutionProvenance::BackwardForwardReplay),
+                  backward, ExprOp::TANH, ExpressionExecutionProvenance::Forward),
               0U);
     EXPECT_EQ(countNodesWithProvenance(
                   backward, ExprOp::MATMUL, ExpressionExecutionProvenance::BackwardGradient),
               1U);
 }
 
-TEST(ExpressionForwardReplayInstrumentation, OutputDependentReductionIsTaggedAsForwardReplay) {
+TEST(ExpressionForwardReplayInstrumentation, OutputDependentReductionBecomesSavedForwardInput) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
     const PhysicalOutputs forward = Expression::outputs({{"y", x.reduce_norm2({1}, {1}, DataType::FP32)}}).physicalOutputs();
-    const PhysicalOutputs backward = buildBackwardOutputs(
+    const BackwardBuildResult build = buildBackwardOutputsWithForwardValueRequirements(
         forward,
         {"x"},
-        std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        std::optional<std::string>{"dy"},
         std::unordered_map<std::string, std::vector<uint64_t>>{{"x", {2, 4}}});
+    const PhysicalOutputs& backward = build.outputs;
 
     EXPECT_EQ(countNodesWithProvenance(
-                  backward, ExprOp::REDUCE_NORM2, ExpressionExecutionProvenance::BackwardForwardReplay),
-              1U);
+                  backward, ExprOp::REDUCE_NORM2, ExpressionExecutionProvenance::Forward),
+              0U);
+    ASSERT_EQ(build.forward_value_requirements.size(), 1U);
+    EXPECT_EQ(build.forward_value_requirements.front().forward_node_index, forward.outputs.front().node_idx);
 }
 
-TEST(ExpressionForwardReplayInstrumentation, ReduceProdOutputIsTaggedAsForwardReplay) {
+TEST(ExpressionForwardReplayInstrumentation, ReduceProdOutputBecomesSavedForwardInput) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
     const PhysicalOutputs forward = Expression::outputs({{"y", x.reduce_prod({1}, {1})}}).physicalOutputs();
-    const PhysicalOutputs backward = buildBackwardOutputs(
+    const BackwardBuildResult build = buildBackwardOutputsWithForwardValueRequirements(
         forward,
         {"x"},
-        std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        std::optional<std::string>{"dy"},
         std::unordered_map<std::string, std::vector<uint64_t>>{{"x", {2, 4}}});
+    const PhysicalOutputs& backward = build.outputs;
 
     EXPECT_EQ(countNodesWithProvenance(
-                  backward, ExprOp::REDUCE_PROD, ExpressionExecutionProvenance::BackwardForwardReplay),
-              1U);
+                  backward, ExprOp::REDUCE_PROD, ExpressionExecutionProvenance::Forward),
+              0U);
+    ASSERT_EQ(build.forward_value_requirements.size(), 1U);
+    EXPECT_EQ(build.forward_value_requirements.front().forward_node_index, forward.outputs.front().node_idx);
 }
 
-TEST(ExpressionForwardReplayInstrumentation, ConvolutionGeluReplayIsDistinctFromConvolutionGradient) {
+TEST(ExpressionForwardReplayInstrumentation, ConvolutionGeluUsesSavedForwardValuesWithoutReplay) {
     const Expression input = Expression::input("input", DataType::FP32, DataType::FP32);
     const Expression filter = Expression::input("filter", DataType::FP32, DataType::FP32);
     ConvolutionSpatial2d spatial;
@@ -352,33 +430,30 @@ TEST(ExpressionForwardReplayInstrumentation, ConvolutionGeluReplayIsDistinctFrom
     const Expression convolution =
         Expression::conv2d(input, filter, spatial, DataType::FP32, DataType::FP32);
     const PhysicalOutputs forward = Expression::outputs({{"y", convolution.gelu()}}).physicalOutputs();
-    const PhysicalOutputs backward = buildBackwardOutputs(
+    const BackwardBuildResult backward_build = buildBackwardOutputsWithForwardValueRequirements(
         forward,
         {"input"},
-        std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        std::optional<std::string>{"dy"},
         std::unordered_map<std::string, std::vector<uint64_t>>{
             {"input", {1, 2, 5, 5}},
             {"filter", {3, 2, 3, 3}},
         });
+    const PhysicalOutputs& backward = backward_build.outputs;
+    EXPECT_FALSE(backward_build.forward_value_requirements.empty());
 
-    // Exact GELU is represented as x * normcdf(x).  The raw Expression graph
-    // therefore contains two structurally identical CONV2D producer nodes: one
-    // through each GELU branch.  AutoDiff sees both logical nodes, so this
-    // source-level provenance test must expect two replay clones and two dInput
-    // nodes.  EquationCompiler deduplicates identical stage-boundary regions by
-    // fusedRegionSignature(), so this does *not* imply two physical convolution
-    // launches per backward plan; the API-level BR0 counter test below the layer
-    // stack is the authoritative physical-execution check.
+    // Exact GELU still contains two logical references to the convolution
+    // producer, but BR6.0A turns any computed primal dependency into a retained
+    // forward input. No CONV2D producer may be cloned into the backward graph.
     EXPECT_EQ(countNodesWithProvenance(
-                  backward, ExprOp::CONV2D, ExpressionExecutionProvenance::BackwardForwardReplay),
-              2U);
+                  backward, ExprOp::CONV2D, ExpressionExecutionProvenance::Forward),
+              0U);
     EXPECT_EQ(countNodesWithProvenance(
                   backward, ExprOp::CONV2D_BACKWARD_DATA, ExpressionExecutionProvenance::BackwardGradient),
               2U);
 }
 
 
-TEST(ExpressionForwardReplayInstrumentation, Convolution3dGeluReplayIsDistinctFromConvolutionGradient) {
+TEST(ExpressionForwardReplayInstrumentation, Convolution3dGeluUsesSavedForwardValuesWithoutReplay) {
     const Expression input = Expression::input("input", DataType::FP32, DataType::FP32);
     const Expression filter = Expression::input("filter", DataType::FP32, DataType::FP32);
     ConvolutionSpatial3d spatial;
@@ -392,38 +467,40 @@ TEST(ExpressionForwardReplayInstrumentation, Convolution3dGeluReplayIsDistinctFr
     const Expression convolution =
         Expression::conv3d(input, filter, spatial, DataType::FP32, DataType::FP32);
     const PhysicalOutputs forward = Expression::outputs({{"y", convolution.gelu()}}).physicalOutputs();
-    const PhysicalOutputs backward = buildBackwardOutputs(
+    const BackwardBuildResult backward_build = buildBackwardOutputsWithForwardValueRequirements(
         forward,
         {"input"},
-        std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        std::optional<std::string>{"dy"},
         std::unordered_map<std::string, std::vector<uint64_t>>{
             {"input", {1, 2, 4, 5, 5}},
             {"filter", {3, 2, 3, 3, 3}},
         });
+    const PhysicalOutputs& backward = backward_build.outputs;
+    EXPECT_FALSE(backward_build.forward_value_requirements.empty());
 
-    // See the 2D case above: exact GELU duplicates the logical producer across
-    // x * normcdf(x) in the raw Expression graph.  BR0 is tagging those two
-    // logical replay nodes correctly; EquationCompiler subsequently CSEs the
-    // identical CONV3D stage-boundary regions before physical execution.
+    // See the 2D case above: duplicated logical references may remain, but the
+    // forward convolution itself is never reconstructed during autodiff.
     EXPECT_EQ(countNodesWithProvenance(
-                  backward, ExprOp::CONV3D, ExpressionExecutionProvenance::BackwardForwardReplay),
-              2U);
+                  backward, ExprOp::CONV3D, ExpressionExecutionProvenance::Forward),
+              0U);
     EXPECT_EQ(countNodesWithProvenance(
                   backward, ExprOp::CONV3D_BACKWARD_DATA, ExpressionExecutionProvenance::BackwardGradient),
               2U);
 }
 
-TEST(ExpressionForwardReplayInstrumentation, PhysicalReductionCounterSeesNorm2Replay) {
+TEST(ExpressionForwardReplayInstrumentation, PhysicalNorm2BackwardConsumesRetainedOutputWithoutReplay) {
     REQUIRE_CUDA_DEVICE();
 
     const Expression x_expr = Expression::input("x", DataType::FP32, DataType::FP32);
     const PhysicalOutputs forward =
         Expression::outputs({{"y", x_expr.reduce_norm2({1}, {1}, DataType::FP32)}}).physicalOutputs();
-    const PhysicalOutputs backward = buildBackwardOutputs(
+    const BackwardBuildResult backward = buildBackwardOutputsWithForwardValueRequirements(
         forward,
         {"x"},
         std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        std::unordered_map<std::string, DataType>{{"y", DataType::FP32}},
         std::unordered_map<std::string, std::vector<uint64_t>>{{"x", {2, 4}}});
+    ASSERT_EQ(backward.forward_value_requirements.size(), 1U);
 
     Stream stream(0);
     const TensorPlacement gpu(TensorPlacement::MemDevices::GPU, 0);
@@ -433,28 +510,39 @@ TEST(ExpressionForwardReplayInstrumentation, PhysicalReductionCounterSeesNorm2Re
     dy.fill(1.0, stream);
     stream.synchronize();
 
-    FusedEquation backward_equation = FusedEquation::compile(backward, 0);
-    StampedExecutionPlan backward_plan = backward_equation.stamp({{"x", x}, {"dy", dy}}, stream);
+    const ForwardValueRequirement& requirement = backward.forward_value_requirements.front();
+    FusedEquation forward_equation = FusedEquation::compile(forward, 0);
+    StampedExecutionPlan forward_plan =
+        forward_equation.stampRetainingForwardValues({requirement.forward_node_index}, {{"x", x}}, stream);
+    forward_plan.run();
+    stream.synchronize();
+
+    FusedEquation backward_equation = FusedEquation::compile(backward.outputs, 0);
+    StampedExecutionPlan backward_plan = backward_equation.stamp(
+        {{"x", x},
+         {"dy", dy},
+         {requirement.backward_input_name, forward_plan.retainedForwardValue(requirement.forward_node_index)}},
+        stream);
     resetExpressionTestExecutionCounters();
     backward_plan.run();
     stream.synchronize();
 
     const ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
     EXPECT_EQ(counters.reduction.forward, 0U);
-    EXPECT_EQ(counters.reduction.backward_gradient, 0U);
-    EXPECT_EQ(counters.reduction.backward_forward_replay, 1U);
 }
 
-TEST(ExpressionForwardReplayInstrumentation, PhysicalSoftmaxCounterSeesOutputReplay) {
+TEST(ExpressionForwardReplayInstrumentation, PhysicalSoftmaxBackwardConsumesRetainedOutputWithoutReplay) {
     REQUIRE_CUDA_DEVICE();
 
     const Expression x_expr = Expression::input("x", DataType::FP32, DataType::FP32);
     const PhysicalOutputs forward = Expression::outputs({{"y", x_expr.softmax()}}).physicalOutputs();
-    const PhysicalOutputs backward = buildBackwardOutputs(
+    const BackwardBuildResult backward = buildBackwardOutputsWithForwardValueRequirements(
         forward,
         {"x"},
         std::unordered_map<std::string, std::string>{{"y", "dy"}},
+        std::unordered_map<std::string, DataType>{{"y", DataType::FP32}},
         std::unordered_map<std::string, std::vector<uint64_t>>{{"x", {2, 4}}});
+    ASSERT_EQ(backward.forward_value_requirements.size(), 1U);
 
     Stream stream(0);
     const TensorPlacement gpu(TensorPlacement::MemDevices::GPU, 0);
@@ -464,16 +552,25 @@ TEST(ExpressionForwardReplayInstrumentation, PhysicalSoftmaxCounterSeesOutputRep
     dy.fill(1.0, stream);
     stream.synchronize();
 
-    FusedEquation backward_equation = FusedEquation::compile(backward, 0);
-    StampedExecutionPlan backward_plan = backward_equation.stamp({{"x", x}, {"dy", dy}}, stream);
+    const ForwardValueRequirement& requirement = backward.forward_value_requirements.front();
+    FusedEquation forward_equation = FusedEquation::compile(forward, 0);
+    StampedExecutionPlan forward_plan =
+        forward_equation.stampRetainingForwardValues({requirement.forward_node_index}, {{"x", x}}, stream);
+    forward_plan.run();
+    stream.synchronize();
+
+    FusedEquation backward_equation = FusedEquation::compile(backward.outputs, 0);
+    StampedExecutionPlan backward_plan = backward_equation.stamp(
+        {{"x", x},
+         {"dy", dy},
+         {requirement.backward_input_name, forward_plan.retainedForwardValue(requirement.forward_node_index)}},
+        stream);
     resetExpressionTestExecutionCounters();
     backward_plan.run();
     stream.synchronize();
 
     const ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
     EXPECT_EQ(counters.softmax.forward, 0U);
-    EXPECT_EQ(counters.softmax.backward_gradient, 0U);
-    EXPECT_EQ(counters.softmax.backward_forward_replay, 1U);
 }
 
 TEST(ExpressionForwardReplayInstrumentation, Br2RetainedForwardPlanFeedsBackwardRequirementWithoutReplay) {
@@ -525,7 +622,7 @@ TEST(ExpressionForwardReplayInstrumentation, Br2RetainedForwardPlanFeedsBackward
     forward_plan.run();
     stream.synchronize();
 
-    std::unordered_map<std::string, Tensor> backward_inputs{{"w", w}, {"dy", dy}};
+    std::unordered_map<std::string, Tensor> backward_inputs{{"x", x}, {"w", w}, {"dy", dy}};
     for (const ForwardValueRequirement& requirement : backward.forward_value_requirements) {
         backward_inputs.emplace(requirement.backward_input_name,
                                 forward_plan.retainedForwardValue(requirement.forward_node_index));
@@ -540,12 +637,11 @@ TEST(ExpressionForwardReplayInstrumentation, Br2RetainedForwardPlanFeedsBackward
 
     const ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
     EXPECT_EQ(counters.matmul.backward_gradient, 1U);
-    EXPECT_EQ(counters.matmul.backward_forward_replay, 0U);
-    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U)
-        << "A BR1 forward-value requirement bound to BR2 retained state must terminate replay completely.";
+    EXPECT_EQ(counters.matmul.forward, 0U)
+        << "A BR1 forward-value requirement bound to BR2 retained state must not launch a forward MATMUL during backward.";
 }
 
-TEST(ExpressionForwardReplayInstrumentation, Br5RequirementModeRefusesFusedActivationWithoutForwardProvider) {
+TEST(ExpressionForwardReplayInstrumentation, Br5SavedForwardAutodiffRefusesFusedActivationWithoutForwardProvider) {
     const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
     const Expression w = Expression::input("w", DataType::FP32, DataType::FP32);
     PhysicalOutputs forward =
@@ -568,7 +664,7 @@ TEST(ExpressionForwardReplayInstrumentation, Br5RequirementModeRefusesFusedActiv
                 {"w", {3, 4}},
             }),
         std::runtime_error)
-        << "BR5 requirement-mode autodiff must never silently replay a fused affine preactivation.";
+        << "BR5 saved-forward autodiff must never silently replay a fused affine preactivation.";
 }
 
 TEST(ExpressionForwardReplayInstrumentation, Br5ExpConsumesRetainedForwardOutputWithoutReplay) {
@@ -601,7 +697,7 @@ TEST(ExpressionForwardReplayInstrumentation, Br5ExpConsumesRetainedForwardOutput
     forward_plan.run();
     stream.synchronize();
 
-    std::unordered_map<std::string, Tensor> backward_inputs{{"dy", dy}};
+    std::unordered_map<std::string, Tensor> backward_inputs{{"x", x}, {"dy", dy}};
     backward_inputs.emplace(backward.forward_value_requirements.front().backward_input_name,
                             forward_plan.retainedForwardValue(backward.forward_value_requirements.front().forward_node_index));
     StampedExecutionPlan backward_plan = FusedEquation::compile(backward.outputs, 0).stamp(backward_inputs, stream);
@@ -609,7 +705,7 @@ TEST(ExpressionForwardReplayInstrumentation, Br5ExpConsumesRetainedForwardOutput
     resetExpressionTestExecutionCounters();
     backward_plan.run();
     stream.synchronize();
-    EXPECT_EQ(expressionTestExecutionCounters().totalBackwardForwardReplay(), 0U)
+    EXPECT_EQ(expressionTestExecutionCounters().fused_kernel.forward, 0U)
         << "EXP backward must consume the already-produced forward EXP output.";
 }
 
@@ -665,9 +761,8 @@ TEST(ExpressionForwardReplayInstrumentation, Br5SoftmaxConsumesRetainedForwardOu
     stream.synchronize();
     ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
     EXPECT_EQ(counters.softmax.forward, 1U);
-    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U);
 
-    std::unordered_map<std::string, Tensor> backward_inputs{{"dy", dy}};
+    std::unordered_map<std::string, Tensor> backward_inputs{{"x", x}, {"dy", dy}};
     backward_inputs.emplace(backward.forward_value_requirements.front().backward_input_name,
                             forward_plan.retainedForwardValue(backward.forward_value_requirements.front().forward_node_index));
     StampedExecutionPlan backward_plan = FusedEquation::compile(backward.outputs, 0).stamp(backward_inputs, stream);
@@ -676,9 +771,7 @@ TEST(ExpressionForwardReplayInstrumentation, Br5SoftmaxConsumesRetainedForwardOu
     backward_plan.run();
     stream.synchronize();
     counters = expressionTestExecutionCounters();
-    EXPECT_EQ(counters.softmax.backward_forward_replay, 0U);
-    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U)
-        << "Softmax backward must consume the real forward Softmax output rather than launching Softmax again.";
+    EXPECT_EQ(counters.softmax.forward, 0U);
 }
 
 TEST(ExpressionForwardReplayInstrumentation, Br5LogSoftmaxUsesRetainedOutputWithoutSecondSoftmax) {
@@ -716,7 +809,7 @@ TEST(ExpressionForwardReplayInstrumentation, Br5LogSoftmaxUsesRetainedOutputWith
     forward_plan.run();
     stream.synchronize();
 
-    std::unordered_map<std::string, Tensor> backward_inputs{{"dy", dy}};
+    std::unordered_map<std::string, Tensor> backward_inputs{{"x", x}, {"dy", dy}};
     backward_inputs.emplace(backward.forward_value_requirements.front().backward_input_name,
                             forward_plan.retainedForwardValue(backward.forward_value_requirements.front().forward_node_index));
     StampedExecutionPlan backward_plan = FusedEquation::compile(backward.outputs, 0).stamp(backward_inputs, stream);
@@ -726,8 +819,7 @@ TEST(ExpressionForwardReplayInstrumentation, Br5LogSoftmaxUsesRetainedOutputWith
     stream.synchronize();
     const ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
     EXPECT_EQ(counters.softmax.backward_gradient, 0U);
-    EXPECT_EQ(counters.softmax.backward_forward_replay, 0U);
-    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U);
+    EXPECT_EQ(counters.softmax.forward, 0U);
 }
 
 TEST(ExpressionForwardReplayInstrumentation, Br5Norm2ConsumesRetainedReductionOutputWithoutReplay) {
@@ -770,9 +862,7 @@ TEST(ExpressionForwardReplayInstrumentation, Br5Norm2ConsumesRetainedReductionOu
     backward_plan.run();
     stream.synchronize();
     const ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
-    EXPECT_EQ(counters.reduction.backward_forward_replay, 0U);
-    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U)
-        << "REDUCE_NORM2 backward must consume the retained real-forward reduction result.";
+    EXPECT_EQ(counters.reduction.forward, 0U);
 }
 
 TEST(ExpressionForwardReplayInstrumentation, Br5ReduceProdConsumesRetainedReductionOutputWithoutReplay) {
@@ -814,9 +904,7 @@ TEST(ExpressionForwardReplayInstrumentation, Br5ReduceProdConsumesRetainedReduct
     backward_plan.run();
     stream.synchronize();
     const ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
-    EXPECT_EQ(counters.reduction.backward_forward_replay, 0U);
-    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U)
-        << "REDUCE_PROD backward must consume the retained real-forward reduction result.";
+    EXPECT_EQ(counters.reduction.forward, 0U);
 }
 
 TEST(ExpressionForwardReplayInstrumentation, Br2RetainsIntermediateWithoutAddingPublicOutput) {
@@ -953,7 +1041,6 @@ TEST(ExpressionForwardReplayInstrumentation, Br3RetainedGeluPrerequisitesPrevent
     const ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
     EXPECT_EQ(counters.matmul.forward, 1U)
         << "Before BR4 supplies a cuBLASLt forward auxiliary value, FC-style GELU retention must execute exactly one affine GEMM.";
-    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U);
 }
 
 TEST(ExpressionForwardReplayInstrumentation, Br4FusedGeluAuxFeedsBackwardWithoutAffineReplay) {
@@ -1034,8 +1121,6 @@ TEST(ExpressionForwardReplayInstrumentation, Br4FusedGeluAuxFeedsBackwardWithout
     stream.synchronize();
     ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
     EXPECT_EQ(counters.matmul.forward, 1U);
-    EXPECT_EQ(counters.matmul.backward_forward_replay, 0U);
-    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U);
 
     const float expected_preactivation =
         static_cast<float>(input_features) * x_value * w_value + bias_value;
@@ -1056,7 +1141,9 @@ TEST(ExpressionForwardReplayInstrumentation, Br4FusedGeluAuxFeedsBackwardWithout
     FusedEquation backward_equation = FusedEquation::compile(backward.outputs, 0);
     const Tensor saved_aux = forward_plan.retainedForwardEpilogueAux(y_node);
     std::unordered_map<std::string, Tensor> backward_inputs{
+        {"x", x},
         {"w", w},
+        {"bias", bias},
         {"dy", dy},
         {aux_requirement.backward_input_name, saved_aux},
     };
@@ -1066,10 +1153,9 @@ TEST(ExpressionForwardReplayInstrumentation, Br4FusedGeluAuxFeedsBackwardWithout
     backward_plan.run();
     stream.synchronize();
     counters = expressionTestExecutionCounters();
-    EXPECT_EQ(counters.matmul.backward_forward_replay, 0U)
-        << "A BR4 saved GELU_AUX binding must never regenerate the affine GEMM.";
+    EXPECT_EQ(counters.matmul.forward, 0U)
+        << "A BR4 saved GELU_AUX binding must never launch a forward affine GEMM during backward.";
     EXPECT_EQ(counters.matmul.backward_gradient, 1U);
-    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U);
 
     const std::vector<float> dx_values = copyFp32ToHost(backward_plan.getFinalOutputs().at("x_grad"), stream);
     const float expected_dx = static_cast<float>(output_features) * w_value *
@@ -1140,81 +1226,33 @@ TEST(ExpressionForwardReplayInstrumentation, Br4IneligibleGeluAuxShapeFallsBackT
     stream.synchronize();
     const ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
     EXPECT_EQ(counters.matmul.forward, 1U);
-    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U);
 }
 
-TEST(ExpressionForwardReplayInstrumentation, ShapeSpecializedAffineGeluBackwardCountsPreambleReplaySeparately) {
-    REQUIRE_CUDA_DEVICE();
+TEST(ExpressionForwardReplayInstrumentation, Br60AOrdinaryAutoDiffRefusesFusedActivationWithoutForwardProvider) {
+    const Expression x = Expression::input("x", DataType::FP32, DataType::FP32);
+    const Expression w = Expression::input("w", DataType::FP32, DataType::FP32);
+    PhysicalOutputs forward =
+        Expression::outputs({{"y", Expression::matmul(x, w, false, false, DataType::FP32, DataType::FP32)}})
+            .physicalOutputs();
+    ASSERT_EQ(forward.outputs.size(), 1U);
+    ExprNode& fused_output = forward.expr->nodes.at(forward.outputs.front().node_idx);
+    ASSERT_EQ(fused_output.op, ExprOp::MATMUL);
+    fused_output.matmul_epilogue = MatmulEpilogue::Relu;
+    fused_output.matmul_forward_epilogue_aux = false;
 
-    Stream stream(0);
-    const TensorPlacement gpu(TensorPlacement::MemDevices::GPU, 0);
-    Tensor x(gpu, TensorDescriptor(DataType::FP32, {2, 3}));
-    Tensor w(gpu, TensorDescriptor(DataType::FP32, {3, 4}));
-    Tensor bias(gpu, TensorDescriptor(DataType::FP32, {4}));
-    Tensor dy(gpu, TensorDescriptor(DataType::FP32, {2, 4}));
-    x.fill(0.25, stream);
-    w.fill(0.5, stream);
-    bias.fill(0.1, stream);
-    dy.fill(1.0, stream);
-    stream.synchronize();
-
-    // Use compileBackward rather than directly differentiating the source
-    // expression: this exercises Thor's runtime shape specialization, which
-    // lowers matmul+bias+exact-GELU to the cuBLASLt GEMM GELU epilogue before
-    // reverse mode calls recomputeForwardMatmulPreamble(). This is the expression
-    // path used by the ordinary FullyConnected CustomLayer.
-    FusedEquation forward_equation = FusedEquation::compile(affineGeluForward(), 0);
-    FusedEquation backward_equation = forward_equation.compileBackward({"x"}, "dy");
-    StampedExecutionPlan backward_plan =
-        backward_equation.stamp({{"x", x}, {"w", w}, {"bias", bias}, {"dy", dy}}, stream);
-
-    resetExpressionTestExecutionCounters();
-    backward_plan.run();
-    stream.synchronize();
-
-    const ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
-    EXPECT_EQ(counters.matmul.forward, 0U);
-    EXPECT_EQ(counters.matmul.backward_gradient, 1U);
-    EXPECT_EQ(counters.matmul.backward_forward_replay, 1U)
-        << "FC-style GELU backward should expose the regenerated affine GEMM as replay, not gradient work.";
+    EXPECT_THROW(
+        (void)buildBackwardOutputs(
+            forward,
+            {"x"},
+            std::unordered_map<std::string, std::string>{{"y", "dy"}},
+            std::unordered_map<std::string, DataType>{{"y", DataType::FP32}},
+            std::unordered_map<std::string, std::vector<uint64_t>>{
+                {"x", {2, 3}},
+                {"w", {3, 4}},
+            }),
+        std::runtime_error)
+        << "BR6.0A removes the legacy affine-preamble replay path from every AutoDiff entry point.";
 }
 
-TEST(ExpressionForwardReplayInstrumentation, PhysicalCountersSeparateForwardReplayAndGradientMatmuls) {
-    REQUIRE_CUDA_DEVICE();
 
-    Stream stream(0);
-    const TensorPlacement gpu(TensorPlacement::MemDevices::GPU, 0);
-    Tensor x(gpu, TensorDescriptor(DataType::FP32, {2, 3}));
-    Tensor w(gpu, TensorDescriptor(DataType::FP32, {3, 4}));
-    Tensor dy(gpu, TensorDescriptor(DataType::FP32, {2, 4}));
-    x.fill(0.25, stream);
-    w.fill(0.5, stream);
-    dy.fill(1.0, stream);
-    stream.synchronize();
-
-    FusedEquation forward_equation = FusedEquation::compile(matmulTanhForward(), 0);
-    StampedExecutionPlan forward_plan = forward_equation.stamp({{"x", x}, {"w", w}}, stream);
-    resetExpressionTestExecutionCounters();
-    forward_plan.run();
-    stream.synchronize();
-
-    ExpressionTestExecutionCounters counters = expressionTestExecutionCounters();
-    EXPECT_EQ(counters.matmul.forward, 1U);
-    EXPECT_EQ(counters.matmul.backward_gradient, 0U);
-    EXPECT_EQ(counters.matmul.backward_forward_replay, 0U);
-    EXPECT_EQ(counters.totalBackwardForwardReplay(), 0U);
-
-    FusedEquation backward_equation = FusedEquation::compile(matmulTanhBackward(), 0);
-    StampedExecutionPlan backward_plan = backward_equation.stamp({{"x", x}, {"w", w}, {"dy", dy}}, stream);
-    resetExpressionTestExecutionCounters();
-    backward_plan.run();
-    stream.synchronize();
-
-    counters = expressionTestExecutionCounters();
-    EXPECT_EQ(counters.matmul.forward, 0U);
-    EXPECT_EQ(counters.matmul.backward_gradient, 1U);
-    EXPECT_EQ(counters.matmul.backward_forward_replay, 1U);
-    EXPECT_GE(counters.fused_kernel.backward_forward_replay, 1U);
-    EXPECT_GE(counters.totalBackwardForwardReplay(), 2U);
-}
 #endif

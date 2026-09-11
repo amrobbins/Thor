@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "Utilities/Cache/LruCache.h"
@@ -819,6 +820,19 @@ class FusedEquation {
         const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs = {},
         const std::unordered_map<std::string, Tensor>& preallocated_outputs = {},
         const std::unordered_map<std::string, std::vector<uint64_t>>& requestedOutputShapes = {}) const;
+
+    // Explicit standalone training pair for the low-level FusedEquation API.
+    // Unlike stamp() on a backward equation, this path owns a real forward
+    // execution and therefore has a legitimate provider for every computed
+    // primal/state required by backward. The caller must run the returned
+    // forward plan before the returned backward plan. No forward subtree is
+    // reconstructed inside the backward expression.
+    [[nodiscard]] std::pair<StampedExecutionPlan, StampedExecutionPlan> stampForwardBackwardPair(
+        const std::unordered_map<std::string, Tensor>& inputs,
+        const Stream& stream,
+        const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs = {},
+        const std::unordered_map<std::string, Tensor>& preallocated_backward_outputs = {},
+        const std::unordered_map<std::string, std::vector<uint64_t>>& requested_backward_output_shapes = {}) const;
 
     void run(const Tensor& input, Tensor& output, Stream& stream) const;
     void run(const std::unordered_map<std::string, Tensor>& inputs, Tensor& output, Stream& stream) const;

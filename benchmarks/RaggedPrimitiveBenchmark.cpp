@@ -528,8 +528,9 @@ struct Result {
     uint32_t autoPartialBlocks = 0;
     uint32_t partialBlocks = 0;
     uint32_t passes = 1;
-    uint64_t usefulBytes = 0;
-    uint64_t estimatedTrafficBytes = 0;
+    uint64_t externalReadBytes = 0;
+    uint64_t externalWriteBytes = 0;
+    uint64_t externalIoBytes = 0;
     TimingStats timing;
 };
 
@@ -545,8 +546,8 @@ void printHeader() {
            "gathered_active_values,active_values,active_scalars,value_bytes,elements_per_value,num_classes,"
            "offset_bytes,index_bytes,prediction_dtype,label_dtype,label_format,selection_mode,blocks,"
            "auto_copy_width,copy_width,auto_lanes_per_token,lanes_per_token,auto_tokens_per_block,tokens_per_block,"
-           "copy_items_per_value,auto_partial_blocks,partial_blocks,passes,useful_bytes,estimated_traffic_bytes,"
-           "p10_us,median_us,p90_us,useful_GBps,estimated_traffic_GBps\n";
+           "copy_items_per_value,auto_partial_blocks,partial_blocks,passes,external_read_bytes,external_write_bytes,"
+           "external_io_bytes,p10_us,median_us,p90_us,external_io_GBps\n";
 }
 
 void printResult(const Result& r) {
@@ -560,11 +561,9 @@ void printResult(const Result& r) {
               << r.blocks << ',' << r.autoCopyWidth << ',' << r.copyWidth << ',' << r.autoLanesPerToken << ','
               << r.lanesPerToken << ',' << r.autoTokensPerBlock << ',' << r.tokensPerBlock << ','
               << r.copyItemsPerValue << ',' << r.autoPartialBlocks << ',' << r.partialBlocks << ',' << r.passes << ','
-              << r.usefulBytes << ','
-              << r.estimatedTrafficBytes << ',' << std::setprecision(3) << r.timing.p10_us << ','
-              << r.timing.median_us << ',' << r.timing.p90_us << ',' << std::setprecision(6)
-              << gbps(r.usefulBytes, r.timing.median_us) << ','
-              << gbps(r.estimatedTrafficBytes, r.timing.median_us) << '\n';
+              << r.externalReadBytes << ',' << r.externalWriteBytes << ',' << r.externalIoBytes << ','
+              << std::setprecision(3) << r.timing.p10_us << ',' << r.timing.median_us << ',' << r.timing.p90_us << ','
+              << std::setprecision(6) << gbps(r.externalIoBytes, r.timing.median_us) << '\n';
 }
 
 struct GatherGeometry {
@@ -958,8 +957,19 @@ void runGatherForwardCase(const Options& options,
     result.autoTokensPerBlock = autoInfo.tokens_per_block;
     result.tokensPerBlock = selectedInfo.tokens_per_block;
     result.copyItemsPerValue = selectedInfo.copy_items_per_value;
-    result.usefulBytes = checkedMultiply(geometry.gatheredActiveValues, valueBytes, "Gather useful bytes overflow");
-    result.estimatedTrafficBytes = checkedMultiply(result.usefulBytes, 2, "Gather traffic bytes overflow");
+    const uint64_t gatheredPayloadBytes =
+        checkedMultiply(geometry.gatheredActiveValues, valueBytes, "Gather payload bytes overflow");
+    const uint64_t offsetReadBytes = checkedMultiply(
+        checkedAdd(geometry.sourceOffsets.size(), geometry.indexOffsets.size(), "Gather offset count overflow"),
+        offsetBytes, "Gather offset bytes overflow");
+    const uint64_t indexReadBytes =
+        checkedMultiply(geometry.gatheredActiveValues, indexBytes, "Gather index bytes overflow");
+    result.externalReadBytes = checkedAdd(
+        gatheredPayloadBytes, checkedAdd(offsetReadBytes, indexReadBytes, "Gather metadata bytes overflow"),
+        "Gather external read bytes overflow");
+    result.externalWriteBytes = gatheredPayloadBytes;
+    result.externalIoBytes = checkedAdd(result.externalReadBytes, result.externalWriteBytes,
+                                        "Gather external IO bytes overflow");
     result.timing = benchmarkDramReads(stream, evictor, options.warmup, options.iterations, operation);
     printResult(result);
 }
@@ -1048,12 +1058,20 @@ void runGatherBackwardCase(const Options& options,
     result.autoTokensPerBlock = autoInfo.tokens_per_block;
     result.tokensPerBlock = selectedInfo.tokens_per_block;
     result.copyItemsPerValue = selectedInfo.elements_per_value;
-    result.usefulBytes = checkedMultiply(geometry.gatheredActiveValues, valueBytes, "Gather backward useful bytes overflow");
-    const uint64_t zeroWrites = checkedMultiply(geometry.sourceActiveValues, valueBytes, "Gather zero bytes overflow");
-    const uint64_t scatterFactor = gatherValuesPerRow == 1 ? 1 : 2;
-    const uint64_t scatterTraffic = checkedMultiply(result.usefulBytes, scatterFactor, "Gather scatter traffic overflow");
-    result.estimatedTrafficBytes = checkedAdd(checkedAdd(result.usefulBytes, zeroWrites, "Gather traffic overflow"),
-                                              scatterTraffic, "Gather traffic overflow");
+    const uint64_t upstreamReadBytes =
+        checkedMultiply(geometry.gatheredActiveValues, valueBytes, "Gather backward upstream bytes overflow");
+    const uint64_t offsetReadBytes = checkedMultiply(
+        checkedAdd(geometry.sourceOffsets.size(), geometry.indexOffsets.size(), "Gather backward offset count overflow"),
+        offsetBytes, "Gather backward offset bytes overflow");
+    const uint64_t indexReadBytes =
+        checkedMultiply(geometry.gatheredActiveValues, indexBytes, "Gather backward index bytes overflow");
+    result.externalReadBytes = checkedAdd(
+        upstreamReadBytes, checkedAdd(offsetReadBytes, indexReadBytes, "Gather backward metadata bytes overflow"),
+        "Gather backward external read bytes overflow");
+    result.externalWriteBytes =
+        checkedMultiply(geometry.sourceActiveValues, valueBytes, "Gather backward output bytes overflow");
+    result.externalIoBytes = checkedAdd(result.externalReadBytes, result.externalWriteBytes,
+                                        "Gather backward external IO bytes overflow");
     result.timing = benchmarkDramReads(stream, evictor, options.warmup, options.iterations, operation);
     printResult(result);
 }
@@ -1162,10 +1180,11 @@ void runWeightedCase(const Options& options,
     result.autoPartialBlocks = autoPartials;
     result.partialBlocks = selectedPartials;
     result.passes = selectedPartials == 1 ? 1 : 2;
-    result.usefulBytes = checkedMultiply(activeScalars, 2 * dtypeBytes(dtype), "Weighted useful bytes overflow");
-    const uint64_t partialTraffic = selectedPartials > 1 ? checkedMultiply(selectedPartials, 16, "Weighted partial traffic overflow") : 0;
-    result.estimatedTrafficBytes = checkedAdd(checkedAdd(result.usefulBytes, partialTraffic, "Weighted traffic overflow"), 8,
-                                              "Weighted traffic overflow");
+    result.externalReadBytes =
+        checkedMultiply(activeScalars, 2 * dtypeBytes(dtype), "Weighted external read bytes overflow");
+    result.externalWriteBytes = 2 * dtypeBytes(DataType::FP32);  // numerator + denominator
+    result.externalIoBytes = checkedAdd(result.externalReadBytes, result.externalWriteBytes,
+                                        "Weighted external IO bytes overflow");
     result.timing = benchmarkDramReads(stream, evictor, options.warmup, options.iterations, operation);
     printResult(result);
 }
@@ -1236,12 +1255,12 @@ void runBinaryCase(const Options& options,
     result.autoPartialBlocks = autoPartials;
     result.partialBlocks = selectedPartials;
     result.passes = selectedPartials == 1 ? 1 : 2;
-    result.usefulBytes = checkedMultiply(activeValues,
-                                         dtypeBytes(predictionDtype) + dtypeBytes(labelDtype),
-                                         "Binary accuracy useful bytes overflow");
-    const uint64_t partialTraffic = selectedPartials > 1 ? checkedMultiply(selectedPartials, 16, "Binary partial traffic overflow") : 0;
-    result.estimatedTrafficBytes = checkedAdd(checkedAdd(result.usefulBytes, partialTraffic, "Binary traffic overflow"), 8,
-                                              "Binary traffic overflow");
+    result.externalReadBytes = checkedMultiply(
+        activeValues, dtypeBytes(predictionDtype) + dtypeBytes(labelDtype),
+        "Binary accuracy external read bytes overflow");
+    result.externalWriteBytes = 2 * dtypeBytes(DataType::FP32);  // correct + token count
+    result.externalIoBytes = checkedAdd(result.externalReadBytes, result.externalWriteBytes,
+                                        "Binary accuracy external IO bytes overflow");
     result.timing = benchmarkDramReads(stream, evictor, options.warmup, options.iterations, operation);
     printResult(result);
 }
@@ -1337,10 +1356,11 @@ void runCategoricalCase(const Options& options,
     const uint64_t activeLabelBytes = perClass
                                           ? checkedMultiply(result.activeScalars, 4, "Categorical per-class label bytes overflow")
                                           : checkedMultiply(activeValues, 4, "Categorical index label bytes overflow");
-    result.usefulBytes = checkedAdd(activePredictionBytes, activeLabelBytes, "Categorical useful bytes overflow");
-    const uint64_t partialTraffic = selectedPartials > 1 ? checkedMultiply(selectedPartials, 16, "Categorical partial traffic overflow") : 0;
-    result.estimatedTrafficBytes = checkedAdd(checkedAdd(result.usefulBytes, partialTraffic, "Categorical traffic overflow"), 8,
-                                              "Categorical traffic overflow");
+    result.externalReadBytes =
+        checkedAdd(activePredictionBytes, activeLabelBytes, "Categorical external read bytes overflow");
+    result.externalWriteBytes = 2 * dtypeBytes(DataType::FP32);  // correct + token count
+    result.externalIoBytes = checkedAdd(result.externalReadBytes, result.externalWriteBytes,
+                                        "Categorical external IO bytes overflow");
     result.timing = benchmarkDramReads(stream, evictor, options.warmup, options.iterations, operation);
     printResult(result);
 }

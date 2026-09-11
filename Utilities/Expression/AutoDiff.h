@@ -13,18 +13,14 @@ namespace ThorImplementation {
 
 inline constexpr const char* DEFAULT_BACKWARD_UPSTREAM_INPUT_NAME = "__grad_output";
 
-// A caller may retain selected forward values and bind them as
-// explicit inputs of its backward graph.  The key is the node index in the
-// physical forward expression; forwardValue() stops at that node instead of
-// replaying its forward subtree.  This is intentionally a value-binding
-// mechanism, not checkpointing: the named backward input must be supplied by
-// the real forward execution.
+// A caller may retain selected forward values and bind them as explicit inputs
+// of its backward graph. The key is the node index in the physical forward
+// expression. AutoDiff never replays a materialized forward subtree: a required
+// computed primal must be supplied by the real forward execution.
 using SavedForwardValueInputNames = std::unordered_map<uint32_t, std::string>;
 
-// A backward expression built in forward-value-requirement mode records every
-// non-root primal value that must be supplied from the real forward execution.
-// BR1 only declares these dependencies; BR2 is responsible for teaching generic
-// CustomLayer forward plans to retain and bind them automatically.
+// A backward expression records every non-root primal value that must be
+// supplied from the real forward execution.
 enum class ForwardValueRequirementKind : uint8_t {
     NodeOutput = 0,
     MatmulEpilogueAux = 1,
@@ -40,6 +36,13 @@ struct BackwardBuildResult {
     PhysicalOutputs outputs;
     std::vector<ForwardValueRequirement> forward_value_requirements;
 };
+
+// PhysicalOutputs-only entry points are intentionally limited to VJPs whose
+// computed-primal dependencies are already known to the caller. If AutoDiff
+// discovers a retained-forward requirement that is not satisfied by an explicit
+// saved_forward_value_input_names binding, these entry points fail immediately.
+// Callers that need AutoDiff to discover retained real-forward state must use
+// buildBackwardOutputsWithForwardValueRequirements().
 
 PhysicalOutputs buildBackwardOutputs(
     const PhysicalOutputs& forward_outputs,
@@ -68,19 +71,20 @@ PhysicalOutputs buildBackwardOutputs(
     bool accumulate_grad_outputs = false,
     const SavedForwardValueInputNames& saved_forward_value_input_names = {});
 
-// Existing buildBackwardOutputs(...) overloads intentionally retain the legacy
-// recompute-if-unbound behavior until BR2 wires these dependencies through the
-// generic forward plan.
-//
-// Build a backward graph without implicitly replaying computed primal values.
-// Instead, forwardValue() turns each required non-root materialized value into a
-// synthetic backward input and returns the corresponding dependency list.
-// Explicit saved_forward_value_input_names may be supplied to preserve stable
-// ABI names for values already retained by specialized callers. Requirement
-// mode is the normal no-replay training contract: every computed
-// primal dependency must be supplied by the real forward as a retained node or
-// backend auxiliary state. Explicit recompute remains available only through the
-// legacy/opt-in compatibility path.
+// Build a backward graph and return every computed primal value that must be
+// supplied from the real forward execution. forwardValue() turns each required
+// non-root materialized value into a synthetic backward input. Explicit
+// saved_forward_value_input_names may be supplied to preserve stable ABI names
+// for values already retained by specialized callers. There is no implicit
+// recompute fallback.
+BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
+    const PhysicalOutputs& forward_outputs,
+    const std::vector<std::string>& wrt_names = {},
+    const std::optional<std::string>& upstream_input_name = std::nullopt,
+    const std::optional<std::unordered_map<std::string, std::vector<uint64_t>>>& forward_input_dims = std::nullopt,
+    bool accumulate_grad_outputs = false,
+    const SavedForwardValueInputNames& saved_forward_value_input_names = {});
+
 BackwardBuildResult buildBackwardOutputsWithForwardValueRequirements(
     const PhysicalOutputs& forward_outputs,
     const std::vector<std::string>& wrt_names,

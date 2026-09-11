@@ -153,13 +153,14 @@ std::unordered_map<std::string, std::vector<float>> runBackwardValues(const Outp
     FusedEquation forward = FusedEquation::compile(forward_outputs.physicalOutputs(), 0);
     FusedEquation backward = forward.compileBackward(wrt_names, upstream_input_name);
 
-    StampedExecutionPlan plan = backward.stamp(inputs, stream);
-    plan.run();
+    auto [forward_plan, backward_plan] = backward.stampForwardBackwardPair(inputs, stream);
+    forward_plan.run();
+    backward_plan.run();
 
     std::unordered_map<std::string, std::vector<float>> gradients;
     for (const std::string& wrt_name : wrt_names) {
         const std::string grad_name = wrt_name + "_grad";
-        gradients.emplace(grad_name, copyToCpuValues(plan.output(grad_name), stream));
+        gradients.emplace(grad_name, copyToCpuValues(backward_plan.output(grad_name), stream));
     }
     return gradients;
 }
@@ -1866,7 +1867,7 @@ TEST(ExpressionTrigOps, CircularTrigPrimitiveAutodiffRulesAreSupported) {
     auto y = x.sin() + x.cos() + x.tan() + x.asin() + x.acos() + x.atan();
 
     auto outputs = Expression::outputs({{"y", y}}).physicalOutputs();
-    EXPECT_NO_THROW((void)buildBackwardOutputs(outputs, {"x"}));
+    EXPECT_NO_THROW((void)buildBackwardOutputsWithForwardValueRequirements(outputs, {"x"}));
 }
 
 TEST(ExpressionTrigOps, CircularTrigPrimitiveBackwardProducesExpectedGradients) {
@@ -2264,7 +2265,7 @@ TEST(ExpressionHyperbolicTrigOps, HyperbolicTrigPrimitiveAutodiffRulesAreSupport
     auto y = x.sinh() + x.cosh() + x.asinh() + x.acosh() + x.atanh();
 
     auto outputs = Expression::outputs({{"y", y}}).physicalOutputs();
-    EXPECT_NO_THROW((void)buildBackwardOutputs(outputs, {"x"}));
+    EXPECT_NO_THROW((void)buildBackwardOutputsWithForwardValueRequirements(outputs, {"x"}));
 }
 
 TEST(ExpressionHyperbolicTrigOps, HyperbolicTrigPrimitiveBackwardProducesExpectedGradients) {
@@ -2608,7 +2609,7 @@ TEST(ExpressionErrorFunctionOps, ErrorFunctionPrimitiveAutodiffRulesAreSupported
     auto y = x.erf() + x.erfc() + x.erfcx() + x.erfinv() + x.erfcinv();
 
     auto outputs = Expression::outputs({{"y", y}}).physicalOutputs();
-    EXPECT_NO_THROW((void)buildBackwardOutputs(outputs, {"x"}));
+    EXPECT_NO_THROW((void)buildBackwardOutputsWithForwardValueRequirements(outputs, {"x"}));
 }
 
 TEST(ExpressionErrorFunctionOps, ErrorFunctionBackwardProducesExpectedGradients) {
@@ -2834,7 +2835,7 @@ TEST(ExpressionGammaFunctionOps, TgammaAndLgammaAutodiffUseDigamma) {
     auto y = x.tgamma() + x.lgamma();
 
     auto outputs = Expression::outputs({{"y", y}}).physicalOutputs();
-    auto backward = buildBackwardOutputs(outputs, {"x"});
+    auto backward = buildBackwardOutputsWithForwardValueRequirements(outputs, {"x"}).outputs;
 
     ASSERT_TRUE(backward.expr != nullptr);
     bool foundDigamma = false;

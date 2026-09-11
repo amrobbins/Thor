@@ -158,15 +158,13 @@ enum class ExprOp : uint16_t {
 };
 
 // Debug/profiling provenance for physical work produced by Expression
-// autodiff.  This is deliberately orthogonal to ExprOp and is not part of the
-// serialized/canonical mathematical expression contract.  Forward is the
+// autodiff. This is deliberately orthogonal to ExprOp and is not part of the
+// serialized/canonical mathematical expression contract. Forward is the
 // default for user-authored expressions; BackwardGradient marks operations
-// synthesized to compute a VJP; BackwardForwardReplay marks forward operations
-// cloned into a backward graph in order to recover a primal value.
+// synthesized to compute a VJP.
 enum class ExpressionExecutionProvenance : uint8_t {
     Forward = 0,
     BackwardGradient = 1,
-    BackwardForwardReplay = 2,
 };
 
 enum class RotaryScalingKind : uint8_t {
@@ -489,22 +487,15 @@ struct PhysicalExpression {
 };
 
 #ifdef THOR_DEBUG
-// Collapse node-level provenance to the provenance of one physical stage.  A
-// stage containing any replayed primal work is classified as replay even when
-// that work is fused with derivative arithmetic; otherwise derivative work
-// takes precedence over ordinary forward work.
+// Collapse node-level provenance to the provenance of one physical stage.
+// Derivative work takes precedence over ordinary forward work.
 inline ExpressionExecutionProvenance expressionExecutionProvenance(const PhysicalExpression& expr) {
-    bool has_backward_gradient = false;
     for (const ExprNode& node : expr.nodes) {
-        if (node.execution_provenance == ExpressionExecutionProvenance::BackwardForwardReplay) {
-            return ExpressionExecutionProvenance::BackwardForwardReplay;
-        }
         if (node.execution_provenance == ExpressionExecutionProvenance::BackwardGradient) {
-            has_backward_gradient = true;
+            return ExpressionExecutionProvenance::BackwardGradient;
         }
     }
-    return has_backward_gradient ? ExpressionExecutionProvenance::BackwardGradient
-                                 : ExpressionExecutionProvenance::Forward;
+    return ExpressionExecutionProvenance::Forward;
 }
 #endif
 

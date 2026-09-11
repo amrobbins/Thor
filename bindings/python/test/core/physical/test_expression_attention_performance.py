@@ -1334,10 +1334,12 @@ def test_packed_qkv_attention_backward_runtime_has_no_pack_scatter_kernel(dtype:
         )
         stamped = prepared.stamp()
     else:
-        compiled_stage_kinds = program._debug_stage_kinds(inputs)
-        stamped = _stamp_program(program, inputs, stream)
+        # A backward that consumes Attention state must be paired with the real
+        # forward that produced that state. Inspect the concrete paired plans
+        # rather than the removed same-plan forward-replay graph.
+        forward_stamped, stamped = program.stamp_forward_backward_pair(inputs, stream)
+        compiled_stage_kinds = forward_stamped._debug_stage_kinds() + stamped._debug_stage_kinds()
 
-    compiled_matmul_stage_kinds = [stage for stage in compiled_stage_kinds if stage.startswith("Matmul")]
     runtime_stage_kinds = stamped._debug_stage_kinds()
 
     record_property("case", case.name)
@@ -1347,16 +1349,13 @@ def test_packed_qkv_attention_backward_runtime_has_no_pack_scatter_kernel(dtype:
     record_property("runtime_stage_kinds", str(runtime_stage_kinds))
     record_property("output_shape", str(output_shape))
 
-    # The same-plan loss intentionally adds forward Attention plus derivative work
-    # before AttentionBackward. The logical compiled graph still contains the packed
-    # dQKV scatter as a FusedKernel after AttentionBackward; stamping must elide that
-    # trailing kernel by wiring cuDNN dQ/dK/dV directly into the packed dQKV buffer.
+    # The real-forward/backward pair must contain exactly one Attention forward
+    # and one AttentionBackward. The concrete backward runtime must not need a
+    # trailing packed dQKV scatter kernel: cuDNN writes directly into the packed
+    # gradient destination.
     assert compiled_stage_kinds.count("Attention") == 1
     assert compiled_stage_kinds.count("AttentionBackward") == 1
-    compiled_backward_index = compiled_stage_kinds.index("AttentionBackward")
-    assert "FusedKernel" in compiled_stage_kinds[compiled_backward_index + 1 :]
 
-    assert runtime_stage_kinds.count("Attention") == 1
     assert runtime_stage_kinds.count("AttentionBackward") == 1
     runtime_backward_index = runtime_stage_kinds.index("AttentionBackward")
     assert "FusedKernel" not in runtime_stage_kinds[runtime_backward_index + 1 :]

@@ -686,10 +686,11 @@ Tensor runBackwardOutput(const Expression& forward_expression,
         preallocated.emplace(output_name, preallocated_output.value());
     }
 
-    StampedExecutionPlan plan = backward.stamp(inputs, stream, {}, preallocated);
-    plan.run();
+    auto [forward_plan, backward_plan] = backward.stampForwardBackwardPair(inputs, stream, {}, preallocated);
+    forward_plan.run();
+    backward_plan.run();
     stream.synchronize();
-    return plan.output(output_name);
+    return backward_plan.output(output_name);
 }
 
 bool containsOp(const PhysicalOutputs& outputs, ExprOp op) {
@@ -1318,7 +1319,8 @@ TEST(RaggedExpression, SegmentedMinMaxBackwardCanonicalizationIncludesRaggedMeta
 
     for (const Expression& reduction : {ragged.segment_min(), ragged.segment_max()}) {
         const PhysicalOutputs forward = Expression::outputs({{"y", reduction}}).physicalOutputs();
-        const PhysicalOutputs backward = buildBackwardOutputs(forward, {"x.values"});
+        const PhysicalOutputs backward =
+            buildBackwardOutputsWithForwardValueRequirements(forward, {"x.values"}).outputs;
         const std::string canonical = canonicalize(backward);
         EXPECT_NE(canonical.find("batch=3"), std::string::npos);
         EXPECT_NE(canonical.find("maxActive=9"), std::string::npos);
@@ -1432,15 +1434,16 @@ TEST(RaggedExpression, OrdinarySoftmaxCompilerConsumesExtentAndAutodiffUsesDedic
             }
             EXPECT_EQ(forward_softmax_stages, 1u);
 
-            PhysicalOutputs backward = buildBackwardOutputs(
-                forward,
-                {"x.values"},
-                std::unordered_map<std::string, std::string>{{"y", "dy"}},
-                std::unordered_map<std::string, DataType>{{"y", value_dtype}},
-                std::unordered_map<std::string, std::vector<uint64_t>>{
-                    {"x.values", {9, 2, 3}},
-                    {"x.offsets", {4}},
-                });
+            PhysicalOutputs backward = buildBackwardOutputsWithForwardValueRequirements(
+                                           forward,
+                                           {"x.values"},
+                                           std::unordered_map<std::string, std::string>{{"y", "dy"}},
+                                           std::unordered_map<std::string, DataType>{{"y", value_dtype}},
+                                           std::unordered_map<std::string, std::vector<uint64_t>>{
+                                               {"x.values", {9, 2, 3}},
+                                               {"x.offsets", {4}},
+                                           })
+                                           .outputs;
             resolveRaggedBackwardTestDTypes(backward, DataType::UINT32, value_dtype);
 
             size_t ragged_backward_ops = 0;
@@ -1774,7 +1777,8 @@ TEST(RaggedExpression, SegmentSoftmaxAndLogSoftmaxAutodiffBuildThroughExistingSe
     }
     EXPECT_GT(softmax_segmented_scans, 0U);
 
-    PhysicalOutputs softmax_backward = buildBackwardOutputs(softmax_outputs, {"x.values"});
+    PhysicalOutputs softmax_backward =
+        buildBackwardOutputsWithForwardValueRequirements(softmax_outputs, {"x.values"}).outputs;
     resolveRaggedBackwardTestDTypes(softmax_backward, DataType::UINT32);
     EXPECT_TRUE(containsOp(softmax_backward, ExprOp::RAGGED_VALUEWISE_EXTENT));
     EXPECT_TRUE(containsOp(softmax_backward, ExprOp::SEGMENTED_SCAN));
@@ -1802,7 +1806,8 @@ TEST(RaggedExpression, SegmentSoftmaxAndLogSoftmaxAutodiffBuildThroughExistingSe
     }
     EXPECT_GT(log_softmax_segmented_scans, 0U);
 
-    PhysicalOutputs log_softmax_backward = buildBackwardOutputs(log_softmax_outputs, {"x.values"});
+    PhysicalOutputs log_softmax_backward =
+        buildBackwardOutputsWithForwardValueRequirements(log_softmax_outputs, {"x.values"}).outputs;
     resolveRaggedBackwardTestDTypes(log_softmax_backward, DataType::UINT32);
     EXPECT_TRUE(containsOp(log_softmax_backward, ExprOp::RAGGED_VALUEWISE_EXTENT));
     EXPECT_TRUE(containsOp(log_softmax_backward, ExprOp::SEGMENTED_SCAN));
@@ -1913,19 +1918,29 @@ TEST(RaggedExpression, T9DAllDifferentiableActiveLocalBroadcastParametersUseSegm
         const PhysicalOutputs forward = Expression::outputs(
             {{"y", value.withRaggedRuntimeExtent(offsets, batch_size, max_total_values, width)}})
                                             .physicalOutputs();
-        PhysicalOutputs backward = buildBackwardOutputs(
-            forward,
-            {"parameter"},
-            std::nullopt,
-            std::unordered_map<std::string, std::vector<uint64_t>>{
-                {"x", {max_total_values, width}},
-                {"parameter", {width}},
-                {"offsets", {batch_size + 1}},
-            });
+        PhysicalOutputs backward = buildBackwardOutputsWithForwardValueRequirements(
+                                       forward,
+                                       {"parameter"},
+                                       std::nullopt,
+                                       std::unordered_map<std::string, std::vector<uint64_t>>{
+                                           {"x", {max_total_values, width}},
+                                           {"parameter", {width}},
+                                           {"offsets", {batch_size + 1}},
+                                       })
+                                       .outputs;
         std::vector<DataType> input_dtypes(backward.expr->inputs.size(), DataType::FP32);
         for (const NamedInput& input : backward.expr->inputs) {
             if (input.name == "offsets") {
                 input_dtypes.at(input.slot) = DataType::UINT32;
+                continue;
+            }
+            if (input.name.rfind("__thor_saved_forward_value_", 0) == 0) {
+                for (const ExprNode& node : backward.expr->nodes) {
+                    if (node.op == ExprOp::INPUT && node.input_slot == input.slot && node.input_tensor_dtype.has_value()) {
+                        input_dtypes.at(input.slot) = node.input_tensor_dtype.value();
+                        break;
+                    }
+                }
             }
         }
         resolveOutputsDTypesInPlace(backward, input_dtypes);
@@ -2026,14 +2041,18 @@ TEST(RaggedExpression, SegmentMinMaxAutodiffLowersThroughSegmentedArgReductionBa
     const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {}, 4, 10));
 
     PhysicalOutputs min_backward =
-        buildBackwardOutputs(Expression::outputs({{"y", ragged.segment_min()}}).physicalOutputs(), {"x.values"});
+        buildBackwardOutputsWithForwardValueRequirements(
+            Expression::outputs({{"y", ragged.segment_min()}}).physicalOutputs(), {"x.values"})
+            .outputs;
     resolveRaggedBackwardTestDTypes(min_backward, DataType::UINT32);
     EXPECT_TRUE(containsOp(min_backward, ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD));
     EXPECT_TRUE(containsOp(min_backward, ExprOp::RAGGED_VALUEWISE_EXTENT));
     EXPECT_NO_THROW((void)EquationCompiler::splitAtReductionBoundaries(min_backward));
 
     PhysicalOutputs max_backward =
-        buildBackwardOutputs(Expression::outputs({{"y", ragged.segment_max()}}).physicalOutputs(), {"x.values"});
+        buildBackwardOutputsWithForwardValueRequirements(
+            Expression::outputs({{"y", ragged.segment_max()}}).physicalOutputs(), {"x.values"})
+            .outputs;
     resolveRaggedBackwardTestDTypes(max_backward, DataType::UINT64);
     EXPECT_TRUE(containsOp(max_backward, ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD));
     EXPECT_TRUE(containsOp(max_backward, ExprOp::RAGGED_VALUEWISE_EXTENT));
@@ -2051,7 +2070,9 @@ TEST(RaggedExpression, VectorSegmentMinMaxAutodiffLowersThroughGeneralizedWinner
     const RaggedExpression ragged = RaggedExpression::input("x", makeDescriptor(DataType::FP32, {2, 2}, 4, 10));
 
     PhysicalOutputs min_backward =
-        buildBackwardOutputs(Expression::outputs({{"y", ragged.segment_min()}}).physicalOutputs(), {"x.values"});
+        buildBackwardOutputsWithForwardValueRequirements(
+            Expression::outputs({{"y", ragged.segment_min()}}).physicalOutputs(), {"x.values"})
+            .outputs;
     resolveRaggedBackwardTestDTypes(min_backward, DataType::UINT32);
     EXPECT_TRUE(containsOp(min_backward, ExprOp::SEGMENTED_REDUCE_MIN_BACKWARD));
     EXPECT_NO_THROW((void)EquationCompiler::splitAtReductionBoundaries(min_backward));
@@ -2065,7 +2086,9 @@ TEST(RaggedExpression, VectorSegmentMinMaxAutodiffLowersThroughGeneralizedWinner
     EXPECT_TRUE(found_min);
 
     PhysicalOutputs max_backward =
-        buildBackwardOutputs(Expression::outputs({{"y", ragged.segment_max()}}).physicalOutputs(), {"x.values"});
+        buildBackwardOutputsWithForwardValueRequirements(
+            Expression::outputs({{"y", ragged.segment_max()}}).physicalOutputs(), {"x.values"})
+            .outputs;
     resolveRaggedBackwardTestDTypes(max_backward, DataType::UINT64);
     EXPECT_TRUE(containsOp(max_backward, ExprOp::SEGMENTED_REDUCE_MAX_BACKWARD));
     EXPECT_NO_THROW((void)EquationCompiler::splitAtReductionBoundaries(max_backward));
@@ -3011,7 +3034,8 @@ TEST(RaggedExpression, PackedRmsNormC6OwnsFiniteExecutableFamiliesAndNeverPrepar
     EXPECT_THROW(linked_backward.runOn(stream_a), std::runtime_error)
         << "BR5 standalone RMSNorm backward must fail instead of regenerating forward statistics.";
 #ifdef THOR_DEBUG
-    EXPECT_EQ(expressionTestExecutionCounters().totalBackwardForwardReplay(), 0U);
+    EXPECT_EQ(expressionTestExecutionCounters().rms_norm.total(), 0U)
+        << "A rejected standalone RMSNorm backward must not launch any RMSNorm work.";
 #endif
     ASSERT_TRUE(linked_backward.tryLinkForwardStateFrom(stamp_a))
         << "BR5 RMSNorm backward must consume the exact invVariance retained by its matching real forward.";
@@ -3040,10 +3064,9 @@ TEST(RaggedExpression, PackedRmsNormC6OwnsFiniteExecutableFamiliesAndNeverPrepar
             << "RMSNorm bucket transitions must not build/replay/deserialize plans at runtime.";
     }
 #ifdef THOR_DEBUG
-    const ExpressionTestExecutionCounters replay_counters = expressionTestExecutionCounters();
-    EXPECT_EQ(replay_counters.rms_norm.backward_forward_replay, 0U)
-        << "BR5 forbids RMSNorm backward from regenerating invVariance with a private forward replay.";
-    EXPECT_EQ(replay_counters.totalBackwardForwardReplay(), 0U);
+    const ExpressionTestExecutionCounters backward_counters = expressionTestExecutionCounters();
+    EXPECT_EQ(backward_counters.rms_norm.forward, 0U)
+        << "BR5 forbids RMSNorm backward from regenerating invVariance with a private forward execution.";
 #endif
 }
 
@@ -6121,7 +6144,7 @@ TEST(RaggedExpression, CausalConv1dT9CRetainsReluBackwardBetweenConvolutions) {
     FusedEquation backward = forward.compileBackward({"tokens.values"}, "dy");
     Tensor dx(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, channels}));
     dx.fill(inactive_sentinel, stream);
-    StampedExecutionPlan backward_plan = backward.stamp({{"tokens.values", gpu_x},
+    auto [paired_forward_plan, backward_plan] = backward.stampForwardBackwardPair({{"tokens.values", gpu_x},
                                                          {"tokens.offsets", gpu_offsets},
                                                          {"filter1", gpu_filter1},
                                                          {"filter2", gpu_filter2},
@@ -6136,6 +6159,7 @@ TEST(RaggedExpression, CausalConv1dT9CRetainsReluBackwardBetweenConvolutions) {
     ASSERT_EQ(backward_plan.paddedRaggedPointwisePreStampedWidthCounts().size(), 1u);
     EXPECT_GT(backward_plan.paddedRaggedPointwisePreStampedWidthCounts().front(), 0u);
 
+    paired_forward_plan.run();
     backward_plan.run();
     stream.synchronize();
 
@@ -6305,7 +6329,7 @@ TEST(RaggedExpression, CausalConv1dT9CRetainsTerminalActiveLocalBackwardAfterDgr
         FusedEquation backward = forward.compileBackward({"tokens.values"}, "dy");
         Tensor dx(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, channels}));
         dx.fill(inactive_sentinel, stream);
-        StampedExecutionPlan backward_plan = backward.stamp({{"tokens.values", gpu_x},
+        auto [paired_forward_plan, backward_plan] = backward.stampForwardBackwardPair({{"tokens.values", gpu_x},
                                                              {"tokens.offsets", gpu_offsets},
                                                              {"filter", gpu_filter},
                                                              {"dy", gpu_dy}},
@@ -6319,6 +6343,7 @@ TEST(RaggedExpression, CausalConv1dT9CRetainsTerminalActiveLocalBackwardAfterDgr
         ASSERT_EQ(backward_plan.paddedRaggedPointwisePreStampedWidthCounts().size(), 1u);
         EXPECT_GT(backward_plan.paddedRaggedPointwisePreStampedWidthCounts().front(), 0u);
 
+        paired_forward_plan.run();
         backward_plan.run();
         stream.synchronize();
         std::vector<float> local_grad = cpuRaggedCausalConv1dDgrad(
@@ -6407,7 +6432,7 @@ TEST(RaggedExpression, CausalConv1dT9DParameterReductionsExitRetainedSpineAtLogi
     FusedEquation backward = forward.compileBackward({"tokens.values", "scale", "bias"}, "dy");
     Tensor dx(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, channels}));
     dx.fill(inactive_dx_sentinel, stream);
-    StampedExecutionPlan plan = backward.stamp({{"tokens.values", gpu_x},
+    auto [paired_forward_plan, plan] = backward.stampForwardBackwardPair({{"tokens.values", gpu_x},
                                                 {"tokens.offsets", gpu_offsets},
                                                 {"filter1", gpu_filter1},
                                                 {"filter2", gpu_filter2},
@@ -6458,6 +6483,7 @@ TEST(RaggedExpression, CausalConv1dT9DParameterReductionsExitRetainedSpineAtLogi
             << " must consume a logical packed view, never retained padded storage";
     }
 
+    paired_forward_plan.run();
     plan.run();
     stream.synchronize();
 
@@ -6561,7 +6587,7 @@ TEST(RaggedExpression, CausalConv1dT9DAllEmptyParameterReductionsProduceExactZer
     FusedEquation backward = forward.compileBackward({"tokens.values", "scale", "bias"}, "dy");
     Tensor dx(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, channels}));
     dx.fill(inactive_dx_sentinel, stream);
-    StampedExecutionPlan plan = backward.stamp({{"tokens.values", gpu_x},
+    auto [paired_forward_plan, plan] = backward.stampForwardBackwardPair({{"tokens.values", gpu_x},
                                                 {"tokens.offsets", gpu_offsets},
                                                 {"filter1", gpu_filter1},
                                                 {"filter2", gpu_filter2},
@@ -6576,6 +6602,7 @@ TEST(RaggedExpression, CausalConv1dT9DAllEmptyParameterReductionsProduceExactZer
     EXPECT_EQ(std::count(stage_names.begin(), stage_names.end(), "RaggedConv1dCausalBackwardData"), 2);
     EXPECT_GE(std::count(stage_names.begin(), stage_names.end(), "SegmentedReduction"), 2);
 
+    paired_forward_plan.run();
     plan.run();
     stream.synchronize();
     const std::vector<float> actual_dx = copyToCpuValues(plan.output("tokens.values_grad"), stream);
@@ -6690,7 +6717,7 @@ TEST(RaggedExpression, CausalConv1dT9EThreeConvBackwardRegionRetainsSpineAndMatc
 
     Tensor dx(gpuPlacement, TensorDescriptor(DataType::FP32, {max_total_values, channels}));
     dx.fill(inactive_dx_sentinel, stream);
-    StampedExecutionPlan plan = backward.stamp({{"tokens.values", gpu_x},
+    auto [paired_forward_plan, plan] = backward.stampForwardBackwardPair({{"tokens.values", gpu_x},
                                                 {"tokens.offsets", gpu_offsets},
                                                 {"filter1", gpu_filter1},
                                                 {"filter2", gpu_filter2},
@@ -6787,6 +6814,7 @@ TEST(RaggedExpression, CausalConv1dT9EThreeConvBackwardRegionRetainsSpineAndMatc
         << "bias gradient branches after conv2 dgrad; conv1 dgrad remains on the sibling dX spine";
 
     forward_plan.run();
+    paired_forward_plan.run();
     plan.run();
     stream.synchronize();
 
@@ -6980,7 +7008,7 @@ TEST(RaggedExpression, CausalConv1dT9FRuntimeWidthFamilyRemainsFiniteAndAllocati
                                                       stream);
 
     FusedEquation backward = forward.compileBackward({"tokens.values", "filter1", "filter2"}, "dy");
-    StampedExecutionPlan backward_plan = backward.stamp({{"tokens.values", gpu_x},
+    auto [paired_forward_plan, backward_plan] = backward.stampForwardBackwardPair({{"tokens.values", gpu_x},
                                                          {"tokens.offsets", gpu_offsets},
                                                          {"filter1", gpu_filter1},
                                                          {"filter2", gpu_filter2},
@@ -7062,6 +7090,7 @@ TEST(RaggedExpression, CausalConv1dT9FRuntimeWidthFamilyRemainsFiniteAndAllocati
         partition.setHostOffsets(runtime_partition.offsets);
 
         forward_plan.run();
+        paired_forward_plan.run();
         backward_plan.run();
 
         assert_runtime_family(forward_plan, forward_baseline, forward_pointwise_width_counts, runtime_partition);
@@ -7495,7 +7524,7 @@ TEST(RaggedExpression, CausalConv1dT10RetainedTrainingGateCoversDtypesGroupedDep
                                             std::vector<float>(max_total_values * channels, inactive_dx_sentinel),
                                             production_case.dtype,
                                             stream);
-        StampedExecutionPlan backward_plan = backward.stamp({{"tokens.values", gpu_x},
+        auto [paired_forward_plan, backward_plan] = backward.stampForwardBackwardPair({{"tokens.values", gpu_x},
                                                              {"tokens.offsets", gpu_offsets},
                                                              {"filter1", gpu_filter1},
                                                              {"filter2", gpu_filter2},
@@ -7518,6 +7547,7 @@ TEST(RaggedExpression, CausalConv1dT10RetainedTrainingGateCoversDtypesGroupedDep
             << "ReLU backward must remain active-local and retained";
 
         forward_plan.run();
+        paired_forward_plan.run();
         backward_plan.run();
         stream.synchronize();
 

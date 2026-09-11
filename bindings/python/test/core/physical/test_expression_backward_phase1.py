@@ -128,6 +128,35 @@ def test_compile_backward_sum_scan_uses_reverse_scan_lowering(dtype: thor.DataTy
     assert got.shape == expected.shape
     _assert_close(got, expected, dtype)
 
+@pytest.mark.cuda
+def test_compile_backward_computed_primal_requires_real_forward_pair():
+    dtype = thor.DataType.fp32
+    x = ex.input("x")
+    upstream_name = "__grad_output"
+    fwd_eq = ex.compile(ex.exp(x), device_num=0)
+    bwd_eq = fwd_eq.compile_backward(["x"], error_input_name=upstream_name)
+
+    x_np = np.array([[0.1, -0.2], [0.3, 0.0]], dtype=np.float32)
+    grad_np = np.array([[0.5, -1.0], [1.5, 0.25]], dtype=np.float32)
+    stream = Stream(gpu_num=0)
+    inputs_gpu = {
+        "x": _host_to_gpu(x_np, dtype, stream),
+        upstream_name: _host_to_gpu(grad_np, dtype, stream),
+    }
+
+    with pytest.raises(RuntimeError, match="retained state from the real forward execution"):
+        bwd_eq.stamp(inputs_gpu, stream)
+
+    forward_stamped, backward_stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
+    backward_stamped.run()
+
+    out_gpu = backward_stamped.output("x_grad")
+    out_host = _cpu_tensor(list(out_gpu.dimensions), thor.DataType.fp32)
+    out_host.copy_from_async(out_gpu, stream)
+    stream.synchronize()
+    np.testing.assert_allclose(out_host.numpy(), grad_np * np.exp(x_np), rtol=1e-5, atol=1e-6)
+
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", FLOAT_DTYPES)
@@ -180,7 +209,8 @@ def test_compile_backward_supported_subset_numerical(dtype: thor.DataType):
         "u": _host_to_gpu(u_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     for name in bwd_eq.output_names():
@@ -245,7 +275,8 @@ def test_compile_backward_more_pointwise_ops_numerical(dtype: thor.DataType):
         "q": _host_to_gpu(q_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     for name in bwd_eq.output_names():
@@ -293,7 +324,8 @@ def test_compile_backward_explicit_upstream_numerical(dtype: thor.DataType):
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     for name in bwd_eq.output_names():
@@ -714,7 +746,8 @@ def test_compile_backward_reduce_norm2_with_squeeze_numerical(dtype: thor.DataTy
         "x": _host_to_gpu(x_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
@@ -1132,7 +1165,8 @@ def test_compile_backward_reused_primal_accumulates_nontrivial_branches_numerica
         "x": _host_to_gpu(x_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
@@ -1741,7 +1775,8 @@ def test_compile_backward_reduce_prod_numerical(dtype: thor.DataType):
         "x": _host_to_gpu(x_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
@@ -1789,7 +1824,8 @@ def test_compile_backward_reduce_prod_explicit_upstream_numerical(dtype: thor.Da
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     out_gpu = stamped.output("x_grad")
@@ -2176,8 +2212,16 @@ def test_compile_backward_accumulate_grad_outputs_run_distinguishes_overwrite_an
         "y_grad": _host_to_gpu(prefill_y_grad_np, dtype, stream),
     }
 
-    bwd_eq_overwrite.run(inputs_gpu, overwrite_outputs_gpu, stream)
-    bwd_eq_accumulate.run(inputs_gpu, accumulate_outputs_gpu, stream)
+    overwrite_forward, overwrite_backward = bwd_eq_overwrite.stamp_forward_backward_pair(
+        inputs_gpu, stream, preallocated_backward_outputs=overwrite_outputs_gpu
+    )
+    accumulate_forward, accumulate_backward = bwd_eq_accumulate.stamp_forward_backward_pair(
+        inputs_gpu, stream, preallocated_backward_outputs=accumulate_outputs_gpu
+    )
+    overwrite_forward.run()
+    overwrite_backward.run()
+    accumulate_forward.run()
+    accumulate_backward.run()
 
     for name in bwd_eq_overwrite.output_names():
         out_host = _cpu_tensor(list(overwrite_outputs_gpu[name].dimensions), thor.DataType.fp32)
@@ -2349,7 +2393,10 @@ def test_compile_backward_accumulate_grad_outputs_stamp_uses_provided_accumulato
         "y_grad": _host_to_gpu(prefill_y_grad_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, preallocated_outputs=outputs_gpu, stream=stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(
+        inputs_gpu, stream, preallocated_backward_outputs=outputs_gpu
+    )
+    forward_stamped.run()
     stamped.run()
 
     for name in bwd_eq.output_names():

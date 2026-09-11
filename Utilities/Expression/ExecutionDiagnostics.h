@@ -7,16 +7,14 @@
 namespace ThorImplementation {
 
 #ifdef THOR_DEBUG
-// BR0 physical execution instrumentation.  These counters are incremented at
+// BR0 physical execution instrumentation. These counters are incremented at
 // stamped-stage submission time, immediately before the backend operation is
-// launched.  Provenance therefore distinguishes actual replayed physical work
-// from both real forward work and legitimate backward-gradient work.
+// launched, and distinguish real forward work from derivative work.
 struct ExpressionPhysicalExecutionProvenanceCounters {
     uint64_t forward = 0;
     uint64_t backward_gradient = 0;
-    uint64_t backward_forward_replay = 0;
 
-    [[nodiscard]] uint64_t total() const noexcept { return forward + backward_gradient + backward_forward_replay; }
+    [[nodiscard]] uint64_t total() const noexcept { return forward + backward_gradient; }
 };
 
 struct ExpressionTestExecutionCounters {
@@ -27,12 +25,6 @@ struct ExpressionTestExecutionCounters {
     ExpressionPhysicalExecutionProvenanceCounters rms_norm;
     ExpressionPhysicalExecutionProvenanceCounters softmax;
 
-    [[nodiscard]] uint64_t totalBackwardForwardReplay() const noexcept {
-        return fused_kernel.backward_forward_replay + reduction.backward_forward_replay +
-               matmul.backward_forward_replay +
-               convolution.backward_forward_replay + rms_norm.backward_forward_replay +
-               softmax.backward_forward_replay;
-    }
 };
 
 void resetExpressionTestExecutionCounters();

@@ -2459,6 +2459,37 @@ thor.physical.Equation
     A stamped execution plan.
 )nbdoc");
 
+    fused_equation.def(
+        "stamp_forward_backward_pair",
+        [](const FusedEquation& self,
+           const std::unordered_map<std::string, Tensor>& inputs,
+           const Stream& stream,
+           const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+           const std::unordered_map<std::string, Tensor>& preallocated_backward_outputs,
+           const std::unordered_map<std::string, std::vector<uint64_t>>& requested_backward_output_shapes) {
+            return self.stampForwardBackwardPair(
+                inputs, stream, tensor_scalar_inputs, preallocated_backward_outputs, requested_backward_output_shapes);
+        },
+        "inputs"_a,
+        "stream"_a,
+        nb::kw_only(),
+        "tensor_scalar_inputs"_a = std::unordered_map<std::string, TensorScalarBinding>{},
+        "preallocated_backward_outputs"_a = std::unordered_map<std::string, Tensor>{},
+        "requested_backward_output_shapes"_a = std::unordered_map<std::string, std::vector<uint64_t>>{},
+        R"nbdoc(
+Stamp an explicit real-forward/backward pair for an equation returned by ``compile_backward``.
+
+The first returned plan is the real forward and must be executed before the second.
+Backward consumes retained values and backend state from that exact forward execution;
+no forward subtree is reconstructed inside backward. This is the standalone physical-expression
+training path for derivatives that require computed primal values or forward backend state.
+
+Returns
+-------
+tuple[thor.physical.Equation, thor.physical.Equation]
+    ``(forward_plan, backward_plan)``.
+)nbdoc");
+
     fused_equation.def("run",
                        nb::overload_cast<const Tensor&, Tensor&, Stream&>(&FusedEquation::run, nb::const_),
                        "input"_a,
@@ -2711,6 +2742,14 @@ Args:
         Name for the upstream-gradient input tensor.
         I.e. the incoming error gradient (for the backward computation) from the
         layer downstream in the forward direction.
+
+Notes
+-----
+Backward never reconstructs a computed forward value. If the derivative needs
+materialized primal values or backend state, stamp the returned equation with
+``stamp_forward_backward_pair(...)`` and execute the returned forward plan before
+the returned backward plan. Plain ``stamp(...)`` remains valid for VJPs that
+need only root inputs and explicit upstream gradients.
 )nbdoc");
 
     fused_equation.def(
@@ -2767,6 +2806,10 @@ bwd = fwd.compile_backward(
 Then the backward equation will only supply x_grad as an ouput. When either
 __grad_main or __grad_aux does not participate in the gradient computation
 for x, the unused tensor will not be accessed - it will be ignored in that case.
+
+Backward never reconstructs computed forward values. When this VJP requires
+retained primal values or backend state, use ``stamp_forward_backward_pair(...)``
+and execute its real forward plan before its backward plan.
 )nbdoc");
 
     fused_equation.def("output_names",

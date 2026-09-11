@@ -626,7 +626,8 @@ def test_matmul_backward_pointwise_composition_numerical(dtype: thor.DataType):
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     got_a_grad = _copy_to_host(stamped.output("a_grad"), dtype, stream)
@@ -1022,7 +1023,8 @@ def test_matmul_backward_large_fp16_likely_workspace_numerical():
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     got_a_grad = _copy_to_host(stamped.output("a_grad"), dtype, stream)
@@ -1137,7 +1139,8 @@ def test_gemm_backward_arbitrary_scalar_expression_wrt_all_inputs_numerical(dtyp
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     got_a_grad = _copy_to_host(stamped.output("a_grad"), dtype, stream)

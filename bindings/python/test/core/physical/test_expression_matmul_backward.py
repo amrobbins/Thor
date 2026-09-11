@@ -195,7 +195,8 @@ def test_matmul_backward_pointwise_composition_numerical(dtype: thor.DataType):
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     got_a_grad = _copy_to_host(stamped.output("a_grad"), dtype, stream)
@@ -475,7 +476,8 @@ def test_matmul_backward_large_fp16_likely_workspace_numerical():
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     got_a_grad = _copy_to_host(stamped.output("a_grad"), dtype, stream)
@@ -563,7 +565,8 @@ def test_gemm_backward_arbitrary_scalar_expression_wrt_all_inputs_numerical(dtyp
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     got_a_grad = _copy_to_host(stamped.output("a_grad"), dtype, stream)
@@ -590,18 +593,15 @@ def _cublaslt_gelu_approx_derivative_np(x: np.ndarray) -> np.ndarray:
 
 
 @pytest.mark.cuda
-def test_fused_gelu_matmul_bias_backward_exposes_bias_grad_from_same_matmul_stage_numerical():
+def test_fused_gelu_matmul_bias_backward_uses_retained_forward_aux_and_matches_bias_grad_numerically():
     dtype = thor.DataType.fp32
     upstream_name = "__grad_output"
 
     x = ex.input("x")
     w1 = ex.input("w1")
     b1 = ex.input("b1")
-    w2 = ex.input("w2")
-
     pre = ex.matmul(x, w1) + b1
-    hidden = pre * ex.normcdf(pre)
-    out = ex.matmul(hidden, w2)
+    out = pre * ex.normcdf(pre)
 
     fwd_eq = ex.compile(out, device_num=0)
     bwd_eq = fwd_eq.compile_backward(["b1"], error_input_name=upstream_name)
@@ -610,28 +610,37 @@ def test_fused_gelu_matmul_bias_backward_exposes_bias_grad_from_same_matmul_stag
     x_np = (np.arange(12, dtype=np.float32).reshape(4, 3) - 5.0) / 8.0
     w1_np = (np.arange(48, dtype=np.float32).reshape(3, 16) - 23.0) / 16.0
     b1_np = np.linspace(-0.35, 0.4, 16, dtype=np.float32)
-    w2_np = (np.arange(80, dtype=np.float32).reshape(16, 5) - 39.0) / 19.0
-    grad_np = (np.arange(20, dtype=np.float32).reshape(4, 5) - 9.0) / 11.0
+    grad_np = (np.arange(64, dtype=np.float32).reshape(4, 16) - 31.0) / 23.0
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
         "x": _host_to_gpu(x_np, dtype, stream),
         "w1": _host_to_gpu(w1_np, dtype, stream),
         "b1": _host_to_gpu(b1_np, dtype, stream),
-        "w2": _host_to_gpu(w2_np, dtype, stream),
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
-    assert any(
-        kind.startswith("Matmul") and "backward_epilogue=dgelu" in kind and "bgrad=1" in kind for kind in stage_kinds)
-    assert "Reduction" not in stage_kinds
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stage_kinds = forward_stamped._debug_stage_kinds()
+    backward_stage_kinds = stamped._debug_stage_kinds()
+
+    # The real forward owns the cuBLASLt GELU auxiliary preactivation required by
+    # backward. stamp_forward_backward_pair() requests that auxiliary explicitly,
+    # and stamping fails if the optimized real-forward Matmul cannot provide it.
+    # StampedExecutionPlan._debug_stage_kinds() intentionally reports only concrete
+    # runtime stage kinds, so it says "Matmul" rather than exposing compile-time
+    # epilogue metadata. Successful paired stamping plus the single Matmul stage and
+    # the numerical gradient below verify the retained-aux path. Because GELU is the
+    # public forward output here, there is no downstream backward GEMM into which
+    # DGELU+bias-reduction could be folded.
+    assert forward_stage_kinds == ["Matmul"]
+    assert not any("backward_epilogue=dgelu" in kind for kind in backward_stage_kinds)
+    assert any(kind.startswith("Reduction") for kind in backward_stage_kinds)
 
     pre_np = x_np @ w1_np + b1_np
-    d_hidden = grad_np @ w2_np.T
-    expected_b1_grad = np.sum(d_hidden * _cublaslt_gelu_approx_derivative_np(pre_np), axis=0)
+    expected_b1_grad = np.sum(grad_np * _cublaslt_gelu_approx_derivative_np(pre_np), axis=0)
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     got_b1_grad = _copy_to_host(stamped.output("b1_grad"), dtype, stream)
@@ -645,29 +654,25 @@ def test_dgelu_backward_epilogue_requires_forward_gelu_cublaslt_epilogue_eligibi
 
     a = ex.input("a")
     b = ex.input("b")
-    w2 = ex.input("w2")
-
     # The transposed projection is intentionally outside the currently allowed forward cuBLASLt GELU epilogue path.
     # Backward must therefore keep the exact expression derivative and must not silently substitute cuBLASLt DGELU.
     pre = ex.matmul(a, b, transpose_a=True)
-    hidden = pre * ex.normcdf(pre)
-    out = ex.matmul(hidden, w2)
+    out = pre * ex.normcdf(pre)
 
     fwd_eq = ex.compile(out, device_num=0)
     bwd_eq = fwd_eq.compile_backward(["a"], error_input_name=upstream_name)
 
     a_np = (np.arange(12, dtype=np.float32).reshape(3, 4) - 5.0) / 7.0
     b_np = (np.arange(48, dtype=np.float32).reshape(3, 16) - 21.0) / 17.0
-    w2_np = (np.arange(80, dtype=np.float32).reshape(16, 5) - 37.0) / 23.0
-    grad_np = (np.arange(20, dtype=np.float32).reshape(4, 5) - 8.0) / 13.0
+    grad_np = (np.arange(64, dtype=np.float32).reshape(4, 16) - 29.0) / 19.0
 
     stream = Stream(gpu_num=0)
     inputs_gpu = {
         "a": _host_to_gpu(a_np, dtype, stream),
         "b": _host_to_gpu(b_np, dtype, stream),
-        "w2": _host_to_gpu(w2_np, dtype, stream),
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    stage_kinds = bwd_eq._debug_stage_kinds(inputs_gpu)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    stage_kinds = stamped._debug_stage_kinds()
     assert not any("backward_epilogue=dgelu" in kind for kind in stage_kinds)

@@ -35,6 +35,19 @@ static std::string retainedForwardOutputName(uint32_t logical_node_index) {
     return "__thor_retained_forward_output_" + std::to_string(logical_node_index);
 }
 
+static bool isSavedForwardBackwardInputName(const std::string& name) {
+    return name.rfind("__thor_saved_forward_value_", 0) == 0 ||
+           name.rfind("__thor_saved_forward_matmul_epilogue_aux_", 0) == 0;
+}
+
+[[noreturn]] static void throwMissingBackwardSavedForwardInput(const std::string& name) {
+    throw std::runtime_error(
+        "Standalone FusedEquation backward requires retained state from the real forward execution for input '" +
+        name +
+        "'. Backward never reconstructs computed forward values. Use stampForwardBackwardPair() "
+        "(Python: stamp_forward_backward_pair()) or a training path that binds retained-forward state.");
+}
+
 static void appendRetainedForwardOutputs(PhysicalOutputs& outputs, const std::vector<uint32_t>& logical_node_indices) {
     if (logical_node_indices.empty()) {
         return;
@@ -7096,25 +7109,31 @@ std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputS
 std::unordered_map<std::string, std::vector<uint64_t>> FusedEquation::getOutputShapes(
     const std::unordered_map<std::string, Tensor>& inputs,
     const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs) const {
+    // A backward equation's public outputs are gradients with respect to original
+    // forward tensor inputs. Their shapes are therefore fixed by those wrt tensors
+    // and do not depend on any retained forward intermediates needed to execute the
+    // VJP. In particular, shape inference must not specialize/stamp the backward
+    // graph and thereby demand hidden __thor_saved_forward_value_* inputs.
+    if (backward_config.has_value()) {
+        std::unordered_map<std::string, std::vector<uint64_t>> output_shapes;
+        output_shapes.reserve(backward_config->wrt_names.size());
+        for (const std::string& wrt_name : backward_config->wrt_names) {
+            auto input_it = inputs.find(wrt_name);
+            if (input_it == inputs.end()) {
+                throw std::runtime_error(
+                    "Missing forward tensor input required for backward output shape inference: " + wrt_name);
+            }
+            output_shapes.emplace(wrt_name + "_grad", input_it->second.getDimensions());
+        }
+        return output_shapes;
+    }
+
     std::unordered_map<uint32_t, RuntimeInputValue> root_values = bindRootInputsForCompilation(inputs, {}, tensor_scalar_inputs);
     if (root_values.empty()) {
         throw std::runtime_error("FusedEquation::getOutputShapes requires at least one bound root input.");
     }
 
     if (outputs_template.isConditional()) {
-        if (backward_config.has_value()) {
-            std::unordered_map<std::string, std::vector<uint64_t>> output_shapes;
-            output_shapes.reserve(backward_config->wrt_names.size());
-            for (const std::string& wrt_name : backward_config->wrt_names) {
-                auto input_it = inputs.find(wrt_name);
-                if (input_it == inputs.end()) {
-                    throw std::runtime_error(
-                        "Missing forward input required for conditional backward output shape inference: " + wrt_name);
-                }
-                output_shapes.emplace(wrt_name + "_grad", input_it->second.getDimensions());
-            }
-            return output_shapes;
-        }
         const PhysicalConditionalOutputs& conditional = *outputs_template.conditional;
         FusedEquation predicate_equation = FusedEquation::compileWithOptions(conditional.predicate, device_num, use_fast_math);
         FusedEquation then_equation = FusedEquation::compileWithOptions(conditional.then_branch, device_num, use_fast_math);
@@ -7693,16 +7712,22 @@ PhysicalOutputs FusedEquation::buildShapeSpecializedOutputs(const std::unordered
             }
         }
 
-        return buildBackwardOutputs(resolved_forward_outputs,
-                                    backward_config->wrt_names,
-                                    backward_config->upstream_input_names_by_output.value(),
-                                    upstream_input_dtypes_by_output,
-                                    forward_input_dims,
-                                    backward_config->accumulate_grad_outputs);
+        return buildBackwardOutputsWithForwardValueRequirements(
+                   resolved_forward_outputs,
+                   backward_config->wrt_names,
+                   backward_config->upstream_input_names_by_output.value(),
+                   upstream_input_dtypes_by_output,
+                   forward_input_dims,
+                   backward_config->accumulate_grad_outputs)
+            .outputs;
     }
 
-    return buildBackwardOutputs(
-        resolved_forward_outputs, backward_config->wrt_names, std::nullopt, forward_input_dims, backward_config->accumulate_grad_outputs);
+    return buildBackwardOutputsWithForwardValueRequirements(resolved_forward_outputs,
+                                                            backward_config->wrt_names,
+                                                            std::nullopt,
+                                                            forward_input_dims,
+                                                            backward_config->accumulate_grad_outputs)
+        .outputs;
 }
 
 std::shared_ptr<CompiledOutputs> FusedEquation::compileForInputs(
@@ -8186,6 +8211,9 @@ std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputs(
         if (input.kind == NamedInput::Kind::Tensor) {
             auto input_it = namedInputs.find(input.name);
             if (input_it == namedInputs.end()) {
+                if (backward_config.has_value() && isSavedForwardBackwardInputName(input.name)) {
+                    throwMissingBackwardSavedForwardInput(input.name);
+                }
                 throw std::runtime_error("Missing required fused equation input: " + input.name);
             }
             values.emplace(input.slot, input_it->second);
@@ -8266,6 +8294,9 @@ std::unordered_map<uint32_t, RuntimeInputValue> FusedEquation::bindRootInputsFor
         if (input.kind == NamedInput::Kind::Tensor) {
             auto it = namedInputs.find(input.name);
             if (it == namedInputs.end()) {
+                if (backward_config.has_value() && isSavedForwardBackwardInputName(input.name)) {
+                    throwMissingBackwardSavedForwardInput(input.name);
+                }
                 throw std::runtime_error("Missing required fused equation input: " + input.name);
             }
             values.emplace(input.slot, it->second);
@@ -10076,6 +10107,168 @@ StampedExecutionPlan FusedEquation::stampForImmediateCrossPlanBackwardLinking(
                      preallocated_outputs,
                      requestedOutputShapes,
                      true);
+}
+
+std::pair<StampedExecutionPlan, StampedExecutionPlan> FusedEquation::stampForwardBackwardPair(
+    const std::unordered_map<std::string, Tensor>& inputs,
+    const Stream& stream,
+    const std::unordered_map<std::string, TensorScalarBinding>& tensor_scalar_inputs,
+    const std::unordered_map<std::string, Tensor>& preallocated_backward_outputs,
+    const std::unordered_map<std::string, std::vector<uint64_t>>& requested_backward_output_shapes) const {
+    if (!backward_config.has_value()) {
+        throw std::runtime_error("stampForwardBackwardPair is only valid on an equation returned by compileBackward().");
+    }
+    if (backward_config->forward_outputs_template.isConditional()) {
+        throw std::runtime_error(
+            "stampForwardBackwardPair does not yet support graph-level conditional forward equations; "
+            "conditional retained-forward ownership is a separate migration.");
+    }
+    if (!backward_config->forward_outputs_template.expr) {
+        throw std::runtime_error("stampForwardBackwardPair requires non-null forward expression metadata.");
+    }
+    if (accumulatesIntoGradOutputs(backward_config) && preallocated_backward_outputs.empty()) {
+        throw std::runtime_error(
+            "stampForwardBackwardPair with accumulate_grad_outputs=true requires caller-provided gradient output tensors.");
+    }
+
+    FusedEquation forward_equation =
+        FusedEquation::compileWithOptions(backward_config->forward_outputs_template, device_num, use_fast_math);
+    const std::unordered_map<std::string, Tensor> forward_inputs =
+        filterTensorInputsForOutputs(backward_config->forward_outputs_template, inputs);
+    const std::unordered_map<std::string, TensorScalarBinding> forward_tensor_scalar_inputs =
+        filterTensorScalarInputsForOutputs(backward_config->forward_outputs_template, tensor_scalar_inputs);
+
+    // Differentiate the same retention-aware forward representation that the real
+    // paired forward will stamp. This is the low-level analogue of CustomLayer's
+    // training preview and prevents a fused GELU preview from asking backward for
+    // state the real forward cannot provide.
+    PhysicalOutputs forward_outputs =
+        forward_equation.physicalOutputsForTrainingBackward(forward_inputs, forward_tensor_scalar_inputs);
+    if (!forward_outputs.expr) {
+        throw std::runtime_error("stampForwardBackwardPair training preview produced a null forward expression.");
+    }
+
+    std::unordered_map<std::string, std::vector<uint64_t>> forward_input_dims;
+    forward_input_dims.reserve(forward_outputs.expr->inputs.size());
+    for (const NamedInput& forward_input : forward_outputs.expr->inputs) {
+        if (forward_input.kind != NamedInput::Kind::Tensor) {
+            continue;
+        }
+        auto value_it = forward_inputs.find(forward_input.name);
+        if (value_it == forward_inputs.end()) {
+            throw std::runtime_error(
+                "stampForwardBackwardPair is missing required real-forward tensor input: " + forward_input.name);
+        }
+        forward_input_dims.emplace(forward_input.name, value_it->second.getDimensions());
+    }
+
+    BackwardBuildResult backward_build;
+    if (backward_config->upstream_input_names_by_output.has_value()) {
+        std::unordered_map<std::string, DataType> upstream_input_dtypes_by_output;
+        upstream_input_dtypes_by_output.reserve(backward_config->upstream_input_names_by_output->size());
+        for (const auto& [output_name, upstream_input_name] : backward_config->upstream_input_names_by_output.value()) {
+            auto upstream_it = inputs.find(upstream_input_name);
+            if (upstream_it == inputs.end()) {
+                throw std::runtime_error(
+                    "stampForwardBackwardPair is missing upstream gradient input: " + upstream_input_name);
+            }
+            upstream_input_dtypes_by_output.emplace(output_name, upstream_it->second.getDataType());
+        }
+        backward_build = buildBackwardOutputsWithForwardValueRequirements(
+            forward_outputs,
+            backward_config->wrt_names,
+            backward_config->upstream_input_names_by_output.value(),
+            upstream_input_dtypes_by_output,
+            forward_input_dims,
+            backward_config->accumulate_grad_outputs);
+    } else {
+        backward_build = buildBackwardOutputsWithForwardValueRequirements(
+            forward_outputs,
+            backward_config->wrt_names,
+            std::nullopt,
+            forward_input_dims,
+            backward_config->accumulate_grad_outputs);
+    }
+
+    std::vector<uint32_t> retained_forward_nodes;
+    std::vector<uint32_t> retained_forward_epilogue_aux_nodes;
+    retained_forward_nodes.reserve(backward_build.forward_value_requirements.size());
+    retained_forward_epilogue_aux_nodes.reserve(backward_build.forward_value_requirements.size());
+    for (const ForwardValueRequirement& requirement : backward_build.forward_value_requirements) {
+        if (requirement.forward_node_index == UINT32_MAX || requirement.backward_input_name.empty()) {
+            throw std::runtime_error("stampForwardBackwardPair received an incomplete retained-forward requirement.");
+        }
+        switch (requirement.kind) {
+            case ForwardValueRequirementKind::NodeOutput:
+                retained_forward_nodes.push_back(requirement.forward_node_index);
+                break;
+            case ForwardValueRequirementKind::MatmulEpilogueAux:
+                retained_forward_epilogue_aux_nodes.push_back(requirement.forward_node_index);
+                break;
+            default:
+                throw std::runtime_error("stampForwardBackwardPair received an unknown retained-forward requirement kind.");
+        }
+    }
+    std::sort(retained_forward_nodes.begin(), retained_forward_nodes.end());
+    retained_forward_nodes.erase(
+        std::unique(retained_forward_nodes.begin(), retained_forward_nodes.end()), retained_forward_nodes.end());
+    std::sort(retained_forward_epilogue_aux_nodes.begin(), retained_forward_epilogue_aux_nodes.end());
+    retained_forward_epilogue_aux_nodes.erase(
+        std::unique(retained_forward_epilogue_aux_nodes.begin(), retained_forward_epilogue_aux_nodes.end()),
+        retained_forward_epilogue_aux_nodes.end());
+
+    StampedExecutionPlan forward_plan = forward_equation.stampRetainingForwardValues(
+        retained_forward_nodes,
+        retained_forward_epilogue_aux_nodes,
+        forward_inputs,
+        stream,
+        forward_tensor_scalar_inputs);
+
+    std::unordered_map<std::string, Tensor> available_backward_inputs = inputs;
+    if (accumulatesIntoGradOutputs(backward_config)) {
+        for (const std::string& wrt_name : backward_config->wrt_names) {
+            const std::string grad_name = wrt_name + "_grad";
+            auto grad_it = preallocated_backward_outputs.find(grad_name);
+            if (grad_it == preallocated_backward_outputs.end()) {
+                throw std::runtime_error(
+                    "stampForwardBackwardPair is missing caller-provided accumulation tensor: " + grad_name);
+            }
+            available_backward_inputs[grad_name] = grad_it->second;
+        }
+    }
+
+    for (const ForwardValueRequirement& requirement : backward_build.forward_value_requirements) {
+        Tensor retained;
+        switch (requirement.kind) {
+            case ForwardValueRequirementKind::NodeOutput:
+                retained = forward_plan.retainedForwardValue(requirement.forward_node_index);
+                break;
+            case ForwardValueRequirementKind::MatmulEpilogueAux:
+                retained = forward_plan.retainedForwardEpilogueAux(requirement.forward_node_index);
+                break;
+            default:
+                throw std::runtime_error("stampForwardBackwardPair received an unknown retained-forward requirement kind.");
+        }
+        available_backward_inputs[requirement.backward_input_name] = retained;
+    }
+
+    const std::unordered_map<std::string, Tensor> backward_inputs =
+        filterTensorInputsForOutputs(backward_build.outputs, available_backward_inputs);
+    const std::unordered_map<std::string, TensorScalarBinding> backward_tensor_scalar_inputs =
+        filterTensorScalarInputsForOutputs(backward_build.outputs, tensor_scalar_inputs);
+
+    FusedEquation backward_equation =
+        FusedEquation::compileWithOptions(backward_build.outputs, device_num, use_fast_math);
+    StampedExecutionPlan backward_plan = backward_equation.stampForImmediateCrossPlanBackwardLinking(
+        backward_inputs,
+        stream,
+        backward_tensor_scalar_inputs,
+        preallocated_backward_outputs,
+        requested_backward_output_shapes);
+    backward_plan.linkRmsNormBackwardStatesFrom(forward_plan);
+    backward_plan.linkAttentionBackwardStatesFrom(forward_plan);
+
+    return {std::move(forward_plan), std::move(backward_plan)};
 }
 
 StampedExecutionPlan FusedEquation::stampImpl(

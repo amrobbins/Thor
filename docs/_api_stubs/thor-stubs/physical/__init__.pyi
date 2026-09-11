@@ -1712,6 +1712,21 @@ class FusedEquation:
             A stamped execution plan.
         """
 
+    def stamp_forward_backward_pair(self, inputs: Mapping[str, PhysicalTensor], stream: Stream, *, tensor_scalar_inputs: Mapping[str, thor._thor.physical.TensorScalarBinding] = {}, preallocated_backward_outputs: Mapping[str, PhysicalTensor] = {}, requested_backward_output_shapes: Mapping[str, Sequence[int]] = {}) -> tuple[Equation, Equation]:
+        """
+        Stamp an explicit real-forward/backward pair for an equation returned by ``compile_backward``.
+
+        The first returned plan is the real forward and must be executed before the second.
+        Backward consumes retained values and backend state from that exact forward execution;
+        no forward subtree is reconstructed inside backward. This is the standalone physical-expression
+        training path for derivatives that require computed primal values or forward backend state.
+
+        Returns
+        -------
+        tuple[thor.physical.Equation, thor.physical.Equation]
+            ``(forward_plan, backward_plan)``.
+        """
+
     @overload
     def run(self, input: PhysicalTensor, output: PhysicalTensor, stream: Stream) -> None:
         """
@@ -1787,6 +1802,14 @@ class FusedEquation:
                 Name for the upstream-gradient input tensor.
                 I.e. the incoming error gradient (for the backward computation) from the
                 layer downstream in the forward direction.
+
+        Notes
+        -----
+        Backward never reconstructs a computed forward value. If the derivative needs
+        materialized primal values or backend state, stamp the returned equation with
+        ``stamp_forward_backward_pair(...)`` and execute the returned forward plan before
+        the returned backward plan. Plain ``stamp(...)`` remains valid for VJPs that
+        need only root inputs and explicit upstream gradients.
         """
 
     @overload
@@ -1831,6 +1854,10 @@ class FusedEquation:
         Then the backward equation will only supply x_grad as an ouput. When either
         __grad_main or __grad_aux does not participate in the gradient computation
         for x, the unused tensor will not be accessed - it will be ignored in that case.
+
+        Backward never reconstructs computed forward values. When this VJP requires
+        retained primal values or backend state, use ``stamp_forward_backward_pair(...)``
+        and execute its real forward plan before its backward plan.
         """
 
     def output_names(self) -> list[str]:

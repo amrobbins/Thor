@@ -1282,7 +1282,8 @@ def test_conv2d_backward_through_pointwise_chain_numerical_fp16():
         upstream_name: _host_to_gpu(grad_np, dtype, stream),
     }
 
-    stamped = bwd_eq.stamp(inputs_gpu, stream)
+    forward_stamped, stamped = bwd_eq.stamp_forward_backward_pair(inputs_gpu, stream)
+    forward_stamped.run()
     stamped.run()
 
     got_x = _copy_to_host_fp32(stamped.output("x_grad"), stream)

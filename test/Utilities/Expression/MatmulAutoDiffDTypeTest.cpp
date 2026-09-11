@@ -34,10 +34,26 @@ std::vector<DataType> inputDTypes(const PhysicalOutputs& outputs,
     std::vector<DataType> dtypes(outputs.expr->inputs.size(), DataType::FP32);
     for (const NamedInput& input : outputs.expr->inputs) {
         auto it = dtype_by_name.find(input.name);
-        if (it == dtype_by_name.end()) {
+        if (it != dtype_by_name.end()) {
+            dtypes.at(input.slot) = it->second;
+            continue;
+        }
+
+        // Saved-forward inputs are synthetic backward ABI entries whose storage
+        // dtype is already known by AutoDiff from the real forward producer.
+        // Graph-structure tests should use that declared dtype rather than
+        // pretending the caller supplied an independent value.
+        std::optional<DataType> declared_dtype;
+        for (const ExprNode& node : outputs.expr->nodes) {
+            if (node.op == ExprOp::INPUT && node.input_slot == input.slot) {
+                declared_dtype = node.input_tensor_dtype.has_value() ? node.input_tensor_dtype : node.output_dtype;
+                break;
+            }
+        }
+        if (!declared_dtype.has_value()) {
             throw std::runtime_error("Missing input dtype in MatmulAutoDiffDTypeTest for: " + input.name);
         }
-        dtypes.at(input.slot) = it->second;
+        dtypes.at(input.slot) = declared_dtype.value();
     }
     return dtypes;
 }
@@ -514,13 +530,15 @@ TEST(MatmulAutoDiffDType, ActivationBackwardRunsBeforeLowPrecisionOutputGradient
     PhysicalOutputs forward = Expression::outputs({{"out", preactivation.max(Expression(0.0))}}).physicalOutputs();
     resolveOutputsDTypesInPlace(forward, {DataType::BF16, DataType::BF16});
 
-    PhysicalOutputs backward = buildBackwardOutputs(forward,
-                                                    {"lhs", "rhs"},
-                                                    std::optional<std::string>{"dout"},
-                                                    std::unordered_map<std::string, std::vector<uint64_t>>{
-                                                        {"lhs", {2, 3}},
-                                                        {"rhs", {3, 4}},
-                                                    });
+    PhysicalOutputs backward = buildBackwardOutputsWithForwardValueRequirements(
+                                   forward,
+                                   {"lhs", "rhs"},
+                                   std::optional<std::string>{"dout"},
+                                   std::unordered_map<std::string, std::vector<uint64_t>>{
+                                       {"lhs", {2, 3}},
+                                       {"rhs", {3, 4}},
+                                   })
+                                   .outputs;
     resolveOutputsDTypesInPlace(backward,
                                 inputDTypes(backward,
                                             {
